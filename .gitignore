@@ -1,0 +1,2 @@
+# Rust build artifacts (target-dir is redirected to D: via .cargo/config.toml).
+/target/

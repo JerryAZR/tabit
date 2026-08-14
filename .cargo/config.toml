@@ -1,0 +1,3 @@
+[build]
+# Keep build artifacts off the (space-constrained) project drive.
+target-dir = "D:/cargo-target/tabit"
