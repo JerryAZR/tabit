@@ -512,17 +512,9 @@ where
             completion_request.record_telemetry_content,
         )
         .build();
-        let max_tokens = if let Some(tokens) = completion_request.max_tokens {
-            tokens
-        } else if let Some(tokens) = self.default_max_tokens {
-            tokens
-        } else {
-            return Err(CompletionError::RequestError(
-                "Anthropic requires `max_tokens`; set it on the completion request (e.g. via \
-                 config)"
-                    .into(),
-            ));
-        };
+        let max_tokens = completion_request
+            .max_tokens
+            .unwrap_or(super::completion::DEFAULT_MAX_TOKENS);
 
         let body = create_streaming_request_body(
             request_model,

@@ -25,16 +25,15 @@ use tracing::{Instrument, Level, enabled};
 pub const ANTHROPIC_VERSION_2023_01_01: &str = "2023-01-01";
 pub const ANTHROPIC_VERSION_2023_06_01: &str = "2023-06-01";
 pub const ANTHROPIC_VERSION_LATEST: &str = ANTHROPIC_VERSION_2023_06_01;
+/// Applied when the completion request carries no `max_tokens`. A plain
+/// provider default (not model-keyed); per-model config overrides it by
+/// setting `max_tokens` on the request.
+pub const DEFAULT_MAX_TOKENS: u64 = 65_536;
 const EMPTY_RESPONSE_ERROR: &str = "Response contained no message or tool call (empty)";
 pub(crate) const ANTHROPIC_RAW_CONTENT_KEY: &str = "anthropic_content";
 
 pub trait AnthropicCompatibleProvider: Provider {
     const PROVIDER_NAME: &'static str;
-
-    fn default_max_tokens(model: &str) -> Option<u64> {
-        let _ = model;
-        None
-    }
 }
 
 impl AnthropicCompatibleProvider for super::client::AnthropicExt {
@@ -1556,7 +1555,6 @@ impl TryFrom<Message> for message::Message {
 pub struct GenericCompletionModel<Ext = super::client::AnthropicExt, T = reqwest::Client> {
     pub(crate) client: crate::client::Client<Ext, T>,
     pub model: String,
-    pub default_max_tokens: Option<u64>,
     /// Enable manual prompt caching (adds cache_control breakpoints to system prompt,
     /// tools, and messages)
     pub prompt_caching: bool,
@@ -1582,13 +1580,9 @@ where
     Ext: AnthropicCompatibleProvider + Clone + 'static,
 {
     pub fn new(client: crate::client::Client<Ext, T>, model: impl Into<String>) -> Self {
-        let model = model.into();
-        let default_max_tokens = Ext::default_max_tokens(&model);
-
         Self {
             client,
-            model,
-            default_max_tokens,
+            model: model.into(),
             prompt_caching: false,
             automatic_caching: false,
             automatic_caching_ttl: None,
@@ -1599,7 +1593,6 @@ where
         Self {
             client,
             model: model.to_string(),
-            default_max_tokens: Ext::default_max_tokens(model),
             prompt_caching: false,
             automatic_caching: false,
             automatic_caching_ttl: None,
@@ -2269,14 +2262,9 @@ impl TryFrom<AnthropicRequestParams<'_>> for AnthropicCompletionRequest {
         } = params;
         let chat_history = req.chat_history_with_documents();
 
-        // Check if max_tokens is set, required for Anthropic
-        let Some(max_tokens) = req.max_tokens else {
-            return Err(CompletionError::RequestError(
-                "Anthropic requires `max_tokens`; set it on the completion request (e.g. via \
-                 config)"
-                    .into(),
-            ));
-        };
+        // Anthropic requires `max_tokens` on every request; requests that
+        // don't carry one get the provider default (config can override).
+        let max_tokens = req.max_tokens.unwrap_or(DEFAULT_MAX_TOKENS);
 
         let (history_system, chat_history) = split_system_messages_from_history(chat_history);
         let mut full_history = vec![];
@@ -2405,7 +2393,7 @@ where
     /// request either way.
     pub async fn raw_completion(
         &self,
-        mut completion_request: completion::CompletionRequest,
+        completion_request: completion::CompletionRequest,
     ) -> Result<CompletionResponse, CompletionError> {
         let request_model = completion_request
             .model
@@ -2421,19 +2409,6 @@ where
             completion_request.record_telemetry_content,
         )
         .build();
-
-        // Check if max_tokens is set, required for Anthropic
-        if completion_request.max_tokens.is_none() {
-            if let Some(tokens) = self.default_max_tokens {
-                completion_request.max_tokens = Some(tokens);
-            } else {
-                return Err(CompletionError::RequestError(
-                    "Anthropic requires `max_tokens`; set it on the completion request (e.g. via \
-                     config)"
-                        .into(),
-                ));
-            }
-        }
 
         let request = AnthropicCompletionRequest::try_from(AnthropicRequestParams {
             model: &request_model,
@@ -2566,10 +2541,7 @@ mod tests {
     use serde_path_to_error::deserialize;
 
     #[test]
-    fn missing_max_tokens_returns_error() {
-        let client = crate::providers::anthropic::Client::new("test-key")
-            .expect("client construction should succeed");
-        let model = CompletionModel::new(client, "claude-sonnet-4-6");
+    fn missing_max_tokens_defaults_to_64k() {
         let request = CompletionRequest {
             model: None,
             preamble: None,
@@ -2584,13 +2556,16 @@ mod tests {
             record_telemetry_content: false,
         };
 
-        let error = futures::executor::block_on(model.raw_completion(request)).unwrap_err();
-        assert!(
-            error.to_string().contains(
-                "Anthropic requires `max_tokens`; set it on the completion request"
-            ),
-            "unexpected error: {error}"
-        );
+        let converted = AnthropicCompletionRequest::try_from(AnthropicRequestParams {
+            model: "claude-sonnet-4-6",
+            request,
+            prompt_caching: false,
+            automatic_caching: false,
+            automatic_caching_ttl: None,
+        })
+        .expect("request without max_tokens should convert using the provider default");
+
+        assert_eq!(converted.max_tokens, DEFAULT_MAX_TOKENS);
     }
 
     #[test]
