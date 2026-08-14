@@ -3103,7 +3103,6 @@ mod tests {
     /// Responses stream whose reasoning deltas lack `item_id` keys
     /// accumulation by a minted identity that never becomes a durable id, so
     /// the next request carries no fabricated `output-{index}` item.
-    #[cfg(feature = "websocket")]
     #[tokio::test]
     async fn delta_only_stream_minted_output_ids_are_not_serialized_upstream() {
         use crate::test_utils::streaming_conformance::{fixtures, ok_chunks};

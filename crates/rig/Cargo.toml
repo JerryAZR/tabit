@@ -50,3 +50,44 @@ rig-core = { path = "../rig-core", version = "0.41.0", default-features = false,
 rig-agent = { path = "../rig-agent", version = "0.41.0", default-features = false, features = [
     "test-utils",
 ] }
+anyhow = { workspace = true }
+async-stream = { workspace = true }
+assert_fs = { workspace = true }
+base64 = { workspace = true }
+bytes = { workspace = true }
+futures = { workspace = true }
+httpmock = { workspace = true, features = ["record", "proxy"] }
+reqwest = { workspace = true, features = ["json", "stream"] }
+reqwest-middleware = { workspace = true, features = [
+    "json",
+    "multipart",
+    "charset",
+    "http2",
+    "rustls",
+] }
+reqwest-retry = { workspace = true }
+schemars = { workspace = true }
+serde = { workspace = true, features = ["derive"] }
+# `float_roundtrip` keeps cassette scrubbing idempotent on float-heavy bodies
+# (e.g. embedding vectors): without it, parse→print can oscillate between two
+# representations of the same decimal and the recorded YAML never stabilizes.
+# `preserve_order` reproduces the serde_json feature-unification upstream's
+# full dev-dep graph provides transitively: the anthropic/openai cassettes were
+# recorded with insertion-ordered maps (e.g. JSON-schema `properties`), and
+# `sanitize_schema` rebuilds `required` from `properties.keys()`.
+serde_json = { workspace = true, features = [
+    "float_roundtrip",
+    "preserve_order",
+] }
+serde_yaml = { workspace = true }
+sha2 = { workspace = true }
+# `syn` drives the AST scan in `tests/common/cassette_safety.rs`; it is the one
+# crate from upstream's "drop" list that a kept test actually needs.
+syn = { workspace = true, features = ["full", "visit"] }
+thiserror = { workspace = true }
+tokio = { workspace = true, features = ["full"] }
+tracing-subscriber = { workspace = true, features = ["env-filter"] }
+url = { workspace = true }
+axum = { workspace = true }
+aws-smithy-eventstream = { workspace = true }
+aws-smithy-types = { workspace = true }

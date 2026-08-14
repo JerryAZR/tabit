@@ -1,0 +1,15 @@
+# Normalize the whole repo to LF on checkout.
+#
+# Cassette recordings (tests/cassettes/**/*.yaml) are byte-sensitive: the
+# replay harness splits interactions on "\n---\n" and validates the scrubbed
+# YAML form, so a CRLF checkout (Windows autocrlf) breaks replay. Keep every
+# text file LF, matching upstream CI.
+* text=auto eol=lf
+
+# Binary test fixtures.
+*.pdf binary
+*.jpg binary
+*.png binary
+*.mp3 binary
+*.mp4 binary
+*.epub binary
