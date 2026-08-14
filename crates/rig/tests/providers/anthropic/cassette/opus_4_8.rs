@@ -19,10 +19,7 @@ use crate::support::{assert_contains_any_case_insensitive, assistant_text_respon
 /// when a test converts a `raw_completion` response itself.
 const ANTHROPIC_PROVIDER: &str = "anthropic";
 
-const SYSTEM_ROLE_INSTRUCTION: &str = "For the rest of this conversation, answer in Spanish only.";
 const DOCUMENT_GLOBAL_SYSTEM_INSTRUCTION: &str = "Answer in Spanish only. Use one short sentence.";
-const SERVER_TOOL_USE_SYSTEM_INSTRUCTION: &str =
-    "For the rest of this conversation, answer in Spanish only.";
 
 #[tokio::test]
 async fn web_search_with_dynamic_filtering_succeeds() {
@@ -66,100 +63,6 @@ async fn web_search_with_dynamic_filtering_succeeds() {
         },
     )
     .await;
-}
-
-#[tokio::test]
-async fn messages_preserve_mid_conversation_system_role() {
-    super::super::support::with_anthropic_cassette(
-        "opus_4_8/messages_preserve_mid_conversation_system_role",
-        |client| async move {
-            let model = client.completion_model(CLAUDE_OPUS_4_8);
-            let request = model
-                .completion_request(
-                    "What color is a clear daytime sky? Reply with one lowercase Spanish word.",
-                )
-                .messages([
-                    Message::user("Start a short language compliance check."),
-                    Message::system(SYSTEM_ROLE_INSTRUCTION),
-                    Message::assistant("Entendido."),
-                ])
-                .max_tokens(64)
-                .build();
-            let raw = model
-                .raw_completion(request)
-                .await
-                .expect("Opus 4.8 system-role request should succeed");
-            let raw_text = raw.get_text_response();
-            let response: RigCompletionResponse = raw
-                .normalize(ANTHROPIC_PROVIDER)
-                .expect("Opus 4.8 system-role response should normalize");
-
-            let text = assistant_text_response(&response.choice)
-                .or(raw_text)
-                .expect("response should contain assistant text");
-            assert_contains_any_case_insensitive(&text, &["azul"]);
-        },
-    )
-    .await;
-
-    assert_cassette_preserves_system_role_message(
-        "opus_4_8/messages_preserve_mid_conversation_system_role",
-        SYSTEM_ROLE_INSTRUCTION,
-    );
-}
-
-#[tokio::test]
-async fn messages_preserve_system_role_after_server_tool_result() {
-    super::super::support::with_anthropic_cassette(
-        "opus_4_8/messages_preserve_system_role_after_server_tool_result",
-        |client| async move {
-            let model = client.completion_model(CLAUDE_OPUS_4_8);
-            let first_response = model
-                .completion_request(
-                    "Use web search to check the color of a clear daytime sky. Keep the final answer under five words.",
-                )
-                .provider_tool(
-                    ProviderToolDefinition::new("web_search_20250305")
-                        .with_config("name", json!("web_search")),
-                )
-                .max_tokens(128)
-                .send()
-                .await
-                .expect("Opus 4.8 web-search request should produce a server-tool transcript");
-            let server_tool_assistant_message =
-                server_tool_assistant_message_from_response(first_response.choice);
-
-            let request = model
-                .completion_request(
-                    "What color is a clear daytime sky? Reply with one lowercase Spanish word.",
-                )
-                .messages([
-                    server_tool_assistant_message,
-                    Message::system(SERVER_TOOL_USE_SYSTEM_INSTRUCTION),
-                    Message::assistant("Entendido."),
-                ])
-                .max_tokens(64)
-                .build();
-            let raw = model.raw_completion(request).await.expect(
-                "Opus 4.8 request with system role after server tool result should succeed",
-            );
-            let raw_text = raw.get_text_response();
-            let response: RigCompletionResponse = raw.normalize(ANTHROPIC_PROVIDER).expect(
-                "Opus 4.8 response with system role after server tool result should normalize",
-            );
-
-            let text = assistant_text_response(&response.choice)
-                .or(raw_text)
-                .expect("response should contain assistant text");
-            assert_contains_any_case_insensitive(&text, &["azul"]);
-        },
-    )
-    .await;
-
-    assert_cassette_preserves_system_role_after_server_tool_result(
-        "opus_4_8/messages_preserve_system_role_after_server_tool_result",
-        SERVER_TOOL_USE_SYSTEM_INSTRUCTION,
-    );
 }
 
 #[tokio::test]
@@ -209,39 +112,6 @@ async fn documents_keep_leading_system_message_top_level() {
     );
 }
 
-fn server_tool_assistant_message_from_response(
-    content: rig::OneOrMany<AssistantContent>,
-) -> Message {
-    let raw_blocks = content
-        .into_iter()
-        .filter_map(|content| match content {
-            AssistantContent::Text(text) if anthropic_raw_content_type(&text).is_some() => {
-                Some(AssistantContent::Text(text))
-            }
-            _ => None,
-        })
-        .collect::<Vec<_>>();
-
-    assert!(
-        raw_blocks
-            .iter()
-            .any(|content| content_raw_type(content) == Some("server_tool_use")),
-        "first Anthropic response should contain a preserved server_tool_use block"
-    );
-    assert!(
-        raw_blocks
-            .last()
-            .is_some_and(|content| content_raw_type(content) == Some("web_search_tool_result")),
-        "first Anthropic response should end the preserved raw transcript with a server-tool result"
-    );
-
-    Message::Assistant {
-        id: None,
-        content: rig::OneOrMany::many(raw_blocks)
-            .expect("server tool assistant message should be non-empty"),
-    }
-}
-
 fn content_raw_type(content: &AssistantContent) -> Option<&str> {
     let AssistantContent::Text(text) = content else {
         return None;
@@ -266,91 +136,6 @@ struct RecordedInteraction {
 #[derive(Deserialize)]
 struct RecordedRequest {
     body: Option<String>,
-}
-
-fn assert_cassette_preserves_system_role_message(scenario: &str, expected_system_text: &str) {
-    let preserves_system_role = recorded_request_bodies(scenario).iter().any(|body| {
-        body.get("messages")
-            .and_then(Value::as_array)
-            .is_some_and(|messages| {
-                messages.iter().any(|message| {
-                    message.get("role").and_then(Value::as_str) == Some("system")
-                        && message_contains_text(message, expected_system_text)
-                })
-            })
-    });
-
-    assert!(
-        preserves_system_role,
-        "expected cassette {scenario} to contain an Anthropic messages[] entry with role=system",
-    );
-}
-
-fn assert_cassette_preserves_system_role_after_server_tool_result(
-    scenario: &str,
-    expected_system_text: &str,
-) {
-    let request_bodies = recorded_request_bodies(scenario);
-    let continuation = request_bodies
-        .iter()
-        .find(|body| {
-            body.get("messages")
-                .and_then(Value::as_array)
-                .is_some_and(|messages| {
-                    messages.iter().any(|message| {
-                        message.get("role").and_then(Value::as_str) == Some("system")
-                            && message_contains_text(message, expected_system_text)
-                    })
-                })
-        })
-        .unwrap_or_else(|| {
-            panic!("expected cassette {scenario} to contain the continuation request")
-        });
-
-    let top_level_system_contains_instruction = continuation
-        .get("system")
-        .and_then(Value::as_array)
-        .is_some_and(|system| {
-            system
-                .iter()
-                .any(|block| block_contains_text(block, expected_system_text))
-        });
-    assert!(
-        !top_level_system_contains_instruction,
-        "expected cassette {scenario} not to hoist the continuation system instruction",
-    );
-
-    let messages = continuation
-        .get("messages")
-        .and_then(Value::as_array)
-        .expect("continuation request should contain messages[]");
-    let roles = messages
-        .iter()
-        .map(|message| message.get("role").and_then(Value::as_str))
-        .collect::<Vec<_>>();
-    assert_eq!(
-        roles,
-        [
-            Some("assistant"),
-            Some("system"),
-            Some("assistant"),
-            Some("user")
-        ],
-        "expected continuation request to preserve assistant -> system -> assistant -> user order",
-    );
-
-    assert!(
-        message_content_has_type(&messages[0], "server_tool_use"),
-        "expected first continuation message to contain a preserved server_tool_use block",
-    );
-    assert!(
-        message_content_has_type(&messages[0], "web_search_tool_result"),
-        "expected first continuation message to contain a preserved web_search_tool_result block",
-    );
-    assert!(
-        message_contains_text(&messages[1], expected_system_text),
-        "expected second continuation message to contain the system instruction",
-    );
 }
 
 fn assert_cassette_hoists_system_instruction(scenario: &str, expected_system_text: &str) {

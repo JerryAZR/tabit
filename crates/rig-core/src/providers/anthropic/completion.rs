@@ -1696,10 +1696,6 @@ where
 }
 
 
-pub(super) fn supports_mid_conversation_system_messages(model: &str) -> bool {
-    model.starts_with(CLAUDE_OPUS_4_8)
-}
-
 #[derive(Debug, Deserialize, Serialize)]
 pub struct Metadata {
     user_id: Option<String>,
@@ -2238,70 +2234,25 @@ pub(super) fn resolve_top_level_cache_control(
 
 pub(super) fn split_system_messages_from_history(
     history: Vec<message::Message>,
-    preserve_mid_conversation_system_messages: bool,
 ) -> (Vec<SystemContent>, Vec<message::Message>) {
     let mut system = Vec::new();
     let mut remaining = Vec::new();
 
-    for (index, message) in history.iter().enumerate() {
+    for message in history {
         match message {
             message::Message::System { content } => {
                 if !content.is_empty() {
-                    if preserve_mid_conversation_system_messages
-                        && is_valid_mid_conversation_system_message(&history, index)
-                    {
-                        remaining.push(message.clone());
-                    } else {
-                        system.push(SystemContent::Text {
-                            text: content.clone(),
-                            cache_control: None,
-                        });
-                    }
+                    system.push(SystemContent::Text {
+                        text: content,
+                        cache_control: None,
+                    });
                 }
             }
-            other => remaining.push(other.clone()),
+            other => remaining.push(other),
         }
     }
 
     (system, remaining)
-}
-
-fn is_valid_mid_conversation_system_message(history: &[message::Message], index: usize) -> bool {
-    let follows_valid_turn = index > 0
-        && history.get(index - 1).is_some_and(|message| {
-            matches!(message, message::Message::User { .. })
-                || assistant_ends_in_server_tool_block(message)
-        });
-    let is_last_or_precedes_assistant = history
-        .get(index + 1)
-        .is_none_or(|message| matches!(message, message::Message::Assistant { .. }));
-
-    follows_valid_turn && is_last_or_precedes_assistant
-}
-
-fn assistant_ends_in_server_tool_block(message: &message::Message) -> bool {
-    let message::Message::Assistant { content, .. } = message else {
-        return false;
-    };
-
-    let Some(message::AssistantContent::Text(text)) = content.iter().last() else {
-        return false;
-    };
-
-    let Some(raw_type) = text
-        .additional_params
-        .as_ref()
-        .and_then(|params| params.get(ANTHROPIC_RAW_CONTENT_KEY))
-        .and_then(|raw_content| raw_content.get("type"))
-        .and_then(serde_json::Value::as_str)
-    else {
-        return false;
-    };
-
-    matches!(
-        raw_type,
-        "server_tool_use" | "web_search_tool_result" | "code_execution_tool_result"
-    )
 }
 
 /// Parameters for building an AnthropicCompletionRequest
@@ -2337,10 +2288,7 @@ impl TryFrom<AnthropicRequestParams<'_>> for AnthropicCompletionRequest {
             ));
         };
 
-        let (history_system, chat_history) = split_system_messages_from_history(
-            chat_history,
-            supports_mid_conversation_system_messages(model),
-        );
+        let (history_system, chat_history) = split_system_messages_from_history(chat_history);
         let mut full_history = vec![];
         full_history.extend(chat_history);
 
@@ -3152,77 +3100,10 @@ mod tests {
             .is_some()
     }
 
-    #[test]
-    fn opus_4_8_preserves_mid_conversation_system_message() {
-        let request = completion_request_with_history(
-            vec![
-                message::Message::System {
-                    content: "Global history instruction.".to_string(),
-                },
-                message::Message::from("Review this code."),
-                message::Message::System {
-                    content: "From now on, require explicit type annotations.".to_string(),
-                },
-            ],
-            Some("Top-level instruction.".to_string()),
-        );
 
-        let request = AnthropicCompletionRequest::try_from(AnthropicRequestParams {
-            model: CLAUDE_OPUS_4_8,
-            request,
-            prompt_caching: false,
-            automatic_caching: false,
-            automatic_caching_ttl: None,
-        })
-        .unwrap();
-
-        let value = serde_json::to_value(request).unwrap();
-        assert_eq!(value["system"][0]["text"], "Top-level instruction.");
-        assert_eq!(value["system"][1]["text"], "Global history instruction.");
-
-        let messages = value["messages"].as_array().unwrap();
-        assert_eq!(messages.len(), 2);
-        assert_eq!(messages[0]["role"], "user");
-        assert_eq!(messages[1]["role"], "system");
-        assert_eq!(
-            messages[1]["content"][0]["text"],
-            "From now on, require explicit type annotations."
-        );
-    }
 
     #[test]
-    fn opus_4_8_preserves_mid_conversation_system_message_before_assistant_turn() {
-        let request = completion_request_with_history(
-            vec![
-                message::Message::user("Review this code."),
-                message::Message::System {
-                    content: "From now on, require explicit type annotations.".to_string(),
-                },
-                message::Message::assistant("I will enforce explicit type annotations."),
-            ],
-            None,
-        );
-
-        let request = AnthropicCompletionRequest::try_from(AnthropicRequestParams {
-            model: CLAUDE_OPUS_4_8,
-            request,
-            prompt_caching: false,
-            automatic_caching: false,
-            automatic_caching_ttl: None,
-        })
-        .unwrap();
-
-        let value = serde_json::to_value(request).unwrap();
-        let messages = value["messages"].as_array().unwrap();
-        assert_eq!(messages.len(), 3);
-        assert_eq!(messages[0]["role"], "user");
-        assert_eq!(messages[1]["role"], "system");
-        assert_eq!(messages[2]["role"], "assistant");
-        assert!(value.get("system").is_none());
-    }
-
-    #[test]
-    fn opus_4_8_hoists_leading_system_message_when_documents_are_present() {
+    fn documents_hoist_leading_and_mid_conversation_system_messages() {
         let mut request = completion_request_with_history(
             vec![
                 message::Message::System {
@@ -3279,160 +3160,8 @@ mod tests {
         );
     }
 
-    #[test]
-    fn opus_4_8_preserves_system_message_after_assistant_server_tool_result() {
-        let request = completion_request_with_history(
-            vec![
-                message::Message::Assistant {
-                    id: None,
-                    content: OneOrMany::many([
-                        message::AssistantContent::Text(message::Text {
-                            text: String::new(),
-                            additional_params: Some(json!({
-                                ANTHROPIC_RAW_CONTENT_KEY: {
-                                    "type": "server_tool_use",
-                                    "id": "srvtoolu_01",
-                                    "name": "web_search",
-                                    "input": {
-                                        "query": "clear daytime sky color"
-                                    }
-                                }
-                            })),
-                        }),
-                        message::AssistantContent::Text(message::Text {
-                            text: String::new(),
-                            additional_params: Some(json!({
-                                ANTHROPIC_RAW_CONTENT_KEY: {
-                                    "type": "web_search_tool_result",
-                                    "tool_use_id": "srvtoolu_01",
-                                    "content": {
-                                        "type": "web_search_tool_result_error",
-                                        "error_code": "unavailable"
-                                    }
-                                }
-                            })),
-                        }),
-                    ])
-                    .unwrap(),
-                },
-                message::Message::System {
-                    content: "For the rest of this conversation, answer in Spanish.".to_string(),
-                },
-                message::Message::assistant("Entendido."),
-            ],
-            None,
-        );
 
-        let request = AnthropicCompletionRequest::try_from(AnthropicRequestParams {
-            model: CLAUDE_OPUS_4_8,
-            request,
-            prompt_caching: false,
-            automatic_caching: false,
-            automatic_caching_ttl: None,
-        })
-        .unwrap();
 
-        let value = serde_json::to_value(request).unwrap();
-        assert!(value.get("system").is_none());
-
-        let messages = value["messages"].as_array().unwrap();
-        assert_eq!(messages.len(), 3);
-        assert_eq!(messages[0]["role"], "assistant");
-        assert_eq!(messages[0]["content"][0]["type"], "server_tool_use");
-        assert_eq!(messages[0]["content"][1]["type"], "web_search_tool_result");
-        assert_eq!(messages[1]["role"], "system");
-        assert_eq!(
-            messages[1]["content"][0]["text"],
-            "For the rest of this conversation, answer in Spanish."
-        );
-        assert_eq!(messages[2]["role"], "assistant");
-    }
-
-    #[test]
-    fn opus_4_8_preserves_system_message_after_assistant_server_tool_use() {
-        let request = completion_request_with_history(
-            vec![
-                message::Message::Assistant {
-                    id: None,
-                    content: OneOrMany::one(message::AssistantContent::Text(message::Text {
-                        text: String::new(),
-                        additional_params: Some(json!({
-                            ANTHROPIC_RAW_CONTENT_KEY: {
-                                "type": "server_tool_use",
-                                "id": "srvtoolu_01",
-                                "name": "web_search",
-                                "input": {
-                                    "query": "clear daytime sky color"
-                                }
-                            }
-                        })),
-                    })),
-                },
-                message::Message::System {
-                    content: "For the rest of this conversation, answer in Spanish.".to_string(),
-                },
-                message::Message::assistant("Entendido."),
-            ],
-            None,
-        );
-
-        let request = AnthropicCompletionRequest::try_from(AnthropicRequestParams {
-            model: CLAUDE_OPUS_4_8,
-            request,
-            prompt_caching: false,
-            automatic_caching: false,
-            automatic_caching_ttl: None,
-        })
-        .unwrap();
-
-        let value = serde_json::to_value(request).unwrap();
-        assert!(value.get("system").is_none());
-
-        let messages = value["messages"].as_array().unwrap();
-        assert_eq!(messages.len(), 3);
-        assert_eq!(messages[0]["role"], "assistant");
-        assert_eq!(messages[0]["content"][0]["type"], "server_tool_use");
-        assert_eq!(messages[1]["role"], "system");
-        assert_eq!(
-            messages[1]["content"][0]["text"],
-            "For the rest of this conversation, answer in Spanish."
-        );
-        assert_eq!(messages[2]["role"], "assistant");
-    }
-
-    #[test]
-    fn opus_4_8_hoists_system_message_in_invalid_mid_conversation_position() {
-        let request = completion_request_with_history(
-            vec![
-                message::Message::user("Review this code."),
-                message::Message::System {
-                    content: "From now on, require explicit type annotations.".to_string(),
-                },
-                message::Message::user("Now review this other file."),
-            ],
-            None,
-        );
-
-        let request = AnthropicCompletionRequest::try_from(AnthropicRequestParams {
-            model: CLAUDE_OPUS_4_8,
-            request,
-            prompt_caching: false,
-            automatic_caching: false,
-            automatic_caching_ttl: None,
-        })
-        .unwrap();
-
-        let value = serde_json::to_value(request).unwrap();
-        assert_eq!(
-            value["system"][0]["text"],
-            "From now on, require explicit type annotations."
-        );
-
-        let messages = value["messages"].as_array().unwrap();
-        assert_eq!(messages.len(), 2);
-        assert_eq!(messages[0]["role"], "user");
-        assert_eq!(messages[1]["role"], "user");
-    }
 
     #[test]
     fn older_anthropic_models_hoist_mid_conversation_system_message() {
