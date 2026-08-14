@@ -324,8 +324,6 @@ const WALK_FLOOR_FILES: &[&str] = &[
     "rig-core/src/providers/internal/wire.rs",
     "rig-core/src/providers/anthropic/streaming.rs",
     "rig-core/src/providers/openai/responses_api/streaming.rs",
-    "rig-bedrock/src/streaming.rs",
-    "rig-gemini-grpc/src/streaming.rs",
 ];
 
 /// Assert the walk saw every floor file; `walked` holds normalized paths.
@@ -438,11 +436,13 @@ const RAW_SERDE_MARKERS: &[&str] = &[
 /// drift, not security boundaries: an aliased import could evade them, and
 /// that aliasing would itself be reviewable. AST-grade enforcement is
 /// deliberately not attempted.
-const SINGLE_FILE_STREAMING_MODULES: &[&str] = &[
-    "providers/ollama.rs",
-    "providers/copilot/mod.rs",
-    "providers/chatgpt/mod.rs",
-];
+const SINGLE_FILE_STREAMING_MODULES: &[&str] = &[];
+// Vendored trim note: upstream listed single-file provider modules whose
+// entire file is a streaming surface (ollama.rs, copilot/mod.rs,
+// chatgpt/mod.rs). Those providers were trimmed; the kept providers (anthropic,
+// openai, internal) keep streaming code under `*/streaming.rs` files, which the
+// filename-based rule below already catches. The list is retained (empty) so
+// the textual scan keeps its single-file hook for any future provider.
 
 /// Identifiers a file cannot mention without participating in wire handling.
 const WIRE_MACHINERY_MARKERS: &[&str] = &[
@@ -574,9 +574,8 @@ fn provider_streaming_modules_never_raw_parse_the_wire() {
     // basename pattern, broken content scoping) is a vacuous pass.
     for suffix in [
         "rig-core/src/providers/anthropic/streaming.rs",
-        "rig-core/src/providers/ollama.rs",
+        "rig-core/src/providers/openai/completion/streaming.rs",
         "rig-core/src/providers/openai/responses_api/streaming.rs",
-        "rig-bedrock/src/streaming.rs",
     ] {
         assert!(
             scanned_targets.iter().any(|label| label.ends_with(suffix)),

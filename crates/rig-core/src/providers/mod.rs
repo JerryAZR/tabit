@@ -1,28 +1,8 @@
 //! Provider integrations included in `rig-core`.
 //!
 //! - Anthropic
-//! - Azure OpenAI
-//! - ChatGPT and GitHub Copilot auth-backed clients
-//! - Cohere
-//! - DeepSeek
-//! - Gemini
-//! - Groq
-//! - Hugging Face
-//! - Hyperbolic
-//! - Llamafile
-//! - MiniMax
-//! - Mira
-//! - Mistral
-//! - Moonshot
-//! - Ollama
-//! - OpenAI
-//! - OpenRouter
-//! - Perplexity
-//! - Together
-//! - Voyage AI
-//! - xAI
-//! - Xiaomi MiMo
-//! - Z.ai
+//! - OpenAI (both the chat-completions path and the Responses API)
+//! - the generic OpenAI-chat-compatible engine (`internal`)
 //!
 //! Each provider module defines a `Client` type and model types for the
 //! capabilities it supports. Capability traits such as
@@ -107,28 +87,5 @@
 //! # }
 //! ```
 pub mod anthropic;
-pub mod azure;
-pub mod chatgpt;
-pub mod cohere;
-pub mod copilot;
-pub mod deepseek;
-pub mod doubleword;
-pub mod gemini;
-pub mod groq;
-pub mod huggingface;
-pub mod hyperbolic;
-pub mod internal;
-pub mod llamafile;
-pub mod minimax;
-pub mod mira;
-pub mod mistral;
-pub mod moonshot;
-pub mod ollama;
 pub mod openai;
-pub mod openrouter;
-pub mod perplexity;
-pub mod together;
-pub mod voyageai;
-pub mod xai;
-pub mod xiaomimimo;
-pub mod zai;
+pub mod internal;
