@@ -623,8 +623,11 @@ impl TryFrom<message::UserContent> for UserContent {
                 DocumentSourceKind::String(_) => Err(message::MessageError::ConversionError(
                     "PDF documents must be base64-encoded, not raw strings".into(),
                 )),
+                // Unreachable at runtime: `FileId` documents are captured by
+                // the earlier outer arm (which matches regardless of media
+                // type). The arm exists only for match exhaustiveness.
                 DocumentSourceKind::FileId(_) => Err(message::MessageError::ConversionError(
-                    "File ID documents should be converted without media type constraints".into(),
+                    "internal invariant violated: FileId documents must be captured by the earlier arm".into(),
                 )),
                 DocumentSourceKind::Unknown => Err(message::MessageError::ConversionError(
                     "Document has no body".into(),
@@ -722,15 +725,14 @@ impl TryFrom<OneOrMany<message::UserContent>> for Vec<Message> {
             messages: &mut Vec<Message>,
             pending: &mut Vec<UserContent>,
         ) -> Result<(), message::MessageError> {
-            if pending.is_empty() {
+            // `from_iter_optional` yields `None` exactly when `pending` is
+            // empty, which is a normal no-op here (e.g. consecutive tool
+            // results), so no fallible `OneOrMany::many` reconstruction is
+            // needed.
+            let Some(content) = OneOrMany::from_iter_optional(std::mem::take(pending)) else {
                 return Ok(());
-            }
+            };
 
-            let content = OneOrMany::many(std::mem::take(pending)).map_err(|_| {
-                message::MessageError::ConversionError(
-                    "OpenAI user message did not contain any non-tool content".into(),
-                )
-            })?;
             messages.push(Message::User {
                 content,
                 name: None,
@@ -1631,10 +1633,14 @@ impl TryFrom<OpenAIRequestParams> for CompletionRequest {
         );
 
         if full_history.is_empty() {
+            // The request's `chat_history` is a non-empty `OneOrMany` and
+            // every message conversion yields at least one wire message, so
+            // an empty history here means a conversion regressed.
             return Err(CompletionError::RequestError(
                 std::io::Error::new(
                     std::io::ErrorKind::InvalidInput,
-                    "OpenAI Chat Completions request has no provider-compatible messages after conversion",
+                    "internal invariant violated: OpenAI Chat Completions request produced no \
+                     messages after conversion (chat history is non-empty by construction)",
                 )
                 .into(),
             ));

@@ -205,6 +205,10 @@ where
                                 });
                                 return Poll::Ready(Some(Err(err)));
                             } else {
+                                // The retry policy declined to schedule a
+                                // retry (exhausted max retries, or a custom
+                                // policy giving up): close the source while
+                                // still surfacing the error — never swallow it.
                                 // Transition: Connecting -> Closed
                                 this.state.set(SourceState::Closed);
                                 return Poll::Ready(Some(Err(err)));
@@ -252,7 +256,11 @@ where
                                 });
                                 return Poll::Ready(Some(Err(err)));
                             } else {
-                                // Transition: Reconnecting -> Closed (max retries exceeded)
+                                // The retry policy declined to schedule a
+                                // retry (exhausted max retries, or a custom
+                                // policy giving up): close the source while
+                                // still surfacing the error — never swallow it.
+                                // Transition: Reconnecting -> Closed
                                 this.state.set(SourceState::Closed);
                                 return Poll::Ready(Some(Err(err)));
                             }
@@ -282,14 +290,23 @@ where
                                 });
                                 return Poll::Ready(Some(Err(err)));
                             } else {
+                                // The retry policy declined to schedule a
+                                // retry (exhausted max retries, or a custom
+                                // policy giving up): close the source while
+                                // still surfacing the error — never swallow it.
                                 // Transition: Open -> Closed
                                 this.state.set(SourceState::Closed);
                                 return Poll::Ready(Some(Err(err)));
                             }
                         }
-                        Poll::Ready(Some(Err(EventStreamError::Parser(_)))) => {
-                            // Parser errors are recoverable - continue polling
-                            continue;
+                        Poll::Ready(Some(Err(EventStreamError::Parser(err)))) => {
+                            // A malformed SSE frame from the provider is a
+                            // response defect: surface it as an error and
+                            // close the source instead of silently skipping it.
+                            this.state.set(SourceState::Closed);
+                            return Poll::Ready(Some(Err(super::Error::Instance(
+                                format!("malformed SSE frame in event stream: {err}").into(),
+                            ))));
                         }
                         Poll::Ready(Some(Err(EventStreamError::Utf8(_)))) => {
                             // UTF-8 errors are recoverable - continue polling

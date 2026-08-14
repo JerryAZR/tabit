@@ -205,14 +205,15 @@ impl PartsAccumulator {
         // the pre-metadata part across the text boundary.
         self.close_minted_reasoning();
         let index = self.ensure_text_block();
-        let Some(ManagedPart::DeltaBuilt(AssistantContent::Text(text))) = self.parts.get_mut(index)
-        else {
-            return;
-        };
-
-        match text.additional_params.as_mut() {
-            Some(existing) => merge_text_additional_params(existing, additional_params),
-            None => text.additional_params = Some(additional_params),
+        // `ensure_text_block` guarantees the index holds a delta-built text
+        // part, so this lookup always matches.
+        if let Some(ManagedPart::DeltaBuilt(AssistantContent::Text(text))) =
+            self.parts.get_mut(index)
+        {
+            match text.additional_params.as_mut() {
+                Some(existing) => merge_text_additional_params(existing, additional_params),
+                None => text.additional_params = Some(additional_params),
+            }
         }
     }
 
@@ -235,17 +236,16 @@ impl PartsAccumulator {
         if let Some(&index) = self.reasoning_index.get(&key) {
             match self.parts.get_mut(index) {
                 Some(ManagedPart::DeltaBuilt(AssistantContent::Reasoning(existing))) => {
+                    // Delta-built reasoning parts are only created by
+                    // `delta_reasoning`, whose content is a single `Text`
+                    // block (and `reasoning_signature` only ever appends
+                    // `Text` blocks), so the last block is always `Text`.
                     if let Some(ReasoningContent::Text {
                         text: existing_text,
                         ..
                     }) = existing.content.last_mut()
                     {
                         existing_text.push_str(text);
-                    } else {
-                        existing.content.push(ReasoningContent::Text {
-                            text: text.to_owned(),
-                            signature: None,
-                        });
                     }
                     return;
                 }
@@ -413,22 +413,18 @@ impl PartsAccumulator {
     /// reasoning block — only the *completed* call is a part boundary,
     /// matching the pre-assembly behavior where deltas bypassed accumulation.
     pub(crate) fn tool_name_delta(&mut self, id: &PartId, name: &str) -> String {
-        let index = self.ensure_open_tool_input(id);
-        match self.open_tool_inputs.get_mut(index) {
-            Some(input) => {
-                // Last-*non-empty* semantics (doc above, and `ToolCallBridge`'s
-                // matching filter): an empty fragment must not erase an
-                // established name, or finalization would drop the call as
-                // nameless.
-                if !name.is_empty() {
-                    name.clone_into(&mut input.name);
-                }
-                input.internal_call_id.clone()
-            }
-            // Unreachable (`ensure` returns a live index); degrade to a fresh
-            // id rather than panic.
-            None => crate::id::generate(),
+        let internal_call_id = self.ensure_open_tool_input(id);
+        // Last-*non-empty* semantics (doc above, and `ToolCallBridge`'s
+        // matching filter): an empty fragment must not erase an
+        // established name, or finalization would drop the call as nameless.
+        // `ensure_open_tool_input` just guaranteed an open input for `id`,
+        // so the lookup always finds it.
+        if !name.is_empty()
+            && let Some(input) = self.open_tool_inputs.iter_mut().find(|input| input.id == *id)
+        {
+            name.clone_into(&mut input.name);
         }
+        internal_call_id
     }
 
     /// Append a streamed argument fragment to the call's buffer, opening the
@@ -436,40 +432,37 @@ impl PartsAccumulator {
     ///
     /// `id` must be non-empty; see [`PartsAccumulator::tool_name_delta`].
     pub(crate) fn tool_args_delta(&mut self, id: &PartId, fragment: &str) -> String {
-        let index = self.ensure_open_tool_input(id);
-        match self.open_tool_inputs.get_mut(index) {
-            Some(input) => {
-                match input.buffer.as_mut() {
-                    Some(buffer) => {
-                        // Some OpenAI-compatible gateways emit a literal
-                        // `null` placeholder before streaming the real JSON
-                        // argument fragments; a later non-empty fragment
-                        // supersedes it.
-                        if buffer.trim() == "null" && !fragment.trim().is_empty() {
-                            buffer.clear();
-                        }
-                        if buffer.len().saturating_add(fragment.len()) > MAX_TOOL_INPUT_BYTES {
-                            if !input.overflowed {
-                                input.overflowed = true;
-                                tracing::warn!(
-                                    tool = %input.name,
-                                    "streamed tool-call input exceeded the accumulation bound; \
-                                     truncating — the call will finalize through the wire's \
-                                     unparseable-input policy"
-                                );
-                            }
-                        } else {
-                            buffer.push_str(fragment);
-                        }
+        let internal_call_id = self.ensure_open_tool_input(id);
+        // `ensure_open_tool_input` just guaranteed an open input for `id`,
+        // so the lookup always finds it.
+        if let Some(input) = self.open_tool_inputs.iter_mut().find(|input| input.id == *id) {
+            match input.buffer.as_mut() {
+                Some(buffer) => {
+                    // Some OpenAI-compatible gateways emit a literal
+                    // `null` placeholder before streaming the real JSON
+                    // argument fragments; a later non-empty fragment
+                    // supersedes it.
+                    if buffer.trim() == "null" && !fragment.trim().is_empty() {
+                        buffer.clear();
                     }
-                    None => input.buffer = Some(fragment.to_owned()),
+                    if buffer.len().saturating_add(fragment.len()) > MAX_TOOL_INPUT_BYTES {
+                        if !input.overflowed {
+                            input.overflowed = true;
+                            tracing::warn!(
+                                tool = %input.name,
+                                "streamed tool-call input exceeded the accumulation bound; \
+                                 truncating — the call will finalize through the wire's \
+                                 unparseable-input policy"
+                            );
+                        }
+                    } else {
+                        buffer.push_str(fragment);
+                    }
                 }
-                input.internal_call_id.clone()
+                None => input.buffer = Some(fragment.to_owned()),
             }
-            // Unreachable (`ensure` returns a live index); degrade to a fresh
-            // id rather than panic.
-            None => crate::id::generate(),
         }
+        internal_call_id
     }
 
     /// Close a streamed tool call's input and finalize it into a completed
@@ -635,29 +628,25 @@ impl PartsAccumulator {
         index
     }
 
-    /// Index of the open call for `id`, opening one if none exists.
-    fn ensure_open_tool_input(&mut self, id: &PartId) -> usize {
-        match self
-            .open_tool_inputs
-            .iter()
-            .position(|input| input.id == *id)
-        {
-            Some(index) => index,
-            None => {
-                // Fragments for an id a full block closed are a *new* call
-                // reusing the id, not a continuation of the finalized one:
-                // drop the mark so its end event finalizes normally.
-                self.closed_by_full_call.remove(id);
-                self.open_tool_inputs.push(OpenToolInput {
-                    id: id.clone(),
-                    internal_call_id: crate::id::generate(),
-                    name: String::new(),
-                    buffer: None,
-                    overflowed: false,
-                });
-                self.open_tool_inputs.len() - 1
-            }
+    /// The minted internal id of `id`'s open call, opening one if none exists.
+    fn ensure_open_tool_input(&mut self, id: &PartId) -> String {
+        if let Some(input) = self.open_tool_inputs.iter().find(|input| input.id == *id) {
+            return input.internal_call_id.clone();
         }
+
+        // Fragments for an id a full block closed are a *new* call
+        // reusing the id, not a continuation of the finalized one:
+        // drop the mark so its end event finalizes normally.
+        self.closed_by_full_call.remove(id);
+        let internal_call_id = crate::id::generate();
+        self.open_tool_inputs.push(OpenToolInput {
+            id: id.clone(),
+            internal_call_id: internal_call_id.clone(),
+            name: String::new(),
+            buffer: None,
+            overflowed: false,
+        });
+        internal_call_id
     }
 
     /// Attach a provider signature to the item's latest reasoning part.

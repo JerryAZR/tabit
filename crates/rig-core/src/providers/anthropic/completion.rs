@@ -860,7 +860,9 @@ fn extract_anthropic_raw_content(text: &message::Text) -> Result<Option<Content>
 
 fn anthropic_raw_content_to_message_text(content: Content) -> Result<message::Text, MessageError> {
     let raw_content = serde_json::to_value(content).map_err(|err| {
-        MessageError::ConversionError(format!("Failed to preserve Anthropic content block: {err}"))
+        MessageError::ConversionError(format!(
+            "internal invariant violated: Anthropic content block failed to serialize: {err}"
+        ))
     })?;
 
     Ok(message::Text {
@@ -889,7 +891,7 @@ fn anthropic_document_additional_params(
             "citations".to_string(),
             serde_json::to_value(citations).map_err(|err| {
                 MessageError::ConversionError(format!(
-                    "Failed to preserve Anthropic document citations metadata: {err}"
+                    "internal invariant violated: Anthropic document citations metadata failed to serialize: {err}"
                 ))
             })?,
         );
@@ -1128,50 +1130,54 @@ fn coerce_tool_input(input: serde_json::Value) -> serde_json::Value {
     }
 }
 
+fn reasoning_block_from_content(block: message::ReasoningContent) -> Content {
+    match block {
+        message::ReasoningContent::Text { text, signature } => Content::Thinking {
+            thinking: text,
+            signature,
+        },
+        message::ReasoningContent::Summary(summary) => Content::Thinking {
+            thinking: summary,
+            signature: None,
+        },
+        message::ReasoningContent::Redacted { data } | message::ReasoningContent::Encrypted(data) => {
+            Content::RedactedThinking { data }
+        }
+    }
+}
+
+/// Convert a generic assistant content block into Anthropic content blocks.
+///
+/// Always returns at least one block on `Ok`, which lets callers merge
+/// converted blocks without a fallible `OneOrMany::many` reconstruction.
 fn anthropic_content_from_assistant_content(
     content: message::AssistantContent,
-) -> Result<Vec<Content>, MessageError> {
+) -> Result<OneOrMany<Content>, MessageError> {
     match content {
-        message::AssistantContent::Text(text) => {
-            Ok(vec![anthropic_text_content_from_message_text(text)?])
-        }
+        message::AssistantContent::Text(text) => Ok(OneOrMany::one(
+            anthropic_text_content_from_message_text(text)?,
+        )),
         message::AssistantContent::Image(_) => Err(MessageError::ConversionError(
             "Anthropic currently doesn't support images.".to_string(),
         )),
         message::AssistantContent::ToolCall(message::ToolCall { id, function, .. }) => {
-            Ok(vec![Content::ToolUse {
+            Ok(OneOrMany::one(Content::ToolUse {
                 id,
                 name: function.name,
                 input: coerce_tool_input(function.arguments),
-            }])
+            }))
         }
         message::AssistantContent::Reasoning(reasoning) => {
-            let mut converted = Vec::new();
-            for block in reasoning.content {
-                match block {
-                    message::ReasoningContent::Text { text, signature } => {
-                        converted.push(Content::Thinking {
-                            thinking: text,
-                            signature,
-                        });
-                    }
-                    message::ReasoningContent::Summary(summary) => {
-                        converted.push(Content::Thinking {
-                            thinking: summary,
-                            signature: None,
-                        });
-                    }
-                    message::ReasoningContent::Redacted { data }
-                    | message::ReasoningContent::Encrypted(data) => {
-                        converted.push(Content::RedactedThinking { data });
-                    }
-                }
-            }
-
-            if converted.is_empty() {
+            let mut blocks = reasoning.content.into_iter();
+            let Some(first) = blocks.next() else {
                 return Err(MessageError::ConversionError(
                     "Cannot convert empty reasoning content to Anthropic format".to_string(),
                 ));
+            };
+
+            let mut converted = OneOrMany::one(reasoning_block_from_content(first));
+            for block in blocks {
+                converted.push(reasoning_block_from_content(block));
             }
 
             Ok(converted)
@@ -1355,22 +1361,20 @@ impl TryFrom<message::Message> for Message {
             },
 
             message::Message::Assistant { content, .. } => {
-                let converted_content = content.into_iter().try_fold(
-                    Vec::new(),
-                    |mut accumulated, assistant_content| {
-                        accumulated
-                            .extend(anthropic_content_from_assistant_content(assistant_content)?);
-                        Ok::<Vec<Content>, MessageError>(accumulated)
-                    },
-                )?;
+                // `content` is a `OneOrMany` (never empty by construction) and
+                // `anthropic_content_from_assistant_content` only ever returns
+                // non-empty blocks on `Ok`, so the merged content is non-empty
+                // by construction and no fallible `OneOrMany::many` is needed.
+                let mut converted_content =
+                    anthropic_content_from_assistant_content(content.first())?;
+                for assistant_content in content.rest() {
+                    for block in anthropic_content_from_assistant_content(assistant_content)? {
+                        converted_content.push(block);
+                    }
+                }
 
                 Message {
-                    content: OneOrMany::many(converted_content).map_err(|_| {
-                        MessageError::ConversionError(
-                            "Assistant message did not contain Anthropic-compatible content"
-                                .to_owned(),
-                        )
-                    })?,
+                    content: converted_content,
                     role: Role::Assistant,
                 }
             }
@@ -1704,19 +1708,16 @@ impl TryFrom<message::ToolChoice> for ToolChoice {
             message::ToolChoice::None => Self::None,
             message::ToolChoice::Required => Self::Any,
             message::ToolChoice::Specific { function_names } => {
-                if function_names.len() != 1 {
-                    return Err(CompletionError::ProviderError(
-                        "Only one tool may be specified to be used by Claude".into(),
-                    ));
+                // `function_names.len() != 1` is handled by the same wildcard
+                // arm, so there is no reachable fall-through after the guard.
+                match function_names.as_slice() {
+                    [name] => Self::Tool { name: name.clone() },
+                    _ => {
+                        return Err(CompletionError::ProviderError(
+                            "Only one tool may be specified to be used by Claude".into(),
+                        ));
+                    }
                 }
-
-                let Some(name) = function_names.into_iter().next() else {
-                    return Err(CompletionError::ProviderError(
-                        "Only one tool may be specified to be used by Claude".into(),
-                    ));
-                };
-
-                Self::Tool { name }
             }
         };
 
@@ -1883,17 +1884,6 @@ pub fn apply_cache_control(system: &mut [SystemContent], messages: &mut [Message
     }
 }
 
-fn final_cacheable_tool_idx(tools: &[serde_json::Value]) -> Option<usize> {
-    tools.iter().rposition(|tool| {
-        tool.as_object().is_some_and(|tool| {
-            !matches!(
-                tool.get("defer_loading"),
-                Some(serde_json::Value::Bool(true))
-            )
-        })
-    })
-}
-
 fn tool_cache_control_count(tools: &[serde_json::Value]) -> usize {
     tools
         .iter()
@@ -2027,14 +2017,13 @@ fn apply_tool_cache_control(
     remaining_cache_markers: &mut usize,
     cache_control: &CacheControl,
 ) -> Result<(), CompletionError> {
-    let Some(idx) = final_cacheable_tool_idx(tools) else {
-        return Ok(());
-    };
-
-    let Some(tool) = tools
-        .get_mut(idx)
-        .and_then(serde_json::Value::as_object_mut)
-    else {
+    // Find the last non-deferred tool definition. Tools are serialized
+    // `ToolDefinition`s (always JSON objects), so this yields the object
+    // directly without a secondary object guard.
+    let Some(tool) = tools.iter_mut().rev().find_map(|tool| {
+        tool.as_object_mut()
+            .filter(|tool| !matches!(tool.get("defer_loading"), Some(serde_json::Value::Bool(true))))
+    }) else {
         return Ok(());
     };
 

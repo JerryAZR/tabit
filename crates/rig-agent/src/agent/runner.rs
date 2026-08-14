@@ -1173,7 +1173,9 @@ impl AgentRunner {
         // The engine yields `Done` unless it errored (handled above).
         response.ok_or_else(|| {
             PromptError::CompletionError(CompletionError::ResponseError(
-                "agent run ended without producing a final response".to_string(),
+                "internal invariant violated: the agent drive loop finished \
+                 without yielding a final response"
+                    .to_string(),
             ))
         })
     }

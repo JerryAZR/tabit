@@ -109,8 +109,13 @@ impl ToolOutput {
         } else if let Some(value) = self.as_json() {
             value.to_string()
         } else {
-            serde_json::to_string(&self.content)
-                .unwrap_or_else(|_| "<structured tool output>".to_string())
+            // `OneOrMany<ToolResultContent>` is plain serde data (strings,
+            // JSON values, media-type enums), so serialization cannot fail;
+            // if it ever does, flag the internal invariant loudly instead of
+            // silently substituting ordinary-looking output.
+            serde_json::to_string(&self.content).unwrap_or_else(|err| {
+                format!("<internal invariant violated: tool output failed to serialize: {err}>")
+            })
         }
     }
 }

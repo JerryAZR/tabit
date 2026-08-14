@@ -622,7 +622,9 @@ impl AgentRun {
                 let Some((prompt_ref, history_for_turn)) = self.new_messages.split_last() else {
                     return Err(PromptError::prompt_cancelled(
                         self.full_history(),
-                        "prompt loop lost its pending prompt",
+                        "malformed agent run state: `new_messages` is empty in the \
+                         `PreparingRequest` state, but it must end with the pending prompt — \
+                         the resumed run state is invalid",
                     ));
                 };
                 let prompt = prompt_ref.clone();
@@ -658,7 +660,9 @@ impl AgentRun {
                 let Some(choice) = OneOrMany::from_iter_optional(items.clone()) else {
                     return Err(PromptError::prompt_cancelled(
                         self.full_history(),
-                        "model turn lost its assistant content",
+                        "malformed agent run state: the pending model turn \
+                         (`AwaitingAdvance`) has no assistant content — `items` must hold at \
+                         least one entry; the resumed run state is invalid",
                     ));
                 };
 
@@ -955,10 +959,13 @@ impl AgentRun {
                 tool_call.clone()
             }
             _ => {
+                let index = resolving.next_index;
                 self.state = RunState::ResolvingToolCalls(resolving);
-                return Err(self.protocol_violation(
-                    "resolve_invalid_tool_call called without a pending invalid tool call",
-                ));
+                return Err(self.protocol_violation(&format!(
+                    "resolve_invalid_tool_call: `items[{index}]` is not a pending invalid \
+                     tool call — check `pending_invalid_tool_call()` first; a resumed run \
+                     with a malformed `next_index` also lands here"
+                )));
             }
         };
 
@@ -1079,10 +1086,13 @@ impl AgentRun {
                     .allowed_tool_names
                     .contains(&tool_call.function.name) => {}
             _ => {
+                let index = resolving.next_index;
                 self.state = RunState::ResolvingToolCalls(resolving);
-                return Err(self.protocol_violation(
-                    "ignore_invalid_tool_call called without a pending invalid tool call",
-                ));
+                return Err(self.protocol_violation(&format!(
+                    "ignore_invalid_tool_call: `items[{index}]` is not a pending invalid \
+                     tool call — check `pending_invalid_tool_call()` first; a resumed run \
+                     with a malformed `next_index` also lands here"
+                )));
             }
         }
 
@@ -1326,15 +1336,8 @@ impl AgentRun {
                 }
                 self.invalid_tool_call_retries += 1;
 
-                let Some((assistant_message, user_message)) =
-                    partial.rollback_messages(invalid.tool_call.clone(), feedback)
-                else {
-                    self.state = RunState::Failed;
-                    return Err(PromptError::prompt_cancelled(
-                        diagnostic_history,
-                        "invalid tool call retry produced no retry messages",
-                    ));
-                };
+                let (assistant_message, user_message) =
+                    partial.rollback_messages(invalid.tool_call.clone(), feedback);
                 self.new_messages.push(assistant_message);
                 self.new_messages.push(user_message);
                 self.rollback_pending = true;
@@ -1378,15 +1381,8 @@ impl AgentRun {
                     call_id: invalid.tool_call.call_id.clone(),
                     content: OneOrMany::one(ToolResultContent::text(reason.clone())),
                 };
-                let Some((assistant_message, user_message)) =
-                    partial.rollback_messages(invalid.tool_call.clone(), reason)
-                else {
-                    self.state = RunState::Failed;
-                    return Err(PromptError::prompt_cancelled(
-                        diagnostic_history,
-                        "invalid tool call skip produced no recovery messages",
-                    ));
-                };
+                let (assistant_message, user_message) =
+                    partial.rollback_messages(invalid.tool_call.clone(), reason);
                 self.new_messages.push(assistant_message);
                 self.new_messages.push(user_message);
                 self.rollback_pending = true;

@@ -92,8 +92,13 @@ where
 fn unknown_with_value<T>(data: &str, event_type: String) -> WireEvent<T> {
     match serde_json::from_str::<serde_json::Value>(data) {
         Ok(value) => WireEvent::Unknown { event_type, value },
-        // Unreachable in practice: the scan already tokenized this text.
-        Err(error) => WireEvent::Corrupt(error),
+        // Unreachable in practice: the scan already tokenized this exact text
+        // (including its trailing-content check), so it is valid JSON that
+        // `Value` accepts. Flag it as the internal invariant violation it
+        // would be rather than papering over it.
+        Err(error) => WireEvent::Corrupt(<serde_json::Error as serde::de::Error>::custom(
+            format!("internal invariant violated: frame re-parse failed after a successful scan: {error}"),
+        )),
     }
 }
 
@@ -159,8 +164,14 @@ where
         // warn log stays diagnosable.
         let value = match serde_json::from_str::<serde_json::Value>(data) {
             Ok(value) => value,
-            // Unreachable in practice: the scan already tokenized this text.
-            Err(error) => return WireEvent::Corrupt(error),
+            // Unreachable in practice: the scan already tokenized this exact
+            // text, so it is valid JSON that `Value` accepts. Flag it as the
+            // internal invariant violation it would be.
+            Err(error) => {
+                return WireEvent::Corrupt(<serde_json::Error as serde::de::Error>::custom(
+                    format!("internal invariant violated: frame re-parse failed after a successful scan: {error}"),
+                ));
+            }
         };
         let event_type = value
             .as_object()
@@ -322,27 +333,29 @@ fn scan_discriminators(
             while let Some(key) = map.next_key::<String>()? {
                 match self.keys.iter().position(|candidate| *candidate == key) {
                     Some(index) => {
-                        let entry = found.get_mut(index).ok_or_else(|| {
-                            serde::de::Error::custom("discriminator index out of range")
-                        })?;
-                        if entry.present {
-                            if self.reject_duplicates {
-                                return Err(serde::de::Error::custom(format!(
-                                    "duplicate `{key}` discriminator key in stream frame"
-                                )));
+                        // `index` came from `position` over `self.keys`, and
+                        // `found` has exactly one entry per key, so this
+                        // lookup always succeeds.
+                        if let Some(entry) = found.get_mut(index) {
+                            if entry.present {
+                                if self.reject_duplicates {
+                                    return Err(serde::de::Error::custom(format!(
+                                        "duplicate `{key}` discriminator key in stream frame"
+                                    )));
+                                }
+                                // Presence-only keys tolerate duplicates; the
+                                // first occurrence's value stands.
+                                map.next_value::<serde::de::IgnoredAny>()?;
+                                continue;
                             }
-                            // Presence-only keys tolerate duplicates; the
-                            // first occurrence's value stands.
-                            map.next_value::<serde::de::IgnoredAny>()?;
-                            continue;
+                            entry.present = true;
+                            // Only string discriminators carry a value; anything
+                            // else (e.g. a `choices` array) records presence.
+                            entry.string_value = match map.next_value::<StringOrIgnored>()? {
+                                StringOrIgnored::String(value) => Some(value),
+                                StringOrIgnored::Ignored => None,
+                            };
                         }
-                        entry.present = true;
-                        // Only string discriminators carry a value; anything
-                        // else (e.g. a `choices` array) records presence.
-                        entry.string_value = match map.next_value::<StringOrIgnored>()? {
-                            StringOrIgnored::String(value) => Some(value),
-                            StringOrIgnored::Ignored => None,
-                        };
                     }
                     None => {
                         map.next_value::<serde::de::IgnoredAny>()?;

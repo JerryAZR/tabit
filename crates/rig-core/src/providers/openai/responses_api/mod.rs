@@ -126,11 +126,11 @@ impl Serialize for InputItem {
         S: serde::Serializer,
     {
         let mut value = serde_json::to_value(&self.input).map_err(serde::ser::Error::custom)?;
-        let map = value.as_object_mut().ok_or_else(|| {
-            serde::ser::Error::custom("Input content must serialize to an object")
-        })?;
-
-        if let Some(role) = &self.role
+        // `InputContent` is an internally tagged enum whose variants all
+        // carry struct payloads, so a successful serialization is always a
+        // JSON object and no non-object fallback is needed.
+        if let Some(map) = value.as_object_mut()
+            && let Some(role) = &self.role
             && !map.contains_key("role")
         {
             map.insert(
@@ -2092,12 +2092,13 @@ where
     T: Serialize,
 {
     let mut value = serde_json::to_value(payload)?;
-    let map = value.as_object_mut().ok_or_else(|| {
-        <serde_json::Error as serde::ser::Error>::custom(
-            "output payload must serialize to a JSON object",
-        )
-    })?;
-    map.insert("type".to_string(), Value::String(tag.to_string()));
+    // This helper is only used with `Message` (internally tagged enum of
+    // struct variants) and `OutputFunctionCall` (a struct) payloads, so a
+    // successful serialization is always a JSON object and no non-object
+    // fallback is needed.
+    if let Some(map) = value.as_object_mut() {
+        map.insert("type".to_string(), Value::String(tag.to_string()));
+    }
     Ok(value)
 }
 
@@ -2128,10 +2129,11 @@ impl Serialize for Output {
                     "encrypted_content": encrypted_content,
                     "status": status,
                 });
-                if !content.is_empty() {
-                    let map = value.as_object_mut().ok_or_else(|| {
-                        serde::ser::Error::custom("reasoning output must serialize to an object")
-                    })?;
+                if !content.is_empty()
+                    // `value` is built from an object `json!` literal above,
+                    // so it is always a `Value::Object`.
+                    && let Some(map) = value.as_object_mut()
+                {
                     map.insert("content".to_string(), reasoning_text_content_json(content));
                 }
                 Ok(value)
@@ -2711,15 +2713,13 @@ fn flush_responses_user_content(
     messages: &mut Vec<Message>,
     pending: &mut Vec<UserContent>,
 ) -> Result<(), MessageError> {
-    if pending.is_empty() {
+    // `from_iter_optional` yields `None` exactly when `pending` is empty,
+    // which is a normal no-op here (e.g. consecutive tool results), so no
+    // fallible `OneOrMany::many` reconstruction is needed.
+    let Some(content) = OneOrMany::from_iter_optional(std::mem::take(pending)) else {
         return Ok(());
-    }
+    };
 
-    let content = OneOrMany::many(std::mem::take(pending)).map_err(|_| {
-        MessageError::ConversionError(
-            "User message did not contain OpenAI Responses-compatible content".to_string(),
-        )
-    })?;
     messages.push(Message::User {
         content,
         name: None,

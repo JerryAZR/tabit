@@ -172,35 +172,55 @@ impl PartialStreamedTurn {
     /// Rollback messages for a retried or skipped streamed turn: the partial
     /// assistant turn plus a user message carrying `feedback` for the invalid
     /// call and a synthetic "not executed" result for each validated peer.
+    ///
+    /// Infallible by construction: both messages are anchored on the invalid
+    /// call (its tool call as assistant content, its result as user content),
+    /// so neither can ever be empty.
     pub(crate) fn rollback_messages(
         &self,
         invalid_tool_call: ToolCall,
         feedback: String,
-    ) -> Option<(Message, Message)> {
-        let assistant_message = self.assistant_message(Some(invalid_tool_call.clone()))?;
+    ) -> (Message, Message) {
+        // Assistant message in canonical order (reasoning → text → tool
+        // calls), anchored on the invalid call and prepending any
+        // accumulated content in reverse canonical order.
+        let mut content = OneOrMany::one(AssistantContent::ToolCall(invalid_tool_call.clone()));
+        for call in self.pending_tool_calls.iter().rev() {
+            content.insert(0, AssistantContent::ToolCall(call.clone()));
+        }
+        if let Some(text) = &self.text
+            && !text.is_empty()
+        {
+            content.insert(0, AssistantContent::text(text.clone()));
+        }
+        for reasoning in self.reasoning.iter().rev() {
+            content.insert(0, AssistantContent::Reasoning(reasoning.clone()));
+        }
+        let assistant_message = Message::Assistant {
+            id: self.message_id.clone(),
+            content,
+        };
 
-        let mut retry_results = self
-            .pending_tool_calls
-            .iter()
-            .map(|tool_call| {
-                tool_result_message(
-                    tool_call.id.clone(),
-                    tool_call.call_id.clone(),
-                    TOOL_NOT_EXECUTED_DUE_TO_INVALID_PEER.to_string(),
-                )
-            })
-            .collect::<Vec<_>>();
-        retry_results.push(tool_result_message(
+        // User message: synthetic "not executed" results for validated peers,
+        // then the invalid call's own feedback result. Anchored on the
+        // feedback result with peers prepended in emission order.
+        let mut retry_results = OneOrMany::one(tool_result_message(
             invalid_tool_call.id,
             invalid_tool_call.call_id,
             feedback,
         ));
-
+        for call in self.pending_tool_calls.iter().rev() {
+            retry_results.insert(0, tool_result_message(
+                call.id.clone(),
+                call.call_id.clone(),
+                TOOL_NOT_EXECUTED_DUE_TO_INVALID_PEER.to_string(),
+            ));
+        }
         let user_message = Message::User {
-            content: OneOrMany::from_iter_optional(retry_results)?,
+            content: retry_results,
         };
 
-        Some((assistant_message, user_message))
+        (assistant_message, user_message)
     }
 }
 

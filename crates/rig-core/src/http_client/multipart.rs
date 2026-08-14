@@ -193,13 +193,26 @@ impl From<MultipartForm> for reqwest::multipart::Form {
                     form = form.text(part.name, text);
                 }
                 PartContent::Binary(bytes) => {
-                    let mut req_part = if let Some(content_type) = part.content_type.as_ref() {
-                        reqwest::multipart::Part::bytes(bytes.to_vec())
-                            .mime_str(content_type.as_ref())
-                            .unwrap_or_else(|_| reqwest::multipart::Part::bytes(bytes.to_vec()))
-                    } else {
-                        reqwest::multipart::Part::bytes(bytes.to_vec())
-                    };
+                    let mut req_part = reqwest::multipart::Part::bytes(bytes.to_vec());
+                    // A stored `Mime` round-trips through its string form, so
+                    // `mime_str` cannot fail in practice (reqwest's direct
+                    // `Part::mime(Mime)` constructor is private, hence the
+                    // re-parse). This `From` impl has no error channel, so a
+                    // failure would be an internal invariant violation and is
+                    // logged loudly rather than silently swallowed.
+                    if let Some(content_type) = part.content_type.as_ref() {
+                        match req_part.mime_str(content_type.as_ref()) {
+                            Ok(with_mime) => req_part = with_mime,
+                            Err(err) => {
+                                tracing::error!(
+                                    content_type = %content_type,
+                                    error = %err,
+                                    "internal invariant violated: stored `Mime` failed to re-parse via `mime_str`; sending the part without a content type"
+                                );
+                                req_part = reqwest::multipart::Part::bytes(bytes.to_vec());
+                            }
+                        }
+                    }
 
                     if let Some(filename) = part.filename {
                         req_part = req_part.file_name(filename);

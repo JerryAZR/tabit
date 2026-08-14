@@ -10,6 +10,19 @@ below with what a future test would need). A raw percentage is not the
 contract; the ledger is. If code changes make a justified line reachable,
 re-classify it — fill or delete; do not let justifications rot.
 
+Defensive ("unreachable") arms follow a stricter rule:
+
+- **Trivially provable dead** → deleted, not documented. A proof quote
+  belongs in the deleting commit, not in a permanent comment.
+- **Reachable via internal error** (our own invariant broke) → loud, hard
+  failure: the request aborts with an `internal invariant violated:`
+  prefixed error — nothing is substituted, nothing is swallowed. (Literal
+  panics are lint-denied in shipped code; the hard error is the loudest
+  permitted form.)
+- **Reachable via external error** (malformed wire input, corrupted
+  persisted state) → graceful, clear error naming the malformed input and
+  its cause. Never a silent skip or a placeholder that looks like real data.
+
 ## Methodology
 
 - `cargo llvm-cov --workspace --html --output-dir target/llvm-cov/html`
@@ -52,16 +65,18 @@ named, the classification applies to its current lcov-uncovered ranges.
    means the invariant under test broke; they are the failure message, not
    missing coverage. Panic-canary hooks (`PanicOnUnknownToolHook` etc.) are
    the same pattern in test-fixture form.
-2. **Unreachable-by-construction shipped arms**: defensive branches guarded
-   by earlier checks that make them unenterable — e.g. `serde_json::to_value`
-   failure mappings for infallible serializations (anthropic completion),
-   `OneOrMany::many` after an emptiness guard (responses_api, anthropic),
-   `visit_none` in `json_utils` (serde_json dispatches `visit_unit` for
-   JSON null), the mime fallback in `multipart.rs` (a stored `mime::Mime`
-   always re-parses), the empty-`Type::Path` arm where noted, and the
-   openai chat-completions PDF-FileId error arm shadowed by an earlier
-   match arm. Kept as defense; a test cannot reach them without changing
-   shipped code.
+2. **Defensive arms in shipped code, post-audit**: every arm once labeled
+   "unreachable by construction" has been audited. Provably dead ones were
+   deleted with proofs in the audit commits (`OneOrMany::many`-after-guard
+   closures, shadowed index guards, `json!`-always-object closures,
+   streaming-parts `else` arms, the derive's `custom_func_path` fallback,
+   the `rollback_messages` `None` guards). The survivors fall in two
+   classes, each identifiable by its message: `internal invariant
+   violated:`-prefixed errors (our own serialization/state invariants —
+   e.g. serde `to_value` on typed content, the multipart `Mime` re-parse,
+   the driver-fold Done guarantee) and external-input errors naming the
+   malformed input (deserialized run state, malformed SSE frames — the
+   SSE parser-error arm surfaces a named error instead of skipping).
 3. **Trait-required methods on test doubles** never queried by their tests
    (`top_n_ids`/`top_n` halves of mock vector indexes, `record_debug`
    visitors, `Write::flush`, blocking-only telemetry `stream`): required
@@ -95,16 +110,15 @@ named, the classification applies to its current lcov-uncovered ranges.
 - `client/mod.rs` `optional_env_var` `VarError::NotUnicode` branch: a
   non-Unicode env var cannot be set portably from a Rust test process;
   would need a child-process harness.
-- `http_client/sse.rs` retry-`None` branches (209-210, 286-287): reachable
-  only with a custom `Retry` policy whose `Stream` impl is not written for
-  generic `Retry` types; covering them requires a shipped-behavior change
-  (generic Stream impl) — revisit if a non-default retry policy is ever
-  added.
-- `http_client/sse.rs` `EventStreamError::Parser` continue-arm: eventsource-
-  stream 0.2.3's parser cannot produce a hard error from any input the
-  `eventsource()` pipeline accepts; would need a fuzzing harness upstream.
 - Doctests are outside the measurement (see Methodology); they run and are
   gated in CI but do not fold into these numbers.
+
+(Removed from this list after the defensive-arm audit: the SSE
+retry-`None` branches — the premise was wrong, `ExponentialBackoff`
+returns `None` on max-retries exhaustion and the close-and-surface
+handling is exercised by `reconnect_gives_up_after_max_retries`; and the
+eventsource-stream parser-error arm — it now surfaces a named error
+rather than skipping, reachable or not.)
 
 ## Maintenance
 

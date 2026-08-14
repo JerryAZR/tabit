@@ -17,12 +17,9 @@ pub(crate) fn custom_embed_fields(
             field
                 .attrs
                 .iter()
-                .filter_map(|attribute| match attribute.is_custom() {
-                    Ok(true) => match attribute.expand_tag() {
-                        Ok(path) => Some(Ok((field, path))),
-                        Err(e) => Some(Err(e)),
-                    },
-                    Ok(false) => None,
+                .filter_map(|attribute| match attribute.custom_embed_path() {
+                    Ok(Some(path)) => Some(Ok((field, path))),
+                    Ok(None) => None,
                     Err(e) => Some(Err(e)),
                 })
                 .next()
@@ -31,99 +28,81 @@ pub(crate) fn custom_embed_fields(
 }
 
 trait CustomAttributeParser {
-    // Determine if field is tagged with an #[embed(embed_with = "...")] attribute.
-    fn is_custom(&self) -> syn::Result<bool>;
-
-    // Get the "..." part of the #[embed(embed_with = "...")] attribute.
-    // Ex: If attribute is tagged with #[embed(embed_with = "my_embed")], returns "my_embed".
-    fn expand_tag(&self) -> syn::Result<syn::ExprPath>;
+    // Parse `#[embed(embed_with = "...")]` in a single pass: `Ok(Some(path))`
+    // when the attribute is a well-formed custom-embed tag (the "..." part of
+    // the tag, ie. the custom function), `Ok(None)` when the attribute is not
+    // an `#[embed(...)]` list (or is an empty `#[embed()]`), and `Err` on a
+    // malformed tag.
+    fn custom_embed_path(&self) -> syn::Result<Option<syn::ExprPath>>;
 }
 
 impl CustomAttributeParser for syn::Attribute {
-    fn is_custom(&self) -> syn::Result<bool> {
-        // Check that the attribute is a list.
-        match &self.meta {
-            syn::Meta::List(meta) => {
-                if meta.tokens.is_empty() {
-                    return Ok(false);
-                }
-            }
-            _ => return Ok(false),
+    fn custom_embed_path(&self) -> syn::Result<Option<syn::ExprPath>> {
+        // Only `#[embed(...)]` lists can be custom tags; an empty `#[embed()]`
+        // is not one either. Rejecting empty lists up front is what guarantees
+        // the fold below always sees at least one nested item: syn's
+        // `parse_nested_meta` invokes its callback before any successful exit,
+        // and its zero-item fast path requires an empty token stream, which
+        // the non-empty check above rules out. So on `Ok`, the path below is
+        // always `Some`; the `Ok(None)` return only ever means "not custom".
+        let syn::Meta::List(meta) = &self.meta else {
+            return Ok(None);
         };
-
-        // Check the first attribute tag (the first "embed")
         if !self.path().is_ident(EMBED) {
-            return Ok(false);
+            return Ok(None);
+        }
+        if meta.tokens.is_empty() {
+            return Ok(None);
         }
 
-        self.parse_nested_meta(|meta| {
-            // Parse the meta attribute as an expression. Need this to compile.
-            meta.value()?.parse::<syn::Expr>()?;
-
-            if meta.path.is_ident(EMBED_WITH) {
-                Ok(())
-            } else {
-                let path = meta.path.to_token_stream().to_string().replace(' ', "");
-                Err(syn::Error::new_spanned(
-                    meta.path,
-                    format_args!("unknown embedding field attribute `{path}`"),
-                ))
-            }
-        })?;
-
-        Ok(true)
-    }
-
-    fn expand_tag(&self) -> syn::Result<syn::ExprPath> {
-        fn function_path(meta: &ParseNestedMeta<'_>) -> syn::Result<ExprPath> {
-            // #[embed(embed_with = "...")]
-            let expr = meta.value()?.parse::<syn::Expr>()?;
-            let mut value = &expr;
-            while let syn::Expr::Group(e) = value {
-                value = &e.expr;
-            }
-            let string = if let syn::Expr::Lit(syn::ExprLit {
-                lit: syn::Lit::Str(lit_str),
-                ..
-            }) = value
-            {
-                let suffix = lit_str.suffix();
-                if !suffix.is_empty() {
-                    return Err(syn::Error::new_spanned(
-                        lit_str,
-                        format!("unexpected suffix `{suffix}` on string literal"),
-                    ));
-                }
-                lit_str.clone()
-            } else {
-                return Err(syn::Error::new_spanned(
-                    value,
-                    format!(
-                        "expected {EMBED_WITH} attribute to be a string: `{EMBED_WITH} = \"...\"`"
-                    ),
-                ));
-            };
-
-            string.parse()
-        }
-
+        // Every nested item must be `embed_with = "..."`; when one is
+        // repeated, the last one wins.
         let mut custom_func_path = None;
-
-        self.parse_nested_meta(|meta| match function_path(&meta) {
-            Ok(path) => {
-                custom_func_path = Some(path);
-                Ok(())
+        self.parse_nested_meta(|meta| {
+            if !meta.path.is_ident(EMBED_WITH) {
+                let path = meta.path.to_token_stream().to_string().replace(' ', "");
+                return Err(syn::Error::new_spanned(
+                    &meta.path,
+                    format!("unknown embedding field attribute `{path}`"),
+                ));
             }
-            Err(e) => Err(e),
+            custom_func_path = Some(function_path(&meta)?);
+            Ok(())
         })?;
 
-        custom_func_path.ok_or_else(|| {
-            syn::Error::new_spanned(
-                self,
-                format!("expected {EMBED_WITH} attribute: `{EMBED_WITH} = \"...\"`"),
-            )
-        })
+        Ok(custom_func_path)
     }
+}
+
+// Get the "..." part of the #[embed(embed_with = "...")] attribute.
+// Ex: If attribute is tagged with #[embed(embed_with = "my_embed")], returns "my_embed".
+fn function_path(meta: &ParseNestedMeta<'_>) -> syn::Result<ExprPath> {
+    let expr = meta.value()?.parse::<syn::Expr>()?;
+    let mut value = &expr;
+    while let syn::Expr::Group(e) = value {
+        value = &e.expr;
+    }
+    let string = if let syn::Expr::Lit(syn::ExprLit {
+        lit: syn::Lit::Str(lit_str),
+        ..
+    }) = value
+    {
+        let suffix = lit_str.suffix();
+        if !suffix.is_empty() {
+            return Err(syn::Error::new_spanned(
+                lit_str,
+                format!("unexpected suffix `{suffix}` on string literal"),
+            ));
+        }
+        lit_str.clone()
+    } else {
+        return Err(syn::Error::new_spanned(
+            value,
+            format!("expected {EMBED_WITH} attribute to be a string: `{EMBED_WITH} = \"...\"`"),
+        ));
+    };
+
+    string.parse()
 }
 
 #[cfg(test)]
@@ -230,6 +209,40 @@ mod tests {
                 .expect_err("a suffixed string literal must fail");
         assert!(
             error.to_string().contains("unexpected suffix `sfx`"),
+            "unexpected error: {error}"
+        );
+    }
+
+    #[test]
+    fn an_empty_invisible_group_in_the_list_is_rejected_not_skipped() {
+        // A proc macro can emit an attribute whose list content is a single
+        // empty `Delimiter::None` group — not expressible in source text. The
+        // non-empty check sees the group, so parsing must surface it as an
+        // error rather than silently reporting the field as not custom.
+        let mut input = syn::parse_str::<syn::DeriveInput>(
+            r#"struct S { #[embed()] a: String }"#,
+        )
+        .expect("test input parses");
+        let syn::Data::Struct(ref mut data_struct) = input.data else {
+            panic!("test input must be a struct");
+        };
+        let field = data_struct
+            .fields
+            .iter_mut()
+            .next()
+            .expect("one field");
+        for attribute in &mut field.attrs {
+            if let syn::Meta::List(list) = &mut attribute.meta {
+                let empty = proc_macro2::Group::new(proc_macro2::Delimiter::None, quote::quote!());
+                list.tokens = quote::quote!(#empty);
+            }
+        }
+
+        let error = custom_embed_fields(data_struct)
+            .map(|fields| fields.len())
+            .expect_err("an empty invisible group must fail, not skip");
+        assert!(
+            !error.to_string().is_empty(),
             "unexpected error: {error}"
         );
     }
