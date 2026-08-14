@@ -1815,10 +1815,6 @@ pub mod fixtures {
         WireInput::Bytes(Bytes::from(format!("data: {data}\n\n")))
     }
 
-    fn ndjson(frame: &serde_json::Value) -> WireInput {
-        WireInput::Bytes(Bytes::from(format!("{frame}\n")))
-    }
-
     /// The frame's SSE text, for buffered-body pipelines that re-parse a
     /// whole body string.
     fn frame_text(frame: &WireInput) -> String {

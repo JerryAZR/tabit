@@ -674,16 +674,6 @@ where
     pub(crate) fn headers_mut(&mut self) -> &mut HeaderMap {
         &mut self.headers
     }
-
-    pub(crate) fn ext_mut(&mut self) -> &mut Ext {
-        &mut self.ext
-    }
-}
-
-impl<Ext, ApiKey, H> ClientBuilder<Ext, ApiKey, H> {
-    pub(crate) fn get_api_key(&self) -> &ApiKey {
-        &self.api_key
-    }
 }
 
 impl<Ext, Key, H> ClientBuilder<Ext, Key, H> {

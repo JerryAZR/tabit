@@ -5,8 +5,10 @@ use crate::http_client::HttpClientExt;
 use crate::http_client::sse::{Event, GenericEventSource};
 use crate::message::ReasoningContent;
 use crate::providers::internal::adapter::{
-    AdapterOutput, WireAdapter, WireFrame, run_wire_buffered, run_wire_stream,
+    AdapterOutput, WireAdapter, WireFrame, run_wire_stream,
 };
+#[cfg(test)]
+use crate::providers::internal::adapter::run_wire_buffered;
 use crate::providers::internal::wire::{self, WireEvent};
 use crate::providers::openai::responses_api::{
     IncompleteDetailsReason, ReasoningSummary, ResponseStatus, ResponsesUsage,
@@ -272,90 +274,6 @@ fn provider_response_from_responses_sse_data(data: &str) -> Option<CompletionErr
         .then(|| provider_response_from_responses_error_value(&value, data))
 }
 
-#[derive(Clone, Copy)]
-pub(crate) enum ResponsesStreamOptions {
-    Strict,
-    StrictWithImmediateToolCalls,
-}
-
-impl ResponsesStreamOptions {
-    pub(crate) const fn strict() -> Self {
-        Self::Strict
-    }
-
-    pub(crate) const fn strict_with_immediate_tool_calls() -> Self {
-        Self::StrictWithImmediateToolCalls
-    }
-
-    const fn emits_completed_tool_calls_immediately(self) -> bool {
-        matches!(self, Self::StrictWithImmediateToolCalls)
-    }
-}
-
-pub(crate) fn parse_sse_completion_body(
-    body: &str,
-    provider_name: &str,
-) -> Result<CompletionResponse, CompletionError> {
-    let mut completed = None;
-
-    for line in body.lines() {
-        let data = line
-            .strip_prefix("data:")
-            .map(str::trim)
-            .unwrap_or_default();
-        if data.is_empty() || data == "[DONE]" {
-            continue;
-        }
-
-        if let Ok(chunk) = serde_json::from_str::<StreamingCompletionChunk>(data) {
-            if let StreamingCompletionChunk::Response(chunk) = chunk {
-                let ResponseChunk { kind, response, .. } = *chunk;
-                match kind {
-                    // `response.incomplete` is a genuine terminal; the unary
-                    // conversion maps its status to a finish reason.
-                    ResponseChunkKind::ResponseCompleted
-                    | ResponseChunkKind::ResponseIncomplete => {
-                        completed = Some(response);
-                        break;
-                    }
-                    ResponseChunkKind::ResponseFailed => {
-                        return Err(crate::provider_response::completion_error_from_body(data));
-                    }
-                    _ => {}
-                }
-            }
-            continue;
-        }
-
-        let value = match serde_json::from_str::<serde_json::Value>(data) {
-            Ok(value) => value,
-            Err(_) => continue,
-        };
-
-        match value.get("type").and_then(serde_json::Value::as_str) {
-            Some("response.completed") | Some("response.incomplete") => {
-                if let Some(response) = value.get("response") {
-                    completed = Some(serde_json::from_value(response.clone())?);
-                    break;
-                }
-            }
-            Some("response.failed") => {
-                return Err(crate::provider_response::completion_error_from_body(data));
-            }
-            Some("error") => {
-                return Err(provider_response_from_responses_error_value(&value, data));
-            }
-            _ => {}
-        }
-    }
-
-    completed.ok_or_else(|| {
-        CompletionError::ProviderError(format!(
-            "{provider_name} stream did not yield a terminal response event (response.completed or response.incomplete)"
-        ))
-    })
-}
-
 pub(crate) struct RawChoiceAccumulator {
     final_usage: ResponsesUsage,
     reasoning_metadata: Option<serde_json::Map<String, serde_json::Value>>,
@@ -443,11 +361,7 @@ impl RawChoiceAccumulator {
         }
     }
 
-    pub(crate) fn decode_item_chunk(
-        &mut self,
-        chunk: ItemChunk,
-        options: ResponsesStreamOptions,
-    ) -> Vec<StreamingRawChoice> {
+    pub(crate) fn decode_item_chunk(&mut self, chunk: ItemChunk) -> Vec<StreamingRawChoice> {
         let mut immediate = Vec::new();
 
         let ItemChunk {
@@ -497,12 +411,7 @@ impl RawChoiceAccumulator {
                 // Any completed item ends the block it carried; a text delta
                 // arriving afterwards belongs to a (re)opened block.
                 self.current_text_item = None;
-                self.push_output_item_done(
-                    message.item,
-                    output_index,
-                    &mut immediate,
-                    options.emits_completed_tool_calls_immediately(),
-                );
+                self.push_output_item_done(message.item, output_index, &mut immediate);
             }
             ItemChunkKind::OutputTextDelta(delta) => {
                 self.start_text_item(&outer_item_id, &mut immediate);
@@ -616,7 +525,6 @@ impl RawChoiceAccumulator {
         item: Output,
         output_index: u64,
         immediate: &mut Vec<StreamingRawChoice>,
-        emit_completed_tool_calls_immediately: bool,
     ) {
         match item {
             Output::FunctionCall(func) => {
@@ -673,13 +581,9 @@ impl RawChoiceAccumulator {
                     }
                 }
                 end.call_id = Some(func.call_id);
-                let end = streaming::RawStreamingChoice::ToolInputEnd(end);
-
-                if emit_completed_tool_calls_immediately {
-                    immediate.push(end);
-                } else {
-                    self.tool_calls.push(end);
-                }
+                // Completed calls are buffered and flushed at the terminal
+                // (see `self.tool_calls`), matching the live SSE loop.
+                self.tool_calls.push(streaming::RawStreamingChoice::ToolInputEnd(end));
             }
             Output::Reasoning {
                 id,
@@ -817,6 +721,13 @@ fn repair_envelope_less_frame(data: &str) -> Option<String> {
     serde_json::to_string(&value).ok()
 }
 
+/// Buffered (unary) SSE-body harness for the inline tests: runs the SAME
+/// interpreter as the live loop (`classify_responses_frame` feeding
+/// `RawChoiceAccumulator`) through `run_wire_buffered`, so the tests exercise
+/// the shipped classification/accumulation machinery without a transport.
+/// No shipped caller remains (its consumer was the trimmed ChatGPT
+/// provider); compiled only for tests.
+#[cfg(test)]
 pub(crate) fn raw_choices_from_sse_body(
     body: &str,
     initial_usage: ResponsesUsage,
@@ -850,23 +761,6 @@ pub(crate) fn raw_choices_from_sse_body(
     // Buffered classification adds the envelope-repair salvage; see
     // [`ResponsesAdapter::buffered`].
     run_wire_buffered(frames, ResponsesAdapter::buffered(initial_usage))
-}
-
-pub(crate) async fn completion_response_from_sse_body(
-    provider: &str,
-    body: &str,
-    raw_response: CompletionResponse,
-) -> Result<completion::CompletionResponse, CompletionError> {
-    let raw_choices = raw_choices_from_sse_body(
-        body,
-        raw_response
-            .usage
-            .clone()
-            .unwrap_or_else(ResponsesUsage::new),
-    )?;
-    completion_response_from_raw_choices(provider, raw_choices, &raw_response)
-        .await?
-        .ok_or_else(|| CompletionError::ResponseError("Response contained no parts".to_owned()))
 }
 
 /// Replay accumulated raw choices through [`normalize_responses_stream`] and
@@ -997,18 +891,6 @@ where
     HttpClient: HttpClientExt + Clone + 'static,
     RequestBody: Into<bytes::Bytes> + Clone + WasmCompatSend + 'static,
 {
-    raw_stream_from_event_source_with_options(event_source, span, ResponsesStreamOptions::strict())
-}
-
-pub(crate) fn raw_stream_from_event_source_with_options<HttpClient, RequestBody>(
-    event_source: GenericEventSource<HttpClient, RequestBody>,
-    span: tracing::Span,
-    options: ResponsesStreamOptions,
-) -> streaming::RawStreamingResult<StreamingCompletionResponse>
-where
-    HttpClient: HttpClientExt + Clone + 'static,
-    RequestBody: Into<bytes::Bytes> + Clone + WasmCompatSend + 'static,
-{
     // Transport layer: SSE events → `WireFrame`s. Byte splitting, framing,
     // and the wire's in-band provider `error` envelope (a terminal transport
     // condition, detected pre-classification exactly as an HTTP failure would
@@ -1048,7 +930,7 @@ where
         event_source.close();
     };
 
-    Box::pin(run_wire_stream(transport, ResponsesAdapter::live(options)).instrument(span))
+    Box::pin(run_wire_stream(transport, ResponsesAdapter::live()).instrument(span))
 }
 
 /// One classified Responses frame, carrying its raw payload alongside the
@@ -1070,7 +952,6 @@ pub(crate) struct ResponsesFrameEvent {
 /// live wire deliberately does NOT repair).
 pub(crate) struct ResponsesAdapter {
     accumulator: RawChoiceAccumulator,
-    options: ResponsesStreamOptions,
     /// Buffered-only envelope salvage; `false` on the live wire.
     repair_envelopes: bool,
     /// A `response.failed` event ended the turn: the flush-then-`Err`
@@ -1079,19 +960,20 @@ pub(crate) struct ResponsesAdapter {
 }
 
 impl ResponsesAdapter {
-    fn live(options: ResponsesStreamOptions) -> Self {
+    fn live() -> Self {
         Self {
             accumulator: RawChoiceAccumulator::new(ResponsesUsage::new()),
-            options,
             repair_envelopes: false,
             finished: false,
         }
     }
 
+    /// Buffered variant for the inline tests' unary replay harness
+    /// ([`raw_choices_from_sse_body`]): envelope-repair salvage on.
+    #[cfg(test)]
     fn buffered(initial_usage: ResponsesUsage) -> Self {
         Self {
             accumulator: RawChoiceAccumulator::new(initial_usage),
-            options: ResponsesStreamOptions::strict(),
             repair_envelopes: true,
             finished: false,
         }
@@ -1149,7 +1031,7 @@ impl WireAdapter for ResponsesAdapter {
             StreamingCompletionChunk::Delta(chunk) => {
                 out.extend(
                     self.accumulator
-                        .decode_item_chunk(chunk, self.options)
+                        .decode_item_chunk(chunk)
                         .into_iter()
                         .map(Ok),
                 );
@@ -1492,8 +1374,8 @@ where
 mod tests {
     use super::{
         ContentPartChunkPart, ItemChunk, ItemChunkKind, RawChoiceAccumulator,
-        ResponsesStreamOptions, StreamingCompletionChunk, classify_responses_frame,
-        raw_choices_from_sse_body, reasoning_choices_from_done_item,
+        StreamingCompletionChunk, classify_responses_frame, raw_choices_from_sse_body,
+        reasoning_choices_from_done_item,
     };
     use crate::completion::CompletionModel;
     use crate::message::ReasoningContent;
@@ -1598,7 +1480,7 @@ mod tests {
         }))
         .expect("reasoning text done event should deserialize");
 
-        let emitted = accumulator.decode_item_chunk(chunk, ResponsesStreamOptions::strict());
+        let emitted = accumulator.decode_item_chunk(chunk);
         assert!(
             emitted.is_empty(),
             "the done restatement must not re-emit the reasoning text: {emitted:?}"
@@ -1798,44 +1680,6 @@ mod tests {
         }
 
         panic!("stream should yield a final response");
-    }
-
-    #[test]
-    fn parse_sse_completion_body_preserves_error_payloads() {
-        let mut response = sample_response(ResponseStatus::Failed);
-        response.error = Some(ResponseError {
-            code: "server_error".to_string(),
-            message: "response failed".to_string(),
-        });
-        let events = [
-            json!({
-                "type": "response.failed",
-                "sequence_number": 1,
-                "response": response,
-            }),
-            json!({
-                "type": "error",
-                "error": {
-                    "message": "boom",
-                    "code": "server_error",
-                    "type": "server_error"
-                }
-            }),
-        ];
-
-        for event in events {
-            let payload = serde_json::to_string(&event).expect("event should serialize");
-            let body = format!("data: {payload}\n");
-            let err = super::parse_sse_completion_body(&body, "ChatGPT")
-                .expect_err("error payload should surface as provider response");
-
-            assert!(matches!(
-                err,
-                crate::completion::CompletionError::ProviderResponse(_)
-            ));
-            assert_eq!(err.provider_response_status(), None);
-            assert_eq!(err.provider_response_body(), Some(payload.as_str()));
-        }
     }
 
     #[test]

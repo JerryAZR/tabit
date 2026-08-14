@@ -9,8 +9,8 @@ use crate::completion::{self, CompletionError};
 use crate::http_client::HttpClientExt;
 use crate::providers::internal::adapter::{TriagedFrame, triage_frame};
 use crate::providers::openai::responses_api::streaming::{
-    ItemChunk, RawChoiceAccumulator, ResponseChunk, ResponseChunkKind, ResponsesStreamOptions,
-    StreamingCompletionChunk, classify_responses_frame, completion_response_from_raw_choices,
+    ItemChunk, RawChoiceAccumulator, ResponseChunk, ResponseChunkKind, StreamingCompletionChunk,
+    classify_responses_frame, completion_response_from_raw_choices,
 };
 use crate::wasm_compat::{WasmCompatSend, WasmCompatSync};
 use futures::{SinkExt, StreamExt};
@@ -584,7 +584,7 @@ where
                 }
                 ResponsesWebSocketEvent::Item(chunk) => {
                     raw_choices.extend(
-                        accumulator.decode_item_chunk(chunk, ResponsesStreamOptions::strict()),
+                        accumulator.decode_item_chunk(chunk),
                     );
                 }
                 ResponsesWebSocketEvent::Unknown(value) => {

@@ -33,10 +33,3 @@ mod cassette {
     mod url_pdf_document;
     mod vllm;
 }
-
-// Live (network-only) OpenAI coverage is trimmed in this vendored facade:
-// upstream's `tests/providers/openai/live/*` modules are `#[ignore]` tests that
-// require a real `OPENAI_API_KEY` and network access. They are dropped to keep
-// the offline replay suite self-contained (see VENDOR.md). The cassette/
-// modules above cover the replayed surface.
-mod live {}
