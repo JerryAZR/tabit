@@ -43,6 +43,15 @@ Current workspace layout:
 6. **Fail loud, not silent.** No silent fallbacks that paper over missing user
    config. A documented provider constant (like `DEFAULT_MAX_TOKENS`) is a
    default, not a fallback — it is visible, named, and config-overridable.
+7. **Implementation quality.** Clean module boundaries — expose only what
+   callers need; a change in one module shouldn't force changes in many
+   others. One purpose per function/module; if a description needs "and",
+   split it. No duplicated logic for the same concern — extract a shared,
+   well-named abstraction that is genuinely simpler than the repetition.
+   Prefer battle-tested algorithms/crates over hand-rolled ones; if you must
+   hand-roll, document why. Internal errors fail hard and loud; external
+   errors fail gracefully and clearly; never swallow an error or substitute
+   a default that masks the real cause.
 
 ## Environment / commands
 
