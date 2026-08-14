@@ -41,7 +41,12 @@ reqwest = { workspace = true, features = ["json", "stream", "multipart"] }
 rig-derive = { version = "0.41.0", path = "../rig-derive", optional = true }
 schemars = { workspace = true }
 serde = { workspace = true, features = ["derive"] }
-serde_json = { workspace = true }
+# `preserve_order` makes serde_json maps insertion-ordered (IndexMap-backed)
+# everywhere, not just in test builds: the anthropic schema sanitizer rebuilds
+# `required` from `properties.keys()`, so shipped behavior must match the
+# insertion-ordered maps the offline cassettes were recorded with. `indexmap`
+# is already a direct dependency, so this adds no new weight.
+serde_json = { workspace = true, features = ["preserve_order"] }
 thiserror = { workspace = true }
 tracing = { workspace = true }
 url = { workspace = true }

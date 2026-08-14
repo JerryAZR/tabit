@@ -71,14 +71,8 @@ serde = { workspace = true, features = ["derive"] }
 # `float_roundtrip` keeps cassette scrubbing idempotent on float-heavy bodies
 # (e.g. embedding vectors): without it, parse→print can oscillate between two
 # representations of the same decimal and the recorded YAML never stabilizes.
-# `preserve_order` reproduces the serde_json feature-unification upstream's
-# full dev-dep graph provides transitively: the anthropic/openai cassettes were
-# recorded with insertion-ordered maps (e.g. JSON-schema `properties`), and
-# `sanitize_schema` rebuilds `required` from `properties.keys()`.
-serde_json = { workspace = true, features = [
-    "float_roundtrip",
-    "preserve_order",
-] }
+# (`preserve_order` comes via rig-core's own dependency, where it belongs.)
+serde_json = { workspace = true, features = ["float_roundtrip"] }
 serde_yaml = { workspace = true }
 sha2 = { workspace = true }
 # `syn` drives the AST scan in `tests/common/cassette_safety.rs`; it is the one
