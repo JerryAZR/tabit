@@ -4,19 +4,21 @@ Guidance for AI coding agents (and humans) working on **tabit**.
 
 ## What this is
 
-`tabit` is an agent framework built on a **vendored, trimmed copy of rig 0.41.0**
-(upstream: `rig-rs/rig`). The workspace currently contains the vendored layer only:
+`tabit` is an agent framework that started from a **vendored, trimmed copy of
+rig 0.41.0** (upstream: `rig-rs/rig`). The rig source was borrowed as source
+rather than an external crate precisely so it can be modified freely: **it is
+tabit's code now** — change, extend, or delete any of it wherever that makes
+sense. `VENDOR.md` is the historical record of the initial vendoring (what was
+trimmed and why), not a constraint on future edits.
 
-- `crates/rig-core` — provider API clients, streaming, tools (providers trimmed to
-  **anthropic + openai** + the shared openai-compatible engine in `providers/internal`)
+Current workspace layout:
+
+- `crates/rig-core` — provider API clients, streaming, tools (providers kept:
+  **anthropic + openai** + the shared openai-compatible engine in
+  `providers/internal`)
 - `crates/rig-agent` — agent loop / runtime
 - `crates/rig-derive` — `#[rig_tool]` proc macros
 - `crates/rig` — facade crate re-exporting the three above
-
-Tabit's own agent/session/subagent layer will be built **on top of** this, as new
-crates — never by editing vendored behavior beyond what the rules below allow.
-See `VENDOR.md` for the full vendor record (what was trimmed, deviations, update
-procedure).
 
 ## Design rules
 
@@ -25,15 +27,15 @@ procedure).
    ids, and parameters (e.g. `max_tokens`) via their own config; the framework
    passes them through. Anthropic requests with no `max_tokens` fail loudly
    ("Anthropic requires `max_tokens`; set it on the completion request").
-2. **Front/back split.** Provider backends (wire clients, streaming, auth — the
-   vendored rig layer) stay strictly decoupled from front-facing logic (agents,
-   sessions, tools, user config). New tabit features go in new crates that
-   *consume* the vendored layer; they never grow provider-specific knowledge.
+2. **Front/back split.** Provider backends (wire clients, streaming, auth) stay
+   strictly decoupled from front-facing logic (agents, sessions, tools, user
+   config). Front-facing code never grows provider-specific knowledge.
 3. **Modular.** One concern per crate. Cross-crate dependencies point downward
    (facade → agent/derive → core). No feature may require reaching into another
    crate's internals.
-4. **Vendored code stays faithful.** Trim, don't rewrite. Any deviation from
-   upstream must be minimal and recorded in `VENDOR.md`.
+4. **We own the code.** The rig source was vendored to be a starting point, not
+   a frozen upstream copy. Feel free to rewrite, restructure, or delete any of
+   it. `VENDOR.md` documents the initial state for provenance only.
 5. **Tests run offline.** Provider behavior is covered by cassette replay
    (httpmock) — never live network in CI/default test runs. Live tests are
    `#[ignore]`d.
@@ -43,13 +45,13 @@ procedure).
 ## Environment / commands
 
 - **Windows.** Use `python` (not `python3`); read/write files as UTF-8 explicitly.
-- Build artifacts live on `D:` via `.cargo/config.toml` (`target-dir`) — the C:
-  drive is space-constrained. **Do not remove this.**
-- `cargo build` / `cargo test` — workspace is green: rig-core 687, rig-agent 489,
-  rig-derive 43, rig 253, doctests 57 (plus upstream-marked ignores).
+- `cargo build` / `cargo test` — the suite runs fully offline (see rule 5);
+  some tests carry upstream-marked `#[ignore]`s (live-network scenarios).
+  Don't record pass counts here — they change constantly; run the suite for
+  current numbers.
 - Cassettes are byte-sensitive (LF endings enforced via `.gitattributes`).
 
-## Deferred (do not assume support)
+## Not planned
 
 - WebSocket streaming (`websocket` feature), companion crates (bedrock,
   gemini-grpc, vector stores, …), `discord-bot`/`rmcp`.

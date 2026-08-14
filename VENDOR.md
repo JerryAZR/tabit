@@ -1,9 +1,10 @@
 # VENDOR.md
 
-This workspace vendors a trimmed subset of the [rig](https://github.com/0xPlaygrounds/rig)
-Rust AI framework for use as the foundation of **tabit**. No tabit-specific
-agent/session/subagent/tool logic lives here — this tree is purely vendored
-upstream code plus the trims and wiring documented below.
+Historical record of how this workspace was seeded from the [rig](https://github.com/0xPlaygrounds/rig)
+Rust AI framework. The rig source was vendored as a starting point for **tabit**
+— borrowed as source rather than an external crate so it can be modified
+freely. The tree is tabit's own code now; this document records the initial
+vendoring state for provenance only and constrains nothing.
 
 ## Source
 
@@ -44,11 +45,10 @@ moonshot, ollama, openrouter, perplexity, together, voyageai, xai, xiaomimimo,
 zai.
 
 `providers/mod.rs` keeps its module list and (useful) implementation-checklist
-doc section, updated for the trimmed set. Some `internal` engine items
-(e.g. `AuthError`, `resolve_tool_result_names`) are now dead code because only
-deleted providers called them; they are kept verbatim and produce
-`dead_code` warnings — harmless and intentional (the engine stays upstream-
-faithful).
+doc section, updated for the trimmed set. Engine items whose only callers were
+deleted providers (`AuthError`, `resolve_tool_result_names`, the buffered
+ChatGPT-replay helpers, etc.) were initially kept verbatim and later deleted —
+the tree is owned code, not a frozen upstream copy.
 
 ### Companion crates (never vendored)
 
@@ -124,9 +124,9 @@ Not brought: upstream's `tests/cassettes/` openrouter scenarios, `tests/data/loa
 and the network-only `live/` modules. For openai, upstream's
 `mod live { … }` submodules are all `#[ignore]`-marked tests requiring a real
 `OPENAI_API_KEY` (plus `reqwest/multipart` for compilation); they are dropped
-and `mod live {}` left empty (anthropic's was already empty), noted in the
-file. `common/cassette_safety.rs`'s `PROVIDER_CASSETTE_SUITES` registry is
-trimmed to anthropic + openai accordingly.
+and `common/cassette_safety.rs`'s `PROVIDER_CASSETTE_SUITE` registry is
+trimmed to anthropic + openai accordingly. The empty `mod live {}` placeholder
+shells were later removed entirely.
 
 ### Dependency pins for cassette fidelity
 
@@ -136,17 +136,13 @@ Upstream's recorded cassettes are sensitive to transitive-version behavior, so
 `serde_json` **1.0.150**, `serde` **1.0.228**, `aws-smithy-eventstream`
 **0.60.18**, `aws-smithy-types` **1.4.3**.
 
-The facade's serde_json dev-dependency additionally enables `preserve_order`.
-Upstream gets serde_json map insertion-order via feature unification from some
-crate in its full (companion-heavy) dev graph; our trimmed graph does not, and
-the anthropic `sanitize_schema` rebuilds the schema's `required` list from
-`properties.keys()`, so replay bodies must match the recorded insertion order.
-This is called out in `crates/rig/Cargo.toml`.
-
-### Build artifacts on D:
-
-`.cargo/config.toml` sets `target-dir = "D:/cargo-target/tabit"` because the C:
-drive is space-constrained. **Do not change this.**
+The anthropic `sanitize_schema` rebuilds the schema's `required` list from
+`properties.keys()`, so map insertion order is behavior: `rig-core` enables
+serde_json's `preserve_order` on its real dependency (indexmap is already a
+direct dep), making shipped ordering deterministic and matching the recorded
+cassette bodies. (Initially this was a facade dev-dependency workaround
+reproducing upstream's feature unification; it was promoted to the real
+dependency so tested and shipped behavior agree.)
 
 ### Line endings
 
@@ -245,28 +241,31 @@ deleted (the hoisting path is still covered by
 2. Facade has no companion crates/features; `rmcp`/`discord-bot` deferred.
 3. `streaming_conformance.rs` provider scenarios trimmed (fallback approach).
 4. Openai network-only live tests dropped (`mod live {}` kept, documented).
-5. `serde_json` `preserve_order` enabled explicitly in the facade dev-deps.
+5. `serde_json` `preserve_order` enabled on `rig-core`'s real dependency
+   (insertion-ordered maps are shipped behavior; see the cassette-fidelity
+   section).
 6. `driver_adoption.rs` / serde allowlist / facade_renamed fixture adjusted for
    the trimmed tree (documented above).
-7. `rig-core` emits ~16 `dead_code` warnings from now-unused `internal` engine
-   items — kept deliberately (minimal-faithful trim).
+7. Dead code left by the provider trim (internal engine items, ChatGPT-replay
+   helpers, etc.) was deleted once the tree was owned; the only remaining
+   `dead_code` warnings are three responses-API helpers that are live under
+   the (not-planned) `websocket` feature and dead without it — they go away
+   with the websocket-removal decision.
 8. Doctests: all green (0 failures; 10 ignored upstream-marked).
 9. Model catalog removed: no model-name constants or name-keyed behavior in
    the vendored providers (see "Model catalog removal"); callers supply model
    ids and `max_tokens` via config.
 
-## Updating from upstream in future
+## Cherry-picking from upstream (optional)
 
-1. Diff the relevant crates against the new upstream tag and port changes
-   verbatim where possible.
-2. Re-apply the trims: keep only the three provider families in
-   `rig-core/src/providers/` (and `mod.rs` list), keep the facade free of
-   companion deps/modules, re-trim `streaming_conformance.rs` scenarios,
-   `cassette_safety.rs`'s suite registry, `driver_adoption.rs` floors, and the
-   serde allowlist for any new/removed provider files.
-3. Re-pin the fidelity-sensitive crates (`schemars`, `serde_json`, `serde`,
-   `aws-smithy-*`) to upstream's locked versions and re-run:
-   `cargo build && cargo test --lib --tests && cargo test --doc`.
-4. If new cassettes are recorded upstream, re-copy them with LF endings (and
-   pristine binary fixtures from the git object store, never a Windows
-   worktree copy).
+The tree is owned and diverges freely, so there is no obligation to track
+upstream. If you ever want to port a specific upstream change, the original
+trim list above is the map of what differs from rig 0.41.0:
+
+1. Diff the relevant crates against the upstream tag; port the change however
+   it best fits the tree as it stands by then.
+2. Mind the offline-test machinery: cassette YAMLs are byte-sensitive
+   (LF endings, pinned serde/schemars versions), and `driver_adoption.rs` /
+   `serde_policy_allowlist.txt` encode structural expectations about the
+   provider tree.
+3. Re-run `cargo build && cargo test --lib --tests && cargo test --doc`.
