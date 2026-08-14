@@ -89,59 +89,16 @@
 //!
 //! # Integrations
 //! ## Model Providers
-//! Rig natively supports the following completion and embedding model provider integrations:
+//! The workspace keeps two provider integrations:
 //! - Anthropic
-//! - Azure OpenAI
-//! - ChatGPT and GitHub Copilot auth-backed clients
-//! - Cohere
-//! - DeepSeek
-//! - Gemini
-//! - Groq
-//! - Hugging Face
-//! - Hyperbolic
-//! - Llamafile
-//! - MiniMax
-//! - Mira
-//! - Mistral
-//! - Moonshot
-//! - Ollama
 //! - OpenAI
-//! - OpenRouter
-//! - Perplexity
-//! - Together
-//! - Voyage AI
-//! - xAI
-//! - Xiaomi MiMo
-//! - Z.ai
 //!
 //! You can also implement your own model provider integration by defining types that
 //! implement the [CompletionModel](crate::completion::CompletionModel) and [EmbeddingModel](crate::embeddings::EmbeddingModel) traits.
-//!
-//! Vector stores are available as separate companion-crates:
-//!
-//! - MongoDB: [`rig-mongodb`](https://github.com/0xPlaygrounds/rig/tree/main/crates/rig-mongodb)
-//! - LanceDB: [`rig-lancedb`](https://github.com/0xPlaygrounds/rig/tree/main/crates/rig-lancedb)
-//! - Neo4j: [`rig-neo4j`](https://github.com/0xPlaygrounds/rig/tree/main/crates/rig-neo4j)
-//! - Qdrant: [`rig-qdrant`](https://github.com/0xPlaygrounds/rig/tree/main/crates/rig-qdrant)
-//! - SQLite: [`rig-sqlite`](https://github.com/0xPlaygrounds/rig/tree/main/crates/rig-sqlite)
-//! - SurrealDB: [`rig-surrealdb`](https://github.com/0xPlaygrounds/rig/tree/main/crates/rig-surrealdb)
-//! - Milvus: [`rig-milvus`](https://github.com/0xPlaygrounds/rig/tree/main/crates/rig-milvus)
-//! - ScyllaDB: [`rig-scylladb`](https://github.com/0xPlaygrounds/rig/tree/main/crates/rig-scylladb)
-//! - AWS S3Vectors: [`rig-s3vectors`](https://github.com/0xPlaygrounds/rig/tree/main/crates/rig-s3vectors)
-//! - HelixDB: [`rig-helixdb`](https://github.com/0xPlaygrounds/rig/tree/main/crates/rig-helixdb)
-//! - Cloudflare Vectorize: [`rig-vectorize`](https://github.com/0xPlaygrounds/rig/tree/main/crates/rig-vectorize)
-//!
-//! You can also implement your own vector store integration by defining types that
-//! implement the [VectorStoreIndex](crate::vector_store::VectorStoreIndex) trait.
-//!
-//! The following providers are available as separate companion-crates:
-//!
-//! - AWS Bedrock: [`rig-bedrock`](https://github.com/0xPlaygrounds/rig/tree/main/crates/rig-bedrock)
-//! - Fastembed: [`rig-fastembed`](https://github.com/0xPlaygrounds/rig/tree/main/crates/rig-fastembed)
-//! - Google Gemini gRPC: [`rig-gemini-grpc`](https://github.com/0xPlaygrounds/rig/tree/main/crates/rig-gemini-grpc)
-//! - Google Vertex AI: [`rig-vertexai`](https://github.com/0xPlaygrounds/rig/tree/main/crates/rig-vertexai)
-//!
 
+// `rig` self-alias: doctests and intra-doc links written against the facade
+// path (`rig::…`) compile inside this split crate, and `#[rig_tool]` can
+// address `::rig::core` when a user depends on rig-core without the facade.
 extern crate self as rig;
 
 #[cfg(feature = "audio")]

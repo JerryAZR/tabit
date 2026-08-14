@@ -27,7 +27,6 @@
 //!   implementations;
 //! - explicit API-key marker/auth types with redacted debug behavior for
 //!   credential-bearing values;
-//! - model constants where they are useful and current;
 //! - request conversion from Rig request types, such as
 //!   [`CompletionRequest`](crate::completion::CompletionRequest), without
 //!   inventing unsupported provider API fields;

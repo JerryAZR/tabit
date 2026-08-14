@@ -52,6 +52,12 @@ Current workspace layout:
    hand-roll, document why. Internal errors fail hard and loud; external
    errors fail gracefully and clearly; never swallow an error or substitute
    a default that masks the real cause.
+8. **Canonical surfaces.** Tabit tools implement `PortableTool`
+   (`#[rig_tool]`); the contextual `Tool`/`ToolContext` is the runtime-side
+   consumption contract reached via the blanket bridge. OpenAI code targets
+   the Responses API; chat completions is the compat-gateway wire format.
+   Tool-call arguments parse strictly — truncated JSON is an error, never a
+   silent partial call.
 
 ## Environment / commands
 
@@ -67,14 +73,13 @@ Current workspace layout:
 
 ## Not planned
 
-- WebSocket streaming: **removed** (`websocket`/`websocket-rustls`/
-  `websocket-native-tls` features and `tokio-tungstenite` are gone) — HTTP
-  SSE only. Reference point: pi uses SSE for everything except an optional
-  Codex-only websocket accelerator with automatic SSE fallback.
-- Companion crates (bedrock, gemini-grpc, vector stores, …),
-  `discord-bot`/`rmcp`.
+- WebSocket streaming: **removed** — HTTP SSE only.
+- Companion crates (bedrock, gemini-grpc, vector stores, …), `discord-bot`,
+  `rmcp` (the rig-agent `rmcp` module is deleted, not just deferred).
 - Mid-conversation system messages: **unsupported by design** — always hoisted
   into the preamble.
+- SSE reconnect/resumption for completion streams (retry belongs at the
+  request layer, only before any body bytes are consumed).
 
 ## Open items for the owner
 

@@ -308,8 +308,14 @@ where
                                 format!("malformed SSE frame in event stream: {err}").into(),
                             ))));
                         }
-                        Poll::Ready(Some(Err(EventStreamError::Utf8(_)))) => {
-                            // UTF-8 errors are recoverable - continue polling
+                        Poll::Ready(Some(Err(EventStreamError::Utf8(err)))) => {
+                            // A recoverable per-byte decode error: the frame's
+                            // remaining bytes are still consumed below. Log it
+                            // so the drop is visible, then continue polling.
+                            tracing::warn!(
+                                error = %err,
+                                "skipping invalid UTF-8 byte in SSE stream"
+                            );
                             continue;
                         }
                         Poll::Ready(None) => {

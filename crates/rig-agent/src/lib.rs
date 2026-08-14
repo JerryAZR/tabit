@@ -32,6 +32,9 @@
 //! not build for it. See the crate README for the full matrix and the
 //! reasoning.
 
+// `rig` self-alias: doctests and intra-doc links written against the facade
+// path compile inside this split crate, and `#[rig_tool]` can address
+// `::rig::core` when a user depends on rig-agent without the facade.
 extern crate self as rig;
 
 /// Direct access to portable provider, data, memory, and tool contracts.

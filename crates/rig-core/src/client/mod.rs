@@ -844,10 +844,10 @@ where
 
 #[cfg(all(target_arch = "wasm32", target_os = "unknown"))]
 mod wasm_model_listing_compile_checks {
-    use super::{ModelListingClient, Nothing};
+    use super::ModelListingClient;
     use crate::{
         http_client::{self, HttpClientExt, LazyBody, MultipartForm, Request, Response},
-        providers::{anthropic, deepseek, mistral, ollama, openai, openrouter},
+        providers::{anthropic, openai},
         wasm_compat::WasmCompatSend,
     };
     use bytes::Bytes;
@@ -903,37 +903,13 @@ mod wasm_model_listing_compile_checks {
     }
 
     fn assert_simple_model_listers_accept_wasm_only_http_clients() {
-        let _ = openrouter::Client::builder()
-            .api_key("dummy-key")
-            .http_client(WasmOnlyHttpClient::default())
-            .build()
-            .map(assert_model_listing_client);
-
         let _ = openai::Client::builder()
             .api_key("dummy-key")
             .http_client(WasmOnlyHttpClient::default())
             .build()
             .map(assert_model_listing_client);
 
-        let _ = mistral::Client::builder()
-            .api_key("dummy-key")
-            .http_client(WasmOnlyHttpClient::default())
-            .build()
-            .map(assert_model_listing_client);
-
         let _ = anthropic::Client::builder()
-            .api_key("dummy-key")
-            .http_client(WasmOnlyHttpClient::default())
-            .build()
-            .map(assert_model_listing_client);
-
-        let _ = ollama::Client::builder()
-            .api_key(Nothing)
-            .http_client(WasmOnlyHttpClient::default())
-            .build()
-            .map(assert_model_listing_client);
-
-        let _ = deepseek::Client::builder()
             .api_key("dummy-key")
             .http_client(WasmOnlyHttpClient::default())
             .build()

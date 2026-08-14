@@ -543,9 +543,9 @@ impl PartsAccumulator {
                 // No streamed arguments: a parameterless invocation.
                 None => serde_json::Value::Object(serde_json::Map::new()),
                 // A capped (overflowed) buffer is truncated by definition —
-                // the lenient partial-JSON parse could still "succeed" on it
-                // and fabricate a silently corrupted call, so overflow forces
-                // the unparseable path.
+                // the strict parse cannot succeed on it, but relying on
+                // that would be implicit; overflow forces the unparseable
+                // path explicitly instead of risking a fabricated call.
                 Some(buffer) => {
                     match crate::json_utils::parse_tool_arguments(&buffer).and_then(|arguments| {
                         if overflowed {
