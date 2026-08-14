@@ -23,7 +23,7 @@
 //!
 //! // 4. Build an agent using the shared tool server handle
 //! let agent = openai_client
-//!     .agent(openai::GPT_5_2)
+//!     .agent("gpt-5.2")
 //!     .preamble("You are a helpful assistant.")
 //!     .tool_server_handle(tool_server_handle)
 //!     .build();

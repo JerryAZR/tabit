@@ -1,7 +1,6 @@
 //! Anthropic streaming smoke test.
 
 use rig::prelude::*;
-use rig::providers::anthropic;
 use rig::streaming::StreamingPrompt;
 
 use super::super::support::with_anthropic_cassette;
@@ -14,7 +13,7 @@ use crate::support::{
 async fn streaming_smoke() {
     with_anthropic_cassette("streaming/streaming_smoke", |client| async move {
         let agent = client
-            .agent(anthropic::completion::CLAUDE_SONNET_4_6)
+            .agent("claude-sonnet-4-6")
             .preamble(STREAMING_PREAMBLE)
             .max_tokens(64_000)
             .build();

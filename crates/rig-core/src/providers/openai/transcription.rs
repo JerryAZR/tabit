@@ -11,7 +11,6 @@ use serde::Deserialize;
 // OpenAI Transcription API
 // ================================================================
 
-pub const WHISPER_1: &str = "whisper-1";
 
 #[derive(Debug, Deserialize)]
 pub struct TranscriptionResponse {
@@ -141,7 +140,7 @@ mod tests {
             .http_client(http_client)
             .build()
             .expect("build client");
-        let model = client.transcription_model(WHISPER_1);
+        let model = client.transcription_model("whisper-1");
 
         let error = match model
             .transcription_request()

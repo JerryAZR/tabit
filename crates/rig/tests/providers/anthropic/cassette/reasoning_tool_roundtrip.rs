@@ -8,7 +8,6 @@ use std::sync::atomic::AtomicUsize;
 
 use rig::completion::{Chat, Message};
 use rig::prelude::*;
-use rig::providers::anthropic::completion::CLAUDE_SONNET_4_6;
 use rig::streaming::StreamingChat;
 
 use super::super::support::with_anthropic_cassette;
@@ -19,7 +18,7 @@ async fn streaming() {
     with_anthropic_cassette("reasoning_tool_roundtrip/streaming", |client| async move {
         let call_count = Arc::new(AtomicUsize::new(0));
         let agent = client
-            .agent(CLAUDE_SONNET_4_6)
+            .agent("claude-sonnet-4-6")
             .preamble(reasoning::TOOL_SYSTEM_PROMPT)
             .max_tokens(16384)
             .tool(WeatherTool::new(call_count.clone()))
@@ -59,7 +58,7 @@ async fn nonstreaming() {
         |client| async move {
             let call_count = Arc::new(AtomicUsize::new(0));
             let agent = client
-                .agent(CLAUDE_SONNET_4_6)
+                .agent("claude-sonnet-4-6")
                 .preamble(reasoning::TOOL_SYSTEM_PROMPT)
                 .max_tokens(16384)
                 .tool(WeatherTool::new(call_count.clone()))

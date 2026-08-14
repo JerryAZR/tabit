@@ -18,7 +18,7 @@ pub trait EmbeddingsClient {
     /// // Initialize the OpenAI client
     /// let openai = Client::new("your-open-ai-api-key")?;
     ///
-    /// let embedding_model = openai.embedding_model(openai::TEXT_EMBEDDING_3_LARGE);
+    /// let embedding_model = openai.embedding_model("text-embedding-3-large");
     /// # Ok(())
     /// # }
     /// ```
@@ -58,7 +58,7 @@ pub trait EmbeddingsClient {
     /// // Initialize the OpenAI client
     /// let openai = Client::new("your-open-ai-api-key")?;
     ///
-    /// let embeddings = openai.embeddings(openai::TEXT_EMBEDDING_3_LARGE)
+    /// let embeddings = openai.embeddings("text-embedding-3-large")
     ///     .documents(vec!["Hello, world!", "Goodbye, world!"])?
     ///     .build()
     ///     .await?;
@@ -83,7 +83,7 @@ pub trait EmbeddingsClient {
     /// // Initialize the OpenAI client
     /// let openai = Client::new("your-open-ai-api-key")?;
     ///
-    /// let embeddings = openai.embeddings_with_ndims(openai::TEXT_EMBEDDING_3_LARGE, 3072)
+    /// let embeddings = openai.embeddings_with_ndims("text-embedding-3-large", 3072)
     ///     .documents(vec!["Hello, world!", "Goodbye, world!"])?
     ///     .build()
     ///     .await?;

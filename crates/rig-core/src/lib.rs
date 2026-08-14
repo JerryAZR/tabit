@@ -35,7 +35,7 @@
 //!     // Create an OpenAI client and completion model.
 //!     // This requires the `OPENAI_API_KEY` environment variable to be set.
 //!     let openai_client = openai::Client::from_env()?;
-//!     let model = openai_client.completion_model(openai::GPT_5_2);
+//!     let model = openai_client.completion_model("gpt-5.2");
 //!
 //!     let request = model.completion_request("Who are you?").build();
 //!     let response = model.completion(request).await?;

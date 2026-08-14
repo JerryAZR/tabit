@@ -11,7 +11,6 @@ use rig::agent::{
 use rig::completion::{Message, Prompt};
 use rig::message::UserContent;
 use rig::prelude::*;
-use rig::providers::openai;
 
 use super::super::support::with_openai_cassette_result;
 use crate::support::assert_nonempty_response;
@@ -74,7 +73,7 @@ async fn request_hook_records_prompt_and_response() -> Result<()> {
         "request_hook/request_hook_records_prompt_and_response",
         |client| async move {
             let agent = client
-                .agent(openai::GPT_4O)
+                .agent("gpt-4o")
                 .preamble("You are a comedian here to entertain the user using humour and jokes.")
                 .build();
 

@@ -10,7 +10,6 @@ use rig::OneOrMany;
 use rig::client::AgentClientExt;
 use rig::completion::Prompt;
 use rig::message::{DocumentMediaType, Message, UserContent};
-use rig::providers::openai;
 
 use super::super::support::with_openai_cassette;
 use crate::support::{assert_contains_any_case_insensitive, assert_nonempty_response};
@@ -23,7 +22,7 @@ async fn url_pdf_document_prompt() {
         "url_pdf_document/url_pdf_document_prompt",
         |client| async move {
             let agent = client
-                .agent(openai::GPT_4O)
+                .agent("gpt-4o")
                 .preamble("You are a helpful assistant that analyzes documents.")
                 .temperature(0.0)
                 .build();

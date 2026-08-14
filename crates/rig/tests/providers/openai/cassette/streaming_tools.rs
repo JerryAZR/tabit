@@ -4,7 +4,6 @@ use rig::OneOrMany;
 use rig::completion::CompletionModel;
 use rig::message::{AssistantContent, Message};
 use rig::prelude::*;
-use rig::providers::openai;
 use rig::providers::openai::responses_api::streaming::StreamingCompletionChunk;
 use rig::streaming::StreamingPrompt;
 
@@ -91,7 +90,7 @@ async fn streaming_tools_smoke() {
         "streaming_tools/streaming_tools_smoke",
         |client| async move {
             let agent = client
-                .agent(openai::GPT_4O)
+                .agent("gpt-4o")
                 .preamble(STREAMING_TOOLS_PREAMBLE)
                 .tool(Adder)
                 .tool(Subtract)
@@ -113,7 +112,7 @@ async fn streaming_tools_smoke() {
 async fn example_streaming_with_tools() {
     with_openai_cassette("streaming_tools/example_streaming_with_tools", |client| async move {
         let agent = client
-            .agent(openai::GPT_4O)
+            .agent("gpt-4o")
             .preamble(
                 "You are a calculator here to help the user perform arithmetic operations. \
                  Use the tools provided to answer the user's question and answer in a full sentence.",
@@ -139,7 +138,7 @@ async fn responses_stream_preserves_tool_result_flow() {
         "streaming_tools/responses_stream_preserves_tool_result_flow",
         |client| async move {
             let agent = client
-                .agent(openai::GPT_4O)
+                .agent("gpt-4o")
                 .preamble(ORDERED_TOOL_STREAM_PREAMBLE)
                 .tool(AlphaSignal)
                 .build();
@@ -165,7 +164,7 @@ async fn raw_responses_stream_preserves_tool_then_followup_text_ordering() {
     with_openai_cassette(
         "streaming_tools/raw_responses_stream_preserves_tool_then_followup_text_ordering",
         |client| async move {
-            let model = client.completion_model(openai::GPT_4O);
+            let model = client.completion_model("gpt-4o");
             let request = model
                 .completion_request(ORDERED_TOOL_STREAM_PROMPT)
                 .preamble(ORDERED_TOOL_STREAM_PREAMBLE.to_string())

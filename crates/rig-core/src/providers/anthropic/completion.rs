@@ -21,16 +21,6 @@ use tracing::{Instrument, Level, enabled};
 // Anthropic Completion API
 // ================================================================
 
-/// `claude-opus-4-6` completion model
-pub const CLAUDE_OPUS_4_6: &str = "claude-opus-4-6";
-/// `claude-opus-4-7` completion model
-pub const CLAUDE_OPUS_4_7: &str = "claude-opus-4-7";
-/// `claude-opus-4-8` completion model
-pub const CLAUDE_OPUS_4_8: &str = "claude-opus-4-8";
-/// `claude-sonnet-4-6` completion model
-pub const CLAUDE_SONNET_4_6: &str = "claude-sonnet-4-6";
-/// `claude-haiku-4-5` completion model
-pub const CLAUDE_HAIKU_4_5: &str = "claude-haiku-4-5";
 
 pub const ANTHROPIC_VERSION_2023_01_01: &str = "2023-01-01";
 pub const ANTHROPIC_VERSION_2023_06_01: &str = "2023-06-01";
@@ -1654,7 +1644,7 @@ where
     /// `cache_control` before budgeting and ordering manual prompt cache markers.
     ///
     /// ```ignore
-    /// let model = client.completion_model(anthropic::completion::CLAUDE_SONNET_4_6)
+    /// let model = client.completion_model("claude-sonnet-4-6")
     ///     .with_automatic_caching();
     /// ```
     ///
@@ -1683,7 +1673,7 @@ where
     /// top-level `cache_control` field:
     ///
     /// ```ignore
-    /// let model = client.completion_model(anthropic::completion::CLAUDE_SONNET_4_6)
+    /// let model = client.completion_model("claude-sonnet-4-6")
     ///     .with_automatic_caching_1h();
     /// ```
     ///
@@ -3124,7 +3114,7 @@ mod tests {
         }];
 
         let request = AnthropicCompletionRequest::try_from(AnthropicRequestParams {
-            model: CLAUDE_OPUS_4_8,
+            model: "claude-opus-4-8",
             request,
             prompt_caching: false,
             automatic_caching: false,
@@ -3176,7 +3166,7 @@ mod tests {
         );
 
         let request = AnthropicCompletionRequest::try_from(AnthropicRequestParams {
-            model: CLAUDE_OPUS_4_7,
+            model: "claude-opus-4-7",
             request,
             prompt_caching: false,
             automatic_caching: false,
@@ -4743,7 +4733,7 @@ mod tests {
         let response = CompletionResponse {
             content: vec![],
             id: "msg_123".to_string(),
-            model: CLAUDE_SONNET_4_6.to_string(),
+            model: "claude-sonnet-4-6".to_string(),
             role: "assistant".to_string(),
             stop_reason: Some("end_turn".to_string()),
             stop_sequence: None,
@@ -4766,7 +4756,7 @@ mod tests {
         ));
         assert_eq!(parsed.provider, "anthropic");
         assert_eq!(parsed.message_id.as_deref(), Some("msg_123"));
-        assert_eq!(parsed.model.as_deref(), Some(CLAUDE_SONNET_4_6));
+        assert_eq!(parsed.model.as_deref(), Some("claude-sonnet-4-6"));
         assert_eq!(parsed.finish_reason(), Some(completion::FinishReason::Stop));
     }
 
@@ -4775,7 +4765,7 @@ mod tests {
         let response = CompletionResponse {
             content: vec![],
             id: "msg_123".to_string(),
-            model: CLAUDE_SONNET_4_6.to_string(),
+            model: "claude-sonnet-4-6".to_string(),
             role: "assistant".to_string(),
             stop_reason: Some("tool_use".to_string()),
             stop_sequence: None,
@@ -4847,7 +4837,7 @@ mod tests {
                 input: json!({"x": 1}),
             }],
             id: "msg_123".to_string(),
-            model: CLAUDE_SONNET_4_6.to_string(),
+            model: "claude-sonnet-4-6".to_string(),
             role: "assistant".to_string(),
             stop_reason: Some("end_turn".to_string()),
             stop_sequence: None,
@@ -5077,7 +5067,7 @@ mod tests {
     fn web_search_response_preserves_raw_blocks_and_citations() {
         let value = json!({
             "id": "msg_web_search",
-            "model": CLAUDE_SONNET_4_6,
+            "model": "claude-sonnet-4-6",
             "role": "assistant",
             "stop_reason": "end_turn",
             "stop_sequence": null,
@@ -5192,7 +5182,7 @@ mod tests {
     fn web_search_tool_result_error_object_is_preserved_raw() {
         let value = json!({
             "id": "msg_web_search_error",
-            "model": CLAUDE_SONNET_4_6,
+            "model": "claude-sonnet-4-6",
             "role": "assistant",
             "stop_reason": "end_turn",
             "stop_sequence": null,
@@ -5304,7 +5294,7 @@ mod tests {
         });
         let value = json!({
             "id": "msg_code_execution",
-            "model": CLAUDE_OPUS_4_8,
+            "model": "claude-opus-4-8",
             "role": "assistant",
             "stop_reason": "end_turn",
             "stop_sequence": null,
@@ -5731,7 +5721,7 @@ mod tests {
             .http_client(http_client)
             .build()
             .expect("build client");
-        let model = client.completion_model(CLAUDE_SONNET_4_6);
+        let model = client.completion_model("claude-sonnet-4-6");
         let request = model
             .completion_request("hello")
             .max_tokens(1024)
@@ -5768,7 +5758,7 @@ mod tests {
             .http_client(http_client)
             .build()
             .expect("build client");
-        let model = client.completion_model(CLAUDE_SONNET_4_6);
+        let model = client.completion_model("claude-sonnet-4-6");
         let request = model
             .completion_request("hello")
             .max_tokens(1024)
@@ -5806,7 +5796,7 @@ mod tests {
             .http_client(http_client)
             .build()
             .expect("build client");
-        let model = client.completion_model(CLAUDE_SONNET_4_6);
+        let model = client.completion_model("claude-sonnet-4-6");
         let request = model
             .completion_request("hello")
             .max_tokens(1024)

@@ -10,7 +10,6 @@ use rig::completion::NormalizeCompletionResponse;
 use rig::completion::{Chat, CompletionModel, FinishReason, Message};
 use rig::message::AssistantContent;
 use rig::prelude::*;
-use rig::providers::openai;
 use rig::providers::openai::responses_api::ResponseStatus;
 use rig::tool::Tool;
 
@@ -25,7 +24,7 @@ async fn strict_tools_opt_in_roundtrip() {
             // The recorded request body locks the strict-tools contract:
             // `strict: true` plus the sanitized schema (additionalProperties
             // false, all properties required) must be accepted by the API.
-            let model = client.completion_model(openai::GPT_4O).with_strict_tools();
+            let model = client.completion_model("gpt-4o").with_strict_tools();
             let request = model
                 .completion_request("Use the add tool to add 7 and 5.")
                 .preamble(TOOLS_PREAMBLE.to_string())
@@ -76,7 +75,7 @@ async fn incomplete_response_surfaces_partial_output() {
     with_openai_cassette(
         "responses_behaviors/incomplete_response_surfaces_partial_output",
         |client| async move {
-            let model = client.completion_model(openai::GPT_4O);
+            let model = client.completion_model("gpt-4o");
             let request = model
                 .completion_request(
                     "Write a story of at least 150 words about a lighthouse keeper.",
@@ -145,7 +144,7 @@ async fn system_messages_as_input_items_mid_conversation() {
             // items instead of the top-level `instructions` field.
             let agent = client
                 .with_system_instructions_as_messages()
-                .agent(openai::GPT_4O)
+                .agent("gpt-4o")
                 .preamble("You are a concise assistant.")
                 .build();
             let mut history = vec![

@@ -19,7 +19,7 @@ mod image {
         /// // Initialize the OpenAI client
         /// let openai = Client::new("your-open-ai-api-key")?;
         ///
-        /// let gpt4 = openai.image_generation_model(openai::DALL_E_3);
+        /// let gpt4 = openai.image_generation_model("dall-e-3");
         /// # Ok(())
         /// # }
         /// ```
@@ -36,7 +36,7 @@ mod image {
         /// // Initialize the OpenAI client
         /// let openai = Client::new("your-open-ai-api-key")?;
         ///
-        /// let gpt4 = openai.image_generation_model(openai::DALL_E_3);
+        /// let gpt4 = openai.image_generation_model("dall-e-3");
         /// # Ok(())
         /// # }
         /// ```

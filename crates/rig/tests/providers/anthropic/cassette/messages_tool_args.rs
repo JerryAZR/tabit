@@ -11,7 +11,6 @@
 use rig::completion::{Chat, CompletionModel, Message, ToolDefinition};
 use rig::message::AssistantContent;
 use rig::prelude::*;
-use rig::providers::anthropic;
 use rig::tool::Tool;
 use serde::Deserialize;
 use serde_json::json;
@@ -158,7 +157,7 @@ async fn zero_argument_tool_use_streaming() {
     with_anthropic_cassette(
         "messages_tool_args/zero_argument_tool_use_streaming",
         |client| async move {
-            let model = client.completion_model(anthropic::completion::CLAUDE_SONNET_4_6);
+            let model = client.completion_model("claude-sonnet-4-6");
             let request = model
                 .completion_request(REQUIRED_ZERO_ARG_TOOL_PROMPT)
                 .preamble("Follow the tool-calling instructions exactly.".to_string())
@@ -182,7 +181,7 @@ async fn zero_argument_tool_use_nonstreaming() {
     with_anthropic_cassette(
         "messages_tool_args/zero_argument_tool_use_nonstreaming",
         |client| async move {
-            let model = client.completion_model(anthropic::completion::CLAUDE_SONNET_4_6);
+            let model = client.completion_model("claude-sonnet-4-6");
             let request = model
                 .completion_request(REQUIRED_ZERO_ARG_TOOL_PROMPT)
                 .preamble("Follow the tool-calling instructions exactly.".to_string())
@@ -220,7 +219,7 @@ async fn nested_arguments_roundtrip_nonstreaming() {
         "messages_tool_args/nested_arguments_roundtrip_nonstreaming",
         |client| async move {
             let agent = client
-                .agent(anthropic::completion::CLAUDE_SONNET_4_6)
+                .agent("claude-sonnet-4-6")
                 .preamble(NESTED_ARGS_PREAMBLE)
                 .max_tokens(2048)
                 .tool(PlanTrip)
@@ -265,7 +264,7 @@ async fn nested_arguments_streaming() {
     with_anthropic_cassette(
         "messages_tool_args/nested_arguments_streaming",
         |client| async move {
-            let model = client.completion_model(anthropic::completion::CLAUDE_SONNET_4_6);
+            let model = client.completion_model("claude-sonnet-4-6");
             let request = model
                 .completion_request(NESTED_ARGS_PROMPT)
                 .preamble(NESTED_ARGS_PREAMBLE.to_string())
@@ -302,7 +301,7 @@ async fn unicode_arguments_streaming() {
     with_anthropic_cassette(
         "messages_tool_args/unicode_arguments_streaming",
         |client| async move {
-            let model = client.completion_model(anthropic::completion::CLAUDE_SONNET_4_6);
+            let model = client.completion_model("claude-sonnet-4-6");
             let request = model
                 .completion_request(
                     "Call the echo tool exactly once with the message argument set to \

@@ -2310,7 +2310,7 @@ pub mod fixtures {
                         .http_client(SequencedStreamingHttpClient::new(byte_chunks(chunks)?))
                         .build()?;
                     let model = client.completion_model(
-                        crate::providers::anthropic::completion::CLAUDE_SONNET_4_6,
+                        "claude-sonnet-4-6",
                     );
                     let request = model.completion_request("hello").build();
                     let stream = model.stream(request).await?;

@@ -25,7 +25,7 @@
 //! let openai = openai::Client::from_env()?;
 //!
 //! // Configure the agent
-//! let agent = openai.agent(openai::GPT_5_2)
+//! let agent = openai.agent("gpt-5.2")
 //!     .preamble("System prompt")
 //!     .context("Context document 1")
 //!     .context("Context document 2")
@@ -67,7 +67,7 @@
 //! let openai = openai::Client::from_env()?;
 //!
 //! // Initialize OpenAI embedding model
-//! let embedding_model = openai.embedding_model(openai::TEXT_EMBEDDING_3_SMALL);
+//! let embedding_model = openai.embedding_model("text-embedding-3-small");
 //!
 //! // Create vector store, compute embeddings and load them in the store
 //! let mut vector_store = InMemoryVectorStore::default();
@@ -86,7 +86,7 @@
 //! // Create vector store index
 //! let index = vector_store.index(embedding_model);
 //!
-//! let agent = openai.agent(openai::GPT_5_2)
+//! let agent = openai.agent("gpt-5.2")
 //!     .preamble("
 //!         You are a dictionary assistant here to assist the user in understanding the meaning of words.
 //!         You will find additional non-standard word definitions that could be useful below.

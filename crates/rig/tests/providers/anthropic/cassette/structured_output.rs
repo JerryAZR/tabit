@@ -3,7 +3,7 @@
 use rig::agent::OutputMode;
 use rig::completion::Prompt;
 use rig::prelude::*;
-use rig::providers::anthropic::{self, completion::CLAUDE_SONNET_4_6};
+use rig::providers::anthropic::{self};
 use rig::test_utils::RecordingHttpClient;
 use rig_agent::test_utils::decode_structured_output;
 
@@ -17,7 +17,7 @@ fn text_response(text: &str) -> String {
     serde_json::json!({
         "content": [{"type": "text", "text": text}],
         "id": "msg_runtime_acceptance",
-        "model": CLAUDE_SONNET_4_6,
+        "model": "claude-sonnet-4-6",
         "role": "assistant",
         "type": "message",
         "stop_reason": "end_turn",
@@ -41,7 +41,7 @@ fn output_tool_response(name: &str) -> String {
             "input": smoke_structured_output_value()
         }],
         "id": "msg_runtime_acceptance",
-        "model": CLAUDE_SONNET_4_6,
+        "model": "claude-sonnet-4-6",
         "role": "assistant",
         "type": "message",
         "stop_reason": "tool_use",
@@ -62,7 +62,7 @@ async fn structured_output_smoke() {
         "structured_output/structured_output_smoke",
         |client| async move {
             let agent = client
-                .agent(CLAUDE_SONNET_4_6)
+                .agent("claude-sonnet-4-6")
                 .output_schema::<SmokeStructuredOutput>()
                 .max_tokens(64_000)
                 .build();
@@ -90,7 +90,7 @@ async fn classic_tool_mode_maps_through_anthropic_messages() {
         .build()
         .expect("Anthropic test client should build");
     let agent = client
-        .agent(CLAUDE_SONNET_4_6)
+        .agent("claude-sonnet-4-6")
         .output_schema::<SmokeStructuredOutput>()
         .output_mode(OutputMode::Tool)
         .max_tokens(64_000)
@@ -123,7 +123,7 @@ async fn classic_prompted_mode_maps_through_anthropic_messages() {
         .build()
         .expect("Anthropic test client should build");
     let agent = client
-        .agent(CLAUDE_SONNET_4_6)
+        .agent("claude-sonnet-4-6")
         .output_schema::<SmokeStructuredOutput>()
         .output_mode(OutputMode::Prompted)
         .max_tokens(64_000)

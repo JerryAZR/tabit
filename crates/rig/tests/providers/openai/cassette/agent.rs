@@ -2,7 +2,6 @@
 
 use rig::completion::Prompt;
 use rig::prelude::*;
-use rig::providers::openai;
 
 use super::super::support::with_openai_cassette;
 use crate::support::{BASIC_PREAMBLE, BASIC_PROMPT, assert_nonempty_response};
@@ -11,7 +10,7 @@ use crate::support::{BASIC_PREAMBLE, BASIC_PROMPT, assert_nonempty_response};
 async fn completion_smoke() {
     with_openai_cassette("agent/completion_smoke", |client| async move {
         let agent = client
-            .agent(openai::GPT_4O)
+            .agent("gpt-4o")
             .preamble(BASIC_PREAMBLE)
             .build();
 

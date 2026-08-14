@@ -9,7 +9,6 @@ use rig::OneOrMany;
 use rig::completion::Prompt;
 use rig::message::{Message, UserContent};
 use rig::prelude::*;
-use rig::providers::anthropic::completion::CLAUDE_SONNET_4_6;
 
 use super::super::support::with_anthropic_cassette;
 use crate::support::{assert_contains_any_case_insensitive, assert_nonempty_response};
@@ -22,7 +21,7 @@ async fn url_pdf_document_prompt() {
         "url_pdf_document/url_pdf_document_prompt",
         |client| async move {
             let agent = client
-                .agent(CLAUDE_SONNET_4_6)
+                .agent("claude-sonnet-4-6")
                 .preamble("You are a helpful assistant that analyzes documents.")
                 .temperature(0.0)
                 .max_tokens(64_000)

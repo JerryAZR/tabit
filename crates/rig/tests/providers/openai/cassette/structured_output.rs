@@ -74,7 +74,7 @@ async fn structured_output_smoke() {
         "structured_output/structured_output_smoke",
         |client| async move {
             let agent = client
-                .agent(openai::GPT_4O)
+                .agent("gpt-4o")
                 .output_schema::<SmokeStructuredOutput>()
                 .output_mode(OutputMode::Native)
                 .build();
@@ -99,7 +99,7 @@ async fn classic_tool_mode_maps_through_openai_responses() {
         .build()
         .expect("OpenAI test client should build");
     let agent = client
-        .agent(openai::GPT_4O)
+        .agent("gpt-4o")
         .output_schema::<SmokeStructuredOutput>()
         .output_mode(OutputMode::Tool)
         .build();
@@ -130,7 +130,7 @@ async fn prompt_typed_and_output_schema() {
         "structured_output/prompt_typed_and_output_schema",
         |client| async move {
             let agent = client
-                .agent(openai::GPT_4O)
+                .agent("gpt-4o")
                 .preamble(
                     "You are a helpful weather assistant. Respond with realistic weather data.",
                 )
@@ -151,7 +151,7 @@ async fn prompt_typed_and_output_schema() {
             assert!(extended.usage.total_tokens > 0, "usage should be populated");
 
             let agent_with_schema = client
-                .agent(openai::GPT_4O)
+                .agent("gpt-4o")
                 .preamble(
                     "You are a helpful weather assistant. Respond with realistic weather data.",
                 )

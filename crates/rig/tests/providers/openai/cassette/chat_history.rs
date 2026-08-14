@@ -8,7 +8,6 @@ use std::sync::atomic::AtomicUsize;
 
 use rig::completion::{Chat, Message};
 use rig::prelude::*;
-use rig::providers::openai;
 
 use super::super::support::with_openai_cassette;
 use crate::reasoning::{self, WeatherTool};
@@ -21,7 +20,7 @@ async fn chat_appends_reasoning_tool_turns_to_caller_history() {
             let call_count = Arc::new(AtomicUsize::new(0));
             let agent = client
                 .with_system_instructions_as_messages()
-                .agent(openai::GPT_5_2)
+                .agent("gpt-5.2")
                 .preamble(reasoning::TOOL_SYSTEM_PROMPT)
                 .max_tokens(4096)
                 .tool(WeatherTool::new(call_count.clone()))

@@ -1,7 +1,6 @@
 //! OpenAI extractor smoke test.
 
 use rig::prelude::*;
-use rig::providers::openai;
 use rig_agent::test_utils::validate_extraction_fields;
 
 use super::super::support::with_openai_cassette;
@@ -10,7 +9,7 @@ use crate::support::{EXTRACTOR_TEXT, SmokePerson, assert_nonempty_response};
 #[tokio::test]
 async fn extractor_smoke() {
     with_openai_cassette("extractor/extractor_smoke", |client| async move {
-        let extractor = client.extractor::<SmokePerson>(openai::GPT_4O).build();
+        let extractor = client.extractor::<SmokePerson>("gpt-4o").build();
 
         let response = extractor
             .extract_with_usage(EXTRACTOR_TEXT)

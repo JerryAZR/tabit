@@ -107,7 +107,7 @@ pub struct TranscriptionRequest {
 ///
 /// # async fn run() -> Result<(), Box<dyn std::error::Error>> {
 /// let openai = Client::new("your-openai-api-key")?;
-/// let model = openai.transcription_model(openai::WHISPER_1);
+/// let model = openai.transcription_model("whisper-1");
 ///
 /// // Create the transcription request and execute it separately.
 /// let request = TranscriptionRequestBuilder::new(model.clone())
@@ -131,7 +131,7 @@ pub struct TranscriptionRequest {
 ///
 /// # async fn run() -> Result<(), Box<dyn std::error::Error>> {
 /// let openai = Client::new("your-openai-api-key")?;
-/// let model = openai.transcription_model(openai::WHISPER_1);
+/// let model = openai.transcription_model("whisper-1");
 ///
 /// // Create the transcription request and execute it directly.
 /// let response = TranscriptionRequestBuilder::new(model)

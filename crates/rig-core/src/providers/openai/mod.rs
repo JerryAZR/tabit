@@ -7,7 +7,7 @@
 //! # fn run() -> Result<(), Box<dyn std::error::Error>> {
 //! let client = openai::Client::new("YOUR_API_KEY")?;
 //!
-//! let model = client.completion_model(openai::GPT_5_2);
+//! let model = client.completion_model("gpt-5.2");
 //! # Ok(())
 //! # }
 //! ```
@@ -115,9 +115,6 @@ pub(crate) fn sanitize_schema(schema: &mut serde_json::Value) {
         }
     }
 }
-
-#[cfg(feature = "audio")]
-pub use audio_generation::{TTS_1, TTS_1_HD};
 
 pub use streaming::*;
 pub use transcription::*;

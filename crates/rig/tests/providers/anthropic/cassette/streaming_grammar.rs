@@ -16,7 +16,6 @@ use rig::OneOrMany;
 use rig::completion::{CompletionModel, FinishReason};
 use rig::message::{AssistantContent, Reasoning, ToolCall};
 use rig::prelude::*;
-use rig::providers::anthropic;
 use rig::streaming::{StreamFinal, StreamedAssistantContent};
 
 use super::super::support::with_anthropic_cassette;
@@ -108,7 +107,7 @@ async fn thinking_multi_block_turn_keeps_discrete_parts() {
     with_anthropic_cassette(
         "streaming_grammar/thinking_multi_block_turn",
         |client| async move {
-            let model = client.completion_model(anthropic::completion::CLAUDE_SONNET_4_6);
+            let model = client.completion_model("claude-sonnet-4-6");
             let request = model
                 .completion_request(
                     "How many positive integers n < 300 are divisible by 8 but not by 12? \
@@ -170,7 +169,7 @@ async fn thinking_multi_block_turn_keeps_discrete_parts() {
 #[tokio::test]
 async fn parallel_tool_use_stays_distinct() {
     with_anthropic_cassette("streaming_grammar/parallel_tool_use", |client| async move {
-        let model = client.completion_model(anthropic::completion::CLAUDE_SONNET_4_6);
+        let model = client.completion_model("claude-sonnet-4-6");
         let request = model
             .completion_request(TWO_TOOL_STREAM_PROMPT)
             .preamble(TWO_TOOL_STREAM_PREAMBLE.to_string())

@@ -19,7 +19,7 @@ mod audio {
         /// // Initialize the OpenAI client
         /// let openai = Client::new("your-open-ai-api-key")?;
         ///
-        /// let tts = openai.audio_generation_model(openai::TTS_1);
+        /// let tts = openai.audio_generation_model("tts-1");
         /// # Ok(())
         /// # }
         /// ```

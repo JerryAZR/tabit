@@ -33,7 +33,7 @@ use crate::{
 /// // Create OpenAI client
 /// let openai_client = openai::Client::from_env()?;
 ///
-/// let model = openai_client.embedding_model(openai::TEXT_EMBEDDING_3_SMALL);
+/// let model = openai_client.embedding_model("text-embedding-3-small");
 ///
 /// let embeddings = EmbeddingsBuilder::new(model.clone())
 ///     .documents(vec![

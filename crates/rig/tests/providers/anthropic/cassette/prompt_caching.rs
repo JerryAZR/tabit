@@ -33,7 +33,7 @@ async fn manual_prompt_caching_reuses_tool_cache() {
         "prompt_caching/manual_prompt_caching_reuses_tool_cache",
         |client| async move {
             let model = client
-                .completion_model(anthropic::completion::CLAUDE_SONNET_4_6)
+                .completion_model("claude-sonnet-4-6")
                 .with_prompt_caching();
             let tools = cache_probe_tools();
 
@@ -66,7 +66,7 @@ async fn streaming_prompt_caching_reuses_tool_cache() {
         "prompt_caching/streaming_prompt_caching_reuses_tool_cache",
         |client| async move {
             let model = client
-                .completion_model(anthropic::completion::CLAUDE_SONNET_4_6)
+                .completion_model("claude-sonnet-4-6")
                 .with_prompt_caching();
             let tools = cache_probe_tools_for("streaming prompt caching");
 
@@ -104,7 +104,7 @@ async fn prompt_and_automatic_caching_reuses_tool_cache() {
         "prompt_caching/prompt_and_automatic_caching_reuses_tool_cache",
         |client| async move {
             let model = client
-                .completion_model(anthropic::completion::CLAUDE_SONNET_4_6)
+                .completion_model("claude-sonnet-4-6")
                 .with_prompt_caching()
                 .with_automatic_caching();
             let tools = cache_probe_tools_for("manual plus automatic prompt caching");

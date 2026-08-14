@@ -8,12 +8,6 @@ use serde::{Deserialize, Serialize};
 // ================================================================
 // OpenAI Embedding API
 // ================================================================
-/// `text-embedding-3-large` embedding model
-pub const TEXT_EMBEDDING_3_LARGE: &str = "text-embedding-3-large";
-/// `text-embedding-3-small` embedding model
-pub const TEXT_EMBEDDING_3_SMALL: &str = "text-embedding-3-small";
-/// `text-embedding-ada-002` embedding model
-pub const TEXT_EMBEDDING_ADA_002: &str = "text-embedding-ada-002";
 
 #[derive(Debug, Deserialize)]
 pub struct EmbeddingResponse {
@@ -127,14 +121,6 @@ pub struct GenericEmbeddingModel<Ext = super::OpenAIResponsesExt, H = reqwest::C
 /// parameter is the HTTP client type.
 pub type EmbeddingModel<H = reqwest::Client> = GenericEmbeddingModel<super::OpenAIResponsesExt, H>;
 
-fn model_dimensions_from_identifier(identifier: &str) -> Option<usize> {
-    match identifier {
-        TEXT_EMBEDDING_3_LARGE => Some(3_072),
-        TEXT_EMBEDDING_3_SMALL | TEXT_EMBEDDING_ADA_002 => Some(1_536),
-        _ => None,
-    }
-}
-
 impl<Ext, H> embeddings::EmbeddingModel for GenericEmbeddingModel<Ext, H>
 where
     crate::client::Client<Ext, H>:
@@ -147,9 +133,7 @@ where
 
     fn make(client: &Self::Client, model: impl Into<String>, ndims: Option<usize>) -> Self {
         let model = model.into();
-        let dims = ndims
-            .or(model_dimensions_from_identifier(&model))
-            .unwrap_or_default();
+        let dims = ndims.unwrap_or_default();
 
         Self::new(client.clone(), model, dims)
     }
@@ -194,8 +178,7 @@ where
             });
         }
 
-        let requested_dimensions =
-            (self.ndims > 0 && self.model != TEXT_EMBEDDING_ADA_002).then_some(self.ndims);
+        let requested_dimensions = (self.ndims > 0).then_some(self.ndims);
         let dimensions = self
             .client
             .ext()
@@ -410,9 +393,9 @@ mod tests {
             .build()
             .expect("build client");
 
-        let model = client.embedding_model(TEXT_EMBEDDING_3_SMALL);
+        let model = client.embedding_model("text-embedding-3-small");
 
-        assert_eq!(model.ndims(), 1_536);
+        assert_eq!(model.ndims(), 0);
     }
 
     #[tokio::test]
@@ -424,7 +407,7 @@ mod tests {
             .build()
             .expect("build client");
         let model = client
-            .embedding_model(TEXT_EMBEDDING_3_SMALL)
+            .embedding_model_with_ndims("text-embedding-3-small", 1_536)
             .encoding_format(EncodingFormat::Float)
             .user("user-123");
 
@@ -453,7 +436,7 @@ mod tests {
             .build()
             .expect("build client");
         let model = client
-            .embedding_model(TEXT_EMBEDDING_3_SMALL)
+            .embedding_model("text-embedding-3-small")
             .encoding_format(EncodingFormat::Base64);
 
         let error = model

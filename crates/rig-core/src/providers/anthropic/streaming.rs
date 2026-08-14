@@ -807,8 +807,8 @@ fn handle_event(
 #[cfg(test)]
 mod tests {
     use super::super::completion::{
-        CLAUDE_OPUS_4_8, CacheControl, CacheTtl, Message, SystemContent,
-        apply_prompt_cache_control, build_tool_definitions, resolve_top_level_cache_control,
+        CacheControl, CacheTtl, Message, SystemContent, apply_prompt_cache_control,
+        build_tool_definitions, resolve_top_level_cache_control,
     };
     use super::*;
     use crate::OneOrMany;
@@ -900,7 +900,7 @@ mod tests {
         };
 
         let body = create_streaming_request_body(
-            CLAUDE_OPUS_4_8.to_string(),
+            "claude-opus-4-8".to_string(),
             request,
             64,
             false,
@@ -956,7 +956,7 @@ mod tests {
         };
 
         let streaming_body = create_streaming_request_body(
-            CLAUDE_OPUS_4_8.to_string(),
+            "claude-opus-4-8".to_string(),
             request.clone(),
             64,
             false,
@@ -984,7 +984,7 @@ mod tests {
         // (built via the same typed request) plus `stream: true`. Pins the two
         // wire formats together so a future edit can't reintroduce drift.
         let blocking = AnthropicCompletionRequest::try_from(AnthropicRequestParams {
-            model: CLAUDE_OPUS_4_8,
+            model: "claude-opus-4-8",
             request,
             prompt_caching: false,
             automatic_caching: false,
@@ -1024,7 +1024,7 @@ mod tests {
         };
 
         let body = create_streaming_request_body(
-            CLAUDE_OPUS_4_8.to_string(),
+            "claude-opus-4-8".to_string(),
             request,
             64,
             false,
@@ -1061,7 +1061,7 @@ mod tests {
         };
 
         let body = create_streaming_request_body(
-            CLAUDE_OPUS_4_8.to_string(),
+            "claude-opus-4-8".to_string(),
             request,
             64,
             false,
@@ -2348,7 +2348,7 @@ mod tests {
                 },
                 stop_reason: Some("max_tokens".to_string()),
                 message_id: Some("msg_1".to_string()),
-                model: Some(CLAUDE_OPUS_4_8.to_string()),
+                model: Some("claude-opus-4-8".to_string()),
             }));
         };
 
@@ -2361,7 +2361,7 @@ mod tests {
         let terminal = stream.response.expect("expected a terminal record");
         assert_eq!(terminal.provider, "anthropic");
         assert_eq!(terminal.message_id.as_deref(), Some("msg_1"));
-        assert_eq!(terminal.model.as_deref(), Some(CLAUDE_OPUS_4_8));
+        assert_eq!(terminal.model.as_deref(), Some("claude-opus-4-8"));
         assert_eq!(
             terminal.finish_reason,
             Some(crate::completion::FinishReason::Length)
@@ -2428,7 +2428,6 @@ mod tests {
 
     #[cfg(not(all(target_arch = "wasm32", target_os = "unknown")))]
     mod terminal_emission {
-        use super::super::super::completion::CLAUDE_SONNET_4_6;
         use crate::client::CompletionClient;
         use crate::completion::CompletionModel as _;
         use crate::providers::anthropic::Client;
@@ -2465,7 +2464,7 @@ mod tests {
                 .http_client(MockStreamingClient { sse_bytes })
                 .build()
                 .expect("build client");
-            let model = client.completion_model(CLAUDE_SONNET_4_6);
+            let model = client.completion_model("claude-sonnet-4-6");
             let request = model
                 .completion_request("hello")
                 .max_tokens(1024)
@@ -2520,7 +2519,7 @@ mod tests {
                 ]))
                 .build()
                 .expect("build client");
-            let model = client.completion_model(CLAUDE_SONNET_4_6);
+            let model = client.completion_model("claude-sonnet-4-6");
             let request = model
                 .completion_request("hello")
                 .max_tokens(1024)

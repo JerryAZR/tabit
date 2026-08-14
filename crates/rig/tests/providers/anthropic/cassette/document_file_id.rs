@@ -7,7 +7,6 @@ use rig::message::{
     Document, DocumentMediaType, DocumentSourceKind, Message, Text, UserContent as RigUserContent,
 };
 use rig::prelude::*;
-use rig::providers::anthropic;
 use rig::providers::anthropic::completion::{
     ANTHROPIC_VERSION_2023_06_01, Content as AnthropicContent,
     DocumentSource as AnthropicDocumentSource, Message as AnthropicMessage, Role as AnthropicRole,
@@ -397,7 +396,7 @@ async fn messages_document_file_id_roundtrip_live() {
             let api_key = parts.api_key;
             with_uploaded_pdf(&base_url, &api_key, |file_id| async move {
                 let agent = client
-                    .agent(anthropic::completion::CLAUDE_SONNET_4_6)
+                    .agent("claude-sonnet-4-6")
                     .preamble(DOCUMENT_PREAMBLE)
                     .max_tokens(64_000)
                     .build();
@@ -460,7 +459,7 @@ async fn streaming_document_file_id_roundtrip_live() {
             let api_key = parts.api_key;
             with_uploaded_pdf(&base_url, &api_key, |file_id| async move {
                 let agent = client
-                    .agent(anthropic::completion::CLAUDE_SONNET_4_6)
+                    .agent("claude-sonnet-4-6")
                     .preamble(DOCUMENT_PREAMBLE)
                     .max_tokens(64_000)
                     .build();

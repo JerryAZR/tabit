@@ -8,7 +8,6 @@ use anyhow::Result;
 use rig::completion::Prompt;
 use rig::message::{AssistantContent, Message};
 use rig::prelude::*;
-use rig::providers::anthropic;
 use rig::tool::Tool;
 use rig::tool::builtin::ThinkTool;
 use serde::Deserialize;
@@ -280,7 +279,7 @@ async fn think_tool_with_other_tools() -> Result<()> {
     super::super::support::with_anthropic_cassette_result("think_tool_with_other_tools/think_tool_with_other_tools", |client| async move {
 
     let agent = client
-        .agent(anthropic::completion::CLAUDE_SONNET_4_6)
+        .agent("claude-sonnet-4-6")
         .name("Customer Service Agent")
         .preamble(
             "You are a customer service agent for an online store.

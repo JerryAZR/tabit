@@ -17,7 +17,7 @@ pub trait TranscriptionClient {
     /// // Initialize the OpenAI client
     /// let openai = Client::new("your-open-ai-api-key")?;
     ///
-    /// let whisper = openai.transcription_model(openai::WHISPER_1);
+    /// let whisper = openai.transcription_model("whisper-1");
     /// # Ok(())
     /// # }
     /// ```

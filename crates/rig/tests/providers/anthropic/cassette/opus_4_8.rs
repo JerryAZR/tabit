@@ -7,7 +7,6 @@ use rig::completion::{
 };
 use rig::message::Text;
 use rig::prelude::*;
-use rig::providers::anthropic::completion::CLAUDE_OPUS_4_8;
 use rig::telemetry::ProviderResponseExt;
 use serde::Deserialize;
 use serde_json::Value;
@@ -26,7 +25,7 @@ async fn web_search_with_dynamic_filtering_succeeds() {
     super::super::support::with_anthropic_cassette(
         "opus_4_8/web_search_with_dynamic_filtering_succeeds",
         |client| async move {
-            let model = client.completion_model(CLAUDE_OPUS_4_8);
+            let model = client.completion_model("claude-opus-4-8");
             let request = model
                 .completion_request(
                     "Search for the current prices of AAPL and GOOGL, then calculate which has a better P/E ratio.",
@@ -70,7 +69,7 @@ async fn documents_keep_leading_system_message_top_level() {
     super::super::support::with_anthropic_cassette(
         "opus_4_8/documents_keep_leading_system_message_top_level",
         |client| async move {
-            let model = client.completion_model(CLAUDE_OPUS_4_8);
+            let model = client.completion_model("claude-opus-4-8");
             let request = model
                 .completion_request(
                     "According to the document, what color is the clear daytime sky?",

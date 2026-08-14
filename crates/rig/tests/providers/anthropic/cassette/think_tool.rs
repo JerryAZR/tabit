@@ -2,7 +2,6 @@
 
 use rig::completion::Prompt;
 use rig::prelude::*;
-use rig::providers::anthropic;
 use rig::tool::builtin::ThinkTool;
 
 use super::super::support::with_anthropic_cassette;
@@ -12,7 +11,7 @@ use crate::support::{assert_contains_any_case_insensitive, assert_nonempty_respo
 async fn think_tool_menu_planning() {
     with_anthropic_cassette("think_tool/think_tool_menu_planning", |client| async move {
         let agent = client
-            .agent(anthropic::completion::CLAUDE_SONNET_4_6)
+            .agent("claude-sonnet-4-6")
             .name("Anthropic Thinker")
             .preamble(
                 "You are a helpful assistant that can solve complex problems. \

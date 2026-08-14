@@ -3,7 +3,6 @@
 use anyhow::Result;
 use futures::stream::{StreamExt, TryStreamExt};
 use rig::prelude::*;
-use rig::providers::openai;
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 
@@ -33,17 +32,17 @@ async fn batch_multi_extract_chain() -> Result<()> {
         CassetteSpec::new("multi_extract/batch_multi_extract_chain").unordered(),
         |client| async move {
             let names_extractor = client
-                .extractor::<Names>(openai::GPT_4O_MINI)
+                .extractor::<Names>("gpt-4o-mini")
                 .preamble("Extract names from the given text.")
                 .retries(2)
                 .build();
             let topics_extractor = client
-                .extractor::<Topics>(openai::GPT_4O_MINI)
+                .extractor::<Topics>("gpt-4o-mini")
                 .preamble("Extract topics from the given text.")
                 .retries(2)
                 .build();
             let sentiment_extractor = client
-                .extractor::<Sentiment>(openai::GPT_4O_MINI)
+                .extractor::<Sentiment>("gpt-4o-mini")
                 .preamble("Extract sentiment and confidence from the given text.")
                 .retries(2)
                 .build();

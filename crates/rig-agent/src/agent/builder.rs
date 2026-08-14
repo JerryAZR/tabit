@@ -133,7 +133,7 @@ pub struct WithBuilderTools {
 /// # fn run() -> Result<(), Box<dyn std::error::Error>> {
 /// let openai = openai::Client::from_env()?;
 ///
-/// let model = openai.completion_model(openai::GPT_5_2);
+/// let model = openai.completion_model("gpt-5.2");
 ///
 /// // Configure the agent
 /// let agent = AgentBuilder::new(model)

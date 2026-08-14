@@ -69,7 +69,7 @@
 //! let openai = openai::Client::from_env()?;
 //!
 //! // Create a model and send a low-level completion request.
-//! let model = openai.completion_model(openai::GPT_5_2);
+//! let model = openai.completion_model("gpt-5.2");
 //! let request = model
 //!     .completion_request("Discuss the fate of Middle Earth.")
 //!     .preamble("\

@@ -6,7 +6,6 @@ use rig::completion::message::Image;
 use rig::message::DocumentSourceKind;
 use rig::message::ImageMediaType;
 use rig::prelude::*;
-use rig::providers::anthropic;
 use tokio::fs;
 
 use super::super::support::with_anthropic_cassette;
@@ -18,7 +17,7 @@ use crate::support::{
 async fn image_prompt_from_fixture() {
     with_anthropic_cassette("image/image_prompt_from_fixture", |client| async move {
         let agent = client
-            .agent(anthropic::completion::CLAUDE_SONNET_4_6)
+            .agent("claude-sonnet-4-6")
             .preamble("You are an image describer.")
             .temperature(0.5)
             .max_tokens(64_000)

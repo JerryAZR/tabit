@@ -5,7 +5,6 @@ use rig::agent::{
 };
 use rig::completion::Prompt;
 use rig::prelude::*;
-use rig::providers;
 use rig::streaming::StreamingPrompt;
 use rig::tool::Tool;
 use serde::{Deserialize, Serialize};
@@ -174,7 +173,7 @@ async fn permission_control_prompt_example() -> Result<()> {
             let cleanup = FileCleanup::new("blocking")?;
 
             let agent = client
-                .agent(providers::openai::GPT_4O_MINI)
+                .agent("gpt-4o-mini")
                 .preamble(
                     "You are a helpful assistant that can read files using different methods.",
                 )
@@ -219,7 +218,7 @@ async fn permission_control_streaming_example() -> Result<()> {
             let cleanup = FileCleanup::new("streaming")?;
 
             let agent = client
-                .agent(providers::openai::GPT_4O_MINI)
+                .agent("gpt-4o-mini")
                 .preamble(
                     "You are a helpful assistant that can read files using different methods.",
                 )

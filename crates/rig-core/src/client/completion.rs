@@ -23,7 +23,7 @@ pub trait CompletionClient {
     /// // Initialize the OpenAI client
     /// let openai = Client::new("your-open-ai-api-key")?;
     ///
-    /// let gpt = openai.completion_model(openai::GPT_5_2);
+    /// let gpt = openai.completion_model("gpt-5.2");
     /// # Ok(())
     /// # }
     /// ```

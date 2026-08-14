@@ -6,7 +6,7 @@ use rig::completion::{CompletionModel, Prompt};
 use rig::message::{Document, DocumentMediaType, DocumentSourceKind, Message, UserContent};
 use rig::prelude::*;
 use rig::providers::anthropic::completion::Citation;
-use rig::providers::anthropic::completion::{self as anthropic_completion, CLAUDE_SONNET_4_6};
+use rig::providers::anthropic::completion::{self as anthropic_completion};
 use rig::streaming::StreamingPrompt;
 use rig::telemetry::ProviderResponseExt;
 
@@ -92,7 +92,7 @@ async fn plaintext_document_prompt() {
         "plaintext_document/plaintext_document_prompt",
         |client| async move {
             let agent = client
-                .agent(CLAUDE_SONNET_4_6)
+                .agent("claude-sonnet-4-6")
                 .preamble("You are a helpful assistant that analyzes documents.")
                 .temperature(0.5)
                 .max_tokens(64_000)
@@ -121,7 +121,7 @@ async fn plaintext_document_with_instruction() {
         "plaintext_document/plaintext_document_with_instruction",
         |client| async move {
             let agent = client
-                .agent(CLAUDE_SONNET_4_6)
+                .agent("claude-sonnet-4-6")
                 .preamble("You are a helpful assistant that analyzes documents.")
                 .temperature(0.5)
                 .max_tokens(64_000)
@@ -152,7 +152,7 @@ async fn streaming_document_citations_accepts_null_citation_start() {
         "plaintext_document/streaming_document_citations_accepts_null_citation_start",
         |client| async move {
             let agent = client
-                .agent(CLAUDE_SONNET_4_6)
+                .agent("claude-sonnet-4-6")
                 .preamble("Answer using the supplied document and citation metadata.")
                 .temperature(0.0)
                 .max_tokens(64_000)
@@ -174,7 +174,7 @@ async fn document_citations_followup_preserves_assistant_citation_history() {
     super::super::support::with_anthropic_cassette(
         "plaintext_document/document_citations_followup_preserves_history",
         |client| async move {
-            let model = client.completion_model(CLAUDE_SONNET_4_6);
+            let model = client.completion_model("claude-sonnet-4-6");
             let prompt = citation_prompt();
 
             let first_request = model

@@ -2,7 +2,6 @@
 
 use rig::completion::Prompt;
 use rig::prelude::*;
-use rig::providers::anthropic;
 
 use super::super::support::with_anthropic_cassette;
 use crate::support::{BASIC_PREAMBLE, BASIC_PROMPT, assert_nonempty_response};
@@ -11,7 +10,7 @@ use crate::support::{BASIC_PREAMBLE, BASIC_PROMPT, assert_nonempty_response};
 async fn completion_smoke() {
     with_anthropic_cassette("agent/completion_smoke", |client| async move {
         let agent = client
-            .agent(anthropic::completion::CLAUDE_SONNET_4_6)
+            .agent("claude-sonnet-4-6")
             .preamble(BASIC_PREAMBLE)
             .max_tokens(64_000)
             .build();

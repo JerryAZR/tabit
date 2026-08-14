@@ -3,7 +3,6 @@
 use anyhow::Result;
 use rig::completion::Prompt;
 use rig::prelude::*;
-use rig::providers::anthropic;
 use rig::tool::Tool;
 use serde::{Deserialize, Serialize};
 use serde_json::json;
@@ -92,7 +91,7 @@ async fn default_max_turns_allows_multi_step_tool_use() -> Result<()> {
         "default_max_turns/default_max_turns_allows_multi_step_tool_use",
         |client| async move {
             let agent = client
-                .agent(anthropic::completion::CLAUDE_SONNET_4_6)
+                .agent("claude-sonnet-4-6")
                 .preamble(
                     "You are an assistant that must use the available tools for arithmetic. \
              Never compute the result yourself.",

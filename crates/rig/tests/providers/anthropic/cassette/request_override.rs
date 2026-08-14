@@ -16,7 +16,6 @@ use rig::agent::{AgentHook, CompletionCallAction, CompletionCallEvent, RequestPa
 use rig::completion::Prompt;
 use rig::message::ToolChoice;
 use rig::prelude::*;
-use rig::providers::anthropic;
 use rig::streaming::StreamingPrompt;
 use rig::tool::Tool;
 use serde::Deserialize;
@@ -201,7 +200,7 @@ async fn request_overridden_by_hook_blocking() {
         "request_override/request_overridden_by_hook_blocking",
         move |client| async move {
             let agent = client
-                .agent(anthropic::completion::CLAUDE_SONNET_4_6)
+                .agent("claude-sonnet-4-6")
                 .preamble(PREAMBLE)
                 .tool(weather)
                 .tool(GetTime)
@@ -236,7 +235,7 @@ async fn request_overridden_by_hook_streaming() {
         "request_override/request_overridden_by_hook_streaming",
         move |client| async move {
             let agent = client
-                .agent(anthropic::completion::CLAUDE_SONNET_4_6)
+                .agent("claude-sonnet-4-6")
                 .preamble(PREAMBLE)
                 .tool(weather)
                 .tool(GetTime)

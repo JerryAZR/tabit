@@ -6,8 +6,6 @@ use crate::providers::openai::Client;
 use bytes::Bytes;
 use serde_json::json;
 
-pub const TTS_1: &str = "tts-1";
-pub const TTS_1_HD: &str = "tts-1-hd";
 
 #[derive(Clone)]
 pub struct AudioGenerationModel<T = reqwest::Client> {
@@ -91,7 +89,7 @@ mod tests {
             .http_client(http_client)
             .build()
             .expect("build client");
-        let model = client.audio_generation_model(TTS_1);
+        let model = client.audio_generation_model("tts-1");
 
         let request = model
             .audio_generation_request()

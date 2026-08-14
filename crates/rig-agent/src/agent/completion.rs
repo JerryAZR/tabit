@@ -541,7 +541,7 @@ pub(crate) async fn build_prepared_completion_request(
 /// let openai = openai::Client::from_env()?;
 ///
 /// let comedian_agent = openai
-///     .agent(openai::GPT_5_2)
+///     .agent("gpt-5.2")
 ///     .preamble("You are a comedian here to entertain the user using humour and jokes.")
 ///     .temperature(0.9)
 ///     .build();

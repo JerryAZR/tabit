@@ -14,7 +14,7 @@
 //!
 //! # async fn run() -> Result<(), Box<dyn std::error::Error>> {
 //! let client = openai::Client::from_env()?;
-//! let model = client.completion_model(openai::GPT_5_2);
+//! let model = client.completion_model("gpt-5.2");
 //!
 //! let request = model
 //!     .completion_request("Who are you?")
@@ -837,7 +837,7 @@ fn merge_provider_tools_into_additional_params(
 ///
 /// # async fn run() -> Result<(), Box<dyn std::error::Error>> {
 /// let openai = Client::new("your-openai-api-key")?;
-/// let model = openai.completion_model(openai::GPT_5_2);
+/// let model = openai.completion_model("gpt-5.2");
 ///
 /// // Create the completion request and execute it separately
 /// let request = CompletionRequestBuilder::new(model.clone(), "Who are you?".to_string())
@@ -860,7 +860,7 @@ fn merge_provider_tools_into_additional_params(
 ///
 /// # async fn run() -> Result<(), Box<dyn std::error::Error>> {
 /// let openai = Client::new("your-openai-api-key")?;
-/// let model = openai.completion_model(openai::GPT_5_2);
+/// let model = openai.completion_model("gpt-5.2");
 ///
 /// // Create the completion request and execute it directly
 /// let response = CompletionRequestBuilder::new(model, "Who are you?".to_string())

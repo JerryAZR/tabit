@@ -4,7 +4,6 @@ use futures::StreamExt;
 use rig::agent::{MultiTurnStreamItem, StreamingError, StreamingResult};
 use rig::message::{Message, UserContent};
 use rig::prelude::*;
-use rig::providers::anthropic;
 use rig::streaming::{StreamedAssistantContent, StreamedUserContent, StreamingPrompt};
 use rig::tool::Tool;
 use serde::Deserialize;
@@ -27,7 +26,7 @@ async fn streaming_tools_smoke() {
         "streaming_tools/streaming_tools_smoke",
         |client| async move {
             let agent = client
-                .agent(anthropic::completion::CLAUDE_SONNET_4_6)
+                .agent("claude-sonnet-4-6")
                 .preamble(STREAMING_TOOLS_PREAMBLE)
                 .tool(Adder)
                 .tool(Subtract)
@@ -52,7 +51,7 @@ async fn streaming_tools_batches_multiple_tool_results_in_one_followup_message()
         "streaming_tools/streaming_tools_batches_multiple_tool_results_in_one_followup_message",
         |client| async move {
             let agent = client
-                .agent(anthropic::completion::CLAUDE_SONNET_4_6)
+                .agent("claude-sonnet-4-6")
                 .preamble(TWO_TOOL_STREAM_PREAMBLE)
                 .tool(AlphaSignal)
                 .tool(BetaSignal)
@@ -115,7 +114,7 @@ async fn streaming_tool_concurrency_surfaces_results_in_call_order_after_batch_s
         |client| async move {
         let order = OutOfOrderSignalOrder::default();
         let agent = client
-            .agent(anthropic::completion::CLAUDE_SONNET_4_6)
+            .agent("claude-sonnet-4-6")
             .preamble(TWO_TOOL_STREAM_PREAMBLE)
             .tool(OutOfOrderAlphaSignal(order.clone()))
             .tool(OutOfOrderBetaSignal(order))

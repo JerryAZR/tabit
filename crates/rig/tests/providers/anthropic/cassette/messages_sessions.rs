@@ -14,7 +14,6 @@ use rig::agent::MultiTurnStreamItem;
 use rig::completion::{Chat, CompletionModel, FinishReason, Message};
 use rig::message::{AssistantContent, UserContent};
 use rig::prelude::*;
-use rig::providers::anthropic;
 use rig::streaming::{StreamingChat, StreamingPrompt};
 use rig::tool::Tool;
 
@@ -97,7 +96,7 @@ async fn sequential_tool_calls_nonstreaming() {
         "messages_sessions/sequential_tool_calls_nonstreaming",
         |client| async move {
             let agent = client
-                .agent(anthropic::completion::CLAUDE_SONNET_4_6)
+                .agent("claude-sonnet-4-6")
                 .preamble(SEQUENTIAL_TOOLS_PREAMBLE)
                 .max_tokens(2048)
                 .tool(Adder)
@@ -149,7 +148,7 @@ async fn sequential_tool_calls_streaming() {
         "messages_sessions/sequential_tool_calls_streaming",
         |client| async move {
             let agent = client
-                .agent(anthropic::completion::CLAUDE_SONNET_4_6)
+                .agent("claude-sonnet-4-6")
                 .preamble(SEQUENTIAL_TOOLS_PREAMBLE)
                 .max_tokens(2048)
                 .tool(Adder)
@@ -196,7 +195,7 @@ async fn parallel_tool_use_single_turn_nonstreaming() {
         "messages_sessions/parallel_tool_use_single_turn_nonstreaming",
         |client| async move {
             let agent = client
-                .agent(anthropic::completion::CLAUDE_SONNET_4_6)
+                .agent("claude-sonnet-4-6")
                 .preamble(TWO_TOOL_STREAM_PREAMBLE)
                 .max_tokens(2048)
                 .tool(AlphaSignal)
@@ -264,7 +263,7 @@ async fn long_history_replay_nonstreaming() {
     with_anthropic_cassette(
         "messages_sessions/long_history_replay_nonstreaming",
         |client| async move {
-            let model = client.completion_model(anthropic::completion::CLAUDE_SONNET_4_6);
+            let model = client.completion_model("claude-sonnet-4-6");
             let preamble = "You are a concise assistant with perfect recall of this conversation.";
 
             // First turn: obtain a real tool_use so the follow-up can echo its
@@ -379,7 +378,7 @@ async fn usage_accumulates_across_streaming_multi_turn() {
         "messages_sessions/usage_accumulates_across_streaming_multi_turn",
         |client| async move {
             let agent = client
-                .agent(anthropic::completion::CLAUDE_SONNET_4_6)
+                .agent("claude-sonnet-4-6")
                 .preamble(ORDERED_TOOL_STREAM_PREAMBLE)
                 .max_tokens(2048)
                 .tool(AlphaSignal)

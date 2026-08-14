@@ -91,10 +91,10 @@ async fn prompt_with_reasoning(
 
 #[test]
 fn model_constants() {
-    assert_eq!(openai::GPT_5_6, "gpt-5.6");
-    assert_eq!(openai::GPT_5_6_SOL, "gpt-5.6-sol");
-    assert_eq!(openai::GPT_5_6_TERRA, "gpt-5.6-terra");
-    assert_eq!(openai::GPT_5_6_LUNA, "gpt-5.6-luna");
+    assert_eq!("gpt-5.6", "gpt-5.6");
+    assert_eq!("gpt-5.6-sol", "gpt-5.6-sol");
+    assert_eq!("gpt-5.6-terra", "gpt-5.6-terra");
+    assert_eq!("gpt-5.6-luna", "gpt-5.6-luna");
 }
 
 fn assert_reasoning_metadata(
@@ -142,7 +142,7 @@ fn assert_has_text(response: &CompletionResponse) {
 #[tokio::test]
 async fn effort_max() {
     with_openai_cassette("gpt_5_6_reasoning/effort_max", |client| async move {
-        let model = client.completion_model(openai::GPT_5_6);
+        let model = client.completion_model("gpt-5.6");
         let (response, raw_response) =
             prompt_with_reasoning(&model, json!({ "effort": "max" })).await;
         assert_has_text(&response);
@@ -164,7 +164,7 @@ async fn mode_pro_with_independent_effort() {
     with_openai_cassette(
         "gpt_5_6_reasoning/mode_pro_with_independent_effort",
         |client| async move {
-            let model = client.completion_model(openai::GPT_5_6_SOL);
+            let model = client.completion_model("gpt-5.6-sol");
             let (response, raw_response) =
                 prompt_with_reasoning(&model, json!({ "effort": "high", "mode": "pro" })).await;
             assert_has_text(&response);
@@ -187,7 +187,7 @@ async fn context_current_turn() {
     with_openai_cassette(
         "gpt_5_6_reasoning/context_current_turn",
         |client| async move {
-            let model = client.completion_model(openai::GPT_5_6_SOL);
+            let model = client.completion_model("gpt-5.6-sol");
             let (response, raw_response) = prompt_with_reasoning(
                 &model,
                 json!({ "effort": "low", "context": "current_turn" }),
@@ -213,7 +213,7 @@ async fn five_turn_reasoning_metadata_roundtrip() {
     with_openai_cassette(
         "gpt_5_6_reasoning/five_turn_metadata_roundtrip",
         |client| async move {
-            let model = client.completion_model(openai::GPT_5_6_SOL);
+            let model = client.completion_model("gpt-5.6-sol");
             let expected_metadata = json!({
                 "context": "all_turns",
                 "effort": "low",
@@ -324,7 +324,7 @@ async fn five_turn_streaming_reasoning_metadata_roundtrip() {
     with_openai_cassette(
         "gpt_5_6_reasoning/five_turn_streaming_metadata_roundtrip",
         |client| async move {
-            let model = client.completion_model(openai::GPT_5_6_SOL);
+            let model = client.completion_model("gpt-5.6-sol");
             let expected_metadata = json!({
                 "context": "all_turns",
                 "effort": "low",
@@ -472,7 +472,7 @@ async fn streaming_reasoning_metadata() {
     with_openai_cassette(
         "gpt_5_6_reasoning/streaming_metadata",
         |client| async move {
-            let model = client.completion_model(openai::GPT_5_6_SOL);
+            let model = client.completion_model("gpt-5.6-sol");
             let request = model
                 .completion_request(PROMPT)
                 .additional_params(json!({

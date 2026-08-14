@@ -19,7 +19,7 @@
 //!
 //! # async fn run() -> Result<(), Box<dyn std::error::Error>> {
 //! let client = openai::Client::from_env()?;
-//! let model = client.completion_model(openai::GPT_5_2);
+//! let model = client.completion_model("gpt-5.2");
 //! let request = model.completion_request("What is Rig?").build();
 //! let response = model.completion(request).await?;
 //! println!("{:?}", response.choice);
