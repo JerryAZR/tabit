@@ -76,13 +76,6 @@ pub mod extractor {
     pub use rig_agent::extractor::*;
 }
 
-/// Classic runtime integrations.
-#[cfg(feature = "agent")]
-#[cfg_attr(docsrs, doc(cfg(feature = "agent")))]
-pub mod integrations {
-    pub use rig_agent::integrations::*;
-}
-
 /// Common portable imports plus additive classic-runtime conveniences.
 pub mod prelude {
     // The classic contextual `Tool` and its mutable `ToolContext` — the same

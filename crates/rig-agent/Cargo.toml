@@ -30,7 +30,6 @@ rig-derive = { path = "../rig-derive", version = "0.41.0", optional = true }
 schemars = { workspace = true }
 serde = { workspace = true, features = ["derive"] }
 serde_json = { workspace = true }
-serenity = { workspace = true, optional = true }
 thiserror = { workspace = true }
 tokio = { workspace = true, features = ["rt", "sync"] }
 tracing = { workspace = true }
@@ -60,5 +59,4 @@ audio = ["rig-core/audio"]
 image = ["rig-core/image"]
 derive = ["dep:rig-derive", "rig-core/derive"]
 test-utils = ["rig-core/test-utils"]
-discord-bot = ["dep:serenity"]
 rmcp = ["dep:rmcp"]
