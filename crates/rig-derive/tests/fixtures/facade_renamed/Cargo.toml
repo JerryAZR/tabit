@@ -7,5 +7,5 @@ publish = false
 [workspace]
 
 [dependencies]
-rig_facade = { package = "rig", path = "../../../../..", default-features = false, features = ["agent"] }
+rig_facade = { package = "rig", path = "../../../../rig", default-features = false, features = ["agent"] }
 rig_macros = { package = "rig-derive", path = "../../.." }

@@ -2267,6 +2267,15 @@ dependencies = [
 ]
 
 [[package]]
+name = "rig"
+version = "0.41.0"
+dependencies = [
+ "rig-agent",
+ "rig-core",
+ "rig-derive",
+]
+
+[[package]]
 name = "rig-agent"
 version = "0.41.0"
 dependencies = [

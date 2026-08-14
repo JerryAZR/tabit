@@ -4,7 +4,7 @@
 [workspace]
 resolver = "3"
 members = ["crates/*"]
-default-members = ["crates/rig-core", "crates/rig-agent", "crates/rig-derive"]
+default-members = ["crates/rig-core", "crates/rig-agent", "crates/rig-derive", "crates/rig"]
 exclude = []
 
 [workspace.package]
