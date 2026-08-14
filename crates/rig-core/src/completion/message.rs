@@ -405,10 +405,10 @@ impl Image {
                     ));
                 };
 
-                Ok(format!(
-                    "data:image/{ty};base64,{data}",
-                    ty = media_type.to_mime_type()
-                ))
+            Ok(format!(
+                "data:{ty};base64,{data}",
+                ty = media_type.to_mime_type()
+            ))
             }
             unknown => Err(MessageError::ConversionError(format!(
                 "Tried to convert unknown type to a URL: {unknown:?}"
@@ -1514,10 +1514,9 @@ mod tests {
             media_type: Some(ImageMediaType::PNG),
             ..Default::default()
         };
-        // NB: the shipped format string prefixes `image/` onto the full MIME type.
         assert_eq!(
             base64_image.try_into_url().unwrap(),
-            "data:image/image/png;base64,aGVsbG8="
+            "data:image/png;base64,aGVsbG8="
         );
 
         let missing_media_type = Image {
@@ -1530,6 +1529,40 @@ mod tests {
         let unknown = Image::default();
         let err = unknown.try_into_url().unwrap_err();
         assert!(err.to_string().contains("unknown type"));
+    }
+
+    #[test]
+    fn image_base64_data_urls_use_the_full_mime_type_exactly_once() {
+        // Every media type must render as `data:<full-mime>;base64,<data>` —
+        // the construction all reference agent frameworks use. A doubled
+        // prefix (`data:image/image/png`) or a stripped suffix
+        // (`image/svg` without `+xml`) is an invalid data URL.
+        let cases = [
+            (ImageMediaType::JPEG, "image/jpeg"),
+            (ImageMediaType::PNG, "image/png"),
+            (ImageMediaType::GIF, "image/gif"),
+            (ImageMediaType::WEBP, "image/webp"),
+            (ImageMediaType::HEIC, "image/heic"),
+            (ImageMediaType::HEIF, "image/heif"),
+            (ImageMediaType::SVG, "image/svg+xml"),
+        ];
+        for (media_type, expected_mime) in cases {
+            let image = Image {
+                data: DocumentSourceKind::base64("aGVsbG8="),
+                media_type: Some(media_type.clone()),
+                ..Default::default()
+            };
+            let url = image.try_into_url().unwrap();
+            let expected = format!("data:{expected_mime};base64,aGVsbG8=");
+            assert_eq!(url, expected, "wrong data URL for {media_type:?}");
+            // Structural check independent of the expected string: the URL
+            // is `data:` + the type's own MIME + `;base64,` + the payload.
+            let (scheme, rest) = url.split_once(':').unwrap();
+            assert_eq!(scheme, "data");
+            let (mime, payload) = rest.split_once(";base64,").unwrap();
+            assert_eq!(mime, media_type.to_mime_type());
+            assert_eq!(payload, "aGVsbG8=");
+        }
     }
 
     #[test]
