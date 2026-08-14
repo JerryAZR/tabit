@@ -745,6 +745,76 @@ mod tests {
         assert_eq!(asm.aggregated_text(), "hello");
     }
 
+    /// An empty text block carrying provider-specific fields is still
+    /// representable assistant content and must not be dropped by the
+    /// provider-aggregate filter.
+    #[test]
+    fn assistant_text_items_keep_metadata_only_text_blocks() {
+        let choice = OneOrMany::many(vec![
+            AssistantContent::Text(Text {
+                text: String::new(),
+                additional_params: Some(json!({"provider_field": "kept"})),
+            }),
+            AssistantContent::Text(Text {
+                text: String::new(),
+                additional_params: None,
+            }),
+        ])
+        .expect("two text items");
+
+        let items = assistant_text_items_from_choice(&choice);
+        assert_eq!(
+            items.len(),
+            1,
+            "empty text without fields is dropped, metadata-only text is kept"
+        );
+        assert!(matches!(&items[0], AssistantContent::Text(text) if text.additional_params.is_some()));
+    }
+
+    /// A partial turn with no reasoning, text, or tool calls has nothing
+    /// representable to roll back; `assistant_message` must say so with `None`.
+    #[test]
+    fn partial_turn_without_content_has_no_assistant_message() {
+        let partial = PartialStreamedTurn {
+            message_id: Some("msg_1".to_string()),
+            text: None,
+            reasoning: Vec::new(),
+            pending_tool_calls: Vec::new(),
+        };
+        assert!(partial.assistant_message(None).is_none());
+    }
+
+    /// Once an invalid tool call is pending, further ingests must error
+    /// instead of silently accumulating behind the unresolved call.
+    #[test]
+    fn ingest_while_an_invalid_call_awaits_resolution_is_an_error() {
+        let mut asm = assembler();
+        expect_invalid(
+            asm.ingest(&tool_call_item("tc_1", "default_api"))
+                .expect("first ingest surfaces the invalid call"),
+        );
+
+        let error = asm
+            .ingest(&text_item("late"))
+            .expect_err("ingest during pending resolution must be rejected");
+        assert!(
+            error
+                .to_string()
+                .contains("awaits resolution"),
+            "unexpected error: {error}"
+        );
+    }
+
+    /// Resolving when nothing is pending is a no-op, not an error.
+    #[test]
+    fn resolve_pending_invalid_without_a_pending_call_is_a_noop() {
+        let mut asm = assembler();
+        let resolution = StreamedResolution::Repaired {
+            tool_name: "add".to_string(),
+        };
+        assert!(asm.resolve_pending_invalid(&resolution).is_empty());
+    }
+
     #[test]
     fn unknown_item_emits_to_consumer_without_touching_accumulation() {
         let mut asm = assembler();

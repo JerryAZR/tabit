@@ -332,6 +332,28 @@ mod tests {
             Some("required tool context value of type `u32` was not found")
         );
     }
+
+    /// Type keys hash through `write_u64`, but the `Hasher` contract still
+    /// requires the byte fallback: it must fold bytes deterministically
+    /// (rotate-xor, one byte at a time) rather than panicking or ignoring
+    /// them, so a future key type that hashes bytes keeps working.
+    #[test]
+    fn id_hasher_byte_fallback_folds_bytes_deterministically() {
+        let mut byte_folded = IdHasher::default();
+        byte_folded.write(&[1, 2, 3]);
+        // 1 -> 0x01; then rotl8^2 -> 0x102; then rotl8^3 -> 0x10203.
+        assert_eq!(byte_folded.finish(), 0x1_02_03);
+
+        // The same bytes produce the same hash; for this input the fold also
+        // agrees with the u64 fast path storing the same value.
+        let mut same = IdHasher::default();
+        same.write(&[1, 2, 3]);
+        assert_eq!(same.finish(), byte_folded.finish());
+
+        let mut u64_fast_path = IdHasher::default();
+        u64_fast_path.write_u64(0x1_02_03);
+        assert_eq!(u64_fast_path.finish(), byte_folded.finish());
+    }
 }
 
 #[cfg(test)]

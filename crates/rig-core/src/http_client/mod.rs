@@ -281,3 +281,251 @@ impl_http_client_ext!(
     #[cfg_attr(docsrs, doc(cfg(feature = "reqwest-middleware")))]
     reqwest_middleware::ClientWithMiddleware
 );
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::net::SocketAddr;
+    use tokio::{
+        io::{AsyncReadExt, AsyncWriteExt},
+        net::TcpListener,
+        sync::oneshot,
+    };
+
+    #[test]
+    fn non_success_accessors_classify_status_code_errors() {
+        let err = Error::InvalidStatusCodeWithMessage(StatusCode::BAD_REQUEST, "bad json".into());
+        assert_eq!(err.non_success_status(), Some(StatusCode::BAD_REQUEST));
+        assert_eq!(err.non_success_body(), Some("bad json"));
+
+        let err = Error::InvalidStatusCode(StatusCode::FORBIDDEN);
+        assert_eq!(err.non_success_status(), Some(StatusCode::FORBIDDEN));
+        assert_eq!(err.non_success_body(), None);
+
+        // Other error variants carry neither a status code nor a body.
+        assert_eq!(Error::StreamEnded.non_success_status(), None);
+        assert_eq!(Error::StreamEnded.non_success_body(), None);
+    }
+
+    #[test]
+    fn instance_error_boxes_arbitrary_errors() {
+        let err = instance_error(std::io::Error::other("connection reset"));
+        assert!(err.to_string().contains("connection reset"));
+        assert!(matches!(err, Error::Instance(_)));
+    }
+
+    #[tokio::test]
+    async fn non_success_status_error_captures_status_and_body() {
+        let response = http::Response::builder().status(404).body("not found").unwrap();
+        let err = non_success_status_error(reqwest::Response::from(response)).await;
+        assert!(
+            matches!(err, Error::InvalidStatusCodeWithMessage(status, ref message)
+                if status == StatusCode::NOT_FOUND && message == "not found")
+        );
+    }
+
+    #[test]
+    fn no_body_converts_to_empty_bytes_and_body() {
+        assert_eq!(Bytes::from(NoBody), Bytes::new());
+        assert_eq!(Body::from(NoBody).as_bytes(), Some(&[][..]));
+    }
+
+    #[test]
+    fn make_auth_header_formats_bearer_token() {
+        let (name, value) = make_auth_header("sk-123").unwrap();
+        assert_eq!(name, http::header::AUTHORIZATION);
+        assert_eq!(value.to_str().unwrap(), "Bearer sk-123");
+    }
+
+    #[test]
+    fn make_auth_header_rejects_illegal_characters() {
+        let err = make_auth_header("bad\nvalue").unwrap_err();
+        assert!(matches!(err, Error::InvalidHeaderValue(_)));
+    }
+
+    #[test]
+    fn bearer_auth_header_inserts_authorization() {
+        let mut headers = HeaderMap::new();
+        bearer_auth_header(&mut headers, "sk-123").unwrap();
+        assert_eq!(
+            headers.get(http::header::AUTHORIZATION).unwrap(),
+            "Bearer sk-123"
+        );
+    }
+
+    #[test]
+    fn with_bearer_auth_sets_header_on_builder() {
+        let builder = with_bearer_auth(Request::post("http://localhost"), "sk-123").unwrap();
+        let req = builder.body(()).unwrap();
+        assert_eq!(req.headers().get(http::header::AUTHORIZATION).unwrap(), "Bearer sk-123");
+    }
+
+    #[test]
+    fn with_bearer_auth_fails_when_builder_has_no_headers() {
+        // A builder in an error state (invalid header name) exposes no headers.
+        let builder = Request::post("http://localhost").header("Bad\nName", "value");
+        assert!(builder.headers_ref().is_none());
+        let err = with_bearer_auth(builder, "sk-123").unwrap_err();
+        assert!(matches!(err, Error::NoHeaders));
+    }
+
+    #[tokio::test]
+    async fn into_lazy_response_maps_non_success_to_error_with_body() {
+        let response = http::Response::builder().status(500).body("boom").unwrap();
+        let err = into_lazy_response::<Bytes>(reqwest::Response::from(response))
+            .await
+            .map(|_| ())
+            .unwrap_err();
+        assert!(
+            matches!(err, Error::InvalidStatusCodeWithMessage(status, ref message)
+                if status == StatusCode::INTERNAL_SERVER_ERROR && message == "boom")
+        );
+    }
+
+    #[tokio::test]
+    async fn into_lazy_response_passes_through_success_body() {
+        let response = http::Response::builder().status(200).body("hello").unwrap();
+        let response = into_lazy_response::<Bytes>(reqwest::Response::from(response))
+            .await
+            .map_err(|_| "into_lazy_response failed")
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::OK);
+        let body = response.into_body().await.unwrap();
+        assert_eq!(body, Bytes::from_static(b"hello"));
+    }
+
+    /// Spawns a single-shot local HTTP/1.1 server (loopback only, no external
+    /// network). Serves one canned response and hands the raw request bytes
+    /// back through the channel.
+    async fn spawn_one_shot_server(
+        response: &'static str,
+    ) -> (SocketAddr, oneshot::Receiver<Vec<u8>>) {
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        let (tx, rx) = oneshot::channel();
+
+        tokio::spawn(async move {
+            let (mut socket, _) = listener.accept().await.unwrap();
+            let mut buf = Vec::new();
+            let mut chunk = [0u8; 4096];
+
+            loop {
+                let complete = buf
+                    .windows(4)
+                    .position(|w| w == b"\r\n\r\n")
+                    .is_some_and(|header_end| {
+                        let headers =
+                            String::from_utf8_lossy(&buf[..header_end]).to_ascii_lowercase();
+                        let content_length = headers
+                            .lines()
+                            .find_map(|line| line.strip_prefix("content-length:"))
+                            .and_then(|value| value.trim().parse::<usize>().ok())
+                            .unwrap_or(0);
+                        buf.len() >= header_end + 4 + content_length
+                    });
+                if complete {
+                    break;
+                }
+                let n = socket.read(&mut chunk).await.unwrap();
+                if n == 0 {
+                    break;
+                }
+                buf.extend_from_slice(&chunk[..n]);
+            }
+
+            socket.write_all(response.as_bytes()).await.unwrap();
+            let _ = socket.shutdown().await;
+            let _ = tx.send(buf);
+        });
+
+        (addr, rx)
+    }
+
+    #[tokio::test]
+    async fn send_multipart_posts_encoded_form_over_the_wire() {
+        let (addr, rx) = spawn_one_shot_server(
+            "HTTP/1.1 200 OK\r\nContent-Type: text/plain\r\nContent-Length: 5\r\nConnection: close\r\n\r\nhello",
+        )
+        .await;
+
+        let client = ReqwestClient::new();
+        let form = MultipartForm::new()
+            .text("field", "value")
+            .file(
+                "upload",
+                "test.txt",
+                "text/plain".parse().unwrap(),
+                Bytes::from_static(b"file contents"),
+            );
+        let request = Request::post(format!("http://{addr}/upload"))
+            .body(form)
+            .unwrap();
+
+        let response = client
+            .send_multipart::<Bytes>(request)
+            .await
+            .map_err(|_| "multipart request failed")
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::OK);
+        let body = response.into_body().await.unwrap();
+        assert_eq!(body, Bytes::from_static(b"hello"));
+
+        let raw_request_bytes = rx.await.unwrap();
+        let raw_request = String::from_utf8_lossy(&raw_request_bytes);
+        assert!(raw_request.contains("Content-Type: multipart/form-data; boundary="));
+        assert!(raw_request.contains("name=\"field\""));
+        assert!(raw_request.contains("value"));
+        assert!(raw_request.contains("name=\"upload\""));
+        assert!(raw_request.contains("filename=\"test.txt\""));
+        assert!(raw_request.contains("file contents"));
+    }
+
+    #[tokio::test]
+    async fn send_streaming_returns_error_with_body_on_non_success() {
+        let (addr, _rx) = spawn_one_shot_server(
+            "HTTP/1.1 500 Internal Server Error\r\nContent-Type: text/plain\r\nContent-Length: 4\r\nConnection: close\r\n\r\nnope",
+        )
+        .await;
+
+        let client = ReqwestClient::new();
+        let request = Request::post(format!("http://{addr}/stream"))
+            .body(Bytes::new())
+            .unwrap();
+
+        let err = client
+            .send_streaming(request)
+            .await
+            .map(|_| ())
+            .unwrap_err();
+        assert!(
+            matches!(err, Error::InvalidStatusCodeWithMessage(status, ref message)
+                if status == StatusCode::INTERNAL_SERVER_ERROR && message == "nope")
+        );
+    }
+
+    #[tokio::test]
+    async fn send_streaming_streams_success_body_chunks() {
+        let (addr, _rx) = spawn_one_shot_server(
+            "HTTP/1.1 200 OK\r\nContent-Type: text/plain\r\nContent-Length: 11\r\nConnection: close\r\n\r\nhello world",
+        )
+        .await;
+
+        use futures::StreamExt;
+
+        let client = ReqwestClient::new();
+        let request = Request::post(format!("http://{addr}/stream"))
+            .body(Bytes::new())
+            .unwrap();
+
+        let response = client.send_streaming(request).await.unwrap();
+        assert_eq!(response.status(), StatusCode::OK);
+        let collected = response
+            .into_body()
+            .fold(Vec::new(), |mut acc, chunk| async {
+                acc.extend_from_slice(&chunk.unwrap());
+                acc
+            })
+            .await;
+        assert_eq!(collected, b"hello world");
+    }
+}

@@ -144,3 +144,44 @@ impl LSHIndex {
         }
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::{LSH, LSHIndex};
+
+    #[test]
+    fn zero_dimensional_hyperplanes_skip_normalization() {
+        // A zero-dimension LSH generates zero-magnitude hyperplanes (norm 0),
+        // which must skip normalization. Hashing is still deterministic: the
+        // dot product of empty vectors is 0.0 and `0.0 >= 0.0` sets every bit.
+        let lsh = LSH::new(0, 2, 3);
+        assert_eq!(lsh.hyperplanes.len(), 6);
+        assert!(lsh.hyperplanes.iter().all(|plane| plane.is_empty()));
+
+        assert_eq!(lsh.hash(&[], 0), 0b111);
+        assert_eq!(lsh.hash(&[], 1), 0b111);
+    }
+
+    #[test]
+    fn hash_returns_zero_for_out_of_range_table() {
+        let lsh = LSH::new(2, 1, 2);
+        // Only table 0 exists; any other table index yields an empty slice.
+        assert_eq!(lsh.hash(&[1.0, -1.0], 5), 0);
+    }
+
+    #[test]
+    fn insert_and_query_round_trip_then_clear_empties_tables() {
+        let mut index = LSHIndex::new(4, 4, 8);
+
+        index.insert("doc1".to_string(), &[0.5, 0.5, 0.5, 0.5]);
+        index.insert("doc2".to_string(), &[0.5, 0.5, 0.5, 0.5]);
+
+        // Identical vectors always share buckets, so both ids are candidates.
+        let mut candidates = index.query(&[0.5, 0.5, 0.5, 0.5]);
+        candidates.sort();
+        assert_eq!(candidates, vec!["doc1".to_string(), "doc2".to_string()]);
+
+        index.clear();
+        assert!(index.query(&[0.5, 0.5, 0.5, 0.5]).is_empty());
+    }
+}

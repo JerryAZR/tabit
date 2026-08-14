@@ -1335,9 +1335,18 @@ impl From<MessageError> for CompletionError {
 
 #[cfg(test)]
 mod tests {
+    use std::str::FromStr as _;
+
     use serde::{Deserialize, Serialize};
 
-    use super::{Message, Reasoning, ReasoningContent, Text, ToolResultContent};
+    use super::{
+        AssistantContent, Audio, AudioMediaType, Document, DocumentMediaType,
+        DocumentSourceKind, Image, ImageDetail, ImageMediaType, MediaType, Message, MessageError,
+        MimeType, Reasoning, ReasoningContent, Text, ToolCall, ToolFunction, ToolResult,
+        ToolResultContent, UserContent, Video, VideoMediaType,
+    };
+    use crate::completion::CompletionError;
+    use crate::OneOrMany;
 
     #[test]
     fn reasoning_constructors_and_accessors_work() {
@@ -1391,10 +1400,12 @@ mod tests {
     fn system_message_constructor_and_serde_roundtrip() {
         let message = Message::system("You are concise.");
 
-        match &message {
-            Message::System { content } => assert_eq!(content, "You are concise."),
-            _ => panic!("Expected system message"),
-        }
+        assert_eq!(
+            message,
+            Message::System {
+                content: "You are concise.".to_string()
+            }
+        );
 
         let json = serde_json::to_string(&message).expect("serialize");
         let roundtrip: Message = serde_json::from_str(&json).expect("deserialize");
@@ -1439,13 +1450,582 @@ mod tests {
         );
 
         let image = ToolResultContent::image_url("https://example.com/result.png", None, None);
-        let image_error = image.deserialize_json::<ExecutorLikeResponse>();
-        assert!(image_error.is_err());
-        if let Err(error) = image_error {
-            assert_eq!(
-                error.to_string(),
-                "cannot decode image tool-result content as JSON"
-            );
+        let image_error = image
+            .deserialize_json::<ExecutorLikeResponse>()
+            .err()
+            .expect("image content should not decode as JSON");
+        assert_eq!(
+            image_error.to_string(),
+            "cannot decode image tool-result content as JSON"
+        );
+    }
+
+    #[test]
+    fn reasoning_id_builders() {
+        let cleared = Reasoning::new("x").optional_id(None);
+        assert_eq!(cleared.id, None);
+
+        let with_id = Reasoning::new("x")
+            .optional_id(Some("reason-1".to_string()))
+            .with_id("reason-2".to_string());
+        assert_eq!(with_id.id.as_deref(), Some("reason-2"));
+    }
+
+    #[test]
+    fn tool_call_builder_setters() {
+        let call = ToolCall::new(
+            "id-1".to_string(),
+            ToolFunction::new(
+                "get_weather".to_string(),
+                serde_json::json!({"city": "Tokyo"}),
+            ),
+        )
+        .with_call_id("call-1".to_string())
+        .with_signature(Some("sig".to_string()))
+        .with_additional_params(Some(serde_json::json!({"k": "v"})));
+
+        assert_eq!(call.id, "id-1");
+        assert_eq!(call.call_id.as_deref(), Some("call-1"));
+        assert_eq!(call.function.name, "get_weather");
+        assert_eq!(call.signature.as_deref(), Some("sig"));
+        assert_eq!(call.additional_params, Some(serde_json::json!({"k": "v"})));
+    }
+
+    #[test]
+    fn text_accessor_and_display() {
+        let text = Text::new("hello");
+        assert_eq!(text.text(), "hello");
+        assert_eq!(text.to_string(), "hello");
+    }
+
+    #[test]
+    fn image_try_into_url_variants() {
+        let url_image = Image {
+            data: DocumentSourceKind::url("https://example.com/cat.png"),
+            ..Default::default()
+        };
+        assert_eq!(
+            url_image.try_into_url().unwrap(),
+            "https://example.com/cat.png"
+        );
+
+        let base64_image = Image {
+            data: DocumentSourceKind::base64("aGVsbG8="),
+            media_type: Some(ImageMediaType::PNG),
+            ..Default::default()
+        };
+        // NB: the shipped format string prefixes `image/` onto the full MIME type.
+        assert_eq!(
+            base64_image.try_into_url().unwrap(),
+            "data:image/image/png;base64,aGVsbG8="
+        );
+
+        let missing_media_type = Image {
+            data: DocumentSourceKind::base64("aGVsbG8="),
+            ..Default::default()
+        };
+        let err = missing_media_type.try_into_url().unwrap_err();
+        assert!(err.to_string().contains("media type is required"));
+
+        let unknown = Image::default();
+        let err = unknown.try_into_url().unwrap_err();
+        assert!(err.to_string().contains("unknown type"));
+    }
+
+    #[test]
+    fn document_source_kind_constructors_display_and_inner() {
+        assert_eq!(
+            DocumentSourceKind::url("u"),
+            DocumentSourceKind::Url("u".to_string())
+        );
+        assert_eq!(
+            DocumentSourceKind::base64("b"),
+            DocumentSourceKind::Base64("b".to_string())
+        );
+        assert_eq!(
+            DocumentSourceKind::file_id("f"),
+            DocumentSourceKind::FileId("f".to_string())
+        );
+        assert_eq!(
+            DocumentSourceKind::raw(vec![1, 2, 3]),
+            DocumentSourceKind::Raw(vec![1, 2, 3])
+        );
+        assert_eq!(
+            DocumentSourceKind::string("s"),
+            DocumentSourceKind::String("s".to_string())
+        );
+        assert_eq!(DocumentSourceKind::unknown(), DocumentSourceKind::Unknown);
+
+        assert_eq!(
+            DocumentSourceKind::url("u").try_into_inner(),
+            Some("u".to_string())
+        );
+        assert_eq!(
+            DocumentSourceKind::base64("b").try_into_inner(),
+            Some("b".to_string())
+        );
+        assert_eq!(
+            DocumentSourceKind::file_id("f").try_into_inner(),
+            Some("f".to_string())
+        );
+        assert_eq!(DocumentSourceKind::raw(vec![1]).try_into_inner(), None);
+        assert_eq!(DocumentSourceKind::string("s").try_into_inner(), None);
+        assert_eq!(DocumentSourceKind::unknown().try_into_inner(), None);
+
+        assert_eq!(DocumentSourceKind::url("u").to_string(), "u");
+        assert_eq!(DocumentSourceKind::base64("b").to_string(), "b");
+        assert_eq!(DocumentSourceKind::file_id("f").to_string(), "f");
+        assert_eq!(DocumentSourceKind::string("s").to_string(), "s");
+        assert_eq!(
+            DocumentSourceKind::raw(vec![1, 2]).to_string(),
+            "<binary data>"
+        );
+        assert_eq!(DocumentSourceKind::unknown().to_string(), "<unknown>");
+    }
+
+    #[test]
+    fn document_media_type_is_code() {
+        assert!(DocumentMediaType::Javascript.is_code());
+        assert!(DocumentMediaType::Python.is_code());
+        assert!(!DocumentMediaType::PDF.is_code());
+        assert!(!DocumentMediaType::TXT.is_code());
+    }
+
+    #[test]
+    fn rag_text_finds_first_text_and_rejects_non_user_roles() {
+        let user_with_text = Message::User {
+            content: OneOrMany::many(vec![
+                UserContent::image_url("https://example.com/a.png", None, None),
+                UserContent::text("find me"),
+            ])
+            .unwrap(),
+        };
+        assert_eq!(user_with_text.rag_text(), Some("find me".to_string()));
+
+        let user_without_text = Message::User {
+            content: OneOrMany::one(UserContent::image_url(
+                "https://example.com/a.png",
+                None,
+                None,
+            )),
+        };
+        assert_eq!(user_without_text.rag_text(), None);
+
+        assert_eq!(Message::system("sys").rag_text(), None);
+        assert_eq!(Message::assistant("a").rag_text(), None);
+    }
+
+    #[test]
+    fn assistant_with_id_constructor() {
+        assert_eq!(
+            Message::assistant_with_id("msg-7".to_string(), "hello"),
+            Message::Assistant {
+                id: Some("msg-7".to_string()),
+                content: OneOrMany::one(AssistantContent::text("hello"))
+            }
+        );
+    }
+
+    #[test]
+    fn user_content_multimedia_constructors() {
+        assert_eq!(
+            UserContent::image_base64("abc", Some(ImageMediaType::PNG), Some(ImageDetail::Low)),
+            UserContent::Image(Image {
+                data: DocumentSourceKind::base64("abc"),
+                media_type: Some(ImageMediaType::PNG),
+                detail: Some(ImageDetail::Low),
+                additional_params: None,
+            })
+        );
+
+        assert_eq!(
+            UserContent::image_raw(vec![1, 2], Some(ImageMediaType::JPEG), None),
+            UserContent::Image(Image {
+                data: DocumentSourceKind::raw(vec![1, 2]),
+                media_type: Some(ImageMediaType::JPEG),
+                detail: None,
+                additional_params: None,
+            })
+        );
+
+        assert_eq!(
+            UserContent::image_url("https://x/y.png", Some(ImageMediaType::PNG), None),
+            UserContent::Image(Image {
+                data: DocumentSourceKind::url("https://x/y.png"),
+                media_type: Some(ImageMediaType::PNG),
+                detail: None,
+                additional_params: None,
+            })
+        );
+
+        assert_eq!(
+            UserContent::audio("abc", Some(AudioMediaType::MP3)),
+            UserContent::Audio(Audio {
+                data: DocumentSourceKind::base64("abc"),
+                media_type: Some(AudioMediaType::MP3),
+                additional_params: None,
+            })
+        );
+
+        assert_eq!(
+            UserContent::audio_raw(vec![3, 4], Some(AudioMediaType::WAV)),
+            UserContent::Audio(Audio {
+                data: DocumentSourceKind::raw(vec![3, 4]),
+                media_type: Some(AudioMediaType::WAV),
+                additional_params: None,
+            })
+        );
+
+        assert_eq!(
+            UserContent::audio_url("https://x/a.wav", Some(AudioMediaType::WAV)),
+            UserContent::Audio(Audio {
+                data: DocumentSourceKind::url("https://x/a.wav"),
+                media_type: Some(AudioMediaType::WAV),
+                additional_params: None,
+            })
+        );
+
+        assert_eq!(
+            UserContent::video("abc", Some(VideoMediaType::MP4)),
+            UserContent::Video(Video {
+                data: DocumentSourceKind::base64("abc"),
+                media_type: Some(VideoMediaType::MP4),
+                additional_params: None,
+            })
+        );
+
+        assert_eq!(
+            UserContent::video_raw(vec![5, 6], Some(VideoMediaType::WEBM)),
+            UserContent::Video(Video {
+                data: DocumentSourceKind::raw(vec![5, 6]),
+                media_type: Some(VideoMediaType::WEBM),
+                additional_params: None,
+            })
+        );
+
+        assert_eq!(
+            UserContent::video_url("https://x/v.mp4", Some(VideoMediaType::MP4)),
+            UserContent::Video(Video {
+                data: DocumentSourceKind::url("https://x/v.mp4"),
+                media_type: Some(VideoMediaType::MP4),
+                additional_params: None,
+            })
+        );
+
+        assert_eq!(
+            UserContent::document("content", Some(DocumentMediaType::TXT)),
+            UserContent::Document(Document {
+                data: DocumentSourceKind::string("content"),
+                media_type: Some(DocumentMediaType::TXT),
+                additional_params: None,
+            })
+        );
+
+        assert_eq!(
+            UserContent::document_raw(vec![7, 8], Some(DocumentMediaType::PDF)),
+            UserContent::Document(Document {
+                data: DocumentSourceKind::raw(vec![7, 8]),
+                media_type: Some(DocumentMediaType::PDF),
+                additional_params: None,
+            })
+        );
+
+        assert_eq!(
+            UserContent::document_url("https://x/d.pdf", Some(DocumentMediaType::PDF)),
+            UserContent::Document(Document {
+                data: DocumentSourceKind::url("https://x/d.pdf"),
+                media_type: Some(DocumentMediaType::PDF),
+                additional_params: None,
+            })
+        );
+    }
+
+    #[test]
+    fn assistant_and_tool_result_image_constructors() {
+        assert_eq!(
+            AssistantContent::image_base64("abc", Some(ImageMediaType::PNG), None),
+            AssistantContent::Image(Image {
+                data: DocumentSourceKind::base64("abc"),
+                media_type: Some(ImageMediaType::PNG),
+                detail: None,
+                additional_params: None,
+            })
+        );
+
+        assert_eq!(
+            ToolResultContent::image_raw(vec![9, 10], Some(ImageMediaType::GIF), None),
+            ToolResultContent::Image(Image {
+                data: DocumentSourceKind::raw(vec![9, 10]),
+                media_type: Some(ImageMediaType::GIF),
+                detail: None,
+                additional_params: None,
+            })
+        );
+    }
+
+    #[test]
+    fn media_type_mime_conversions() {
+        // MediaType wrapper: from MIME for each family plus a miss.
+        assert_eq!(
+            MediaType::from_mime_type("image/png"),
+            Some(MediaType::Image(ImageMediaType::PNG))
+        );
+        assert_eq!(
+            MediaType::from_mime_type("application/pdf"),
+            Some(MediaType::Document(DocumentMediaType::PDF))
+        );
+        assert_eq!(
+            MediaType::from_mime_type("audio/wav"),
+            Some(MediaType::Audio(AudioMediaType::WAV))
+        );
+        assert_eq!(
+            MediaType::from_mime_type("video/mp4"),
+            Some(MediaType::Video(VideoMediaType::MP4))
+        );
+        assert_eq!(MediaType::from_mime_type("application/x-nope"), None);
+        assert_eq!(
+            MediaType::Image(ImageMediaType::JPEG).to_mime_type(),
+            "image/jpeg"
+        );
+        assert_eq!(
+            MediaType::Audio(AudioMediaType::FLAC).to_mime_type(),
+            "audio/flac"
+        );
+        assert_eq!(
+            MediaType::Document(DocumentMediaType::CSV).to_mime_type(),
+            "text/csv"
+        );
+        assert_eq!(
+            MediaType::Video(VideoMediaType::WEBM).to_mime_type(),
+            "video/webm"
+        );
+    }
+
+    #[test]
+    fn image_media_type_mime_roundtrip() {
+        let variants = [
+            (ImageMediaType::JPEG, "image/jpeg"),
+            (ImageMediaType::PNG, "image/png"),
+            (ImageMediaType::GIF, "image/gif"),
+            (ImageMediaType::WEBP, "image/webp"),
+            (ImageMediaType::HEIC, "image/heic"),
+            (ImageMediaType::HEIF, "image/heif"),
+            (ImageMediaType::SVG, "image/svg+xml"),
+        ];
+        for (variant, mime) in variants {
+            assert_eq!(ImageMediaType::from_mime_type(mime), Some(variant.clone()));
+            assert_eq!(variant.to_mime_type(), mime);
         }
+        assert_eq!(ImageMediaType::from_mime_type("image/tiff"), None);
+    }
+
+    #[test]
+    fn document_media_type_mime_roundtrip() {
+        let variants = [
+            (DocumentMediaType::PDF, "application/pdf"),
+            (DocumentMediaType::TXT, "text/plain"),
+            (DocumentMediaType::RTF, "text/rtf"),
+            (DocumentMediaType::HTML, "text/html"),
+            (DocumentMediaType::CSS, "text/css"),
+            (DocumentMediaType::MARKDOWN, "text/markdown"),
+            (DocumentMediaType::CSV, "text/csv"),
+            (DocumentMediaType::XML, "text/xml"),
+            (DocumentMediaType::Javascript, "application/x-javascript"),
+            (DocumentMediaType::Python, "application/x-python"),
+        ];
+        for (variant, mime) in variants {
+            assert_eq!(DocumentMediaType::from_mime_type(mime), Some(variant.clone()));
+            assert_eq!(variant.to_mime_type(), mime);
+        }
+        // Accepted aliases.
+        assert_eq!(
+            DocumentMediaType::from_mime_type("text/md"),
+            Some(DocumentMediaType::MARKDOWN)
+        );
+        assert_eq!(
+            DocumentMediaType::from_mime_type("text/x-javascript"),
+            Some(DocumentMediaType::Javascript)
+        );
+        assert_eq!(
+            DocumentMediaType::from_mime_type("text/x-python"),
+            Some(DocumentMediaType::Python)
+        );
+        assert_eq!(DocumentMediaType::from_mime_type("text/x-rust"), None);
+    }
+
+    #[test]
+    fn audio_media_type_mime_roundtrip() {
+        let variants = [
+            (AudioMediaType::WAV, "audio/wav"),
+            (AudioMediaType::MP3, "audio/mp3"),
+            (AudioMediaType::AIFF, "audio/aiff"),
+            (AudioMediaType::AAC, "audio/aac"),
+            (AudioMediaType::OGG, "audio/ogg"),
+            (AudioMediaType::FLAC, "audio/flac"),
+            (AudioMediaType::M4A, "audio/m4a"),
+            (AudioMediaType::PCM16, "audio/pcm16"),
+            (AudioMediaType::PCM24, "audio/pcm24"),
+        ];
+        for (variant, mime) in variants {
+            assert_eq!(AudioMediaType::from_mime_type(mime), Some(variant.clone()));
+            assert_eq!(variant.to_mime_type(), mime);
+        }
+        assert_eq!(AudioMediaType::from_mime_type("audio/xyz"), None);
+    }
+
+    #[test]
+    fn video_media_type_mime_roundtrip() {
+        let variants = [
+            (VideoMediaType::AVI, "video/avi"),
+            (VideoMediaType::MP4, "video/mp4"),
+            (VideoMediaType::MPEG, "video/mpeg"),
+            (VideoMediaType::MOV, "video/mov"),
+            (VideoMediaType::WEBM, "video/webm"),
+        ];
+        for (variant, mime) in variants {
+            assert_eq!(VideoMediaType::from_mime_type(mime), Some(variant.clone()));
+            assert_eq!(variant.to_mime_type(), mime);
+        }
+        assert_eq!(VideoMediaType::from_mime_type("video/xyz"), None);
+    }
+
+    #[test]
+    fn image_detail_from_str() {
+        assert_eq!(ImageDetail::from_str("low").unwrap(), ImageDetail::Low);
+        assert_eq!(ImageDetail::from_str("high").unwrap(), ImageDetail::High);
+        assert_eq!(ImageDetail::from_str("auto").unwrap(), ImageDetail::Auto);
+        assert_eq!(ImageDetail::from_str("HIGH").unwrap(), ImageDetail::High);
+        assert!(ImageDetail::from_str("ultra").is_err());
+    }
+
+    #[test]
+    fn text_conversions() {
+        let owned_string = "from String".to_string();
+        assert_eq!(Text::from(owned_string).text(), "from String");
+
+        let borrowed_string: &String = &"from &String".to_string();
+        assert_eq!(Text::from(borrowed_string).text(), "from &String");
+
+        assert_eq!(Text::from_str("from str").unwrap().text(), "from str");
+    }
+
+    #[test]
+    fn message_from_impls() {
+        let source = Message::user("clone me");
+        assert_eq!(Message::from(&source), source);
+
+        let borrowed: &String = &"from &String".to_string();
+        assert_eq!(
+            Message::from(borrowed.clone()),
+            Message::user("from &String")
+        );
+
+        assert_eq!(
+            Message::from(Text::new("from Text")),
+            Message::User {
+                content: OneOrMany::one(UserContent::Text(Text::new("from Text")))
+            }
+        );
+
+        let audio = Audio {
+            data: DocumentSourceKind::base64("abc"),
+            media_type: Some(AudioMediaType::MP3),
+            ..Default::default()
+        };
+        assert_eq!(
+            Message::from(audio.clone()),
+            Message::User {
+                content: OneOrMany::one(UserContent::Audio(audio))
+            }
+        );
+
+        assert_eq!(
+            AssistantContent::from("assistant".to_string()),
+            AssistantContent::text("assistant")
+        );
+        assert_eq!(
+            UserContent::from("user".to_string()),
+            UserContent::text("user")
+        );
+
+        assert_eq!(
+            Message::from(AssistantContent::text("a")),
+            Message::Assistant {
+                id: None,
+                content: OneOrMany::one(AssistantContent::text("a"))
+            }
+        );
+
+        assert_eq!(
+            Message::from(UserContent::text("u")),
+            Message::User {
+                content: OneOrMany::one(UserContent::text("u"))
+            }
+        );
+
+        let assistant_many = OneOrMany::many(vec![
+            AssistantContent::text("a1"),
+            AssistantContent::text("a2"),
+        ])
+        .unwrap();
+        assert_eq!(
+            Message::from(assistant_many.clone()),
+            Message::Assistant {
+                id: None,
+                content: assistant_many
+            }
+        );
+
+        let user_many =
+            OneOrMany::many(vec![UserContent::text("u1"), UserContent::text("u2")]).unwrap();
+        assert_eq!(
+            Message::from(user_many.clone()),
+            Message::User {
+                content: user_many
+            }
+        );
+
+        let tool_call = ToolCall::new(
+            "id-1".to_string(),
+            ToolFunction::new("tool".to_string(), serde_json::json!({})),
+        );
+        assert_eq!(
+            Message::from(tool_call.clone()),
+            Message::Assistant {
+                id: None,
+                content: OneOrMany::one(AssistantContent::ToolCall(tool_call))
+            }
+        );
+
+        let tool_result = ToolResult {
+            id: "id-1".to_string(),
+            call_id: None,
+            content: OneOrMany::one(ToolResultContent::text("ok")),
+        };
+        assert_eq!(
+            Message::from(tool_result.clone()),
+            Message::User {
+                content: OneOrMany::one(UserContent::ToolResult(tool_result))
+            }
+        );
+
+        let tool_result_content = ToolResultContent::text("ok");
+        assert_eq!(
+            Message::from(tool_result_content.clone()),
+            Message::User {
+                content: OneOrMany::one(UserContent::ToolResult(ToolResult {
+                    id: String::new(),
+                    call_id: None,
+                    content: OneOrMany::one(tool_result_content),
+                }))
+            }
+        );
+    }
+
+    #[test]
+    fn message_error_converts_to_completion_error() {
+        let error = MessageError::ConversionError("boom".to_string());
+        let completion_error = CompletionError::from(error);
+        assert!(completion_error.to_string().contains("boom"));
     }
 }

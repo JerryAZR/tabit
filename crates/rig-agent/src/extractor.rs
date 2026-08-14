@@ -1050,4 +1050,127 @@ mod tests {
                 if message == "second"
         ));
     }
+
+    #[tokio::test]
+    async fn with_model_handle_replaces_the_default_model() {
+        let unused = MockCompletionModel::new([MockTurn::text("no submit call")]);
+        let replacement = MockCompletionModel::new([submit_turn("John")]);
+
+        let person = ExtractorBuilder::<Person>::new(unused.clone())
+            .build()
+            .with_model_handle(ModelHandle::new(replacement.clone()))
+            .extract("John")
+            .await
+            .expect("the replacement model should serve the run");
+
+        assert_eq!(person.name, "John");
+        assert_eq!(unused.request_count(), 0);
+        assert_eq!(replacement.request_count(), 1);
+    }
+
+    #[tokio::test]
+    async fn extract_with_chat_history_includes_the_prior_conversation() {
+        let model = MockCompletionModel::new([submit_turn("John")]);
+
+        let person = ExtractorBuilder::<Person>::new(model.clone())
+            .build()
+            .extract_with_chat_history("John", vec![Message::user("earlier question")])
+            .await
+            .expect("extraction should succeed");
+
+        assert_eq!(person.name, "John");
+        assert!(
+            model.requests()[0]
+                .chat_history
+                .iter()
+                .any(|message| *message == Message::user("earlier question")),
+            "the supplied chat history should precede the extraction prompt"
+        );
+    }
+
+    #[tokio::test]
+    async fn extract_with_chat_history_with_usage_reports_accumulated_usage() {
+        let model = MockCompletionModel::new([submit_turn("John").with_usage(usage(11))]);
+
+        let response = ExtractorBuilder::<Person>::new(model)
+            .build()
+            .extract_with_chat_history_with_usage("John", vec![Message::user("earlier")])
+            .await
+            .expect("extraction should succeed");
+
+        assert_eq!(response.data.name, "John");
+        assert_eq!(response.usage.total_tokens, 11);
+    }
+
+    #[tokio::test]
+    async fn run_local_model_chat_history_methods_use_the_run_model() {
+        let default_model = MockCompletionModel::new([MockTurn::text("no submit call")]);
+        let run_model = MockCompletionModel::new([
+            submit_turn("First").with_usage(usage(4)),
+            submit_turn("Second").with_usage(usage(6)),
+        ]);
+        let extractor = ExtractorBuilder::<Person>::new(default_model.clone()).build();
+        let handle = ModelHandle::new(run_model.clone());
+
+        let person = extractor
+            .using_model(handle.clone())
+            .extract_with_chat_history("Who?", vec![Message::user("earlier")])
+            .await
+            .expect("the run-local model should serve the run");
+        assert_eq!(person.name, "First");
+
+        let response = extractor
+            .using_model(handle)
+            .extract_with_chat_history_with_usage("Who again?", vec![Message::user("later")])
+            .await
+            .expect("the run-local model should serve the second run");
+        assert_eq!(response.data.name, "Second");
+        assert_eq!(response.usage.total_tokens, 6);
+        assert_eq!(default_model.request_count(), 0);
+    }
+
+    #[tokio::test]
+    async fn multiple_submit_calls_use_the_first_submission() {
+        let turn = MockTurn::from_contents([
+            tool_call("submit_1", SUBMIT_TOOL_NAME, json!({ "name": "First" })),
+            tool_call("submit_2", SUBMIT_TOOL_NAME, json!({ "name": "Second" })),
+        ])
+        .expect("two submit calls");
+
+        let person = extractor(MockCompletionModel::new([turn]), 0)
+            .extract("John")
+            .await
+            .expect("duplicate submit calls should not fail extraction");
+
+        assert_eq!(person.name, "First");
+    }
+
+    #[tokio::test]
+    async fn builder_passthrough_options_reach_the_completion_request() {
+        let model = MockCompletionModel::new([submit_turn("John")]);
+
+        let person = ExtractorBuilder::<Person>::new(model.clone())
+            .preamble("extra instructions")
+            .context("grounding document")
+            .additional_params(json!({"beta": true}))
+            .max_tokens(321)
+            .tool_choice(ToolChoice::Auto)
+            .build()
+            .extract("John")
+            .await
+            .expect("extraction should succeed");
+
+        assert_eq!(person.name, "John");
+        let request = &model.requests()[0];
+        assert_eq!(request.max_tokens, Some(321));
+        assert_eq!(request.additional_params, Some(json!({"beta": true})));
+        assert!(matches!(request.tool_choice, Some(ToolChoice::Auto)));
+        assert!(
+            request
+                .documents
+                .iter()
+                .any(|document| document.text == "grounding document"),
+            "the static context document should reach the request"
+        );
+    }
 }

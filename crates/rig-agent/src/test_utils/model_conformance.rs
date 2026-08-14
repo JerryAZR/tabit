@@ -2099,8 +2099,14 @@ mod tests {
     };
     use rig_core::{
         OneOrMany,
-        message::{ToolCall, ToolFunction},
+        completion::{CompletionRequest, CompletionResponse},
+        message::{
+            DocumentSourceKind, Image, ToolCall, ToolFunction, ToolResult, ToolResultContent,
+        },
+        streaming::StreamingCompletionResponse,
+        tool::ToolResult as ExecutionResult,
     };
+    use crate::tool::ToolOutput;
 
     fn tool_call(id: &str, name: &str, arguments: serde_json::Value) -> AssistantContent {
         AssistantContent::ToolCall(ToolCall::new(
@@ -2313,5 +2319,957 @@ mod tests {
         };
         assert!(validate_unknown_tool_failure(&error, "missing", &[]).is_ok());
         assert!(validate_unknown_tool_failure(&error, "other", &[]).is_err());
+    }
+
+    // ------------------------------------------------------------------
+    // Validator failure branches
+    // ------------------------------------------------------------------
+
+    #[test]
+    fn validators_reject_wrong_error_shapes() {
+        let wrong = PromptError::CompletionError(CompletionError::ProviderError(
+            "wrong shape".to_string(),
+        ));
+        assert!(matches!(
+            validate_unknown_tool_failure(&wrong, "add", &["add"]),
+            Err(ScenarioError::Contract { .. })
+        ));
+        assert!(matches!(
+            validate_cancelled_failure(&wrong, "reason", "add"),
+            Err(ScenarioError::Contract { .. })
+        ));
+        assert!(matches!(
+            validate_max_turns_failure(&wrong, 1),
+            Err(ScenarioError::Contract { .. })
+        ));
+    }
+
+    #[test]
+    fn cancelled_validation_rejects_reason_and_history_mismatches() {
+        let no_calls = vec![Message::Assistant {
+            id: None,
+            content: OneOrMany::one(AssistantContent::text("no tool calls")),
+        }];
+        let mismatched_reason = PromptError::PromptCancelled {
+            chat_history: no_calls.clone(),
+            reason: "other reason".to_string(),
+        };
+        assert!(matches!(
+            validate_cancelled_failure(&mismatched_reason, "expected", "add"),
+            Err(ScenarioError::Contract { .. })
+        ));
+
+        let matching_reason_missing_call = PromptError::PromptCancelled {
+            chat_history: no_calls,
+            reason: "expected".to_string(),
+        };
+        assert!(matches!(
+            validate_cancelled_failure(&matching_reason_missing_call, "expected", "add"),
+            Err(ScenarioError::Contract { .. })
+        ));
+
+        let with_call = vec![
+            Message::Assistant {
+                id: None,
+                content: OneOrMany::one(AssistantContent::text("turn")),
+            },
+            Message::Assistant {
+                id: None,
+                content: OneOrMany::one(tool_call(
+                    "c1",
+                    "add",
+                    serde_json::json!({"x": 1, "y": 2}),
+                )),
+            },
+        ];
+        let matching = PromptError::PromptCancelled {
+            chat_history: with_call,
+            reason: "expected".to_string(),
+        };
+        assert!(validate_cancelled_failure(&matching, "expected", "add").is_ok());
+    }
+
+    #[test]
+    fn max_turns_validation_rejects_budget_and_history_mismatches() {
+        let prompt = Message::User {
+            content: OneOrMany::one(UserContent::text("pending")),
+        };
+        let wrong_budget = PromptError::MaxTurnsError {
+            max_turns: 2,
+            chat_history: Box::new(Vec::new()),
+            prompt: Box::new(prompt.clone()),
+        };
+        assert!(matches!(
+            validate_max_turns_failure(&wrong_budget, 1),
+            Err(ScenarioError::Contract { .. })
+        ));
+
+        let right_budget_empty_history = PromptError::MaxTurnsError {
+            max_turns: 1,
+            chat_history: Box::new(Vec::new()),
+            prompt: Box::new(prompt),
+        };
+        assert!(matches!(
+            validate_max_turns_failure(&right_budget_empty_history, 1),
+            Err(ScenarioError::Contract { .. })
+        ));
+    }
+
+    #[test]
+    fn rewritten_argument_validation_rejects_malformed_observations() {
+        const SCENARIO: &str = "validate_rewritten_arguments";
+        assert!(matches!(
+            validate_rewritten_arguments(
+                SCENARIO,
+                &[serde_json::json!({"x": 7})],
+                &serde_json::json!([1]),
+            ),
+            Err(ScenarioError::Contract { .. })
+        ));
+        assert!(matches!(
+            validate_rewritten_arguments(SCENARIO, &[], &serde_json::json!({"x": 7})),
+            Err(ScenarioError::Contract { .. })
+        ));
+        assert!(matches!(
+            validate_rewritten_arguments(
+                SCENARIO,
+                &[serde_json::json!(3)],
+                &serde_json::json!({"x": 7}),
+            ),
+            Err(ScenarioError::Contract { .. })
+        ));
+        assert!(matches!(
+            validate_rewritten_arguments(
+                SCENARIO,
+                &[serde_json::json!({"x": 8})],
+                &serde_json::json!({"x": 7}),
+            ),
+            Err(ScenarioError::Contract { .. })
+        ));
+        assert!(validate_rewritten_arguments(
+            SCENARIO,
+            &[serde_json::json!({"x": 7, "z": 9})],
+            &serde_json::json!({"x": 7}),
+        )
+        .is_ok());
+    }
+
+    #[test]
+    fn result_redaction_validation_covers_every_failure_mode() {
+        const SCENARIO: &str = "result_redaction";
+        assert!(matches!(
+            validate_result_redaction(SCENARIO, false, "clean output", "s3cr3t"),
+            Err(ScenarioError::Contract { .. })
+        ));
+        assert!(matches!(
+            validate_result_redaction(SCENARIO, true, "", "s3cr3t"),
+            Err(ScenarioError::Contract { .. })
+        ));
+        assert!(matches!(
+            validate_result_redaction(SCENARIO, true, "leaked s3cr3t", "s3cr3t"),
+            Err(ScenarioError::Contract { .. })
+        ));
+        assert!(validate_result_redaction(SCENARIO, true, "clean output", "s3cr3t").is_ok());
+    }
+
+    #[test]
+    fn extraction_validation_rejects_wrong_people_and_missing_usage() {
+        assert!(matches!(
+            validate_extraction_fields(
+                "extraction",
+                Some("Grace"),
+                Some("Hopper"),
+                Some("mathematician"),
+                usage(1, 1),
+            ),
+            Err(ScenarioError::Contract { .. })
+        ));
+        assert!(matches!(
+            validate_extraction_fields(
+                "extraction",
+                Some("Ada"),
+                Some("Lovelace"),
+                Some("mathematician"),
+                Usage::new(),
+            ),
+            Err(ScenarioError::Contract { .. })
+        ));
+    }
+
+    // ------------------------------------------------------------------
+    // History helpers
+    // ------------------------------------------------------------------
+
+    #[test]
+    fn tool_result_values_skip_images_and_non_user_messages() {
+        let image_result = ToolResult {
+            id: "img".to_string(),
+            call_id: None,
+            content: OneOrMany::many(vec![
+                ToolResultContent::text("label"),
+                ToolResultContent::Image(Image {
+                    data: DocumentSourceKind::url("https://example.test/i.png"),
+                    ..Image::default()
+                }),
+            ])
+            .expect("non-empty content"),
+        };
+        let user = Message::User {
+            content: OneOrMany::one(UserContent::ToolResult(image_result)),
+        };
+        assert_eq!(
+            tool_result_values(&user),
+            vec![serde_json::Value::String("label".to_string())]
+        );
+        let assistant = Message::Assistant {
+            id: None,
+            content: OneOrMany::one(AssistantContent::text("not a result")),
+        };
+        assert!(tool_result_values(&assistant).is_empty());
+    }
+
+    #[test]
+    fn tool_correlation_validation_rejects_uncorrelated_histories() {
+        let call = |id: &str| Message::Assistant {
+            id: None,
+            content: OneOrMany::one(tool_call(id, "add", serde_json::json!({"x": 1, "y": 2}))),
+        };
+        let result = |id: &str| {
+            UserContent::ToolResult(ToolResult {
+                id: id.to_string(),
+                call_id: None,
+                content: OneOrMany::one(ToolResultContent::text("ok")),
+            })
+        };
+        // Correlated pass, including a skipped system message.
+        let correlated = vec![
+            Message::System {
+                content: "preamble".to_string(),
+            },
+            call("c1"),
+            Message::User {
+                content: OneOrMany::one(result("c1")),
+            },
+        ];
+        assert!(validate_tool_correlation("t", &correlated).is_ok());
+
+        // History without any assistant tool calls.
+        let no_calls = vec![Message::User {
+            content: OneOrMany::one(result("r1")),
+        }];
+        assert!(matches!(
+            validate_tool_correlation("t", &no_calls),
+            Err(ScenarioError::Contract { .. })
+        ));
+
+        // Result id does not correlate with the call.
+        let uncorrelated = vec![
+            call("c1"),
+            Message::User {
+                content: OneOrMany::one(result("other")),
+            },
+        ];
+        assert!(matches!(
+            validate_tool_correlation("t", &uncorrelated),
+            Err(ScenarioError::Contract { .. })
+        ));
+
+        // Dangling extra result.
+        let dangling = vec![
+            call("c1"),
+            Message::User {
+                content: OneOrMany::many(vec![result("c1"), result("extra")])
+                    .expect("non-empty"),
+            },
+        ];
+        assert!(matches!(
+            validate_tool_correlation("t", &dangling),
+            Err(ScenarioError::Contract { .. })
+        ));
+    }
+
+    // ------------------------------------------------------------------
+    // Hook branches
+    // ------------------------------------------------------------------
+
+    #[tokio::test]
+    async fn rewrite_and_result_hooks_leave_non_add_tools_untouched() {
+        let context = HookContext::new(false, None);
+        let rewrite = RewriteArgument {
+            key: "x",
+            value: serde_json::json!(7),
+        };
+        let other_tool = ToolCallEvent {
+            tool_name: "subtract",
+            tool_call_id: Some("p1"),
+            internal_call_id: "i1",
+            args: r#"{"x":1,"y":2}"#,
+        };
+        assert!(matches!(
+            rewrite.on_tool_call(&context, other_tool).await,
+            ToolCallAction::Run
+        ));
+        let bad_json = ToolCallEvent {
+            tool_name: "add",
+            tool_call_id: Some("p2"),
+            internal_call_id: "i2",
+            args: "not json",
+        };
+        assert!(matches!(
+            rewrite.on_tool_call(&context, bad_json).await,
+            ToolCallAction::Run
+        ));
+        let scalar_args = ToolCallEvent {
+            tool_name: "add",
+            tool_call_id: Some("p3"),
+            internal_call_id: "i3",
+            args: "3",
+        };
+        assert!(matches!(
+            rewrite.on_tool_call(&context, scalar_args).await,
+            ToolCallAction::Run
+        ));
+        let add_call = ToolCallEvent {
+            tool_name: "add",
+            tool_call_id: Some("p4"),
+            internal_call_id: "i4",
+            args: r#"{"y":2}"#,
+        };
+        assert!(matches!(
+            rewrite.on_tool_call(&context, add_call).await,
+            ToolCallAction::Rewrite(_)
+        ));
+
+        let presentation = ToolOutput::text("raw");
+        let raw = ExecutionResult::success(ToolOutput::text("raw"));
+        let result_event = ToolResultEvent {
+            tool_name: "subtract",
+            tool_call_id: Some("p5"),
+            internal_call_id: "i5",
+            args: "{}",
+            presentation: &presentation,
+            raw_result: &raw,
+            tool_context: &ToolContext::new(),
+        };
+        assert!(matches!(
+            ReplaceResult("redacted").on_tool_result(&context, result_event).await,
+            ToolResultAction::Keep
+        ));
+        assert!(matches!(
+            WrapResult.on_tool_result(&context, result_event).await,
+            ToolResultAction::Keep
+        ));
+        assert!(matches!(
+            StopAfterResult("reason").on_tool_result(&context, result_event).await,
+            ToolResultAction::Keep
+        ));
+    }
+
+    #[tokio::test]
+    async fn sum_alias_tool_executes_and_counts() {
+        let calls = Arc::new(AtomicUsize::new(0));
+        let mut context = ToolContext::new();
+        let output = Tool::call(
+            &CountingSum(Arc::clone(&calls)),
+            &mut context,
+            OperationArgs { x: 2, y: 3 },
+        )
+        .await
+        .expect("sum tool succeeds");
+        assert_eq!(output, 5);
+        assert_eq!(calls.load(Ordering::SeqCst), 1);
+    }
+
+    // ------------------------------------------------------------------
+    // Scenario success paths
+    // ------------------------------------------------------------------
+
+    /// Serves one buffered text completion and one scripted stream from the
+    /// same model instance, for scenarios that compare both surfaces.
+    #[derive(Clone)]
+    struct BufferedAndStreamMock {
+        buffered: MockCompletionModel,
+        streaming: MockCompletionModel,
+    }
+
+    impl CompletionModel for BufferedAndStreamMock {
+        async fn completion(
+            &self,
+            request: CompletionRequest,
+        ) -> Result<CompletionResponse, CompletionError> {
+            self.buffered.completion(request).await
+        }
+
+        async fn stream(
+            &self,
+            request: CompletionRequest,
+        ) -> Result<StreamingCompletionResponse, CompletionError> {
+            self.streaming.stream(request).await
+        }
+    }
+
+    #[tokio::test]
+    async fn buffered_streaming_parity_contract_passes_with_mocks() -> Result<(), ScenarioError> {
+        let model = BufferedAndStreamMock {
+            buffered: MockCompletionModel::new([MockTurn::text("Paris").with_usage(usage(3, 1))]),
+            streaming: MockCompletionModel::from_stream_turns([vec![
+                MockStreamEvent::text("Paris"),
+                MockStreamEvent::FinalResponse(mock_final(usage(3, 1))),
+            ]]),
+        };
+        let report = buffered_streaming_text_parity(model).await?;
+        fixture_contract(report.response.contains("Paris"), "parity streamed text")?;
+        assert!(fixture_contract(true, "probe").is_ok());
+        assert!(fixture_contract(false, "probe").is_err());
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn parallel_contract_passes_with_default_concurrency() -> Result<(), ScenarioError> {
+        let first = MockTurn::from_contents([
+            tool_call("call_add", "add", serde_json::json!({"x": 3, "y": 4})),
+            tool_call("call_subtract", "subtract", serde_json::json!({"x": 10, "y": 2})),
+        ])
+        .map_err(|error| ScenarioError::contract("test_fixture", error.to_string()))?;
+        let report = parallel_tools(
+            MockCompletionModel::new([first, MockTurn::text("7 and 8")]),
+            |builder| builder,
+            None,
+        )
+        .await?;
+        fixture_contract(report.tool_calls == 2, "default-concurrency call count")?;
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn optional_argument_contract_defaults_repetitions() -> Result<(), ScenarioError> {
+        let report = optional_argument(
+            MockCompletionModel::new([
+                MockTurn::tool_call(
+                    "repeat_call",
+                    "repeat_text",
+                    serde_json::json!({"text": "banana"}),
+                ),
+                MockTurn::text("banana banana"),
+            ]),
+            |builder| builder,
+        )
+        .await?;
+        fixture_contract(report.tool_calls == 1, "optional-argument call count")?;
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn sequential_tools_contract_computes_chained_arithmetic() -> Result<(), ScenarioError> {
+        let report = sequential_tools(
+            MockCompletionModel::new([
+                MockTurn::tool_call("add_call", "add", serde_json::json!({"a": 4, "b": 6})),
+                MockTurn::tool_call(
+                    "multiply_call",
+                    "multiply",
+                    serde_json::json!({"a": 10, "b": 2}),
+                ),
+                MockTurn::text("20"),
+            ]),
+            |builder| builder,
+        )
+        .await?;
+        fixture_contract(report.tool_calls == 2, "sequential call count")?;
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn structured_after_tool_contract_decodes_final_result() -> Result<(), ScenarioError> {
+        let report = structured_after_tool(
+            MockCompletionModel::new([
+                MockTurn::tool_call("add_call", "add", serde_json::json!({"a": 19, "b": 23})),
+                MockTurn::tool_call(
+                    "result_call",
+                    "final_result",
+                    serde_json::json!({"answer": 42, "explanation": "19 plus 23"}),
+                ),
+            ]),
+            |builder| builder,
+        )
+        .await?;
+        fixture_contract(report.tool_calls == 2, "structured-after-tool call count")?;
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn tool_choice_mode_contract_accepts_scripted_choices() -> Result<(), ScenarioError> {
+        let report = tool_choice_modes(MockCompletionModel::new([
+            MockTurn::text("4"),
+            MockTurn::tool_call("alpha_call", "alpha", serde_json::json!({"value": 7})),
+            MockTurn::tool_call("beta_call", "beta", serde_json::json!({"value": 9})),
+        ]))
+        .await?;
+        fixture_contract(report.tool_calls == 2, "tool-choice call count")?;
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn streaming_structured_contract_decodes_final_result() -> Result<(), ScenarioError> {
+        let model = MockCompletionModel::from_stream_turns([
+            vec![
+                MockStreamEvent::tool_call(
+                    "add_call",
+                    "add",
+                    serde_json::json!({"a": 19, "b": 23}),
+                ),
+                MockStreamEvent::FinalResponse(mock_final(usage(10, 2))),
+            ],
+            vec![
+                MockStreamEvent::tool_call(
+                    "result_call",
+                    "final_result",
+                    serde_json::json!({"answer": 42}),
+                ),
+                MockStreamEvent::FinalResponse(mock_final(usage(12, 3))),
+            ],
+        ]);
+        let report = streaming_structured_after_tool(model, |builder| builder).await?;
+        fixture_contract(report.tool_calls == 2, "streaming structured call count")?;
+        Ok(())
+    }
+
+    // ------------------------------------------------------------------
+    // Scenario contract-failure diagnostics: a misbehaving model must be
+    // rejected with a typed ScenarioError, never silently accepted.
+    // ------------------------------------------------------------------
+
+    #[tokio::test]
+    async fn parallel_contract_rejects_non_conforming_batches() {
+        // Single-call batch: no assistant turn contains exactly two calls.
+        let single = MockTurn::tool_call("only_add", "add", serde_json::json!({"x": 3, "y": 4}));
+        assert!(matches!(
+            parallel_tools(
+                MockCompletionModel::new([single, MockTurn::text("7")]),
+                |builder| builder,
+                None,
+            )
+            .await,
+            Err(ScenarioError::Contract { .. })
+        ));
+
+        // Two-call batch with the wrong tool names.
+        let wrong_names = MockTurn::from_contents([
+            tool_call("a", "add", serde_json::json!({"x": 3, "y": 4})),
+            tool_call("b", "add", serde_json::json!({"x": 1, "y": 1})),
+        ])
+        .expect("fixture");
+        assert!(matches!(
+            parallel_tools(
+                MockCompletionModel::new([wrong_names, MockTurn::text("done")]),
+                |builder| builder,
+                None,
+            )
+            .await,
+            Err(ScenarioError::Contract { .. })
+        ));
+
+        // Batch whose results are neither 7 nor 8.
+        let wrong_results = MockTurn::from_contents([
+            tool_call("a", "add", serde_json::json!({"x": 1, "y": 1})),
+            tool_call("b", "subtract", serde_json::json!({"x": 1, "y": 1})),
+        ])
+        .expect("fixture");
+        assert!(matches!(
+            parallel_tools(
+                MockCompletionModel::new([wrong_results, MockTurn::text("done")]),
+                |builder| builder,
+                None,
+            )
+            .await,
+            Err(ScenarioError::Contract { .. })
+        ));
+    }
+
+    #[tokio::test]
+    async fn zero_argument_contract_rejects_models_that_skip_the_tool() {
+        // The tool is never invoked: history has no correlated call/result
+        // round trip to validate.
+        assert!(matches!(
+            zero_argument_tool(
+                MockCompletionModel::text("answered directly"),
+                |builder| builder,
+            )
+            .await,
+            Err(ScenarioError::Contract { .. })
+        ));
+
+        // Correlated round trip, but the model invoked the tool more than once.
+        let twice = MockTurn::from_contents([
+            tool_call("ping_1", "ping", serde_json::json!({})),
+            tool_call("ping_2", "ping", serde_json::json!({})),
+        ])
+        .expect("fixture");
+        assert!(matches!(
+            zero_argument_tool(
+                MockCompletionModel::new([twice, MockTurn::text(PING_OUTPUT)]),
+                |builder| builder,
+            )
+            .await,
+            Err(ScenarioError::Contract { .. })
+        ));
+    }
+
+    #[tokio::test]
+    async fn serialization_contract_rejects_missing_config_call() {
+        let first = MockTurn::tool_call("motto_call", "fetch_motto", serde_json::json!({}));
+        assert!(matches!(
+            tool_output_serialization(
+                MockCompletionModel::new([first, MockTurn::text("motto only")]),
+                |builder| builder,
+            )
+            .await,
+            Err(ScenarioError::Contract { .. })
+        ));
+    }
+
+    #[tokio::test]
+    async fn complex_argument_contract_rejects_wrong_payloads() {
+        let wrong = MockTurn::tool_call(
+            "profile_call",
+            "store_profile",
+            serde_json::json!({
+                "profile": {"name": "Wrong", "tags": []},
+                "mode": "fast",
+                "quote": "no"
+            }),
+        );
+        assert!(matches!(
+            complex_tool_arguments(
+                MockCompletionModel::new([wrong, MockTurn::text("stored")]),
+                |builder| builder,
+            )
+            .await,
+            Err(ScenarioError::Contract { .. })
+        ));
+    }
+
+    #[tokio::test]
+    async fn hook_rewrite_contract_rejects_models_that_skip_the_tool() {
+        // The tool is never invoked, so there are no rewritten arguments to
+        // observe.
+        assert!(matches!(
+            hook_rewrites_and_request_patch(
+                MockCompletionModel::text("no tool used"),
+                |builder| builder,
+            )
+            .await,
+            Err(ScenarioError::Contract { .. })
+        ));
+
+        // Rewrites are observed, but the extra call breaks the single-call and
+        // two-completion-call invariants.
+        let twice = MockCompletionModel::new([
+            MockTurn::tool_call("hook-add-1", "add", serde_json::json!({"x": 1, "y": 1})),
+            MockTurn::tool_call("hook-add-2", "add", serde_json::json!({"x": 1, "y": 1})),
+            MockTurn::text("[portable-redacted]"),
+        ]);
+        assert!(matches!(
+            hook_rewrites_and_request_patch(twice, |builder| builder).await,
+            Err(ScenarioError::Contract { .. })
+        ));
+    }
+
+    #[tokio::test]
+    async fn cancellation_contract_rejects_unexpectedly_completing_runs() {
+        // The stop hook never fires: the cancelled sub-run answers directly.
+        assert!(matches!(
+            cancellation_and_max_turns(MockCompletionModel::text("42"), |builder| builder).await,
+            Err(ScenarioError::Contract { .. })
+        ));
+        // Cancellation works, but the one-turn budget completes because the
+        // second sub-run's model also answers immediately.
+        let mixed = MockCompletionModel::new([
+            MockTurn::tool_call("cancel-add", "add", serde_json::json!({"x": 20, "y": 22})),
+            MockTurn::text("42"),
+        ]);
+        assert!(matches!(
+            cancellation_and_max_turns(mixed, |builder| builder).await,
+            Err(ScenarioError::Contract { .. })
+        ));
+    }
+
+    #[tokio::test]
+    async fn recovery_contract_rejects_multi_call_source_turns() {
+        let two_adds = MockTurn::from_contents([
+            tool_call("invalid-add-1", "add", serde_json::json!({"x": 2, "y": 3})),
+            tool_call("invalid-add-2", "add", serde_json::json!({"x": 2, "y": 3})),
+        ])
+        .expect("fixture");
+        assert!(matches!(
+            invalid_tool_recovery(MockCompletionModel::new([two_adds]), |builder| builder).await,
+            Err(ScenarioError::Contract { .. })
+        ));
+    }
+
+    #[tokio::test]
+    async fn streaming_contract_rejects_wrong_final_answers() {
+        let model = MockCompletionModel::from_stream_turns([
+            vec![
+                MockStreamEvent::tool_call(
+                    "add_call",
+                    "add",
+                    serde_json::json!({"a": 17, "b": 25}),
+                ),
+                MockStreamEvent::FinalResponse(mock_final(usage(10, 2))),
+            ],
+            vec![
+                MockStreamEvent::text("41"),
+                MockStreamEvent::FinalResponse(mock_final(usage(14, 1))),
+            ],
+        ]);
+        assert!(matches!(
+            streaming_tool(model, |builder| builder).await,
+            Err(ScenarioError::Contract { .. })
+        ));
+    }
+
+    #[tokio::test]
+    async fn streaming_contract_rejects_leaked_protocol_markers() {
+        let model = MockCompletionModel::from_stream_turns([
+            vec![
+                MockStreamEvent::tool_call(
+                    "add_call",
+                    "add",
+                    serde_json::json!({"a": 17, "b": 25}),
+                ),
+                MockStreamEvent::FinalResponse(mock_final(usage(10, 2))),
+            ],
+            vec![
+                MockStreamEvent::text("42 <tool_call>"),
+                MockStreamEvent::FinalResponse(mock_final(usage(14, 1))),
+            ],
+        ]);
+        assert!(matches!(
+            streaming_tool(model, |builder| builder).await,
+            Err(ScenarioError::Contract { .. })
+        ));
+    }
+
+    #[tokio::test]
+    async fn parity_contract_rejects_disagreeing_surfaces() {
+        let model = BufferedAndStreamMock {
+            buffered: MockCompletionModel::new([MockTurn::text("London").with_usage(usage(3, 1))]),
+            streaming: MockCompletionModel::from_stream_turns([vec![
+                MockStreamEvent::text("London"),
+                MockStreamEvent::FinalResponse(mock_final(usage(3, 1))),
+            ]]),
+        };
+        assert!(matches!(
+            buffered_streaming_text_parity(model).await,
+            Err(ScenarioError::Contract { .. })
+        ));
+    }
+
+    #[tokio::test]
+    async fn optional_argument_contract_rejects_direct_answers() {
+        assert!(matches!(
+            optional_argument(MockCompletionModel::text("banana"), |builder| builder).await,
+            Err(ScenarioError::Contract { .. })
+        ));
+    }
+
+    #[tokio::test]
+    async fn sequential_tools_contract_rejects_direct_answers() {
+        assert!(matches!(
+            sequential_tools(MockCompletionModel::text("20"), |builder| builder).await,
+            Err(ScenarioError::Contract { .. })
+        ));
+    }
+
+    #[tokio::test]
+    async fn structured_after_tool_contract_rejects_wrong_answers() {
+        let wrong_answer = MockTurn::tool_call(
+            "result_call",
+            "final_result",
+            serde_json::json!({"answer": 41}),
+        );
+        assert!(matches!(
+            structured_after_tool(
+                MockCompletionModel::new([
+                    MockTurn::tool_call("add_call", "add", serde_json::json!({"a": 19, "b": 23})),
+                    wrong_answer,
+                ]),
+                |builder| builder,
+            )
+            .await,
+            Err(ScenarioError::Contract { .. })
+        ));
+    }
+
+    #[tokio::test]
+    async fn tool_choice_mode_contract_rejects_violating_choices() {
+        // `none` mode must not emit a tool call.
+        let none_emits_call = MockCompletionModel::new([MockTurn::tool_call(
+            "alpha_call",
+            "alpha",
+            serde_json::json!({"value": 7}),
+        )]);
+        assert!(matches!(
+            tool_choice_modes(none_emits_call).await,
+            Err(ScenarioError::Contract { .. })
+        ));
+
+        // `required` mode must emit at least one call.
+        let required_silent = MockCompletionModel::new([
+            MockTurn::text("4"),
+            MockTurn::text("still no call"),
+        ]);
+        assert!(matches!(
+            tool_choice_modes(required_silent).await,
+            Err(ScenarioError::Contract { .. })
+        ));
+
+        // `specific` mode must select only the named function.
+        let specific_wrong_tool = MockCompletionModel::new([
+            MockTurn::text("4"),
+            MockTurn::tool_call("alpha_call", "alpha", serde_json::json!({"value": 7})),
+            MockTurn::tool_call("alpha_call", "alpha", serde_json::json!({"value": 9})),
+        ]);
+        assert!(matches!(
+            tool_choice_modes(specific_wrong_tool).await,
+            Err(ScenarioError::Contract { .. })
+        ));
+    }
+
+    #[tokio::test]
+    async fn streaming_structured_contract_rejects_wrong_answers() {
+        let model = MockCompletionModel::from_stream_turns([
+            vec![
+                MockStreamEvent::tool_call(
+                    "add_call",
+                    "add",
+                    serde_json::json!({"a": 19, "b": 23}),
+                ),
+                MockStreamEvent::FinalResponse(mock_final(usage(10, 2))),
+            ],
+            vec![
+                MockStreamEvent::tool_call(
+                    "result_call",
+                    "final_result",
+                    serde_json::json!({"answer": 41}),
+                ),
+                MockStreamEvent::FinalResponse(mock_final(usage(12, 3))),
+            ],
+        ]);
+        assert!(matches!(
+            streaming_structured_after_tool(model, |builder| builder).await,
+            Err(ScenarioError::Contract { .. })
+        ));
+    }
+
+    #[tokio::test]
+    async fn parallel_contract_rejects_protocol_marker_leaks_in_summary() {
+        let batch = MockTurn::from_contents([
+            tool_call("call_add", "add", serde_json::json!({"x": 3, "y": 4})),
+            tool_call("call_subtract", "subtract", serde_json::json!({"x": 10, "y": 2})),
+        ])
+        .expect("fixture");
+        assert!(matches!(
+            parallel_tools(
+                MockCompletionModel::new([batch, MockTurn::text("7 and 8 <tool_call>")]),
+                |builder| builder,
+                None,
+            )
+            .await,
+            Err(ScenarioError::Contract { .. })
+        ));
+    }
+
+    #[tokio::test]
+    async fn parallel_contract_rejects_unexpected_extra_executions() {
+        let batch = MockTurn::from_contents([
+            tool_call("call_add", "add", serde_json::json!({"x": 3, "y": 4})),
+            tool_call("call_subtract", "subtract", serde_json::json!({"x": 10, "y": 2})),
+        ])
+        .expect("fixture");
+        assert!(matches!(
+            parallel_tools(
+                MockCompletionModel::new([
+                    batch,
+                    MockTurn::tool_call("extra_add", "add", serde_json::json!({"x": 1, "y": 1})),
+                    MockTurn::text("done"),
+                ]),
+                |builder| builder,
+                None,
+            )
+            .await,
+            Err(ScenarioError::Contract { .. })
+        ));
+    }
+
+    #[tokio::test]
+    async fn extraction_contract_rejects_wrong_extracted_fields() {
+        assert!(matches!(
+            structured_extraction(MockCompletionModel::new([MockTurn::tool_call(
+                "submit_call",
+                "submit",
+                serde_json::json!({
+                    "first_name": "Grace",
+                    "last_name": "Lovelace",
+                    "job": "mathematician"
+                }),
+            )
+            .with_usage(usage(20, 5))]))
+            .await,
+            Err(ScenarioError::Contract { .. })
+        ));
+    }
+
+    #[tokio::test]
+    async fn buffered_streaming_parity_ignores_non_text_surfaces() -> Result<(), ScenarioError> {
+        let buffered_turn = MockTurn::from_contents([
+            tool_call("parity_call", "alpha", serde_json::json!({"value": 1})),
+            AssistantContent::text("Paris"),
+        ])
+        .expect("fixture");
+        let model = BufferedAndStreamMock {
+            buffered: MockCompletionModel::new([buffered_turn.with_usage(usage(3, 1))]),
+            streaming: MockCompletionModel::from_stream_turns([vec![
+                MockStreamEvent::tool_call(
+                    "parity_call",
+                    "alpha",
+                    serde_json::json!({"value": 1}),
+                ),
+                MockStreamEvent::text("Paris"),
+                MockStreamEvent::FinalResponse(mock_final(usage(3, 1))),
+            ]]),
+        };
+        let report = buffered_streaming_text_parity(model).await?;
+        fixture_contract(report.response.contains("Paris"), "parity ignores non-text items")?;
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn parity_contract_rejects_streams_without_final_metadata() {
+        let model = BufferedAndStreamMock {
+            buffered: MockCompletionModel::new([MockTurn::text("Paris").with_usage(usage(3, 1))]),
+            streaming: MockCompletionModel::from_stream_turns([vec![MockStreamEvent::text("Paris")]]),
+        };
+        assert!(matches!(
+            buffered_streaming_text_parity(model).await,
+            Err(ScenarioError::Contract { .. })
+        ));
+    }
+
+    #[tokio::test]
+    async fn tool_choice_specific_mode_tolerates_mixed_content() -> Result<(), ScenarioError> {
+        let specific_turn = MockTurn::from_contents([
+            AssistantContent::text("calling beta"),
+            tool_call("beta_call", "beta", serde_json::json!({"value": 9})),
+        ])
+        .expect("fixture");
+        let report = tool_choice_modes(MockCompletionModel::new([
+            MockTurn::text("4"),
+            MockTurn::tool_call("alpha_call", "alpha", serde_json::json!({"value": 7})),
+            specific_turn,
+        ]))
+        .await?;
+        fixture_contract(report.tool_calls == 2, "mixed-content specific choice")?;
+        Ok(())
     }
 }

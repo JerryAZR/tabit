@@ -739,4 +739,79 @@ mod migrated_tests {
         assert_eq!(refused.kind(), ToolErrorKind::PermissionDenied);
         assert_eq!(refused.code(), Some("POLICY"));
     }
+
+    #[test]
+    fn kind_names_are_stable_and_displayable() {
+        for (kind, name) in [
+            (ToolErrorKind::InvalidArgs, "invalid_args"),
+            (ToolErrorKind::Timeout, "timeout"),
+            (ToolErrorKind::Cancelled, "cancelled"),
+            (ToolErrorKind::NotFound, "not_found"),
+            (ToolErrorKind::PermissionDenied, "permission_denied"),
+            (ToolErrorKind::RateLimited, "rate_limited"),
+            (ToolErrorKind::Provider, "provider"),
+            (ToolErrorKind::Network, "network"),
+            (ToolErrorKind::Other, "other"),
+        ] {
+            assert_eq!(kind.as_str(), name);
+            assert_eq!(kind.to_string(), name);
+        }
+    }
+
+    #[test]
+    fn redacted_feedback_is_stable_for_every_kind() {
+        for (error, feedback) in [
+            (
+                ToolExecutionError::invalid_args("secret-detail"),
+                "tool arguments were invalid",
+            ),
+            (
+                ToolExecutionError::timeout("secret-detail"),
+                "tool execution timed out",
+            ),
+            (
+                ToolExecutionError::cancelled("secret-detail"),
+                "tool execution was cancelled",
+            ),
+            (
+                ToolExecutionError::not_found("secret-detail"),
+                "the requested tool or resource was not found",
+            ),
+            (
+                ToolExecutionError::permission_denied("secret-detail"),
+                "the tool denied the request",
+            ),
+            (
+                ToolExecutionError::rate_limited("secret-detail"),
+                "the tool was rate limited; try again later",
+            ),
+            (
+                ToolExecutionError::provider("secret-detail"),
+                "the tool provider failed",
+            ),
+            (
+                ToolExecutionError::network("secret-detail"),
+                "the tool could not reach its upstream service",
+            ),
+            (
+                ToolExecutionError::other("secret-detail"),
+                "the tool failed",
+            ),
+        ] {
+            assert_eq!(error.redact_model_feedback().model_feedback(), Some(feedback));
+        }
+    }
+
+    #[test]
+    fn display_and_source_expose_operator_diagnostics() {
+        #[derive(Debug, thiserror::Error)]
+        #[error("upstream boom")]
+        struct Upstream;
+
+        let error = ToolExecutionError::network("connection refused").with_source(Upstream);
+
+        assert_eq!(error.to_string(), "connection refused");
+        let source = std::error::Error::source(&error).expect("the source is preserved");
+        assert_eq!(source.to_string(), "upstream boom");
+    }
 }

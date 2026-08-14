@@ -273,4 +273,31 @@ mod provider_response_tests {
             Some(http::StatusCode::BAD_REQUEST)
         );
     }
+
+    /// Only the `PromptError` variant carries a provider response; the
+    /// deserialization and empty-response variants expose nothing.
+    #[test]
+    fn structured_output_error_provider_response_helpers_return_none_outside_prompt_errors() {
+        let deserialization = StructuredOutputError::DeserializationError(
+            serde_json::from_str::<u32>("not json").expect_err("invalid json must fail"),
+        );
+        assert_eq!(deserialization.provider_response_body(), None);
+        assert_eq!(deserialization.provider_response_status(), None);
+        assert_eq!(
+            deserialization
+                .provider_response_json()
+                .expect("no body is not an error"),
+            None
+        );
+
+        let empty = StructuredOutputError::EmptyResponse;
+        assert_eq!(empty.provider_response_body(), None);
+        assert_eq!(empty.provider_response_status(), None);
+        assert_eq!(
+            empty
+                .provider_response_json()
+                .expect("no body is not an error"),
+            None
+        );
+    }
 }

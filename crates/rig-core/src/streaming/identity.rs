@@ -304,4 +304,36 @@ mod tests {
             }
         }
     }
+
+    /// `WireId` lends the identifier as well as consuming it, so request
+    /// builders can borrow without cloning.
+    #[test]
+    fn wire_id_borrows_the_identifier() {
+        let id = PartId::wire("rs_123")
+            .into_wire_id()
+            .expect("wire-genuine identity");
+        assert_eq!(id.as_str(), "rs_123");
+        assert_eq!(WireId::into_string(id), "rs_123");
+    }
+
+    /// The block minter (anthropic/bedrock index-as-id wires) mints and maps
+    /// wire indices under its own kind.
+    #[test]
+    fn block_minters_mint_under_the_block_kind() {
+        let mut ids = SyntheticIds::block();
+        assert_eq!(
+            ids.mint(),
+            PartId::Minted {
+                kind: MintKind::Block,
+                index: 0
+            }
+        );
+        assert_eq!(
+            ids.for_index(7),
+            PartId::Minted {
+                kind: MintKind::Block,
+                index: 7
+            }
+        );
+    }
 }

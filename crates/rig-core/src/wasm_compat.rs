@@ -157,4 +157,9 @@ mod tests {
         let result = timeout(Duration::ZERO, async { 7 }).await;
         assert_eq!(result, Ok(7));
     }
+
+    #[test]
+    fn elapsed_displays_a_stable_message() {
+        assert_eq!(Elapsed.to_string(), "future timed out");
+    }
 }

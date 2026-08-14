@@ -685,4 +685,63 @@ mod tests {
             _ => panic!("Expected ParseError"),
         }
     }
+
+    #[test]
+    fn test_model_list_ref_into_iter() {
+        let list = ModelList::new(vec![
+            Model::from_id("gpt-4"),
+            Model::from_id("gpt-3.5-turbo"),
+        ]);
+        let models: Vec<&Model> = (&list).into_iter().collect();
+        assert_eq!(models.len(), 2);
+        assert_eq!(models[0].id, "gpt-4");
+        assert_eq!(models[1].id, "gpt-3.5-turbo");
+    }
+
+    #[test]
+    fn test_from_http_client_error() {
+        let error = crate::http_client::Error::InvalidStatusCodeWithMessage(
+            http::StatusCode::BAD_GATEWAY,
+            "upstream blew up".to_string(),
+        );
+        let error = ModelListingError::from(error);
+
+        match error {
+            ModelListingError::RequestError { message } => {
+                assert!(message.contains("502"), "message should carry the status: {message}");
+                assert!(message.contains("upstream blew up"));
+            }
+            other => panic!("Expected RequestError, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn test_from_http_error() {
+        let error = http::Request::builder()
+            .method("NOT A METHOD")
+            .body(())
+            .expect_err("invalid method must fail");
+        let error = ModelListingError::from(error);
+
+        match error {
+            ModelListingError::RequestError { message } => {
+                assert!(!message.is_empty());
+            }
+            other => panic!("Expected RequestError, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn test_from_serde_json_error() {
+        let error = serde_json::from_str::<serde_json::Value>("{")
+            .expect_err("malformed JSON must fail");
+        let error = ModelListingError::from(error);
+
+        match error {
+            ModelListingError::ParseError { message } => {
+                assert!(message.contains("EOF while parsing an object"));
+            }
+            other => panic!("Expected ParseError, got {other:?}"),
+        }
+    }
 }

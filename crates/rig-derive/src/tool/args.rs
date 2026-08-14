@@ -223,3 +223,85 @@ impl Parse for MacroArgs {
         })
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn parse(input: &str) -> syn::Result<MacroArgs> {
+        syn::parse_str(input)
+    }
+
+    fn rejects(input: &str, fragment: &str) {
+        let error =
+            parse(input).err().unwrap_or_else(|| panic!("`{input}` should be rejected"));
+        assert!(
+            error.to_string().contains(fragment),
+            "`{input}` produced: {error}"
+        );
+    }
+
+    #[test]
+    fn empty_arguments_parse_to_defaults() {
+        let args = parse("").expect("empty parses");
+        assert_eq!(args.name, None);
+        assert_eq!(args.description, None);
+        assert!(args.param_descriptions.is_empty());
+        assert_eq!(args.required, None);
+    }
+
+    #[test]
+    fn full_argument_grammar_round_trips() {
+        let args = parse(
+            r#"name = "tool", description = "d", params(x = "px", y = "py"), required(x)"#,
+        )
+        .expect("full grammar parses");
+        assert_eq!(args.name.as_deref(), Some("tool"));
+        assert_eq!(args.description.as_deref(), Some("d"));
+        assert_eq!(args.description_for("y"), Some("py"));
+        assert_eq!(
+            args.required.as_ref().map(|names| names.len()),
+            Some(1_usize)
+        );
+    }
+
+    #[test]
+    fn non_ident_paths_are_rejected_everywhere() {
+        rejects(
+            r#"other::path = "x""#,
+            "unsupported top-level #[rig_tool] argument",
+        );
+        rejects(
+            r#"other::path(x = "d")"#,
+            "unsupported top-level #[rig_tool] argument",
+        );
+        rejects(
+            r#"params(other::path = "d")"#,
+            "parameter descriptions must use identifier keys",
+        );
+    }
+
+    #[test]
+    fn params_entries_must_be_name_value_pairs() {
+        rejects(r#"params(alpha)"#, "`params(...)` entries must have the form");
+    }
+
+    #[test]
+    fn duplicate_required_entries_are_rejected() {
+        rejects("required(a, a)", "duplicate `required(...)` entry for `a`");
+    }
+
+    #[test]
+    fn unknown_list_arguments_are_rejected() {
+        rejects(r#"bogus(x = "y")"#, "unsupported top-level #[rig_tool] argument `bogus`");
+    }
+
+    #[test]
+    fn bare_path_arguments_are_rejected() {
+        rejects("flag", "unsupported top-level #[rig_tool] argument `flag`");
+        rejects(
+            "other::path",
+            "unsupported top-level #[rig_tool] argument",
+        );
+    }
+}

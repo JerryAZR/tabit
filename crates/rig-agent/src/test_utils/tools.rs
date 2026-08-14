@@ -242,43 +242,6 @@ impl Tool for MockImageOutputTool {
     }
 }
 
-/// A mock tool named `generate_test_image` that returns a 1x1 red PNG image payload.
-#[derive(Debug, Deserialize, Serialize)]
-pub struct MockImageGeneratorTool;
-
-impl Tool for MockImageGeneratorTool {
-    const NAME: &'static str = "generate_test_image";
-    type Error = MockToolError;
-    type Args = serde_json::Value;
-    type Output = ToolOutput;
-
-    fn description(&self) -> String {
-        "Generates a small test image (a 1x1 red pixel). Call this tool when asked to generate or show an image.".to_string()
-    }
-
-    fn parameters(&self) -> serde_json::Value {
-        json!({
-            "type": "object",
-            "properties": {},
-            "required": []
-        })
-    }
-
-    async fn call(
-        &self,
-        _context: &mut crate::tool::ToolContext,
-        _args: Self::Args,
-    ) -> Result<Self::Output, Self::Error> {
-        Ok(ToolOutput::content(OneOrMany::one(
-            ToolResultContent::image_base64(
-                "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mP8z8DwHwAFBQIAX8jx0gAAAABJRU5ErkJggg==",
-                Some(ImageMediaType::PNG),
-                None,
-            ),
-        )))
-    }
-}
-
 /// A mock tool that returns a JSON object.
 #[derive(Deserialize, Serialize)]
 pub struct MockObjectOutputTool;
@@ -646,5 +609,106 @@ impl Tool for MockMetadataTool {
     ) -> Result<Self::Output, Self::Error> {
         context.insert_result(MockRequestId("req-7".to_string()));
         Ok("done".to_string())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::tool::ToolContext;
+    use rig_core::vector_store::VectorStoreIndex;
+
+    #[tokio::test]
+    async fn subtract_tool_computes_differences() {
+        let output = Tool::call(
+            &MockSubtractTool,
+            &mut ToolContext::new(),
+            MockOperationArgs { x: 10, y: 4 },
+        )
+        .await
+        .expect("subtract tool should succeed");
+        assert_eq!(output, 6);
+    }
+
+    #[test]
+    fn output_tools_advertise_their_schema_surfaces() {
+        let notify = || Arc::new(tokio::sync::Notify::new());
+        let controlled = MockControlledTool::new(notify(), notify());
+        for (name, description, parameters) in [
+            (
+                MockStringOutputTool::NAME,
+                Tool::description(&MockStringOutputTool),
+                Tool::parameters(&MockStringOutputTool),
+            ),
+            (
+                MockImageOutputTool::NAME,
+                Tool::description(&MockImageOutputTool),
+                Tool::parameters(&MockImageOutputTool),
+            ),
+            (
+                MockObjectOutputTool::NAME,
+                Tool::description(&MockObjectOutputTool),
+                Tool::parameters(&MockObjectOutputTool),
+            ),
+            (
+                MockExampleTool::NAME,
+                Tool::description(&MockExampleTool),
+                Tool::parameters(&MockExampleTool),
+            ),
+            (
+                MockControlledTool::NAME,
+                Tool::description(&controlled),
+                Tool::parameters(&controlled),
+            ),
+        ] {
+            assert!(!description.is_empty(), "{name} lost its description");
+            assert_eq!(parameters["type"], "object", "{name} schema shape");
+        }
+    }
+
+    #[tokio::test]
+    async fn tool_indexes_return_no_documents_from_top_n() {
+        let request = VectorSearchRequest::builder()
+            .query("anything")
+            .samples(3)
+            .build();
+
+        let plain = MockToolIndex::new(["add", "subtract"]);
+        let documents: Vec<(f64, String, serde_json::Value)> =
+            plain.top_n(request.clone()).await.expect("top_n succeeds");
+        assert!(documents.is_empty());
+        let ids = plain
+            .top_n_ids(request.clone())
+            .await
+            .expect("top_n_ids succeeds");
+        assert_eq!(ids.len(), 2);
+        assert_eq!(ids[0].1, "add");
+        assert!(ids[0].0 > ids[1].0, "ids arrive in rank order");
+
+        let barrier = Arc::new(tokio::sync::Barrier::new(1));
+        let barrier_index = BarrierMockToolIndex::new(barrier, "add");
+        let documents: Vec<(f64, String, serde_json::Value)> = barrier_index
+            .top_n(request.clone())
+            .await
+            .expect("barrier top_n succeeds");
+        assert!(documents.is_empty());
+        let ids = barrier_index
+            .top_n_ids(request)
+            .await
+            .expect("barrier top_n_ids succeeds");
+        assert_eq!(ids, vec![(1.0, "add".to_string())]);
+    }
+
+    #[test]
+    fn failing_tool_maps_unclassified_kinds_without_http_status() {
+        let error = MockFailingTool::new(ToolErrorKind::Timeout).map_error(MockFailure);
+        assert_eq!(error.http_status(), None);
+        assert_eq!(error.message(), "mock tool call failed");
+
+        // Classified kinds keep their HTTP status mapping.
+        let not_found = MockFailingTool::new(ToolErrorKind::NotFound).map_error(MockFailure);
+        assert_eq!(not_found.http_status(), Some(404));
+        let rate_limited = MockFailingTool::new(ToolErrorKind::RateLimited).map_error(MockFailure);
+        assert_eq!(rate_limited.http_status(), Some(429));
     }
 }

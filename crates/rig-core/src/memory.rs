@@ -512,4 +512,64 @@ mod tests {
         mem.clear("c").await.unwrap();
         assert!(mem.load("c").await.unwrap().is_empty());
     }
+
+    #[tokio::test]
+    async fn noop_demotion_hook_succeeds() {
+        NoopDemotionHook
+            .on_demote("c", vec![user("demoted")])
+            .await
+            .unwrap();
+    }
+
+    #[tokio::test]
+    async fn arc_demotion_hook_forwards_to_inner() {
+        let hook: Arc<dyn DemotionHook> = Arc::new(NoopDemotionHook);
+        hook.on_demote("c", vec![user("demoted")]).await.unwrap();
+    }
+
+    struct FirstMessageCompactor;
+
+    impl Compactor for FirstMessageCompactor {
+        type Artifact = Message;
+
+        fn compact<'a>(
+            &'a self,
+            _conversation_id: &'a str,
+            evicted: &'a [Message],
+            _carry_over: Option<&'a Self::Artifact>,
+        ) -> WasmBoxedFuture<'a, Result<Self::Artifact, MemoryError>> {
+            Box::pin(async move {
+                Ok(evicted
+                    .first()
+                    .cloned()
+                    .unwrap_or_else(|| Message::user("nothing evicted")))
+            })
+        }
+    }
+
+    #[tokio::test]
+    async fn arc_compactor_forwards_to_inner() {
+        let inner = Arc::new(FirstMessageCompactor);
+        let compactor: Arc<FirstMessageCompactor> = inner.clone();
+
+        let evicted = vec![user("old-1"), user("old-2")];
+        let artifact = compactor.compact("c", &evicted, None).await.unwrap();
+        assert_eq!(artifact, Message::user("old-1"));
+
+        // With an empty eviction window the compactor still produces an artifact.
+        let artifact = compactor.compact("c", &[], None).await.unwrap();
+        assert_eq!(artifact, Message::user("nothing evicted"));
+    }
+
+    #[test]
+    fn debug_shows_filter_marker_only_when_filter_present() {
+        let plain = InMemoryConversationMemory::new();
+        let rendered = format!("{plain:?}");
+        assert!(rendered.contains("InMemoryConversationMemory"));
+        assert!(!rendered.contains("<filter>"));
+
+        let filtered =
+            InMemoryConversationMemory::new().with_filter(|msgs: Vec<Message>| msgs);
+        assert!(format!("{filtered:?}").contains("<filter>"));
+    }
 }

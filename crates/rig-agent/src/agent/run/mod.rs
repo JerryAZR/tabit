@@ -2731,4 +2731,235 @@ mod tests {
         let response = expect_done(&mut resumed);
         assert_eq!(response.output, "done");
     }
+
+    fn streamed_invalid_call() -> (PartialStreamedTurn, StreamedInvalidToolCall) {
+        let invalid = StreamedInvalidToolCall {
+            tool_call: ToolCall::new(
+                "call_1".to_string(),
+                ToolFunction::new("unknown".to_string(), json!({})),
+            ),
+            internal_call_id: "ic1".to_string(),
+            args: Some("{}".to_string()),
+            executable_tool_names: tool_names(&["add"]),
+            allowed_tool_names: tool_names(&["add"]),
+        };
+        let partial = PartialStreamedTurn {
+            message_id: None,
+            text: Some("partial text".to_string()),
+            reasoning: Vec::new(),
+            pending_tool_calls: Vec::new(),
+        };
+        (partial, invalid)
+    }
+
+    fn streamed_text_turn() -> StreamedTurn {
+        StreamedTurn {
+            message_id: None,
+            choice: OneOrMany::one(AssistantContent::text("hi")),
+            executable_tool_names: tool_names(&["add"]),
+            allowed_tool_names: tool_names(&["add"]),
+            internal_call_ids: Vec::new(),
+        }
+    }
+
+    fn cancelled_reason(error: &PromptError) -> &str {
+        match error {
+            PromptError::PromptCancelled { reason, .. } => reason,
+            other => panic!("expected PromptCancelled, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn response_accessor_exposes_the_final_response_only_when_done() {
+        let mut run = AgentRun::new("hello");
+        assert!(run.response().is_none());
+        expect_call_model(&mut run);
+        assert!(run.response().is_none());
+        expect_continue(
+            run.model_response(text_turn("hi"))
+                .expect("model_response should succeed"),
+        );
+        assert!(run.response().is_none());
+        let response = expect_done(&mut run);
+        assert_eq!(run.response().expect("done run").output, response.output);
+    }
+
+    #[test]
+    fn accepted_turn_choice_is_only_some_while_awaiting_advance() {
+        let mut run = AgentRun::new("hello");
+        assert!(run.accepted_turn_choice().is_none());
+        expect_call_model(&mut run);
+        assert!(run.accepted_turn_choice().is_none());
+        expect_continue(
+            run.model_response(text_turn("hi"))
+                .expect("model_response should succeed"),
+        );
+        let choice = run
+            .accepted_turn_choice()
+            .expect("accepted turn awaiting advancement");
+        assert!(matches!(choice.first(), AssistantContent::Text(_)));
+        expect_done(&mut run);
+        assert!(run.accepted_turn_choice().is_none());
+    }
+
+    #[test]
+    fn retry_model_turn_rejects_out_of_protocol_calls_without_corrupting_state() {
+        let mut run = AgentRun::new("hello");
+
+        let err = run
+            .retry_model_turn(RetryRequest::Repeat)
+            .expect_err("no accepted turn is pending");
+        assert!(
+            cancelled_reason(&err).contains("without an accepted turn"),
+            "{err:?}"
+        );
+
+        let (_, _, turn) = expect_call_model(&mut run);
+        assert_eq!(turn, 1);
+    }
+
+    #[test]
+    fn out_of_protocol_ingestion_is_rejected_across_every_entry_point() {
+        let mut run = AgentRun::new("hello");
+
+        let err = run
+            .model_response(text_turn("hi"))
+            .expect_err("no CallModel step is pending");
+        assert!(
+            cancelled_reason(&err).contains("without a pending CallModel step"),
+            "{err:?}"
+        );
+
+        let err = run
+            .resolve_invalid_tool_call(InvalidToolCallAction::fail())
+            .expect_err("no invalid tool call is pending");
+        assert!(
+            cancelled_reason(&err).contains("without a pending invalid tool call"),
+            "{err:?}"
+        );
+
+        let err = run
+            .ignore_invalid_tool_call()
+            .expect_err("no invalid tool call is pending");
+        assert!(
+            cancelled_reason(&err).contains("without a pending invalid tool call"),
+            "{err:?}"
+        );
+
+        let (partial, invalid) = streamed_invalid_call();
+        let err = run
+            .resolve_streamed_invalid_tool_call(
+                &partial,
+                &invalid,
+                InvalidToolCallAction::fail(),
+            )
+            .expect_err("no CallModel step is pending");
+        assert!(
+            cancelled_reason(&err).contains("without a pending CallModel step"),
+            "{err:?}"
+        );
+
+        let err = run
+            .streamed_turn(streamed_text_turn())
+            .expect_err("no CallModel step is pending");
+        assert!(
+            cancelled_reason(&err).contains("without a pending CallModel step"),
+            "{err:?}"
+        );
+
+        // The run survives every rejected out-of-protocol call.
+        expect_call_model(&mut run);
+        expect_continue(
+            run.model_response(text_turn("hi"))
+                .expect("model_response should succeed"),
+        );
+        assert_eq!(expect_done(&mut run).output, "hi");
+    }
+
+    #[test]
+    fn next_step_is_rejected_while_an_invalid_tool_call_resolution_is_pending() {
+        let mut run = AgentRun::new("call something");
+        expect_call_model(&mut run);
+        expect_needs_resolution(
+            run.model_response(tool_call_turn("call_1", "unknown"))
+                .expect("model_response should succeed"),
+        );
+
+        let err = run.next_step().expect_err("a resolution is pending");
+        assert!(
+            cancelled_reason(&err).contains("resolve_invalid_tool_call first"),
+            "{err:?}"
+        );
+
+        // The pending resolution survives the rejected step.
+        let err = run
+            .resolve_invalid_tool_call(InvalidToolCallAction::fail())
+            .expect_err("fail action should error");
+        assert!(matches!(err, PromptError::UnknownToolCall { .. }));
+    }
+
+    #[test]
+    fn tool_results_rejects_partially_answered_pending_calls() {
+        let mut run = AgentRun::new("do both").max_turns(2);
+        expect_call_model(&mut run);
+        let turn = ModelTurn::new(
+            None,
+            OneOrMany::many(vec![tool_call("call_1", "add"), tool_call("call_2", "add")])
+                .expect("two items"),
+            Usage::new(),
+            tool_names(&["add"]),
+            tool_names(&["add"]),
+        );
+        expect_continue(
+            run.model_response(turn)
+                .expect("model_response should succeed"),
+        );
+        expect_call_tools(&mut run);
+
+        let err = run
+            .tool_results(vec![tool_result("call_1", "a")])
+            .expect_err("one pending call is left unanswered");
+        assert!(
+            cancelled_reason(&err).contains("unanswered"),
+            "{err:?}"
+        );
+
+        // The rejection does not corrupt the run: answering both calls is
+        // accepted afterwards.
+        run.tool_results(vec![tool_result("call_1", "a"), tool_result("call_2", "b")])
+            .expect("complete results should be accepted after a rejection");
+    }
+
+    #[test]
+    fn streamed_repair_to_a_disallowed_name_fails() {
+        let mut run = AgentRun::new("call something");
+        expect_call_model(&mut run);
+        let (partial, invalid) = streamed_invalid_call();
+
+        let err = run
+            .resolve_streamed_invalid_tool_call(
+                &partial,
+                &invalid,
+                InvalidToolCallAction::repair("also_unknown"),
+            )
+            .expect_err("repair to a disallowed name should fail");
+
+        assert!(matches!(
+            err,
+            PromptError::UnknownToolCall { tool_name, .. } if tool_name == "also_unknown"
+        ));
+    }
+
+    #[test]
+    fn streamed_skip_under_tool_choice_none_fails() {
+        let mut run = AgentRun::new("call something").with_tool_choice(ToolChoice::None);
+        expect_call_model(&mut run);
+        let (partial, invalid) = streamed_invalid_call();
+
+        let err = run
+            .resolve_streamed_invalid_tool_call(&partial, &invalid, InvalidToolCallAction::skip("nope"))
+            .expect_err("skip under ToolChoice::None should fail");
+
+        assert!(matches!(err, PromptError::UnknownToolCall { .. }));
+    }
 }

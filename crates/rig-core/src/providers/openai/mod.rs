@@ -229,4 +229,54 @@ mod tests {
             .unwrap();
         assert!(inner_required.contains(&json!("value")));
     }
+
+    #[test]
+    fn test_sanitize_adds_empty_properties_to_object_schemas() {
+        let mut schema = json!({
+            "type": "object"
+        });
+
+        sanitize_schema(&mut schema);
+
+        assert_eq!(schema["properties"], json!({}));
+        assert_eq!(schema["additionalProperties"], json!(false));
+        assert_eq!(schema["required"], json!([]));
+    }
+
+    #[test]
+    fn test_sanitize_merges_one_of_into_existing_any_of() {
+        let mut schema = json!({
+            "anyOf": [{ "type": "string" }],
+            "oneOf": [{ "type": "number" }, { "type": "boolean" }]
+        });
+
+        sanitize_schema(&mut schema);
+
+        assert!(schema.get("oneOf").is_none());
+        let merged = schema["anyOf"].as_array().unwrap();
+        assert_eq!(merged.len(), 3, "oneOf variants append to anyOf: {merged:?}");
+        assert!(merged.contains(&json!({ "type": "string" })));
+        assert!(merged.contains(&json!({ "type": "number" })));
+        assert!(merged.contains(&json!({ "type": "boolean" })));
+    }
+
+    #[test]
+    fn test_sanitize_recurses_into_array_items() {
+        let mut schema = json!({
+            "type": "object",
+            "properties": {
+                "tags": {
+                    "type": "array",
+                    "items": { "type": "object", "properties": { "label": { "type": "string" } } }
+                }
+            }
+        });
+
+        sanitize_schema(&mut schema);
+
+        let items = &schema["properties"]["tags"]["items"];
+        assert_eq!(items["additionalProperties"], json!(false));
+        let required = items["required"].as_array().unwrap();
+        assert!(required.contains(&json!("label")));
+    }
 }

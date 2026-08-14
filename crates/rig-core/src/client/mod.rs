@@ -948,7 +948,9 @@ mod wasm_model_listing_compile_checks {
 
 #[cfg(test)]
 mod tests {
-    use crate::providers::anthropic;
+    use super::*;
+    use crate::providers::{anthropic, openai};
+    use crate::test_utils::RecordingHttpClient;
 
     /// Type-level test that `Client::builder()` methods do not require annotation to determine
     /// backig HTTP client
@@ -960,5 +962,328 @@ mod tests {
             .api_key("Foo")
             .build()
             .unwrap();
+    }
+
+    #[test]
+    fn nothing_api_key_contributes_no_header() {
+        assert!(
+            Nothing.into_header().is_none(),
+            "`Nothing` should let the provider extension own credentials"
+        );
+    }
+
+    #[test]
+    fn debug_ext_default_fields_are_empty() {
+        use crate::providers::anthropic::client::AnthropicExt;
+
+        assert_eq!(
+            AnthropicExt.fields().count(),
+            0,
+            "extensions without custom fields should report none"
+        );
+    }
+
+    #[test]
+    fn client_debug_redacts_credentials_but_keeps_other_headers() {
+        let mut headers = HeaderMap::new();
+        headers.insert(
+            HeaderName::from_static("x-custom"),
+            HeaderValue::from_static("custom-value"),
+        );
+
+        let client = anthropic::Client::builder()
+            .api_key("super-secret-key")
+            .http_headers(headers)
+            .build()
+            .expect("build client");
+
+        let debug = format!("{client:?}");
+        assert!(
+            !debug.contains("super-secret-key"),
+            "debug output must not leak API keys"
+        );
+        assert!(
+            debug.contains("anthropic-version"),
+            "non-credential headers should remain visible"
+        );
+        assert!(debug.contains("custom-value"));
+    }
+
+    #[test]
+    fn provider_build_uri_handles_trailing_slash_and_empty_base() {
+        let client = anthropic::Client::builder()
+            .api_key("test-key")
+            .build()
+            .expect("build client");
+
+        assert_eq!(
+            client
+                .ext()
+                .build_uri("https://api.anthropic.com/", "/v1/messages", Transport::Http),
+            "https://api.anthropic.com/v1/messages",
+            "a trailing slash must not be doubled"
+        );
+        assert_eq!(
+            client.ext().build_uri("", "/v1/messages", Transport::Http),
+            "v1/messages",
+            "an empty base URL (user-supplied endpoint) must not add a slash"
+        );
+    }
+
+    #[test]
+    fn builder_accessors_expose_base_url_headers_and_ext() {
+        let mut headers = HeaderMap::new();
+        headers.insert(
+            HeaderName::from_static("x-custom"),
+            HeaderValue::from_static("custom-value"),
+        );
+
+        let builder = anthropic::Client::builder()
+            .base_url("https://example.invalid")
+            .http_headers(headers)
+            .api_key("test-key");
+
+        assert_eq!(builder.get_base_url(), "https://example.invalid");
+        assert!(
+            builder.ext().anthropic_betas.is_empty(),
+            "default anthropic builder state should carry no betas"
+        );
+
+        let client = builder.build().expect("build client");
+        assert_eq!(client.base_url(), "https://example.invalid");
+        assert!(
+            client.headers().contains_key("x-custom"),
+            "http_headers must be applied to the built client"
+        );
+    }
+
+    #[tokio::test]
+    async fn request_builders_apply_default_headers_and_provider_uris() {
+        use crate::http_client::{HttpClientExt, NoBody};
+        use bytes::Bytes;
+
+        let http_backend = RecordingHttpClient::new("");
+        let client = anthropic::Client::builder()
+            .api_key("test-key")
+            .http_client(http_backend.clone())
+            .build()
+            .expect("build client");
+
+        // Regular POST
+        let req = client
+            .post("/v1/messages")
+            .expect("post builder")
+            .body(Bytes::new())
+            .expect("post body");
+        client.send::<_, Bytes>(req).await.expect("send post");
+        let captured = &http_backend.requests()[0];
+        assert_eq!(captured.uri, "https://api.anthropic.com/v1/messages");
+        assert!(captured.headers.contains_key("x-api-key"));
+        assert!(captured.headers.contains_key("anthropic-version"));
+        assert_eq!(
+            captured.headers.get(http::header::CONTENT_TYPE).unwrap(),
+            "application/json"
+        );
+
+        // SSE POST
+        let req = client
+            .post_sse("/v1/messages")
+            .expect("post_sse builder")
+            .body(Bytes::new())
+            .expect("post_sse body");
+        client.send::<_, Bytes>(req).await.expect("send post_sse");
+        let captured = &http_backend.requests()[1];
+        assert_eq!(captured.uri, "https://api.anthropic.com/v1/messages");
+        assert!(captured.headers.contains_key("x-api-key"));
+
+        // SSE GET
+        let req = client
+            .get_sse("/v1/messages")
+            .expect("get_sse builder")
+            .body(NoBody)
+            .expect("get_sse body");
+        client.send::<_, Bytes>(req).await.expect("send get_sse");
+        let captured = &http_backend.requests()[2];
+        assert_eq!(captured.uri, "https://api.anthropic.com/v1/messages");
+
+        // Regular GET
+        let req = client
+            .get("/v1/models")
+            .expect("get builder")
+            .body(NoBody)
+            .expect("get body");
+        client.send::<_, Bytes>(req).await.expect("send get");
+        let captured = &http_backend.requests()[3];
+        assert_eq!(captured.uri, "https://api.anthropic.com/v1/models");
+        assert!(captured.headers.contains_key("x-api-key"));
+    }
+
+    #[tokio::test]
+    async fn verify_maps_overloaded_provider_status_to_http_error() {
+        let body = r#"{"error":{"message":"overloaded"}}"#;
+        let overloaded =
+            http::StatusCode::from_u16(529).expect("529 should be a valid status code");
+        let http_backend = RecordingHttpClient::with_error_response(overloaded, body);
+        let client = openai::Client::builder()
+            .api_key("test-key")
+            .http_client(http_backend)
+            .build()
+            .expect("build client");
+
+        let error = client
+            .verify()
+            .await
+            .expect_err("verify should fail on a 529 response");
+
+        assert!(matches!(error, VerifyError::HttpError(_)));
+        assert_eq!(error.provider_response_status(), Some(overloaded));
+        assert_eq!(error.provider_response_body(), Some(body));
+    }
+
+    #[tokio::test]
+    async fn verify_maps_unlisted_non_success_status_to_http_error() {
+        let body = r#"{"error":{"message":"not found"}}"#;
+        let http_backend = RecordingHttpClient::with_error_response(
+            http::StatusCode::NOT_FOUND,
+            body,
+        );
+        let client = openai::Client::builder()
+            .api_key("test-key")
+            .http_client(http_backend)
+            .build()
+            .expect("build client");
+
+        let error = client
+            .verify()
+            .await
+            .expect_err("verify should fail on a 404 response");
+
+        assert!(matches!(error, VerifyError::HttpError(_)));
+        assert_eq!(
+            error.provider_response_status(),
+            Some(http::StatusCode::NOT_FOUND)
+        );
+        assert_eq!(error.provider_response_body(), Some(body));
+    }
+
+    #[tokio::test]
+    async fn verify_accepts_any_success_status() {
+        let http_backend = RecordingHttpClient::with_error_response(
+            http::StatusCode::CREATED,
+            "",
+        );
+        let client = openai::Client::builder()
+            .api_key("test-key")
+            .http_client(http_backend)
+            .build()
+            .expect("build client");
+
+        client
+            .verify()
+            .await
+            .expect("any 2xx status should verify successfully");
+    }
+
+    /// Runtime coverage for the blanket [`RerankingClient`] implementation over
+    /// the generic [`Client`], using a local provider extension that only
+    /// declares the rerank capability.
+    mod rerank_capability {
+        use super::*;
+        use crate::http_client;
+        use crate::http_client::HttpClientExt;
+        use crate::rerank::{RerankError, RerankModel, RerankResponse};
+
+        #[derive(Debug, Default, Clone, Copy)]
+        struct RerankExt;
+        #[derive(Debug, Default, Clone, Copy)]
+        struct RerankExtBuilder;
+
+        impl Provider for RerankExt {
+            type Builder = RerankExtBuilder;
+            const VERIFY_PATH: &'static str = "/";
+        }
+
+        impl ProviderBuilder for RerankExtBuilder {
+            type Extension<H> = RerankExt where H: HttpClientExt;
+            type ApiKey = BearerAuth;
+
+            const BASE_URL: &'static str = "https://rerank.invalid";
+
+            fn build<H>(
+                _builder: &ClientBuilder<Self, Self::ApiKey, H>,
+            ) -> http_client::Result<Self::Extension<H>>
+            where
+                H: HttpClientExt,
+            {
+                Ok(RerankExt)
+            }
+        }
+
+        impl<H> Capabilities<H> for RerankExt {
+            type Completion = Nothing;
+            type Embeddings = Nothing;
+            type Transcription = Nothing;
+            type ModelListing = Nothing;
+            #[cfg(feature = "image")]
+            type ImageGeneration = Nothing;
+            #[cfg(feature = "audio")]
+            type AudioGeneration = Nothing;
+            type Rerank = Capable<MockRerankModel<H>>;
+        }
+
+        impl DebugExt for RerankExt {}
+
+        #[derive(Clone, Debug)]
+        struct MockRerankModel<H> {
+            model: String,
+            _client: Client<RerankExt, H>,
+        }
+
+        impl<H> RerankModel for MockRerankModel<H>
+        where
+            H: Clone + Send + Sync + 'static,
+        {
+            const MAX_DOCUMENTS: usize = 16;
+
+            type Client = Client<RerankExt, H>;
+
+            fn make(client: &Self::Client, model: impl Into<String>) -> Self {
+                Self {
+                    model: model.into(),
+                    _client: client.clone(),
+                }
+            }
+
+            async fn rerank(
+                &self,
+                _query: &str,
+                _documents: Vec<String>,
+            ) -> Result<RerankResponse, RerankError> {
+                Err(RerankError::ResponseError(format!(
+                    "{} is a mock rerank model",
+                    self.model
+                )))
+            }
+        }
+
+        #[tokio::test]
+        async fn blanket_reranking_client_constructs_and_uses_the_model() {
+            let client = Client::<RerankExt, reqwest::Client>::builder()
+                .api_key("test-key")
+                .http_client(RecordingHttpClient::new(""))
+                .build()
+                .expect("client should build over a scripted backend");
+
+            let model = client.rerank_model("rerank-mock");
+
+            let error = model
+                .rerank("query", vec!["document".to_string()])
+                .await
+                .expect_err("mock rerank model should fail");
+            assert!(matches!(
+                error,
+                RerankError::ResponseError(message) if message.contains("rerank-mock")
+            ));
+        }
     }
 }

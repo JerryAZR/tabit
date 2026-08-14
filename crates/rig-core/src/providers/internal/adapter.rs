@@ -363,3 +363,138 @@ fn drain_buffered<R>(
 }
 
 pub use crate::streaming::SyntheticIds;
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn byte_frames_render_lossily_as_text() {
+        assert_eq!(WireFrame::Text("hi".to_string()).as_str(), "hi");
+        assert_eq!(WireFrame::Bytes(vec![0x68, 0x69]).as_str(), "hi");
+        // Invalid UTF-8 degrades with the replacement character, never panics.
+        assert_eq!(WireFrame::Bytes(vec![0xff]).as_str(), "\u{fffd}");
+    }
+
+    #[test]
+    fn triage_frame_passes_known_and_fails_corrupt() {
+        let triaged = triage_frame::<u8>(WireEvent::Known(1));
+        assert!(matches!(triaged, Ok(TriagedFrame::Event(1))));
+
+        let corrupt =
+            <serde_json::Error as serde::de::Error>::custom("data-level defect");
+        let triaged = triage_frame::<u8>(WireEvent::Corrupt(corrupt));
+        assert!(matches!(
+            triaged,
+            Err(CompletionError::JsonError(error)) if error.to_string().contains("data-level defect")
+        ));
+    }
+
+    #[test]
+    fn triage_frame_warns_and_hands_back_unknown_payloads() {
+        // The warn's `payload_bytes` field expression only evaluates under an
+        // enabled subscriber; install one so the helper runs.
+        let _isolation = crate::test_utils::scoped_tracing_subscriber_guard_blocking();
+        let subscriber = tracing_subscriber::fmt()
+            .with_max_level(tracing::Level::WARN)
+            .with_ansi(false)
+            .without_time()
+            .with_writer(std::io::sink)
+            .finish();
+        let _guard = tracing::subscriber::set_default(subscriber);
+
+        let triaged = triage_frame::<u8>(WireEvent::Unknown {
+            event_type: "future.event".to_string(),
+            value: serde_json::json!({"payload": 1}),
+        });
+        match triaged {
+            Ok(TriagedFrame::Unknown(value)) => {
+                assert_eq!(value, serde_json::json!({"payload": 1}));
+            }
+            other => panic!("unknown frames pass through raw, got {other:?}"),
+        }
+    }
+
+    /// Minimal adapter for driver-policy tests: `term` classifies Known and
+    /// interprets to the terminal record, `bad` is Corrupt, anything else is
+    /// Unknown.
+    #[derive(Default)]
+    struct StubAdapter;
+
+    impl WireAdapter for StubAdapter {
+        type Frame = WireFrame;
+        type Event = ();
+        type Response = ();
+
+        fn classify(&self, frame: WireFrame) -> WireEvent<()> {
+            let data = frame.as_str();
+            let data = data.as_ref();
+            match data {
+                "term" => WireEvent::Known(()),
+                "bad" => WireEvent::Corrupt(
+                    <serde_json::Error as serde::de::Error>::custom("bad frame"),
+                ),
+                other => WireEvent::Unknown {
+                    event_type: other.to_string(),
+                    value: serde_json::Value::String(other.to_string()),
+                },
+            }
+        }
+
+        fn interpret(&mut self, _event: (), out: &mut AdapterOutput<()>) {
+            out.push(Ok(RawStreamingChoice::FinalResponse(())));
+        }
+
+        fn finish(&mut self, _out: &mut AdapterOutput<()>) {}
+    }
+
+    #[test]
+    fn run_wire_buffered_stops_after_the_terminal_record() {
+        let choices = run_wire_buffered(
+            [WireFrame::Text("term".into()), WireFrame::Text("term".into())],
+            StubAdapter,
+        )
+        .expect("buffered run should succeed");
+
+        assert_eq!(
+            choices.len(),
+            1,
+            "no frame after the terminal record may contribute choices"
+        );
+        assert!(matches!(choices[0], RawStreamingChoice::FinalResponse(())));
+    }
+
+    #[test]
+    fn run_wire_buffered_skips_unknown_frames_with_a_warning() {
+        let _isolation = crate::test_utils::scoped_tracing_subscriber_guard_blocking();
+        let subscriber = tracing_subscriber::fmt()
+            .with_max_level(tracing::Level::WARN)
+            .with_ansi(false)
+            .without_time()
+            .with_writer(std::io::sink)
+            .finish();
+        let _guard = tracing::subscriber::set_default(subscriber);
+
+        let choices = run_wire_buffered(
+            [WireFrame::Text("future.event".into())],
+            StubAdapter,
+        )
+        .expect("unknown frames are warn-and-skip, not failures");
+
+        assert!(
+            choices.is_empty(),
+            "a buffered result has no raw channel, so unknown frames vanish"
+        );
+    }
+
+    #[test]
+    fn run_wire_buffered_fails_whole_operation_on_corrupt_frames() {
+        let error = run_wire_buffered([WireFrame::Text("bad".into())], StubAdapter)
+            .expect_err("a corrupt frame must fail the buffered operation");
+
+        assert!(
+            matches!(error, CompletionError::ResponseError(ref message) if message.contains("bad frame")),
+            "the classifier's error message surfaces verbatim: {error:?}"
+        );
+    }
+}

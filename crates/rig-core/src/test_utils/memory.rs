@@ -154,3 +154,66 @@ impl ConversationMemory for AppendFailingMemory {
         Box::pin(async { Ok(()) })
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::{AppendFailingMemory, CountingMemory, FailingMemory};
+    use crate::completion::Message;
+    use crate::memory::ConversationMemory as _;
+
+    #[tokio::test]
+    async fn counting_memory_records_loads_appends_and_clears() {
+        let memory = CountingMemory::default();
+
+        let messages = memory.load("conv-1").await.expect("load should succeed");
+        assert!(messages.is_empty());
+
+        memory
+            .append("conv-1", vec![Message::user("hello")])
+            .await
+            .expect("append should succeed");
+
+        let messages = memory.load("conv-1").await.expect("load should succeed");
+        assert_eq!(messages.len(), 1);
+
+        memory.clear("conv-1").await.expect("clear should succeed");
+        let messages = memory.load("conv-1").await.expect("load should succeed");
+        assert!(messages.is_empty());
+
+        assert_eq!(memory.load_count(), 3);
+        assert_eq!(memory.append_count(), 1);
+    }
+
+    #[tokio::test]
+    async fn failing_memory_fails_load_and_no_ops_append_and_clear() {
+        let memory = FailingMemory::new("cannot reach store");
+
+        let error = memory
+            .load("conv-1")
+            .await
+            .expect_err("load must fail");
+        assert!(error.to_string().contains("cannot reach store"));
+
+        memory
+            .append("conv-1", vec![Message::user("hello")])
+            .await
+            .expect("append is a no-op success");
+        memory.clear("conv-1").await.expect("clear is a no-op success");
+    }
+
+    #[tokio::test]
+    async fn append_failing_memory_loads_empty_and_fails_append() {
+        let memory = AppendFailingMemory::default();
+
+        let messages = memory.load("conv-1").await.expect("load should succeed");
+        assert!(messages.is_empty());
+
+        let error = memory
+            .append("conv-1", vec![Message::user("hello")])
+            .await
+            .expect_err("append must fail");
+        assert!(error.to_string().contains("append boom"));
+
+        memory.clear("conv-1").await.expect("clear is a no-op success");
+    }
+}

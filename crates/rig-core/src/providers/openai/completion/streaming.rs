@@ -482,6 +482,8 @@ mod tests {
         assert_zero_arg_tool_call_is_emitted, sse_bytes_from_data_lines,
     };
 
+    use crate::http_client;
+
     fn streaming_request() -> http::Request<Vec<u8>> {
         http::Request::builder()
             .method("POST")
@@ -1296,5 +1298,310 @@ mod tests {
 
         assert_eq!(texts, ["hi"]);
         assert!(saw_final, "the genuine terminal must still arrive");
+    }
+
+    #[test]
+    fn test_streaming_delta_content_as_array_of_parts() {
+        // Some compatible providers (e.g. Mistral reasoning models) stream the
+        // delta content as an array of content parts instead of a string.
+        let json =
+            r#"{"content":[{"type":"text","text":"Hello "},{"type":"text","text":"world"}]}"#;
+        let delta: StreamingDelta = serde_json::from_str(json).unwrap();
+        assert_eq!(delta.content.as_deref(), Some("Hello world"));
+
+        // Only non-text parts join to an empty string, which reads as no content.
+        let json = r#"{"content":[{"type":"image_url","image_url":{"url":"https://example.com/x.png"}}]}"#;
+        let delta: StreamingDelta = serde_json::from_str(json).unwrap();
+        assert_eq!(delta.content, None);
+
+        // Any other scalar shape is not text content either.
+        let json = r#"{"content": 42}"#;
+        let delta: StreamingDelta = serde_json::from_str(json).unwrap();
+        assert_eq!(delta.content, None);
+    }
+
+    #[test]
+    fn test_streaming_completion_response_new_starts_minimal() {
+        let response = StreamingCompletionResponse::new(Usage::new());
+
+        assert_eq!(response.finish_reason, None);
+        assert_eq!(response.response_id, None);
+        assert_eq!(response.model, None);
+    }
+
+    #[test]
+    fn test_openai_profile_defines_no_detail_hooks() {
+        let profile =
+            OpenAICompatibleProfile::<crate::providers::openai::OpenAICompletionsExt, Usage>::default(
+            );
+
+        assert!(
+            profile
+                .detail_reasoning(&serde_json::json!({"type": "reasoning.encrypted"}))
+                .is_none()
+        );
+        assert!(
+            profile
+                .decorate_tool_call(&serde_json::json!({"type": "tool_decoration"}))
+                .is_none()
+        );
+    }
+
+    /// A streaming double that records each request body before yielding the
+    /// scripted byte chunks, so tests can assert on the serialized wire request.
+    #[derive(Clone, Default, Debug)]
+    struct CapturingStreamingClient {
+        chunks:
+            std::sync::Arc<std::sync::Mutex<Option<Vec<http_client::Result<bytes::Bytes>>>>>,
+        bodies: std::sync::Arc<std::sync::Mutex<Vec<Vec<u8>>>>,
+    }
+
+    impl CapturingStreamingClient {
+        fn new(chunks: Vec<http_client::Result<bytes::Bytes>>) -> Self {
+            Self {
+                chunks: std::sync::Arc::new(std::sync::Mutex::new(Some(chunks))),
+                bodies: std::sync::Arc::new(std::sync::Mutex::new(Vec::new())),
+            }
+        }
+
+        fn sole_request_body(&self) -> Vec<u8> {
+            let mut bodies = self.bodies.lock().unwrap_or_else(|p| p.into_inner());
+            assert_eq!(bodies.len(), 1, "expected exactly one captured request");
+            bodies.pop().unwrap()
+        }
+    }
+
+    impl crate::http_client::HttpClientExt for CapturingStreamingClient {
+        fn send<T, U>(
+            &self,
+            _req: http::Request<T>,
+        ) -> impl std::future::Future<Output = http_client::Result<http::Response<crate::http_client::LazyBody<U>>>> + crate::wasm_compat::WasmCompatSend + 'static
+        where
+            T: Into<bytes::Bytes> + crate::wasm_compat::WasmCompatSend,
+            U: From<bytes::Bytes> + crate::wasm_compat::WasmCompatSend + 'static,
+        {
+            futures::future::ready(Err(http_client::Error::InvalidStatusCode(
+                http::StatusCode::NOT_IMPLEMENTED,
+            )))
+        }
+
+        fn send_multipart<U>(
+            &self,
+            _req: http::Request<crate::http_client::MultipartForm>,
+        ) -> impl std::future::Future<Output = http_client::Result<http::Response<crate::http_client::LazyBody<U>>>> + crate::wasm_compat::WasmCompatSend + 'static
+        where
+            U: From<bytes::Bytes> + crate::wasm_compat::WasmCompatSend + 'static,
+        {
+            futures::future::ready(Err(http_client::Error::InvalidStatusCode(
+                http::StatusCode::NOT_IMPLEMENTED,
+            )))
+        }
+
+        fn send_streaming<T>(
+            &self,
+            req: http::Request<T>,
+        ) -> impl std::future::Future<Output = http_client::Result<crate::http_client::StreamingResponse>> + crate::wasm_compat::WasmCompatSend
+        where
+            T: Into<bytes::Bytes> + crate::wasm_compat::WasmCompatSend,
+        {
+            let body: bytes::Bytes = req.into_body().into();
+            self.bodies
+                .lock()
+                .unwrap_or_else(|p| p.into_inner())
+                .push(body.to_vec());
+            let chunks = self
+                .chunks
+                .lock()
+                .unwrap_or_else(|p| p.into_inner())
+                .take();
+
+            async move {
+                let Some(chunks) = chunks else {
+                    return Err(http_client::Error::InvalidStatusCodeWithMessage(
+                        http::StatusCode::INTERNAL_SERVER_ERROR,
+                        "streaming chunks should only be consumed once".to_string(),
+                    ));
+                };
+
+                let byte_stream = futures::stream::iter(chunks);
+                let boxed_stream: http_client::sse::BoxedStream = Box::pin(byte_stream);
+
+                http::Response::builder()
+                    .status(http::StatusCode::OK)
+                    .header(http::header::CONTENT_TYPE, "text/event-stream")
+                    .body(boxed_stream)
+                    .map_err(http_client::Error::Protocol)
+            }
+        }
+    }
+
+    async fn captured_stream_request_body(
+        additional_params: serde_json::Value,
+    ) -> serde_json::Value {
+        use crate::client::CompletionClient;
+        use crate::completion::CompletionModel;
+
+        let http_client = CapturingStreamingClient::new(vec![Ok(bytes::Bytes::from_static(
+            b"data: [DONE]\n\n",
+        ))]);
+        let client = crate::providers::openai::CompletionsClient::builder()
+            .http_client(http_client.clone())
+            .api_key("test-key")
+            .build()
+            .unwrap();
+        let model = client.completion_model("gpt-test");
+        let request = model
+            .completion_request("hello")
+            .additional_params(additional_params)
+            .build();
+
+        // The transport is lazy: the request only goes out once the stream is
+        // polled, so drain it before asserting on the captured wire body.
+        use futures::StreamExt;
+
+        let mut stream = model.raw_stream(request).await.unwrap();
+        while stream.next().await.is_some() {}
+
+        serde_json::from_slice(&http_client.sole_request_body()).unwrap()
+    }
+
+    #[tokio::test]
+    async fn capturing_double_supports_exactly_one_streaming_request() {
+        let client = CapturingStreamingClient::new(Vec::new());
+
+        // Unary paths are not implemented by the streaming double.
+        let unary: http_client::Result<http::Response<crate::http_client::LazyBody<bytes::Bytes>>> =
+            crate::http_client::HttpClientExt::send(
+                &client,
+                http::Request::post("http://localhost").body(Vec::new()).unwrap(),
+            )
+            .await;
+        assert!(unary.is_err());
+
+        let multipart: http_client::Result<
+            http::Response<crate::http_client::LazyBody<bytes::Bytes>>,
+        > = crate::http_client::HttpClientExt::send_multipart(
+            &client,
+            http::Request::post("http://localhost")
+                .body(crate::http_client::MultipartForm::new())
+                .unwrap(),
+        )
+        .await;
+        assert!(multipart.is_err());
+
+        // The streaming path works exactly once, then reports misuse loudly.
+        let first = crate::http_client::HttpClientExt::send_streaming(
+            &client,
+            http::Request::post("http://localhost").body(Vec::new()).unwrap(),
+        )
+        .await;
+        assert!(first.is_ok());
+
+        let second = crate::http_client::HttpClientExt::send_streaming(
+            &client,
+            http::Request::post("http://localhost").body(Vec::new()).unwrap(),
+        )
+        .await;
+        let Err(error) = second else {
+            panic!("a streaming double must be consumed exactly once");
+        };
+        assert!(error.to_string().contains("consumed once"));
+    }
+
+    #[tokio::test]
+    async fn normalized_stream_maps_the_terminal_record() {
+        use crate::client::CompletionClient;
+        use crate::completion::CompletionModel;
+        use crate::test_utils::MockStreamingClient;
+        use futures::StreamExt;
+
+        let client = crate::providers::openai::CompletionsClient::builder()
+            .http_client(MockStreamingClient {
+                sse_bytes: sse_bytes_from_data_lines([
+                    r#"{"id":"chatcmpl-1","object":"chat.completion.chunk","choices":[{"delta":{"content":"hi"},"finish_reason":null}]}"#,
+                    r#"{"id":"chatcmpl-1","object":"chat.completion.chunk","choices":[{"delta":{},"finish_reason":"stop"}],"usage":{"prompt_tokens":3,"completion_tokens":1,"total_tokens":4}}"#,
+                    "[DONE]",
+                ]),
+            })
+            .api_key("test-key")
+            .build()
+            .unwrap();
+        let model = client.completion_model("gpt-test");
+        let request = model.completion_request("hello").build();
+
+        let mut stream = model.stream(request).await.unwrap();
+        let mut texts = Vec::new();
+        let mut final_record = None;
+        while let Some(item) = stream.next().await {
+            if let Ok(streaming::StreamedAssistantContent::Text(text)) = &item {
+                texts.push(text.text.clone());
+            }
+            if let Ok(streaming::StreamedAssistantContent::Final(response)) = item {
+                final_record = Some(response);
+            }
+        }
+
+        assert_eq!(texts, ["hi"]);
+        let final_record = final_record.expect("a terminal record");
+        assert_eq!(final_record.provider, "openai");
+        assert_eq!(final_record.usage.total_tokens, 4);
+    }
+
+    #[tokio::test]
+    async fn caller_supplied_stream_options_keep_their_keys_and_gain_include_usage() {
+        // The `include_usage` merge is shallow: the caller's stream_options
+        // keys survive and the usage chunk is still requested.
+        let body = captured_stream_request_body(serde_json::json!({
+            "stream_options": {"custom": true}
+        }))
+        .await;
+
+        assert_eq!(body["stream"], true);
+        assert_eq!(body["stream_options"]["custom"], true);
+        assert_eq!(body["stream_options"]["include_usage"], true);
+    }
+
+    #[tokio::test]
+    async fn a_non_object_stream_options_is_left_alone() {
+        // A scalar `stream_options` cannot be extended, so it is passed through
+        // verbatim rather than replaced.
+        let body =
+            captured_stream_request_body(serde_json::json!({"stream_options": true})).await;
+
+        assert_eq!(body["stream"], true);
+        assert_eq!(body["stream_options"], serde_json::Value::Bool(true));
+        assert!(body.get("include_usage").is_none());
+    }
+
+    #[tokio::test]
+    async fn streaming_request_body_is_traced_under_a_trace_subscriber() {
+        use crate::client::CompletionClient;
+        use crate::completion::CompletionModel;
+
+        // Scoped-subscriber tests must not run concurrently; see
+        // `test_utils::scoped_tracing_subscriber_guard`.
+        let _isolation = crate::test_utils::scoped_tracing_subscriber_guard().await;
+        let subscriber = tracing_subscriber::fmt()
+            .with_max_level(tracing::Level::TRACE)
+            .with_ansi(false)
+            .without_time()
+            .with_writer(std::io::sink)
+            .finish();
+        let _guard = tracing::subscriber::set_default(subscriber);
+
+        let client = crate::providers::openai::CompletionsClient::builder()
+            .http_client(CapturingStreamingClient::new(vec![Ok(
+                bytes::Bytes::from_static(b"data: [DONE]\n\n"),
+            )]))
+            .api_key("test-key")
+            .build()
+            .unwrap();
+        let model = client.completion_model("gpt-test");
+        let request = model.completion_request("hello").build();
+
+        use futures::StreamExt;
+
+        let mut stream = model.raw_stream(request).await.unwrap();
+        while stream.next().await.is_some() {}
     }
 }

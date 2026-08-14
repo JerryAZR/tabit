@@ -740,4 +740,138 @@ mod test {
 
         assert!(dummy.field.is_none());
     }
+
+    #[test]
+    fn test_first_mut_and_last() {
+        let mut one = OneOrMany::one("only".to_string());
+        assert_eq!(one.last(), "only".to_string());
+        *one.first_mut() = "first".to_string();
+        assert_eq!(one.first(), "first".to_string());
+        *one.last_mut() = "last".to_string();
+        assert_eq!(one.last(), "last".to_string());
+
+        let mut many =
+            OneOrMany::many(vec!["a".to_string(), "b".to_string(), "c".to_string()]).unwrap();
+        assert_eq!(many.last(), "c".to_string());
+        assert_eq!(*many.last_ref(), "c".to_string());
+        *many.first_mut() = "A".to_string();
+        *many.last_mut() = "C".to_string();
+        assert_eq!(many.iter().collect::<Vec<_>>(), [&"A", &"b", &"C"]);
+    }
+
+    #[test]
+    fn test_insert() {
+        let mut oom = OneOrMany::many(vec!["a".to_string(), "c".to_string()]).unwrap();
+
+        // Inserting at index 0 replaces `first` and shifts the old first into `rest`.
+        oom.insert(0, "start".to_string());
+        assert_eq!(
+            oom.iter().collect::<Vec<_>>(),
+            [&"start", &"a", &"c"],
+            "insert at 0 should shift the old first item into rest"
+        );
+
+        // Inserting at index 1 goes to the front of `rest`.
+        oom.insert(1, "after-start".to_string());
+        assert_eq!(
+            oom.iter().collect::<Vec<_>>(),
+            [&"start", &"after-start", &"a", &"c"]
+        );
+
+        // Inserting at a later index maps to `rest[index - 1]`.
+        oom.insert(3, "b".to_string());
+        assert_eq!(
+            oom.iter().collect::<Vec<_>>(),
+            [&"start", &"after-start", &"a", &"b", &"c"]
+        );
+        assert_eq!(oom.len(), 5);
+    }
+
+    #[test]
+    fn test_is_empty_always_false() {
+        assert!(!OneOrMany::one("hello".to_string()).is_empty());
+        assert!(
+            !OneOrMany::many(vec!["hello".to_string(), "word".to_string()])
+                .unwrap()
+                .is_empty()
+        );
+    }
+
+    #[test]
+    fn test_exhausted_iter_mut_size_hint() {
+        let mut oom = OneOrMany::one("hello".to_string());
+        let mut iter = oom.iter_mut();
+        while iter.next().is_some() {}
+        assert_eq!(iter.size_hint(), (0, Some(0)));
+    }
+
+    #[test]
+    fn test_deserialize_rejects_non_sequence_and_empty_sequence() {
+        let type_err = serde_json::from_value::<OneOrMany<i32>>(json!(5)).unwrap_err();
+        assert!(
+            type_err.to_string().contains("a sequence of at least one element"),
+            "unexpected error: {type_err}"
+        );
+
+        let length_err = serde_json::from_value::<OneOrMany<i32>>(json!([])).unwrap_err();
+        assert!(
+            length_err.to_string().contains("a sequence of at least one element"),
+            "unexpected error: {length_err}"
+        );
+    }
+
+    #[test]
+    fn test_deserialize_string_field_rejects_non_string_non_sequence() {
+        let err = serde_json::from_value::<DummyStruct>(json!({"field": 5})).unwrap_err();
+        assert!(
+            err.to_string().contains("a string or sequence"),
+            "unexpected error: {err}"
+        );
+    }
+
+    #[test]
+    fn test_deserialize_map_field_becomes_single_item() {
+        let dummy: DummyStruct =
+            serde_json::from_value(json!({"field": {"string": "hello"}})).unwrap();
+        assert_eq!(dummy.field.len(), 1);
+        assert_eq!(dummy.field.first(), DummyString::from_str("hello").unwrap());
+    }
+
+    // A deserializer whose `deserialize_option` immediately hands the visitor a
+    // type it cannot handle, so the `StringOrOptionOneOrMany` visitor reports its
+    // `expecting` message ("null, a string, or a sequence").
+    struct NotAnOption;
+
+    impl<'de> serde::Deserializer<'de> for NotAnOption {
+        type Error = serde::de::value::Error;
+
+        fn deserialize_any<V>(self, visitor: V) -> Result<V::Value, Self::Error>
+        where
+            V: serde::de::Visitor<'de>,
+        {
+            visitor.visit_u32(7)
+        }
+
+        fn deserialize_option<V>(self, visitor: V) -> Result<V::Value, Self::Error>
+        where
+            V: serde::de::Visitor<'de>,
+        {
+            visitor.visit_u32(7)
+        }
+
+        serde::forward_to_deserialize_any! {
+            bool i8 i16 i32 i64 i128 u8 u16 u32 u64 u128 f32 f64 char str string
+            bytes byte_buf unit unit_struct newtype_struct seq tuple
+            tuple_struct map struct enum identifier ignored_any
+        }
+    }
+
+    #[test]
+    fn test_option_field_rejects_unexpected_type() {
+        let err = string_or_option_one_or_many::<DummyString, _>(NotAnOption).unwrap_err();
+        assert!(
+            err.to_string().contains("null, a string, or a sequence"),
+            "unexpected error: {err}"
+        );
+    }
 }

@@ -167,6 +167,23 @@ pub(crate) use impl_provider_response_helpers;
 mod tests {
     use http::StatusCode;
 
+    use super::ProviderResponseError;
+
+    #[test]
+    fn display_includes_the_status_when_one_was_captured() {
+        let error = ProviderResponseError {
+            status: Some(StatusCode::BAD_GATEWAY),
+            body: "upstream melted".to_string(),
+        };
+        assert_eq!(error.to_string(), "status 502 Bad Gateway: upstream melted");
+    }
+
+    #[test]
+    fn display_shows_only_the_body_without_a_status() {
+        let error = ProviderResponseError::without_status("upstream melted");
+        assert_eq!(error.to_string(), "upstream melted");
+    }
+
     /// Asserts the shared funnel preserves a provider's status + body across the
     /// three routes every capability error exposes: a non-success HTTP response,
     /// a 2xx provider error envelope, and a non-HTTP (gRPC/SDK) transport.

@@ -297,3 +297,132 @@ mod provider_response_tests {
         assert_eq!(error.provider_response_json().expect("no body"), None);
     }
 }
+
+#[cfg(test)]
+mod default_method_tests {
+    use super::*;
+
+    /// Scripted text-embedding double: replays a fixed response for every call.
+    #[derive(Clone)]
+    struct StubEmbeddingModel {
+        embeddings: Vec<Embedding>,
+    }
+
+    impl EmbeddingModel for StubEmbeddingModel {
+        const MAX_DOCUMENTS: usize = 16;
+
+        type Client = ();
+
+        fn make(_client: &(), _model: impl Into<String>, _dims: Option<usize>) -> Self {
+            Self {
+                embeddings: Vec::new(),
+            }
+        }
+
+        fn ndims(&self) -> usize {
+            0
+        }
+
+        async fn embed_texts(
+            &self,
+            _texts: impl IntoIterator<Item = String> + WasmCompatSend,
+        ) -> Result<Vec<Embedding>, EmbeddingError> {
+            Ok(self.embeddings.clone())
+        }
+    }
+
+    fn embedding(document: &str) -> Embedding {
+        Embedding {
+            document: document.to_string(),
+            vec: vec![0.25, 0.75],
+        }
+    }
+
+    #[tokio::test]
+    async fn embed_text_reports_an_empty_provider_response() {
+        let model = StubEmbeddingModel {
+            embeddings: Vec::new(),
+        };
+
+        let error = model.embed_text("hello").await.unwrap_err();
+        assert!(
+            error.to_string().contains("empty response"),
+            "unexpected error: {error}"
+        );
+    }
+
+    #[tokio::test]
+    async fn embed_text_with_usage_reports_an_empty_provider_response() {
+        let model = StubEmbeddingModel {
+            embeddings: Vec::new(),
+        };
+
+        let error = model.embed_text_with_usage("hello").await.unwrap_err();
+        assert!(
+            error.to_string().contains("empty response"),
+            "unexpected error: {error}"
+        );
+    }
+
+    #[tokio::test]
+    async fn embed_text_with_usage_defaults_to_zero_valued_usage() {
+        let model = StubEmbeddingModel {
+            embeddings: vec![embedding("hello")],
+        };
+
+        let response = model.embed_text_with_usage("hello").await.unwrap();
+        assert_eq!(response.embeddings, vec![embedding("hello")]);
+        assert_eq!(response.usage, Usage::default());
+    }
+
+    /// Scripted image-embedding double: replays a fixed response for every call.
+    #[derive(Clone)]
+    struct StubImageEmbeddingModel {
+        embeddings: Vec<Embedding>,
+    }
+
+    impl ImageEmbeddingModel for StubImageEmbeddingModel {
+        const MAX_DOCUMENTS: usize = 16;
+
+        fn ndims(&self) -> usize {
+            0
+        }
+
+        async fn embed_images(
+            &self,
+            _images: impl IntoIterator<Item = Vec<u8>> + WasmCompatSend,
+        ) -> Result<Vec<Embedding>, EmbeddingError> {
+            Ok(self.embeddings.clone())
+        }
+    }
+
+    #[tokio::test]
+    async fn embed_image_returns_the_single_embedding() {
+        let model = StubImageEmbeddingModel {
+            embeddings: vec![embedding("image")],
+        };
+
+        assert_eq!(model.ndims(), 0);
+        let result = model.embed_image(&[1, 2, 3]).await.unwrap();
+        assert_eq!(result, embedding("image"));
+    }
+
+    #[test]
+    fn stub_model_make_and_ndims_round_trip() {
+        let model = StubEmbeddingModel::make(&(), "stub-model", Some(8));
+        assert_eq!(model.ndims(), 0);
+    }
+
+    #[tokio::test]
+    async fn embed_image_reports_an_empty_provider_response() {
+        let model = StubImageEmbeddingModel {
+            embeddings: Vec::new(),
+        };
+
+        let error = model.embed_image(&[1, 2, 3]).await.unwrap_err();
+        assert!(
+            error.to_string().contains("empty response"),
+            "unexpected error: {error}"
+        );
+    }
+}

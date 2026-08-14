@@ -248,4 +248,81 @@ mod tests {
         assert!(body_str.contains("Content-Type: text/plain"));
         assert!(body_str.contains("file contents"));
     }
+
+    #[test]
+    fn test_part_accessors() {
+        let text_part = Part::text("name", "value");
+        assert_eq!(text_part.name(), "name");
+        assert_eq!(text_part.get_filename(), None);
+        assert_eq!(text_part.get_content_type(), None);
+
+        let file_part = Part::bytes("data", Bytes::from_static(b"payload"))
+            .filename("report.pdf")
+            .content_type("application/pdf".parse().unwrap());
+        assert_eq!(file_part.name(), "data");
+        assert_eq!(file_part.get_filename(), Some("report.pdf"));
+        let content_type = file_part.get_content_type().unwrap();
+        assert_eq!(content_type.type_(), mime::APPLICATION_PDF.type_());
+        assert_eq!(content_type.subtype(), mime::APPLICATION_PDF.subtype());
+    }
+
+    #[test]
+    fn test_custom_boundary_is_used_in_encoding() {
+        let form = MultipartForm::new()
+            .boundary("custom-boundary-42")
+            .text("field", "value");
+
+        assert_eq!(form.parts().len(), 1);
+        assert_eq!(form.parts()[0].name(), "field");
+
+        let (boundary, body) = form.encode();
+        assert_eq!(boundary, "custom-boundary-42");
+        let body_str = String::from_utf8_lossy(&body);
+        assert!(body_str.starts_with("--custom-boundary-42\r\n"));
+        assert!(body_str.ends_with("--custom-boundary-42--\r\n"));
+    }
+
+    #[test]
+    fn test_boundary_generated_when_unset() {
+        let form = MultipartForm::new().text("field", "value");
+        let (boundary, body) = form.encode();
+        assert!(boundary.starts_with("----boundary"));
+        assert!(String::from_utf8_lossy(&body).contains(&boundary));
+    }
+
+    #[test]
+    fn test_binary_part_content_is_embedded_verbatim() {
+        static PAYLOAD: &[u8] = &[0, 1, 2, 255];
+        let form = MultipartForm::new().part(
+            Part::bytes("blob", Bytes::from_static(PAYLOAD))
+                .content_type("application/octet-stream".parse().unwrap()),
+        );
+        let (_, body) = form.encode();
+        let ct = b"Content-Type: application/octet-stream";
+        assert!(body.windows(ct.len()).any(|w| w == ct));
+        assert!(body.windows(PAYLOAD.len()).any(|w| w == PAYLOAD));
+        assert!(body.windows(b"\r\n\r\n".len() + PAYLOAD.len()).any(|w| {
+            w.ends_with(PAYLOAD) && w.starts_with(b"\r\n\r\n")
+        }));
+        // Binary parts without a filename omit the filename clause.
+        assert!(!body.windows(b"filename".len()).any(|w| w == b"filename"));
+    }
+
+    #[test]
+    fn test_convert_to_reqwest_form() {
+        let form = MultipartForm::new()
+            .text("field", "value")
+            .file(
+                "upload",
+                "test.txt",
+                "text/plain".parse().unwrap(),
+                Bytes::from("file contents"),
+            );
+        // Conversion of both text and binary (mime + filename) parts must succeed.
+        let converted = reqwest::multipart::Form::from(form);
+        let _ = converted;
+
+        // Empty forms convert to an empty reqwest form.
+        let _ = reqwest::multipart::Form::from(MultipartForm::new());
+    }
 }

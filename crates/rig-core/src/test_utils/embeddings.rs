@@ -94,3 +94,29 @@ impl Embed for MockMultiTextDocument {
         Ok(())
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::embeddings::EmbeddingModel;
+
+    #[test]
+    fn mock_embedding_model_make_reports_ten_dimensions() {
+        let model = MockEmbeddingModel::make(&Nothing, "ignored-model-id", None);
+        assert_eq!(model.ndims(), 10);
+        assert_eq!(MockEmbeddingModel::MAX_DOCUMENTS, 5);
+    }
+
+    #[tokio::test]
+    async fn mock_embedding_model_embeds_each_document_deterministically() {
+        let embeddings = MockEmbeddingModel
+            .embed_texts(["first".to_string(), "second".to_string()])
+            .await
+            .expect("mock embedding should succeed");
+
+        assert_eq!(embeddings.len(), 2);
+        assert_eq!(embeddings[0].document, "first");
+        assert_eq!(embeddings[1].document, "second");
+        assert_eq!(embeddings[0].vec, vec![0.0, 0.1, 0.2, 0.3, 0.4, 0.5, 0.6, 0.7, 0.8, 0.9]);
+    }
+}

@@ -458,4 +458,86 @@ mod tests {
             CompletionError::ProviderError(message) if message == "boom"
         ));
     }
+
+    #[tokio::test]
+    async fn request_error_turn_maps_to_request_error() {
+        let model = MockCompletionModel::new([MockTurn::request_error("bad request")]);
+
+        let err = model
+            .completion(request("hello"))
+            .await
+            .err()
+            .expect("scripted request error should surface");
+
+        assert!(matches!(
+            err,
+            CompletionError::RequestError(message) if message.to_string().contains("bad request")
+        ));
+    }
+
+    #[tokio::test]
+    async fn missing_stream_turn_returns_provider_error() {
+        let model = MockCompletionModel::default();
+
+        let err = model
+            .stream(request("stream"))
+            .await
+            .err()
+            .expect("missing stream turn should error");
+
+        assert!(matches!(
+            err,
+            CompletionError::ProviderError(message)
+                if message.contains("no scripted streaming turn")
+        ));
+    }
+
+    #[tokio::test]
+    async fn with_call_id_ignores_non_tool_call_and_error_turns() {
+        // A text turn has no tool call to annotate; the builder must return the
+        // turn unchanged instead of panicking.
+        let text = MockTurn::text("hello").with_call_id("call_1");
+        let response = text
+            .into_completion_response()
+            .expect("text turn should still succeed");
+        assert!(matches!(
+            response.choice.first(),
+            AssistantContent::Text(text) if text.text == "hello"
+        ));
+
+        // An error turn has no response to mutate.
+        let error = MockTurn::error("boom").with_call_id("call_1");
+        assert!(error.into_completion_response().is_err());
+    }
+
+    #[tokio::test]
+    async fn poisoned_model_state_still_serves_turns() {
+        /// Panic in a scoped helper thread while holding the lock, poisoning it.
+        fn poison<T: Send>(mutex: &Mutex<T>) {
+            std::thread::scope(|scope| {
+                scope.spawn(move || {
+                    let _ = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                        let _guard = mutex.lock();
+                        panic!("intentional mutex poison");
+                    }));
+                });
+            });
+        }
+
+        let model = MockCompletionModel::new([MockTurn::text("ok")]);
+        poison(&model.state.turns);
+        poison(&model.state.stream_turns);
+        poison(&model.state.requests);
+
+        let response = model
+            .completion(request("hello"))
+            .await
+            .expect("poisoned state should still serve scripted turns");
+        assert!(matches!(
+            response.choice.first(),
+            AssistantContent::Text(text) if text.text == "ok"
+        ));
+        assert_eq!(model.request_count(), 1);
+        assert_eq!(model.requests().len(), 1);
+    }
 }

@@ -357,3 +357,147 @@ mod provider_response_tests {
         assert_eq!(error.provider_response_json().expect("no body"), None);
     }
 }
+
+#[cfg(test)]
+mod builder_tests {
+    use assert_fs::prelude::{FileWriteStr, PathChild};
+
+    use super::{MockTranscriptionModel, TranscriptionModel, TranscriptionRequestBuilder};
+
+    #[test]
+    fn builder_sets_every_optional_field() {
+        let request = TranscriptionRequestBuilder::new(MockTranscriptionModel::default())
+            .filename(Some("clip.mp3".to_string()))
+            .language("en".to_string())
+            .prompt("context".to_string())
+            .temperature(0.5)
+            .additional_params(serde_json::json!({ "tier": "standard" }))
+            .data(b"audio-bytes".to_vec())
+            .build();
+
+        assert_eq!(request.data, b"audio-bytes".to_vec());
+        assert_eq!(request.filename, "clip.mp3");
+        assert_eq!(request.language.as_deref(), Some("en"));
+        assert_eq!(request.prompt.as_deref(), Some("context"));
+        assert_eq!(request.temperature, Some(0.5));
+        assert_eq!(
+            request.additional_params,
+            Some(serde_json::json!({ "tier": "standard" }))
+        );
+    }
+
+    #[test]
+    fn builder_merges_repeated_additional_params_and_can_replace_them() {
+        let request = TranscriptionRequestBuilder::new(MockTranscriptionModel::default())
+            .additional_params(serde_json::json!({ "tier": "standard", "keep": 1 }))
+            .additional_params(serde_json::json!({ "tier": "nano" }))
+            .additional_params_opt(Some(serde_json::json!({ "replaced": true })))
+            .data(vec![0u8; 4])
+            .build();
+
+        assert_eq!(
+            request.additional_params,
+            Some(serde_json::json!({ "replaced": true }))
+        );
+
+        let cleared = TranscriptionRequestBuilder::new(MockTranscriptionModel::default())
+            .additional_params(serde_json::json!({ "tier": "standard" }))
+            .additional_params_opt(None)
+            .data(vec![0u8; 4])
+            .build();
+        assert_eq!(cleared.additional_params, None);
+    }
+
+    #[test]
+    fn builder_defaults_filename_when_unset() {
+        let request = TranscriptionRequestBuilder::new(MockTranscriptionModel::default())
+            .filename(None)
+            .data(b"audio-bytes".to_vec())
+            .build();
+
+        assert_eq!(request.filename, "file");
+    }
+
+    #[test]
+    fn builder_load_file_reads_data_and_derives_filename() {
+        let temp = assert_fs::TempDir::new().expect("temp dir");
+        let audio = temp.child("clip.mp3");
+        audio
+            .write_str("fake audio")
+            .expect("Failed to write audio file");
+
+        let request = TranscriptionRequestBuilder::new(MockTranscriptionModel::default())
+            .language("en".to_string())
+            .load_file(audio.path())
+            .expect("load_file should succeed")
+            .build();
+
+        assert_eq!(request.data, b"fake audio".to_vec());
+        assert_eq!(request.filename, "clip.mp3");
+        assert_eq!(request.language.as_deref(), Some("en"));
+    }
+
+    #[test]
+    fn builder_load_file_missing_path_errors() {
+        let result =
+            TranscriptionRequestBuilder::new(MockTranscriptionModel::default()).load_file("no/such/file.mp3");
+
+        assert!(result.is_err());
+    }
+
+    #[tokio::test]
+    async fn builder_send_invokes_the_model() {
+        let response = TranscriptionRequestBuilder::new(MockTranscriptionModel::default())
+            .filename(Some("clip.mp3".to_string()))
+            .data(b"audio-bytes".to_vec())
+            .send()
+            .await
+            .expect("mock transcription should succeed");
+
+        assert_eq!(response.text, "clip.mp3");
+    }
+
+    #[test]
+    fn transcription_model_make_returns_clone() {
+        let model = <MockTranscriptionModel as TranscriptionModel>::make(&(), "whisper-1");
+        assert_eq!(model.model_id, "whisper-1");
+    }
+}
+
+#[cfg(test)]
+mod mock_model {
+    use super::{
+        TranscriptionError, TranscriptionModel, TranscriptionRequest, TranscriptionResponse,
+    };
+
+    /// Deterministic transcription model: echoes the request filename as the
+    /// transcription text so builder tests can assert what the model received.
+    #[derive(Clone, Debug, Default)]
+    pub(super) struct MockTranscriptionModel {
+        pub(super) model_id: String,
+    }
+
+    impl TranscriptionModel for MockTranscriptionModel {
+        type Response = String;
+        type Client = ();
+
+        fn make(_client: &Self::Client, model: impl Into<String>) -> Self {
+            Self {
+                model_id: model.into(),
+            }
+        }
+
+        async fn transcription(
+            &self,
+            request: TranscriptionRequest,
+        ) -> Result<TranscriptionResponse<Self::Response>, TranscriptionError> {
+            Ok(TranscriptionResponse {
+                text: request.filename.clone(),
+                response: request.filename,
+            })
+        }
+    }
+}
+
+#[cfg(test)]
+use mock_model::MockTranscriptionModel;

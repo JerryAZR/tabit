@@ -304,6 +304,7 @@ impl<T> Iterator for IntoIter<'_, T> {
 
 #[cfg(test)]
 mod tests {
+    use assert_fs::fixture::PathCreateDir;
     use assert_fs::prelude::{FileTouch, FileWriteStr, PathChild};
 
     use super::FileLoader;
@@ -366,5 +367,118 @@ mod tests {
 
         assert!(!actual.is_empty());
         assert!(expected == actual)
+    }
+
+    #[test]
+    fn test_file_loader_with_dir_reads_only_files() {
+        let temp = assert_fs::TempDir::new().expect("Failed to create temp dir");
+        let foo_file = temp.child("foo.txt");
+        let bar_file = temp.child("bar.txt");
+        let nested_dir = temp.child("nested");
+
+        foo_file.write_str("foo").expect("Failed to write to foo");
+        bar_file.write_str("bar").expect("Failed to write to bar");
+        nested_dir
+            .create_dir_all()
+            .expect("Failed to create nested dir");
+        nested_dir
+            .child("ignored.txt")
+            .write_str("ignored")
+            .expect("Failed to write nested file");
+
+        let dir = temp.path().to_string_lossy();
+        let loader = FileLoader::with_dir(dir.as_ref()).expect("with_dir failed");
+        let mut actual: Vec<String> = loader
+            .read()
+            .ignore_errors()
+            .into_iter()
+            .collect::<Vec<_>>();
+        actual.sort();
+
+        assert_eq!(actual, vec!["bar".to_string(), "foo".to_string()]);
+    }
+
+    #[test]
+    fn test_file_loader_with_dir_missing_directory_errors() {
+        let temp = assert_fs::TempDir::new().expect("Failed to create temp dir");
+        let missing = temp.path().join("does-not-exist");
+
+        let error = FileLoader::with_dir(missing.to_string_lossy().as_ref())
+            .err()
+            .expect("with_dir on a missing directory should fail");
+        assert!(matches!(error, super::FileLoaderError::IoError(_)));
+    }
+
+    #[test]
+    fn test_file_loader_read_with_path_returns_path_and_contents() {
+        let temp = assert_fs::TempDir::new().expect("Failed to create temp dir");
+        let foo_file = temp.child("foo.txt");
+        foo_file.write_str("foo").expect("Failed to write to foo");
+
+        let glob = temp.path().to_string_lossy().to_string() + "/foo.txt";
+
+        let loader = FileLoader::with_glob(&glob).expect("with_glob failed");
+        let actual: Vec<(std::path::PathBuf, String)> = loader
+            .read_with_path()
+            .ignore_errors()
+            .into_iter()
+            .collect();
+
+        assert_eq!(actual.len(), 1);
+        assert_eq!(actual[0].0, foo_file.path());
+        assert_eq!(actual[0].1, "foo");
+    }
+
+    #[test]
+    fn test_file_loader_read_errors_propagate() {
+        use super::{FileLoaderError, Readable};
+
+        let temp = assert_fs::TempDir::new().expect("Failed to create temp dir");
+        let missing = temp.path().join("missing.txt");
+        let io_error =
+            std::fs::read_to_string(&missing).expect_err("missing file read must fail");
+
+        // Reading a missing path fails for both flavors.
+        let error = missing.clone().read();
+        assert!(matches!(error, Err(FileLoaderError::IoError(_))));
+        let error = missing.clone().read_with_path();
+        assert!(matches!(error, Err(FileLoaderError::IoError(_))));
+
+        // The `Result` wrappers forward errors from earlier pipeline stages.
+        let error: Result<String, FileLoaderError> =
+            Err::<std::path::PathBuf, _>(FileLoaderError::IoError(io_error)).read();
+        assert!(matches!(error, Err(FileLoaderError::IoError(_))));
+        let io_error =
+            std::fs::read_to_string(&missing).expect_err("missing file read must fail");
+        let error: Result<(std::path::PathBuf, String), FileLoaderError> =
+            Err::<std::path::PathBuf, _>(FileLoaderError::IoError(io_error)).read_with_path();
+        assert!(matches!(error, Err(FileLoaderError::IoError(_))));
+    }
+
+    #[test]
+    fn test_file_loader_from_bytes_read_with_path_reports_memory_path() {
+        let loader = FileLoader::from_bytes(b"raw-bytes".to_vec());
+        let actual: Vec<(std::path::PathBuf, String)> = loader
+            .read_with_path()
+            .ignore_errors()
+            .into_iter()
+            .collect();
+
+        assert_eq!(actual.len(), 1);
+        assert_eq!(actual[0].0, std::path::PathBuf::from("<memory>"));
+        assert_eq!(actual[0].1, "raw-bytes");
+    }
+
+    #[test]
+    fn test_file_loader_from_bytes_invalid_utf8_errors() {
+        let loader = FileLoader::from_bytes(vec![0xff, 0xfe, 0xfd]);
+        let results: Vec<Result<String, super::FileLoaderError>> =
+            loader.read().into_iter().collect();
+
+        assert_eq!(results.len(), 1);
+        assert!(matches!(
+            results[0].as_ref().err(),
+            Some(super::FileLoaderError::StringUtf8Error(_))
+        ));
     }
 }

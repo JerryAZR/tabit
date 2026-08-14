@@ -105,3 +105,108 @@ where
         InMemoryVectorStore::from_builder(self.embeddings, self.index_strategy)
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use serde::Serialize;
+
+    use crate::{OneOrMany, embeddings::embedding::Embedding};
+
+    use super::InMemoryVectorStoreBuilder;
+
+    #[derive(Clone, Debug, Serialize, PartialEq, Eq)]
+    struct Doc {
+        name: String,
+    }
+
+    fn doc(name: &str, vec: Vec<f64>) -> (Doc, OneOrMany<Embedding>) {
+        (
+            Doc {
+                name: name.to_string(),
+            },
+            OneOrMany::one(Embedding {
+                document: name.to_string(),
+                vec,
+            }),
+        )
+    }
+
+    fn ids_in_insertion_order(mut pairs: Vec<(String, Doc)>) -> Vec<String> {
+        pairs.sort_by(|(a, _), (b, _)| a.cmp(b));
+        pairs.into_iter().map(|(id, _)| id).collect()
+    }
+
+    #[test]
+    fn default_builds_an_empty_brute_force_store() {
+        let store = InMemoryVectorStoreBuilder::<String>::default().build();
+
+        assert!(store.is_empty());
+        assert_eq!(store.len(), 0);
+    }
+
+    #[test]
+    fn documents_with_id_f_uses_supplied_function() {
+        fn upper_name(doc: &Doc) -> String {
+            doc.name.to_uppercase()
+        }
+
+        let store = InMemoryVectorStoreBuilder::new()
+            .documents_with_id_f(
+                vec![doc("abc", vec![0.1, 0.2, 0.3]), doc("de", vec![0.3, 0.2, 0.1])],
+                upper_name,
+            )
+            .build();
+
+        let pairs: Vec<(String, Doc)> = store
+            .iter()
+            .map(|(id, (doc, _))| (id.clone(), doc.clone()))
+            .collect();
+
+        assert_eq!(
+            ids_in_insertion_order(pairs),
+            vec!["ABC".to_string(), "DE".to_string()]
+        );
+        assert_eq!(store.len(), 2);
+    }
+
+    #[test]
+    fn documents_continue_auto_id_numbering_across_calls() {
+        let store = InMemoryVectorStoreBuilder::new()
+            .documents(vec![doc("first", vec![0.1, 0.2, 0.3])])
+            .documents(vec![doc("second", vec![0.3, 0.2, 0.1])])
+            .build();
+
+        let pairs: Vec<(String, Doc)> = store
+            .iter()
+            .map(|(id, (doc, _))| (id.clone(), doc.clone()))
+            .collect();
+
+        assert_eq!(
+            ids_in_insertion_order(pairs),
+            vec!["doc0".to_string(), "doc1".to_string()]
+        );
+    }
+
+    #[test]
+    fn documents_with_ids_keeps_explicit_ids() {
+        let (doc, embeddings) = doc("named", vec![0.1, 0.2, 0.3]);
+        let store = InMemoryVectorStoreBuilder::new()
+            .documents_with_ids(vec![("custom-id", doc, embeddings)])
+            .build();
+
+        let pairs: Vec<(String, Doc)> = store
+            .iter()
+            .map(|(id, (doc, _))| (id.clone(), doc.clone()))
+            .collect();
+
+        assert_eq!(
+            pairs,
+            vec![(
+                "custom-id".to_string(),
+                Doc {
+                    name: "named".to_string()
+                }
+            )]
+        );
+    }
+}

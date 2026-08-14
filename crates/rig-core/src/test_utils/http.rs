@@ -31,8 +31,6 @@ pub struct CapturedHttpRequest {
 pub enum MockHttpResponse {
     /// Return this body with a successful HTTP status.
     Success(Bytes),
-    /// Return a status-code error with the given body text.
-    Error(http::StatusCode, String),
     /// Return an HTTP response with the given (typically non-success) status
     /// and body, instead of a transport-level error.
     ErrorResponse(http::StatusCode, Bytes),
@@ -42,11 +40,6 @@ impl MockHttpResponse {
     /// Create a successful response from bytes.
     pub fn success(body: impl Into<Bytes>) -> Self {
         Self::Success(body.into())
-    }
-
-    /// Create an error response with a status code and message.
-    pub fn error(status: http::StatusCode, message: impl Into<String>) -> Self {
-        Self::Error(status, message.into())
     }
 }
 
@@ -73,14 +66,6 @@ impl RecordingHttpClient {
         }
     }
 
-    /// Create a client that returns an HTTP status error for unary requests.
-    pub fn with_error(status: http::StatusCode, message: impl Into<String>) -> Self {
-        Self {
-            requests: Arc::new(Mutex::new(Vec::new())),
-            response: Arc::new(Mutex::new(MockHttpResponse::error(status, message))),
-        }
-    }
-
     /// Create a client that returns a non-success HTTP response (status and body)
     /// for unary requests, instead of a transport-level error.
     pub fn with_error_response(status: http::StatusCode, body: impl Into<Bytes>) -> Self {
@@ -96,11 +81,6 @@ impl RecordingHttpClient {
     /// Return the requests captured so far.
     pub fn requests(&self) -> Vec<CapturedHttpRequest> {
         self.requests_guard().clone()
-    }
-
-    /// Replace the scripted unary response.
-    pub fn set_response(&self, response: MockHttpResponse) {
-        *self.response_guard() = response;
     }
 
     fn requests_guard(&self) -> MutexGuard<'_, Vec<CapturedHttpRequest>> {
@@ -130,11 +110,6 @@ impl RecordingHttpClient {
     {
         let (status, response_body) = match response {
             MockHttpResponse::Success(response_body) => (http::StatusCode::OK, response_body),
-            MockHttpResponse::Error(status, message) => {
-                return Err(http_client::Error::InvalidStatusCodeWithMessage(
-                    status, message,
-                ));
-            }
             MockHttpResponse::ErrorResponse(status, response_body) => (status, response_body),
         };
         let body: LazyBody<U> = Box::pin(async move { Ok(U::from(response_body)) });
@@ -494,5 +469,240 @@ impl HttpClientExt for SequencedStreamingHttpClient {
                 .body(boxed_stream)
                 .map_err(http_client::Error::Protocol)
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn unary_request() -> Request<Bytes> {
+        Request::post("http://recording.test/unary")
+            .body(Bytes::from_static(b"payload"))
+            .expect("static request builds")
+    }
+
+    fn multipart_request() -> Request<MultipartForm> {
+        Request::post("http://recording.test/multipart")
+            .body(MultipartForm::new())
+            .expect("static request builds")
+    }
+
+    /// Panic in a helper thread while holding the lock, poisoning the mutex.
+    fn poison<T: Send + 'static>(mutex: Arc<Mutex<T>>) {
+        let _ = std::thread::spawn(move || {
+            let _guard = mutex.lock();
+            panic!("intentional mutex poison");
+        })
+        .join();
+    }
+
+    #[tokio::test]
+    async fn default_client_serves_an_empty_success_response() {
+        let client = RecordingHttpClient::default();
+        let response = HttpClientExt::send::<_, Bytes>(&client, unary_request())
+            .await
+            .expect("default scripted response should succeed");
+        assert_eq!(response.status(), http::StatusCode::OK);
+        let body = response.into_body().await.expect("body resolves");
+        assert!(body.is_empty());
+    }
+
+    #[tokio::test]
+    async fn poisoned_recording_client_still_records_and_responds() {
+        let client = RecordingHttpClient::new("body");
+        poison(Arc::clone(&client.requests));
+        poison(Arc::clone(&client.response));
+
+        let response = HttpClientExt::send::<_, Bytes>(&client, unary_request())
+            .await
+            .expect("poisoned client should still respond");
+        assert_eq!(response.status(), http::StatusCode::OK);
+        assert_eq!(client.requests().len(), 1);
+        assert_eq!(client.requests()[0].uri, "http://recording.test/unary");
+    }
+
+    #[tokio::test]
+    async fn recording_client_rejects_streaming_requests() {
+        let client = RecordingHttpClient::new("body");
+        let error = client
+            .send_streaming(unary_request())
+            .await
+            .err()
+            .expect("recording double does not implement streaming");
+        assert!(matches!(
+            error,
+            http_client::Error::InvalidStatusCode(http::StatusCode::NOT_IMPLEMENTED)
+        ));
+    }
+
+    #[tokio::test]
+    async fn mock_streaming_client_rejects_unary_requests() {
+        let client = MockStreamingClient {
+            sse_bytes: Bytes::from_static(b"data: x\n\n"),
+        };
+
+        let unary = HttpClientExt::send::<_, Bytes>(&client, unary_request())
+            .await
+            .err()
+            .expect("streaming double does not implement unary send");
+        assert!(matches!(
+            unary,
+            http_client::Error::InvalidStatusCode(http::StatusCode::NOT_IMPLEMENTED)
+        ));
+
+        let multipart = client
+            .send_multipart::<Bytes>(multipart_request())
+            .await
+            .err()
+            .expect("streaming double does not implement multipart send");
+        assert!(matches!(
+            multipart,
+            http_client::Error::InvalidStatusCode(http::StatusCode::NOT_IMPLEMENTED)
+        ));
+    }
+
+    #[tokio::test]
+    async fn http_error_streaming_client_defaults_and_rejects_unary_requests() {
+        let client = HttpErrorStreamingClient::default();
+        assert_eq!(client.status, http::StatusCode::INTERNAL_SERVER_ERROR);
+        assert!(client.body.is_empty());
+
+        let unary = HttpClientExt::send::<_, Bytes>(&client, unary_request())
+            .await
+            .err()
+            .expect("error-streaming double does not implement unary send");
+        assert!(matches!(
+            unary,
+            http_client::Error::InvalidStatusCode(http::StatusCode::NOT_IMPLEMENTED)
+        ));
+
+        let multipart = client
+            .send_multipart::<Bytes>(multipart_request())
+            .await
+            .err()
+            .expect("error-streaming double does not implement multipart send");
+        assert!(matches!(
+            multipart,
+            http_client::Error::InvalidStatusCode(http::StatusCode::NOT_IMPLEMENTED)
+        ));
+    }
+
+    #[tokio::test]
+    async fn sequenced_streaming_client_rejects_unary_requests() {
+        let client = SequencedStreamingHttpClient::new(vec![Ok(Bytes::from_static(b"chunk"))]);
+
+        let unary = HttpClientExt::send::<_, Bytes>(&client, unary_request())
+            .await
+            .err()
+            .expect("sequenced-streaming double does not implement unary send");
+        assert!(matches!(
+            unary,
+            http_client::Error::InvalidStatusCode(http::StatusCode::NOT_IMPLEMENTED)
+        ));
+
+        let multipart = client
+            .send_multipart::<Bytes>(multipart_request())
+            .await
+            .err()
+            .expect("sequenced-streaming double does not implement multipart send");
+        assert!(matches!(
+            multipart,
+            http_client::Error::InvalidStatusCode(http::StatusCode::NOT_IMPLEMENTED)
+        ));
+    }
+
+    #[tokio::test]
+    async fn sequenced_streaming_client_yields_chunks_exactly_once() {
+        let client = SequencedStreamingHttpClient::new(vec![
+            Ok(Bytes::from_static(b"one")),
+            Ok(Bytes::from_static(b"two")),
+        ]);
+
+        let first = client
+            .send_streaming(unary_request())
+            .await
+            .expect("first streaming call serves the scripted chunks");
+        assert_eq!(first.status(), http::StatusCode::OK);
+
+        let error = client
+            .send_streaming(unary_request())
+            .await
+            .err()
+            .expect("scripted chunks should only be consumed once");
+        assert!(matches!(
+            error,
+            http_client::Error::InvalidStatusCodeWithMessage(status, message)
+                if status == http::StatusCode::INTERNAL_SERVER_ERROR
+                    && message.contains("only be consumed once")
+        ));
+    }
+
+    #[tokio::test]
+    async fn poisoned_sequenced_streaming_client_still_takes_its_chunks() {
+        let client = SequencedStreamingHttpClient::new(vec![Ok(Bytes::from_static(b"chunk"))]);
+        poison(Arc::clone(&client.chunks));
+
+        let response = client
+            .send_streaming(unary_request())
+            .await
+            .expect("poisoned lock should still expose the scripted chunks");
+        assert_eq!(response.status(), http::StatusCode::OK);
+    }
+
+    #[tokio::test]
+    async fn sequenced_client_drains_responses_then_fails_loudly() {
+        let client = SequencedHttpClient::new([
+            MockHttpResponse::success("first"),
+            MockHttpResponse::success("second"),
+        ]);
+        assert_eq!(client.remaining_responses(), 2);
+
+        let first = HttpClientExt::send::<_, Bytes>(&client, unary_request())
+            .await
+            .expect("first scripted response should succeed");
+        assert_eq!(first.into_body().await.expect("body resolves"), "first");
+        assert_eq!(client.remaining_responses(), 1);
+
+        let multipart = client
+            .send_multipart::<Bytes>(multipart_request())
+            .await
+            .expect("second scripted response should serve multipart too");
+        assert_eq!(multipart.into_body().await.expect("body resolves"), "second");
+        assert_eq!(client.remaining_responses(), 0);
+        assert_eq!(client.requests().len(), 2);
+
+        let exhausted = HttpClientExt::send::<_, Bytes>(&client, unary_request())
+            .await
+            .err()
+            .expect("exhausted sequence should fail loudly");
+        assert!(matches!(
+            exhausted,
+            http_client::Error::InvalidStatusCode(http::StatusCode::NOT_IMPLEMENTED)
+        ));
+
+        let streaming = client
+            .send_streaming(unary_request())
+            .await
+            .err()
+            .expect("sequenced double does not implement streaming");
+        assert!(matches!(
+            streaming,
+            http_client::Error::InvalidStatusCode(http::StatusCode::NOT_IMPLEMENTED)
+        ));
+    }
+
+    #[tokio::test]
+    async fn poisoned_sequenced_client_still_records_and_responds() {
+        let client = SequencedHttpClient::new([MockHttpResponse::success("body")]);
+        poison(Arc::clone(&client.requests));
+        poison(Arc::clone(&client.responses));
+
+        let response = HttpClientExt::send::<_, Bytes>(&client, unary_request())
+            .await
+            .expect("poisoned client should still respond");
+        assert_eq!(response.into_body().await.expect("body resolves"), "body");
+        assert_eq!(client.requests().len(), 1);
+        assert_eq!(client.remaining_responses(), 0);
     }
 }

@@ -98,3 +98,87 @@ pub trait EmbeddingsClient {
         EmbeddingsBuilder::new(self.embedding_model_with_ndims(model, ndims))
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use crate::client::EmbeddingsClient;
+    use crate::providers::openai::CompletionsClient;
+    use crate::test_utils::RecordingHttpClient;
+
+    const RESPONSE_BODY: &str = r#"{
+        "object": "list",
+        "model": "text-embedding-3-small",
+        "usage": { "prompt_tokens": 4, "total_tokens": 4 },
+        "data": [
+            { "object": "embedding", "index": 0, "embedding": [0.1, 0.2] },
+            { "object": "embedding", "index": 1, "embedding": [0.3, 0.4] }
+        ]
+    }"#;
+
+    #[tokio::test]
+    async fn embeddings_builds_a_batch_builder_around_the_named_model() {
+        let http_backend = RecordingHttpClient::new(RESPONSE_BODY);
+        let client = CompletionsClient::builder()
+            .api_key("test-key")
+            .http_client(http_backend.clone())
+            .build()
+            .expect("build client");
+
+        let mut embeddings = client
+            .embeddings::<String>("text-embedding-3-small")
+            .documents(["hello".to_string(), "world".to_string()])
+            .expect("documents should embed")
+            .build()
+            .await
+            .expect("embedding request should succeed");
+
+        // `build` merges per-document embeddings through a HashMap, so the
+        // result order is unspecified.
+        embeddings.sort_by_key(|(document, _)| document.clone());
+
+        assert_eq!(embeddings.len(), 2);
+        assert_eq!(embeddings[0].0, "hello");
+        assert_eq!(embeddings[1].0, "world");
+
+        let requests = http_backend.requests();
+        assert_eq!(requests.len(), 1);
+        let body: serde_json::Value =
+            serde_json::from_slice(&requests[0].body).expect("request body should be JSON");
+        assert_eq!(
+            body["input"],
+            serde_json::json!(["hello", "world"]),
+            "both documents should be batched into one request"
+        );
+        assert!(
+            body.get("dimensions").is_none(),
+            "no dimensions should be requested without ndims"
+        );
+    }
+
+    #[tokio::test]
+    async fn embeddings_with_ndims_passes_dimensions_to_the_model() {
+        let http_backend = RecordingHttpClient::new(RESPONSE_BODY);
+        let client = CompletionsClient::builder()
+            .api_key("test-key")
+            .http_client(http_backend.clone())
+            .build()
+            .expect("build client");
+
+        let mut embeddings = client
+            .embeddings_with_ndims::<String>("text-embedding-3-small", 1_536)
+            .documents(["hello".to_string(), "world".to_string()])
+            .expect("documents should embed")
+            .build()
+            .await
+            .expect("embedding request should succeed");
+
+        embeddings.sort_by_key(|(document, _)| document.clone());
+        assert_eq!(embeddings.len(), 2);
+
+        let requests = http_backend.requests();
+        assert_eq!(requests.len(), 1);
+        let body: serde_json::Value =
+            serde_json::from_slice(&requests[0].body).expect("request body should be JSON");
+        assert_eq!(body["dimensions"], serde_json::json!(1_536));
+    }
+}

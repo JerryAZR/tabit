@@ -1445,58 +1445,13 @@ mod tests {
     async fn test_stream_cancellation() {
         let mut stream = create_mock_stream();
 
-        println!("Response: ");
         let mut chunk_count = 0;
         while let Some(chunk) = stream.next().await {
-            match chunk {
-                Ok(StreamedAssistantContent::Text(text)) => {
-                    print!("{}", text.text);
-                    std::io::Write::flush(&mut std::io::stdout()).unwrap();
-                    chunk_count += 1;
-                }
-                Ok(StreamedAssistantContent::ToolCall {
-                    tool_call,
-                    internal_call_id,
-                }) => {
-                    println!("\nTool Call: {tool_call:?}, internal_call_id={internal_call_id:?}");
-                    chunk_count += 1;
-                }
-                Ok(StreamedAssistantContent::ToolCallDelta {
-                    id,
-                    internal_call_id,
-                    content,
-                }) => {
-                    println!(
-                        "\nTool Call delta: id={id:?}, internal_call_id={internal_call_id:?}, content={content:?}"
-                    );
-                    chunk_count += 1;
-                }
-                Ok(StreamedAssistantContent::Final(res)) => {
-                    println!("\nFinal response: {res:?}");
-                }
-                Ok(StreamedAssistantContent::Reasoning(reasoning)) => {
-                    let reasoning = reasoning.display_text();
-                    print!("{reasoning}");
-                    std::io::Write::flush(&mut std::io::stdout()).unwrap();
-                }
-                Ok(StreamedAssistantContent::ReasoningDelta { reasoning, .. }) => {
-                    println!("Reasoning delta: {reasoning}");
-                    chunk_count += 1;
-                }
-                Ok(StreamedAssistantContent::Unknown(value)) => {
-                    println!("\nUnknown item: {value:?}");
-                    chunk_count += 1;
-                }
-                Err(e) => {
-                    eprintln!("Error: {e:?}");
-                    break;
-                }
-            }
+            assert!(chunk.is_ok(), "mock stream should not error: {chunk:?}");
+            chunk_count += 1;
 
             if chunk_count >= 2 {
-                println!("\nCancelling stream...");
                 stream.cancel();
-                println!("Stream cancelled.");
                 break;
             }
         }
@@ -2033,6 +1988,236 @@ mod tests {
         };
         assert_eq!(text, "second");
         assert_eq!(additional_params["block"], 2);
+    }
+
+    /// Re-polling while still paused reuses the parked wait instead of
+    /// creating a second one — and still must not wake itself.
+    #[tokio::test]
+    async fn repeated_polls_while_paused_reuse_the_parked_wait() {
+        let stream = StreamingCompletionResponse::stream(
+            TEST_PROVIDER,
+            to_stream_result(stream! {
+                yield Ok(RawStreamingChoice::Message("hello".to_string()));
+            }),
+        );
+        stream.pause();
+
+        let mut task = tokio_test::task::spawn(stream);
+        assert!(
+            task.poll_next().is_pending(),
+            "the first paused poll parks"
+        );
+        assert!(
+            !task.is_woken(),
+            "a paused stream must idle, not re-wake itself"
+        );
+        assert!(
+            task.poll_next().is_pending(),
+            "the second paused poll reuses the parked wait and stays parked"
+        );
+        assert!(!task.is_woken(), "still no busy waking");
+    }
+
+    /// A `Keep`-mode end that cannot finalize leaves the call open, and a
+    /// later name fragment can still complete it — the end itself yields
+    /// nothing, so the consumer sees no partial call.
+    #[tokio::test]
+    async fn a_nameless_call_survives_a_keep_mode_end_and_finalizes_later() {
+        let mut stream = StreamingCompletionResponse::stream(
+            TEST_PROVIDER,
+            to_stream_result(stream! {
+                yield Ok(RawStreamingChoice::ToolCallDelta {
+                    id: PartId::wire("call_1"),
+                    content: ToolCallDeltaContent::Delta("{\"x\":".to_string()),
+                });
+                yield Ok(RawStreamingChoice::ToolInputEnd(ToolInputEnd::new(
+                    "call_1",
+                    UnparseableToolInput::Keep,
+                )));
+                yield Ok(RawStreamingChoice::ToolCallDelta {
+                    id: PartId::wire("call_1"),
+                    content: ToolCallDeltaContent::Name("probe".to_string()),
+                });
+                yield Ok(RawStreamingChoice::ToolCallDelta {
+                    id: PartId::wire("call_1"),
+                    content: ToolCallDeltaContent::Delta("1}".to_string()),
+                });
+                yield Ok(RawStreamingChoice::ToolInputEnd(ToolInputEnd::new(
+                    "call_1",
+                    UnparseableToolInput::Drop,
+                )));
+                yield Ok(RawStreamingChoice::FinalResponse(mock_final_with_total_tokens(1)));
+            }),
+        );
+
+        let mut completed = Vec::new();
+        while let Some(item) = stream.next().await {
+            if let Ok(StreamedAssistantContent::ToolCall { tool_call, .. }) = item {
+                completed.push(tool_call);
+            }
+        }
+
+        assert_eq!(completed.len(), 1);
+        assert_eq!(completed[0].function.name, "probe");
+        assert_eq!(completed[0].function.arguments, serde_json::json!({"x": 1}));
+    }
+
+    /// A trailing reasoning signature is lifecycle metadata: it reaches the
+    /// consumer only through the aggregated reasoning part and is never
+    /// yielded as its own stream item.
+    #[tokio::test]
+    async fn a_trailing_reasoning_signature_lands_on_the_aggregated_part() {
+        let mut stream = StreamingCompletionResponse::stream(
+            TEST_PROVIDER,
+            to_stream_result(stream! {
+                yield Ok(RawStreamingChoice::Reasoning {
+                    id: PartId::wire("rs_1"),
+                    content: ReasoningContent::Text {
+                        text: "chain-of-thought".to_string(),
+                        signature: None,
+                    },
+                });
+                yield Ok(RawStreamingChoice::ReasoningSignature {
+                    id: PartId::wire("rs_1"),
+                    signature: "sig_1".to_string(),
+                });
+                yield Ok(RawStreamingChoice::FinalResponse(mock_final_with_total_tokens(1)));
+            }),
+        );
+
+        let mut items = 0;
+        while let Some(item) = stream.next().await {
+            assert!(
+                item.is_ok(),
+                "a signature is not an error: {item:?}"
+            );
+            items += 1;
+        }
+        assert_eq!(items, 2, "only the reasoning block and the terminal record");
+
+        let choice_items: Vec<AssistantContent> = stream.choice.clone().into_iter().collect();
+        assert!(matches!(
+            choice_items.as_slice(),
+            [AssistantContent::Reasoning(Reasoning {
+                id: Some(id),
+                content
+            })] if id == "rs_1"
+                && matches!(
+                    content.first(),
+                    Some(ReasoningContent::Text { signature: Some(signature), .. })
+                        if signature == "sig_1"
+                )
+        ));
+    }
+
+    /// A duplicate terminal record is swallowed: the stream already surfaced
+    /// its final response, so the repeat must not re-yield one.
+    #[tokio::test]
+    async fn a_duplicate_final_response_is_swallowed() {
+        let mut stream = StreamingCompletionResponse::stream(
+            TEST_PROVIDER,
+            to_stream_result(stream! {
+                yield Ok(RawStreamingChoice::FinalResponse(mock_final_with_total_tokens(7)));
+                yield Ok(RawStreamingChoice::FinalResponse(mock_final_with_total_tokens(9)));
+                yield Ok(RawStreamingChoice::Message("late".to_string()));
+            }),
+        );
+
+        let mut final_records = 0;
+        while let Some(item) = stream.next().await {
+            if let Ok(StreamedAssistantContent::Final(_)) = item {
+                final_records += 1;
+            }
+        }
+
+        assert_eq!(final_records, 1, "only the first terminal record is yielded");
+        assert_eq!(stream.usage().total_tokens, 7, "the first record wins");
+    }
+
+    /// `try_map_final` forwards every incremental event unchanged, including
+    /// the ones the map closure must never see.
+    #[test]
+    fn try_map_final_preserves_non_terminal_events_verbatim() {
+        let choice = RawStreamingChoice::ReasoningSignature {
+            id: PartId::wire("rs_1"),
+            signature: "sig_1".to_string(),
+        };
+
+        let mapped = choice
+            .try_map_final(|final_record: StreamFinal| Ok(final_record))
+            .expect("map should succeed");
+        assert!(matches!(
+            mapped,
+            RawStreamingChoice::ReasoningSignature { ref id, ref signature }
+                if id == &PartId::wire("rs_1") && signature == "sig_1"
+        ));
+    }
+
+    /// The empty tool-call accumulator seeds provider streaming parsers, and
+    /// the `with_*` builders override every defaulted field.
+    #[test]
+    fn raw_streaming_tool_call_builders_override_every_field() {
+        let empty = RawStreamingToolCall::empty();
+        assert!(matches!(empty.id, PartId::Wire(id) if id.is_empty()));
+        assert_eq!(empty.name, "");
+        assert_eq!(empty.arguments, serde_json::Value::Null);
+        assert_eq!(empty.call_id, None);
+        assert_eq!(empty.signature, None);
+        assert_eq!(empty.additional_params, None);
+
+        let full = RawStreamingToolCall::new(
+            PartId::wire("call_1"),
+            "probe".to_string(),
+            serde_json::json!({}),
+        )
+            .with_internal_call_id("internal_1".to_string())
+            .with_call_id("call_abc".to_string())
+            .with_signature(Some("sig".to_string()))
+            .with_additional_params(Some(serde_json::json!({"extra": true})));
+
+        assert_eq!(full.internal_call_id, "internal_1");
+        assert_eq!(full.call_id.as_deref(), Some("call_abc"));
+        assert_eq!(full.signature.as_deref(), Some("sig"));
+        assert_eq!(full.additional_params, Some(serde_json::json!({"extra": true})));
+    }
+
+    /// The provider name is known when the stream opens and surfaced as-is.
+    #[test]
+    fn a_stream_reports_its_provider_name() {
+        let stream = StreamingCompletionResponse::stream(
+            TEST_PROVIDER,
+            to_stream_result(stream! {
+                yield Ok(RawStreamingChoice::Message("hi".to_string()));
+            }),
+        );
+        assert_eq!(stream.provider(), TEST_PROVIDER);
+    }
+
+    /// `PauseControl: Default` matches `new`: running, not paused.
+    #[test]
+    fn pause_control_default_is_running() {
+        let control = PauseControl::default();
+        assert!(!control.is_paused());
+    }
+
+    /// The streamed user-content constructor correlates the result with the
+    /// originating tool call.
+    #[test]
+    fn streamed_tool_result_carries_its_correlation_id() {
+        let tool_result = ToolResult {
+            id: "result_1".to_string(),
+            call_id: Some("call_1".to_string()),
+            content: OneOrMany::one(crate::message::ToolResultContent::text("42")),
+        };
+
+        let streamed = StreamedUserContent::tool_result(tool_result, "internal_1".to_string());
+        assert!(matches!(
+            streamed,
+            StreamedUserContent::ToolResult {
+                internal_call_id,
+                ..
+            } if internal_call_id == "internal_1"
+        ));
     }
 }
 

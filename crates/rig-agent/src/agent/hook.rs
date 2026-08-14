@@ -2649,6 +2649,104 @@ mod migrated_tests {
         assert_eq!(salvaged, None);
     }
 
+    struct NeverResolvingHook;
+    impl AgentHook for NeverResolvingHook {
+        async fn on_tool_call(&self, _: &HookContext, _: ToolCall<'_>) -> ToolCallAction {
+            std::future::pending().await
+        }
+    }
+
+    #[test]
+    fn run_id_displays_as_text() {
+        let run_id = RunId::generate();
+        assert!(!run_id.as_str().is_empty());
+        assert_eq!(run_id.to_string(), run_id.as_str());
+    }
+
+    #[test]
+    fn scratchpad_contains_tracks_type_presence() {
+        let pad = Scratchpad::default();
+        assert!(!pad.contains::<u32>());
+        pad.insert(7_u32);
+        assert!(pad.contains::<u32>());
+        pad.remove::<u32>();
+        assert!(!pad.contains::<u32>());
+    }
+
+    #[test]
+    fn hook_context_debug_reports_scratchpad_entry_count() {
+        let context = ctx();
+        context.scratchpad().insert(1_u32);
+        let debug = format!("{context:?}");
+        assert!(
+            debug.contains("entries: 1"),
+            "scratchpad entry count missing: {debug}"
+        );
+    }
+
+    #[test]
+    fn model_selection_new_constructs_the_event_from_parts() {
+        let default = model("default");
+        let selected = model("selected");
+        let prompt = Message::user("route");
+        let event = ModelSelection::new(&prompt, &[], None, None, &default, &selected);
+        assert_eq!(event.default_model.label(), Some("default"));
+        assert_eq!(event.selected_model.label(), Some("selected"));
+        assert!(event.request_patch.is_none());
+        assert!(event.previous_model.is_none());
+    }
+
+    #[test]
+    fn rewrite_output_replaces_with_explicit_tool_output() {
+        let output = ToolOutput::text("redacted");
+        assert_eq!(
+            ToolResultAction::rewrite_output(output.clone()),
+            ToolResultAction::Rewrite(output)
+        );
+    }
+
+    #[test]
+    fn hook_stack_len_reports_registration_count() {
+        let mut stack = HookStack::new();
+        assert_eq!(stack.len(), 0);
+        assert!(stack.is_empty());
+        stack.push(());
+        stack.push(());
+        assert_eq!(stack.len(), 2);
+        assert!(!stack.is_empty());
+    }
+
+    #[test]
+    fn hook_stack_debug_reports_hook_count() {
+        let mut stack = HookStack::new();
+        stack.push(());
+        let debug = format!("{stack:?}");
+        assert!(debug.contains("len: 1"), "hook count missing: {debug}");
+    }
+
+    #[tokio::test]
+    async fn dropped_tool_call_dispatch_future_releases_its_resolution_frame() {
+        let stack = HookStack::with(NeverResolvingHook);
+        let context = ctx();
+
+        // Poll the erased dispatch future once (creating its resolution
+        // frame), then drop it unfinished: `ToolCallResolutionFrame::drop`
+        // must clean the frame up so later resolutions stay balanced.
+        let mut dispatch = stack.hooks[0].tool_call(&context, tool_call_event());
+        tokio::select! {
+            biased;
+            _ = &mut dispatch => panic!("the hook must never resolve"),
+            _ = tokio::task::yield_now() => {}
+        }
+        drop(dispatch);
+
+        // A later resolution for the same internal call id works normally.
+        let later = HookStack::with(RewriteHook(json!({"x": 1})));
+        let (action, salvaged) = later.resolve_tool_call(&context, tool_call_event()).await;
+        assert_eq!(action, ToolCallAction::rewrite(json!({"x": 1})));
+        assert_eq!(salvaged, None);
+    }
+
     #[test]
     fn action_types_are_event_specific() {
         fn model_selection(_: ModelSelectionAction) {}

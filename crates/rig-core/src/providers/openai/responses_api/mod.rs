@@ -5550,4 +5550,804 @@ mod tests {
             "base64 PDF should not carry file_url: {input_file:#}"
         );
     }
+
+    fn image_content(
+        data: DocumentSourceKind,
+        media_type: Option<message::ImageMediaType>,
+    ) -> message::UserContent {
+        message::UserContent::Image(message::Image {
+            data,
+            media_type,
+            detail: None,
+            additional_params: None,
+        })
+    }
+
+    fn user_message_with(content: message::UserContent) -> completion::Message {
+        completion::Message::User {
+            content: OneOrMany::one(content),
+        }
+    }
+
+    /// `ReasoningSummary::text` and the `OneOrMany<String>` conversion used by
+    /// providers that lift summaries into a reasoning item.
+    #[test]
+    fn reasoning_summary_accessors_round_trip() {
+        let summaries = Vec::<ReasoningSummary>::from(OneOrMany::many([
+            "first".to_string(),
+            "second".to_string(),
+        ])
+        .expect("non-empty"));
+
+        assert_eq!(
+            summaries.iter().map(ReasoningSummary::text).collect::<Vec<_>>(),
+            vec!["first".to_string(), "second".to_string()]
+        );
+    }
+
+    /// The `content` field of a reasoning item accepts every documented wire
+    /// spelling: a plain string, an array of strings, and the tagged
+    /// `reasoning_text` object array (which also round-trips on serialize).
+    #[test]
+    fn reasoning_content_accepts_every_wire_spelling() {
+        let cases = [
+            (json!("step one"), vec!["step one".to_string()]),
+            (
+                json!(["step one", "step two"]),
+                vec!["step one".to_string(), "step two".to_string()],
+            ),
+            (
+                json!([
+                    {"type": "reasoning_text", "text": "step one"},
+                    {"type": "reasoning_text", "text": "step two"}
+                ]),
+                vec!["step one".to_string(), "step two".to_string()],
+            ),
+        ];
+
+        for (wire, expected) in cases {
+            let value = json!({
+                "id": "rs_1",
+                "summary": [{"type": "summary_text", "text": "summary"}],
+                "content": wire,
+            });
+            let reasoning: OpenAIReasoning =
+                serde_json::from_value(value).expect("reasoning should deserialize");
+            assert_eq!(reasoning.content, expected, "spelling {wire}");
+
+            let encoded = serde_json::to_value(&reasoning).expect("reasoning should serialize");
+            let expected_wire: Vec<_> = expected
+                .iter()
+                .map(|text| json!({"type": "reasoning_text", "text": text}))
+                .collect();
+            assert_eq!(
+                encoded["content"],
+                serde_json::Value::Array(expected_wire),
+                "serialization always emits the tagged object array"
+            );
+        }
+    }
+
+    /// A base64 tool-result image without a media type cannot form a data URL
+    /// and must fail loudly rather than fabricate one.
+    #[test]
+    fn tool_result_base64_image_without_media_type_errors() {
+        let input = rig_tool_result(message::ToolResultContent::Image(message::Image {
+            data: DocumentSourceKind::base64("dGVzdA=="),
+            media_type: None,
+            detail: None,
+            additional_params: None,
+        }));
+
+        let err = Vec::<Message>::try_from(input)
+            .expect_err("a media type is required for base64 tool-result images");
+        assert!(err.to_string().contains("media type is required"));
+    }
+
+    /// A URL-backed tool-result image passes the URL through as `image_url`.
+    #[test]
+    fn tool_result_url_image_uses_the_url_directly() {
+        let input = rig_tool_result(message::ToolResultContent::Image(message::Image {
+            data: DocumentSourceKind::url("https://example.com/pic.png"),
+            media_type: None,
+            detail: None,
+            additional_params: None,
+        }));
+
+        let items = Vec::<InputItem>::try_from(input).expect("URL image should convert");
+        match &items[0].input {
+            InputContent::FunctionCallOutput(ToolResult {
+                output: ToolResultOutput::Content(blocks),
+                ..
+            }) => match &blocks[0] {
+                ToolResultOutputContent::InputImage { image_url, .. } => {
+                    assert_eq!(image_url.as_deref(), Some("https://example.com/pic.png"));
+                }
+                other => panic!("expected an input image block, got {other:?}"),
+            },
+            other => panic!("expected a function-call output item, got {other:?}"),
+        }
+    }
+
+    /// Source kinds the Responses API cannot express as a tool-result image
+    /// (raw bytes, string payloads) surface as conversion errors.
+    #[test]
+    fn tool_result_unsupported_image_sources_error() {
+        for data in [
+            DocumentSourceKind::raw(vec![1, 2, 3]),
+            DocumentSourceKind::string("not an image"),
+        ] {
+            let input = rig_tool_result(message::ToolResultContent::Image(message::Image {
+                data,
+                media_type: None,
+                detail: None,
+                additional_params: None,
+            }));
+
+            let err =
+                Vec::<InputItem>::try_from(input).expect_err("unsupported source should error");
+            assert!(
+                err.to_string().contains("Unsupported tool-result image source"),
+                "got: {err}"
+            );
+        }
+    }
+
+    /// `From<Message> for InputItem` maps every Responses message shape onto
+    /// an input item, including the reasoning-aware assistant role elision.
+    #[test]
+    fn from_message_converts_every_responses_message_shape() {
+        let text = || {
+            OneOrMany::one(AssistantContentType::Text(AssistantContent::OutputText(
+                Text::new("hi"),
+            )))
+        };
+        let reasoning = || {
+            OneOrMany::one(AssistantContentType::Reasoning(OpenAIReasoning {
+                id: "rs_1".to_string(),
+                summary: Vec::new(),
+                content: Vec::new(),
+                encrypted_content: None,
+                status: None,
+            }))
+        };
+
+        let user = InputItem::from(Message::User {
+            content: OneOrMany::one(UserContent::InputText {
+                text: "hi".to_string(),
+            }),
+            name: None,
+        });
+        assert!(matches!(user.role, Some(Role::User)));
+
+        let assistant_text = InputItem::from(Message::Assistant {
+            content: text(),
+            id: "msg_1".to_string(),
+            name: None,
+            status: ToolStatus::Completed,
+        });
+        assert!(matches!(assistant_text.role, Some(Role::Assistant)));
+
+        let assistant_reasoning = InputItem::from(Message::Assistant {
+            content: reasoning(),
+            id: "msg_1".to_string(),
+            name: None,
+            status: ToolStatus::Completed,
+        });
+        assert!(
+            assistant_reasoning.role.is_none(),
+            "a reasoning item replays without a message role"
+        );
+
+        let assistant_input = InputItem::from(Message::AssistantInput {
+            content: "hi".to_string(),
+            name: None,
+        });
+        assert!(matches!(assistant_input.role, Some(Role::Assistant)));
+
+        let system = InputItem::from(Message::system("you are terse"));
+        assert!(matches!(system.role, Some(Role::System)));
+
+        let tool_result = InputItem::from(Message::ToolResult {
+            tool_call_id: "call_1".to_string(),
+            output: ToolResultOutput::Text("ok".to_string()),
+        });
+        assert!(tool_result.role.is_none());
+        assert!(matches!(
+            tool_result.input,
+            InputContent::FunctionCallOutput(_)
+        ));
+    }
+
+    /// A hand-built input item whose content has no `role` key of its own
+    /// (a function-call output) still serializes the stored role alongside it.
+    #[test]
+    fn input_item_serializes_a_role_for_non_message_content() {
+        let item = InputItem {
+            role: Some(Role::User),
+            input: InputContent::FunctionCallOutput(ToolResult {
+                call_id: "call_1".to_string(),
+                output: ToolResultOutput::Text("ok".to_string()),
+                status: ToolStatus::Completed,
+            }),
+        };
+
+        let encoded = serde_json::to_value(&item).expect("input item should serialize");
+        assert_eq!(encoded["role"], json!("user"));
+        assert_eq!(encoded["call_id"], json!("call_1"));
+        assert_eq!(encoded["output"], json!("ok"));
+    }
+
+    /// User image content converts through the full completion-request path:
+    /// base64 (with and without a media type) and URL sources succeed; raw and
+    /// string sources fail loudly.
+    #[test]
+    fn user_image_content_converts_for_every_source_kind() {
+        let base64_with_type = Vec::<InputItem>::try_from(user_message_with(image_content(
+            DocumentSourceKind::base64("dGVzdA=="),
+            Some(message::ImageMediaType::PNG),
+        )))
+        .expect("base64 image with media type should convert");
+        let encoded = serde_json::to_value(&base64_with_type).expect("items should serialize");
+        assert_eq!(
+            encoded[0]["content"][0]["image_url"],
+            json!("data:image/png;base64,dGVzdA==")
+        );
+
+        let base64_without_type = Vec::<InputItem>::try_from(user_message_with(image_content(
+            DocumentSourceKind::base64("dGVzdA=="),
+            None,
+        )))
+        .expect("a media-type-less base64 image still converts");
+        let encoded = serde_json::to_value(&base64_without_type).expect("items should serialize");
+        assert_eq!(
+            encoded[0]["content"][0]["image_url"],
+            json!("data:;base64,dGVzdA==")
+        );
+
+        let url = Vec::<InputItem>::try_from(user_message_with(image_content(
+            DocumentSourceKind::url("https://example.com/pic.png"),
+            None,
+        )))
+        .expect("URL image should convert");
+        let encoded = serde_json::to_value(&url).expect("items should serialize");
+        assert_eq!(
+            encoded[0]["content"][0]["image_url"],
+            json!("https://example.com/pic.png")
+        );
+
+        for data in [
+            DocumentSourceKind::raw(vec![1, 2, 3]),
+            DocumentSourceKind::string("not an image"),
+        ] {
+            let err = Vec::<InputItem>::try_from(user_message_with(image_content(data, None)))
+                .expect_err("unsupported image source should error");
+            assert!(
+                err.to_string().contains("not supported")
+                    || err.to_string().contains("Unsupported document type"),
+                "got: {err}"
+            );
+        }
+    }
+
+    /// PDF documents from raw or string sources cannot become Responses
+    /// `file_data`/`file_url` and error instead.
+    #[test]
+    fn pdf_documents_from_unsupported_sources_error() {
+        for data in [
+            DocumentSourceKind::raw(vec![1, 2, 3]),
+            DocumentSourceKind::string("not really a pdf"),
+        ] {
+            let input = user_message_with(message::UserContent::Document(message::Document {
+                data,
+                media_type: Some(message::DocumentMediaType::PDF),
+                additional_params: None,
+            }));
+
+            let err = Vec::<InputItem>::try_from(input)
+                .expect_err("unsupported PDF source should error");
+            assert!(
+                err.to_string().contains("not supported")
+                    || err.to_string().contains("Unsupported document type"),
+                "got: {err}"
+            );
+        }
+    }
+
+    /// Assistant image content has no Responses representation and must error
+    /// rather than silently dropping content.
+    #[test]
+    fn assistant_image_content_errors_on_request_conversion() {
+        let input = completion::Message::Assistant {
+            id: Some("msg_1".to_string()),
+            content: OneOrMany::one(message::AssistantContent::Image(message::Image {
+                data: DocumentSourceKind::url("https://example.com/pic.png"),
+                media_type: None,
+                detail: None,
+                additional_params: None,
+            })),
+        };
+
+        let err =
+            Vec::<InputItem>::try_from(input).expect_err("assistant images should not convert");
+        assert!(
+            err.to_string()
+                .contains("Assistant image content is not supported"),
+            "got: {err}"
+        );
+    }
+
+    /// Hosted tool constructors and their config extension.
+    #[test]
+    fn hosted_tool_constructors_set_their_kind() {
+        assert_eq!(ResponsesToolDefinition::hosted("custom_tool").kind, "custom_tool");
+        assert_eq!(ResponsesToolDefinition::web_search().kind, "web_search");
+        assert_eq!(ResponsesToolDefinition::file_search().kind, "file_search");
+        assert_eq!(ResponsesToolDefinition::computer_use().kind, "computer_use");
+
+        let tool = ResponsesToolDefinition::web_search().with_config(
+            "search_context_size",
+            serde_json::json!("low"),
+        );
+        assert_eq!(tool.config["search_context_size"], json!("low"));
+    }
+
+    /// The request-level builder extensions for structured outputs, reasoning,
+    /// and hosted tools.
+    #[test]
+    fn completion_request_builder_extensions_apply() {
+        let base = CompletionRequest::try_from(("gpt-4o".to_string(), weather_tool_request()))
+            .expect("request should convert");
+
+        let structured = base.clone().with_structured_outputs(
+            "weather",
+            json!({"type": "object", "properties": {"city": {"type": "string"}}}),
+        );
+        let TextConfig {
+            format: TextFormat::JsonSchema(StructuredOutputsInput { name, strict, .. }),
+        } = structured
+            .additional_parameters
+            .text
+            .expect("structured output should be configured")
+        else {
+            panic!("expected a JSON schema text format");
+        };
+        assert_eq!(name, "weather");
+        assert!(strict);
+
+        let reasoned = base.clone().with_reasoning(
+            Reasoning::new().with_effort(ReasoningEffort::High),
+        );
+        assert!(reasoned.additional_parameters.reasoning.is_some());
+
+        let with_one = base.clone().with_tool(ResponsesToolDefinition::web_search());
+        assert_eq!(with_one.tools.len(), 2);
+        assert_eq!(with_one.tools[1].kind, "web_search");
+
+        let with_many = base.with_tools([
+            ResponsesToolDefinition::file_search(),
+            ResponsesToolDefinition::computer_use(),
+        ]);
+        assert_eq!(with_many.tools.len(), 3);
+        assert_eq!(with_many.tools[1].kind, "file_search");
+        assert_eq!(with_many.tools[2].kind, "computer_use");
+    }
+
+    fn usage_with(details: Option<InputTokensDetails>, output: Option<OutputTokensDetails>) -> ResponsesUsage {
+        ResponsesUsage {
+            input_tokens: 1,
+            input_tokens_details: details,
+            output_tokens: 2,
+            output_tokens_details: output,
+            total_tokens: 3,
+        }
+    }
+
+    /// `Add` keeps whichever side carries details and drops to `None` only
+    /// when neither does — and `From<ResponsesUsage>` carries the detail
+    /// fields onto the normalized usage.
+    #[test]
+    fn responses_usage_add_and_from_cover_every_details_combination() {
+        let details = InputTokensDetails { cached_tokens: 5 };
+        let output_details = OutputTokensDetails { reasoning_tokens: 7 };
+
+        let lhs_only = usage_with(Some(details.clone()), Some(output_details.clone()))
+            + usage_with(None, None);
+        assert_eq!(
+            lhs_only
+                .input_tokens_details
+                .map(|details| details.cached_tokens),
+            Some(5)
+        );
+        assert_eq!(
+            lhs_only
+                .output_tokens_details
+                .map(|details| details.reasoning_tokens),
+            Some(7)
+        );
+
+        let neither = usage_with(None, None) + usage_with(None, None);
+        assert!(neither.input_tokens_details.is_none());
+        assert!(neither.output_tokens_details.is_none());
+
+        let input_sum = details.clone() + InputTokensDetails { cached_tokens: 2 };
+        assert_eq!(input_sum.cached_tokens, 7);
+        let output_sum = output_details.clone() + OutputTokensDetails { reasoning_tokens: 3 };
+        assert_eq!(output_sum.reasoning_tokens, 10);
+
+        let normalized = crate::completion::Usage::from(usage_with(
+            Some(details),
+            Some(output_details),
+        ));
+        assert_eq!(normalized.cached_input_tokens, 5);
+        assert_eq!(normalized.reasoning_tokens, 7);
+        assert_eq!(normalized.total_tokens, 3);
+    }
+
+    /// Every status keeps OpenAI's own wire spelling when rendered into a
+    /// finish reason, including the in-flight ones `map_finish_reason` itself
+    /// never renders.
+    #[test]
+    fn response_status_wire_name_matches_the_documented_spellings() {
+        for (status, expected) in [
+            (ResponseStatus::InProgress, "in_progress"),
+            (ResponseStatus::Completed, "completed"),
+            (ResponseStatus::Failed, "failed"),
+            (ResponseStatus::Cancelled, "cancelled"),
+            (ResponseStatus::Queued, "queued"),
+            (ResponseStatus::Incomplete, "incomplete"),
+        ] {
+            assert_eq!(response_status_wire_name(&status), expected);
+        }
+    }
+
+    /// A boolean `additional_params` payload is the `stream` toggle and must
+    /// not leak into the typed additional-parameters object.
+    #[test]
+    fn boolean_additional_params_become_the_stream_flag() {
+        let mut request = weather_tool_request();
+        request.additional_params = Some(json!(true));
+
+        let converted =
+            CompletionRequest::try_from(("gpt-4o".to_string(), request)).expect("convert");
+        assert_eq!(converted.stream, Some(true));
+        assert_eq!(
+            serde_json::to_value(&converted).expect("serialize")["background"],
+            Value::Null,
+            "the boolean payload itself must not survive as a typed parameter"
+        );
+    }
+
+    /// An `additional_params.tools` payload that is not a valid tool list
+    /// errors with the payload context rather than a bare serde message.
+    #[test]
+    fn invalid_additional_params_tools_payload_errors() {
+        let mut request = weather_tool_request();
+        request.additional_params = Some(json!({"tools": "not-a-tool-list"}));
+
+        let err = CompletionRequest::try_from(("gpt-4o".to_string(), request))
+            .expect_err("invalid tools payload should error");
+        assert!(
+            err.to_string()
+                .contains("Invalid OpenAI Responses tools payload"),
+            "got: {err}"
+        );
+    }
+
+    /// `with_model` matches `new`, and `provider_name` reports the ext's
+    /// provider descriptor.
+    #[test]
+    fn with_model_matches_new_and_reports_provider_name() {
+        let client = crate::providers::openai::Client::new("dummy-key").expect("client");
+        let model = ResponsesCompletionModel::with_model(client, "gpt-4o-mini");
+
+        assert_eq!(model.model, "gpt-4o-mini");
+        assert_eq!(model.provider_name(), "openai");
+    }
+
+    /// Model-level default tools append after the request's own tools, and
+    /// `completions_api` hands the same model id to the Chat Completions model.
+    #[test]
+    fn model_with_tools_appends_and_completions_api_keeps_the_model() {
+        let client = crate::providers::openai::Client::new("dummy-key").expect("client");
+        let model = ResponsesCompletionModel::new(client, "gpt-4o-mini").with_tools([
+            ResponsesToolDefinition::web_search(),
+            ResponsesToolDefinition::file_search(),
+        ]);
+
+        let req = model
+            .create_completion_request(weather_tool_request())
+            .expect("request should convert");
+        assert_eq!(req.tools.len(), 3);
+        assert_eq!(req.tools[1].kind, "web_search");
+        assert_eq!(req.tools[2].kind, "file_search");
+
+        let chat_model = ResponsesCompletionModel::new(
+            crate::providers::openai::Client::new("dummy-key").expect("client"),
+            "gpt-4o-mini",
+        )
+        .completions_api();
+        assert_eq!(chat_model.model, "gpt-4o-mini");
+    }
+
+    /// `AdditionalParameters::to_json` renders the typed struct as a JSON
+    /// object.
+    #[test]
+    fn additional_parameters_to_json_is_an_object() {
+        let mut params = AdditionalParameters::default();
+        params.background = Some(true);
+        params.user = Some("jane".to_string());
+
+        let encoded = params.to_json();
+        assert_eq!(encoded["background"], json!(true));
+        assert_eq!(encoded["user"], json!("jane"));
+    }
+
+    /// The `Message::system` helper and the refusal-content conversion.
+    #[test]
+    fn message_system_helper_and_refusal_conversion() {
+        let encoded = serde_json::to_value(Message::system("be terse"))
+            .expect("system message should serialize");
+        assert_eq!(encoded["role"], json!("system"));
+        assert_eq!(encoded["content"][0]["type"], json!("input_text"));
+        assert_eq!(encoded["content"][0]["text"], json!("be terse"));
+
+        let converted = completion::AssistantContent::from(AssistantContent::Refusal {
+            refusal: "no can do".to_string(),
+        });
+        assert!(matches!(
+            converted,
+            completion::AssistantContent::Text(Text { text, .. }) if text == "no can do"
+        ));
+    }
+
+    /// `FromStr` infallibly produces the plain-text content variants.
+    #[test]
+    fn content_from_str_produces_plain_text() {
+        let system: SystemContent = "hello".parse().expect("system content parses");
+        assert_eq!(system, SystemContent::InputText { text: "hello".into() });
+
+        let user: UserContent = "hello".parse().expect("user content parses");
+        assert_eq!(user, UserContent::InputText { text: "hello".into() });
+    }
+
+    fn core_user_message(content: message::UserContent) -> message::Message {
+        message::Message::User {
+            content: OneOrMany::one(content),
+        }
+    }
+
+    /// The `Vec<Message>` path converts user image content for every source
+    /// kind, erroring on the ones the Responses wire cannot express.
+    #[test]
+    fn responses_message_image_content_converts_for_every_source_kind() {
+        let messages = Vec::<Message>::try_from(core_user_message(image_content(
+            DocumentSourceKind::base64("dGVzdA=="),
+            Some(message::ImageMediaType::PNG),
+        )))
+        .expect("base64 image should convert");
+        let encoded = serde_json::to_value(&messages).expect("messages should serialize");
+        assert_eq!(
+            encoded[0]["content"][0]["image_url"],
+            json!("data:image/png;base64,dGVzdA==")
+        );
+
+        let messages = Vec::<Message>::try_from(core_user_message(image_content(
+            DocumentSourceKind::base64("dGVzdA=="),
+            None,
+        )))
+        .expect("a media-type-less base64 image still converts");
+        let encoded = serde_json::to_value(&messages).expect("messages should serialize");
+        assert_eq!(
+            encoded[0]["content"][0]["image_url"],
+            json!("data:;base64,dGVzdA==")
+        );
+
+        let messages = Vec::<Message>::try_from(core_user_message(image_content(
+            DocumentSourceKind::url("https://example.com/pic.png"),
+            None,
+        )))
+        .expect("URL image should convert");
+        let encoded = serde_json::to_value(&messages).expect("messages should serialize");
+        assert_eq!(
+            encoded[0]["content"][0]["image_url"],
+            json!("https://example.com/pic.png")
+        );
+
+        for data in [
+            DocumentSourceKind::raw(vec![1, 2, 3]),
+            DocumentSourceKind::string("not an image"),
+        ] {
+            let err = Vec::<Message>::try_from(core_user_message(image_content(data, None)))
+                .expect_err("unsupported image source should error");
+            assert!(
+                err.to_string().contains("not supported")
+                    || err.to_string().contains("Unsupported document type"),
+                "got: {err}"
+            );
+        }
+    }
+
+    /// Documents and audio through the `Vec<Message>` path: base64 PDFs carry
+    /// `file_data` plus the default filename, plain base64 documents become
+    /// text, base64 audio is passed through, and non-base64 audio errors.
+    #[test]
+    fn responses_message_document_and_audio_content_convert() {
+        let messages = Vec::<Message>::try_from(core_user_message(
+            message::UserContent::Document(message::Document {
+                data: DocumentSourceKind::base64("dGVzdA=="),
+                media_type: Some(message::DocumentMediaType::PDF),
+                additional_params: None,
+            }),
+        ))
+        .expect("base64 PDF should convert");
+        let encoded = serde_json::to_value(&messages).expect("messages should serialize");
+        assert_eq!(
+            encoded[0]["content"][0]["file_data"],
+            json!("data:application/pdf;base64,dGVzdA==")
+        );
+        assert_eq!(encoded[0]["content"][0]["filename"], json!("document.pdf"));
+
+        for data in [
+            DocumentSourceKind::raw(vec![1, 2, 3]),
+            DocumentSourceKind::string("not really a pdf"),
+        ] {
+            let err = Vec::<Message>::try_from(core_user_message(
+                message::UserContent::Document(message::Document {
+                    data,
+                    media_type: Some(message::DocumentMediaType::PDF),
+                    additional_params: None,
+                }),
+            ))
+            .expect_err("unsupported PDF source should error");
+            assert!(
+                err.to_string().contains("not supported")
+                    || err.to_string().contains("Unsupported document type"),
+                "got: {err}"
+            );
+        }
+
+        let messages = Vec::<Message>::try_from(core_user_message(
+            message::UserContent::Document(message::Document {
+                data: DocumentSourceKind::base64("aGk="),
+                media_type: None,
+                additional_params: None,
+            }),
+        ))
+        .expect("plain base64 document should convert");
+        let encoded = serde_json::to_value(&messages).expect("messages should serialize");
+        assert_eq!(encoded[0]["content"][0]["type"], json!("input_text"));
+
+        let messages = Vec::<Message>::try_from(core_user_message(message::UserContent::Audio(
+            message::Audio {
+                data: DocumentSourceKind::base64("//uQx"),
+                media_type: Some(message::AudioMediaType::WAV),
+                additional_params: None,
+            },
+        )))
+        .expect("base64 audio should convert");
+        let encoded = serde_json::to_value(&messages).expect("messages should serialize");
+        assert_eq!(encoded[0]["content"][0]["input_audio"]["format"], json!("wav"));
+
+        let err = Vec::<Message>::try_from(core_user_message(message::UserContent::Audio(
+            message::Audio {
+                data: DocumentSourceKind::url("https://example.com/clip.wav"),
+                media_type: None,
+                additional_params: None,
+            },
+        )))
+        .expect_err("non-base64 audio should error");
+        assert!(
+            err.to_string().contains("Audio must be base64"),
+            "got: {err}"
+        );
+    }
+
+    /// A tool result without a `call_id` cannot be correlated on the wire and
+    /// errors rather than serializing an unpaired output.
+    #[test]
+    fn tool_result_without_call_id_errors_on_message_conversion() {
+        let input = message::Message::User {
+            content: OneOrMany::one(message::UserContent::ToolResult(message::ToolResult {
+                id: "result-id".to_string(),
+                call_id: None,
+                content: OneOrMany::one(message::ToolResultContent::text("tool output")),
+            })),
+        };
+
+        let err = Vec::<Message>::try_from(input).expect_err("call_id is required");
+        assert!(err.to_string().contains("`call_id` is required"), "got: {err}");
+    }
+
+    /// A core system message converts to a Responses system message, and an
+    /// empty-text assistant fragment is skipped entirely.
+    #[test]
+    fn system_messages_convert_and_empty_assistant_text_is_skipped() {
+        let messages = Vec::<Message>::try_from(message::Message::system("be terse"))
+            .expect("system message should convert");
+        assert!(matches!(messages.as_slice(), [Message::System { .. }]));
+
+        let messages = Vec::<Message>::try_from(message::Message::Assistant {
+            id: None,
+            content: OneOrMany::one(message::AssistantContent::Text(Text::new(""))),
+        })
+        .expect("empty assistant text should convert to nothing");
+        assert!(messages.is_empty());
+    }
+
+    /// Assistant edge cases through the `Vec<Message>` path: a tool call
+    /// without a `call_id` errors, a valid tool call converts, and assistant
+    /// image content is rejected.
+    #[test]
+    fn assistant_tool_call_edges_on_message_conversion() {
+        let tool_call = |call_id: Option<String>| {
+            message::Message::Assistant {
+                id: Some("msg_1".to_string()),
+                content: OneOrMany::one(message::AssistantContent::ToolCall(
+                    message::ToolCall {
+                        id: "fc_1".to_string(),
+                        call_id,
+                        function: message::ToolFunction {
+                            name: "lookup".to_string(),
+                            arguments: json!({"q": "rig"}),
+                        },
+                        signature: None,
+                        additional_params: None,
+                    },
+                )),
+            }
+        };
+
+        let err = Vec::<Message>::try_from(tool_call(None))
+            .expect_err("tool call without call_id should error");
+        assert!(err.to_string().contains("`call_id` is required"), "got: {err}");
+
+        let messages = Vec::<Message>::try_from(tool_call(Some("call_1".to_string())))
+            .expect("tool call with call_id should convert");
+        assert!(matches!(
+            messages.as_slice(),
+            [Message::Assistant { .. }]
+        ));
+
+        let err = Vec::<Message>::try_from(message::Message::Assistant {
+            id: Some("msg_1".to_string()),
+            content: OneOrMany::one(message::AssistantContent::Image(message::Image {
+                data: DocumentSourceKind::url("https://example.com/pic.png"),
+                media_type: None,
+                detail: None,
+                additional_params: None,
+            })),
+        })
+        .expect_err("assistant images should not convert");
+        assert!(
+            err.to_string()
+                .contains("Assistant image content is not supported"),
+            "got: {err}"
+        );
+    }
+
+    /// Truncation policy on the output path: a function call whose arguments
+    /// never parsed into JSON is dropped (not fabricated), and an unmodeled
+    /// output item contributes no assistant content.
+    #[test]
+    fn truncated_arguments_and_unknown_outputs_contribute_no_content() {
+        let truncated: Output = serde_json::from_value(json!({
+            "type": "function_call",
+            "id": "fc_1",
+            "call_id": "call_1",
+            "name": "lookup",
+            "arguments": "{\"q\": \"tru",
+            "status": "completed",
+        }))
+        .expect("truncated function call should decode");
+        let converted: Vec<completion::AssistantContent> = truncated.into();
+        assert!(
+            converted.is_empty(),
+            "a truncated call must not fabricate a tool call"
+        );
+
+        let unknown = Output::Unknown(json!({"type": "web_search_call", "id": "ws_1"}));
+        let converted: Vec<completion::AssistantContent> = unknown.into();
+        assert!(converted.is_empty());
+    }
 }

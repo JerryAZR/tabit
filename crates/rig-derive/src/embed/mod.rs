@@ -157,3 +157,36 @@ impl StructParser for DataStruct {
         ))
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn derive(source: &str) -> syn::Result<TokenStream> {
+        let mut input = syn::parse_str::<syn::DeriveInput>(source).expect("test input parses");
+        expand_derive_embedding(&mut input)
+    }
+
+    #[test]
+    fn derive_without_any_embed_fields_is_rejected() {
+        let error = derive("struct Plain { a: String, b: i32 }")
+            .err()
+            .expect("unannotated struct rejected");
+        assert!(error.to_string().contains("Add at least one field"));
+    }
+
+    #[test]
+    fn derive_on_non_structs_is_rejected() {
+        let error = derive("enum NotAStruct { A, B }")
+            .err()
+            .expect("enum rejected");
+        assert!(error.to_string().contains("should only be used on structs"));
+    }
+
+    #[test]
+    fn combining_basic_and_custom_embed_attributes_is_rejected() {
+        let source = r#"struct S { #[embed] #[embed(embed_with = "path")] a: String }"#;
+        let error = derive(source).err().expect("conflicting attrs rejected");
+        assert!(error.to_string().contains("cannot combine"));
+    }
+}

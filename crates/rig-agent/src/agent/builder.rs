@@ -818,6 +818,126 @@ mod tests {
             .build();
     }
 
+    /// With no retrievable text in the prompt or history (here: a prompt whose
+    /// only content is an image), the dynamic-context hook must continue the
+    /// run instead of querying the index or stopping.
+    #[tokio::test]
+    async fn dynamic_context_without_a_retrieval_query_continues_the_run() {
+        use crate::completion::Message;
+        use rig_core::OneOrMany;
+        use rig_core::message::UserContent;
+
+        let hook = DynamicContext {
+            samples: 1,
+            index: MockToolIndex::new(["add"]),
+        };
+
+        let prompt = Message::User {
+            content: OneOrMany::one(UserContent::image_url(
+                "https://example.com/a.png",
+                None,
+                None,
+            )),
+        };
+        let event = CompletionCall {
+            prompt: &prompt,
+            history: &[],
+            turn: 1,
+        };
+
+        let action = hook
+            .on_completion_call(&HookContext::new(false, None), event)
+            .await;
+        assert!(matches!(action, CompletionCallAction::Continue));
+    }
+
+    #[test]
+    fn without_preamble_clears_a_configured_preamble() {
+        let agent = AgentBuilder::new(MockCompletionModel::text("ok"))
+            .preamble("system prompt")
+            .without_preamble()
+            .build();
+        assert_eq!(agent.preamble, None);
+    }
+
+    #[test]
+    fn output_schema_raw_installs_a_caller_supplied_schema() {
+        let schema = schemars::schema_for!(u32);
+        let agent = AgentBuilder::new(MockCompletionModel::text("ok"))
+            .output_schema_raw(schema.clone())
+            .build();
+        assert_eq!(agent.output_schema.as_ref().map(schemars::Schema::as_value), Some(schema.as_value()));
+    }
+
+    fn portable_tool(name: &str) -> PortableDynamicTool {
+        PortableDynamicTool::new(
+            name,
+            "portable tool for builder coverage",
+            serde_json::json!({"type": "object", "properties": {}}),
+            |_arguments| {
+                Box::pin(async {
+                    Ok(crate::tool::ToolOutput::text("ok")) as Result<_, ToolExecutionError>
+                })
+            },
+        )
+    }
+
+    fn dynamic_tool(name: &str) -> DynamicTool {
+        DynamicTool::new(
+            name,
+            "dynamic tool for builder coverage",
+            serde_json::json!({"type": "object", "properties": {}}),
+            |_context, _arguments| {
+                Box::pin(async { Ok(crate::tool::ToolOutput::text("ok")) as Result<_, ToolExecutionError> })
+            },
+        )
+    }
+
+    async fn advertised_names(agent: &Agent) -> Vec<String> {
+        agent
+            .tool_server_handle
+            .get_tool_defs(None)
+            .await
+            .unwrap()
+            .into_iter()
+            .map(|definition| definition.name)
+            .collect()
+    }
+
+    /// `portable_dynamic_tool` on a fresh builder transitions it into the
+    /// builder-tools state and registers the tool under its own name.
+    #[tokio::test]
+    async fn portable_dynamic_tool_transitions_from_no_tool_config() {
+        let agent = AgentBuilder::new(MockCompletionModel::text("ok"))
+            .portable_dynamic_tool(portable_tool("from_scratch"))
+            .build();
+        assert_eq!(advertised_names(&agent).await, vec!["from_scratch".to_string()]);
+    }
+
+    /// Once in the builder-tools state, the `dynamic_tool`,
+    /// `portable_dynamic_tool`, and `dynamic_tools` methods keep appending
+    /// tools to the same registry.
+    #[tokio::test]
+    async fn with_builder_tools_appends_dynamic_and_portable_tools() {
+        let agent = AgentBuilder::new(MockCompletionModel::text("ok"))
+            .tool(MockAddTool)
+            .dynamic_tool(dynamic_tool("dyn_one"))
+            .portable_dynamic_tool(portable_tool("portable_one"))
+            .dynamic_tools(vec![dynamic_tool("dyn_two_a"), dynamic_tool("dyn_two_b")])
+            .build();
+
+        assert_eq!(
+            advertised_names(&agent).await,
+            vec![
+                "add".to_string(),
+                "dyn_one".to_string(),
+                "portable_one".to_string(),
+                "dyn_two_a".to_string(),
+                "dyn_two_b".to_string(),
+            ]
+        );
+    }
+
     struct NamedTool;
 
     impl NamedTool {

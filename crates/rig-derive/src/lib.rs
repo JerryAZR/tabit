@@ -10,7 +10,7 @@ mod tool;
 //References:
 //<https://doc.rust-lang.org/book/ch19-06-macros.html#how-to-write-a-custom-derive-macro>
 //<https://doc.rust-lang.org/reference/procedural-macros.html>
-/// A macro that allows you to implement the `rig::embedding::Embed` trait by deriving it.
+/// A macro that allows you to implement the `rig::embeddings::Embed` trait by deriving it.
 /// Usage can be found below:
 ///
 /// ```text

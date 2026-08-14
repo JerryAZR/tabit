@@ -1832,4 +1832,208 @@ mod tests {
             None
         );
     }
+
+    /// `Arc<M>` is a completion model: it forwards completion, streaming, and
+    /// capabilities, and the builder helper clones the `Arc`, never the model.
+    #[tokio::test]
+    async fn a_shared_model_forwards_every_completion_model_method() {
+        use crate::completion::CompletionModel;
+        use crate::test_utils::MockStreamEvent;
+
+        let model = std::sync::Arc::new(MockCompletionModel::text("hello"));
+        let request = CompletionRequestBuilder::new(
+            MockCompletionModel::default(),
+            Message::user("Prompt"),
+        )
+        .build();
+
+        let response = model
+            .completion(request)
+            .await
+            .expect("Arc forwards completion");
+        assert!(matches!(
+            response.choice.first(),
+            AssistantContent::Text(text) if text.text == "hello"
+        ));
+
+        let streamed_model = std::sync::Arc::new(MockCompletionModel::from_stream_turns([[
+            MockStreamEvent::text("hi"),
+        ]]));
+        let mut streamed = streamed_model
+            .stream(
+                CompletionRequestBuilder::new(MockCompletionModel::default(), Message::user("Prompt"))
+                    .build(),
+            )
+            .await
+            .expect("Arc forwards stream");
+        use futures::StreamExt as _;
+        while streamed.next().await.is_some() {}
+
+        assert_eq!(model.capabilities(), ProviderCapabilities::default());
+
+        // The `completion_request` convenience works through the Arc too.
+        let builder_request = model.completion_request("hi").build();
+        assert_eq!(builder_request.chat_history.len(), 1);
+    }
+
+    /// The schema name extraction: a `title` is used verbatim, anything else
+    /// falls back to `"response_schema"`, and no schema means no name.
+    #[test]
+    fn output_schema_name_uses_the_title_or_falls_back() {
+        let titled: schemars::Schema = serde_json::from_value(serde_json::json!({
+            "title": "WeatherResponse",
+            "type": "object",
+        }))
+        .expect("schema should deserialize");
+        let untitled: schemars::Schema = serde_json::from_value(serde_json::json!({
+            "type": "object",
+        }))
+        .expect("schema should deserialize");
+
+        let request = CompletionRequest {
+            output_schema: Some(titled),
+            ..base_request()
+        };
+        assert_eq!(request.output_schema_name(), Some("WeatherResponse".to_string()));
+
+        let request = CompletionRequest {
+            output_schema: Some(untitled),
+            ..base_request()
+        };
+        assert_eq!(
+            request.output_schema_name(),
+            Some("response_schema".to_string())
+        );
+
+        assert_eq!(base_request().output_schema_name(), None);
+    }
+
+    fn base_request() -> CompletionRequest {
+        CompletionRequest {
+            model: None,
+            preamble: None,
+            chat_history: OneOrMany::one(Message::user("Prompt")),
+            documents: Vec::new(),
+            tools: Vec::new(),
+            temperature: None,
+            max_tokens: None,
+            tool_choice: None,
+            additional_params: None,
+            output_schema: None,
+            record_telemetry_content: false,
+        }
+    }
+
+    fn provider_tool(kind: &str) -> ProviderToolDefinition {
+        ProviderToolDefinition {
+            kind: kind.to_string(),
+            config: serde_json::Map::new(),
+        }
+    }
+
+    /// Provider-hosted tools merge into `additional_params.tools` whatever the
+    /// starting payload shape: nothing, an object, a boolean stream flag, or a
+    /// payload that already carries tools.
+    #[test]
+    fn provider_tools_merge_into_every_additional_params_shape() {
+        let request = base_request().with_provider_tool(provider_tool("web_search"));
+        assert_eq!(
+            request.additional_params,
+            Some(serde_json::json!({
+                "tools": [{"type": "web_search"}]
+            }))
+        );
+
+        let object_params = base_request();
+        let request = CompletionRequest {
+            additional_params: Some(serde_json::json!({"top_p": 0.9})),
+            ..object_params
+        }
+        .with_provider_tools(vec![provider_tool("web_search"), provider_tool("file_search")]);
+        assert_eq!(
+            request.additional_params,
+            Some(serde_json::json!({
+                "top_p": 0.9,
+                "tools": [{"type": "web_search"}, {"type": "file_search"}]
+            }))
+        );
+
+        let request = CompletionRequest {
+            additional_params: Some(serde_json::json!(true)),
+            ..base_request()
+        }
+        .with_provider_tool(provider_tool("web_search"));
+        assert_eq!(
+            request.additional_params,
+            Some(serde_json::json!({
+                "stream": true,
+                "tools": [{"type": "web_search"}]
+            })),
+            "a boolean payload is the stream flag and must survive the merge"
+        );
+
+        let request = CompletionRequest {
+            additional_params: Some(serde_json::json!({
+                "tools": [{"type": "computer_use"}]
+            })),
+            ..base_request()
+        }
+        .with_provider_tool(provider_tool("web_search"));
+        assert_eq!(
+            request.additional_params,
+            Some(serde_json::json!({
+                "tools": [{"type": "computer_use"}, {"type": "web_search"}]
+            })),
+            "an existing tools list is appended to, not replaced"
+        );
+
+        // An empty tool list leaves the payload untouched.
+        let request =
+            base_request().with_provider_tools(Vec::new());
+        assert_eq!(request.additional_params, None);
+    }
+
+    /// The builder's model override, additional-params merging, provider
+    /// tools, and output schema all land on the built request.
+    #[test]
+    fn builder_overrides_model_merges_params_and_carries_schema() {
+        let schema: schemars::Schema = serde_json::from_value(serde_json::json!({
+            "title": "Typed",
+            "type": "object",
+        }))
+        .expect("schema should deserialize");
+
+        let request = CompletionRequestBuilder::new(MockCompletionModel::default(), "Prompt")
+            .model("override-model")
+            .additional_params(serde_json::json!({"a": 1}))
+            .additional_params(serde_json::json!({"b": 2}))
+            .provider_tool(provider_tool("web_search"))
+            .provider_tools(vec![provider_tool("file_search")])
+            .output_schema(schema)
+            .build();
+
+        assert_eq!(request.model.as_deref(), Some("override-model"));
+        assert_eq!(
+            request.additional_params,
+            Some(serde_json::json!({
+                "a": 1,
+                "b": 2,
+                "tools": [{"type": "web_search"}, {"type": "file_search"}]
+            })),
+            "additional_params calls merge and provider tools append"
+        );
+        assert_eq!(request.output_schema_name(), Some("Typed".to_string()));
+
+        // `model_opt` clears or replaces the override.
+        let request = CompletionRequestBuilder::new(MockCompletionModel::default(), "Prompt")
+            .model("first")
+            .model_opt(None)
+            .build();
+        assert_eq!(request.model, None);
+
+        let request = CompletionRequestBuilder::new(MockCompletionModel::default(), "Prompt")
+            .model_opt(Some("second".to_string()))
+            .build();
+        assert_eq!(request.model.as_deref(), Some("second"));
+    }
 }

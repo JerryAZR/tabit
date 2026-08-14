@@ -397,4 +397,118 @@ mod tests {
         let either = F::eq("category", json!("veg")).or(F::lt("price", json!(50)));
         assert!(either.satisfies(&doc));
     }
+
+    #[test]
+    fn satisfies_compares_bools_and_nulls() {
+        let doc = json!({ "active": true, "empty": null });
+
+        // Booleans compare by ordering: true > false.
+        assert!(F::eq("active", json!(true)).satisfies(&doc));
+        assert!(!F::eq("active", json!(false)).satisfies(&doc));
+        assert!(F::gt("active", json!(false)).satisfies(&doc));
+        assert!(!F::lt("active", json!(false)).satisfies(&doc));
+
+        // Nulls compare equal to each other and never order above/below anything.
+        assert!(F::eq("empty", json!(null)).satisfies(&doc));
+        assert!(!F::gt("empty", json!(null)).satisfies(&doc));
+        assert!(!F::lt("empty", json!(null)).satisfies(&doc));
+
+        // Mixed types never satisfy an ordering comparison.
+        assert!(!F::gt("active", json!(1)).satisfies(&doc));
+    }
+
+    /// A target filter representation for exercising [`Filter::interpret`].
+    #[derive(Debug, PartialEq)]
+    struct StringFilter(String);
+
+    impl SearchFilter for StringFilter {
+        type Value = serde_json::Value;
+
+        fn eq(key: impl AsRef<str>, value: Self::Value) -> Self {
+            StringFilter(format!("{}={}", key.as_ref(), value))
+        }
+
+        fn gt(key: impl AsRef<str>, value: Self::Value) -> Self {
+            StringFilter(format!("{}>{}", key.as_ref(), value))
+        }
+
+        fn lt(key: impl AsRef<str>, value: Self::Value) -> Self {
+            StringFilter(format!("{}<{}", key.as_ref(), value))
+        }
+
+        fn and(self, rhs: Self) -> Self {
+            StringFilter(format!("({}&{})", self.0, rhs.0))
+        }
+
+        fn or(self, rhs: Self) -> Self {
+            StringFilter(format!("({}|{})", self.0, rhs.0))
+        }
+    }
+
+    #[test]
+    fn interpret_compiles_every_filter_variant() {
+        let filter = F::eq("a", json!(1))
+            .and(F::gt("b", json!(2)).or(F::lt("c", json!(3))));
+
+        let compiled: StringFilter = filter.interpret();
+        assert_eq!(
+            compiled,
+            StringFilter("(a=1&(b>2|c<3))".to_string())
+        );
+    }
+
+    #[test]
+    fn try_map_filter_converts_or_fails_on_error() {
+        use super::{FilterError, VectorSearchRequest};
+
+        let with_filter = VectorSearchRequest::builder()
+            .query("q")
+            .samples(1)
+            .filter(F::eq("k", json!(7)))
+            .build();
+
+        let mapped = with_filter
+            .clone()
+            .try_map_filter::<String, _>(|filter| match filter {
+                Filter::Eq(key, value) => Ok(format!("{key}={value}")),
+                other => Err(FilterError::TypeError(format!("{other:?}"))),
+            })
+            .expect("mapping an eq filter should succeed");
+        assert_eq!(mapped.filter().as_ref(), Some(&"k=7".to_string()));
+
+        let error = with_filter
+            .try_map_filter::<String, _>(|filter| match filter {
+                Filter::Eq(_, _) => Err(FilterError::TypeError("eq unsupported".to_string())),
+                other => Err(FilterError::TypeError(format!("{other:?}"))),
+            })
+            .expect_err("failing conversion must propagate");
+        assert!(matches!(error, FilterError::TypeError(_)));
+
+        let without_filter = VectorSearchRequest::<F>::builder()
+            .query("q")
+            .samples(1)
+            .build();
+        let mapped = without_filter
+            .try_map_filter::<String, _>(|filter| match filter {
+                Filter::Eq(key, value) => Ok(format!("{key}={value}")),
+                other => Err(FilterError::TypeError(format!("{other:?}"))),
+            })
+            .expect("mapping without a filter should succeed");
+        assert_eq!(mapped.filter(), &None);
+    }
+
+    #[test]
+    fn builder_additional_params_round_trips_through_serde() {
+        use super::VectorSearchRequest;
+
+        let request = VectorSearchRequest::<F>::builder()
+            .query("q")
+            .samples(3)
+            .additional_params(json!({ "region": "us" }))
+            .expect("additional_params accepts an object")
+            .build();
+
+        let serialized = serde_json::to_value(&request).expect("request serializes");
+        assert_eq!(serialized["additional_params"], json!({ "region": "us" }));
+    }
 }

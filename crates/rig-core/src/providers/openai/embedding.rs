@@ -385,6 +385,90 @@ mod tests {
         "data": [{ "object": "embedding", "index": 0, "embedding": [0.1, 0.2] }]
     }"#;
 
+    const NO_USAGE_BODY: &str = r#"{
+        "object": "list",
+        "model": "text-embedding-3-small",
+        "data": [{ "object": "embedding", "index": 0, "embedding": [0.5] }]
+    }"#;
+
+    /// A local provider extension that speaks the OpenAI-compatible embeddings
+    /// wire format with every compatibility knob flipped against OpenAI:
+    /// no `encoding_format`, no `user`, optional usage, and Mistral-style
+    /// `output_dimension` instead of `dimensions`.
+    mod compat_ext {
+        use super::*;
+        use crate::client::{
+            BearerAuth, Capabilities, Capable, Client, ClientBuilder, DebugExt, Nothing, Provider,
+            ProviderBuilder,
+        };
+        use crate::http_client::{self, HttpClientExt};
+
+        #[derive(Debug, Default, Clone, Copy)]
+        pub(super) struct CompatExt;
+        #[derive(Debug, Default, Clone, Copy)]
+        pub(super) struct CompatExtBuilder;
+
+        impl Provider for CompatExt {
+            type Builder = CompatExtBuilder;
+            const VERIFY_PATH: &'static str = "/";
+        }
+
+        impl ProviderBuilder for CompatExtBuilder {
+            type Extension<H> = CompatExt where H: HttpClientExt;
+            type ApiKey = BearerAuth;
+
+            const BASE_URL: &'static str = "https://compat.invalid";
+
+            fn build<H>(
+                _builder: &ClientBuilder<Self, Self::ApiKey, H>,
+            ) -> http_client::Result<Self::Extension<H>>
+            where
+                H: HttpClientExt,
+            {
+                Ok(CompatExt)
+            }
+        }
+
+        impl<H> Capabilities<H> for CompatExt {
+            type Completion = Nothing;
+            type Embeddings = Capable<GenericEmbeddingModel<CompatExt, H>>;
+            type Transcription = Nothing;
+            type ModelListing = Nothing;
+            #[cfg(feature = "image")]
+            type ImageGeneration = Nothing;
+            #[cfg(feature = "audio")]
+            type AudioGeneration = Nothing;
+            type Rerank = Nothing;
+        }
+
+        impl DebugExt for CompatExt {}
+
+        impl OpenAIEmbeddingsCompatible for CompatExt {
+            const PROVIDER_NAME: &'static str = "compat";
+            const SUPPORTS_ENCODING_FORMAT: bool = false;
+            const SUPPORTS_USER: bool = false;
+            const REQUIRES_USAGE: bool = false;
+
+            fn embedding_dimensions(
+                &self,
+                _model: &str,
+                dimensions: Option<usize>,
+            ) -> Result<Option<EmbeddingDimensions>, EmbeddingError> {
+                Ok(dimensions.map(EmbeddingDimensions::OutputDimension))
+            }
+        }
+
+        pub(super) fn client(
+            http_client: RecordingHttpClient,
+        ) -> Client<CompatExt, RecordingHttpClient> {
+            Client::<CompatExt, reqwest::Client>::builder()
+                .api_key("test-key")
+                .http_client(http_client)
+                .build()
+                .expect("build compat client")
+        }
+    }
+
     #[test]
     fn embedding_model_accepts_backend_without_default_or_debug() {
         let client = CompletionsClient::builder()
@@ -396,6 +480,43 @@ mod tests {
         let model = client.embedding_model("text-embedding-3-small");
 
         assert_eq!(model.ndims(), 0);
+    }
+
+    #[tokio::test]
+    async fn custom_backend_errors_surface_from_every_send_path() {
+        let client = CompletionsClient::builder()
+            .api_key("test-key")
+            .http_client(CustomHttpClient)
+            .build()
+            .expect("build client");
+        let model = client.embedding_model("text-embedding-3-small");
+
+        let error = model
+            .embed_texts(["hello".to_string()])
+            .await
+            .expect_err("unary send should fail");
+        assert!(matches!(error, EmbeddingError::HttpError(_)));
+
+        let multipart_req = Request::post("https://compat.invalid")
+            .body(MultipartForm::new())
+            .expect("multipart request");
+        let error = match CustomHttpClient
+            .send_multipart::<Bytes>(multipart_req)
+            .await
+        {
+            Err(error) => error,
+            Ok(_) => panic!("multipart send should fail"),
+        };
+        assert!(matches!(error, http_client::Error::StreamEnded));
+
+        let stream_req = Request::post("https://compat.invalid")
+            .body(Bytes::new())
+            .expect("streaming request");
+        let error = match CustomHttpClient.send_streaming(stream_req).await {
+            Err(error) => error,
+            Ok(_) => panic!("streaming send should fail"),
+        };
+        assert!(matches!(error, http_client::Error::StreamEnded));
     }
 
     #[tokio::test]
@@ -428,6 +549,62 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn embed_texts_returns_embeddings_on_success() {
+        let http_client = RecordingHttpClient::new(RESPONSE_BODY);
+        let client = CompletionsClient::builder()
+            .api_key("test-key")
+            .http_client(http_client)
+            .build()
+            .expect("build client");
+        let model = client.embedding_model("text-embedding-3-small");
+
+        let embeddings = model
+            .embed_texts(["hello".to_string()])
+            .await
+            .expect("embedding should succeed");
+
+        assert_eq!(embeddings.len(), 1);
+        assert_eq!(embeddings[0].document, "hello");
+        assert_eq!(embeddings[0].vec, vec![0.1, 0.2]);
+    }
+
+    #[tokio::test]
+    async fn legacy_constructors_build_working_models() {
+        let http_client = RecordingHttpClient::new(RESPONSE_BODY);
+        let client = CompletionsClient::builder()
+            .api_key("test-key")
+            .http_client(http_client.clone())
+            .build()
+            .expect("build client");
+
+        let with_model =
+            GenericEmbeddingModel::with_model(client.clone(), "text-embedding-3-small", 0);
+        let embeddings = with_model
+            .embed_texts(["hello".to_string()])
+            .await
+            .expect("`with_model` should embed");
+        assert_eq!(embeddings[0].document, "hello");
+
+        let with_format = GenericEmbeddingModel::with_encoding_format(
+            client,
+            "text-embedding-3-small",
+            0,
+            EncodingFormat::Float,
+        );
+        let embeddings = with_format
+            .embed_texts(["hello".to_string()])
+            .await
+            .expect("`with_encoding_format` should embed");
+        assert_eq!(embeddings[0].document, "hello");
+
+        let requests = http_client.requests();
+        assert_eq!(requests.len(), 2);
+        let body: serde_json::Value =
+            serde_json::from_slice(&requests[1].body).expect("request body should be JSON");
+        assert_eq!(body["encoding_format"], serde_json::json!("float"));
+    }
+
+    #[tokio::test]
     async fn openai_rejects_base64_before_sending() {
         let http_client = RecordingHttpClient::new(RESPONSE_BODY);
         let client = CompletionsClient::builder()
@@ -452,6 +629,117 @@ mod tests {
             }
         ));
         assert!(http_client.requests().is_empty());
+    }
+
+    #[tokio::test]
+    async fn openai_requires_usage_in_successful_responses() {
+        let http_client = RecordingHttpClient::new(NO_USAGE_BODY);
+        let client = CompletionsClient::builder()
+            .api_key("test-key")
+            .http_client(http_client)
+            .build()
+            .expect("build client");
+        let model = client.embedding_model("text-embedding-3-small");
+
+        let error = model
+            .embed_texts(["hello".to_string()])
+            .await
+            .expect_err("missing usage should fail for openai");
+
+        assert!(matches!(
+            error,
+            EmbeddingError::MissingUsage { provider: "openai" }
+        ));
+    }
+
+    #[tokio::test]
+    async fn response_data_length_must_match_input_length() {
+        let http_client = RecordingHttpClient::new(RESPONSE_BODY);
+        let client = CompletionsClient::builder()
+            .api_key("test-key")
+            .http_client(http_client)
+            .build()
+            .expect("build client");
+        let model = client.embedding_model("text-embedding-3-small");
+
+        let error = model
+            .embed_texts(["hello".to_string(), "world".to_string()])
+            .await
+            .expect_err("one embedding for two documents should fail");
+
+        assert!(matches!(
+            error,
+            EmbeddingError::ResponseError(message)
+                if message.contains("does not match input length")
+        ));
+    }
+
+    #[tokio::test]
+    async fn compat_provider_rejects_unsupported_encoding_format() {
+        let http_client = RecordingHttpClient::new(RESPONSE_BODY);
+        let client = compat_ext::client(http_client.clone());
+        let model = GenericEmbeddingModel::new(client, "compat-model", 0)
+            .encoding_format(EncodingFormat::Float);
+
+        let error = model
+            .embed_texts(["hello".to_string()])
+            .await
+            .expect_err("compat provider should reject encoding_format");
+
+        assert!(matches!(
+            error,
+            EmbeddingError::UnsupportedParameter {
+                provider: "compat",
+                parameter: "encoding_format"
+            }
+        ));
+        assert!(http_client.requests().is_empty());
+    }
+
+    #[tokio::test]
+    async fn compat_provider_rejects_unsupported_user() {
+        let http_client = RecordingHttpClient::new(RESPONSE_BODY);
+        let client = compat_ext::client(http_client.clone());
+        let model = GenericEmbeddingModel::new(client, "compat-model", 0).user("user-123");
+
+        let error = model
+            .embed_texts(["hello".to_string()])
+            .await
+            .expect_err("compat provider should reject user");
+
+        assert!(matches!(
+            error,
+            EmbeddingError::UnsupportedParameter {
+                provider: "compat",
+                parameter: "user"
+            }
+        ));
+        assert!(http_client.requests().is_empty());
+    }
+
+    #[tokio::test]
+    async fn compat_provider_serializes_output_dimension_and_tolerates_missing_usage() {
+        let http_client = RecordingHttpClient::new(NO_USAGE_BODY);
+        let client = compat_ext::client(http_client.clone());
+        let model = GenericEmbeddingModel::new(client, "compat-model", 256);
+
+        let response = model
+            .embed_texts_with_usage(["hello".to_string()])
+            .await
+            .expect("compat provider should not require usage");
+
+        assert_eq!(response.usage.total_tokens, 0);
+        assert_eq!(response.embeddings[0].document, "hello");
+
+        let requests = http_client.requests();
+        assert_eq!(requests[0].uri, "https://compat.invalid/embeddings");
+        let body: serde_json::Value =
+            serde_json::from_slice(&requests[0].body).expect("request body should be JSON");
+        assert_eq!(body["output_dimension"], serde_json::json!(256));
+        assert!(
+            body.get("dimensions").is_none(),
+            "compat provider should use `output_dimension`, not `dimensions`"
+        );
     }
 
     #[test]

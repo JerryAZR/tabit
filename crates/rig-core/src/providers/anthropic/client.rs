@@ -299,4 +299,84 @@ mod tests {
 
         assert_eq!(client.base_url(), "https://api.anthropic.com");
     }
+
+    #[test]
+    fn from_env_restores_a_preexisting_base_url_value() {
+        let _guard = ENV_LOCK.lock().expect("env lock should not be poisoned");
+        let _preexisting =
+            EnvVarGuard::set("ANTHROPIC_BASE_URL", "https://preexisting.example");
+        let _api_key = EnvVarGuard::set("ANTHROPIC_API_KEY", "dummy-key");
+
+        // A second guard over the same variable captures the preexisting value
+        // as its `original`, so dropping it restores that value.
+        {
+            let _overridden =
+                EnvVarGuard::set("ANTHROPIC_BASE_URL", "https://overridden.example");
+            assert_eq!(
+                std::env::var("ANTHROPIC_BASE_URL").as_deref(),
+                Ok("https://overridden.example")
+            );
+        }
+
+        assert_eq!(
+            std::env::var("ANTHROPIC_BASE_URL").as_deref(),
+            Ok("https://preexisting.example"),
+            "the guard must restore the value that was set before it"
+        );
+    }
+
+    #[test]
+    fn from_val_builds_a_client_from_a_bare_api_key() {
+        let client = crate::providers::anthropic::Client::from_val("dummy-key".to_string())
+            .expect("Client::from_val should build from an api key string");
+
+        assert_eq!(client.base_url(), "https://api.anthropic.com");
+        assert_eq!(
+            client.headers().get("x-api-key").and_then(|value| value.to_str().ok()),
+            Some("dummy-key")
+        );
+    }
+
+    #[test]
+    fn builder_applies_anthropic_version_and_beta_headers() {
+        let client = crate::providers::anthropic::Client::builder()
+            .api_key("dummy-key")
+            .anthropic_version("2023-01-01")
+            .anthropic_beta("prompt-caching-2024-07-31")
+            .anthropic_betas(&["context-1m-2025-08-07", "pdfs-2024-09-25"])
+            .build()
+            .expect("builder should apply anthropic version and betas");
+
+        assert_eq!(
+            client.headers().get("anthropic-version").and_then(|v| v.to_str().ok()),
+            Some("2023-01-01")
+        );
+        assert_eq!(
+            client
+                .headers()
+                .get("anthropic-beta")
+                .and_then(|v| v.to_str().ok()),
+            Some("prompt-caching-2024-07-31,context-1m-2025-08-07,pdfs-2024-09-25")
+        );
+    }
+
+    #[test]
+    fn normalize_anthropic_base_url_strips_known_suffixes() {
+        assert_eq!(
+            super::normalize_anthropic_base_url("https://relay.example/v1/messages/"),
+            "https://relay.example"
+        );
+        assert_eq!(
+            super::normalize_anthropic_base_url("https://relay.example/messages"),
+            "https://relay.example"
+        );
+        assert_eq!(
+            super::normalize_anthropic_base_url("https://relay.example/v1"),
+            "https://relay.example"
+        );
+        assert_eq!(
+            super::normalize_anthropic_base_url("https://api.anthropic.com/"),
+            "https://api.anthropic.com"
+        );
+    }
 }

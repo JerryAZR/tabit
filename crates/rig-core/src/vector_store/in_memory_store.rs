@@ -987,4 +987,289 @@ mod tests {
         assert_eq!(results[0].1, "mixed");
         assert!(results[0].0.is_finite());
     }
+
+    #[derive(Clone, Debug, serde::Serialize, serde::Deserialize, PartialEq, Eq)]
+    struct Item {
+        name: String,
+    }
+
+    fn item_doc(name: &str, vec: Vec<f64>) -> (Item, OneOrMany<Embedding>) {
+        (
+            Item {
+                name: name.to_string(),
+            },
+            OneOrMany::one(Embedding {
+                document: name.to_string(),
+                vec,
+            }),
+        )
+    }
+
+    fn sorted_ids(store: &InMemoryVectorStore<Item>) -> Vec<String> {
+        let mut ids: Vec<String> = store.iter().map(|(id, _)| id.clone()).collect();
+        ids.sort();
+        ids
+    }
+
+    #[test]
+    fn from_documents_generates_sequential_ids() {
+        let store = InMemoryVectorStore::from_documents(vec![
+            item_doc("one", vec![0.1, 0.2, 0.3]),
+            item_doc("two", vec![0.3, 0.2, 0.1]),
+        ]);
+
+        assert!(!store.is_empty());
+        assert_eq!(store.len(), 2);
+        assert_eq!(sorted_ids(&store), vec!["doc0".to_string(), "doc1".to_string()]);
+    }
+
+    #[test]
+    fn from_documents_with_id_f_uses_supplied_function() {
+        fn upper_name(doc: &Item) -> String {
+            doc.name.to_uppercase()
+        }
+
+        let store = InMemoryVectorStore::from_documents_with_id_f(
+            vec![
+                item_doc("one", vec![0.1, 0.2, 0.3]),
+                item_doc("two", vec![0.3, 0.2, 0.1]),
+            ],
+            upper_name,
+        );
+
+        assert_eq!(sorted_ids(&store), vec!["ONE".to_string(), "TWO".to_string()]);
+    }
+
+    #[test]
+    fn add_documents_with_ids_and_get_document() {
+        let mut store =
+            InMemoryVectorStore::from_documents(vec![item_doc("one", vec![0.1, 0.2, 0.3])]);
+        let (two_doc, two_embeddings) = item_doc("two", vec![0.3, 0.2, 0.1]);
+        store.add_documents_with_ids(vec![("explicit", two_doc, two_embeddings)]);
+
+        assert_eq!(
+            sorted_ids(&store),
+            vec!["doc0".to_string(), "explicit".to_string()]
+        );
+
+        let loaded: Item = store
+            .get_document("explicit")
+            .expect("lookup should not fail")
+            .expect("document should exist");
+        assert_eq!(loaded.name, "two");
+
+        let missing: Option<Item> = store
+            .get_document("does-not-exist")
+            .expect("lookup should not fail");
+        assert_eq!(missing, None);
+    }
+
+    #[test]
+    fn add_documents_with_id_f_uses_supplied_function() {
+        fn upper_name(doc: &Item) -> String {
+            doc.name.to_uppercase()
+        }
+
+        let mut store =
+            InMemoryVectorStore::from_documents(vec![item_doc("one", vec![0.1, 0.2, 0.3])]);
+        store.add_documents_with_id_f(vec![item_doc("two", vec![0.3, 0.2, 0.1])], upper_name);
+
+        assert_eq!(
+            sorted_ids(&store),
+            vec!["TWO".to_string(), "doc0".to_string()]
+        );
+
+        let loaded: Item = store
+            .get_document("TWO")
+            .expect("lookup should not fail")
+            .expect("document should exist");
+        assert_eq!(loaded.name, "two");
+    }
+
+    #[test]
+    fn get_document_reports_deserialization_errors() {
+        #[derive(Debug, serde::Deserialize)]
+        #[allow(dead_code)]
+        struct NotAnItem {
+            missing_field: u32,
+        }
+
+        let store = InMemoryVectorStore::from_documents(vec![item_doc("one", vec![0.1, 0.2, 0.3])]);
+
+        let error = store
+            .get_document::<NotAnItem>("doc0")
+            .expect_err("deserializing a string document into a struct must fail");
+        assert!(matches!(
+            error,
+            crate::vector_store::VectorStoreError::JsonError(_)
+        ));
+    }
+
+    #[test]
+    fn brute_force_search_truncates_results_to_top_n() {
+        let (near_doc, near_embeddings) = item_doc("near", vec![0.9, 0.1, 0.1]);
+        let (far_doc, far_embeddings) = item_doc("far", vec![-0.9, 0.1, 0.1]);
+        let (middle_doc, middle_embeddings) = item_doc("middle", vec![0.2, 0.9, 0.1]);
+        let store = InMemoryVectorStore::from_documents_with_ids(vec![
+            ("near", near_doc, near_embeddings),
+            ("far", far_doc, far_embeddings),
+            ("middle", middle_doc, middle_embeddings),
+        ]);
+
+        let ranking = store
+            .vector_search(
+                &Embedding {
+                    document: "query".to_string(),
+                    vec: vec![1.0, 0.0, 0.0],
+                },
+                1,
+                None,
+                None,
+            )
+            .unwrap();
+
+        let results: Vec<String> = ranking
+            .into_iter()
+            .map(|Reverse(RankingItem(_, id, _, _))| id.clone())
+            .collect();
+        assert_eq!(results, vec!["near".to_string()]);
+    }
+
+    #[test]
+    fn lsh_strategy_on_empty_store_falls_back_to_brute_force_after_add() {
+        // An LSH store built without documents cannot build an index (there is
+        // no dimension available yet), so later searches fall back to brute
+        // force and still return correct results.
+        let mut store = InMemoryVectorStore::builder()
+            .index_strategy(IndexStrategy::LSH {
+                num_tables: 4,
+                num_hyperplanes: 8,
+            })
+            .build();
+        assert!(store.is_empty());
+
+        store.add_documents(vec![item_doc("one", vec![0.9, 0.1, 0.1])]);
+
+        let ranking = store
+            .vector_search(
+                &Embedding {
+                    document: "query".to_string(),
+                    vec: vec![1.0, 0.0, 0.0],
+                },
+                5,
+                None,
+                None,
+            )
+            .unwrap();
+
+        let results: Vec<String> = ranking
+            .into_iter()
+            .map(|Reverse(RankingItem(_, id, _, _))| id.clone())
+            .collect();
+        assert_eq!(results, vec!["doc0".to_string()]);
+    }
+
+    #[test]
+    fn lsh_index_skipped_when_embeddings_have_zero_dimension() {
+        let store = InMemoryVectorStore::builder()
+            .index_strategy(IndexStrategy::LSH {
+                num_tables: 4,
+                num_hyperplanes: 8,
+            })
+            .documents(vec![item_doc("empty", vec![])])
+            .build();
+
+        // No LSH index can be built from zero-dimensional embeddings; the
+        // search must not panic and simply returns no finite similarities.
+        let ranking = store
+            .vector_search(
+                &Embedding {
+                    document: "query".to_string(),
+                    vec: vec![1.0, 0.0, 0.0],
+                },
+                5,
+                None,
+                None,
+            )
+            .unwrap();
+        assert!(ranking.is_empty());
+    }
+
+    #[test]
+    fn add_documents_to_indexed_lsh_store_keeps_ids_searchable() {
+        // Documents added after the LSH index was built must land in the index
+        // and remain searchable through the LSH candidate path.
+        let mut store = InMemoryVectorStore::builder()
+            .index_strategy(IndexStrategy::LSH {
+                num_tables: 8,
+                num_hyperplanes: 16,
+            })
+            .documents(vec![item_doc("one", vec![0.9, 0.1, 0.1])])
+            .build();
+
+        let (two_doc, two_embeddings) = item_doc("two", vec![0.9, 0.1, 0.1]);
+        store.add_documents_with_ids(vec![("explicit", two_doc, two_embeddings)]);
+
+
+        let ranking = store
+            .vector_search(
+                &Embedding {
+                    document: "query".to_string(),
+                    vec: vec![1.0, 0.0, 0.0],
+                },
+                5,
+                None,
+                None,
+            )
+            .unwrap();
+
+        let mut results: Vec<String> = ranking
+            .into_iter()
+            .map(|Reverse(RankingItem(_, id, _, _))| id.clone())
+            .collect();
+        results.sort();
+        assert_eq!(results, vec!["doc0".to_string(), "explicit".to_string()]);
+    }
+
+    #[tokio::test]
+    async fn top_n_returns_scores_ids_and_documents() {
+        use crate::test_utils::MockEmbeddingModel;
+        use crate::vector_store::VectorStoreIndex;
+        use crate::vector_store::request::VectorSearchRequest;
+
+        let (alpha_doc, alpha_embeddings) =
+            item_doc("alpha", vec![0.0, 0.1, 0.2, 0.3, 0.4, 0.5, 0.6, 0.7, 0.8, 0.9]);
+        let index = InMemoryVectorStore::from_documents_with_ids(vec![(
+            "a",
+            alpha_doc,
+            alpha_embeddings,
+        )])
+        .index(MockEmbeddingModel);
+
+        // `top_n` returns the document payload deserialized into `T`.
+        let results = index
+            .top_n::<serde_json::Value>(
+                VectorSearchRequest::builder()
+                    .query("q")
+                    .samples(5)
+                    .build(),
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(results.len(), 1);
+        assert_eq!(results[0].1, "a");
+        assert!((results[0].0 - 1.0).abs() < 1e-9);
+        assert_eq!(results[0].2["name"], serde_json::json!("alpha"));
+    }
+
+    #[test]
+    fn in_memory_vector_index_exposes_store_accessors() {
+        let store = InMemoryVectorStore::from_documents(vec![item_doc("one", vec![0.1, 0.2, 0.3])]);
+        let index = store.index(crate::test_utils::MockEmbeddingModel);
+
+        assert!(!index.is_empty());
+        assert_eq!(index.len(), 1);
+        assert_eq!(index.iter().count(), 1);
+    }
 }

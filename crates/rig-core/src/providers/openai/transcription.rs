@@ -159,4 +159,100 @@ mod tests {
         );
         assert_eq!(error.provider_response_body(), Some(body));
     }
+
+    #[tokio::test]
+    async fn transcription_success_returns_text_with_all_request_fields() {
+        // Every optional request field is serialized into the multipart form
+        // and the success payload is deserialized into the public response.
+        let http_client = RecordingHttpClient::new(r#"{"text":"hello world"}"#);
+        let client = Client::builder()
+            .api_key("test-key")
+            .http_client(http_client)
+            .build()
+            .expect("build client");
+        let model = client.transcription_model("whisper-1");
+
+        let response = model
+            .transcription_request()
+            .filename(Some("audio.mp3".to_string()))
+            .language("en".to_string())
+            .prompt("say hi".to_string())
+            .temperature(0.7)
+            .additional_params(serde_json::json!({ "tier": "nano" }))
+            .data(vec![1u8; 16])
+            .send()
+            .await
+            .expect("transcription should succeed");
+
+        assert_eq!(response.text, "hello world");
+        assert_eq!(response.response.text, "hello world");
+    }
+
+    #[tokio::test]
+    async fn transcription_success_with_provider_error_payload_is_reported() {
+        // A 200 response whose body carries an `error` object must surface as a
+        // provider response error rather than a successful transcription.
+        let http_client = RecordingHttpClient::new(
+            r#"{"error":{"message":"bad audio","type":"invalid_request_error"}}"#,
+        );
+        let client = Client::builder()
+            .api_key("test-key")
+            .http_client(http_client)
+            .build()
+            .expect("build client");
+        let model = client.transcription_model("whisper-1");
+
+        let error = match model
+            .transcription_request()
+            .data(vec![0u8; 16])
+            .send()
+            .await
+        {
+            Err(error) => error,
+            Ok(_) => panic!("error payload should fail"),
+        };
+
+        assert_eq!(
+            error.provider_response_body(),
+            Some(r#"{"error":{"message":"bad audio","type":"invalid_request_error"}}"#)
+        );
+        assert_eq!(error.provider_response_status(), Some(http::StatusCode::OK));
+    }
+
+    #[tokio::test]
+    async fn transcription_non_object_additional_params_rejected() {
+        let http_client = RecordingHttpClient::new(r#"{"text":"unused"}"#);
+        let client = Client::builder()
+            .api_key("test-key")
+            .http_client(http_client)
+            .build()
+            .expect("build client");
+        let model = client.transcription_model("whisper-1");
+
+        let error = match model
+            .transcription_request()
+            .additional_params(serde_json::json!([1, 2]))
+            .data(vec![0u8; 16])
+            .send()
+            .await
+        {
+            Err(error) => error,
+            Ok(_) => panic!("non-object additional params must fail"),
+        };
+
+        assert!(matches!(error, TranscriptionError::RequestError(_)));
+    }
+
+    #[test]
+    fn try_from_response_copies_text_and_keeps_raw_response() {
+        let raw = TranscriptionResponse {
+            text: "transcribed".to_string(),
+        };
+
+        let converted: transcription::TranscriptionResponse<TranscriptionResponse> =
+            raw.try_into().expect("conversion should succeed");
+
+        assert_eq!(converted.text, "transcribed");
+        assert_eq!(converted.response.text, "transcribed");
+    }
 }

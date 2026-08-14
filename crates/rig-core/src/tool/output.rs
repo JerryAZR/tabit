@@ -318,4 +318,101 @@ mod tests {
             ToolOutput::one(ToolResultContent::json(serde_json::json!({"ok": true})))
         );
     }
+
+    #[test]
+    fn singleton_accessors_reject_multi_block_output() {
+        let output = ToolOutput::content(
+            OneOrMany::many(vec![
+                ToolResultContent::text("first"),
+                ToolResultContent::text("second"),
+            ])
+            .unwrap(),
+        );
+
+        assert_eq!(output.as_text(), None);
+        assert_eq!(output.as_json(), None);
+    }
+
+    #[test]
+    fn render_falls_back_to_serializing_mixed_content() {
+        let output = ToolOutput::content(
+            OneOrMany::many(vec![
+                ToolResultContent::text("before"),
+                ToolResultContent::json(serde_json::json!({"after": true})),
+            ])
+            .unwrap(),
+        );
+
+        // Neither a single text nor a single JSON block, so the ordered
+        // content itself is serialized for telemetry.
+        let rendered: serde_json::Value = serde_json::from_str(&output.render()).unwrap();
+        assert_eq!(rendered[0]["type"], "text");
+        assert_eq!(rendered[0]["text"], "before");
+        assert_eq!(rendered[1]["type"], "json");
+        assert_eq!(rendered[1]["value"], serde_json::json!({"after": true}));
+    }
+
+    #[test]
+    fn as_json_rejects_non_json_singleton_blocks() {
+        assert_eq!(ToolOutput::text("hello").as_json(), None);
+        let image = ToolOutput::one(ToolResultContent::image_base64(
+            "ZGF0YQ==",
+            Some(ImageMediaType::PNG),
+            None,
+        ));
+        assert_eq!(image.as_json(), None);
+    }
+
+    #[test]
+    fn tool_output_passes_through_into_tool_output() {
+        let output = ToolOutput::text("hello");
+
+        assert_eq!(output.clone().into_tool_output().unwrap(), output);
+    }
+
+    #[test]
+    fn unserializable_output_fails_loudly_with_its_source() {
+        struct Unserializable;
+
+        impl Serialize for Unserializable {
+            fn serialize<S>(&self, _serializer: S) -> Result<S::Ok, S::Error>
+            where
+                S: serde::Serializer,
+            {
+                Err(serde::ser::Error::custom("cannot serialize"))
+            }
+        }
+
+        let error = Unserializable.into_tool_output().unwrap_err();
+
+        assert!(
+            error.to_string().contains("failed to serialize tool output"),
+            "unexpected message: {error}"
+        );
+        assert!(error.is::<serde_json::Error>());
+    }
+
+    #[test]
+    fn from_impls_preserve_each_canonical_shape() {
+        let text: ToolOutput = "literal".to_string().into();
+        assert_eq!(text, ToolOutput::text("literal"));
+
+        let text_ref: ToolOutput = "literal".into();
+        assert_eq!(text_ref, ToolOutput::text("literal"));
+
+        let json: ToolOutput = serde_json::json!({"ok": true}).into();
+        assert_eq!(json, ToolOutput::json(serde_json::json!({"ok": true})));
+
+        let content = ToolResultContent::text("block");
+        let one: ToolOutput = content.clone().into();
+        assert_eq!(one, ToolOutput::one(content));
+
+        let content = OneOrMany::many(vec![
+            ToolResultContent::text("first"),
+            ToolResultContent::text("second"),
+        ])
+        .unwrap();
+        let many: ToolOutput = content.clone().into();
+        assert_eq!(many, ToolOutput::content(content));
+    }
 }

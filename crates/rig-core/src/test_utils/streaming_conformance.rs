@@ -272,3 +272,121 @@ pub mod fixtures {
         }
     }
 }
+
+#[cfg(test)]
+mod conformance_law_tests {
+    use super::assert_valid_event_stream;
+    use crate::OneOrMany;
+    use crate::completion::Usage;
+    use crate::completion::message::{
+        AssistantContent, Reasoning, ReasoningContent, Text,
+    };
+    use crate::streaming::{StreamFinal, StreamedAssistantContent as Item};
+
+    fn final_record() -> StreamFinal {
+        StreamFinal::new("mock", Usage::new())
+    }
+
+    #[test]
+    fn a_well_formed_stream_satisfies_every_law() {
+        use crate::message::{ToolCall, ToolFunction};
+        use crate::streaming::ToolCallDeltaContent;
+
+        let items = vec![
+            Ok(Item::Text(Text {
+                text: "hi".to_string(),
+                additional_params: None,
+            })),
+            Ok(Item::ToolCallDelta {
+                id: "call_1".to_string(),
+                internal_call_id: "call_1".to_string(),
+                content: ToolCallDeltaContent::Name("ping".to_string()),
+            }),
+            Ok(Item::ToolCall {
+                tool_call: ToolCall::new(
+                    "call_1".to_string(),
+                    ToolFunction::new("ping".to_string(), serde_json::json!({})),
+                ),
+                internal_call_id: "call_1".to_string(),
+            }),
+            Ok(Item::Final(final_record())),
+            Ok(Item::Unknown(serde_json::json!({"late": true}))),
+        ];
+        let choice = OneOrMany::many(vec![
+            AssistantContent::Text(Text {
+                text: "hi".to_string(),
+                additional_params: None,
+            }),
+            AssistantContent::ToolCall(ToolCall::new(
+                "call_1".to_string(),
+                ToolFunction::new("ping".to_string(), serde_json::json!({})),
+            )),
+        ])
+        .unwrap();
+
+        assert_valid_event_stream(&items, &choice);
+    }
+
+    #[test]
+    fn unknown_items_after_the_terminal_satisfy_every_law() {
+        let items = vec![
+            Ok(Item::Final(final_record())),
+            Ok(Item::Unknown(serde_json::json!({"late": true}))),
+        ];
+        let choice = OneOrMany::one(AssistantContent::Text(Text {
+            text: String::new(),
+            additional_params: None,
+        }));
+
+        assert_valid_event_stream(&items, &choice);
+    }
+
+    #[test]
+    fn deltas_only_reasoning_must_equal_the_aggregated_text_parts() {
+        let items = vec![Ok(Item::ReasoningDelta {
+            id: "reasoning-0".to_string(),
+            reasoning: "thinking".to_string(),
+        })];
+        // A non-text reasoning part (redacted payload) contributes no text, and
+        // a non-reasoning content block contributes nothing to the reasoning.
+        let choice = OneOrMany::many(vec![
+            AssistantContent::Text(Text {
+                text: String::new(),
+                additional_params: None,
+            }),
+            AssistantContent::Reasoning(Reasoning {
+                id: None,
+                content: vec![
+                    ReasoningContent::Text {
+                        text: "thinking".to_string(),
+                        signature: None,
+                    },
+                    ReasoningContent::Redacted {
+                        data: "opaque".to_string(),
+                    },
+                ],
+            }),
+        ])
+        .unwrap();
+
+        assert_valid_event_stream(&items, &choice);
+    }
+
+    #[test]
+    #[should_panic(expected = "content item after the terminal record")]
+    fn a_semantic_item_after_the_terminal_violates_law_one() {
+        let items = vec![
+            Ok(Item::Final(final_record())),
+            Ok(Item::Text(Text {
+                text: "late".to_string(),
+                additional_params: None,
+            })),
+        ];
+        let choice = OneOrMany::one(AssistantContent::Text(Text {
+            text: "late".to_string(),
+            additional_params: None,
+        }));
+
+        assert_valid_event_stream(&items, &choice);
+    }
+}

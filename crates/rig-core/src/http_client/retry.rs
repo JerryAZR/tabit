@@ -77,3 +77,119 @@ pub const DEFAULT_RETRY: ExponentialBackoff = ExponentialBackoff::new(
     Some(Duration::from_secs(5)),
     None,
 );
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn new_sets_all_fields() {
+        let policy = ExponentialBackoff::new(
+            Duration::from_millis(10),
+            3.,
+            Some(Duration::from_secs(1)),
+            Some(2),
+        );
+        assert_eq!(policy.start, Duration::from_millis(10));
+        assert_eq!(policy.factor, 3.);
+        assert_eq!(policy.max_duration, Some(Duration::from_secs(1)));
+        assert_eq!(policy.max_retries, Some(2));
+    }
+
+    #[test]
+    fn first_retry_returns_start_duration() {
+        let policy = ExponentialBackoff::new(Duration::from_millis(100), 2., None, None);
+        assert_eq!(
+            policy.retry(&Error::StreamEnded, None),
+            Some(Duration::from_millis(100))
+        );
+    }
+
+    #[test]
+    fn subsequent_retries_scale_by_factor() {
+        let policy = ExponentialBackoff::new(Duration::from_millis(100), 2., None, None);
+        assert_eq!(
+            policy.retry(&Error::StreamEnded, Some((1, Duration::from_millis(100)))),
+            Some(Duration::from_millis(200))
+        );
+        assert_eq!(
+            policy.retry(&Error::StreamEnded, Some((2, Duration::from_millis(200)))),
+            Some(Duration::from_millis(400))
+        );
+    }
+
+    #[test]
+    fn retries_clamp_to_max_duration() {
+        let policy = ExponentialBackoff::new(
+            Duration::from_millis(100),
+            2.,
+            Some(Duration::from_millis(300)),
+            None,
+        );
+        assert_eq!(
+            policy.retry(&Error::StreamEnded, Some((1, Duration::from_millis(200)))),
+            Some(Duration::from_millis(300))
+        );
+    }
+
+    #[test]
+    fn retries_stop_once_max_retries_reached() {
+        let policy = ExponentialBackoff::new(Duration::from_millis(100), 2., None, Some(2));
+        // retry_num 1 < max_retries 2: keep going
+        assert_eq!(
+            policy.retry(&Error::StreamEnded, Some((1, Duration::from_millis(100)))),
+            Some(Duration::from_millis(200))
+        );
+        // retry_num 2 == max_retries 2: give up
+        assert_eq!(
+            policy.retry(&Error::StreamEnded, Some((2, Duration::from_millis(200)))),
+            None
+        );
+    }
+
+    #[test]
+    fn default_retry_never_exhausts_and_starts_at_300ms() {
+        assert_eq!(
+            DEFAULT_RETRY.retry(&Error::StreamEnded, None),
+            Some(Duration::from_millis(300))
+        );
+        // max_retries is None, so the backoff continues indefinitely (clamped by max_duration).
+        assert_eq!(
+            DEFAULT_RETRY.retry(&Error::StreamEnded, Some((100, Duration::from_secs(5)))),
+            Some(Duration::from_secs(5))
+        );
+    }
+
+    #[test]
+    fn set_reconnection_time_updates_start() {
+        let mut policy = ExponentialBackoff::new(Duration::from_millis(100), 2., None, None);
+        policy.set_reconnection_time(Duration::from_secs(2));
+        assert_eq!(policy.start, Duration::from_secs(2));
+        // Without a max_duration, none is introduced.
+        assert_eq!(policy.max_duration, None);
+        // The next retry cycle uses the new reconnection time.
+        assert_eq!(
+            policy.retry(&Error::StreamEnded, None),
+            Some(Duration::from_secs(2))
+        );
+    }
+
+    #[test]
+    fn set_reconnection_time_raises_max_duration_when_needed() {
+        let mut policy = ExponentialBackoff::new(
+            Duration::from_millis(100),
+            2.,
+            Some(Duration::from_secs(1)),
+            None,
+        );
+        // New reconnection time above the cap: cap is raised so it is honored.
+        policy.set_reconnection_time(Duration::from_secs(2));
+        assert_eq!(policy.max_duration, Some(Duration::from_secs(2)));
+        assert_eq!(policy.start, Duration::from_secs(2));
+
+        // New reconnection time below the cap: cap is unchanged.
+        policy.set_reconnection_time(Duration::from_millis(500));
+        assert_eq!(policy.max_duration, Some(Duration::from_secs(2)));
+        assert_eq!(policy.start, Duration::from_millis(500));
+    }
+}

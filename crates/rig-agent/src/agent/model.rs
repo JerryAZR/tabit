@@ -316,6 +316,53 @@ mod tests {
         }
     }
 
+    /// The zero-clone assertion in [`erasure_never_clones_the_model`] only means
+    /// something if the counter actually counts: cloning the model directly must
+    /// increment it, exactly once per clone.
+    #[test]
+    fn clone_counter_counts_direct_model_clones() {
+        let clones = Arc::new(AtomicUsize::new(0));
+        let model = CloneCountingModel {
+            inner: MockCompletionModel::text("shared"),
+            clones: Arc::clone(&clones),
+        };
+        let _first = model.clone();
+        let _second = model.clone();
+        assert_eq!(
+            clones.load(Ordering::SeqCst),
+            2,
+            "direct clones outside erasure must be counted"
+        );
+    }
+
+    /// [`NonCloneModel`]'s method bodies are reachable through the handle: the
+    /// probe errors must surface unchanged on both the unary and streaming
+    /// paths, and labels must round-trip through the named/unnamed seams.
+    #[tokio::test]
+    async fn non_clone_model_errors_surface_through_the_handle() {
+        let named = ModelHandle::named("probe", NonCloneModel);
+        assert_eq!(named.label(), Some("probe"));
+        assert_eq!(ModelHandle::new(NonCloneModel).label(), None);
+        assert!(format!("{named:?}").contains("probe"), "debug label");
+
+        let request = named.completion_request("go").build();
+        match CompletionModel::completion(&named, request.clone()).await {
+            Err(CompletionError::ProviderError(message)) => {
+                assert_eq!(message, "compile-time probe");
+            }
+            other => panic!("unary probe should error, observed {other:?}"),
+        }
+        match CompletionModel::stream(&named, request).await {
+            Err(CompletionError::ProviderError(message)) => {
+                assert_eq!(message, "compile-time probe");
+            }
+            other => {
+                let _ = other;
+                panic!("streaming probe should error");
+            }
+        }
+    }
+
     #[test]
     fn traits() {
         fn assert_completion_model<M: CompletionModel>() {}
@@ -328,13 +375,14 @@ mod tests {
         assert_completion_model::<std::sync::Arc<NonCloneModel>>();
 
         // Construction through the public erasure seams type-checks without a
-        // `Clone` impl; never awaited — the bounds are the test.
-        let _ = || {
+        // `Clone` impl; the bounds are the test, but the closure is also
+        // invoked once so the construction bodies themselves stay exercised.
+        let _ = (|| {
             let handle = ModelHandle::new(NonCloneModel);
             let named = ModelHandle::named("probe", NonCloneModel);
             let via_arc = std::sync::Arc::new(NonCloneModel).completion_request("go");
             let builder = crate::AgentBuilder::new(NonCloneModel);
             (handle, named, via_arc, builder)
-        };
+        })();
     }
 }

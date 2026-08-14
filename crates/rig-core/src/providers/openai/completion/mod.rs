@@ -3127,4 +3127,951 @@ mod tests {
             .expect("parsed JSON should be present");
         assert_eq!(json["error"]["type"], "rate_limit_error");
     }
+
+    // ================================================================
+    // Coverage additions: conversions, tool choice, finalize paths
+    // ================================================================
+
+    fn rig_image(data: DocumentSourceKind) -> message::UserContent {
+        message::UserContent::Image(message::Image {
+            data,
+            media_type: Some(message::ImageMediaType::PNG),
+            detail: None,
+            additional_params: None,
+        })
+    }
+
+    fn rig_audio(data: DocumentSourceKind) -> message::UserContent {
+        message::UserContent::Audio(message::Audio {
+            data,
+            media_type: None,
+            additional_params: None,
+        })
+    }
+
+    fn rig_video(data: DocumentSourceKind, media_type: Option<message::VideoMediaType>) -> message::UserContent {
+        message::UserContent::Video(message::Video {
+            data,
+            media_type,
+            additional_params: None,
+        })
+    }
+
+    fn wire_assistant(content: Vec<AssistantContent>) -> Message {
+        Message::Assistant {
+            content,
+            reasoning: None,
+            refusal: None,
+            audio: None,
+            name: None,
+            tool_calls: vec![],
+            reasoning_details: vec![],
+            images: vec![],
+        }
+    }
+
+    fn completion_response_with_message(message: Message) -> CompletionResponse {
+        CompletionResponse {
+            id: "chatcmpl-1".to_owned(),
+            object: "chat.completion".to_owned(),
+            created: 0,
+            model: "gpt-4o-mini".to_owned(),
+            system_fingerprint: None,
+            choices: vec![Choice {
+                index: 0,
+                message,
+                logprobs: None,
+                finish_reason: "stop".to_owned(),
+            }],
+            usage: None,
+        }
+    }
+
+    fn weather_output_schema() -> serde_json::Value {
+        serde_json::json!({
+            "title": "WeatherResponse",
+            "type": "object",
+            "properties": {
+                "city": { "type": "string" }
+            }
+        })
+    }
+
+    fn core_request(history: Vec<message::Message>) -> CoreCompletionRequest {
+        CoreCompletionRequest {
+            model: None,
+            preamble: None,
+            chat_history: OneOrMany::many(history).expect("history should be non-empty"),
+            documents: vec![],
+            tools: vec![],
+            temperature: None,
+            max_tokens: None,
+            tool_choice: None,
+            additional_params: None,
+            output_schema: None,
+            record_telemetry_content: false,
+        }
+    }
+
+    #[test]
+    fn assistant_content_text_and_refusal_convert_to_rig_text() {
+        let text: completion::AssistantContent =
+            AssistantContent::Text { text: "hello".to_string() }.into();
+        assert_eq!(text, completion::AssistantContent::text("hello"));
+
+        let refusal: completion::AssistantContent =
+            AssistantContent::Refusal { refusal: "no can do".to_string() }.into();
+        assert_eq!(refusal, completion::AssistantContent::text("no can do"));
+    }
+
+    #[test]
+    fn tool_result_content_parses_from_str() {
+        let parsed: ToolResultContent = "tool output".parse().expect("parse should be infallible");
+        assert_eq!(parsed, ToolResultContent::from("tool output".to_string()));
+    }
+
+    #[test]
+    fn tool_result_content_value_from_string_and_to_array() {
+        let string_form =
+            ToolResultContentValue::from_string("one".to_string(), false);
+        assert_eq!(string_form, ToolResultContentValue::String("one".to_string()));
+        assert_eq!(string_form.as_text(), "one");
+
+        let array_form = ToolResultContentValue::from_string("two".to_string(), true);
+        assert_eq!(
+            array_form,
+            ToolResultContentValue::Array(vec![ToolResultContent::from("two".to_string())])
+        );
+        assert_eq!(array_form.as_text(), "two");
+
+        // `to_array` is idempotent on arrays and wraps strings.
+        assert_eq!(array_form.to_array(), array_form);
+        assert_eq!(
+            string_form.to_array(),
+            ToolResultContentValue::Array(vec![ToolResultContent::from("one".to_string())])
+        );
+    }
+
+    #[test]
+    fn tool_definition_with_strict_sets_flag_and_sanitizes_schema() {
+        let def = ToolDefinition::from(completion::ToolDefinition {
+            name: "get_weather".to_string(),
+            description: "Get the weather".to_string(),
+            parameters: serde_json::json!({
+                "type": "object",
+                "properties": { "city": { "type": "string" } }
+            }),
+        })
+        .with_strict();
+
+        let json = serde_json::to_value(&def).expect("serialize tool definition");
+        assert_eq!(json["function"]["strict"], true);
+        assert_eq!(json["function"]["parameters"]["additionalProperties"], false);
+        assert_eq!(
+            json["function"]["parameters"]["required"],
+            serde_json::json!(["city"])
+        );
+    }
+
+    #[test]
+    fn tool_choice_serializes_modes_and_function_form() {
+        assert_eq!(
+            serde_json::to_value(ToolChoice::Auto).expect("serialize auto"),
+            serde_json::json!("auto")
+        );
+        assert_eq!(
+            serde_json::to_value(ToolChoice::None).expect("serialize none"),
+            serde_json::json!("none")
+        );
+        assert_eq!(
+            serde_json::to_value(ToolChoice::Required).expect("serialize required"),
+            serde_json::json!("required")
+        );
+        assert_eq!(
+            serde_json::to_value(ToolChoice::Function { name: "get_weather".to_string() })
+                .expect("serialize function"),
+            serde_json::json!({ "type": "function", "function": { "name": "get_weather" } })
+        );
+    }
+
+    #[test]
+    fn tool_choice_deserializes_modes_and_function_form() {
+        assert_eq!(
+            serde_json::from_str::<ToolChoice>("\"auto\"").expect("deserialize auto"),
+            ToolChoice::Auto
+        );
+        assert_eq!(
+            serde_json::from_str::<ToolChoice>("\"none\"").expect("deserialize none"),
+            ToolChoice::None
+        );
+        assert_eq!(
+            serde_json::from_str::<ToolChoice>("\"required\"").expect("deserialize required"),
+            ToolChoice::Required
+        );
+        assert_eq!(
+            serde_json::from_str::<ToolChoice>(
+                r#"{"type":"function","function":{"name":"get_weather"}}"#
+            )
+            .expect("deserialize function"),
+            ToolChoice::function("get_weather")
+        );
+
+        let err = serde_json::from_str::<ToolChoice>("\"bananas\"")
+            .expect_err("unknown mode should fail");
+        assert!(err.to_string().contains("unknown tool_choice mode"));
+    }
+
+    #[test]
+    fn tool_choice_function_constructor_builds_function_variant() {
+        assert_eq!(
+            ToolChoice::function("subtract"),
+            ToolChoice::Function { name: "subtract".to_string() }
+        );
+    }
+
+    #[test]
+    fn tool_choice_converts_from_rig_tool_choice() {
+        assert_eq!(
+            ToolChoice::try_from(message::ToolChoice::Auto).expect("auto converts"),
+            ToolChoice::Auto
+        );
+        assert_eq!(
+            ToolChoice::try_from(message::ToolChoice::None).expect("none converts"),
+            ToolChoice::None
+        );
+        assert_eq!(
+            ToolChoice::try_from(message::ToolChoice::Required).expect("required converts"),
+            ToolChoice::Required
+        );
+        assert_eq!(
+            ToolChoice::try_from(message::ToolChoice::Specific {
+                function_names: vec!["get_weather".to_string()],
+            })
+            .expect("single specific tool converts"),
+            ToolChoice::Function { name: "get_weather".to_string() }
+        );
+    }
+
+    #[test]
+    fn tool_choice_specific_with_multiple_names_errors() {
+        let err = ToolChoice::try_from(message::ToolChoice::Specific {
+            function_names: vec!["first".to_string(), "second".to_string()],
+        })
+        .expect_err("only exactly one specific tool is supported");
+        assert!(err.to_string().contains("exactly one specific tool"));
+    }
+
+    #[test]
+    fn tool_result_with_image_content_errors() {
+        let result = message::ToolResult {
+            id: "result-id".to_string(),
+            call_id: None,
+            content: OneOrMany::one(message::ToolResultContent::image_base64(
+                "AAAA",
+                Some(message::ImageMediaType::PNG),
+                None,
+            )),
+        };
+
+        let res: Result<Message, _> = result.try_into();
+        assert!(
+            matches!(&res, Err(message::MessageError::ConversionError(msg)) if msg.contains("images in tool results")),
+            "expected image-in-tool-result error, got: {res:?}"
+        );
+    }
+
+    #[test]
+    fn image_url_source_converts_with_default_and_explicit_detail() {
+        let converted: UserContent = message::UserContent::image_url(
+            "https://example.com/cat.png",
+            None,
+            None,
+        )
+        .try_into()
+        .expect("url image converts");
+        assert_eq!(
+            serde_json::to_value(&converted).expect("serialize"),
+            serde_json::json!({
+                "type": "image_url",
+                "image_url": { "url": "https://example.com/cat.png", "detail": "auto" }
+            })
+        );
+
+        let low: UserContent = message::UserContent::image_url(
+            "https://example.com/cat.png",
+            None,
+            Some(ImageDetail::Low),
+        )
+        .try_into()
+        .expect("url image converts");
+        assert_eq!(
+            serde_json::to_value(&low).expect("serialize")["image_url"]["detail"],
+            "low"
+        );
+    }
+
+    #[test]
+    fn base64_image_without_media_type_errors() {
+        let image = message::UserContent::Image(message::Image {
+            data: DocumentSourceKind::Base64("AAAA".into()),
+            media_type: None,
+            detail: None,
+            additional_params: None,
+        });
+
+        let res: Result<UserContent, _> = image.try_into();
+        assert!(
+            matches!(&res, Err(message::MessageError::ConversionError(msg)) if msg.contains("media type")),
+            "expected missing-media-type error, got: {res:?}"
+        );
+    }
+
+    #[test]
+    fn image_unsupported_sources_error() {
+        let sources = [
+            DocumentSourceKind::Raw(vec![0, 1]),
+            DocumentSourceKind::FileId("file_1".into()),
+            DocumentSourceKind::String("not-an-image".into()),
+            DocumentSourceKind::Unknown,
+        ];
+
+        for source in sources {
+            let res: Result<UserContent, _> = rig_image(source).try_into();
+            assert!(
+                matches!(res, Err(message::MessageError::ConversionError(_))),
+                "expected conversion error"
+            );
+        }
+    }
+
+    #[test]
+    fn pdf_string_and_unknown_sources_error() {
+        let string_doc = message::UserContent::Document(message::Document {
+            data: DocumentSourceKind::String("raw pdf text".into()),
+            media_type: Some(message::DocumentMediaType::PDF),
+            additional_params: None,
+        });
+        let res: Result<UserContent, _> = string_doc.try_into();
+        assert!(
+            matches!(&res, Err(message::MessageError::ConversionError(msg)) if msg.contains("base64-encoded")),
+            "expected raw-string PDF error, got: {res:?}"
+        );
+
+        let unknown_doc = message::UserContent::Document(message::Document {
+            data: DocumentSourceKind::Unknown,
+            media_type: Some(message::DocumentMediaType::PDF),
+            additional_params: None,
+        });
+        let res: Result<UserContent, _> = unknown_doc.try_into();
+        assert!(
+            matches!(&res, Err(message::MessageError::ConversionError(msg)) if msg.contains("no body")),
+            "expected missing-body error, got: {res:?}"
+        );
+    }
+
+    #[test]
+    fn url_document_without_media_type_errors() {
+        let doc = message::UserContent::document_url("https://example.com/doc.pdf", None);
+        let res: Result<UserContent, _> = doc.try_into();
+        assert!(
+            matches!(&res, Err(message::MessageError::ConversionError(msg)) if msg.contains("base64 or a string")),
+            "expected non-base64 document error, got: {res:?}"
+        );
+    }
+
+    #[test]
+    fn base64_audio_converts_to_input_audio() {
+        let wav: UserContent = message::UserContent::audio("QUJD", Some(message::AudioMediaType::WAV))
+            .try_into()
+            .expect("audio converts");
+        assert_eq!(
+            serde_json::to_value(&wav).expect("serialize"),
+            serde_json::json!({
+                "type": "input_audio",
+                "input_audio": { "data": "QUJD", "format": "wav" }
+            })
+        );
+
+        // Absent media type falls back to MP3 on the wire.
+        let default: UserContent = message::UserContent::audio("QUJD", None)
+            .try_into()
+            .expect("audio converts");
+        assert_eq!(
+            serde_json::to_value(&default).expect("serialize")["input_audio"]["format"],
+            "mp3"
+        );
+    }
+
+    #[test]
+    fn audio_unsupported_sources_error() {
+        let sources = [
+            DocumentSourceKind::Url("https://example.com/a.wav".into()),
+            DocumentSourceKind::Raw(vec![0, 1]),
+            DocumentSourceKind::FileId("file_1".into()),
+            DocumentSourceKind::String("not-audio".into()),
+            DocumentSourceKind::Unknown,
+        ];
+
+        for source in sources {
+            let res: Result<UserContent, _> = rig_audio(source).try_into();
+            assert!(
+                matches!(res, Err(message::MessageError::ConversionError(_))),
+                "expected conversion error"
+            );
+        }
+    }
+
+    #[test]
+    fn user_tool_result_content_errors() {
+        let content = message::UserContent::ToolResult(message::ToolResult {
+            id: "call_1".to_string(),
+            call_id: None,
+            content: OneOrMany::one(message::ToolResultContent::text("tool output")),
+        });
+        let res: Result<UserContent, _> = content.try_into();
+        assert!(
+            matches!(&res, Err(message::MessageError::ConversionError(msg)) if msg.contains("unsupported format")),
+            "expected tool-result unsupported-format error, got: {res:?}"
+        );
+    }
+
+    #[test]
+    fn base64_video_converts_to_data_uri() {
+        let converted: UserContent = message::UserContent::video("QUJD", Some(message::VideoMediaType::MP4))
+            .try_into()
+            .expect("base64 video converts");
+        assert_eq!(
+            serde_json::to_value(&converted).expect("serialize"),
+            serde_json::json!({
+                "type": "video_url",
+                "video_url": { "url": "data:video/mp4;base64,QUJD" }
+            })
+        );
+    }
+
+    #[test]
+    fn video_unsupported_sources_error() {
+        let sources = [
+            DocumentSourceKind::Raw(vec![0, 1]),
+            DocumentSourceKind::FileId("file_1".into()),
+            DocumentSourceKind::String("not-video".into()),
+            DocumentSourceKind::Unknown,
+        ];
+
+        for source in sources {
+            let res: Result<UserContent, _> =
+                rig_video(source, Some(message::VideoMediaType::MP4)).try_into();
+            assert!(
+                matches!(res, Err(message::MessageError::ConversionError(_))),
+                "expected conversion error"
+            );
+        }
+
+        // Base64 without a media type cannot build a data URI.
+        let res: Result<UserContent, _> =
+            rig_video(DocumentSourceKind::Base64("QUJD".into()), None).try_into();
+        assert!(
+            matches!(&res, Err(message::MessageError::ConversionError(msg)) if msg.contains("media type required")),
+            "expected missing-media-type error, got: {res:?}"
+        );
+    }
+
+    #[test]
+    fn assistant_image_content_errors() {
+        let content = OneOrMany::one(message::AssistantContent::image_base64(
+            "AAAA",
+            Some(message::ImageMediaType::PNG),
+            None,
+        ));
+
+        let res: Result<Vec<Message>, _> = content.try_into();
+        assert!(
+            matches!(&res, Err(message::MessageError::ConversionError(msg)) if msg.contains("image content")),
+            "expected assistant-image error, got: {res:?}"
+        );
+    }
+
+    #[test]
+    fn openai_tool_call_converts_to_rig_tool_call() {
+        let call = ToolCall {
+            id: "call_9".to_string(),
+            r#type: ToolType::Function,
+            function: Function {
+                name: "get_weather".to_string(),
+                arguments: serde_json::json!({ "city": "Paris" }),
+            },
+        };
+
+        let rig: message::ToolCall = call.into();
+        assert_eq!(rig.id, "call_9");
+        assert_eq!(rig.call_id, None);
+        assert_eq!(rig.function.name, "get_weather");
+        assert_eq!(rig.function.arguments, serde_json::json!({ "city": "Paris" }));
+        assert_eq!(rig.signature, None);
+        assert_eq!(rig.additional_params, None);
+    }
+
+    #[test]
+    fn refusal_assistant_content_maps_to_rig_text() {
+        let assistant = wire_assistant(vec![AssistantContent::Refusal {
+            refusal: "blocked".to_string(),
+        }]);
+
+        let rig: message::Message = assistant.try_into().expect("refusal converts");
+        let message::Message::Assistant { content, .. } = rig else {
+            panic!("expected assistant message");
+        };
+        let items: Vec<_> = content.into_iter().collect();
+        assert_eq!(items.len(), 1);
+        assert!(
+            matches!(&items[0], message::AssistantContent::Text(text) if text.text == "blocked"),
+            "expected refusal to map to text, got: {items:?}"
+        );
+    }
+
+    #[test]
+    fn empty_assistant_message_errors_on_rig_conversion() {
+        let res: Result<message::Message, _> = wire_assistant(vec![]).try_into();
+        assert!(
+            matches!(&res, Err(message::MessageError::ConversionError(msg)) if msg.contains("Neither `content` nor `tool_calls`")),
+            "expected empty-assistant error, got: {res:?}"
+        );
+    }
+
+    #[test]
+    fn tool_result_message_maps_back_to_rig_user_tool_result() {
+        let tool = Message::ToolResult {
+            tool_call_id: "call_1".to_string(),
+            content: ToolResultContentValue::Array(vec![
+                ToolResultContent::from("first".to_string()),
+                ToolResultContent::from("second".to_string()),
+            ]),
+        };
+
+        let rig: message::Message = tool.try_into().expect("tool result converts");
+        let message::Message::User { content } = rig else {
+            panic!("expected user message");
+        };
+        let items: Vec<_> = content.into_iter().collect();
+        assert_eq!(items.len(), 1);
+        assert!(
+            matches!(&items[0], message::UserContent::ToolResult(result) if result.id == "call_1"),
+            "expected tool result content, got: {items:?}"
+        );
+        // The array content is flattened into a single joined text block.
+        let message::UserContent::ToolResult(result) = &items[0] else {
+            panic!("expected tool result content");
+        };
+        let blocks: Vec<_> = result.content.iter().collect();
+        assert_eq!(blocks.len(), 1);
+        assert!(
+            matches!(&blocks[0], message::ToolResultContent::Text(text) if text.text == "first\nsecond"),
+            "expected joined text, got: {blocks:?}"
+        );
+    }
+
+    #[test]
+    fn system_message_maps_to_rig_user_text() {
+        let system = Message::System {
+            content: OneOrMany::one(SystemContent::from("sys prompt".to_string())),
+            name: None,
+        };
+
+        let rig: message::Message = system.try_into().expect("system converts");
+        let message::Message::User { content } = rig else {
+            panic!("expected user message");
+        };
+        assert!(
+            matches!(content.first(), message::UserContent::Text(text) if text.text == "sys prompt"),
+            "expected system text to survive, got: {content:?}"
+        );
+    }
+
+    #[test]
+    fn wire_image_and_audio_map_back_to_rig_content() {
+        let image = UserContent::Image {
+            image_url: ImageUrl {
+                url: "https://example.com/cat.png".to_string(),
+                detail: Some(ImageDetail::Low),
+            },
+        };
+        let rig: message::UserContent = image.into();
+        assert!(
+            matches!(&rig, message::UserContent::Image(img)
+                if matches!(&img.data, DocumentSourceKind::Url(url) if url == "https://example.com/cat.png")
+                    && img.detail == Some(ImageDetail::Low)
+                    && img.media_type.is_none()),
+            "expected url-backed rig image, got: {rig:?}"
+        );
+
+        let audio = UserContent::Audio {
+            input_audio: InputAudio {
+                data: "QUJD".to_string(),
+                format: AudioMediaType::WAV,
+            },
+        };
+        let rig: message::UserContent = audio.into();
+        assert!(
+            matches!(&rig, message::UserContent::Audio(audio)
+                if matches!(&audio.data, DocumentSourceKind::Base64(data) if data == "QUJD")
+                    && audio.media_type == Some(AudioMediaType::WAV)),
+            "expected base64 rig audio, got: {rig:?}"
+        );
+    }
+
+    #[test]
+    fn file_with_non_pdf_data_url_maps_to_string_document() {
+        let wire = UserContent::File {
+            file: FileData {
+                file_data: Some("data:text/plain;base64,QUJD".to_string()),
+                file_id: None,
+                filename: None,
+            },
+        };
+
+        let rig: message::UserContent = wire.into();
+        let message::UserContent::Document(doc) = rig else {
+            panic!("expected document");
+        };
+        assert_eq!(doc.media_type, Some(message::DocumentMediaType::PDF));
+        assert!(
+            matches!(&doc.data, DocumentSourceKind::String(data) if data == "data:text/plain;base64,QUJD"),
+            "expected the unrecognized data URI kept as a string, got: {:?}",
+            doc.data
+        );
+    }
+
+    #[test]
+    fn file_with_neither_data_nor_id_maps_to_empty_text() {
+        let wire = UserContent::File {
+            file: FileData {
+                file_data: None,
+                file_id: None,
+                filename: None,
+            },
+        };
+
+        let rig: message::UserContent = wire.into();
+        assert!(
+            matches!(rig, message::UserContent::Text(ref text) if text.text.is_empty()),
+            "expected empty text fallback, got: {rig:?}"
+        );
+    }
+
+    #[test]
+    fn user_content_from_string_str_and_parse() {
+        assert_eq!(
+            UserContent::from("hello".to_string()),
+            UserContent::Text { text: "hello".to_string() }
+        );
+        assert_eq!(
+            UserContent::from("hi"),
+            UserContent::Text { text: "hi".to_string() }
+        );
+        let parsed: UserContent = "parsed".parse().expect("parse should be infallible");
+        assert_eq!(parsed, UserContent::Text { text: "parsed".to_string() });
+    }
+
+    #[test]
+    fn system_content_parses_from_str() {
+        let parsed: SystemContent = "sys".parse().expect("parse should be infallible");
+        assert_eq!(parsed, SystemContent::from("sys".to_string()));
+    }
+
+    #[test]
+    fn normalize_without_choices_errors() {
+        let mut response = completion_response_with_message(wire_assistant(vec![
+            AssistantContent::Text { text: "hello".to_string() },
+        ]));
+        response.choices.clear();
+
+        let err = response
+            .normalize("openai")
+            .expect_err("response without choices should fail");
+        assert!(
+            err.to_string().contains("no choices"),
+            "expected no-choices error, got: {err}"
+        );
+    }
+
+    #[test]
+    fn normalize_non_assistant_choice_errors() {
+        let response = completion_response_with_message(Message::User {
+            content: OneOrMany::one(UserContent::Text { text: "hi".to_string() }),
+            name: None,
+        });
+
+        let err = response
+            .normalize("openai")
+            .expect_err("non-assistant choice should fail");
+        assert!(
+            err.to_string().contains("valid message"),
+            "expected invalid-message error, got: {err}"
+        );
+    }
+
+    #[test]
+    fn normalize_empty_assistant_choice_errors() {
+        let response = completion_response_with_message(wire_assistant(vec![]));
+
+        let err = response
+            .normalize("openai")
+            .expect_err("assistant without content or tool calls should fail");
+        assert!(
+            err.to_string().contains("empty"),
+            "expected empty-message error, got: {err}"
+        );
+    }
+
+    #[test]
+    fn normalize_maps_refusal_content_to_text() {
+        let mut response = completion_response_with_message(wire_assistant(vec![
+            AssistantContent::Refusal { refusal: "blocked".to_string() },
+        ]));
+        response.choices[0].finish_reason = String::new();
+
+        let normalized = response.normalize("openai").expect("refusal normalizes");
+        assert_eq!(normalized.choice.len(), 1);
+        assert!(
+            matches!(
+                normalized.choice.first(),
+                completion::message::AssistantContent::Text(text) if text.text == "blocked"
+            ),
+            "expected refusal text, got: {:?}",
+            normalized.choice.first()
+        );
+    }
+
+    #[test]
+    fn provider_response_ext_reports_id_model_messages_and_usage() {
+        let response = completion_response_with_message(wire_assistant(vec![
+            AssistantContent::Text { text: "hello".to_string() },
+        ]));
+
+        assert_eq!(response.get_response_id(), Some("chatcmpl-1".to_string()));
+        assert_eq!(
+            response.get_response_model_name(),
+            Some("gpt-4o-mini".to_string())
+        );
+        assert_eq!(response.get_output_messages().len(), 1);
+        assert!(response.get_usage().is_none());
+    }
+
+    #[test]
+    fn text_response_is_none_without_assistant_choices() {
+        let mut response = completion_response_with_message(wire_assistant(vec![
+            AssistantContent::Text { text: "hello".to_string() },
+        ]));
+        response.choices.clear();
+        assert_eq!(response.get_text_response(), None);
+
+        // Non-assistant messages contribute nothing either.
+        let tool_only = completion_response_with_message(Message::ToolResult {
+            tool_call_id: "call_1".to_string(),
+            content: ToolResultContentValue::String("done".to_string()),
+        });
+        assert_eq!(tool_only.get_text_response(), None);
+    }
+
+    #[test]
+    fn text_response_is_none_for_empty_assistant_without_refusal() {
+        let response = completion_response_with_message(wire_assistant(vec![]));
+        assert_eq!(response.get_text_response(), None);
+    }
+
+    #[test]
+    fn usage_display_formats_prompt_and_total_tokens() {
+        let usage = Usage {
+            prompt_tokens: 12,
+            completion_tokens: Some(34),
+            total_tokens: 46,
+            ..Usage::default()
+        };
+        assert_eq!(usage.to_string(), "Prompt tokens: 12 Total tokens: 46");
+    }
+
+    #[test]
+    fn default_streaming_detail_hooks_return_none() {
+        use crate::providers::openai::OpenAICompletionsExt;
+
+        let ext = OpenAICompletionsExt::default();
+        assert!(
+            <OpenAICompletionsExt as OpenAICompatibleProvider>::streaming_detail_reasoning(
+                &ext,
+                &serde_json::json!({ "type": "reasoning.encrypted" }),
+            )
+            .is_none()
+        );
+        assert!(
+            <OpenAICompletionsExt as OpenAICompatibleProvider>::decorate_streaming_tool_call(
+                &ext,
+                &serde_json::json!({ "type": "reasoning.encrypted" }),
+            )
+            .is_none()
+        );
+    }
+
+    #[test]
+    fn completion_model_builders_toggle_flags() {
+        use crate::client::CompletionClient;
+        use crate::providers::openai::CompletionsClient;
+        use crate::test_utils::RecordingHttpClient;
+
+        let client = CompletionsClient::builder()
+            .api_key("test-key")
+            .http_client(RecordingHttpClient::new("{}"))
+            .build()
+            .expect("build client");
+        let model = client.completion_model("gpt-4o-mini");
+        assert!(!model.strict_tools);
+        assert!(!model.tool_result_array_content);
+
+        let model = model.with_strict_tools().with_tool_result_array_content();
+        assert!(model.strict_tools);
+        assert!(model.tool_result_array_content);
+    }
+
+    #[test]
+    fn joined_text_parts_concatenates_text_parts_in_order() {
+        let parts = serde_json::json!([
+            { "type": "text", "text": "a" },
+            { "type": "image_url", "image_url": { "url": "https://example.com/x.png" } },
+            { "type": "text", "text": "b" },
+            { "type": "text" },
+        ]);
+        assert_eq!(
+            joined_text_parts(parts.as_array().expect("parts should be an array")),
+            "ab"
+        );
+        assert_eq!(joined_text_parts(&[]), "");
+    }
+
+    #[test]
+    fn request_conversion_drops_tools_and_schema_for_unsupported_provider() {
+        let request = CoreCompletionRequest {
+            tools: vec![completion::ToolDefinition {
+                name: "get_weather".to_string(),
+                description: "Get the weather".to_string(),
+                parameters: serde_json::json!({
+                    "type": "object",
+                    "properties": { "city": { "type": "string" } }
+                }),
+            }],
+            tool_choice: Some(message::ToolChoice::Required),
+            output_schema: Some(
+                serde_json::from_value(weather_output_schema())
+                    .expect("schema should deserialize"),
+            ),
+            ..core_request(vec![message::Message::user("hello")])
+        };
+
+        let converted = CompletionRequest::try_from(OpenAIRequestParams {
+            model: "gpt-4o-mini".to_string(),
+            request,
+            strict_tools: false,
+            tool_result_array_content: false,
+            supports_response_format: false,
+            supports_tools: false,
+        })
+        .expect("request conversion should succeed");
+
+        let serialized = serde_json::to_value(converted).expect("serialization should succeed");
+        assert!(
+            serialized.get("tools").is_none(),
+            "tools should be dropped: {serialized:?}"
+        );
+        assert!(
+            serialized.get("tool_choice").is_none(),
+            "tool_choice should be dropped: {serialized:?}"
+        );
+        assert!(
+            serialized.get("response_format").is_none(),
+            "response_format should be dropped: {serialized:?}"
+        );
+    }
+
+    #[test]
+    fn response_format_merges_with_existing_additional_params() {
+        let request = CoreCompletionRequest {
+            additional_params: Some(serde_json::json!({ "top_p": 0.5 })),
+            output_schema: Some(
+                serde_json::from_value(weather_output_schema())
+                    .expect("schema should deserialize"),
+            ),
+            ..core_request(vec![message::Message::user("hello")])
+        };
+
+        let converted = CompletionRequest::try_from(OpenAIRequestParams {
+            model: "gpt-4o-mini".to_string(),
+            request,
+            strict_tools: false,
+            tool_result_array_content: false,
+            supports_response_format: true,
+            supports_tools: true,
+        })
+        .expect("request conversion should succeed");
+
+        let serialized = serde_json::to_value(converted).expect("serialization should succeed");
+        assert_eq!(serialized["top_p"], 0.5, "existing params survive: {serialized:?}");
+        assert_eq!(
+            serialized["response_format"]["json_schema"]["name"], "WeatherResponse",
+            "schema name comes from the schema title: {serialized:?}"
+        );
+        assert_eq!(serialized["response_format"]["json_schema"]["strict"], true);
+    }
+
+    #[test]
+    fn empty_assistant_content_is_omitted_from_the_wire() {
+        // `content` carries `skip_serializing_if = "Vec::is_empty"`: an
+        // assistant turn with no content (pure tool-call scaffolding)
+        // serializes without a `content` field at all.
+        let json = serde_json::to_value(wire_assistant(vec![])).expect("serialize");
+        assert!(json.get("content").is_none(), "got: {json:?}");
+    }
+
+    #[tokio::test]
+    async fn completion_logs_request_and_response_bodies_at_trace_level() {
+        use crate::client::CompletionClient;
+        use crate::completion::CompletionModel;
+        use crate::providers::openai::CompletionsClient;
+        use crate::test_utils::{RecordingHttpClient, scoped_tracing_subscriber_guard};
+
+        // Serialize against tests that install scoped tracing subscribers.
+        let _guard = scoped_tracing_subscriber_guard().await;
+
+        let body = r#"{
+            "id": "chatcmpl-1",
+            "object": "chat.completion",
+            "created": 0,
+            "model": "gpt-4o-mini",
+            "system_fingerprint": null,
+            "choices": [{
+                "index": 0,
+                "message": { "role": "assistant", "content": "hello" },
+                "logprobs": null,
+                "finish_reason": "stop"
+            }],
+            "usage": { "prompt_tokens": 1, "completion_tokens": 1, "total_tokens": 2 }
+        }"#;
+        let http_client = RecordingHttpClient::new(body);
+        let client = CompletionsClient::builder()
+            .api_key("test-key")
+            .http_client(http_client)
+            .build()
+            .expect("build client");
+        let model = client.completion_model("gpt-4o-mini");
+        let request = model.completion_request("hello").build();
+
+        let subscriber = tracing_subscriber::fmt()
+            .with_max_level(tracing::Level::TRACE)
+            .with_test_writer()
+            .finish();
+        let response = tracing::subscriber::with_default(subscriber, || async {
+            model.completion(request).await
+        })
+        .await
+        .expect("completion should succeed with trace subscriber installed");
+
+        assert_eq!(response.choice.len(), 1);
+    }
 }

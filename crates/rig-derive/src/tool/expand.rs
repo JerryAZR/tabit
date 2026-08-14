@@ -400,3 +400,121 @@ pub(crate) fn expand_rig_tool(args: MacroArgs, input_fn: syn::ItemFn) -> syn::Re
         #vis static #static_name: #struct_name = #struct_name;
     })
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn fn_attrs(source: &str) -> Vec<Attribute> {
+        syn::parse_str::<syn::ItemFn>(source)
+            .expect("test function parses")
+            .attrs
+    }
+
+    fn output_of(source: &str) -> syn::Result<(TokenStream, TokenStream)> {
+        let function = syn::parse_str::<syn::ItemFn>(source).expect("test function parses");
+        result_type_tokens(&function.sig.output)
+    }
+
+    #[test]
+    fn doc_comment_extraction_skips_non_literal_docs() {
+        let docs = fn_attrs(r#"#[doc = "line one"] #[doc = " line two"] fn f() {}"#);
+        assert_eq!(
+            extract_doc_comment(&docs).as_deref(),
+            Some("line one\nline two")
+        );
+
+        let non_literal = fn_attrs(r#"#[doc = concat!("a", "b")] fn f() {}"#);
+        assert_eq!(extract_doc_comment(&non_literal), None);
+
+        assert_eq!(extract_doc_comment(&[]), None);
+    }
+
+    #[test]
+    fn option_detection_rejects_non_path_types() {
+        let option: Type = syn::parse_str("Option<i32>").expect("type parses");
+        assert!(is_option_type(&option));
+
+        let reference: Type = syn::parse_str("&i32").expect("type parses");
+        assert!(!is_option_type(&reference));
+
+        let tuple: Type = syn::parse_str("(i32,)").expect("type parses");
+        assert!(!is_option_type(&tuple));
+    }
+
+    #[test]
+    fn result_type_tokens_reject_non_result_signatures() {
+        for source in [
+            "fn f() {}",
+            "fn f() -> (i32,) {}",
+            "fn f() -> Vec<i32> {}",
+            "fn f() -> Result {}",
+            "fn f() -> Result<i32> {}",
+            "fn f() -> Result<i32, E, X> {}",
+        ] {
+            let error = output_of(source)
+                .err()
+                .unwrap_or_else(|| panic!("`{source}` should be rejected"));
+            assert!(
+                error.to_string().contains("Result"),
+                "`{source}` produced: {error}"
+            );
+        }
+    }
+
+    #[test]
+    fn result_type_tokens_splits_output_and_error() {
+        let (output, error) = output_of("fn f() -> std::result::Result<i32, E> {}").expect("ok");
+        assert_eq!(output.to_string(), "i32");
+        assert_eq!(error.to_string(), "E");
+    }
+
+    #[test]
+    fn result_type_tokens_rejects_an_empty_path() {
+        // A `Type::Path` with zero segments is not expressible in source text,
+        // but the parser is a library entry point, so it must reject a
+        // constructed one instead of indexing.
+        let mut function = syn::parse_str::<syn::ItemFn>("fn f() -> Result<i32, E> {}")
+            .expect("test function parses");
+        function.sig.output = syn::ReturnType::Type(Default::default(), Box::new(Type::Path(syn::TypePath {
+            qself: None,
+            path: syn::Path {
+                leading_colon: None,
+                segments: Default::default(),
+            },
+        })));
+
+        let error = result_type_tokens(&function.sig.output)
+            .err()
+            .expect("empty path must be rejected");
+        assert!(
+            error.to_string().contains("Result"),
+            "unexpected error: {error}"
+        );
+    }
+
+    fn expand(source: &str) -> syn::Result<TokenStream> {
+        let function = syn::parse_str::<syn::ItemFn>(source).expect("test function parses");
+        let args: MacroArgs = syn::parse_str("").expect("empty macro args parse");
+        expand_rig_tool(args, function)
+    }
+
+    #[test]
+    fn receiver_parameters_are_rejected() {
+        let error = expand("fn f(&self) -> Result<i32, E> {}").expect_err("rejected");
+        assert!(error.to_string().contains("receiver parameter"));
+    }
+
+    #[test]
+    fn wildcard_context_parameters_are_rejected() {
+        let source = "fn f(#[rig(context)] _: &mut Ctx) -> Result<i32, E> {}";
+        let error = expand(source).expect_err("rejected");
+        assert!(error.to_string().contains("plain identifier"));
+    }
+
+    #[test]
+    fn wildcard_model_parameters_are_rejected() {
+        let error = expand("fn f(_: i32) -> Result<i32, E> {}").expect_err("rejected");
+        assert!(error.to_string().contains("identifier patterns"));
+    }
+}

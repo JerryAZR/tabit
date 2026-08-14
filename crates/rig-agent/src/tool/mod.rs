@@ -1241,6 +1241,156 @@ mod tests {
             assert_rich_error_output(&result, "dynamic feedback");
         }
     }
+
+    #[test]
+    fn dynamic_tool_reports_its_runtime_name() {
+        let tool = DynamicTool::new(
+            "runtime_name",
+            "runtime-defined",
+            serde_json::json!({"type": "object"}),
+            |_context, _args| Box::pin(async { Ok(ToolOutput::text("ok")) }),
+        );
+        assert_eq!(tool.name(), "runtime_name");
+    }
+
+    #[tokio::test]
+    async fn dynamic_tool_rejects_malformed_json_arguments() {
+        let tool = DynamicTool::new(
+            "dynamic",
+            "parses its arguments as JSON",
+            serde_json::json!({"type": "object"}),
+            |_context, args| Box::pin(async move { Ok(ToolOutput::text(args.to_string())) }),
+        );
+        let set = ToolSet::from_dynamic_tools(vec![tool]);
+
+        let result = set
+            .execute("dynamic", "{not json", &mut ToolContext::new())
+            .await;
+
+        assert!(result.is_error_kind(ToolErrorKind::InvalidArgs));
+        assert!(
+            result
+                .output()
+                .as_text()
+                .is_some_and(|message| message.starts_with("failed to parse tool arguments:")),
+            "the parse failure should stay actionable for the model"
+        );
+    }
+
+    #[tokio::test]
+    async fn typed_tool_output_that_cannot_serialize_fails_at_dispatch() {
+        struct UnserializableOutput;
+        impl serde::Serialize for UnserializableOutput {
+            fn serialize<S: serde::Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
+                use serde::ser::SerializeMap;
+                let mut map = serializer.serialize_map(Some(1))?;
+                // A sequence is not a valid JSON object key, so `to_value` fails.
+                map.serialize_entry(&vec!["not", "a", "string", "key"], "v")?;
+                map.end()
+            }
+        }
+
+        struct UnserializableTool;
+
+        impl Tool for UnserializableTool {
+            const NAME: &'static str = "unserializable";
+            type Error = rig::tool::ToolExecutionError;
+            type Args = ();
+            type Output = UnserializableOutput;
+
+            fn description(&self) -> String {
+                "returns a value JSON cannot represent".into()
+            }
+
+            fn parameters(&self) -> serde_json::Value {
+                serde_json::json!({"type": "object"})
+            }
+
+            async fn call(
+                &self,
+                _context: &mut ToolContext,
+                _args: Self::Args,
+            ) -> Result<Self::Output, Self::Error> {
+                Ok(UnserializableOutput)
+            }
+        }
+
+        let mut set = ToolSet::default();
+        set.add_tool(UnserializableTool);
+
+        let result = set
+            .execute("unserializable", "null", &mut ToolContext::new())
+            .await;
+
+        assert!(result.is_error_kind(ToolErrorKind::Other));
+        assert!(
+            result
+                .output()
+                .as_text()
+                .is_some_and(|message| message.contains("failed to serialize tool output")),
+            "the serialization failure should be observable"
+        );
+    }
+
+    #[tokio::test]
+    async fn null_args_for_required_fields_fail_actionably() {
+        #[derive(serde::Deserialize)]
+        struct RequiredArgs {
+            label: String,
+        }
+
+        struct RequiredTool;
+
+        impl Tool for RequiredTool {
+            const NAME: &'static str = "required_args";
+            type Error = rig::tool::ToolExecutionError;
+            type Args = RequiredArgs;
+            type Output = String;
+
+            fn description(&self) -> String {
+                "requires its arguments".into()
+            }
+
+            fn parameters(&self) -> serde_json::Value {
+                serde_json::json!({"type": "object"})
+            }
+
+            async fn call(
+                &self,
+                _context: &mut ToolContext,
+                args: Self::Args,
+            ) -> Result<Self::Output, Self::Error> {
+                Ok(args.label)
+            }
+        }
+
+        let mut set = ToolSet::default();
+        set.add_tool(RequiredTool);
+
+        // `null` neither deserializes as `RequiredArgs` nor normalizes to a
+        // valid `{}` (the required field is still missing), so the dispatch
+        // must fail with actionable `InvalidArgs` feedback.
+        let result = set
+            .execute("required_args", "null", &mut ToolContext::new())
+            .await;
+
+        assert!(result.is_error_kind(ToolErrorKind::InvalidArgs));
+        assert!(
+            result
+                .output()
+                .as_text()
+                .is_some_and(|message| message.contains("failed to parse tool arguments")),
+            "the null-argument failure should stay actionable for the model"
+        );
+    }
+
+    #[test]
+    fn static_only_toolsets_produce_no_schemas() {
+        let schemas = crate::test_utils::mock_math_toolset()
+            .schemas()
+            .expect("static tools have no embedding context to fail on");
+        assert!(schemas.is_empty());
+    }
 }
 
 #[cfg(test)]
@@ -1551,10 +1701,15 @@ mod migrated_tests {
         let docs = toolset.documents();
         assert_eq!(docs[0].id, NamedTool::NAME);
         assert!(docs[0].text.contains(NamedTool::NAME));
+
+        let result = toolset
+            .execute(NamedTool::NAME, "{}", &mut ToolContext::new())
+            .await;
+        assert_eq!(result.output().render(), "ok");
     }
 
-    #[test]
-    fn retrieved_tool_schemas_use_canonical_name() {
+    #[tokio::test]
+    async fn retrieved_tool_schemas_use_canonical_name() {
         #[derive(Debug, thiserror::Error)]
         #[error("init error")]
         struct InitError;
@@ -1605,7 +1760,85 @@ mod migrated_tests {
         let schemas = toolset.schemas().unwrap();
         assert_eq!(schemas.len(), 1);
         assert_eq!(schemas[0].name, RetrievedTool::NAME);
-        assert_eq!(schemas[0].embedding_docs, vec!["dynamic tool docs"]);
+        assert_eq!(schemas[0].embedding_docs, vec!["dynamic tool docs".to_string()]);
+
+        // Definitions and execution go through the same registration, and the
+        // embedding tool reconstructs through `ToolEmbedding::init`.
+        let defs = toolset.get_tool_definitions();
+        assert_eq!(defs[0].description, "dynamic tool");
+
+        let result = toolset
+            .execute(RetrievedTool::NAME, "{}", &mut ToolContext::new())
+            .await;
+        assert_eq!(result.output().render(), "ok");
+
+        let restored: RetrievedTool =
+            ToolEmbedding::init((), ()).expect("init should reconstruct the tool");
+        assert_eq!(Tool::description(&restored), "dynamic tool");
+    }
+
+    #[test]
+    fn builder_registers_every_tool_kind_in_registration_order() {
+        struct BuilderStaticTool;
+
+        impl Tool for BuilderStaticTool {
+            const NAME: &'static str = "builder_static";
+            type Error = rig::tool::ToolExecutionError;
+            type Args = serde_json::Value;
+            type Output = String;
+
+            fn description(&self) -> String {
+                "builder static tool".to_string()
+            }
+            fn parameters(&self) -> serde_json::Value {
+                json!({ "type": "object", "properties": {} })
+            }
+            async fn call(
+                &self,
+                _context: &mut ToolContext,
+                _args: Self::Args,
+            ) -> Result<Self::Output, ToolExecutionError> {
+                Ok("ok".to_string())
+            }
+        }
+
+        let set = ToolSet::builder()
+            .static_tool(BuilderStaticTool)
+            .dynamic_tool(named_tool("builder_dynamic", "builder dynamic tool"))
+            .portable_dynamic_tool(portable_dynamic_fixture())
+            .retrieved_tool(PortableEmbeddingFixture::new("builder"))
+            .build();
+
+        assert_eq!(
+            set.get_tool_definitions()
+                .iter()
+                .map(|definition| definition.name.as_str())
+                .collect::<Vec<_>>(),
+            [
+                "builder_static",
+                "builder_dynamic",
+                "portable_runtime_name",
+                "portable_embedding_fixture"
+            ]
+        );
+        // Only the embedding registration contributes retrieval schemas.
+        assert_eq!(set.schemas().unwrap().len(), 1);
+    }
+
+    #[test]
+    fn portable_embedding_tools_reconstruct_through_the_blanket_init() {
+        let tool = PortableEmbeddingFixture::new("shared");
+        let context = ToolEmbedding::context(&tool);
+        let restored: PortableEmbeddingFixture =
+            ToolEmbedding::init((), context).expect("init should reconstruct");
+        assert_eq!(
+            Tool::description(&restored),
+            Tool::description(&tool)
+        );
+        assert_eq!(
+            Tool::parameters(&restored),
+            Tool::parameters(&tool)
+        );
     }
 
     #[tokio::test]

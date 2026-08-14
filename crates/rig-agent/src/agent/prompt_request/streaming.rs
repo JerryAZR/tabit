@@ -6822,4 +6822,399 @@ mod migrated_tests {
             "FinalResponse must be yielded even when memory.append fails"
         );
     }
+
+    #[test]
+    fn final_response_constructors_surface_content_usage_and_history() {
+        let item = MultiTurnStreamItem::final_response(
+            OneOrMany::one(AssistantContent::text("done")),
+            usage(1, 2),
+        );
+        let MultiTurnStreamItem::FinalResponse(response) = item else {
+            panic!("expected a final response item, got {item:?}");
+        };
+        assert_eq!(response.output(), "done");
+        assert_eq!(response.usage(), usage(1, 2));
+        assert_eq!(response.messages(), None);
+        assert!(response.completion_calls().is_empty());
+
+        let history = vec![Message::user("hi"), Message::assistant("hello")];
+        let item = MultiTurnStreamItem::final_response_with_history(
+            OneOrMany::one(AssistantContent::text("done")),
+            usage(3, 4),
+            Some(history.clone()),
+        );
+        let MultiTurnStreamItem::FinalResponse(response) = item else {
+            panic!("expected a final response item, got {item:?}");
+        };
+        assert_eq!(response.usage(), usage(3, 4));
+        assert_eq!(response.messages(), Some(&history[..]));
+
+        let item = MultiTurnStreamItem::final_response_with_history(
+            OneOrMany::one(AssistantContent::text("done")),
+            usage(3, 4),
+            None,
+        );
+        let MultiTurnStreamItem::FinalResponse(response) = item else {
+            panic!("expected a final response item, got {item:?}");
+        };
+        assert_eq!(response.messages(), None);
+    }
+
+    #[tokio::test]
+    async fn stream_to_stdout_handles_reasoning_retries_and_errors() {
+        let mut reasoning = rig_core::message::Reasoning::new("");
+        reasoning.content = vec![ReasoningContent::Text {
+            text: "thinking".to_string(),
+            signature: None,
+        }];
+        let items = vec![
+            Ok(MultiTurnStreamItem::StreamAssistantItem(
+                StreamedAssistantContent::Text(rig_core::message::Text {
+                    text: "answer".to_string(),
+                    additional_params: None,
+                }),
+            )),
+            Ok(MultiTurnStreamItem::StreamAssistantItem(
+                StreamedAssistantContent::Reasoning(reasoning),
+            )),
+            Ok(MultiTurnStreamItem::ModelTurnRetried { turn: 1 }),
+            Ok(MultiTurnStreamItem::CompletionCall(CompletionCall::new(
+                0,
+                Usage::new(),
+            ))),
+            Err(StreamingError::Completion(CompletionError::ResponseError(
+                "boom".to_string(),
+            ))),
+            Ok(MultiTurnStreamItem::FinalResponse(PromptResponse::new(
+                "done",
+                Usage::new(),
+            ))),
+        ];
+        let mut stream: StreamingResult = futures::stream::iter(items).boxed();
+
+        let response = stream_to_stdout(&mut stream)
+            .await
+            .expect("stdout writes should succeed");
+
+        assert_eq!(response.output(), "done");
+    }
+
+    #[tokio::test]
+    async fn streaming_skip_drains_trailing_events_before_final_usage() {
+        let model = MockCompletionModel::from_stream_turns([
+            vec![
+                MockStreamEvent::text("checking "),
+                MockStreamEvent::tool_call(
+                    "tool_call_1",
+                    "default_api",
+                    serde_json::json!({"x": 2, "y": 3}),
+                ),
+                // Trailing events after the abandoned tool call: draining them
+                // must still surface the terminal record's usage rather than
+                // dropping it.
+                MockStreamEvent::text("trailing "),
+                MockStreamEvent::reasoning("more thinking"),
+                MockStreamEvent::final_response_with_total_tokens(4),
+            ],
+            vec![
+                MockStreamEvent::text("continued"),
+                MockStreamEvent::final_response_with_total_tokens(6),
+            ],
+        ]);
+        let recorded = model.clone();
+        let agent = AgentBuilder::new(model).tool(MockAddTool).build();
+
+        let mut stream = agent
+            .stream_prompt("use the tool")
+            .add_hook(SkipDefaultApiHook)
+            .max_turns(3)
+            .history(Vec::<Message>::new())
+            .await;
+        let mut completion_calls = Vec::new();
+        let mut final_output = None;
+
+        while let Some(item) = stream.next().await {
+            match item {
+                Ok(MultiTurnStreamItem::CompletionCall(call)) => completion_calls.push(call),
+                Ok(MultiTurnStreamItem::FinalResponse(res)) => {
+                    final_output = Some(res.output().to_string());
+                    break;
+                }
+                Ok(_) => {}
+                Err(err) => panic!("unexpected streaming error: {err:?}"),
+            }
+        }
+
+        assert_eq!(final_output.as_deref(), Some("continued"));
+        assert_eq!(
+            completion_calls.len(),
+            2,
+            "one completion call per model turn"
+        );
+        assert_eq!(
+            completion_calls[0].usage.total_tokens, 4,
+            "the abandoned turn's terminal-record usage must survive the drain"
+        );
+        assert_eq!(completion_calls[1].usage.total_tokens, 6);
+        assert_eq!(recorded.request_count(), 2);
+    }
+
+    #[tokio::test]
+    async fn streaming_skip_drain_surfaces_provider_error_after_abandon() {
+        let model = MockCompletionModel::from_stream_turns([
+            // The provider errors after the abandoned tool call: the drain
+            // must propagate that error instead of reporting a silently
+            // zero-usage completion.
+            vec![
+                MockStreamEvent::tool_call(
+                    "tool_call_1",
+                    "default_api",
+                    serde_json::json!({"x": 2, "y": 3}),
+                ),
+                MockStreamEvent::error("post-abandon boom"),
+            ],
+            vec![
+                MockStreamEvent::text("should not be requested"),
+                MockStreamEvent::final_response_with_total_tokens(6),
+            ],
+        ]);
+        let recorded = model.clone();
+        let agent = AgentBuilder::new(model).tool(MockAddTool).build();
+
+        let mut stream = agent
+            .stream_prompt("use the tool")
+            .add_hook(SkipDefaultApiHook)
+            .max_turns(3)
+            .history(Vec::<Message>::new())
+            .await;
+        let mut error = None;
+        while let Some(item) = stream.next().await {
+            if let Err(err) = item {
+                error = Some(err);
+                break;
+            }
+        }
+
+        let error = error.expect("an error during the post-abandon drain must surface");
+        assert!(
+            error.to_string().contains("post-abandon boom"),
+            "expected the drained provider error, got: {error}"
+        );
+        assert_eq!(recorded.request_count(), 1);
+    }
+
+    #[tokio::test]
+    async fn streaming_skip_after_truncated_stream_reports_zero_drained_usage() {
+        let model = MockCompletionModel::from_stream_turns([
+            // The provider stream truncates right after the invalid tool call:
+            // no terminal record ever arrives, so the drain must fall back to
+            // zero usage instead of hanging or misreporting.
+            vec![MockStreamEvent::tool_call(
+                "tool_call_1",
+                "default_api",
+                serde_json::json!({"x": 2, "y": 3}),
+            )],
+            vec![
+                MockStreamEvent::text("continued"),
+                MockStreamEvent::final_response_with_total_tokens(6),
+            ],
+        ]);
+        let recorded = model.clone();
+        let agent = AgentBuilder::new(model).tool(MockAddTool).build();
+
+        let mut stream = agent
+            .stream_prompt("use the tool")
+            .add_hook(SkipDefaultApiHook)
+            .max_turns(3)
+            .history(Vec::<Message>::new())
+            .await;
+        let mut completion_calls = Vec::new();
+        let mut skipped_tool_result = false;
+        let mut final_output = None;
+
+        while let Some(item) = stream.next().await {
+            match item {
+                Ok(MultiTurnStreamItem::CompletionCall(call)) => completion_calls.push(call),
+                Ok(MultiTurnStreamItem::StreamUserItem(StreamedUserContent::ToolResult {
+                    ..
+                })) => skipped_tool_result = true,
+                Ok(MultiTurnStreamItem::FinalResponse(res)) => {
+                    final_output = Some(res.output().to_string());
+                    break;
+                }
+                Ok(_) => {}
+                Err(err) => panic!("unexpected streaming error: {err:?}"),
+            }
+        }
+
+        assert_eq!(final_output.as_deref(), Some("continued"));
+        assert!(skipped_tool_result, "skip recovery emits the synthetic result");
+        assert_eq!(completion_calls.len(), 2);
+        assert_eq!(
+            completion_calls[0].usage,
+            Usage::new(),
+            "a truncated drain reports zero usage for the abandoned turn"
+        );
+        assert_eq!(completion_calls[1].usage.total_tokens, 6);
+        assert_eq!(recorded.request_count(), 2);
+    }
+
+    #[tokio::test]
+    async fn streaming_skip_mixed_turn_at_higher_concurrency_preresolves_without_execution() {
+        let add_calls = Arc::new(AtomicU32::new(0));
+        let model = MockCompletionModel::from_stream_turns([
+            vec![
+                MockStreamEvent::tool_call(
+                    "tool_call_1",
+                    "add",
+                    serde_json::json!({"x": 1, "y": 2}),
+                )
+                .with_call_id("call_1"),
+                MockStreamEvent::tool_call(
+                    "tool_call_2",
+                    "default_api",
+                    serde_json::json!({"x": 3, "y": 4}),
+                )
+                .with_call_id("call_2"),
+                MockStreamEvent::final_response_with_total_tokens(4),
+            ],
+            vec![
+                MockStreamEvent::text("skipped"),
+                MockStreamEvent::final_response_with_total_tokens(6),
+            ],
+        ]);
+        let agent = AgentBuilder::new(model)
+            .tool(CountingAddTool {
+                calls: add_calls.clone(),
+            })
+            .build();
+
+        let mut stream = agent
+            .stream_prompt("use tools")
+            .add_hook(SkipDefaultApiHook)
+            .tool_concurrency(2)
+            .max_turns(3)
+            .history(Vec::<Message>::new())
+            .await;
+        let mut skipped_results = Vec::new();
+        let mut final_output = None;
+
+        while let Some(item) = stream.next().await {
+            match item {
+                Ok(MultiTurnStreamItem::StreamUserItem(StreamedUserContent::ToolResult {
+                    tool_result,
+                    ..
+                })) => skipped_results.push(tool_result),
+                Ok(MultiTurnStreamItem::FinalResponse(res)) => {
+                    final_output = Some(res.output().to_string());
+                    break;
+                }
+                Ok(_) => {}
+                Err(err) => panic!("unexpected streaming error: {err:?}"),
+            }
+        }
+
+        assert_eq!(final_output.as_deref(), Some("skipped"));
+        assert_eq!(
+            add_calls.load(Ordering::SeqCst),
+            0,
+            "the valid peer must not execute during skip recovery, at any concurrency"
+        );
+        // The invalid call's synthetic result is surfaced during the model
+        // turn; the valid peer is preresolved with a synthetic result that is
+        // committed to history only, so exactly one result is streamed.
+        assert_eq!(
+            skipped_results.len(),
+            1,
+            "only the invalid call's skip feedback is streamed: {skipped_results:?}"
+        );
+        assert!(matches!(
+            skipped_results.first(),
+            Some(result) if result.id == "tool_call_2"
+                && result.content.iter().any(|content| matches!(
+                    content,
+                    ToolResultContent::Text(text) if text.text == "default_api was skipped"
+                ))
+        ));
+    }
+
+    /// Shared sink for [`streaming_empty_final_turn_logs_a_warning_under_a_subscriber`].
+    #[derive(Clone, Default)]
+    struct SharedLogBuffer(Arc<Mutex<Vec<u8>>>);
+
+    impl std::io::Write for SharedLogBuffer {
+        fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
+            self.0
+                .lock()
+                .expect("log buffer mutex was poisoned")
+                .extend_from_slice(buf);
+            Ok(buf.len())
+        }
+
+        fn flush(&mut self) -> std::io::Result<()> {
+            Ok(())
+        }
+    }
+
+    impl<'a> tracing_subscriber::fmt::MakeWriter<'a> for SharedLogBuffer {
+        type Writer = SharedLogBuffer;
+
+        fn make_writer(&'a self) -> Self::Writer {
+            self.clone()
+        }
+    }
+
+    #[tokio::test]
+    async fn streaming_empty_final_turn_logs_a_warning_under_a_subscriber() {
+        let _isolation = crate::test_utils::scoped_tracing_subscriber_guard().await;
+        let buffer = SharedLogBuffer::default();
+        let subscriber = tracing_subscriber::fmt()
+            .with_ansi(false)
+            .with_writer(buffer.clone())
+            .finish();
+        let _default = tracing::subscriber::set_default(subscriber);
+
+        // Same callsite-interest hazard the span-capture harness documents:
+        // warm the textless-turn path from THIS thread (registering the warn
+        // callsite against this subscriber), then heal any cache a foreign
+        // thread poisoned, then clear the buffer before the observed run.
+        let warmup = AgentBuilder::new(streaming_final_only_model()).build();
+        let mut warmup_stream = warmup.stream_prompt("warmup").max_turns(1).await;
+        while let Some(item) = warmup_stream
+            .try_next()
+            .await
+            .expect("warmup stream should not error")
+        {
+            if matches!(item, MultiTurnStreamItem::FinalResponse(_)) {
+                break;
+            }
+        }
+        tracing::callsite::rebuild_interest_cache();
+        buffer
+            .0
+            .lock()
+            .expect("log buffer mutex was poisoned")
+            .clear();
+
+        let agent = AgentBuilder::new(streaming_final_only_model()).build();
+        let mut stream = agent.stream_prompt("say nothing").max_turns(1).await;
+        while let Some(item) = stream
+            .try_next()
+            .await
+            .expect("textless stream should not error")
+        {
+            if matches!(item, MultiTurnStreamItem::FinalResponse(_)) {
+                break;
+            }
+        }
+
+        let logged = String::from_utf8_lossy(
+            &buffer.0.lock().expect("log buffer mutex was poisoned"),
+        )
+        .to_string();
+        assert!(
+            logged.contains("Streaming turn completed without assistant text"),
+            "expected the textless-turn warning to be logged, got: {logged}"
+        );
+    }
 }

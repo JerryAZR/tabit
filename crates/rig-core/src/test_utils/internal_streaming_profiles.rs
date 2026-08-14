@@ -88,6 +88,58 @@ impl CompatibleStreamProfile for ErrorAfterPendingToolCallProfile {
     }
 }
 
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::providers::internal::wire::WireEvent;
+
+    #[test]
+    fn unmatched_frames_classify_as_unknown_for_every_profile() {
+        let profiles: [&dyn CompatibleStreamProfile<Usage = Usage, Detail = (), FinalResponse = StreamFinal>; 3] = [
+            &ErrorAfterPendingToolCallProfile,
+            &DistinctToolCallEvictionProfile,
+            &FinishReasonCleanupProfile,
+        ];
+
+        for profile in profiles {
+            assert!(
+                matches!(
+                    profile.classify_chunk("mystery"),
+                    WireEvent::Unknown { ref event_type, ref value }
+                        if event_type == "mystery"
+                            && *value == serde_json::Value::String("mystery".to_owned())
+                ),
+                "an unmatched frame must classify as Unknown carrying the raw payload"
+            );
+        }
+    }
+
+    #[test]
+    fn error_after_pending_tool_call_profile_builds_its_terminal_record() {
+        let mut usage = Usage::new();
+        usage.total_tokens = 7;
+        let terminal = CompatibleTerminal {
+            usage,
+            finish_reason: Some(crate::completion::FinishReason::ToolCalls),
+            response_id: Some("resp_1".to_string()),
+            model: Some("test-model".to_string()),
+        };
+
+        let final_record = ErrorAfterPendingToolCallProfile.build_final_response(terminal);
+
+        assert_eq!(final_record.provider, MOCK_PROVIDER);
+        assert_eq!(final_record.usage.total_tokens, 7);
+        assert_eq!(
+            final_record.finish_reason,
+            Some(crate::completion::FinishReason::ToolCalls)
+        );
+        // This profile's terminal mapping only threads usage and finish
+        // reason through; metadata fields stay unset.
+        assert_eq!(final_record.response_id, None);
+        assert_eq!(final_record.model, None);
+    }
+}
+
 /// Streaming profile whose same-index tool calls should evict by distinct IDs.
 #[derive(Clone, Copy)]
 pub(crate) struct DistinctToolCallEvictionProfile;

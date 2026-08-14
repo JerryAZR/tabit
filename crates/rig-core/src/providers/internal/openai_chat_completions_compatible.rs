@@ -1325,4 +1325,516 @@ mod tests {
         );
         assert!(stream.response.is_none());
     }
+
+    // ------------------------------------------------------------------
+    // Profile-hook coverage: complete single-chunk tool calls, per-detail
+    // reasoning/decoration hooks, and span recording on live spans.
+    // ------------------------------------------------------------------
+
+    use crate::completion::Usage as GenericUsage;
+    use crate::providers::internal::adapter::WireAdapter as _;
+    use crate::providers::internal::wire::WireEvent;
+    use crate::streaming::{PartId, ToolCallDecoration};
+
+    fn choice_chunk<D>(
+        finish_reason: super::CompatibleFinishReason,
+        text: Option<&str>,
+        tool_calls: Vec<super::CompatibleToolCallChunk>,
+        details: Vec<D>,
+    ) -> super::CompatibleChunk<GenericUsage, D> {
+        super::CompatibleChunk {
+            response_id: None,
+            response_model: None,
+            choice: Some(super::CompatibleChoice {
+                finish_reason,
+                text: text.map(ToOwned::to_owned),
+                reasoning: None,
+                tool_calls,
+                details,
+            }),
+            usage: None,
+        }
+    }
+
+    fn unknown_frame<U, D>(data: &str) -> WireEvent<super::CompatibleChunk<U, D>> {
+        WireEvent::Unknown {
+            event_type: data.to_owned(),
+            value: serde_json::Value::String(data.to_owned()),
+        }
+    }
+
+    /// A provider whose tool calls arrive name+arguments in one chunk and are
+    /// finalized immediately; its chunks also carry details that exercise the
+    /// default (no-op) detail hooks.
+    #[derive(Clone, Copy)]
+    struct CompleteSingleChunkProfile;
+
+    impl CompatibleStreamProfile for CompleteSingleChunkProfile {
+        type Usage = GenericUsage;
+        type Detail = ();
+        type FinalResponse = crate::streaming::StreamFinal;
+
+        fn classify_chunk(
+            &self,
+            data: &str,
+        ) -> WireEvent<super::CompatibleChunk<Self::Usage, Self::Detail>> {
+            match data {
+                "call" => WireEvent::Known(choice_chunk(
+                    super::CompatibleFinishReason::Absent,
+                    None,
+                    vec![super::CompatibleToolCallChunk {
+                        index: 0,
+                        id: Some("call_1".to_string()),
+                        name: Some("ping".to_string()),
+                        arguments: Some("{\"x\": 1}".to_string()),
+                    }],
+                    vec![()],
+                )),
+                // A second fragment at the same index exercises the profile's
+                // eviction check (this profile uses the tolerant default).
+                "call2" => WireEvent::Known(choice_chunk(
+                    super::CompatibleFinishReason::Absent,
+                    None,
+                    vec![super::CompatibleToolCallChunk {
+                        index: 0,
+                        id: Some("call_2".to_string()),
+                        name: Some("pong".to_string()),
+                        arguments: Some("{\"y\": 2}".to_string()),
+                    }],
+                    vec![()],
+                )),
+                "finish" => WireEvent::Known(choice_chunk(
+                    super::CompatibleFinishReason::Reported(
+                        crate::completion::FinishReason::ToolCalls,
+                    ),
+                    None,
+                    Vec::new(),
+                    Vec::new(),
+                )),
+                _ => unknown_frame(data),
+            }
+        }
+
+        fn build_final_response(
+            &self,
+            terminal: super::CompatibleTerminal<Self::Usage>,
+        ) -> Self::FinalResponse {
+            crate::streaming::StreamFinal::new(
+                crate::test_utils::MOCK_PROVIDER,
+                terminal.usage,
+            )
+            .with_optional_finish_reason(terminal.finish_reason)
+        }
+
+        fn emits_complete_single_chunk_tool_calls(&self) -> bool {
+            true
+        }
+    }
+
+    #[tokio::test]
+    async fn complete_single_chunk_tool_calls_finalize_immediately() {
+        let client = MockStreamingClient {
+            sse_bytes: sse_bytes_from_data_lines(["call", "call2", "finish"]),
+        };
+        let req = http::Request::builder()
+            .method("POST")
+            .uri("http://localhost/v1/chat/completions")
+            .body(Vec::new())
+            .expect("request should build");
+
+        let mut stream =
+            send_compatible_streaming_request(client, req, CompleteSingleChunkProfile)
+                .await
+                .expect("stream should start");
+
+        let mut collected_tool_calls = Vec::new();
+        let mut saw_final = false;
+        while let Some(item) = stream.next().await {
+            match item.expect("stream item should be ok") {
+                StreamedAssistantContent::ToolCall { tool_call, .. } => {
+                    collected_tool_calls.push(tool_call)
+                }
+                StreamedAssistantContent::Final(_) => saw_final = true,
+                _ => {}
+            }
+        }
+
+        assert!(saw_final, "a finished stream must emit the terminal record");
+        assert_eq!(
+            collected_tool_calls.len(),
+            2,
+            "the tolerant default keeps both same-index calls distinct"
+        );
+        assert_eq!(collected_tool_calls[0].id, "call_1");
+        assert_eq!(collected_tool_calls[0].function.name, "ping");
+        assert_eq!(
+            collected_tool_calls[0].function.arguments,
+            serde_json::json!({"x": 1}),
+            "the single-chunk completion probe must finalize parseable arguments"
+        );
+        assert_eq!(collected_tool_calls[1].id, "call_2");
+        assert_eq!(
+            collected_tool_calls[1].function.arguments,
+            serde_json::json!({"y": 2})
+        );
+    }
+
+    /// A provider whose per-chunk details map onto turn-level reasoning blocks
+    /// and in-flight tool-call decorations (the OpenRouter-style hooks).
+    #[derive(Clone, Copy)]
+    struct DetailHooksProfile;
+
+    impl CompatibleStreamProfile for DetailHooksProfile {
+        type Usage = GenericUsage;
+        type Detail = (&'static str, &'static str);
+        type FinalResponse = crate::streaming::StreamFinal;
+
+        fn classify_chunk(
+            &self,
+            data: &str,
+        ) -> WireEvent<super::CompatibleChunk<Self::Usage, Self::Detail>> {
+            match data {
+                "open" => WireEvent::Known(choice_chunk(
+                    super::CompatibleFinishReason::Absent,
+                    None,
+                    vec![super::CompatibleToolCallChunk {
+                        index: 0,
+                        id: Some("call_9".to_string()),
+                        name: Some("search".to_string()),
+                        arguments: Some("{}".to_string()),
+                    }],
+                    Vec::new(),
+                )),
+                "reasoning" => {
+                    WireEvent::Known(choice_chunk(
+                        super::CompatibleFinishReason::Absent,
+                        None,
+                        Vec::new(),
+                        vec![("reasoning", "thinking hard")],
+                    ))
+                }
+                "decorate" => WireEvent::Known(choice_chunk(
+                    super::CompatibleFinishReason::Absent,
+                    None,
+                    Vec::new(),
+                    vec![("decorate", "sig-1")],
+                )),
+                "finish" => WireEvent::Known(choice_chunk(
+                    super::CompatibleFinishReason::Reported(
+                        crate::completion::FinishReason::ToolCalls,
+                    ),
+                    None,
+                    Vec::new(),
+                    Vec::new(),
+                )),
+                _ => unknown_frame(data),
+            }
+        }
+
+        fn build_final_response(
+            &self,
+            terminal: super::CompatibleTerminal<Self::Usage>,
+        ) -> Self::FinalResponse {
+            crate::streaming::StreamFinal::new(
+                crate::test_utils::MOCK_PROVIDER,
+                terminal.usage,
+            )
+            .with_optional_finish_reason(terminal.finish_reason)
+        }
+
+        fn detail_reasoning(
+            &self,
+            detail: &Self::Detail,
+        ) -> Option<(PartId, crate::message::ReasoningContent)> {
+            let (kind, content) = *detail;
+            (kind == "reasoning").then(|| {
+                (
+                    PartId::wire("reasoning_1"),
+                    crate::message::ReasoningContent::Text {
+                        text: content.to_string(),
+                        signature: None,
+                    },
+                )
+            })
+        }
+
+        fn decorate_tool_call(&self, detail: &Self::Detail) -> Option<ToolCallDecoration> {
+            let (kind, signature) = *detail;
+            (kind == "decorate").then(|| ToolCallDecoration {
+                tool_id: "call_9".to_string(),
+                signature: Some(signature.to_string()),
+                additional_params: None,
+            })
+        }
+    }
+
+    #[tokio::test]
+    async fn detail_hooks_emit_reasoning_and_decorate_open_tool_calls() {
+        use crate::streaming::StreamedAssistantContent;
+
+        let client = MockStreamingClient {
+            sse_bytes: sse_bytes_from_data_lines(["open", "reasoning", "decorate", "finish"]),
+        };
+        let req = http::Request::builder()
+            .method("POST")
+            .uri("http://localhost/v1/chat/completions")
+            .body(Vec::new())
+            .expect("request should build");
+
+        let mut stream = send_compatible_streaming_request(client, req, DetailHooksProfile)
+            .await
+            .expect("stream should start");
+
+        let mut saw_reasoning = false;
+        let mut decorated_tool_calls = Vec::new();
+        while let Some(item) = stream.next().await {
+            match item.expect("stream item should be ok") {
+                StreamedAssistantContent::Reasoning(_) => saw_reasoning = true,
+                StreamedAssistantContent::ToolCall { tool_call, .. } => {
+                    decorated_tool_calls.push(tool_call)
+                }
+                _ => {}
+            }
+        }
+
+        assert!(
+            saw_reasoning,
+            "a reasoning detail must surface as turn-level reasoning"
+        );
+        assert_eq!(decorated_tool_calls.len(), 1);
+        assert_eq!(decorated_tool_calls[0].id, "call_9");
+        assert!(
+            decorated_tool_calls[0].signature.as_deref().is_some_and(|s| s == "sig-1"),
+            "the decoration must attach the provider signature to the open call, got {:?}",
+            decorated_tool_calls[0].signature
+        );
+    }
+
+    /// Records usage + response metadata on the terminal; used with a live
+    /// (enabled) span to exercise the span-record helpers.
+    #[derive(Clone, Copy)]
+    struct SpanRecordingProfile;
+
+    impl CompatibleStreamProfile for SpanRecordingProfile {
+        type Usage = GenericUsage;
+        type Detail = ();
+        type FinalResponse = crate::streaming::StreamFinal;
+
+        fn classify_chunk(
+            &self,
+            data: &str,
+        ) -> WireEvent<super::CompatibleChunk<Self::Usage, Self::Detail>> {
+            if data == "text" {
+                return WireEvent::Known(choice_chunk(
+                    super::CompatibleFinishReason::Absent,
+                    Some("hi"),
+                    Vec::new(),
+                    Vec::new(),
+                ));
+            }
+
+            // Anything object-shaped is a metadata/usage trailer chunk.
+            if data.starts_with('{')
+                && let Ok(value) = serde_json::from_str::<serde_json::Value>(data)
+            {
+                let usage = value.get("usage").map(|usage| {
+                    let mut converted = GenericUsage::new();
+                    converted.input_tokens = usage
+                        .get("prompt_tokens")
+                        .and_then(serde_json::Value::as_u64)
+                        .unwrap_or_default();
+                    converted.output_tokens = usage
+                        .get("completion_tokens")
+                        .and_then(serde_json::Value::as_u64)
+                        .unwrap_or_default();
+                    converted.total_tokens = usage
+                        .get("total_tokens")
+                        .and_then(serde_json::Value::as_u64)
+                        .unwrap_or_default();
+                    converted
+                });
+                return WireEvent::Known(super::CompatibleChunk {
+                    response_id: value
+                        .get("id")
+                        .and_then(serde_json::Value::as_str)
+                        .map(str::to_string),
+                    response_model: value
+                        .get("model")
+                        .and_then(serde_json::Value::as_str)
+                        .map(str::to_string),
+                    choice: None,
+                    usage,
+                });
+            }
+
+            unknown_frame(data)
+        }
+
+        fn build_final_response(
+            &self,
+            terminal: super::CompatibleTerminal<Self::Usage>,
+        ) -> Self::FinalResponse {
+            crate::streaming::StreamFinal::new(
+                crate::test_utils::MOCK_PROVIDER,
+                terminal.usage,
+            )
+            .with_optional_finish_reason(terminal.finish_reason)
+        }
+    }
+
+    fn span_recording_req() -> http::Request<Vec<u8>> {
+        http::Request::builder()
+            .method("POST")
+            .uri("http://localhost/v1/chat/completions")
+            .body(Vec::new())
+            .expect("request should build")
+    }
+
+    #[tokio::test]
+    async fn span_records_usage_and_response_metadata_when_enabled() {
+        let _isolation = crate::test_utils::scoped_tracing_subscriber_guard().await;
+        let subscriber = tracing_subscriber::fmt()
+            .with_max_level(tracing::Level::TRACE)
+            .with_ansi(false)
+            .without_time()
+            .with_writer(std::io::sink)
+            .finish();
+        let _guard = tracing::subscriber::set_default(subscriber);
+
+        // The usage trailer chunk carries id/model metadata and real usage.
+        let usage_chunk = serde_json::json!({
+            "id": "chatcmpl-9",
+            "model": "gpt-test",
+            "usage": { "prompt_tokens": 3, "completion_tokens": 5, "total_tokens": 8 }
+        });
+        let client = MockStreamingClient {
+            sse_bytes: sse_bytes_from_data_lines([
+                serde_json::to_string(&usage_chunk).expect("serialize"),
+                "text".to_string(),
+                "[DONE]".to_string(),
+            ]),
+        };
+
+        let raw = super::send_compatible_raw_streaming_request(
+            client,
+            span_recording_req(),
+            SpanRecordingProfile,
+        )
+        .await
+        .expect("stream should start");
+        let mut stream = Box::pin(crate::streaming::normalize_stream(raw, Ok));
+        while let Some(item) = stream.next().await {
+            assert!(item.is_ok(), "stream item should be ok");
+        }
+    }
+
+    #[tokio::test]
+    async fn span_leaves_zero_valued_usage_fields_unset() {
+        let _isolation = crate::test_utils::scoped_tracing_subscriber_guard().await;
+        let subscriber = tracing_subscriber::fmt()
+            .with_max_level(tracing::Level::TRACE)
+            .with_ansi(false)
+            .without_time()
+            .with_writer(std::io::sink)
+            .finish();
+        let _guard = tracing::subscriber::set_default(subscriber);
+
+        // No usage event at all: the terminal carries the zero-valued default,
+        // the documented "provider supplied no metrics" sentinel.
+        let client = MockStreamingClient {
+            sse_bytes: sse_bytes_from_data_lines(["text", "[DONE]"]),
+        };
+
+        let raw = super::send_compatible_raw_streaming_request(
+            client,
+            span_recording_req(),
+            SpanRecordingProfile,
+        )
+        .await
+        .expect("stream should start");
+        let mut stream = Box::pin(crate::streaming::normalize_stream(raw, Ok));
+        while let Some(item) = stream.next().await {
+            assert!(item.is_ok(), "stream item should be ok");
+        }
+    }
+
+    /// Direct unit checks for the two record helpers, outside the stream
+    /// machinery: a disabled span must be a no-op, and an enabled span must
+    /// absorb id/model metadata and non-zero usage.
+    #[test]
+    fn record_helpers_are_noops_on_disabled_and_record_on_enabled_spans() {
+        use super::{record_response_metadata, record_usage};
+
+        // Disabled span (no subscriber): both helpers return without panicking.
+        let disabled = tracing::Span::none();
+        record_usage(&disabled, &GenericUsage::new());
+        record_response_metadata(&disabled, Some("id"), Some("model"));
+
+        // Enabled span: fields are recorded through the span's `record` calls.
+        // The span must be created *inside* the default-subscriber scope, or
+        // it starts life disabled and every record is skipped.
+        let _isolation = crate::test_utils::scoped_tracing_subscriber_guard_blocking();
+        let subscriber = tracing_subscriber::fmt()
+            .with_max_level(tracing::Level::TRACE)
+            .with_ansi(false)
+            .without_time()
+            .with_writer(std::io::sink)
+            .finish();
+        tracing::subscriber::with_default(subscriber, || {
+            let span = tracing::info_span!(
+                "unit_test_span",
+                gen_ai.usage.input_tokens = tracing::field::Empty,
+                gen_ai.usage.output_tokens = tracing::field::Empty,
+                gen_ai.usage.cache_read.input_tokens = tracing::field::Empty,
+                gen_ai.response.id = tracing::field::Empty,
+                gen_ai.response.model = tracing::field::Empty
+            );
+            let _guard = span.enter();
+            let mut usage = GenericUsage::new();
+            usage.input_tokens = 3;
+            usage.output_tokens = 5;
+            record_usage(&span, &usage);
+            record_usage(&span, &GenericUsage::new());
+            record_response_metadata(&span, Some("chatcmpl-1"), Some("gpt-test"));
+            record_response_metadata(&span, Some(""), Some(""));
+        });
+    }
+
+    /// `record_usage`/`record_response_metadata` are also reachable through
+    /// the adapter without a stream: chunks carrying usage/id/model flow
+    /// through `interpret` on a live span.
+    #[test]
+    fn adapter_records_span_fields_during_interpret() {
+        let _isolation = crate::test_utils::scoped_tracing_subscriber_guard_blocking();
+        let subscriber = tracing_subscriber::fmt()
+            .with_max_level(tracing::Level::TRACE)
+            .with_ansi(false)
+            .without_time()
+            .with_writer(std::io::sink)
+            .finish();
+
+        let chunk = super::CompatibleChunk::<GenericUsage, ()> {
+            response_id: Some("chatcmpl-1".to_string()),
+            response_model: Some("gpt-test".to_string()),
+            choice: None,
+            usage: Some({
+                let mut usage = GenericUsage::new();
+                usage.input_tokens = 1;
+                usage.output_tokens = 2;
+                usage
+            }),
+        };
+
+        let mut adapter = super::CompatAdapter::new(SpanRecordingProfile);
+        let mut out = Vec::new();
+        tracing::subscriber::with_default(subscriber, || {
+            let span = tracing::info_span!(target: "rig::completions", "interpret_span");
+            let _guard = span.enter();
+            adapter.interpret(
+                super::CompatEvent::Chunk(chunk),
+                &mut out,
+            );
+        });
+        assert!(out.is_empty(), "a choice-less chunk emits nothing");
+    }
 }

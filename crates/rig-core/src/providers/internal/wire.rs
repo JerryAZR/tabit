@@ -715,4 +715,54 @@ mod tests {
             WireEvent::Corrupt(_)
         ));
     }
+
+    /// Marker-keyed classifiers apply the same non-object policy as the
+    /// tagged/chat ones: scalars, nulls, arrays and booleans are Unknown.
+    #[test]
+    fn marker_keyed_non_object_json_is_unknown_never_corrupt() {
+        for frame in ["null", "[]", "42", "-42", "3.5", "true", r#""ping""#] {
+            let event = super::classify_marker_keyed_frame::<TestChunk>(frame, &["choices"]);
+            assert!(
+                matches!(event, WireEvent::Unknown { .. }),
+                "marker-keyed classifier must skip {frame}, got {event:?}"
+            );
+        }
+    }
+
+    /// A discriminator whose value is not a string must be Corrupt (a
+    /// data-level defect in the tag itself), not Unknown.
+    #[test]
+    fn tagged_frame_with_non_string_tag_value_is_corrupt() {
+        for frame in [
+            r#"{"type":true}"#,
+            r#"{"type":42}"#,
+            r#"{"type":-42}"#,
+            r#"{"type":3.5}"#,
+            r#"{"type":null}"#,
+            r#"{"type":{}}"#,
+            r#"{"type":{"a":1}}"#,
+            r#"{"type":[]}"#,
+        ] {
+            let event = classify_tagged_frame::<TestEvent>(frame, "type", known);
+            assert!(
+                matches!(event, WireEvent::Corrupt(_)),
+                "a non-string tag value must classify Corrupt: {frame}"
+            );
+        }
+    }
+
+    /// Marker keys are presence checks and are duplicate-tolerant by design,
+    /// unlike discriminators: a duplicated marker still classifies through the
+    /// typed decode instead of failing the duplicate scan.
+    #[test]
+    fn marker_keys_tolerate_duplicate_keys() {
+        let event = super::classify_marker_keyed_frame::<TestChunk>(
+            r#"{"choices":[],"usage":1,"usage":2}"#,
+            &["choices", "usage"],
+        );
+        assert!(
+            matches!(event, WireEvent::Known(_)),
+            "duplicated marker keys must stay duplicate-tolerant, got {event:?}"
+        );
+    }
 }

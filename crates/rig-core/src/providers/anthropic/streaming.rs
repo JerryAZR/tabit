@@ -2418,6 +2418,342 @@ mod tests {
         );
     }
 
+    // -------------------------------------------------------------------
+    // Wire-decode strictness and adapter state-machine edge cases.
+    // -------------------------------------------------------------------
+
+    #[test]
+    fn content_delta_requires_an_object_payload() {
+        let error = serde_json::from_str::<ContentDelta>("42")
+            .expect_err("a scalar content delta payload must be rejected");
+        assert!(
+            error.to_string().contains("content delta must be an object"),
+            "unexpected error: {error}"
+        );
+    }
+
+    #[test]
+    fn citations_delta_missing_its_citation_field_is_rejected() {
+        let error = serde_json::from_str::<ContentDelta>(r#"{"type":"citations_delta"}"#)
+            .expect_err("a citations_delta without a citation must be rejected");
+        assert!(
+            error
+                .to_string()
+                .contains("`citations_delta` content delta is missing a `citation` field"),
+            "unexpected error: {error}"
+        );
+    }
+
+    #[test]
+    fn content_delta_with_non_string_type_is_rejected() {
+        let error = serde_json::from_str::<ContentDelta>(r#"{"type":42}"#)
+            .expect_err("a non-string discriminator must be rejected");
+        assert!(
+            error.to_string().contains("content delta `type` must be a string"),
+            "unexpected error: {error}"
+        );
+    }
+
+    #[test]
+    fn partial_usage_converts_to_generic_usage_by_value() {
+        let usage: crate::completion::Usage = PartialUsage {
+            output_tokens: 5,
+            input_tokens: Some(3),
+            cache_creation_input_tokens: Some(7),
+            cache_read_input_tokens: Some(2),
+        }
+        .into();
+
+        assert_eq!(usage.input_tokens, 3);
+        assert_eq!(usage.output_tokens, 5);
+        assert_eq!(usage.cached_input_tokens, 2);
+        assert_eq!(usage.cache_creation_input_tokens, 7);
+        assert_eq!(usage.total_tokens, 17);
+    }
+
+    #[test]
+    fn events_after_a_provider_error_are_ignored() {
+        let adapter = AnthropicAdapter::default();
+        let frame = WireFrame::Text(
+            r#"{"type":"error","error":{"type":"overloaded_error","message":"Overloaded"}}"#
+                .into(),
+        );
+        let crate::providers::internal::wire::WireEvent::Known(event) = adapter.classify(frame)
+        else {
+            panic!("the error envelope must classify as a Known event");
+        };
+
+        let mut adapter = AnthropicAdapter::default();
+        let mut out = Vec::new();
+        adapter.interpret(event, &mut out);
+        assert_eq!(out.len(), 1, "the error envelope surfaces as one error item");
+
+        let mut out_after = Vec::new();
+        adapter.interpret(StreamingEvent::Ping, &mut out_after);
+        assert!(
+            out_after.is_empty(),
+            "frames after an in-band provider error must not produce output"
+        );
+    }
+
+    #[test]
+    fn message_delta_without_stop_reason_is_a_noop() {
+        let adapter = AnthropicAdapter::default();
+        let frame =
+            WireFrame::Text(r#"{"type":"message_delta","delta":{"stop_reason":null},"usage":{"output_tokens":3}}"#.into());
+        let crate::providers::internal::wire::WireEvent::Known(event) = adapter.classify(frame)
+        else {
+            panic!("a modeled event must classify as Known");
+        };
+
+        let mut adapter = AnthropicAdapter::default();
+        let mut out = Vec::new();
+        adapter.interpret(event, &mut out);
+        assert!(
+            out.is_empty(),
+            "a message_delta without a stop reason must not terminate the turn"
+        );
+    }
+
+    #[test]
+    fn text_delta_while_a_tool_call_is_open_is_suppressed() {
+        let event: StreamingEvent = serde_json::from_str(
+            r#"{"type":"content_block_delta","index":1,"delta":{"type":"text_delta","text":"ignored"}}"#,
+        )
+        .unwrap();
+        let mut current_tool_call = Some("toolu_1".to_string());
+        let mut current_thinking = None;
+
+        assert!(handle_event(&event, &mut current_tool_call, &mut current_thinking).is_none());
+    }
+
+    #[test]
+    fn input_json_delta_without_a_matching_slot_or_tool_call_is_dropped() {
+        let event: StreamingEvent = serde_json::from_str(
+            r#"{"type":"content_block_delta","index":7,"delta":{"type":"input_json_delta","partial_json":"{\"x\":"}}"#,
+        )
+        .unwrap();
+        let mut current_tool_call = None;
+        let mut current_thinking = None;
+
+        assert!(handle_event(&event, &mut current_tool_call, &mut current_thinking).is_none());
+    }
+
+    #[test]
+    fn unknown_content_delta_warns_under_an_enabled_subscriber() {
+        // Scoped-subscriber tests must not run concurrently; see
+        // `test_utils::scoped_tracing_subscriber_guard`.
+        let _isolation = crate::test_utils::scoped_tracing_subscriber_guard_blocking();
+        let subscriber = tracing_subscriber::fmt()
+            .with_max_level(tracing::Level::WARN)
+            .with_ansi(false)
+            .without_time()
+            .with_writer(std::io::sink)
+            .finish();
+        let _guard = tracing::subscriber::set_default(subscriber);
+
+        let event: StreamingEvent = serde_json::from_str(
+            r#"{"type":"content_block_delta","index":0,"delta":{"type":"banana_delta","x":1}}"#,
+        )
+        .unwrap();
+        let mut current_tool_call = None;
+        let mut current_thinking = None;
+
+        assert!(handle_event(&event, &mut current_tool_call, &mut current_thinking).is_none());
+    }
+
+    #[test]
+    fn text_block_start_carries_citations_as_additional_params() {
+        let event: StreamingEvent = serde_json::from_str(
+            r#"{"type":"content_block_start","index":0,"content_block":{"type":"text","text":"","citations":[{"type":"char_location","cited_text":"cit","document_index":0,"start_char_index":0,"end_char_index":3}]}}"#,
+        )
+        .unwrap();
+        let mut current_tool_call = None;
+        let mut current_thinking = None;
+
+        let Some(Ok(RawStreamingChoice::TextStart {
+            additional_params, ..
+        })) = handle_event(&event, &mut current_tool_call, &mut current_thinking)
+        else {
+            panic!("a text block start must emit a TextStart choice");
+        };
+
+        let params = additional_params.expect("citations ride on the start event");
+        assert_eq!(params["citations"][0]["type"], "char_location");
+        assert_eq!(params["citations"][0]["start_char_index"], 0);
+    }
+
+    #[test]
+    fn tool_use_block_start_emits_the_name_delta_and_opens_the_call() {
+        let event: StreamingEvent = serde_json::from_str(
+            r#"{"type":"content_block_start","index":0,"content_block":{"type":"tool_use","id":"toolu_1","name":"get_weather","input":{}}}"#,
+        )
+        .unwrap();
+        let mut current_tool_call = None;
+        let mut current_thinking = None;
+
+        let Some(Ok(RawStreamingChoice::ToolCallDelta { id, content })) =
+            handle_event(&event, &mut current_tool_call, &mut current_thinking)
+        else {
+            panic!("a tool_use block start must emit a tool-call delta");
+        };
+
+        assert_eq!(id.as_wire(), Some("toolu_1"));
+        assert!(matches!(
+            content,
+            ToolCallDeltaContent::Name(name) if name == "get_weather"
+        ));
+        assert_eq!(
+            current_tool_call.as_deref(),
+            Some("toolu_1"),
+            "the adapter must track the open call's wire id"
+        );
+    }
+
+    #[test]
+    fn content_block_start_of_unhandled_content_types_is_a_noop() {
+        for json in [
+            r#"{"type":"content_block_start","index":0,"content_block":{"type":"image","source":{"type":"base64","media_type":"image/jpeg","data":"aGk="}}}"#,
+            r#"{"type":"content_block_start","index":1,"content_block":{"type":"tool_result","tool_use_id":"toolu_1","content":"ok"}}"#,
+        ] {
+            let event: StreamingEvent = serde_json::from_str(json).unwrap();
+            let mut current_tool_call = None;
+            let mut current_thinking = None;
+
+            assert!(
+                handle_event(&event, &mut current_tool_call, &mut current_thinking).is_none(),
+                "content block starts without special handling must be a no-op: {json}"
+            );
+        }
+    }
+
+    #[test]
+    fn server_tool_use_stop_finalizes_assembled_input() {
+        let raw_content_key = crate::providers::anthropic::completion::ANTHROPIC_RAW_CONTENT_KEY;
+        let start_with = |input: &str| {
+            format!(
+                r#"{{"type":"content_block_start","index":1,"content_block":{{"type":"server_tool_use","id":"srv_1","name":"web_search","input":{input}}}}}"#
+            )
+        };
+
+        // Null initial input and no argument deltas finalize to `{}`.
+        let mut server_tool_uses = HashMap::new();
+        let mut current_tool_call = None;
+        let mut current_thinking = None;
+        let start: StreamingEvent = serde_json::from_str(&start_with("null")).unwrap();
+        assert!(super::handle_event(
+            &start,
+            &mut current_tool_call,
+            &mut server_tool_uses,
+            &mut current_thinking
+        )
+        .is_none());
+
+        let stop: StreamingEvent =
+            serde_json::from_str(r#"{"type":"content_block_stop","index":1}"#).unwrap();
+        let Some(Ok(RawStreamingChoice::TextStart {
+            additional_params: Some(params),
+            ..
+        })) = super::handle_event(
+            &stop,
+            &mut current_tool_call,
+            &mut server_tool_uses,
+            &mut current_thinking,
+        ) else {
+            panic!("a closed server tool use must emit its raw content");
+        };
+        assert_eq!(params[raw_content_key]["name"], "web_search");
+        assert_eq!(params[raw_content_key]["input"], json!({}));
+
+        // A non-null initial input survives when no deltas stream.
+        let mut server_tool_uses = HashMap::new();
+        let start: StreamingEvent =
+            serde_json::from_str(&start_with(r#"{"query":"claude"}"#)).unwrap();
+        assert!(super::handle_event(
+            &start,
+            &mut current_tool_call,
+            &mut server_tool_uses,
+            &mut current_thinking
+        )
+        .is_none());
+        let Some(Ok(RawStreamingChoice::TextStart {
+            additional_params: Some(params),
+            ..
+        })) = super::handle_event(
+            &stop,
+            &mut current_tool_call,
+            &mut server_tool_uses,
+            &mut current_thinking,
+        ) else {
+            panic!("a closed server tool use must emit its raw content");
+        };
+        assert_eq!(params[raw_content_key]["input"], json!({"query": "claude"}));
+
+        // Accumulated deltas that never parse surface as an error item.
+        let mut server_tool_uses = HashMap::new();
+        let start: StreamingEvent = serde_json::from_str(&start_with("null")).unwrap();
+        let delta: StreamingEvent = serde_json::from_str(
+            r#"{"type":"content_block_delta","index":1,"delta":{"type":"input_json_delta","partial_json":"{bad"}}"#,
+        )
+        .unwrap();
+        for event in [&start, &delta] {
+            assert!(super::handle_event(
+                event,
+                &mut current_tool_call,
+                &mut server_tool_uses,
+                &mut current_thinking
+            )
+            .is_none());
+        }
+        assert!(matches!(
+            super::handle_event(
+                &stop,
+                &mut current_tool_call,
+                &mut server_tool_uses,
+                &mut current_thinking
+            ),
+            Some(Err(_))
+        ));
+    }
+
+    #[cfg(not(all(target_arch = "wasm32", target_os = "unknown")))]
+    #[tokio::test]
+    async fn stream_logs_request_body_at_trace_level() {
+        use crate::client::CompletionClient;
+        use crate::completion::CompletionModel as _;
+        use crate::providers::anthropic::Client;
+        use crate::test_utils::MockStreamingClient;
+
+        // Scoped-subscriber tests must not run concurrently; see
+        // `test_utils::scoped_tracing_subscriber_guard`.
+        let _isolation = crate::test_utils::scoped_tracing_subscriber_guard().await;
+        let subscriber = tracing_subscriber::fmt()
+            .with_max_level(tracing::Level::TRACE)
+            .with_ansi(false)
+            .without_time()
+            .with_writer(std::io::sink)
+            .finish();
+        let _guard = tracing::subscriber::set_default(subscriber);
+
+        let sse_bytes = bytes::Bytes::from_static(
+            b"data: {\"type\":\"ping\"}\n\ndata: {\"type\":\"message_delta\",\"delta\":{\"stop_reason\":\"end_turn\"},\"usage\":{\"output_tokens\":1}}\n\n",
+        );
+        let client = Client::builder()
+            .api_key("test-key")
+            .http_client(MockStreamingClient { sse_bytes })
+            .build()
+            .expect("build client");
+        let model = client.completion_model("claude-sonnet-4-6");
+        let request = model.completion_request("hello").max_tokens(64).build();
+
+        let mut stream = crate::completion::CompletionModel::stream(&model, request)
+            .await
+            .expect("stream should open under a trace subscriber");
+        while let Some(item) = stream.next().await {
+            assert!(item.is_ok(), "stream item should be ok");
+        }
+    }
+
     #[cfg(not(all(target_arch = "wasm32", target_os = "unknown")))]
     mod terminal_emission {
         use crate::client::CompletionClient;

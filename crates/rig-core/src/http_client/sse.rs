@@ -372,3 +372,400 @@ fn check_response<T>(
         Err(super::Error::InvalidContentType(content_type.clone()))
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::http_client::{Error, LazyBody, MultipartForm, StreamingResponse};
+    use futures::StreamExt;
+    use std::collections::VecDeque;
+    use std::sync::{Arc, Mutex};
+
+    /// A scripted outcome for one `send_streaming` attempt.
+    enum MockOutcome {
+        Response {
+            status: StatusCode,
+            content_type: Option<&'static str>,
+            chunks: Vec<StreamResult<Bytes>>,
+        },
+        Fail(Error),
+    }
+
+    /// A [`HttpClientExt`] mock that replays a scripted list of outcomes,
+    /// recording the `last-event-id` header of every attempt.
+    #[derive(Clone, Default)]
+    struct MockClient {
+        outcomes: Arc<Mutex<VecDeque<MockOutcome>>>,
+        seen_last_event_ids: Arc<Mutex<Vec<Option<String>>>>,
+    }
+
+    impl MockClient {
+        fn with(outcomes: Vec<MockOutcome>) -> Self {
+            Self {
+                outcomes: Arc::new(Mutex::new(outcomes.into())),
+                seen_last_event_ids: Arc::new(Mutex::new(Vec::new())),
+            }
+        }
+
+        fn last_event_ids(&self) -> Vec<Option<String>> {
+            self.seen_last_event_ids.lock().unwrap().clone()
+        }
+    }
+
+    impl HttpClientExt for MockClient {
+        // The RPITIT bound is `+ WasmCompatSend + 'static`, which an `async fn`
+        // impl cannot satisfy because it would capture `&self`.
+        #[allow(clippy::manual_async_fn)]
+        fn send<T, U>(
+            &self,
+            _req: Request<T>,
+        ) -> impl Future<Output = crate::http_client::Result<Response<LazyBody<U>>>> + WasmCompatSend + 'static
+        where
+            T: Into<Bytes>,
+            T: WasmCompatSend,
+            U: From<Bytes>,
+            U: WasmCompatSend + 'static,
+        {
+            async { Err(Error::StreamEnded) }
+        }
+
+        #[allow(clippy::manual_async_fn)]
+        fn send_multipart<U>(
+            &self,
+            _req: Request<MultipartForm>,
+        ) -> impl Future<Output = crate::http_client::Result<Response<LazyBody<U>>>> + WasmCompatSend + 'static
+        where
+            U: From<Bytes>,
+            U: WasmCompatSend + 'static,
+        {
+            async { Err(Error::StreamEnded) }
+        }
+
+        fn send_streaming<T>(
+            &self,
+            req: Request<T>,
+        ) -> impl Future<Output = crate::http_client::Result<StreamingResponse>> + WasmCompatSend
+        where
+            T: Into<Bytes> + WasmCompatSend,
+        {
+            let last_event_id = req
+                .headers()
+                .get("last-event-id")
+                .and_then(|value| value.to_str().ok())
+                .map(str::to_owned);
+            self.seen_last_event_ids
+                .lock()
+                .unwrap()
+                .push(last_event_id);
+            let outcome = self.outcomes.lock().unwrap().pop_front();
+
+            async move {
+                match outcome {
+                    Some(MockOutcome::Fail(err)) => Err(err),
+                    Some(MockOutcome::Response {
+                        status,
+                        content_type,
+                        chunks,
+                    }) => {
+                        let mut builder = Response::builder().status(status);
+                        if let Some(ct) = content_type {
+                            builder = builder.header(http::header::CONTENT_TYPE, ct);
+                        }
+                        builder
+                            .body(Box::pin(futures::stream::iter(chunks)) as BoxedStream)
+                            .map_err(Error::Protocol)
+                    }
+                    None => Err(Error::StreamEnded),
+                }
+            }
+        }
+    }
+
+    fn test_request() -> Request<Bytes> {
+        Request::post("http://localhost/sse")
+            .body(Bytes::new())
+            .unwrap()
+    }
+
+    fn sse_ok(chunks: Vec<StreamResult<Bytes>>) -> MockOutcome {
+        MockOutcome::Response {
+            status: StatusCode::OK,
+            content_type: Some("text/event-stream"),
+            chunks,
+        }
+    }
+
+    fn boxed_source(client: &MockClient) -> Pin<Box<GenericEventSource<MockClient, Bytes>>> {
+        Box::pin(GenericEventSource::new(client.clone(), test_request()))
+    }
+
+    fn boxed_source_with_policy(
+        client: &MockClient,
+        retry_policy: ExponentialBackoff,
+        last_event_id: Option<String>,
+    ) -> Pin<Box<GenericEventSource<MockClient, Bytes>>> {
+        let req = test_request();
+        let state = SourceState::Connecting {
+            response_future: GenericEventSource::<MockClient, Bytes>::create_response_future(
+                client, &req, None,
+            ),
+        };
+        Box::pin(GenericEventSource {
+            client: client.clone(),
+            req,
+            retry_policy,
+            last_event_id,
+            allow_missing_content_type: false,
+            state,
+        })
+    }
+
+    fn fast_backoff(max_retries: Option<usize>) -> ExponentialBackoff {
+        ExponentialBackoff::new(Duration::from_millis(1), 2., None, max_retries)
+    }
+
+    #[test]
+    fn event_converts_from_message_event() {
+        let message = MessageEvent {
+            data: "hi".into(),
+            id: "42".into(),
+            ..Default::default()
+        };
+        assert_eq!(Event::from(message.clone()), Event::Message(message));
+    }
+
+    #[tokio::test]
+    async fn streams_events_and_terminates_when_source_ends() {
+        let client = MockClient::with(vec![sse_ok(vec![Ok(Bytes::from_static(
+            b"id: abc\ndata: first\n\ndata: second\n\n",
+        ))])]);
+        let mut source = boxed_source(&client);
+
+        assert!(matches!(source.next().await, Some(Ok(Event::Open))));
+
+        let Some(Ok(Event::Message(event))) = source.next().await else {
+            panic!("expected first message");
+        };
+        assert_eq!(event.data, "first");
+        assert_eq!(event.id, "abc");
+        assert_eq!(source.last_event_id(), Some("abc"));
+
+        let Some(Ok(Event::Message(event))) = source.next().await else {
+            panic!("expected second message");
+        };
+        assert_eq!(event.data, "second");
+        // Empty ids do not overwrite the last event id.
+        assert_eq!(source.last_event_id(), Some("abc"));
+
+        // Source ended: the event source closes and stays closed.
+        assert!(source.next().await.is_none());
+        assert!(source.next().await.is_none());
+    }
+
+    #[tokio::test]
+    async fn retry_field_updates_reconnection_time() {
+        let client = MockClient::with(vec![sse_ok(vec![Ok(Bytes::from_static(
+            b"retry: 2000\ndata: hi\n\n",
+        ))])]);
+        let mut source = boxed_source(&client);
+
+        assert!(matches!(source.next().await, Some(Ok(Event::Open))));
+        let Some(Ok(Event::Message(event))) = source.next().await else {
+            panic!("expected message");
+        };
+        assert_eq!(event.data, "hi");
+        assert_eq!(
+            source.retry_policy.start,
+            Duration::from_millis(2000),
+            "retry field should update the backoff start"
+        );
+        // The pre-existing 5s cap is preserved (raised only if exceeded).
+        assert_eq!(
+            source.retry_policy.max_duration,
+            Some(Duration::from_secs(5))
+        );
+    }
+
+    #[tokio::test]
+    async fn missing_content_type_rejected_without_opt_in() {
+        let client = MockClient::with(vec![MockOutcome::Response {
+            status: StatusCode::OK,
+            content_type: None,
+            chunks: vec![Ok(Bytes::from_static(b"data: hi\n\n"))],
+        }]);
+        let mut source = boxed_source(&client);
+
+        assert!(matches!(
+            source.next().await,
+            Some(Err(Error::InvalidContentType(ref value))) if value.is_empty()
+        ));
+        // Non-retryable: the source is closed for good.
+        assert!(source.next().await.is_none());
+    }
+
+    #[tokio::test]
+    async fn allow_missing_content_type_accepts_headerless_response() {
+        let client = MockClient::with(vec![MockOutcome::Response {
+            status: StatusCode::OK,
+            content_type: None,
+            chunks: vec![Ok(Bytes::from_static(b"data: hi\n\n"))],
+        }]);
+        let mut source = Box::pin(
+            GenericEventSource::new(client.clone(), test_request()).allow_missing_content_type(),
+        );
+
+        assert!(matches!(source.next().await, Some(Ok(Event::Open))));
+        let Some(Ok(Event::Message(event))) = source.next().await else {
+            panic!("expected message");
+        };
+        assert_eq!(event.data, "hi");
+        assert!(source.next().await.is_none());
+    }
+
+    #[tokio::test]
+    async fn non_event_stream_content_type_rejected() {
+        let client = MockClient::with(vec![MockOutcome::Response {
+            status: StatusCode::OK,
+            content_type: Some("application/json"),
+            chunks: vec![Ok(Bytes::from_static(b"data: hi\n\n"))],
+        }]);
+        let mut source = boxed_source(&client);
+
+        assert!(matches!(
+            source.next().await,
+            Some(Err(Error::InvalidContentType(ref value))) if value == "application/json"
+        ));
+        assert!(source.next().await.is_none());
+    }
+
+    #[tokio::test]
+    async fn non_ok_status_rejected() {
+        let client = MockClient::with(vec![MockOutcome::Response {
+            status: StatusCode::NOT_FOUND,
+            content_type: Some("text/event-stream"),
+            chunks: vec![],
+        }]);
+        let mut source = boxed_source(&client);
+
+        assert!(matches!(
+            source.next().await,
+            Some(Err(Error::InvalidStatusCode(StatusCode::NOT_FOUND)))
+        ));
+        assert!(source.next().await.is_none());
+    }
+
+    #[tokio::test]
+    async fn transport_error_triggers_reconnect_with_last_event_id() {
+        let client = MockClient::with(vec![
+            // Initial connection attempt fails.
+            MockOutcome::Fail(Error::StreamEnded),
+            // Reconnect succeeds, yields an event with an id, then breaks.
+            sse_ok(vec![
+                Ok(Bytes::from_static(b"id: e1\ndata: first\n\n")),
+                Err(Error::StreamEnded),
+            ]),
+            // Second reconnect succeeds and completes cleanly.
+            sse_ok(vec![Ok(Bytes::from_static(b"data: second\n\n"))]),
+        ]);
+        let mut source = boxed_source_with_policy(&client, fast_backoff(None), None);
+
+        // Initial connection failure is surfaced and retried.
+        assert!(matches!(source.next().await, Some(Err(Error::StreamEnded))));
+        // Reconnect succeeds.
+        assert!(matches!(source.next().await, Some(Ok(Event::Open))));
+        let Some(Ok(Event::Message(event))) = source.next().await else {
+            panic!("expected first message");
+        };
+        assert_eq!(event.data, "first");
+        assert_eq!(source.last_event_id(), Some("e1"));
+        // Transport error while open is surfaced and retried.
+        assert!(matches!(source.next().await, Some(Err(Error::StreamEnded))));
+        // Second reconnect succeeds.
+        assert!(matches!(source.next().await, Some(Ok(Event::Open))));
+        let Some(Ok(Event::Message(event))) = source.next().await else {
+            panic!("expected second message");
+        };
+        assert_eq!(event.data, "second");
+        assert!(source.next().await.is_none());
+
+        // The last event id is replayed on reconnections that happen after the
+        // id was received (the first reconnect happens before any event, so it
+        // has no id to replay).
+        assert_eq!(
+            client.last_event_ids(),
+            vec![None, None, Some("e1".to_string())]
+        );
+    }
+
+    #[tokio::test]
+    async fn reconnect_with_bad_response_closes_the_source() {
+        let client = MockClient::with(vec![
+            MockOutcome::Fail(Error::StreamEnded),
+            // The reconnection attempt gets a non-OK response: the source must
+            // close instead of retrying (check_response errors are terminal).
+            MockOutcome::Response {
+                status: StatusCode::INTERNAL_SERVER_ERROR,
+                content_type: Some("text/event-stream"),
+                chunks: vec![],
+            },
+        ]);
+        let mut source = boxed_source_with_policy(&client, fast_backoff(None), None);
+
+        assert!(matches!(source.next().await, Some(Err(Error::StreamEnded))));
+        assert!(matches!(
+            source.next().await,
+            Some(Err(Error::InvalidStatusCode(StatusCode::INTERNAL_SERVER_ERROR)))
+        ));
+        assert!(source.next().await.is_none());
+    }
+
+    #[tokio::test]
+    async fn reconnect_gives_up_after_max_retries() {
+        let client = MockClient::with(vec![
+            MockOutcome::Fail(Error::StreamEnded),
+            MockOutcome::Fail(Error::StreamEnded),
+        ]);
+        // max_retries = 1: one reconnect attempt, then give up.
+        let mut source = boxed_source_with_policy(&client, fast_backoff(Some(1)), None);
+
+        assert!(matches!(source.next().await, Some(Err(Error::StreamEnded))));
+        assert!(matches!(source.next().await, Some(Err(Error::StreamEnded))));
+        assert!(source.next().await.is_none());
+    }
+
+    #[tokio::test]
+    async fn initial_connect_seeds_last_event_id_into_stream() {
+        let client = MockClient::with(vec![sse_ok(vec![Ok(Bytes::from_static(
+            b"data: hi\n\n",
+        ))])]);
+        let mut source =
+            boxed_source_with_policy(&client, DEFAULT_RETRY, Some("seed".to_string()));
+
+        assert!(matches!(source.next().await, Some(Ok(Event::Open))));
+        let Some(Ok(Event::Message(event))) = source.next().await else {
+            panic!("expected message");
+        };
+        assert_eq!(event.data, "hi");
+        assert!(source.next().await.is_none());
+    }
+
+    #[tokio::test]
+    async fn utf8_error_is_skipped_and_stream_continues() {
+        let client = MockClient::with(vec![sse_ok(vec![
+            Ok(Bytes::from_static(b"data: hi\n\n")),
+            // Trailing invalid UTF-8 byte: surfaces a Utf8 stream error, which
+            // the source must treat as recoverable (keep polling) before the
+            // source ends.
+            Ok(Bytes::from_static(&[0xff])),
+        ])]);
+        let mut source = boxed_source(&client);
+
+        assert!(matches!(source.next().await, Some(Ok(Event::Open))));
+        let Some(Ok(Event::Message(event))) = source.next().await else {
+            panic!("expected message");
+        };
+        assert_eq!(event.data, "hi");
+        // The Utf8 error is consumed internally; the stream then ends.
+        assert!(source.next().await.is_none());
+    }
+}

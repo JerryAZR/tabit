@@ -56,7 +56,25 @@ pub trait ConstructCompletionModel<C>: Sized {
 mod tests {
     use super::*;
     use crate::completion::{CompletionError, CompletionRequest, CompletionResponse};
+    use crate::message::Message;
     use crate::streaming::StreamingCompletionResponse;
+    use crate::OneOrMany;
+
+    fn minimal_request(prompt: &str) -> CompletionRequest {
+        CompletionRequest {
+            model: None,
+            preamble: None,
+            chat_history: OneOrMany::one(Message::user(prompt)),
+            documents: Vec::new(),
+            tools: Vec::new(),
+            temperature: None,
+            max_tokens: None,
+            tool_choice: None,
+            additional_params: None,
+            output_schema: None,
+            record_telemetry_content: false,
+        }
+    }
 
     /// A model implemented entirely outside rig's provider machinery: no
     /// response associated types, no client associated type, and no
@@ -112,6 +130,29 @@ mod tests {
         assert_completion_model(&ExternalModel {
             name: "standalone".to_owned(),
         });
+    }
+
+    #[tokio::test]
+    async fn external_model_completion_and_stream_report_their_name() {
+        let model = ExternalClient.completion_model("external-model");
+
+        let completion_error = model
+            .completion(minimal_request("hello"))
+            .await
+            .expect_err("compile-coverage model should fail completion");
+        assert!(matches!(
+            completion_error,
+            CompletionError::ResponseError(message) if message.contains("external-model")
+        ));
+
+        let stream_error = match model.stream(minimal_request("hello")).await {
+            Err(error) => error,
+            Ok(_) => panic!("compile-coverage model should fail streaming"),
+        };
+        assert!(matches!(
+            stream_error,
+            CompletionError::ResponseError(message) if message.contains("external-model")
+        ));
     }
 
     /// Compile coverage for an out-of-tree provider extension built on the
@@ -218,6 +259,39 @@ mod tests {
             fn assert_completion_client<C: CompletionClient>() {}
 
             assert_completion_client::<Client<ExternalExt, reqwest::Client>>();
+        }
+
+        #[tokio::test]
+        async fn external_extension_builds_a_client_and_model_through_the_blanket_impl() {
+            use crate::test_utils::RecordingHttpClient;
+
+            let client = Client::<ExternalExt, reqwest::Client>::builder()
+                .api_key("test-key")
+                .http_client(RecordingHttpClient::new(""))
+                .build()
+                .expect("client should build over a scripted backend");
+
+            let model = client.completion_model("external-generic-model");
+
+            let completion_error = model
+                .completion(super::minimal_request("hello"))
+                .await
+                .expect_err("compile-coverage model should fail completion");
+            assert!(matches!(
+                completion_error,
+                CompletionError::ResponseError(message)
+                    if message.contains("external-generic-model")
+            ));
+
+            let stream_error = match model.stream(super::minimal_request("hello")).await {
+                Err(error) => error,
+                Ok(_) => panic!("compile-coverage model should fail streaming"),
+            };
+            assert!(matches!(
+                stream_error,
+                CompletionError::ResponseError(message)
+                    if message.contains("external-generic-model")
+            ));
         }
     }
 }

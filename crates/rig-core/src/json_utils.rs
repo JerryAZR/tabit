@@ -385,4 +385,78 @@ mod tests {
         let parsed = parse_tool_arguments(r#"{"key":"value"}"#).unwrap();
         assert_eq!(parsed, serde_json::json!({"key": "value"}));
     }
+
+    #[test]
+    fn test_serialize_json_value_keeps_string_scalars_quoted() {
+        assert_eq!(
+            serialize_json_value(&serde_json::json!("text")),
+            "\"text\""
+        );
+        assert_eq!(serialize_json_value(&serde_json::json!(7)), "7");
+        assert_eq!(serialize_json_value(&serde_json::json!([1, 2])), "[1,2]");
+    }
+
+    #[test]
+    fn test_merge_non_object_a_is_returned_unchanged() {
+        let a = serde_json::json!([1, 2]);
+        let b = serde_json::json!({"key": "value"});
+        assert_eq!(merge(a.clone(), b), a);
+    }
+
+    #[test]
+    fn test_merge_inplace_ignores_non_object_inputs() {
+        let mut a = serde_json::json!([1, 2]);
+        let b = serde_json::json!({"key": "value"});
+        merge_inplace(&mut a, b);
+        assert_eq!(a, serde_json::json!([1, 2]));
+
+        let mut a = serde_json::json!({"key": "value"});
+        let b = serde_json::json!("scalar");
+        merge_inplace(&mut a, b);
+        assert_eq!(a, serde_json::json!({"key": "value"}));
+    }
+
+    #[derive(Debug, serde::Deserialize)]
+    struct StringOrVecWrapper {
+        #[serde(default, deserialize_with = "string_or_vec")]
+        items: Vec<String>,
+    }
+
+    #[derive(Debug, serde::Deserialize)]
+    struct NullOrVecWrapper {
+        #[serde(default, deserialize_with = "null_or_vec")]
+        items: Vec<String>,
+    }
+
+    #[test]
+    fn test_string_or_vec_from_null_is_empty() {
+        let w: StringOrVecWrapper = serde_json::from_str(r#"{"items": null}"#).unwrap();
+        assert!(w.items.is_empty());
+    }
+
+    #[test]
+    fn test_string_or_vec_rejects_other_json_types() {
+        let error = serde_json::from_str::<StringOrVecWrapper>(r#"{"items": true}"#)
+            .expect_err("a bool is neither a string nor a sequence");
+        assert!(
+            error.to_string().contains("a string, sequence, or null"),
+            "unexpected message: {error}"
+        );
+    }
+
+    #[test]
+    fn test_null_or_vec_from_null_is_empty() {
+        let w: NullOrVecWrapper = serde_json::from_str(r#"{"items": null}"#).unwrap();
+        assert!(w.items.is_empty());
+    }
+
+    #[test]
+    fn test_null_or_vec_rejects_other_json_types() {
+        let error = serde_json::from_str::<NullOrVecWrapper>(r#"{"items": 3}"#)
+            .expect_err("a number is not a sequence");
+        assert!(
+            error.to_string().contains("a sequence or null"),
+            "unexpected message: {error}"
+        );
+    }
 }

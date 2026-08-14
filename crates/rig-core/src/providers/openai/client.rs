@@ -277,13 +277,124 @@ pub(crate) enum ApiResponse<T> {
 
 #[cfg(test)]
 mod tests {
-    use crate::client::{CompletionClient, EmbeddingsClient};
+    use crate::client::{CompletionClient, EmbeddingsClient, ProviderClient};
     use crate::message::ImageDetail;
     use crate::providers::openai::{
         AssistantContent, Function, ImageUrl, Message, ToolCall, ToolType, UserContent,
     };
     use crate::{OneOrMany, message};
     use serde_path_to_error::deserialize;
+    use std::sync::Mutex;
+
+    static ENV_LOCK: Mutex<()> = Mutex::new(());
+
+    struct EnvVarGuard {
+        key: &'static str,
+        original: Option<String>,
+    }
+
+    impl EnvVarGuard {
+        fn set(key: &'static str, value: &str) -> Self {
+            let original = std::env::var(key).ok();
+            // SAFETY: Tests in this module hold ENV_LOCK while mutating process
+            // environment and restore the original value before releasing it.
+            unsafe { std::env::set_var(key, value) };
+
+            Self { key, original }
+        }
+
+        fn remove(key: &'static str) -> Self {
+            let original = std::env::var(key).ok();
+            // SAFETY: Tests in this module hold ENV_LOCK while mutating process
+            // environment and restore the original value before releasing it.
+            unsafe { std::env::remove_var(key) };
+
+            Self { key, original }
+        }
+    }
+
+    impl Drop for EnvVarGuard {
+        fn drop(&mut self) {
+            // SAFETY: Tests in this module hold ENV_LOCK while mutating process
+            // environment and restore the original value before releasing it.
+            unsafe {
+                match &self.original {
+                    Some(value) => std::env::set_var(self.key, value),
+                    None => std::env::remove_var(self.key),
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn from_env_uses_openai_base_url_for_responses_and_completions_clients() {
+        let _guard = ENV_LOCK.lock().expect("env lock should not be poisoned");
+        let _api_key = EnvVarGuard::set("OPENAI_API_KEY", "dummy-key");
+        let _base_url = EnvVarGuard::set("OPENAI_BASE_URL", "https://openai-compatible.example/v1");
+
+        let responses = super::Client::from_env().expect("responses client should build from env");
+        assert_eq!(responses.base_url(), "https://openai-compatible.example/v1");
+
+        let completions =
+            super::CompletionsClient::from_env().expect("completions client should build from env");
+        assert_eq!(completions.base_url(), "https://openai-compatible.example/v1");
+    }
+
+    #[test]
+    fn from_env_restores_a_preexisting_base_url_value() {
+        let _guard = ENV_LOCK.lock().expect("env lock should not be poisoned");
+        let _preexisting = EnvVarGuard::set("OPENAI_BASE_URL", "https://preexisting.example");
+        let _api_key = EnvVarGuard::set("OPENAI_API_KEY", "dummy-key");
+
+        // A second guard over the same variable captures the preexisting value
+        // as its `original`, so dropping it restores that value.
+        {
+            let _overridden =
+                EnvVarGuard::set("OPENAI_BASE_URL", "https://overridden.example");
+            assert_eq!(
+                std::env::var("OPENAI_BASE_URL").as_deref(),
+                Ok("https://overridden.example")
+            );
+        }
+
+        assert_eq!(
+            std::env::var("OPENAI_BASE_URL").as_deref(),
+            Ok("https://preexisting.example"),
+            "the guard must restore the value that was set before it"
+        );
+    }
+
+    #[test]
+    fn from_env_uses_default_base_url_when_openai_base_url_is_unset() {
+        let _guard = ENV_LOCK.lock().expect("env lock should not be poisoned");
+        let _api_key = EnvVarGuard::set("OPENAI_API_KEY", "dummy-key");
+        let _base_url = EnvVarGuard::remove("OPENAI_BASE_URL");
+
+        let responses = super::Client::from_env().expect("responses client should build from env");
+        assert_eq!(responses.base_url(), super::OPENAI_API_BASE_URL);
+
+        let completions =
+            super::CompletionsClient::from_env().expect("completions client should build from env");
+        assert_eq!(completions.base_url(), super::OPENAI_API_BASE_URL);
+    }
+
+    #[test]
+    fn from_val_builds_responses_and_completions_clients_from_an_api_key() {
+        let responses = super::Client::from_val("dummy-key".into())
+            .expect("responses client should build from a bare api key");
+        assert_eq!(responses.base_url(), super::OPENAI_API_BASE_URL);
+        assert_eq!(
+            responses
+                .headers()
+                .get("authorization")
+                .and_then(|value| value.to_str().ok()),
+            Some("Bearer dummy-key")
+        );
+
+        let completions = super::CompletionsClient::from_val("dummy-key".into())
+            .expect("completions client should build from a bare api key");
+        assert_eq!(completions.base_url(), super::OPENAI_API_BASE_URL);
+    }
 
     #[test]
     fn test_deserialize_message() {

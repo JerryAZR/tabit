@@ -5860,4 +5860,1093 @@ mod tests {
             );
         }
     }
+
+    // -------------------------------------------------------------------
+    // Coverage additions: response accessors, usage, citations, content
+    // conversions, cache control, schema sanitization, and request-builder
+    // edge cases.
+    // -------------------------------------------------------------------
+
+    fn sample_usage() -> Usage {
+        Usage {
+            input_tokens: 3,
+            cache_read_input_tokens: Some(5),
+            cache_creation_input_tokens: Some(7),
+            output_tokens: 11,
+        }
+    }
+
+    fn sample_completion_response() -> CompletionResponse {
+        CompletionResponse {
+            content: vec![Content::Text {
+                text: "hello".to_string(),
+                citations: Vec::new(),
+                cache_control: None,
+            }],
+            id: "msg_9".to_string(),
+            model: "claude-test".to_string(),
+            role: "assistant".to_string(),
+            stop_reason: Some("end_turn".to_string()),
+            stop_sequence: None,
+            usage: sample_usage(),
+        }
+    }
+
+    #[test]
+    fn provider_response_ext_accessors_expose_id_model_messages_and_usage() {
+        let response = sample_completion_response();
+        assert_eq!(response.get_response_id(), Some("msg_9".to_string()));
+        assert_eq!(
+            response.get_response_model_name(),
+            Some("claude-test".to_string())
+        );
+        assert_eq!(response.get_output_messages(), response.content);
+        let usage = response.get_usage().expect("usage should be reported");
+        assert_eq!(usage.input_tokens, sample_usage().input_tokens);
+        assert_eq!(usage.output_tokens, sample_usage().output_tokens);
+        assert_eq!(
+            usage.cache_read_input_tokens,
+            sample_usage().cache_read_input_tokens
+        );
+        assert_eq!(
+            usage.cache_creation_input_tokens,
+            sample_usage().cache_creation_input_tokens
+        );
+    }
+
+    #[test]
+    fn usage_display_and_conversion_to_generic_usage() {
+        let usage = sample_usage();
+        let display = usage.to_string();
+        assert!(display.contains("Input tokens: 3"));
+        assert!(display.contains("Cache read input tokens: 5"));
+        assert!(display.contains("Cache creation input tokens: 7"));
+        assert!(display.contains("Output tokens: 11"));
+
+        // Absent cache counts render as `n/a`.
+        let bare = Usage {
+            cache_read_input_tokens: None,
+            cache_creation_input_tokens: None,
+            ..sample_usage()
+        };
+        assert!(bare.to_string().contains("Cache read input tokens: n/a"));
+        assert!(bare
+            .to_string()
+            .contains("Cache creation input tokens: n/a"));
+
+        let generic = crate::completion::Usage::from(usage);
+        assert_eq!(generic.input_tokens, 3);
+        assert_eq!(generic.output_tokens, 11);
+        assert_eq!(generic.cached_input_tokens, 5);
+        assert_eq!(generic.cache_creation_input_tokens, 7);
+        assert_eq!(generic.total_tokens, 3 + 5 + 7 + 11);
+    }
+
+    #[test]
+    fn cache_control_1h_constructor_serializes_extended_ttl() {
+        assert_eq!(
+            CacheControl::ephemeral_1h(),
+            CacheControl::Ephemeral {
+                ttl: Some(CacheTtl::OneHour)
+            }
+        );
+        assert_eq!(
+            serde_json::to_value(CacheControl::ephemeral_1h()).unwrap(),
+            json!({"type": "ephemeral", "ttl": "1h"})
+        );
+    }
+
+    #[test]
+    fn search_result_location_citation_roundtrips() {
+        let citation = Citation::SearchResultLocation {
+            cited_text: "Quoted text.".into(),
+            source: "https://example.com/search".into(),
+            title: Some("Example".into()),
+            search_result_index: 2,
+            start_block_index: 0,
+            end_block_index: 3,
+        };
+        let value = serde_json::to_value(&citation).unwrap();
+        assert_eq!(value["type"], "search_result_location");
+        assert_eq!(value["cited_text"], "Quoted text.");
+        assert_eq!(value["source"], "https://example.com/search");
+        assert_eq!(value["title"], "Example");
+        assert_eq!(value["search_result_index"], 2);
+        assert_eq!(value["start_block_index"], 0);
+        assert_eq!(value["end_block_index"], 3);
+        let back: Citation = serde_json::from_value(value).unwrap();
+        assert_eq!(back, citation);
+
+        let no_title = Citation::SearchResultLocation {
+            cited_text: "Quoted text.".into(),
+            source: "https://example.com/search".into(),
+            title: None,
+            search_result_index: 2,
+            start_block_index: 0,
+            end_block_index: 3,
+        };
+        let value = serde_json::to_value(&no_title).unwrap();
+        assert!(value.get("title").is_none());
+        let back: Citation = serde_json::from_value(value).unwrap();
+        assert_eq!(back, no_title);
+    }
+
+    #[test]
+    fn content_block_location_citation_serializes_document_title() {
+        let citation = Citation::ContentBlockLocation {
+            cited_text: "Findings.".into(),
+            document_index: 1,
+            document_title: Some("Custom Doc".into()),
+            start_block_index: 0,
+            end_block_index: 1,
+        };
+        let value = serde_json::to_value(&citation).unwrap();
+        assert_eq!(value["type"], "content_block_location");
+        assert_eq!(value["document_title"], "Custom Doc");
+    }
+
+    #[test]
+    fn unknown_citation_serializes_raw_and_typeless_payload_deserializes_as_unknown() {
+        let raw = json!({"type": "future_location", "field": "kept"});
+        let citation = Citation::Unknown(raw.clone());
+        assert_eq!(serde_json::to_value(&citation).unwrap(), raw);
+
+        // A citation payload without a `type` field stays raw.
+        let parsed: Citation = serde_json::from_value(json!({"cited_text": "x"})).unwrap();
+        assert!(matches!(parsed, Citation::Unknown(value) if value["cited_text"] == "x"));
+    }
+
+    #[test]
+    fn document_additional_params_with_invalid_citations_config_errors() {
+        let doc = message::UserContent::Document(message::Document {
+            data: DocumentSourceKind::String("doc".into()),
+            media_type: Some(message::DocumentMediaType::TXT),
+            additional_params: Some(json!({"citations": {"enabled": "not-a-bool"}})),
+        });
+        let msg = message::Message::User {
+            content: OneOrMany::one(doc),
+        };
+
+        let err = Message::try_from(msg)
+            .expect_err("invalid citations metadata must not be silently dropped");
+        assert!(err.to_string().contains("not a valid CitationsConfig"));
+    }
+
+    fn raw_content_params(raw: serde_json::Value, text: &str) -> message::Text {
+        let mut params = serde_json::Map::new();
+        params.insert(ANTHROPIC_RAW_CONTENT_KEY.to_string(), raw);
+        message::Text {
+            text: text.to_string(),
+            additional_params: Some(serde_json::Value::Object(params)),
+        }
+    }
+
+    #[test]
+    fn raw_content_metadata_paths_are_validated() {
+        // Valid server-tool block combined with non-empty text is rejected.
+        let assistant_text = message::AssistantContent::Text(raw_content_params(
+            json!({
+                "type": "server_tool_use",
+                "id": "srvtoolu_01",
+                "name": "web_search",
+                "input": {"query": "claude"}
+            }),
+            "leftover text",
+        ));
+        let err = Content::try_from(assistant_text)
+            .expect_err("raw content metadata cannot combine with text");
+        assert!(err.to_string().contains("cannot be combined with non-empty text"));
+
+        // A valid server-tool block with empty text converts.
+        let assistant_text = message::AssistantContent::Text(raw_content_params(
+            json!({
+                "type": "web_search_tool_result",
+                "tool_use_id": "srvtoolu_01",
+                "content": []
+            }),
+            "",
+        ));
+        let content =
+            Content::try_from(assistant_text).expect("raw content should convert to a block");
+        assert!(matches!(content, Content::WebSearchToolResult { .. }));
+
+        // Payloads that are not Anthropic content blocks at all are rejected.
+        let err = extract_anthropic_raw_content(&raw_content_params(json!("not-a-block"), ""))
+            .expect_err("non-object payloads are invalid Anthropic content");
+        assert!(err.to_string().contains("is not valid Anthropic content"));
+
+        // Client-writable block types are rejected: only server tool blocks may
+        // travel through the escape hatch.
+        let err = extract_anthropic_raw_content(&raw_content_params(
+            json!({"type": "text", "text": "nope"}),
+            "",
+        ))
+        .expect_err("only server tool blocks are supported");
+        assert!(err.to_string().contains("only supports"));
+    }
+
+    #[test]
+    fn from_string_conversions_produce_text_variants() {
+        let content: Content = "hello".to_string().into();
+        assert_eq!(
+            content,
+            Content::Text {
+                text: "hello".to_string(),
+                citations: Vec::new(),
+                cache_control: None,
+            }
+        );
+
+        let tool_result_content: ToolResultContent = "result".to_string().into();
+        assert_eq!(
+            tool_result_content,
+            ToolResultContent::Text {
+                text: "result".to_string()
+            }
+        );
+    }
+
+    #[test]
+    fn image_format_conversions_cover_supported_and_unsupported_types() {
+        let pairs = [
+            (ImageFormat::JPEG, message::ImageMediaType::JPEG),
+            (ImageFormat::PNG, message::ImageMediaType::PNG),
+            (ImageFormat::GIF, message::ImageMediaType::GIF),
+            (ImageFormat::WEBP, message::ImageMediaType::WEBP),
+        ];
+        for (format, media_type) in pairs {
+            let converted: ImageFormat = media_type.clone().try_into().unwrap();
+            assert_eq!(converted, format);
+            let back: message::ImageMediaType = format.into();
+            assert_eq!(back, media_type);
+        }
+
+        let err = ImageFormat::try_from(message::ImageMediaType::SVG)
+            .expect_err("SVG is not supported by the Anthropic API");
+        assert!(err.to_string().contains("Unsupported image media type"));
+    }
+
+    #[test]
+    fn document_format_conversions_require_pdf_for_base64_sources() {
+        assert_eq!(
+            DocumentFormat::try_from(DocumentMediaType::PDF).unwrap(),
+            DocumentFormat::PDF
+        );
+
+        let err = DocumentFormat::try_from(DocumentMediaType::HTML)
+            .expect_err("only PDF converts to an Anthropic document format");
+        assert!(err.to_string().contains("DocumentFormat only supports PDF"));
+    }
+
+    #[test]
+    fn assistant_content_variants_convert_to_anthropic_content() {
+        // Assistant images are not supported by the Anthropic API.
+        let err = Content::try_from(message::AssistantContent::image_base64(
+            "dg==",
+            Some(message::ImageMediaType::PNG),
+            None,
+        ))
+        .expect_err("assistant images are unsupported");
+        assert!(err.to_string().contains("doesn't support images"));
+
+        // Tool calls map onto tool_use blocks with coerced object input.
+        let content = Content::try_from(message::AssistantContent::tool_call(
+            "toolu_01",
+            "get_weather",
+            json!({"city": "SF"}),
+        ))
+        .unwrap();
+        assert!(matches!(
+            &content,
+            Content::ToolUse { id, name, input }
+                if id == "toolu_01" && name == "get_weather" && input["city"] == "SF"
+        ));
+
+        // Reasoning maps onto a thinking block with its signature.
+        let content = Content::try_from(message::AssistantContent::Reasoning(
+            message::Reasoning::new_with_signature("thinking hard", Some("sig-1".to_string())),
+        ))
+        .unwrap();
+        assert!(matches!(
+            content,
+            Content::Thinking {
+                thinking,
+                signature: Some(signature),
+            } if thinking == "thinking hard" && signature == "sig-1"
+        ));
+    }
+
+    #[test]
+    fn assistant_message_image_and_empty_reasoning_are_rejected() {
+        let image_message = message::Message::Assistant {
+            id: None,
+            content: OneOrMany::one(message::AssistantContent::image_base64(
+                "dg==",
+                Some(message::ImageMediaType::PNG),
+                None,
+            )),
+        };
+        let err = Message::try_from(image_message).expect_err("assistant images are unsupported");
+        assert!(err.to_string().contains("doesn't support images"));
+
+        let empty_reasoning = message::Message::Assistant {
+            id: None,
+            content: OneOrMany::one(message::AssistantContent::Reasoning(message::Reasoning {
+                id: None,
+                content: Vec::new(),
+            })),
+        };
+        let err = Message::try_from(empty_reasoning).expect_err("empty reasoning is rejected");
+        assert!(err.to_string().contains("empty reasoning content"));
+    }
+
+    #[test]
+    fn user_tool_result_image_content_converts_to_anthropic_tool_result_image() {
+        let msg = message::Message::User {
+            content: OneOrMany::one(message::UserContent::tool_result(
+                "toolu_01",
+                OneOrMany::one(message::ToolResultContent::image_base64(
+                    "aVpv",
+                    Some(message::ImageMediaType::PNG),
+                    None,
+                )),
+            )),
+        };
+        let converted: Message = msg.try_into().unwrap();
+        let Content::ToolResult { content, .. } = converted.content.first() else {
+            panic!("expected tool result");
+        };
+        assert_eq!(
+            content.first(),
+            ToolResultContent::Image {
+                source: ImageSource::Base64 {
+                    data: "aVpv".to_string(),
+                    media_type: ImageFormat::PNG,
+                }
+            }
+        );
+
+        // URL-backed tool result images are rejected: only base64 is accepted.
+        let msg = message::Message::User {
+            content: OneOrMany::one(message::UserContent::tool_result(
+                "toolu_01",
+                OneOrMany::one(message::ToolResultContent::image_url(
+                    "https://example.com/shot.png",
+                    None,
+                    None,
+                )),
+            )),
+        };
+        let err = Message::try_from(msg).expect_err("URL tool result images are rejected");
+        assert!(err.to_string().contains("Only base64 strings"));
+
+        // Base64 tool result images require a media type.
+        let msg = message::Message::User {
+            content: OneOrMany::one(message::UserContent::tool_result(
+                "toolu_01",
+                OneOrMany::one(message::ToolResultContent::image_base64("aVpv", None, None)),
+            )),
+        };
+        let err = Message::try_from(msg).expect_err("media type is required");
+        assert!(err.to_string().contains("Image media type is required"));
+    }
+
+    #[test]
+    fn user_image_url_converts_and_unknown_or_raw_sources_error() {
+        let url_msg = message::Message::User {
+            content: OneOrMany::one(message::UserContent::image_url(
+                "https://example.com/cat.png",
+                None,
+                None,
+            )),
+        };
+        let converted: Message = url_msg.try_into().unwrap();
+        assert_eq!(
+            converted.content.first(),
+            Content::Image {
+                source: ImageSource::Url {
+                    url: "https://example.com/cat.png".to_string()
+                },
+                cache_control: None,
+            }
+        );
+
+        let unknown_msg = message::Message::User {
+            content: OneOrMany::one(message::UserContent::Image(message::Image::default())),
+        };
+        let err = Message::try_from(unknown_msg).expect_err("empty image bodies are rejected");
+        assert!(err.to_string().contains("Image content has no body"));
+
+        let raw_msg = message::Message::User {
+            content: OneOrMany::one(message::UserContent::Image(message::Image {
+                data: DocumentSourceKind::Raw(vec![1, 2, 3]),
+                media_type: None,
+                detail: None,
+                additional_params: None,
+            })),
+        };
+        let err = Message::try_from(raw_msg).expect_err("raw image bytes are rejected");
+        assert!(err.to_string().contains("Unsupported document type"));
+    }
+
+    #[test]
+    fn user_document_conversions_cover_pdf_and_plaintext_source_kinds() {
+        // String-backed PDF payloads map onto the base64 source kind.
+        let string_pdf = message::Message::User {
+            content: OneOrMany::one(message::UserContent::document(
+                "cGRm",
+                Some(message::DocumentMediaType::PDF),
+            )),
+        };
+        let converted: Message = string_pdf.try_into().unwrap();
+        assert!(matches!(
+            converted.content.first(),
+            Content::Document {
+                source: DocumentSource::Base64 {
+                    data,
+                    media_type: DocumentFormat::PDF,
+                },
+                ..
+            } if data == "cGRm"
+        ));
+
+        // Base64-backed PDF payloads map onto the same source kind.
+        let base64_pdf = message::Message::User {
+            content: OneOrMany::one(message::UserContent::Document(message::Document {
+                data: DocumentSourceKind::Base64("cGRm".into()),
+                media_type: Some(message::DocumentMediaType::PDF),
+                additional_params: None,
+            })),
+        };
+        let converted: Message = base64_pdf.try_into().unwrap();
+        assert!(matches!(
+            converted.content.first(),
+            Content::Document {
+                source: DocumentSource::Base64 { .. },
+                ..
+            }
+        ));
+
+        // Base64-backed plain text documents map onto the text source kind.
+        let base64_txt = message::Message::User {
+            content: OneOrMany::one(message::UserContent::Document(message::Document {
+                data: DocumentSourceKind::Base64("aGVsbG8=".into()),
+                media_type: Some(message::DocumentMediaType::TXT),
+                additional_params: None,
+            })),
+        };
+        let converted: Message = base64_txt.try_into().unwrap();
+        assert!(matches!(
+            converted.content.first(),
+            Content::Document {
+                source: DocumentSource::Text {
+                    data,
+                    media_type: PlainTextMediaType::Plain,
+                },
+                ..
+            } if data == "aGVsbG8="
+        ));
+
+        // A document with neither media type nor URL source is rejected.
+        let no_media_type = message::Message::User {
+            content: OneOrMany::one(message::UserContent::Document(message::Document {
+                data: DocumentSourceKind::String("doc".into()),
+                media_type: None,
+                additional_params: None,
+            })),
+        };
+        let err = Message::try_from(no_media_type).expect_err("media type is required");
+        assert!(err.to_string().contains("Document media type is required"));
+
+        // PDF documents cannot be backed by opaque/unknown sources.
+        let unknown_pdf = message::Message::User {
+            content: OneOrMany::one(message::UserContent::Document(message::Document {
+                data: DocumentSourceKind::Unknown,
+                media_type: Some(message::DocumentMediaType::PDF),
+                additional_params: None,
+            })),
+        };
+        let err = Message::try_from(unknown_pdf).expect_err("unknown PDF sources are rejected");
+        assert!(err
+            .to_string()
+            .contains("Only base64 encoded data or URLs are supported for PDF"));
+    }
+
+    #[test]
+    fn audio_and_video_user_content_are_rejected() {
+        let audio = message::Message::User {
+            content: OneOrMany::one(message::UserContent::audio(
+                "data",
+                Some(message::AudioMediaType::MP3),
+            )),
+        };
+        let err = Message::try_from(audio).expect_err("audio is unsupported");
+        assert!(err.to_string().contains("Audio is not supported"));
+
+        let video = message::Message::User {
+            content: OneOrMany::one(message::UserContent::video(
+                "data",
+                Some(message::VideoMediaType::MP4),
+            )),
+        };
+        let err = Message::try_from(video).expect_err("video is unsupported");
+        assert!(err.to_string().contains("Video is not supported"));
+    }
+
+    #[test]
+    fn content_to_assistant_content_rejects_non_assistant_variants() {
+        let err = message::AssistantContent::try_from(Content::Image {
+            source: ImageSource::Url {
+                url: "https://example.com/cat.png".to_string(),
+            },
+            cache_control: None,
+        })
+        .expect_err("images cannot become assistant content");
+        assert!(err
+            .to_string()
+            .contains("did not contain a message, tool call, or reasoning"));
+    }
+
+    #[test]
+    fn tool_result_content_image_sources_convert_back_to_generic_content() {
+        let base64: message::ToolResultContent = ToolResultContent::Image {
+            source: ImageSource::Base64 {
+                data: "aVpv".to_string(),
+                media_type: ImageFormat::PNG,
+            },
+        }
+        .into();
+        assert_eq!(
+            base64,
+            message::ToolResultContent::image_base64(
+                "aVpv",
+                Some(message::ImageMediaType::PNG),
+                None
+            )
+        );
+
+        let url: message::ToolResultContent = ToolResultContent::Image {
+            source: ImageSource::Url {
+                url: "https://example.com/shot.png".to_string(),
+            },
+        }
+        .into();
+        assert_eq!(
+            url,
+            message::ToolResultContent::image_url("https://example.com/shot.png", None, None)
+        );
+    }
+
+    #[test]
+    fn url_image_message_converts_back_to_generic_url_image() {
+        let provider_message = Message {
+            role: Role::User,
+            content: OneOrMany::one(Content::Image {
+                source: ImageSource::Url {
+                    url: "https://example.com/cat.png".to_string(),
+                },
+                cache_control: None,
+            }),
+        };
+        let generic: message::Message = provider_message.try_into().unwrap();
+        let message::Message::User { content } = generic else {
+            panic!("expected user message");
+        };
+        assert!(matches!(
+            content.first(),
+            message::UserContent::Image(message::Image {
+                data: DocumentSourceKind::Url(url),
+                media_type: None,
+                ..
+            }) if url == "https://example.com/cat.png"
+        ));
+    }
+
+    #[test]
+    fn unsupported_variants_error_for_user_and_system_roles() {
+        let user_tool_use = Message {
+            role: Role::User,
+            content: OneOrMany::one(Content::ToolUse {
+                id: "toolu_01".to_string(),
+                name: "get_weather".to_string(),
+                input: json!({}),
+            }),
+        };
+        let err = message::Message::try_from(user_tool_use)
+            .expect_err("tool_use cannot appear in a user message");
+        assert!(err
+            .to_string()
+            .contains("Unsupported content type for User role"));
+
+        let system_tool_use = Message {
+            role: Role::System,
+            content: OneOrMany::one(Content::ToolUse {
+                id: "toolu_01".to_string(),
+                name: "get_weather".to_string(),
+                input: json!({}),
+            }),
+        };
+        let err = message::Message::try_from(system_tool_use)
+            .expect_err("tool_use cannot appear in a system message");
+        assert!(err
+            .to_string()
+            .contains("Unsupported content type for System role"));
+    }
+
+    #[test]
+    fn completion_model_constructors_and_automatic_caching_flags() {
+        use crate::client::CompletionClient;
+        use crate::providers::anthropic::Client;
+        use crate::test_utils::RecordingHttpClient;
+
+        let client = Client::builder()
+            .api_key("test-key")
+            .http_client(RecordingHttpClient::new("{}"))
+            .build()
+            .expect("build client");
+
+        let model = client.completion_model("claude-a");
+        assert_eq!(model.model, "claude-a");
+        assert!(!model.prompt_caching);
+        assert!(!model.automatic_caching);
+        assert_eq!(model.automatic_caching_ttl, None);
+
+        let model = client
+            .completion_model("claude-b")
+            .with_prompt_caching()
+            .with_automatic_caching()
+            .with_automatic_caching_1h();
+        assert_eq!(model.model, "claude-b");
+        assert!(model.prompt_caching);
+        assert!(model.automatic_caching);
+        assert_eq!(model.automatic_caching_ttl, Some(CacheTtl::OneHour));
+
+        let model = CompletionModel::with_model(client, "claude-c");
+        assert_eq!(model.model, "claude-c");
+        assert!(!model.prompt_caching);
+        assert!(!model.automatic_caching);
+        assert_eq!(model.automatic_caching_ttl, None);
+    }
+
+    #[test]
+    fn tool_choice_specific_requires_exactly_one_function() {
+        assert!(matches!(
+            ToolChoice::try_from(message::ToolChoice::Auto).unwrap(),
+            ToolChoice::Auto
+        ));
+        assert!(matches!(
+            ToolChoice::try_from(message::ToolChoice::None).unwrap(),
+            ToolChoice::None
+        ));
+        assert!(matches!(
+            ToolChoice::try_from(message::ToolChoice::Required).unwrap(),
+            ToolChoice::Any
+        ));
+        assert!(matches!(
+            ToolChoice::try_from(message::ToolChoice::Specific {
+                function_names: vec!["get_weather".to_string()],
+            })
+            .unwrap(),
+            ToolChoice::Tool { name } if name == "get_weather"
+        ));
+
+        let err = ToolChoice::try_from(message::ToolChoice::Specific {
+            function_names: Vec::new(),
+        })
+        .expect_err("zero tool names are rejected");
+        assert!(err.to_string().contains("Only one tool may be specified"));
+
+        let err = ToolChoice::try_from(message::ToolChoice::Specific {
+            function_names: vec!["a".to_string(), "b".to_string()],
+        })
+        .expect_err("multiple tool names are rejected");
+        assert!(err.to_string().contains("Only one tool may be specified"));
+    }
+
+    #[test]
+    fn sanitize_schema_strips_numeric_constraints_and_enforces_strict_objects() {
+        let mut schema = json!({
+            "type": "object",
+            "properties": {
+                "name": {"type": "string"},
+                "count": {
+                    "type": "integer",
+                    "minimum": 0,
+                    "maximum": 10,
+                    "exclusiveMinimum": -1,
+                    "exclusiveMaximum": 5,
+                    "multipleOf": 2
+                },
+                "ratio": {"type": "number", "minimum": 0.5}
+            }
+        });
+        sanitize_schema(&mut schema);
+
+        assert_eq!(schema["additionalProperties"], json!(false));
+        assert_eq!(schema["required"], json!(["name", "count", "ratio"]));
+
+        let count = &schema["properties"]["count"];
+        for key in [
+            "minimum",
+            "maximum",
+            "exclusiveMinimum",
+            "exclusiveMaximum",
+            "multipleOf",
+        ] {
+            assert!(count.get(key).is_none(), "{key} should be stripped: {count}");
+        }
+
+        assert!(schema["properties"]["ratio"].get("minimum").is_none());
+    }
+
+    #[test]
+    fn sanitize_schema_recurses_into_defs_properties_items_and_variants() {
+        let mut schema = json!({
+            "type": "object",
+            "properties": {
+                "nested": {
+                    "type": "object",
+                    "properties": {"inner": {"type": "integer", "minimum": 1}}
+                },
+                "list": {
+                    "type": "array",
+                    "items": {"properties": {"item": {"type": "number", "maximum": 2}}}
+                },
+                "pick": {"oneOf": [{"type": "string"}, {"oneOf": [{"type": "boolean"}]}]},
+                "merged": {
+                    "anyOf": [{"type": "null"}],
+                    "oneOf": [{"type": "string"}]
+                },
+                "combo": {
+                    "anyOf": [{"type": "integer", "minimum": 3}],
+                    "allOf": [{"type": "object", "properties": {"x": {"type": "string"}}}]
+                }
+            },
+            "$defs": {
+                "definition": {"properties": {"y": {"type": "integer", "exclusiveMinimum": 4}}}
+            }
+        });
+        sanitize_schema(&mut schema);
+
+        // Nested properties recurse.
+        assert!(schema["properties"]["nested"]["properties"]["inner"]
+            .get("minimum")
+            .is_none());
+        assert_eq!(schema["properties"]["nested"]["required"], json!(["inner"]));
+
+        // Array items recurse.
+        let item = &schema["properties"]["list"]["items"];
+        assert_eq!(item["additionalProperties"], json!(false));
+        assert_eq!(item["required"], json!(["item"]));
+        assert!(item["properties"]["item"].get("maximum").is_none());
+
+        // oneOf is rewritten to anyOf and recursed into: the nested oneOf
+        // inside the second variant is itself rewritten.
+        let pick = &schema["properties"]["pick"];
+        assert!(pick.get("oneOf").is_none());
+        assert_eq!(pick["anyOf"][1]["anyOf"][0]["type"], "boolean");
+
+        // An existing anyOf absorbs the oneOf variants.
+        let merged = &schema["properties"]["merged"];
+        assert!(merged.get("oneOf").is_none());
+        assert_eq!(merged["anyOf"].as_array().unwrap().len(), 2);
+
+        // anyOf/allOf variants recurse (numeric constraints stripped, strict
+        // objects completed).
+        assert!(schema["properties"]["combo"]["anyOf"][0]
+            .get("minimum")
+            .is_none());
+        assert_eq!(
+            schema["properties"]["combo"]["allOf"][0]["required"],
+            json!(["x"])
+        );
+
+        // $defs recurse.
+        assert!(schema["$defs"]["definition"]["properties"]["y"]
+            .get("exclusiveMinimum")
+            .is_none());
+        assert_eq!(schema["$defs"]["definition"]["required"], json!(["y"]));
+    }
+
+    #[test]
+    fn apply_cache_control_marks_tool_result_image_and_document_blocks() {
+        let tool_result_message = Message {
+            role: Role::User,
+            content: OneOrMany::one(Content::ToolResult {
+                tool_use_id: "toolu_01".to_string(),
+                content: OneOrMany::one(ToolResultContent::Text {
+                    text: "15 degrees".to_string(),
+                }),
+                is_error: None,
+                cache_control: None,
+            }),
+        };
+        let image_message = Message {
+            role: Role::User,
+            content: OneOrMany::one(Content::Image {
+                source: ImageSource::Url {
+                    url: "https://example.com/cat.png".to_string(),
+                },
+                cache_control: None,
+            }),
+        };
+        let document_message = Message {
+            role: Role::User,
+            content: OneOrMany::one(Content::Document {
+                source: DocumentSource::Text {
+                    data: "doc".to_string(),
+                    media_type: PlainTextMediaType::Plain,
+                },
+                title: None,
+                context: None,
+                citations: None,
+                cache_control: None,
+            }),
+        };
+
+        for message in [tool_result_message, image_message, document_message] {
+            let mut messages = vec![message];
+            apply_cache_control(&mut [], &mut messages);
+            let block = messages[0].content.first();
+            let cache_control = content_cache_control(&block)
+                .expect("last content block should be marked for caching");
+            assert_eq!(*cache_control, CacheControl::ephemeral());
+        }
+    }
+
+    #[test]
+    fn top_level_cache_control_null_is_removed_and_invalid_payloads_error() {
+        let mut params = json!({"cache_control": null, "metadata": {"source": "kept"}});
+        assert_eq!(extract_top_level_cache_control(&mut params).unwrap(), None);
+        assert!(params.get("cache_control").is_none());
+        assert_eq!(params["metadata"]["source"], "kept");
+
+        let mut invalid = json!({"cache_control": {"type": "definitely-not-ephemeral"}});
+        let err = extract_top_level_cache_control(&mut invalid)
+            .expect_err("unknown cache control types are rejected");
+        assert!(err
+            .to_string()
+            .contains("Invalid Anthropic `additional_params.cache_control` payload"));
+
+        let mut absent = json!({"metadata": {"source": "no-cache-control"}});
+        assert_eq!(extract_top_level_cache_control(&mut absent).unwrap(), None);
+    }
+
+    #[test]
+    fn empty_preamble_produces_no_system_blocks() {
+        let request = completion_request_with_history(
+            vec![message::Message::user("hi")],
+            Some(String::new()),
+        );
+        let converted = AnthropicCompletionRequest::try_from(AnthropicRequestParams {
+            model: "claude-sonnet-4-6",
+            request,
+            prompt_caching: false,
+            automatic_caching: false,
+            automatic_caching_ttl: None,
+        })
+        .unwrap();
+
+        let value = serde_json::to_value(&converted).unwrap();
+        // An empty system array is skipped entirely during serialization.
+        assert!(value
+            .get("system")
+            .and_then(|system| system.as_array())
+            .is_none_or(Vec::is_empty));
+    }
+
+    #[test]
+    fn invalid_additional_params_tools_payload_errors() {
+        let request =
+            completion_request_with_tools(Vec::new(), Some(json!({"tools": "not-an-array"})));
+
+        let err = AnthropicCompletionRequest::try_from(AnthropicRequestParams {
+            model: "claude-sonnet-4-6",
+            request,
+            prompt_caching: false,
+            automatic_caching: false,
+            automatic_caching_ttl: None,
+        })
+        .expect_err("invalid tools payload must error loudly");
+
+        assert!(err
+            .to_string()
+            .contains("Invalid Anthropic `additional_params.tools` payload"));
+    }
+
+    #[tokio::test]
+    async fn raw_completion_emits_request_and_response_trace_logs() {
+        use crate::client::CompletionClient;
+        use crate::completion::CompletionModel as _;
+        use crate::providers::anthropic::Client;
+        use crate::test_utils::RecordingHttpClient;
+
+        // Scoped-subscriber tests must not run concurrently; see
+        // `test_utils::scoped_tracing_subscriber_guard`.
+        let _isolation = crate::test_utils::scoped_tracing_subscriber_guard().await;
+        let subscriber = tracing_subscriber::fmt()
+            .with_max_level(tracing::Level::TRACE)
+            .with_ansi(false)
+            .without_time()
+            .with_writer(std::io::sink)
+            .finish();
+        let _guard = tracing::subscriber::set_default(subscriber);
+
+        let body = r#"{
+            "type": "message",
+            "id": "msg_trace",
+            "model": "claude-sonnet-4-6",
+            "role": "assistant",
+            "stop_reason": "end_turn",
+            "stop_sequence": null,
+            "usage": {"input_tokens": 1, "output_tokens": 1},
+            "content": [{"type": "text", "text": "hi"}]
+        }"#;
+        let http_client = RecordingHttpClient::new(body);
+        let client = Client::builder()
+            .api_key("test-key")
+            .http_client(http_client)
+            .build()
+            .expect("build client");
+        let model = client.completion_model("claude-sonnet-4-6");
+        let request = model.completion_request("hello").max_tokens(64).build();
+
+        let response = model
+            .raw_completion(request)
+            .await
+            .expect("trace-enabled completion should succeed");
+
+        assert_eq!(response.id, "msg_trace");
+        assert_eq!(response.get_text_response().as_deref(), Some("hi"));
+    }
+
+    #[test]
+    fn user_tool_result_json_content_serializes_as_text() {
+        let msg = message::Message::User {
+            content: OneOrMany::one(message::UserContent::tool_result(
+                "toolu_01",
+                OneOrMany::one(message::ToolResultContent::json(json!({"answer": 42}))),
+            )),
+        };
+        let converted: Message = msg.try_into().unwrap();
+        let Content::ToolResult { content, .. } = converted.content.first() else {
+            panic!("expected tool result");
+        };
+        assert_eq!(
+            content.first(),
+            ToolResultContent::Text {
+                text: json!({"answer": 42}).to_string()
+            }
+        );
+    }
+
+    #[test]
+    fn thinking_content_converts_back_to_assistant_reasoning() {
+        let content = Content::Thinking {
+            thinking: "step by step".to_string(),
+            signature: Some("sig-1".to_string()),
+        };
+        let converted: message::AssistantContent = content.try_into().unwrap();
+        assert!(matches!(
+            converted,
+            message::AssistantContent::Reasoning(message::Reasoning { content, .. })
+                if matches!(
+                    content.first(),
+                    Some(message::ReasoningContent::Text { text, signature: Some(signature) })
+                        if text == "step by step" && signature == "sig-1"
+                )
+        ));
+    }
+
+    #[test]
+    fn cache_control_helpers_ignore_non_cacheable_variants() {
+        // The catch-all arms: thinking blocks carry no cache breakpoint, so
+        // setting one is a no-op and reading one yields `None`.
+        let mut content = Content::Thinking {
+            thinking: "thought".to_string(),
+            signature: None,
+        };
+        set_content_cache_control(&mut content, Some(CacheControl::ephemeral()));
+        assert!(content_cache_control(&content).is_none());
+
+        // apply_cache_control tolerates a tool_use block as the final block:
+        // the marker is simply not applied.
+        let mut messages = vec![Message {
+            role: Role::Assistant,
+            content: OneOrMany::one(Content::ToolUse {
+                id: "toolu_01".to_string(),
+                name: "get_weather".to_string(),
+                input: json!({}),
+            }),
+        }];
+        apply_cache_control(&mut [], &mut messages);
+        assert!(matches!(
+            messages[0].content.first(),
+            Content::ToolUse { .. }
+        ));
+    }
+
+    #[test]
+    fn completion_model_capabilities_and_construct() {
+        use crate::client::CompletionClient;
+        use crate::client::ConstructCompletionModel as _;
+        use crate::completion::CompletionModel as _;
+        use crate::providers::anthropic::Client;
+        use crate::test_utils::RecordingHttpClient;
+
+        let client = Client::builder()
+            .api_key("test-key")
+            .http_client(RecordingHttpClient::new("{}"))
+            .build()
+            .expect("build client");
+        let model = client.completion_model("claude-a");
+
+        // Anthropic's structured outputs compose with strict tool use.
+        let capabilities = model.capabilities();
+        assert!(capabilities.composes_native_output_with_tools);
+
+        let constructed = CompletionModel::construct(&client, "claude-b".to_string());
+        assert_eq!(constructed.model, "claude-b");
+    }
+
+    #[tokio::test]
+    async fn completion_normalizes_a_successful_wire_response() {
+        use crate::client::CompletionClient;
+        use crate::completion::CompletionModel as _;
+        use crate::providers::anthropic::Client;
+        use crate::test_utils::RecordingHttpClient;
+
+        let body = r#"{
+            "type": "message",
+            "id": "msg_normalized",
+            "model": "claude-sonnet-4-6",
+            "role": "assistant",
+            "stop_reason": "end_turn",
+            "stop_sequence": null,
+            "usage": {"input_tokens": 4, "output_tokens": 6},
+            "content": [{"type": "text", "text": "the answer"}]
+        }"#;
+        let http_client = RecordingHttpClient::new(body);
+        let client = Client::builder()
+            .api_key("test-key")
+            .http_client(http_client)
+            .build()
+            .expect("build client");
+        let model = client.completion_model("claude-sonnet-4-6");
+        let request = model.completion_request("hello").max_tokens(64).build();
+
+        let response = model
+            .completion(request)
+            .await
+            .expect("completion should succeed and normalize");
+
+        assert_eq!(response.provider, "anthropic");
+        assert_eq!(response.message_id.as_deref(), Some("msg_normalized"));
+        assert_eq!(response.model.as_deref(), Some("claude-sonnet-4-6"));
+        assert_eq!(response.finish_reason(), Some(completion::FinishReason::Stop));
+        assert!(matches!(
+            response.choice.first(),
+            completion::AssistantContent::Text(text) if text.text == "the answer"
+        ));
+    }
 }

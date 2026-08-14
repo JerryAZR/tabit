@@ -105,3 +105,102 @@ pub(crate) fn is_tool_context_parameter(
 
     Ok(false)
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn first_param_attrs(source: &str) -> Vec<Attribute> {
+        let function = syn::parse_str::<syn::ItemFn>(source).expect("test function parses");
+        match function.sig.inputs.first() {
+            Some(syn::FnArg::Typed(pat_type)) => pat_type.attrs.clone(),
+            _ => panic!("test function needs a typed first parameter"),
+        }
+    }
+
+    fn marker(source: &str) -> syn::Result<bool> {
+        has_tool_context_marker(&first_param_attrs(source))
+    }
+
+    #[test]
+    fn duplicate_context_markers_are_rejected() {
+        let error = marker("fn f(#[rig(context)] #[rig(context)] a: &mut T) {}")
+            .err()
+            .expect("duplicate marker rejected");
+        assert!(error.to_string().contains("duplicate"));
+    }
+
+    #[test]
+    fn non_list_rig_attributes_are_rejected() {
+        let error = marker(r#"fn f(#[rig = "context"] a: &mut T) {}"#)
+            .err()
+            .expect("name-value marker rejected");
+        assert!(error.to_string().contains("expected `#[rig(context)]`"));
+    }
+
+    #[test]
+    fn multi_token_markers_are_rejected() {
+        let error = marker("fn f(#[rig(context, extra)] a: &mut T) {}")
+            .err()
+            .expect("multi-token marker rejected");
+        assert!(error.to_string().contains("expected `#[rig(context)]`"));
+    }
+
+    #[test]
+    fn only_the_context_marker_is_supported() {
+        let error = marker("fn f(#[rig(bogus)] a: &mut T) {}")
+            .err()
+            .expect("unknown marker rejected");
+        assert!(error.to_string().contains("only supported parameter marker"));
+    }
+
+    #[test]
+    fn plain_parameters_carry_no_marker() {
+        assert_eq!(marker("fn f(a: i32) {}").expect("unmarked parses"), false);
+    }
+
+    fn wrapped(inner: &str, group: bool) -> Type {
+        let inner: Type = syn::parse_str(inner).expect("inner type parses");
+        if group {
+            Type::Group(syn::TypeGroup {
+                group_token: Default::default(),
+                elem: Box::new(inner),
+            })
+        } else {
+            Type::Paren(syn::TypeParen {
+                paren_token: Default::default(),
+                elem: Box::new(inner),
+            })
+        }
+    }
+
+    #[test]
+    fn non_path_types_are_never_context() {
+        let refs = CrateRefs::resolve();
+        let tuple: Type = syn::parse_str("(i32,)").expect("tuple parses");
+        assert!(!is_tool_context_parameter(&tuple, false, &refs).expect("tuple classified"));
+        assert!(!is_tool_context_type(&tuple, &refs));
+    }
+
+    #[test]
+    fn group_and_paren_wrappers_are_transparent() {
+        let refs = CrateRefs::resolve();
+
+        // A transparent wrapper around a non-path type stays a non-context.
+        let wrapped_tuple = wrapped("(i32,)", true);
+        assert!(
+            !is_tool_context_parameter(&wrapped_tuple, false, &refs).expect("group classified")
+        );
+
+        // The path classifier itself also unwraps transparent wrappers.
+        let wrapped_path = wrapped("some::ToolContext", true);
+        is_tool_context_type(&wrapped_path, &refs);
+
+        // A transparent wrapper around an explicitly marked shared reference
+        // is reported as a context (with the mutability checked separately).
+        let marked = wrapped("&mut Context", false);
+        assert!(
+            is_tool_context_parameter(&marked, true, &refs).expect("paren classified")
+        );
+    }
+}

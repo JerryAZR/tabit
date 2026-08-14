@@ -1190,9 +1190,12 @@ mod tests {
     use serde_json::json;
 
     use crate::{
-        agent::{AgentBuilder, AgentHook, HookContext, ToolResultAction, ToolResultEvent},
-        completion::{CompletionModel, Document},
-        test_utils::{MockCompletionModel, MockStreamEvent, MockTurn},
+        agent::{
+            AgentBuilder, AgentHook, HookContext, HookStack, ToolCall, ToolCallAction,
+            ToolResultAction, ToolResultEvent,
+        },
+        completion::{CompletionModel, Document, PromptError},
+        test_utils::{MockAddTool, MockCompletionModel, MockStreamEvent, MockTurn},
         tool::{Tool, ToolContext, ToolErrorKind, ToolExecutionError},
     };
     use rig_core::message::ToolChoice;
@@ -1609,6 +1612,123 @@ mod tests {
             clones.load(Ordering::SeqCst),
             2,
             "each of the two agent dispatches should clone inbound context once"
+        );
+    }
+
+    #[tokio::test]
+    async fn using_model_value_replaces_the_run_model() {
+        let default_model = MockCompletionModel::text("default answer");
+        let override_model = MockCompletionModel::text("override answer");
+
+        let response = AgentBuilder::new(default_model.clone())
+            .build()
+            .runner("question")
+            .using_model_value(override_model.clone())
+            .run()
+            .await
+            .expect("run should succeed with the run-local model");
+
+        assert_eq!(response.output, "override answer");
+        assert_eq!(default_model.request_count(), 0);
+        assert_eq!(override_model.request_count(), 1);
+    }
+
+    #[tokio::test]
+    async fn merge_additional_params_replaces_a_non_object_baseline() {
+        let model = MockCompletionModel::text("done");
+        AgentBuilder::new(model.clone())
+            .build()
+            .runner("question")
+            .replace_additional_params(json!("scalar-baseline"))
+            .merge_additional_params(json!({"keep": 1}).as_object().expect("object").clone())
+            .run()
+            .await
+            .expect("run should succeed");
+
+        let request = &model.requests()[0];
+        assert_eq!(
+            request.additional_params,
+            Some(json!({"keep": 1})),
+            "merging an object into a non-object baseline must replace it wholesale"
+        );
+    }
+
+    #[tokio::test]
+    async fn record_content_telemetry_runner_override_completes_the_run() {
+        let response = AgentBuilder::new(MockCompletionModel::text("done"))
+            .build()
+            .runner("question")
+            .record_content_telemetry(true)
+            .run()
+            .await
+            .expect("run should succeed with content telemetry enabled");
+        assert_eq!(response.output, "done");
+    }
+
+    struct RewriteArgsToForty;
+    impl AgentHook for RewriteArgsToForty {
+        async fn on_tool_call(&self, _: &HookContext, _: ToolCall<'_>) -> ToolCallAction {
+            ToolCallAction::rewrite(json!({"x": 2, "y": 40}))
+        }
+    }
+
+    #[tokio::test]
+    async fn content_telemetry_records_effective_args_for_a_proceeding_rewrite() {
+        let model = MockCompletionModel::from_turns([
+            MockTurn::tool_call("tc1", "add", json!({"x": 2, "y": 3})),
+            MockTurn::text("done"),
+        ]);
+
+        let response = AgentBuilder::new(model)
+            .tool(MockAddTool)
+            .record_content_telemetry(true)
+            .add_hook(RewriteArgsToForty)
+            .build()
+            .runner("add")
+            .max_turns(3)
+            .run()
+            .await
+            .expect("rewritten tool run should succeed");
+
+        assert_eq!(response.output, "done");
+    }
+
+    #[tokio::test]
+    async fn content_telemetry_records_effective_args_for_a_terminal_rewrite() {
+        // A nested stack that rewrites and then stops surfaces the rewrite as a
+        // salvaged value; the re-record path must still execute.
+        struct StopToolCalls;
+        impl AgentHook for StopToolCalls {
+            async fn on_tool_call(&self, _: &HookContext, _: ToolCall<'_>) -> ToolCallAction {
+                ToolCallAction::stop("terminal after rewrite")
+            }
+        }
+
+        let mut inner = HookStack::new();
+        inner.push(RewriteArgsToForty);
+        inner.push(StopToolCalls);
+
+        let model = MockCompletionModel::from_turns([MockTurn::tool_call(
+            "tc1",
+            "add",
+            json!({"x": 2, "y": 3}),
+        )]);
+
+        let error = AgentBuilder::new(model)
+            .tool(MockAddTool)
+            .record_content_telemetry(true)
+            .add_hook(inner)
+            .build()
+            .runner("add")
+            .max_turns(2)
+            .run()
+            .await
+            .expect_err("the terminal tool-call action should stop the run");
+
+        assert!(
+            matches!(error, PromptError::PromptCancelled { ref reason, .. }
+                if reason == "terminal after rewrite"),
+            "unexpected error: {error:?}"
         );
     }
 }

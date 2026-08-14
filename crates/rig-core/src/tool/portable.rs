@@ -213,12 +213,74 @@ mod tests {
             |arguments| Box::pin(async move { Ok(ToolOutput::json(arguments)) }),
         );
 
+        assert_eq!(tool.name(), "echo");
+        assert_eq!(tool.definition().name, "echo");
+        assert_eq!(tool.definition().description, "Echo a JSON value");
+
         let arguments = serde_json::json!({"value": "hello"});
-        let output = tool.execute(arguments.clone()).await;
-        assert!(output.is_ok());
-        let Ok(output) = output else {
-            return;
-        };
+        let output = tool
+            .execute(arguments.clone())
+            .await
+            .expect("the echo callback always succeeds");
         assert_eq!(output.as_json(), Some(&arguments));
+    }
+
+    #[tokio::test]
+    async fn dynamic_tool_debug_reports_metadata_without_the_callback() {
+        let tool = PortableDynamicTool::new(
+            "echo",
+            "Echo a JSON value",
+            serde_json::json!({"type": "object"}),
+            |_arguments| Box::pin(async move { Ok(ToolOutput::text("ok")) }),
+        );
+
+        let debug = format!("{tool:?}");
+        assert!(debug.contains("echo"));
+        assert!(debug.contains("Echo a JSON value"));
+        assert!(debug.contains("type"));
+
+        // The debug test's callback is a real callback: it must still execute.
+        let output = tool.execute(serde_json::json!({})).await.unwrap();
+        assert_eq!(output.as_text(), Some("ok"));
+    }
+
+    #[derive(Debug, thiserror::Error)]
+    #[error("kaboom")]
+    struct Kaboom;
+
+    struct Failing;
+
+    impl PortableTool for Failing {
+        const NAME: &'static str = "failing";
+
+        type Args = ();
+        type Output = ();
+        type Error = Kaboom;
+
+        fn description(&self) -> String {
+            "Always fails".to_string()
+        }
+
+        fn parameters(&self) -> serde_json::Value {
+            serde_json::json!({})
+        }
+
+        async fn call(&self, _arguments: Self::Args) -> Result<Self::Output, Self::Error> {
+            Err(Kaboom)
+        }
+    }
+
+    #[tokio::test]
+    async fn map_error_normalizes_a_concrete_failure_at_the_boundary() {
+        assert_eq!(Failing.description(), "Always fails");
+        assert_eq!(Failing.parameters(), serde_json::json!({}));
+        assert!(Failing.call(()).await.is_err());
+
+        let error = Failing.map_error(Kaboom);
+
+        assert_eq!(error.kind(), crate::tool::ToolErrorKind::Other);
+        assert_eq!(error.message(), "kaboom");
+        // Arbitrary sources are treated as operator-only diagnostics.
+        assert_eq!(error.model_feedback(), Some("the tool failed"));
     }
 }

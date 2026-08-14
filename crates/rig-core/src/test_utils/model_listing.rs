@@ -33,3 +33,20 @@ impl ModelLister for MockModelLister {
         async move { Ok(ModelList::new(models)) }
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[tokio::test]
+    async fn model_lister_constructor_round_trips_through_list_all() {
+        let lister =
+            <MockModelLister as ModelLister>::new(vec![Model::from_id("m-1"), Model::from_id("m-2")]);
+
+        let list = lister.list_all().await.unwrap();
+
+        assert_eq!(list.data.len(), 2);
+        assert_eq!(list.data[0].id, "m-1");
+        assert_eq!(list.data[1].id, "m-2");
+    }
+}

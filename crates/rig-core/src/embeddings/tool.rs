@@ -147,4 +147,29 @@ mod tests {
 
         assert_eq!(schema.name, NamedTool::NAME);
     }
+
+    #[test]
+    fn tool_schema_embeds_its_embedding_docs_in_order() {
+        use crate::embeddings::to_texts;
+
+        let schema = ToolSchema {
+            name: "static_name".to_string(),
+            context: serde_json::Value::Null,
+            embedding_docs: vec!["first doc".to_string(), "second doc".to_string()],
+        };
+
+        let texts = to_texts(schema.clone()).unwrap();
+
+        assert_eq!(texts, schema.embedding_docs);
+    }
+
+    #[tokio::test]
+    async fn named_tool_trait_surface_round_trips() {
+        assert_eq!(NamedTool.description(), "A statically named tool");
+        assert_eq!(NamedTool.parameters(), serde_json::json!({}));
+        NamedTool.call(()).await.unwrap();
+
+        let tool = <NamedTool as PortableToolEmbedding>::init((), ()).unwrap();
+        assert_eq!(tool.embedding_docs(), vec!["named tool".to_string()]);
+    }
 }

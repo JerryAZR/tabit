@@ -115,4 +115,41 @@ mod tests {
         assert_eq!(out, "outer done");
         assert_eq!(probe.observed().as_deref(), Some("session:abc-123"));
     }
+
+    /// Malformed sub-agent tool arguments fail with typed invalid-args
+    /// diagnostics instead of reaching the inner agent: the failure is
+    /// model-visible feedback, the inner model is never invoked, and the
+    /// outer run recovers on the next turn. The sub-agent is attached via
+    /// `From<Agent> for DynamicTool`, pinning that conversion seam too.
+    #[tokio::test]
+    async fn invalid_agent_tool_arguments_fail_without_reaching_the_sub_agent() {
+        let inner_model = MockCompletionModel::text("inner done");
+        let inner = AgentBuilder::new(inner_model.clone())
+            .name("researcher")
+            .build();
+        let tool: DynamicTool = inner.into();
+
+        let outer_model = MockCompletionModel::new([
+            // `prompt` is missing; deserialization inside the tool closure
+            // must reject this before the sub-agent runs.
+            MockTurn::tool_call("bad", "researcher", json!({"not_prompt": true})),
+            MockTurn::text("recovered"),
+        ]);
+        let outer = AgentBuilder::new(outer_model)
+            .dynamic_tool(tool)
+            .build();
+
+        let out = outer
+            .prompt("start")
+            .max_turns(3)
+            .await
+            .expect("invalid tool args are model-visible feedback, not fatal");
+
+        assert_eq!(out, "recovered");
+        assert_eq!(
+            inner_model.request_count(),
+            0,
+            "the sub-agent model must not be invoked on invalid arguments"
+        );
+    }
 }

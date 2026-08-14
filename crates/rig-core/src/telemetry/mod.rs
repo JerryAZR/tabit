@@ -1841,4 +1841,218 @@ mod tests {
 
         assert!(fields.contains("gen_ai.usage.tool_use_prompt_tokens", 12));
     }
+
+    // ------------------------------------------------------------------
+    // Content-telemetry part conversions for media, reasoning and tool
+    // results (pure conversions over the normalized message model).
+    // ------------------------------------------------------------------
+
+    #[test]
+    fn input_messages_serialize_user_media_and_document_parts() {
+        use crate::message::{
+            Audio, AudioMediaType, Document, ImageMediaType, Video, VideoMediaType,
+        };
+
+        let input = input_messages(&[Message::User {
+            content: OneOrMany::many(vec![
+                UserContent::Image(Image {
+                    data: DocumentSourceKind::url("https://img.example/a.png"),
+                    media_type: Some(ImageMediaType::PNG),
+                    ..Default::default()
+                }),
+                UserContent::Image(Image {
+                    data: DocumentSourceKind::raw(vec![1, 2, 3]),
+                    ..Default::default()
+                }),
+                // An unknown source carries nothing reportable and drops out.
+                UserContent::Image(Image::default()),
+                UserContent::Audio(Audio {
+                    data: DocumentSourceKind::base64("QUJD"),
+                    media_type: Some(AudioMediaType::MP3),
+                    ..Default::default()
+                }),
+                UserContent::Video(Video {
+                    data: DocumentSourceKind::file_id("file_1"),
+                    media_type: Some(VideoMediaType::MP4),
+                    ..Default::default()
+                }),
+                UserContent::Document(Document {
+                    data: DocumentSourceKind::string("plain text doc"),
+                    ..Default::default()
+                }),
+            ])
+            .expect("non-empty"),
+        }]);
+
+        assert_eq!(
+            serde_json::to_value(input).expect("input DTOs serialize"),
+            json!([{
+                "role": "user",
+                "parts": [
+                    {"type": "uri", "mime_type": "image/png", "modality": "image", "uri": "https://img.example/a.png"},
+                    {"type": "blob", "modality": "image", "content": "AQID"},
+                    {"type": "blob", "mime_type": "audio/mp3", "modality": "audio", "content": "QUJD"},
+                    {"type": "file", "mime_type": "video/mp4", "modality": "video", "file_id": "file_1"},
+                    {"type": "text", "content": "plain text doc"}
+                ]
+            }])
+        );
+    }
+
+    #[test]
+    fn assistant_reasoning_and_image_parts_serialize() {
+        let reasoning = Reasoning {
+            id: Some("r_1".to_string()),
+            content: vec![
+                ReasoningContent::Text {
+                    text: "step".to_string(),
+                    signature: Some("s".to_string()),
+                },
+                ReasoningContent::Summary("sum".to_string()),
+                ReasoningContent::Encrypted("enc".to_string()),
+                ReasoningContent::Redacted {
+                    data: "red".to_string(),
+                },
+            ],
+        };
+
+        let input = input_messages(&[Message::Assistant {
+            id: None,
+            content: OneOrMany::many(vec![
+                AssistantContent::Reasoning(reasoning),
+                AssistantContent::Image(Image {
+                    data: DocumentSourceKind::base64("aGk="),
+                    media_type: Some(crate::message::ImageMediaType::JPEG),
+                    ..Default::default()
+                }),
+            ])
+            .expect("non-empty"),
+        }]);
+
+        assert_eq!(
+            serde_json::to_value(input).expect("input DTOs serialize"),
+            json!([{
+                "role": "assistant",
+                "parts": [
+                    {"type": "reasoning", "content": "step"},
+                    {"type": "reasoning", "content": "sum"},
+                    {"type": "reasoning", "content": "enc"},
+                    {"type": "reasoning", "content": "red"},
+                    {"type": "blob", "mime_type": "image/jpeg", "modality": "image", "content": "aGk="}
+                ]
+            }])
+        );
+    }
+
+    #[test]
+    fn tool_result_responses_serialize_images_and_multi_content() {
+        use crate::message::Text as MessageText;
+
+        // A lone image content becomes the response object directly.
+        let input = input_messages(&[Message::User {
+            content: OneOrMany::one(UserContent::ToolResult(ToolResult {
+                id: "call_1".to_string(),
+                call_id: None,
+                content: OneOrMany::one(ToolResultContent::Image(Image {
+                    data: DocumentSourceKind::base64("aGk="),
+                    media_type: Some(crate::message::ImageMediaType::JPEG),
+                    ..Default::default()
+                })),
+            })),
+        }]);
+        assert_eq!(
+            serde_json::to_value(input).expect("input DTOs serialize"),
+            json!([{
+                "role": "user",
+                "parts": [{
+                    "type": "tool_call_response",
+                    "id": "call_1",
+                    "response": {
+                        "type": "blob",
+                        "mime_type": "image/jpeg",
+                        "modality": "image",
+                        "content": "aGk="
+                    }
+                }]
+            }])
+        );
+
+        // Mixed content collapses to an array only when there is more than one
+        // item.
+        let input = input_messages(&[Message::User {
+            content: OneOrMany::one(UserContent::ToolResult(ToolResult {
+                id: "call_2".to_string(),
+                call_id: None,
+                content: OneOrMany::many(vec![
+                    ToolResultContent::Text(MessageText::new("sunny")),
+                    ToolResultContent::Json {
+                        value: json!({"temp": 15}),
+                    },
+                ])
+                .expect("non-empty"),
+            })),
+        }]);
+        assert_eq!(
+            serde_json::to_value(input).expect("input DTOs serialize"),
+            json!([{
+                "role": "user",
+                "parts": [{
+                    "type": "tool_call_response",
+                    "id": "call_2",
+                    "response": ["sunny", {"temp": 15}]
+                }]
+            }])
+        );
+    }
+
+    #[test]
+    fn record_model_input_and_output_are_noops_when_disabled() {
+        // Content telemetry is opt-in: disabled recording (and recording onto
+        // a disabled span) must be a no-op.
+        let span = tracing::Span::none();
+        record_model_input(&span, &[Message::user("hi")], false);
+        record_model_input(&span, &[Message::user("hi")], true);
+        record_model_output(
+            &span,
+            &OneOrMany::one(AssistantContent::text("done")),
+            false,
+        );
+    }
+
+    #[test]
+    fn record_model_input_and_output_record_on_enabled_spans() {
+        let _isolation = crate::test_utils::scoped_tracing_subscriber_guard_blocking();
+        let subscriber = tracing_subscriber::fmt()
+            .with_max_level(tracing::Level::TRACE)
+            .with_ansi(false)
+            .without_time()
+            .with_writer(std::io::sink)
+            .finish();
+        tracing::subscriber::with_default(subscriber, || {
+            // The span must be created inside the subscriber scope, or it
+            // starts disabled and every record is skipped.
+            let span = tracing::info_span!(
+                "content_recording",
+                gen_ai.input.messages = tracing::field::Empty,
+                gen_ai.output.messages = tracing::field::Empty
+            );
+            let _guard = span.enter();
+
+            record_model_input(&span, &[Message::user("hi")], true);
+            record_model_output(
+                &span,
+                &OneOrMany::one(AssistantContent::text("done")),
+                true,
+            );
+            record_model_output(
+                &span,
+                &OneOrMany::one(AssistantContent::tool_call(
+                    "call_1",
+                    "weather",
+                    json!({"city": "Paris"}),
+                )),
+                true,
+            );
+        });
+    }
 }

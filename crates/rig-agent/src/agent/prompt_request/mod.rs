@@ -2827,4 +2827,323 @@ mod tests {
 
         assert!(!response.is_empty());
     }
+
+    fn static_document(id: &str, text: &str) -> crate::completion::Document {
+        crate::completion::Document {
+            id: id.to_string(),
+            text: text.to_string(),
+            additional_props: Default::default(),
+        }
+    }
+
+    #[tokio::test]
+    async fn prompt_request_setters_reach_the_prepared_completion_request() {
+        let model = MockCompletionModel::new([MockTurn::text("done"), MockTurn::text("done")]);
+        let recorded = model.clone();
+        let agent = AgentBuilder::new(model).preamble("agent preamble").build();
+
+        let mut params = serde_json::Map::new();
+        params.insert("merged".to_string(), json!(1));
+        let out = agent
+            .prompt("configured run")
+            .preamble("request preamble")
+            .document(static_document("d1", "doc one"))
+            .documents([static_document("d2", "doc two")])
+            .temperature(0.7)
+            .max_tokens(128)
+            .merge_additional_params(params)
+            .tool_choice(ToolChoice::Auto)
+            .record_content_telemetry(true)
+            .max_turns(1)
+            .await
+            .expect("run with request-level setters should succeed");
+
+        assert_eq!(out, "done");
+        let request = &recorded.requests()[0];
+        // The request preamble is hoisted into a leading system message.
+        assert!(request.chat_history.iter().any(
+            |message| matches!(message, Message::System { content } if content == "request preamble")
+        ));
+        assert_eq!(request.documents.len(), 2);
+        assert_eq!(request.temperature, Some(0.7));
+        assert_eq!(request.max_tokens, Some(128));
+        assert_eq!(request.additional_params, Some(json!({"merged": 1})));
+        assert_eq!(request.tool_choice, Some(ToolChoice::Auto));
+
+        // A later `replace_additional_params` swaps the whole map.
+        let out = agent
+            .prompt("replaced params run")
+            .replace_additional_params(json!({"replaced": true}))
+            .max_turns(1)
+            .await
+            .expect("run with replaced params should succeed");
+        assert_eq!(out, "done");
+        let request = &recorded.requests()[1];
+        assert_eq!(request.additional_params, Some(json!({"replaced": true})));
+    }
+
+    #[tokio::test]
+    async fn prompt_request_without_setters_clear_overrides_back_to_none() {
+        let model = MockCompletionModel::new([MockTurn::text("done")]);
+        let recorded = model.clone();
+        let agent = AgentBuilder::new(model).preamble("agent preamble").build();
+
+        let out = agent
+            .prompt("cleared run")
+            .preamble("temporary")
+            .without_preamble()
+            .temperature(0.7)
+            .without_temperature()
+            .max_tokens(128)
+            .without_max_tokens()
+            .replace_additional_params(json!({"k": 1}))
+            .without_additional_params()
+            .tool_choice(ToolChoice::Auto)
+            .without_tool_choice()
+            .max_turns(1)
+            .await
+            .expect("run with cleared setters should succeed");
+
+        assert_eq!(out, "done");
+        let request = &recorded.requests()[0];
+        assert_eq!(request.preamble, None);
+        assert_eq!(request.temperature, None);
+        assert_eq!(request.max_tokens, None);
+        assert_eq!(request.additional_params, None);
+        assert_eq!(request.tool_choice, None);
+    }
+
+    #[tokio::test]
+    async fn prompt_request_using_model_value_swaps_the_run_model() {
+        let model = MockCompletionModel::new([MockTurn::text("from agent model")]);
+        let replacement = MockCompletionModel::new([MockTurn::text("from request model")]);
+        let agent = AgentBuilder::new(model).build();
+
+        let out = agent
+            .prompt("swap the model")
+            .using_model_value(replacement)
+            .max_turns(1)
+            .await
+            .expect("request-level model swap should run");
+
+        assert_eq!(out, "from request model");
+    }
+
+    #[tokio::test]
+    async fn prompt_request_using_model_handle_swaps_the_run_model() {
+        let model = MockCompletionModel::new([MockTurn::text("from agent model")]);
+        let replacement = MockCompletionModel::new([MockTurn::text("from handle model")]);
+        let agent = AgentBuilder::new(model).build();
+
+        let out = agent
+            .prompt("swap the model via handle")
+            .using_model(crate::agent::ModelHandle::new(replacement))
+            .max_turns(1)
+            .await
+            .expect("request-level model-handle swap should run");
+
+        assert_eq!(out, "from handle model");
+    }
+
+    #[tokio::test]
+    async fn invalid_tool_call_hook_skips_mixed_turn_concurrently_without_executing_valid_call()
+    {
+        // Same scenario as the sequential variant, but with
+        // `tool_concurrency(2)`: the preresolved (skip-recovery) calls must
+        // short-circuit without executing even through the concurrent batch
+        // driver.
+        let add_calls = Arc::new(AtomicU32::new(0));
+        let mut valid_tool_call = ToolCall::new(
+            "tool_call_1".to_string(),
+            ToolFunction::new("add".to_string(), json!({"x": 2, "y": 3})),
+        );
+        valid_tool_call.call_id = Some("call_1".to_string());
+        let mut invalid_tool_call = ToolCall::new(
+            "tool_call_2".to_string(),
+            ToolFunction::new("default_api".to_string(), json!({"x": 4, "y": 5})),
+        );
+        invalid_tool_call.call_id = Some("call_2".to_string());
+        let model = MockCompletionModel::new([
+            MockTurn::from_contents([
+                AssistantContent::ToolCall(valid_tool_call),
+                AssistantContent::ToolCall(invalid_tool_call),
+            ])
+            .expect("tool-call response should be non-empty"),
+            MockTurn::text("skipped"),
+        ]);
+        let agent = AgentBuilder::new(model)
+            .tool(CountingAddTool {
+                calls: add_calls.clone(),
+            })
+            .build();
+
+        let response = agent
+            .prompt("add")
+            .add_hook(SkipDefaultApiHook)
+            .tool_concurrency(2)
+            .max_turns(3)
+            .extended_details()
+            .await
+            .expect("skip should recover without executing peer tools");
+
+        assert_eq!(response.output, "skipped");
+        assert_eq!(
+            add_calls.load(Ordering::SeqCst),
+            0,
+            "the valid peer must not execute during skip recovery, at any concurrency"
+        );
+        let messages = response.messages.expect("messages should be present");
+        assert!(matches!(
+            messages.get(2),
+            Some(Message::User { content })
+                if content.iter().filter(|item| matches!(item, UserContent::ToolResult(_))).count() == 2
+                    && content.iter().any(|item| matches!(
+                        item,
+                        UserContent::ToolResult(result)
+                            if result.id == "tool_call_1"
+                                && result.call_id.as_deref() == Some("call_1")
+                                && result.content.iter().any(|content| matches!(
+                                    content,
+                                    rig_core::message::ToolResultContent::Text(text)
+                                        if text.text == super::TOOL_NOT_EXECUTED_DUE_TO_INVALID_PEER
+                                ))
+                    ))
+                    && content.iter().any(|item| matches!(
+                        item,
+                        UserContent::ToolResult(result)
+                            if result.id == "tool_call_2"
+                                && result.call_id.as_deref() == Some("call_2")
+                                && result.content.iter().any(|content| matches!(
+                                    content,
+                                    rig_core::message::ToolResultContent::Text(text)
+                                        if text.text == "default_api is not available"
+                                ))
+                    ))
+        ));
+    }
+
+    #[tokio::test]
+    async fn typed_prompt_request_setters_and_model_swap_reach_the_run() {
+        let model = MockCompletionModel::new([MockTurn::text("from agent model")]);
+        let replacement = MockCompletionModel::new([MockTurn::text(r#"{"value":"swapped"}"#)]);
+        let recorded = replacement.clone();
+        let agent = AgentBuilder::new(model).preamble("agent preamble").build();
+
+        let response = agent
+            .prompt_typed::<TypedAnswer>("swap the model")
+            .preamble("request preamble")
+            .without_preamble()
+            .document(static_document("d1", "doc one"))
+            .documents([static_document("d2", "doc two")])
+            .temperature(0.7)
+            .without_temperature()
+            .max_tokens(128)
+            .without_max_tokens()
+            .merge_additional_params(serde_json::Map::new())
+            .replace_additional_params(json!({"replaced": true}))
+            .without_additional_params()
+            .tool_choice(ToolChoice::Auto)
+            .without_tool_choice()
+            .record_content_telemetry(true)
+            .using_model_value(replacement)
+            .max_turns(1)
+            .await
+            .expect("typed run with request-level setters should succeed");
+
+        assert_eq!(response, TypedAnswer { value: "swapped".into() });
+        let request = &recorded.requests()[0];
+        assert_eq!(request.preamble, None);
+        assert_eq!(request.documents.len(), 2);
+        assert_eq!(request.temperature, None);
+        assert_eq!(request.max_tokens, None);
+        assert_eq!(request.additional_params, None);
+        assert_eq!(request.tool_choice, None);
+    }
+
+    #[test]
+    fn prompt_response_display_formats_the_output_text() {
+        let response = PromptResponse::new("hello display", usage(1, 2));
+        assert_eq!(format!("{response}"), "hello display");
+    }
+
+    #[test]
+    fn invalid_tool_retry_user_message_skips_non_tool_call_content() {
+        let invalid =
+            ToolCall::new("tool_call_1".to_string(), ToolFunction::new("default_api".to_string(), json!({})));
+        let peer =
+            ToolCall::new("tool_call_2".to_string(), ToolFunction::new("add".to_string(), json!({})));
+        let contents = rig_core::OneOrMany::many(vec![
+            AssistantContent::text("prose alongside the calls"),
+            AssistantContent::ToolCall(invalid),
+            AssistantContent::ToolCall(peer),
+        ])
+        .expect("three content items");
+
+        let message = super::invalid_tool_retry_user_message(&contents, "tool_call_1", "fix it".to_string())
+            .expect("tool calls should produce a retry user message");
+
+        let Message::User { content } = &message else {
+            panic!("expected a user message, got {message:?}");
+        };
+        // Only the two tool calls contribute results; the text part is skipped.
+        let mut items = content.iter();
+        assert!(matches!(
+            items.next(),
+            Some(UserContent::ToolResult(result))
+                if result.id == "tool_call_1"
+                    && result.content.iter().any(|item| matches!(
+                        item,
+                        rig_core::message::ToolResultContent::Text(text) if text.text == "fix it"
+                    ))
+        ));
+        assert!(matches!(
+            items.next(),
+            Some(UserContent::ToolResult(result))
+                if result.id == "tool_call_2"
+                    && result.content.iter().any(|item| matches!(
+                        item,
+                        rig_core::message::ToolResultContent::Text(text)
+                            if text.text == super::TOOL_NOT_EXECUTED_DUE_TO_INVALID_PEER
+                    ))
+        ));
+        assert!(
+            items.next().is_none(),
+            "the non-tool-call content part must not produce a result"
+        );
+    }
+
+    #[tokio::test]
+    async fn typed_prompt_empty_final_output_reports_empty_response() {
+        let model = MockCompletionModel::new([MockTurn::text("")]);
+        let agent = AgentBuilder::new(model).build();
+
+        let err = agent
+            .prompt_typed::<TypedAnswer>("return nothing")
+            .max_turns(1)
+            .await
+            .expect_err("an empty final output cannot be deserialized");
+
+        assert!(
+            matches!(err, StructuredOutputError::EmptyResponse),
+            "expected EmptyResponse, got {err:?}"
+        );
+    }
+
+    #[tokio::test]
+    async fn typed_prompt_extended_empty_final_output_reports_empty_response() {
+        let model = MockCompletionModel::new([MockTurn::text("")]);
+        let agent = AgentBuilder::new(model).build();
+
+        let err = agent
+            .prompt_typed::<TypedAnswer>("return nothing")
+            .extended_details()
+            .max_turns(1)
+            .await
+            .expect_err("an empty final output cannot be deserialized (extended)");
+
+        assert!(
+            matches!(err, StructuredOutputError::EmptyResponse),
+            "expected EmptyResponse, got {err:?}"
+        );
+    }
 }

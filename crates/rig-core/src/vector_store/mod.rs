@@ -316,4 +316,96 @@ mod tests {
         assert_eq!(result.id, "doc-1");
         assert_eq!(result.document, json!({ "answer": 42 }));
     }
+
+    #[tokio::test]
+    async fn vector_tool_describes_itself() {
+        let index = TestIndex {
+            queries: Arc::new(Mutex::new(Vec::new())),
+        };
+
+        let description = <TestIndex as PortableTool>::description(&index);
+        assert!(description.contains("vector store"));
+
+        let parameters = <TestIndex as PortableTool>::parameters(&index);
+        let properties = parameters
+            .get("properties")
+            .and_then(|value| value.as_object())
+            .expect("parameters must declare properties");
+        for field in ["query", "samples", "threshold"] {
+            assert!(properties.contains_key(field), "missing field: {field}");
+        }
+        assert_eq!(parameters["required"], json!(["query", "samples"]));
+    }
+
+    #[tokio::test]
+    async fn dyn_top_n_ids_delegates_to_the_index() {
+        let index = TestIndex {
+            queries: Arc::new(Mutex::new(Vec::new())),
+        };
+        let request = VectorSearchRequest::builder()
+            .query("answer")
+            .samples(1)
+            .build();
+
+        let results = VectorStoreIndexDyn::top_n_ids(&index, request)
+            .await
+            .expect("dyn top_n_ids should succeed");
+        assert_eq!(results, vec![(0.9, "doc-1".to_string())]);
+    }
+
+    struct PruningIndex;
+
+    impl VectorStoreIndex for PruningIndex {
+        type Filter = Filter<serde_json::Value>;
+
+        async fn top_n<T: for<'a> Deserialize<'a> + WasmCompatSend>(
+            &self,
+            _req: VectorSearchRequest,
+        ) -> Result<Vec<(f64, String, T)>, VectorStoreError> {
+            let document = serde_json::from_value(json!({
+                "text": "kept",
+                "count": 7,
+                "flag": true,
+                "nothing": null,
+                "small": [1, [2, 3]],
+                "huge": vec![0u32; 401],
+            }))?;
+            Ok(vec![(0.5, "doc-1".to_string(), document)])
+        }
+
+        async fn top_n_ids(
+            &self,
+            _req: VectorSearchRequest,
+        ) -> Result<Vec<(f64, String)>, VectorStoreError> {
+            Ok(vec![(0.5, "doc-1".to_string())])
+        }
+    }
+
+    #[tokio::test]
+    async fn dyn_top_n_prunes_oversized_arrays_from_documents() {
+        let index = PruningIndex;
+        let request = VectorSearchRequest::builder()
+            .query("q")
+            .samples(1)
+            .build();
+
+        let results = VectorStoreIndexDyn::top_n(&index, request)
+            .await
+            .expect("dyn top_n should succeed");
+        assert_eq!(results.len(), 1);
+        let (_, id, document) = results.first().expect("one result");
+
+        assert_eq!(id, "doc-1");
+        // Oversized arrays are pruned wholesale; every other JSON kind is kept.
+        assert_eq!(
+            document,
+            &json!({
+                "text": "kept",
+                "count": 7,
+                "flag": true,
+                "nothing": null,
+                "small": [1, [2, 3]],
+            })
+        );
+    }
 }

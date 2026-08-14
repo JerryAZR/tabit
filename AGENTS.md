@@ -51,6 +51,9 @@ Current workspace layout:
   some tests carry upstream-marked `#[ignore]`s (live-network scenarios).
   Don't record pass counts here — they change constantly; run the suite for
   current numbers.
+- Coverage: `cargo llvm-cov --workspace --html --output-dir target/llvm-cov/html`.
+  Every gap must be filled, justified, or explicitly deferred — the ledger
+  and policy live in `COVERAGE.md`.
 - Cassettes are byte-sensitive (LF endings enforced via `.gitattributes`).
 
 ## Not planned

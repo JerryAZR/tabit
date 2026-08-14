@@ -124,3 +124,58 @@ impl CrateRefs {
 pub(crate) fn crate_attr_string(root: &TokenStream, item: &str) -> String {
     format!("{}::{item}", root.to_string().replace(' ', ""))
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn refs() -> CrateRefs {
+        CrateRefs {
+            core: quote!(::rig_core),
+            agent: Some(quote!(::rig_agent)),
+            context_roots: vec!["rig_agent".to_string(), "rig".to_string()],
+            facade_roots: vec!["rig".to_string()],
+        }
+    }
+
+    fn segments(values: &[&str]) -> Vec<String> {
+        values.iter().map(|value| value.to_string()).collect()
+    }
+
+    #[test]
+    fn direct_context_paths_match_resolved_roots() {
+        let refs = refs();
+        let context = segments(&["rig_agent", "tool", "ToolContext"]);
+        assert!(refs.is_context_path(&context));
+        let facade_alias = segments(&["rig", "tool", "ToolContext"]);
+        assert!(refs.is_context_path(&facade_alias));
+    }
+
+    #[test]
+    fn facade_context_paths_require_the_agent_module() {
+        let refs = refs();
+        let through_facade = segments(&["rig", "agent", "tool", "ToolContext"]);
+        assert!(refs.is_context_path(&through_facade));
+
+        let wrong_root = segments(&["other", "agent", "tool", "ToolContext"]);
+        assert!(!refs.is_context_path(&wrong_root));
+        let wrong_module = segments(&["rig_agent", "agent", "tool", "ToolContext"]);
+        assert!(!refs.is_context_path(&wrong_module));
+    }
+
+    #[test]
+    fn unrelated_paths_and_arities_never_match() {
+        let refs = refs();
+        assert!(!refs.is_context_path(&segments(&["rig_agent", "tool"])));
+        assert!(!refs.is_context_path(&segments(&[
+            "rig", "agent", "tool", "ToolContext", "extra"
+        ])));
+        assert!(!refs.is_context_path(&segments(&["ToolContext"])));
+        assert!(!refs.is_context_path(&[]));
+    }
+
+    #[test]
+    fn crate_attr_strings_strip_whitespace() {
+        assert_eq!(crate_attr_string(&quote!(::rig :: core), "serde"), "::rig::core::serde");
+    }
+}

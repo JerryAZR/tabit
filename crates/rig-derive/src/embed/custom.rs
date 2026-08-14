@@ -125,3 +125,112 @@ impl CustomAttributeParser for syn::Attribute {
         })
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// Parse a struct and collect its custom embed fields.
+    fn custom_fields(source: &str) -> syn::Result<Vec<String>> {
+        let input = syn::parse_str::<syn::DeriveInput>(source).expect("test input parses");
+        let syn::Data::Struct(data_struct) = input.data else {
+            panic!("test input must be a struct");
+        };
+        Ok(custom_embed_fields(&data_struct)?
+            .into_iter()
+            .map(|(_, path)| path.path.segments.last().unwrap().ident.to_string())
+            .collect())
+    }
+
+    #[test]
+    fn tagged_fields_report_their_function_paths() {
+        let paths = custom_fields(r#"struct S { #[embed(embed_with = "my_embed")] a: String }"#)
+            .expect("valid attribute");
+        assert_eq!(paths, vec!["my_embed".to_string()]);
+    }
+
+    #[test]
+    fn group_wrapped_string_literals_resolve_to_the_path() {
+        // Invisible `Delimiter::None` groups (how macro-passed expressions
+        // reach the derive) cannot be typed in source text, so build one.
+        let mut input =
+            syn::parse_str::<syn::DeriveInput>(r#"struct S { #[embed(embed_with = "my_embed")] a: String }"#)
+                .expect("test input parses");
+        let syn::Data::Struct(ref mut data_struct) = input.data else {
+            panic!("test input must be a struct");
+        };
+        let field = data_struct
+            .fields
+            .iter_mut()
+            .next()
+            .expect("one field");
+        for attribute in &mut field.attrs {
+            if !attribute.path().is_ident(EMBED) {
+                continue;
+            }
+            if let syn::Meta::List(list) = &mut attribute.meta {
+                let grouped = proc_macro2::Group::new(
+                    proc_macro2::Delimiter::None,
+                    quote::quote!("my_embed"),
+                );
+                list.tokens = quote::quote!(embed_with = #grouped);
+            }
+        }
+
+        let paths = custom_embed_fields(data_struct)
+            .expect("group-wrapped string literal is accepted")
+            .into_iter()
+            .map(|(_, path)| path.path.segments.last().unwrap().ident.to_string())
+            .collect::<Vec<_>>();
+        assert_eq!(paths, vec!["my_embed".to_string()]);
+    }
+
+    #[test]
+    fn empty_and_non_list_and_foreign_attributes_are_not_custom() {
+        // `#[embed()]` (empty list) and `#[embed]`/`#[embed = "..."]`
+        // (non-list metas) are filtered out before tag expansion, and
+        // attributes under a different path are ignored entirely.
+        let paths = custom_fields(
+            r#"struct S {
+                #[embed()]
+                #[embed]
+                #[embed = "plain"]
+                #[serde(skip)]
+                a: String,
+            }"#,
+        )
+        .expect("none of these are custom attributes");
+        assert!(paths.is_empty());
+    }
+
+    #[test]
+    fn unknown_attribute_keys_are_rejected() {
+        let error = custom_fields(r#"struct S { #[embed(bogus = "x")] a: String }"#)
+            .expect_err("unknown attribute key must fail");
+        assert!(
+            error.to_string().contains("unknown embedding field attribute `bogus`"),
+            "unexpected error: {error}"
+        );
+    }
+
+    #[test]
+    fn non_string_values_are_rejected() {
+        let error = custom_fields(r#"struct S { #[embed(embed_with = 42)] a: String }"#)
+            .expect_err("a non-string value must fail");
+        assert!(
+            error.to_string().contains("expected embed_with attribute to be a string"),
+            "unexpected error: {error}"
+        );
+    }
+
+    #[test]
+    fn string_literal_suffixes_are_rejected() {
+        let error =
+            custom_fields(r#"struct S { #[embed(embed_with = "my_embed"sfx)] a: String }"#)
+                .expect_err("a suffixed string literal must fail");
+        assert!(
+            error.to_string().contains("unexpected suffix `sfx`"),
+            "unexpected error: {error}"
+        );
+    }
+}

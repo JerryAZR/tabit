@@ -1822,6 +1822,177 @@ mod tests {
             .expect("the untouched assembly still finalizes");
         assert_eq!(internal, other);
     }
+
+    /// Null metadata is a no-op: it neither opens a text block nor merges
+    /// anything into one.
+    #[test]
+    fn null_text_metadata_is_ignored() {
+        let mut accumulator = PartsAccumulator::new();
+        accumulator.text_additional_params(serde_json::Value::Null);
+        assert_eq!(accumulator.finish(), vec![AssistantContent::text("")]);
+    }
+
+    /// A minted full call never adopts a different minted assembly: two
+    /// id-less calls are distinct, and guessing would corrupt one of them.
+    #[test]
+    fn a_minted_full_call_never_adopts_a_different_minted_assembly() {
+        let mut accumulator = PartsAccumulator::new();
+        let open = accumulator.tool_name_delta(&pid("tool-1"), "probe");
+
+        let published = accumulator.tool_call(
+            &pid("tool-0"),
+            call_named("tool-0", "other"),
+            "freshly-minted".to_owned(),
+        );
+        assert_eq!(published, "freshly-minted");
+
+        // The open assembly was untouched and still finalizes under its own id.
+        accumulator.tool_args_delta(&pid("tool-1"), "{}");
+        let (_, internal) = accumulator
+            .tool_input_end(end("tool-1", UnparseableToolInput::Drop))
+            .expect("no error")
+            .expect("the open assembly still finalizes");
+        assert_eq!(internal, open);
+    }
+
+    /// A nameless call that a `Keep`-mode probe cannot finalize stays open in
+    /// its start-order slot, so a late name fragment can complete it.
+    #[test]
+    fn a_nameless_call_survives_a_keep_mode_end_in_its_slot() {
+        let mut accumulator = PartsAccumulator::new();
+        let internal = accumulator.tool_args_delta(&pid("call_1"), "{\"x\":");
+        assert!(
+            accumulator
+                .tool_input_end(end("call_1", UnparseableToolInput::Keep))
+                .expect("no error")
+                .is_none(),
+            "a nameless call cannot finalize"
+        );
+
+        accumulator.tool_name_delta(&pid("call_1"), "probe");
+        accumulator.tool_args_delta(&pid("call_1"), "1}");
+        let (tool_call, internal_after) = accumulator
+            .tool_input_end(end("call_1", UnparseableToolInput::Drop))
+            .expect("no error")
+            .expect("the call finalizes once its name arrives");
+        assert_eq!(internal_after, internal);
+        assert_eq!(tool_call.function.name, "probe");
+        assert_eq!(tool_call.function.arguments, serde_json::json!({"x": 1}));
+    }
+
+    /// A signature for a delta-built item attaches to its streamed text.
+    #[test]
+    fn a_trailing_signature_attaches_to_the_streamed_reasoning_text() {
+        let mut accumulator = PartsAccumulator::new();
+        accumulator.reasoning_delta(&pid("rs_1"), "chain");
+        accumulator.reasoning_signature(&pid("rs_1"), "sig_1".to_owned());
+
+        let parts = accumulator.finish();
+        assert!(matches!(
+            parts.as_slice(),
+            [AssistantContent::Reasoning(Reasoning { id: Some(id), content })]
+                if id == "rs_1"
+                    && matches!(
+                        content.first(),
+                        Some(ReasoningContent::Text { text, signature: Some(sig) })
+                            if text == "chain" && sig == "sig_1"
+                    )
+        ));
+    }
+
+    /// A signature for an item whose latest part carries no text (a summary
+    /// sibling) records an empty text part carrying the signature, matching
+    /// the replay shape Gemini expects.
+    #[test]
+    fn a_signature_for_a_summary_only_part_appends_an_empty_text_slot() {
+        let mut accumulator = PartsAccumulator::new();
+        accumulator.reasoning_full(&pid("rs_1"), full("rs_1", summary("s1")));
+        accumulator.reasoning_signature(&pid("rs_1"), "sig_1".to_owned());
+
+        let parts = accumulator.finish();
+        assert!(matches!(
+            parts.as_slice(),
+            [AssistantContent::Reasoning(Reasoning { content, .. })]
+                if matches!(content.first(), Some(ReasoningContent::Summary(text)) if text == "s1")
+                    && matches!(
+                        content.get(1),
+                        Some(ReasoningContent::Text { text, signature: Some(sig) })
+                            if text.is_empty() && sig == "sig_1"
+                    )
+        ));
+    }
+
+    /// A signature-only stream (Gemini's trailing `thoughtSignature` with no
+    /// streamed thought) still records a signable part so replay state
+    /// reaches history.
+    #[test]
+    fn a_signature_only_stream_records_a_signature_only_part() {
+        let mut accumulator = PartsAccumulator::new();
+        accumulator.reasoning_signature(&pid("rs_1"), "sig_1".to_owned());
+
+        let parts = accumulator.finish();
+        assert!(matches!(
+            parts.as_slice(),
+            [AssistantContent::Reasoning(Reasoning { id: Some(id), content })]
+                if id == "rs_1"
+                    && matches!(
+                        content.first(),
+                        Some(ReasoningContent::Text { text, signature: Some(sig) })
+                            if text.is_empty() && sig == "sig_1"
+                    )
+        ));
+    }
+
+    /// Text metadata merges deeply: nested objects merge key-by-key, new keys
+    /// insert, and a scalar mismatch takes the incoming value.
+    #[test]
+    fn text_metadata_deep_merges_objects_and_overwrites_scalars() {
+        let mut accumulator = PartsAccumulator::new();
+        accumulator.text_delta("answer");
+        accumulator.text_additional_params(serde_json::json!({
+            "nested": {"keep": 1, "replace": "old"},
+            "scalar": 1,
+        }));
+        accumulator.text_additional_params(serde_json::json!({
+            "nested": {"replace": "new", "added": true},
+            "scalar": {"becomes": "object"},
+            "fresh": [2],
+        }));
+
+        let parts = accumulator.finish();
+        let Some(AssistantContent::Text(crate::message::Text {
+            additional_params: Some(params),
+            ..
+        })) = parts.first()
+        else {
+            panic!("expected a text part with metadata");
+        };
+        assert_eq!(
+            params["nested"],
+            serde_json::json!({"keep": 1, "replace": "new", "added": true}),
+            "nested objects merge key-by-key"
+        );
+        assert_eq!(
+            params["scalar"],
+            serde_json::json!({"becomes": "object"}),
+            "a scalar/object mismatch takes the incoming value"
+        );
+        assert_eq!(params["fresh"], serde_json::json!([2]), "new keys insert");
+    }
+
+    /// Redacted reasoning blocks accumulate like any other full block — the
+    /// helper's arm is exercised by real wire shapes, not dead code.
+    #[test]
+    fn redacted_reasoning_blocks_survive_accumulation() {
+        let mut accumulator = PartsAccumulator::new();
+        accumulator.reasoning_full(
+            &pid("rs_1"),
+            full("rs_1", ReasoningContent::Redacted { data: "redacted-payload".to_owned() }),
+        );
+
+        let parts = accumulator.finish();
+        assert_eq!(reasoning_texts(&parts), vec!["redacted-payload".to_owned()]);
+    }
 }
 
 /// The aggregation laws, as properties (#2258 A5).

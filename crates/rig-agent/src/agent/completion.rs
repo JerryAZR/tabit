@@ -1166,4 +1166,115 @@ mod tests {
         let executable = tool_names(&["final_result", "final_result_1"]);
         assert_eq!(pick_output_tool_name(&executable), "final_result_2");
     }
+
+    /// A run already committed to Tool output mode whose active `tool_choice`
+    /// forbids the output-tool call (`ToolChoice::None`, or a `Specific` set
+    /// that omits it) cannot finalize this turn. The request is still built
+    /// (the run is pinned to Tool mode, it cannot degrade mid-run); the pinned
+    /// name is reused and the stall is only warned about, not errored on.
+    #[tokio::test]
+    async fn committed_tool_mode_with_forbidding_choice_builds_but_warns() {
+        use crate::tool::server::ToolServer;
+        use crate::test_utils::MockCompletionModel;
+
+        let model = ModelHandle::new(MockCompletionModel::text("ignored"));
+        let tool_server_handle = ToolServer::new().run();
+        let schema = schemars::schema_for!(u32);
+
+        let prepared = build_prepared_completion_request(
+            &model,
+            Message::user("answer"),
+            &[],
+            None,
+            &[],
+            None,
+            None,
+            None,
+            false,
+            Some(&ToolChoice::None),
+            &tool_server_handle,
+            Some(&schema),
+            &OutputMode::Tool,
+            Some("final_result"),
+            None,
+            true,
+            None,
+        )
+        .await
+        .expect("a pinned Tool-mode turn must still prepare a request");
+
+        assert_eq!(
+            prepared.output_tool_name.as_deref(),
+            Some("final_result"),
+            "the committed output-tool name is reused"
+        );
+        assert!(
+            prepared.executable_tool_names.is_empty(),
+            "no real tools were configured"
+        );
+    }
+
+    #[test]
+    fn model_handle_set_and_with_model_replace_the_default() {
+        use crate::test_utils::MockCompletionModel;
+
+        let mut agent = crate::AgentBuilder::new(MockCompletionModel::text("first")).build();
+        assert!(
+            agent.model_handle().label().is_none(),
+            "an erased unnamed handle carries no label"
+        );
+
+        agent.set_model(MockCompletionModel::text("second"));
+        let replaced = agent
+            .with_model(MockCompletionModel::text("third"))
+            .with_model_handle(ModelHandle::named("named", MockCompletionModel::text("fourth")));
+        assert_eq!(replaced.model_handle().label(), Some("named"));
+    }
+
+    #[tokio::test]
+    async fn tool_definitions_exposes_the_read_only_view() {
+        use crate::test_utils::{MockAddTool, MockCompletionModel};
+
+        let agent = crate::AgentBuilder::new(MockCompletionModel::text("ok"))
+            .tool(MockAddTool)
+            .build();
+
+        let definitions = agent
+            .tool_definitions(None)
+            .await
+            .expect("tool definitions should resolve");
+        assert_eq!(
+            definitions.iter().map(|def| def.name.as_str()).collect::<Vec<_>>(),
+            vec!["add"]
+        );
+    }
+
+    /// `&Agent` implements `Prompt` so a borrowed agent builds the same
+    /// request as an owned one.
+    #[tokio::test]
+    async fn prompt_through_an_agent_reference_runs_the_request() {
+        use crate::test_utils::MockCompletionModel;
+
+        let agent = crate::AgentBuilder::new(MockCompletionModel::text("ok")).build();
+        let output = (&agent).prompt("hi").await.expect("prompt should succeed");
+        assert_eq!(output, "ok");
+    }
+
+    /// `&Agent` implements `TypedPrompt` symmetrically with `Agent`.
+    #[tokio::test]
+    async fn prompt_typed_through_an_agent_reference_deserializes_the_output() {
+        use crate::test_utils::{MockCompletionModel, MockTurn};
+
+        #[derive(serde::Deserialize, schemars::JsonSchema)]
+        struct Answer {
+            value: String,
+        }
+
+        let model = MockCompletionModel::new([MockTurn::text(r#"{"value":"ok"}"#)]);
+        let agent = crate::AgentBuilder::new(model).build();
+        let answer: Answer = TypedPrompt::prompt_typed(&agent, "answer")
+            .await
+            .expect("typed prompt should succeed");
+        assert_eq!(answer.value, "ok");
+    }
 }

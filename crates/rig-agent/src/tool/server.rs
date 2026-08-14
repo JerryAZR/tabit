@@ -598,9 +598,13 @@ mod tests {
             MockSubtractTool, MockToolIndex,
         },
         tool::{
-            Tool, ToolContext, ToolEmbedding, ToolExecutionError, ToolSet,
-            server::{ToolServer, ToolServerHandle},
+            DynamicTool, PortableDynamicTool, Tool, ToolContext, ToolEmbedding,
+            ToolExecutionError, ToolOutput, ToolSet,
+            server::{ToolServer, ToolServerError, ToolServerHandle},
         },
+    };
+    use rig_core::vector_store::{
+        VectorSearchRequest, VectorStoreError, VectorStoreIndex, request::Filter,
     };
 
     async fn execute_tool(
@@ -825,6 +829,12 @@ mod tests {
             .unwrap();
         assert_eq!(defs.len(), 1);
         assert_eq!(defs[0].name, NamedTool::NAME);
+
+        // The retrieved registration stays executable through the handle.
+        let result = handle
+            .execute(NamedTool::NAME, "{}", &mut ToolContext::new())
+            .await;
+        assert_eq!(result.output().render(), "ok");
     }
 
     #[tokio::test]
@@ -1242,5 +1252,151 @@ mod tests {
                 .model_feedback()
                 .is_some_and(|feedback| feedback.contains("does_not_exist"))
         );
+    }
+
+    #[tokio::test]
+    async fn default_tool_server_starts_empty() {
+        let handle = ToolServer::default().run();
+        assert!(handle.get_tool_defs(None).await.unwrap().is_empty());
+    }
+
+    fn dynamic_text_tool(name: &'static str) -> DynamicTool {
+        DynamicTool::new(
+            name,
+            "runtime-defined tool",
+            serde_json::json!({"type": "object"}),
+            move |_context, _args| {
+                let output = name;
+                Box::pin(async move { Ok(ToolOutput::text(output)) })
+            },
+        )
+    }
+
+    fn portable_text_tool(name: &'static str) -> PortableDynamicTool {
+        PortableDynamicTool::new(
+            name,
+            "context-free dynamic tool",
+            serde_json::json!({"type": "object"}),
+            move |_arguments| Box::pin(async move { Ok(ToolOutput::text(name)) }),
+        )
+    }
+
+    #[tokio::test]
+    async fn builder_registers_dynamic_and_portable_dynamic_tools() {
+        let handle = ToolServer::new()
+            .dynamic_tool(dynamic_text_tool("builder_dynamic"))
+            .portable_dynamic_tool(portable_text_tool("builder_portable"))
+            .run();
+
+        let defs = handle.get_tool_defs(None).await.unwrap();
+        assert_eq!(
+            defs.iter().map(|def| def.name.as_str()).collect::<Vec<_>>(),
+            ["builder_dynamic", "builder_portable"]
+        );
+        assert_eq!(
+            execute_tool(&handle, "builder_dynamic", "{}").await.unwrap(),
+            "builder_dynamic"
+        );
+        assert_eq!(
+            execute_tool(&handle, "builder_portable", "{}").await.unwrap(),
+            "builder_portable"
+        );
+    }
+
+    #[tokio::test]
+    async fn handle_registers_dynamic_and_portable_dynamic_tools() {
+        let handle = ToolServer::new().run();
+        handle
+            .add_dynamic_tool(dynamic_text_tool("handle_dynamic"))
+            .await;
+        handle
+            .add_portable_dynamic_tool(portable_text_tool("handle_portable"))
+            .await;
+
+        let defs = handle.get_tool_defs(None).await.unwrap();
+        assert_eq!(
+            defs.iter().map(|def| def.name.as_str()).collect::<Vec<_>>(),
+            ["handle_dynamic", "handle_portable"]
+        );
+        assert_eq!(
+            execute_tool(&handle, "handle_dynamic", "{}").await.unwrap(),
+            "handle_dynamic"
+        );
+        assert_eq!(
+            execute_tool(&handle, "handle_portable", "{}").await.unwrap(),
+            "handle_portable"
+        );
+    }
+
+    struct FailingToolIndex;
+
+    impl VectorStoreIndex for FailingToolIndex {
+        type Filter = Filter<serde_json::Value>;
+
+        async fn top_n<T>(
+            &self,
+            _req: VectorSearchRequest,
+        ) -> Result<Vec<(f64, String, T)>, VectorStoreError>
+        where
+            T: for<'a> serde::Deserialize<'a> + rig_core::wasm_compat::WasmCompatSend,
+        {
+            Ok(Vec::new())
+        }
+
+        async fn top_n_ids(
+            &self,
+            _req: VectorSearchRequest,
+        ) -> Result<Vec<(f64, String)>, VectorStoreError> {
+            Err(VectorStoreError::BuilderError(
+                "tool index unavailable".to_string(),
+            ))
+        }
+    }
+
+    #[tokio::test]
+    async fn retrieval_failure_fails_tool_definitions() {
+        let handle = ToolServer::new()
+            .retrieved_tools(1, FailingToolIndex, ToolSet::default())
+            .run();
+
+        let error = handle
+            .get_tool_defs(Some("query".to_string()))
+            .await
+            .expect_err("a failing retrieval index must surface an error");
+        assert!(matches!(error, ToolServerError::DefinitionError(_)));
+    }
+
+    #[tokio::test]
+    async fn duplicate_retrieved_ids_advertise_one_definition() {
+        let handle = ToolServer::new()
+            .tool(MockAddTool)
+            .retrieved_tools(1, MockToolIndex::new(["add", "add"]), ToolSet::default())
+            .run();
+
+        let defs = handle
+            .get_tool_defs(Some("add two numbers".to_string()))
+            .await
+            .unwrap();
+        assert_eq!(
+            defs.len(),
+            1,
+            "duplicate retrieved ids must not produce duplicate declarations"
+        );
+    }
+
+    #[test]
+    fn named_tool_embedding_metadata_and_init_roundtrip() {
+        let toolset = ToolSet::builder().retrieved_tool(NamedTool::new()).build();
+
+        let schemas = toolset.schemas().unwrap();
+        assert_eq!(schemas.len(), 1);
+        assert_eq!(
+            schemas[0].embedding_docs,
+            vec!["named retrieved tool".to_string()]
+        );
+        assert!(schemas[0].context.is_null());
+
+        let restored = <NamedTool as ToolEmbedding>::init((), ()).expect("init should reconstruct");
+        assert_eq!(restored.description(), "uses its canonical name");
     }
 }

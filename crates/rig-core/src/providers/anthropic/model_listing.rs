@@ -85,3 +85,130 @@ where
         Ok(ModelList::new(all_models))
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::test_utils::{MockHttpResponse, RecordingHttpClient, SequencedHttpClient};
+
+    fn page_json(ids: &[(&str, &str)], has_more: bool, last_id: Option<&str>) -> Vec<u8> {
+        let data: Vec<serde_json::Value> = ids
+            .iter()
+            .map(|(id, display_name)| {
+                serde_json::json!({ "id": id, "display_name": display_name })
+            })
+            .collect();
+        serde_json::json!({
+            "data": data,
+            "has_more": has_more,
+            "last_id": last_id,
+        })
+        .to_string()
+        .into_bytes()
+    }
+
+    fn client<H>(http: H) -> Client<H>
+    where
+        H: HttpClientExt + WasmCompatSend + WasmCompatSync + 'static,
+    {
+        Client::builder()
+            .api_key("test-key")
+            .http_client(http)
+            .build()
+            .expect("build client")
+    }
+
+    #[tokio::test]
+    async fn list_all_paginates_with_after_id_cursors() {
+        let http = SequencedHttpClient::new([
+            MockHttpResponse::success(page_json(
+                &[("claude-a", "Claude A"), ("claude-b", "Claude B")],
+                true,
+                Some("claude-b"),
+            )),
+            MockHttpResponse::success(page_json(&[("claude-c", "Claude C")], false, None)),
+        ]);
+
+        let lister = AnthropicModelLister::new(client(http));
+        let models = lister.list_all().await.expect("list_all should succeed");
+
+        assert_eq!(models.len(), 3);
+        let models: Vec<_> = models.iter().cloned().collect();
+        assert_eq!(models[0].id, "claude-a");
+        assert_eq!(models[0].name.as_deref(), Some("Claude A"));
+        assert_eq!(models[2].id, "claude-c");
+        assert_eq!(models[2].name.as_deref(), Some("Claude C"));
+    }
+
+    #[tokio::test]
+    async fn list_all_requests_use_cursor_query_parameters() {
+        let http = SequencedHttpClient::new([
+            MockHttpResponse::success(page_json(
+                &[("claude-a", "Claude A")],
+                true,
+                Some("claude-a"),
+            )),
+            MockHttpResponse::success(page_json(&[("claude-b", "Claude B")], false, None)),
+        ]);
+        let requests = {
+            let probe = http.clone();
+            let lister = AnthropicModelLister::new(client(probe));
+            lister.list_all().await.expect("list_all should succeed");
+            http.requests()
+        };
+
+        assert_eq!(requests.len(), 2);
+        assert!(requests[0].uri.ends_with("/v1/models"), "{}", requests[0].uri);
+        assert!(
+            requests[1]
+                .uri
+                .ends_with("/v1/models?after_id=claude-a"),
+            "the cursor page must follow the last model id of the previous page: {}",
+            requests[1].uri
+        );
+        for request in &requests {
+            assert_eq!(
+                request.headers.get("x-api-key").and_then(|v| v.to_str().ok()),
+                Some("test-key")
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn list_all_maps_http_error_status_to_api_error() {
+        let http = RecordingHttpClient::with_error_response(
+            http::StatusCode::UNAUTHORIZED,
+            "{\"error\":\"invalid api key\"}",
+        );
+
+        let lister = AnthropicModelLister::new(client(http));
+        let error = lister
+            .list_all()
+            .await
+            .expect_err("a non-success status must surface as an error");
+
+        let message = error.to_string();
+        assert!(
+            message.contains("Anthropic") && message.contains("/v1/models"),
+            "error should carry provider and path context: {message}"
+        );
+        assert!(message.contains("401"), "status code expected: {message}");
+    }
+
+    #[tokio::test]
+    async fn list_all_maps_invalid_json_to_parse_error() {
+        let http = RecordingHttpClient::new("not json");
+
+        let lister = AnthropicModelLister::new(client(http));
+        let error = lister
+            .list_all()
+            .await
+            .expect_err("a malformed body must surface as an error");
+
+        let message = error.to_string();
+        assert!(
+            message.contains("Anthropic") && message.contains("/v1/models"),
+            "parse error should carry provider and path context: {message}"
+        );
+    }
+}

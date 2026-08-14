@@ -191,3 +191,86 @@ impl<T: Embed> Embed for Vec<T> {
         Ok(())
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn embed_error_new_wraps_the_inner_error() {
+        let error = EmbedError::new(std::io::Error::other("inner failure"));
+
+        assert_eq!(error.to_string(), "inner failure");
+    }
+
+    #[test]
+    fn text_embedder_accumulates_texts_in_order() {
+        let mut embedder = TextEmbedder::default();
+        embedder.embed("first".to_string());
+        embedder.embed("second".to_string());
+
+        assert_eq!(embedder.texts, vec!["first", "second"]);
+    }
+
+    #[test]
+    fn to_texts_collects_string_and_str_fragments() {
+        assert_eq!(to_texts("hello").unwrap(), vec!["hello"]);
+        assert_eq!(to_texts(String::from("world")).unwrap(), vec!["world"]);
+    }
+
+    #[test]
+    fn to_texts_renders_integer_fragments() {
+        assert_eq!(to_texts(7_i8).unwrap(), vec!["7"]);
+        assert_eq!(to_texts(-7_i16).unwrap(), vec!["-7"]);
+        assert_eq!(to_texts(1_024_i32).unwrap(), vec!["1024"]);
+        assert_eq!(to_texts(-1_i64).unwrap(), vec!["-1"]);
+        assert_eq!(to_texts(170_i128).unwrap(), vec!["170"]);
+    }
+
+    #[test]
+    fn to_texts_renders_float_bool_and_char_fragments() {
+        assert_eq!(to_texts(1.5_f32).unwrap(), vec!["1.5"]);
+        assert_eq!(to_texts(2.25_f64).unwrap(), vec!["2.25"]);
+        assert_eq!(to_texts(true).unwrap(), vec!["true"]);
+        assert_eq!(to_texts(false).unwrap(), vec!["false"]);
+        assert_eq!(to_texts('x').unwrap(), vec!["x"]);
+    }
+
+    #[test]
+    fn to_texts_serializes_json_values() {
+        let value = serde_json::json!({"b": 2, "a": 1});
+        let texts = to_texts(value).expect("JSON value should embed");
+
+        assert_eq!(texts.len(), 1);
+        let parsed: serde_json::Value =
+            serde_json::from_str(&texts[0]).expect("embedded text should be JSON");
+        assert_eq!(parsed["a"], 1);
+        assert_eq!(parsed["b"], 2);
+    }
+
+    #[test]
+    fn to_texts_embeds_references_and_vectors() {
+        let text = String::from("borrowed");
+        assert_eq!(to_texts(&text).unwrap(), vec!["borrowed"]);
+
+        assert_eq!(
+            to_texts(vec![String::from("a"), "b".to_string()]).unwrap(),
+            vec!["a", "b"]
+        );
+        assert_eq!(to_texts(vec!["c", "d"]).unwrap(), vec!["c", "d"]);
+    }
+
+    #[test]
+    fn to_texts_propagates_embed_errors() {
+        struct Failing;
+
+        impl Embed for Failing {
+            fn embed(&self, _embedder: &mut TextEmbedder) -> Result<(), EmbedError> {
+                Err(EmbedError::new(std::io::Error::other("cannot embed")))
+            }
+        }
+
+        let error = to_texts(Failing).expect_err("failing embed should surface its error");
+        assert_eq!(error.to_string(), "cannot embed");
+    }
+}
