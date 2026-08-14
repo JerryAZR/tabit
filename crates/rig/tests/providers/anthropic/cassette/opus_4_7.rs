@@ -32,6 +32,7 @@ async fn messages_prompt_smoke() {
             let agent = client
                 .agent(CLAUDE_OPUS_4_7)
                 .preamble(BASIC_PREAMBLE)
+                .max_tokens(128_000)
                 .build();
 
             let response = agent
@@ -53,6 +54,7 @@ async fn messages_streaming_prompt_smoke() {
             let agent = client
                 .agent(CLAUDE_OPUS_4_7)
                 .preamble(STREAMING_PREAMBLE)
+                .max_tokens(128_000)
                 .build();
 
             let mut stream = agent.stream_prompt(STREAMING_PROMPT).await;
@@ -77,6 +79,7 @@ async fn messages_tools_smoke() {
                 .tool(Adder)
                 .tool(Subtract)
                 .default_max_turns(2)
+                .max_tokens(128_000)
                 .build();
 
             let response = agent
@@ -101,6 +104,7 @@ async fn messages_streaming_tools_smoke() {
                 .tool(Adder)
                 .tool(Subtract)
                 .default_max_turns(2)
+                .max_tokens(128_000)
                 .build();
 
             let mut stream = agent.stream_prompt(STREAMING_TOOLS_PROMPT).await;
@@ -122,6 +126,7 @@ async fn messages_structured_output_smoke() {
             let agent = client
                 .agent(CLAUDE_OPUS_4_7)
                 .output_schema::<SmokeStructuredOutput>()
+                .max_tokens(128_000)
                 .build();
 
             let response = agent
@@ -142,7 +147,10 @@ async fn messages_extractor_smoke() {
     super::super::support::with_anthropic_cassette(
         "opus_4_7/messages_extractor_smoke",
         |client| async move {
-            let extractor = client.extractor::<SmokePerson>(CLAUDE_OPUS_4_7).build();
+            let extractor = client
+                .extractor::<SmokePerson>(CLAUDE_OPUS_4_7)
+                .max_tokens(128_000)
+                .build();
 
             let response = extractor
                 .extract_with_usage(EXTRACTOR_TEXT)
@@ -186,6 +194,7 @@ async fn messages_image_input_smoke() {
             let agent = client
                 .agent(CLAUDE_OPUS_4_7)
                 .preamble("You are an image describer.")
+                .max_tokens(128_000)
                 .build();
             let image_bytes =
                 std::fs::read(IMAGE_FIXTURE_PATH).expect("fixture image should be readable");
@@ -215,7 +224,8 @@ async fn messages_adaptive_thinking_nonstreaming_smoke() {
             reasoning::run_reasoning_roundtrip_nonstreaming(ReasoningRoundtripAgent::new(
                 client.completion_model(CLAUDE_OPUS_4_7),
                 Some(opus_4_7_thinking_params()),
-            ))
+            )
+            .with_max_tokens(128_000))
             .await;
         },
     )
@@ -245,6 +255,7 @@ async fn messages_adaptive_thinking_streaming_smoke() {
                     client.completion_model(CLAUDE_OPUS_4_7),
                     Some(opus_4_7_thinking_params()),
                 )
+                .with_max_tokens(128_000)
                 .expecting_signed_reasoning_block(),
             )
             .await;

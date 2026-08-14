@@ -399,6 +399,7 @@ async fn messages_document_file_id_roundtrip_live() {
                 let agent = client
                     .agent(anthropic::completion::CLAUDE_SONNET_4_6)
                     .preamble(DOCUMENT_PREAMBLE)
+                    .max_tokens(64_000)
                     .build();
                 let mut history = Vec::new();
 
@@ -461,6 +462,7 @@ async fn streaming_document_file_id_roundtrip_live() {
                 let agent = client
                     .agent(anthropic::completion::CLAUDE_SONNET_4_6)
                     .preamble(DOCUMENT_PREAMBLE)
+                    .max_tokens(64_000)
                     .build();
 
                 let stream_prompt = direct_file_id_document_question(&file_id, 2);

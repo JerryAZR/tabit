@@ -206,6 +206,7 @@ async fn request_overridden_by_hook_blocking() {
                 .tool(weather)
                 .tool(GetTime)
                 .add_hook(ForceWeatherOnlyOnFirstTurn)
+                .max_tokens(64_000)
                 .build();
 
             let response = agent
@@ -240,6 +241,7 @@ async fn request_overridden_by_hook_streaming() {
                 .tool(weather)
                 .tool(GetTime)
                 .add_hook(ForceWeatherOnlyOnFirstTurn)
+                .max_tokens(64_000)
                 .build();
 
             let mut stream = agent.stream_prompt(PROMPT).max_turns(5).await;

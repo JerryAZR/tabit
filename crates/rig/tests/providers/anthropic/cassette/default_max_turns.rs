@@ -100,6 +100,7 @@ async fn default_max_turns_allows_multi_step_tool_use() -> Result<()> {
                 .tool(Add)
                 .tool(Divide)
                 .default_max_turns(10)
+                .max_tokens(64_000)
                 .build();
 
             let response = agent

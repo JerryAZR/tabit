@@ -25,6 +25,7 @@ async fn url_pdf_document_prompt() {
                 .agent(CLAUDE_SONNET_4_6)
                 .preamble("You are a helpful assistant that analyzes documents.")
                 .temperature(0.0)
+                .max_tokens(64_000)
                 .build();
 
             let response = agent

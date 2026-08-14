@@ -518,7 +518,9 @@ where
             tokens
         } else {
             return Err(CompletionError::RequestError(
-                "`max_tokens` must be set for Anthropic".into(),
+                "Anthropic requires `max_tokens`; set it on the completion request (e.g. via \
+                 config)"
+                    .into(),
             ));
         };
 
@@ -2464,7 +2466,10 @@ mod tests {
                 .build()
                 .expect("build client");
             let model = client.completion_model(CLAUDE_SONNET_4_6);
-            let request = model.completion_request("hello").build();
+            let request = model
+                .completion_request("hello")
+                .max_tokens(1024)
+                .build();
             let mut stream = crate::completion::CompletionModel::stream(&model, request)
                 .await
                 .expect("stream should open");
@@ -2516,7 +2521,10 @@ mod tests {
                 .build()
                 .expect("build client");
             let model = client.completion_model(CLAUDE_SONNET_4_6);
-            let request = model.completion_request("hello").build();
+            let request = model
+                .completion_request("hello")
+                .max_tokens(1024)
+                .build();
             let mut stream = crate::completion::CompletionModel::stream(&model, request)
                 .await
                 .expect("stream should open");

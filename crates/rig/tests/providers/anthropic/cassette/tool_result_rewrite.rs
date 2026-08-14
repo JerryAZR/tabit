@@ -151,6 +151,7 @@ async fn tool_result_redacted_by_hook_blocking() {
                 .preamble(PREAMBLE)
                 .tool(tool)
                 .add_hook(RedactSsnFromResult)
+                .max_tokens(64_000)
                 .build();
 
             let response = agent
@@ -184,6 +185,7 @@ async fn tool_result_redacted_by_hook_streaming() {
                 .preamble(PREAMBLE)
                 .tool(tool)
                 .add_hook(RedactSsnFromResult)
+                .max_tokens(64_000)
                 .build();
 
             let mut stream = agent.stream_prompt(LOOKUP_PROMPT).max_turns(5).await;

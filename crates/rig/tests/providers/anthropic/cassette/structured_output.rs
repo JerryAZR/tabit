@@ -64,6 +64,7 @@ async fn structured_output_smoke() {
             let agent = client
                 .agent(CLAUDE_SONNET_4_6)
                 .output_schema::<SmokeStructuredOutput>()
+                .max_tokens(64_000)
                 .build();
 
             let response = agent
@@ -92,6 +93,7 @@ async fn classic_tool_mode_maps_through_anthropic_messages() {
         .agent(CLAUDE_SONNET_4_6)
         .output_schema::<SmokeStructuredOutput>()
         .output_mode(OutputMode::Tool)
+        .max_tokens(64_000)
         .build();
 
     let response = agent
@@ -124,6 +126,7 @@ async fn classic_prompted_mode_maps_through_anthropic_messages() {
         .agent(CLAUDE_SONNET_4_6)
         .output_schema::<SmokeStructuredOutput>()
         .output_mode(OutputMode::Prompted)
+        .max_tokens(64_000)
         .build();
 
     let response = agent

@@ -19,6 +19,7 @@ async fn think_tool_menu_planning() {
              Use the 'think' tool to reason through complex problems step by step.",
             )
             .tool(ThinkTool)
+            .max_tokens(64_000)
             .build();
 
         let response = agent

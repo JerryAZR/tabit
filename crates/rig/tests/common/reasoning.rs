@@ -42,6 +42,8 @@ pub(crate) struct ReasoningRoundtripAgent<M: CompletionModel> {
     /// then asserts that a complete `Reasoning` block with a signature
     /// reached the caller and was round-tripped into turn 2.
     pub(crate) expects_signed_reasoning_block: bool,
+    /// Provider-required `max_tokens` (e.g. Anthropic). `None` omits the field.
+    pub(crate) max_tokens: Option<u64>,
 }
 
 impl<M> ReasoningRoundtripAgent<M>
@@ -54,7 +56,14 @@ where
             preamble: ROUNDTRIP_PREAMBLE.to_owned(),
             additional_params,
             expects_signed_reasoning_block: false,
+            max_tokens: None,
         }
+    }
+
+    /// Set a provider-required `max_tokens` (e.g. Anthropic).
+    pub(crate) fn with_max_tokens(mut self, max_tokens: u64) -> Self {
+        self.max_tokens = Some(max_tokens);
+        self
     }
 
     /// See [`ReasoningRoundtripAgent::expects_signed_reasoning_block`].
@@ -88,7 +97,7 @@ pub(crate) async fn run_reasoning_roundtrip_streaming_with_final<M, F>(
         documents: vec![],
         tools: vec![],
         temperature: None,
-        max_tokens: None,
+        max_tokens: agent.max_tokens,
         tool_choice: None,
         additional_params: agent.additional_params.clone(),
         model: None,
@@ -171,7 +180,7 @@ pub(crate) async fn run_reasoning_roundtrip_streaming_with_final<M, F>(
         documents: vec![],
         tools: vec![],
         temperature: None,
-        max_tokens: None,
+        max_tokens: agent.max_tokens,
         tool_choice: None,
         additional_params: agent.additional_params.clone(),
         model: None,
@@ -222,7 +231,7 @@ where
         documents: vec![],
         tools: vec![],
         temperature: None,
-        max_tokens: None,
+        max_tokens: agent.max_tokens,
         tool_choice: None,
         additional_params: agent.additional_params.clone(),
         model: None,
@@ -269,7 +278,7 @@ where
         documents: vec![],
         tools: vec![],
         temperature: None,
-        max_tokens: None,
+        max_tokens: agent.max_tokens,
         tool_choice: None,
         additional_params: agent.additional_params.clone(),
         model: None,

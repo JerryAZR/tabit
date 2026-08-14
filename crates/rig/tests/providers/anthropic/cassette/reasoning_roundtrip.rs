@@ -17,7 +17,8 @@ async fn streaming() {
             Some(serde_json::json!({
                 "thinking": { "type": "adaptive" }
             })),
-        ))
+        )
+        .with_max_tokens(64_000))
         .await;
     })
     .await;
@@ -31,7 +32,8 @@ async fn nonstreaming() {
             Some(serde_json::json!({
                 "thinking": { "type": "adaptive" }
             })),
-        ))
+        )
+        .with_max_tokens(64_000))
         .await;
     })
     .await;

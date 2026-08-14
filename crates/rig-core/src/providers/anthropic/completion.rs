@@ -49,10 +49,6 @@ pub trait AnthropicCompatibleProvider: Provider {
 
 impl AnthropicCompatibleProvider for super::client::AnthropicExt {
     const PROVIDER_NAME: &'static str = "anthropic";
-
-    fn default_max_tokens(model: &str) -> Option<u64> {
-        default_max_tokens_for_model(model)
-    }
 }
 
 #[derive(Debug, Deserialize, Serialize)]
@@ -1613,8 +1609,7 @@ where
         Self {
             client,
             model: model.to_string(),
-            default_max_tokens: Ext::default_max_tokens(model)
-                .or_else(|| Some(default_max_tokens_with_fallback(model))),
+            default_max_tokens: Ext::default_max_tokens(model),
             prompt_caching: false,
             automatic_caching: false,
             automatic_caching_ttl: None,
@@ -1700,28 +1695,6 @@ where
     }
 }
 
-/// Anthropic requires a `max_tokens` parameter to be set, which is dependent on the model. If not
-/// set or if set too high, the request will fail. The following values are based on Anthropic's
-/// published synchronous Messages API output limits for current models.
-fn default_max_tokens_for_model(model: &str) -> Option<u64> {
-    if model.starts_with("claude-opus-4-8")
-        || model.starts_with("claude-opus-4-7")
-        || model.starts_with("claude-opus-4-6")
-    {
-        Some(128_000)
-    } else if model.starts_with("claude-opus-4")
-        || model.starts_with("claude-sonnet-4")
-        || model.starts_with("claude-haiku-4-5")
-    {
-        Some(64_000)
-    } else {
-        None
-    }
-}
-
-fn default_max_tokens_with_fallback(model: &str) -> u64 {
-    default_max_tokens_for_model(model).unwrap_or(2_048)
-}
 
 pub(super) fn supports_mid_conversation_system_messages(model: &str) -> bool {
     model.starts_with(CLAUDE_OPUS_4_8)
@@ -2358,7 +2331,9 @@ impl TryFrom<AnthropicRequestParams<'_>> for AnthropicCompletionRequest {
         // Check if max_tokens is set, required for Anthropic
         let Some(max_tokens) = req.max_tokens else {
             return Err(CompletionError::RequestError(
-                "`max_tokens` must be set for Anthropic".into(),
+                "Anthropic requires `max_tokens`; set it on the completion request (e.g. via \
+                 config)"
+                    .into(),
             ));
         };
 
@@ -2515,7 +2490,9 @@ where
                 completion_request.max_tokens = Some(tokens);
             } else {
                 return Err(CompletionError::RequestError(
-                    "`max_tokens` must be set for Anthropic".into(),
+                    "Anthropic requires `max_tokens`; set it on the completion request (e.g. via \
+                     config)"
+                        .into(),
                 ));
             }
         }
@@ -2651,21 +2628,31 @@ mod tests {
     use serde_path_to_error::deserialize;
 
     #[test]
-    fn current_model_default_max_tokens_match_anthropic_limits() {
-        assert_eq!(default_max_tokens_for_model(CLAUDE_OPUS_4_8), Some(128_000));
-        assert_eq!(default_max_tokens_for_model(CLAUDE_OPUS_4_7), Some(128_000));
-        assert_eq!(default_max_tokens_for_model(CLAUDE_OPUS_4_6), Some(128_000));
-        assert_eq!(
-            default_max_tokens_for_model(CLAUDE_SONNET_4_6),
-            Some(64_000)
-        );
-        assert_eq!(default_max_tokens_for_model(CLAUDE_HAIKU_4_5), Some(64_000));
-    }
+    fn missing_max_tokens_returns_error() {
+        let client = crate::providers::anthropic::Client::new("test-key")
+            .expect("client construction should succeed");
+        let model = CompletionModel::new(client, "claude-sonnet-4-6");
+        let request = CompletionRequest {
+            model: None,
+            preamble: None,
+            chat_history: OneOrMany::one("hi".into()),
+            documents: vec![],
+            tools: vec![],
+            temperature: None,
+            max_tokens: None,
+            tool_choice: None,
+            additional_params: None,
+            output_schema: None,
+            record_telemetry_content: false,
+        };
 
-    #[test]
-    fn unknown_model_uses_conservative_default_max_tokens_fallback() {
-        assert_eq!(default_max_tokens_for_model("claude-unknown"), None);
-        assert_eq!(default_max_tokens_with_fallback("claude-unknown"), 2_048);
+        let error = futures::executor::block_on(model.raw_completion(request)).unwrap_err();
+        assert!(
+            error.to_string().contains(
+                "Anthropic requires `max_tokens`; set it on the completion request"
+            ),
+            "unexpected error: {error}"
+        );
     }
 
     #[test]
@@ -6016,7 +6003,10 @@ mod tests {
             .build()
             .expect("build client");
         let model = client.completion_model(CLAUDE_SONNET_4_6);
-        let request = model.completion_request("hello").build();
+        let request = model
+            .completion_request("hello")
+            .max_tokens(1024)
+            .build();
 
         let error = model
             .completion(request)
@@ -6050,7 +6040,10 @@ mod tests {
             .build()
             .expect("build client");
         let model = client.completion_model(CLAUDE_SONNET_4_6);
-        let request = model.completion_request("hello").build();
+        let request = model
+            .completion_request("hello")
+            .max_tokens(1024)
+            .build();
 
         let error = model
             .completion(request)
@@ -6085,7 +6078,10 @@ mod tests {
             .build()
             .expect("build client");
         let model = client.completion_model(CLAUDE_SONNET_4_6);
-        let request = model.completion_request("hello").build();
+        let request = model
+            .completion_request("hello")
+            .max_tokens(1024)
+            .build();
 
         let mut stream = model.stream(request).await.expect("stream should start");
 

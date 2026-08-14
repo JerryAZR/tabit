@@ -32,6 +32,7 @@ async fn streaming_tools_smoke() {
                 .tool(Adder)
                 .tool(Subtract)
                 .default_max_turns(2)
+                .max_tokens(64_000)
                 .build();
 
             let mut stream = agent.stream_prompt(STREAMING_TOOLS_PROMPT).await;
@@ -55,6 +56,7 @@ async fn streaming_tools_batches_multiple_tool_results_in_one_followup_message()
                 .preamble(TWO_TOOL_STREAM_PREAMBLE)
                 .tool(AlphaSignal)
                 .tool(BetaSignal)
+                .max_tokens(64_000)
                 .build();
 
             let mut stream = agent
@@ -117,6 +119,7 @@ async fn streaming_tool_concurrency_surfaces_results_in_call_order_after_batch_s
             .preamble(TWO_TOOL_STREAM_PREAMBLE)
             .tool(OutOfOrderAlphaSignal(order.clone()))
             .tool(OutOfOrderBetaSignal(order))
+            .max_tokens(64_000)
             .build();
 
         let mut stream = agent

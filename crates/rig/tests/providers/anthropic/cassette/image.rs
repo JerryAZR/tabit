@@ -21,6 +21,7 @@ async fn image_prompt_from_fixture() {
             .agent(anthropic::completion::CLAUDE_SONNET_4_6)
             .preamble("You are an image describer.")
             .temperature(0.5)
+            .max_tokens(64_000)
             .build();
 
         let image_bytes = fs::read(IMAGE_FIXTURE_PATH)

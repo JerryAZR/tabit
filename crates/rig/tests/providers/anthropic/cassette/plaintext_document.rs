@@ -95,6 +95,7 @@ async fn plaintext_document_prompt() {
                 .agent(CLAUDE_SONNET_4_6)
                 .preamble("You are a helpful assistant that analyzes documents.")
                 .temperature(0.5)
+                .max_tokens(64_000)
                 .build();
 
             let document = Document {
@@ -123,6 +124,7 @@ async fn plaintext_document_with_instruction() {
                 .agent(CLAUDE_SONNET_4_6)
                 .preamble("You are a helpful assistant that analyzes documents.")
                 .temperature(0.5)
+                .max_tokens(64_000)
                 .build();
 
             let response = agent
@@ -153,6 +155,7 @@ async fn streaming_document_citations_accepts_null_citation_start() {
                 .agent(CLAUDE_SONNET_4_6)
                 .preamble("Answer using the supplied document and citation metadata.")
                 .temperature(0.0)
+                .max_tokens(64_000)
                 .build();
 
             let mut stream = agent.stream_prompt(citation_prompt()).await;

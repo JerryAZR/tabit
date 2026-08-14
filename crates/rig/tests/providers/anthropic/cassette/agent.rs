@@ -13,6 +13,7 @@ async fn completion_smoke() {
         let agent = client
             .agent(anthropic::completion::CLAUDE_SONNET_4_6)
             .preamble(BASIC_PREAMBLE)
+            .max_tokens(64_000)
             .build();
 
         let response = agent

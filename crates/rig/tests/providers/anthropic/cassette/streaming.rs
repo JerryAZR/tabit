@@ -16,6 +16,7 @@ async fn streaming_smoke() {
         let agent = client
             .agent(anthropic::completion::CLAUDE_SONNET_4_6)
             .preamble(STREAMING_PREAMBLE)
+            .max_tokens(64_000)
             .build();
 
         let mut stream = agent.stream_prompt(STREAMING_PROMPT).await;

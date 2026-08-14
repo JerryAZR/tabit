@@ -153,6 +153,7 @@ async fn tool_call_args_rewritten_by_hook_blocking() {
                 .preamble("You are a weather assistant. Always use the get_weather tool to answer.")
                 .tool(weather)
                 .add_hook(PinUnitsToCelsius)
+                .max_tokens(64_000)
                 .build();
 
             let response = agent
@@ -182,6 +183,7 @@ async fn tool_call_args_rewritten_by_hook_streaming() {
                 .preamble("You are a weather assistant. Always use the get_weather tool to answer.")
                 .tool(weather)
                 .add_hook(PinUnitsToCelsius)
+                .max_tokens(64_000)
                 .build();
 
             let mut stream = agent.stream_prompt(WEATHER_PROMPT).max_turns(5).await;

@@ -300,6 +300,7 @@ async fn think_tool_with_other_tools() -> Result<()> {
         .tool(ThinkTool)
         .tool(Calculator::new(calculator_calls.clone()))
         .tool(DatabaseLookup::new(database_lookup_calls.clone()))
+        .max_tokens(64_000)
         .build();
 
     let response = agent
