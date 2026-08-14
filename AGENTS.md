@@ -24,9 +24,10 @@ Current workspace layout:
 
 1. **API abstraction only — no model catalog.** No model-name constants, no
    model-name-keyed branching anywhere. Users supply provider endpoints, model
-   ids, and parameters (e.g. `max_tokens`) via their own config; the framework
-   passes them through. Anthropic requests with no `max_tokens` fail loudly
-   ("Anthropic requires `max_tokens`; set it on the completion request").
+   ids, and parameters via their own config; the framework passes them through.
+   The one required-with-default parameter: Anthropic requests with no
+   `max_tokens` get `anthropic::DEFAULT_MAX_TOKENS` (65,536) — a plain
+   provider constant, overridable per model via config.
 2. **Front/back split.** Provider backends (wire clients, streaming, auth) stay
    strictly decoupled from front-facing logic (agents, sessions, tools, user
    config). Front-facing code never grows provider-specific knowledge.
@@ -40,7 +41,8 @@ Current workspace layout:
    (httpmock) — never live network in CI/default test runs. Live tests are
    `#[ignore]`d.
 6. **Fail loud, not silent.** No silent fallbacks that paper over missing user
-   config (the old 2048-token anthropic fallback was removed for this reason).
+   config. A documented provider constant (like `DEFAULT_MAX_TOKENS`) is a
+   default, not a fallback — it is visible, named, and config-overridable.
 
 ## Environment / commands
 
@@ -53,8 +55,12 @@ Current workspace layout:
 
 ## Not planned
 
-- WebSocket streaming (`websocket` feature), companion crates (bedrock,
-  gemini-grpc, vector stores, …), `discord-bot`/`rmcp`.
+- WebSocket streaming: **removed** (`websocket`/`websocket-rustls`/
+  `websocket-native-tls` features and `tokio-tungstenite` are gone) — HTTP
+  SSE only. Reference point: pi uses SSE for everything except an optional
+  Codex-only websocket accelerator with automatic SSE fallback.
+- Companion crates (bedrock, gemini-grpc, vector stores, …),
+  `discord-bot`/`rmcp`.
 - Mid-conversation system messages: **unsupported by design** — always hoisted
   into the preamble.
 

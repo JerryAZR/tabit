@@ -1,6 +1,8 @@
 //! The streaming module for the OpenAI Responses API.
 //! Please see the `openai_streaming` or `openai_streaming_with_tools` example for more practical usage.
-use crate::completion::{self, CompletionError};
+use crate::completion::CompletionError;
+#[cfg(test)]
+use crate::completion;
 use crate::http_client::HttpClientExt;
 use crate::http_client::sse::{Event, GenericEventSource};
 use crate::message::ReasoningContent;
@@ -763,13 +765,30 @@ pub(crate) fn raw_choices_from_sse_body(
     run_wire_buffered(frames, ResponsesAdapter::buffered(initial_usage))
 }
 
+fn message_id_from_response(response: &CompletionResponse) -> Option<String> {
+    response.output.iter().find_map(|item| match item {
+        Output::Message(message) => Some(message.id.clone()),
+        _ => None,
+    })
+}
+
+/// Usage fallback for the test replay harness below: the terminal body's
+/// usage when the replayed stream reported none.
+#[cfg(test)]
+fn usage_from_raw_response(response: &CompletionResponse) -> completion::Usage {
+    response
+        .usage
+        .as_ref()
+        .map(completion::Usage::from)
+        .unwrap_or_default()
+}
+
 /// Replay accumulated raw choices through [`normalize_responses_stream`] and
-/// merge the result with the parsed terminal response body.
-///
-/// The replayed stream is authoritative where it reported something; the
-/// terminal body fills any gap it left (usage, message ID, finish reason,
-/// model). Returns `Ok(None)` when the replay produced no content, leaving the
-/// caller to decide how to fall back.
+/// merge the result with the parsed terminal response body — the inline
+/// tests' harness for turning a drained buffered body into a completion
+/// response. Its shipped caller was the (removed) websocket session; the
+/// tests exercise the live replay/merge machinery through it.
+#[cfg(test)]
 pub(crate) async fn completion_response_from_raw_choices(
     provider: &str,
     raw_choices: Vec<StreamingRawChoice>,
@@ -855,6 +874,7 @@ pub(crate) async fn completion_response_from_raw_choices(
     ))
 }
 
+#[cfg(test)]
 fn choice_is_empty(choice: &crate::OneOrMany<completion::AssistantContent>) -> bool {
     choice.iter().all(|content| match content {
         completion::AssistantContent::Text(text) => text.text.trim().is_empty(),
@@ -862,21 +882,6 @@ fn choice_is_empty(choice: &crate::OneOrMany<completion::AssistantContent>) -> b
         completion::AssistantContent::Image(_) => false,
         completion::AssistantContent::ToolCall(_) => false,
     })
-}
-
-fn message_id_from_response(response: &CompletionResponse) -> Option<String> {
-    response.output.iter().find_map(|item| match item {
-        Output::Message(message) => Some(message.id.clone()),
-        _ => None,
-    })
-}
-
-fn usage_from_raw_response(response: &CompletionResponse) -> completion::Usage {
-    response
-        .usage
-        .as_ref()
-        .map(completion::Usage::from)
-        .unwrap_or_default()
 }
 
 /// Open a Responses SSE stream whose terminal record stays provider-native.

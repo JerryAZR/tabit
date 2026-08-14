@@ -64,10 +64,16 @@ removed from `[features]` as well. Also deferred (removed): `discord-bot`,
 
 ### Websocket
 
-The `websocket` feature (and its rustls/native-tls variants) is **retained**
-(`rig-core`'s optional `tokio-tungstenite` runtime dep is intact), but the
-websocket conformance test `tests/streaming_conformance_websocket.rs` was
-removed in Phase 1 and websocket is not in default features.
+The `websocket` feature was initially retained (rig-core's optional
+`tokio-tungstenite` runtime dep intact, not in default features) and later
+**removed entirely**: `responses_api/websocket.rs`, the client entry points
+(`responses_websocket`/`responses_websocket_builder`), the three feature
+flags, the `tokio-tungstenite` dependency, and the
+`openai_responses_websocket` conformance family are gone. Rationale: the
+owner confirmed websocket is not needed (pi's precedent — SSE everywhere
+except an optional Codex-only websocket accelerator with SSE fallback). The
+Responses replay/merge helpers the websocket session used survive only as
+`#[cfg(test)]` harnesses for the inline tests.
 
 ### `test_utils/streaming_conformance.rs` trim (fallback taken)
 
@@ -81,12 +87,14 @@ Per the plan's fallback we instead **surgically trimmed the module**:
 - removed the `gemini_rest`, `interactions` (gemini), `cohere`, and `ollama`
   fixture submodules and the chatgpt-backed `buffered_driver()` (its only
   callers were the deleted provider crates);
-- `WIRE_FAMILIES` now lists only `openai_chat`, `openai_responses`,
-  `openai_responses_websocket`, `anthropic`.
+- `WIRE_FAMILIES` initially listed only `openai_chat`, `openai_responses`,
+  `openai_responses_websocket`, `anthropic`; the websocket family was later
+  removed with the websocket feature itself (the list now carries the three
+  SSE families).
 
-The openai + anthropic fixtures, and everything `openai/responses_api/{mod.rs,
-websocket.rs}` imports (`fixtures`, `ok_chunks`, `WireInput`, …), are preserved
-and the module stays unconditionally available (native only, as upstream).
+The openai + anthropic fixtures, and everything `openai/responses_api/mod.rs`
+imports (`fixtures`, `ok_chunks`, `WireInput`, …), are preserved and the
+module stays unconditionally available (native only, as upstream).
 
 ### Structural test fixes
 
@@ -160,27 +168,23 @@ model information via their own config; nothing in the vendored layer branches
 on model names or ships a model catalog. Three changes were made (one commit
 each):
 
-### 1. `max_tokens` is pure pass-through (Anthropic)
+### 1. `max_tokens` (Anthropic): caller-supplied, one plain default
 
 - `default_max_tokens_for_model` / `default_max_tokens_with_fallback` (the
   name-keyed inference of Anthropic's required `max_tokens` from the model
-  name) are deleted.
-- The `AnthropicCompatibleProvider::default_max_tokens` extension hook is
-  **kept** but its default (and the `AnthropicExt` impl) now returns `None` —
-  it is an optional override point for compat providers, no longer
-  name-keyed.
-- New contract: the caller **must** set `max_tokens` on the completion
-  request (e.g. via config / `AgentBuilder::max_tokens` /
-  `CompletionRequestBuilder::max_tokens`). If it is missing and the extension
-  hook does not supply one, both the non-streaming and streaming paths fail
-  with:
-
-  > `Anthropic requires \`max_tokens\`; set it on the completion request (e.g. via config)`
-
-  There are no silent defaults anywhere.
-- Test suites that previously relied on the inference now set
-  `.max_tokens(N)` explicitly, with `N` taken from the recorded cassette
-  request bodies so replay still matches byte-for-byte.
+  name) are deleted, along with the `AnthropicCompatibleProvider::
+  default_max_tokens` extension hook and the `GenericCompletionModel::
+  default_max_tokens` field.
+- Current contract: requests carrying `max_tokens` pass it through verbatim;
+  requests without one get `anthropic::DEFAULT_MAX_TOKENS` (65,536) — a
+  plain, documented provider constant that per-model config overrides. (The
+  intermediate "fail loudly when missing" contract was replaced by the
+  owner's decision: a safe 64K default beats an error, and config can
+  override trivially.)
+- Test suites set `.max_tokens(N)` explicitly, with `N` taken from the
+  recorded cassette request bodies so replay still matches byte-for-byte;
+  the missing-`max_tokens` test asserts the 64K default at the
+  request-conversion layer.
 
 ### 2. Mid-conversation system messages are always hoisted (Anthropic)
 
@@ -247,14 +251,15 @@ deleted (the hoisting path is still covered by
 6. `driver_adoption.rs` / serde allowlist / facade_renamed fixture adjusted for
    the trimmed tree (documented above).
 7. Dead code left by the provider trim (internal engine items, ChatGPT-replay
-   helpers, etc.) was deleted once the tree was owned; the only remaining
-   `dead_code` warnings are three responses-API helpers that are live under
-   the (not-planned) `websocket` feature and dead without it — they go away
-   with the websocket-removal decision.
+   helpers, etc.) was deleted once the tree was owned; the websocket feature
+   was removed outright. The Responses replay/merge helpers whose shipped
+   callers disappeared survive as `#[cfg(test)]` harnesses for the inline
+   tests. The default build compiles with zero warnings.
 8. Doctests: all green (0 failures; 10 ignored upstream-marked).
 9. Model catalog removed: no model-name constants or name-keyed behavior in
    the vendored providers (see "Model catalog removal"); callers supply model
-   ids and `max_tokens` via config.
+   ids via config, and `max_tokens` via config with the 64K provider default
+   when unset.
 
 ## Cherry-picking from upstream (optional)
 

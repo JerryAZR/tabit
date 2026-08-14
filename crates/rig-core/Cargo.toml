@@ -65,11 +65,6 @@ reqwest-middleware = { workspace = true, optional = true, features = [
   "http2",
 ] }
 
-# Native-only dependency for OpenAI Responses websocket mode.
-# Keeping it target-scoped avoids pulling a tokio socket transport into wasm builds.
-[target.'cfg(not(target_family = "wasm"))'.dependencies]
-tokio-tungstenite = { workspace = true, optional = true }
-
 # futures-timer's default backend uses a background timer thread, which cannot
 # drive timers on wasm. Pull in its wasm-bindgen (setTimeout) backend whenever
 # the target is browser wasm — regardless of feature flags — so
@@ -119,19 +114,8 @@ reqwest = [
   "reqwest/http2",
   "reqwest/system-proxy",
 ]
-websocket = ["websocket-rustls"]
-websocket-rustls = [
-  "dep:tokio-tungstenite",
-  "tokio-tungstenite/connect",
-  "rustls",
-]
-websocket-native-tls = [
-  "dep:tokio-tungstenite",
-  "tokio-tungstenite/connect",
-  "native-tls",
-]
-rustls = ["reqwest/rustls", "tokio-tungstenite?/rustls-tls-webpki-roots"]
-native-tls = ["reqwest/native-tls", "tokio-tungstenite?/native-tls"]
+rustls = ["reqwest/rustls"]
+native-tls = ["reqwest/native-tls"]
 reqwest-middleware = ["reqwest-middleware-rustls"]
 reqwest-middleware-rustls = ["dep:reqwest-middleware", "rustls", "reqwest-middleware/rustls"]
 reqwest-middleware-native-tls = ["dep:reqwest-middleware", "native-tls"]
