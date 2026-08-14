@@ -2277,6 +2277,7 @@ mod migrated_tests {
             total_tokens: input_tokens + output_tokens,
             cached_input_tokens: 0,
             cache_creation_input_tokens: 0,
+            cache_creation_1h_input_tokens: 0,
             tool_use_prompt_tokens: 0,
             reasoning_tokens: 0,
         }
@@ -3127,7 +3128,7 @@ mod migrated_tests {
                     "output_tokens": 4,
                     "total_tokens": 7,
                     "cached_input_tokens": 0,
-                    "cache_creation_input_tokens": 0,
+                    "cache_creation_input_tokens": 0,"cache_creation_1h_input_tokens": 0,
                     "tool_use_prompt_tokens": 0,
                     "reasoning_tokens": 0,
                 }
@@ -3159,7 +3160,7 @@ mod migrated_tests {
                     "output_tokens": 0,
                     "total_tokens": 0,
                     "cached_input_tokens": 0,
-                    "cache_creation_input_tokens": 0,
+                    "cache_creation_input_tokens": 0,"cache_creation_1h_input_tokens": 0,
                     "tool_use_prompt_tokens": 0,
                     "reasoning_tokens": 0,
                 }
@@ -3210,7 +3211,7 @@ mod migrated_tests {
                         "output_tokens": 0,
                         "total_tokens": 0,
                         "cached_input_tokens": 0,
-                        "cache_creation_input_tokens": 0,
+                        "cache_creation_input_tokens": 0,"cache_creation_1h_input_tokens": 0,
                         "tool_use_prompt_tokens": 0,
                         "reasoning_tokens": 0,
                     }
@@ -3222,7 +3223,7 @@ mod migrated_tests {
                         "output_tokens": 4,
                         "total_tokens": 7,
                         "cached_input_tokens": 0,
-                        "cache_creation_input_tokens": 0,
+                        "cache_creation_input_tokens": 0,"cache_creation_1h_input_tokens": 0,
                         "tool_use_prompt_tokens": 0,
                         "reasoning_tokens": 0,
                     }
@@ -6079,6 +6080,7 @@ mod migrated_tests {
                 total_tokens: 42,
                 cached_input_tokens: 0,
                 cache_creation_input_tokens: 0,
+                cache_creation_1h_input_tokens: 0,
                 tool_use_prompt_tokens: 0,
                 reasoning_tokens: 0,
             }

@@ -88,3 +88,58 @@
 pub mod anthropic;
 pub mod openai;
 pub mod internal;
+
+use crate::completion::{CompletionError, Message};
+
+/// Validate that every tool result in a conversation history answers a tool
+/// call that appears earlier in the same history.
+///
+/// Both Anthropic and OpenAI reject (or silently mishandle) a request whose
+/// history carries a tool result whose correlation key matches no prior
+/// assistant tool call. Failing here at the request-conversion boundary —
+/// naming the unmatched result id and its history index — is the loud
+/// alternative to forwarding the orphan and letting the provider 400 (or
+/// worse, attribute the result to the wrong call).
+///
+/// `call_key`/`result_key` extract the provider's correlation key: Anthropic
+/// correlates on the rig-level `id`; the OpenAI paths prefer the
+/// provider-issued `call_id` when it differs.
+pub(crate) fn validate_tool_result_correlation(
+    history: &[Message],
+    call_key: impl Fn(&crate::message::ToolCall) -> &str,
+    result_key: impl Fn(&crate::message::ToolResult) -> &str,
+) -> Result<(), CompletionError> {
+    let mut seen_call_ids = std::collections::HashSet::new();
+
+    for (index, message) in history.iter().enumerate() {
+        match message {
+            Message::Assistant { content, .. } => {
+                for item in content.iter() {
+                    if let crate::message::AssistantContent::ToolCall(call) = item {
+                        seen_call_ids.insert(call_key(call).to_owned());
+                    }
+                }
+            }
+            Message::User { content, .. } => {
+                for item in content.iter() {
+                    let crate::message::UserContent::ToolResult(result) = item else {
+                        continue;
+                    };
+                    let result_id = result_key(result);
+                    if !seen_call_ids.contains(result_id) {
+                        return Err(CompletionError::RequestError(
+                            format!(
+                                "tool result \"{result_id}\" has no matching tool call in the \
+                                 conversation history (tool result at history index {index})"
+                            )
+                            .into(),
+                        ));
+                    }
+                }
+            }
+            Message::System { .. } => {}
+        }
+    }
+
+    Ok(())
+}

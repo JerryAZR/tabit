@@ -1603,6 +1603,16 @@ impl TryFrom<OpenAIRequestParams> for CompletionRequest {
         } = params;
         let chat_history = req.chat_history_with_documents();
 
+        // An orphan tool result (no prior assistant tool call carrying the
+        // same correlation key) is rejected up front: OpenAI would 400 on it,
+        // and the alternative — forwarding it — risks attributing the result
+        // to the wrong call. Fail loud, at the conversion boundary.
+        crate::providers::validate_tool_result_correlation(&chat_history, |call| {
+            call.call_id.as_deref().unwrap_or(call.id.as_str())
+        }, |result| {
+            result.call_id.as_deref().unwrap_or(result.id.as_str())
+        })?;
+
         let CoreCompletionRequest {
             model: request_model,
             preamble,
@@ -2015,9 +2025,22 @@ mod tests {
         CoreCompletionRequest {
             model: None,
             preamble: None,
-            chat_history: OneOrMany::one(message::Message::User {
-                content: OneOrMany::one(message::UserContent::ToolResult(tool_result)),
-            }),
+            // The assistant turn that produced the call must precede its
+            // result: the conversion layer rejects orphan tool results.
+            chat_history: OneOrMany::many(vec![
+                message::Message::Assistant {
+                    id: None,
+                    content: OneOrMany::one(message::AssistantContent::tool_call(
+                        "call-id",
+                        "report",
+                        serde_json::json!({}),
+                    )),
+                },
+                message::Message::User {
+                    content: OneOrMany::one(message::UserContent::ToolResult(tool_result)),
+                },
+            ])
+            .expect("history should be non-empty"),
             documents: vec![],
             tools: vec![],
             temperature: None,
@@ -2111,24 +2134,28 @@ mod tests {
 
         let wire = serde_json::to_value(&request.messages).expect("messages should serialize");
 
+        // The correlated assistant tool-call turn precedes the result on the
+        // wire; the tool message itself is what this test pins.
+        let serde_json::Value::Array(messages) = wire else {
+            panic!("messages should serialize to an array");
+        };
+        assert_eq!(messages.len(), 2);
         assert_eq!(
-            wire,
-            serde_json::json!([
-                {
-                    "role": "tool",
-                    "tool_call_id": "call-id",
-                    "content": [
-                        {
-                            "type": "text",
-                            "text": "first"
-                        },
-                        {
-                            "type": "text",
-                            "text": "second"
-                        }
-                    ]
-                }
-            ])
+            messages[1],
+            serde_json::json!({
+                "role": "tool",
+                "tool_call_id": "call-id",
+                "content": [
+                    {
+                        "type": "text",
+                        "text": "first"
+                    },
+                    {
+                        "type": "text",
+                        "text": "second"
+                    }
+                ]
+            })
         );
     }
 
@@ -2146,15 +2173,71 @@ mod tests {
 
         let wire = serde_json::to_value(&request.messages).expect("messages should serialize");
 
+        // The correlated assistant tool-call turn precedes the result on the
+        // wire; the tool message itself is what this test pins.
+        let serde_json::Value::Array(messages) = wire else {
+            panic!("messages should serialize to an array");
+        };
+        assert_eq!(messages.len(), 2);
         assert_eq!(
-            wire,
-            serde_json::json!([
-                {
-                    "role": "tool",
-                    "tool_call_id": "call-id",
-                    "content": "first\nsecond"
-                }
+            messages[1],
+            serde_json::json!({
+                "role": "tool",
+                "tool_call_id": "call-id",
+                "content": "first\nsecond"
+            })
+        );
+    }
+
+    /// A tool result whose correlation key matches no prior assistant tool
+    /// call is an orphan: the conversion fails loudly, naming the id and the
+    /// history index, instead of forwarding a request OpenAI would reject.
+    #[test]
+    fn orphan_tool_result_history_fails_request_conversion() {
+        let request = CoreCompletionRequest {
+            model: None,
+            preamble: None,
+            chat_history: OneOrMany::many(vec![
+                message::Message::user("Run the report."),
+                message::Message::User {
+                    content: OneOrMany::one(message::UserContent::ToolResult(
+                        message::ToolResult {
+                            id: "result-id".to_string(),
+                            call_id: Some("call-orphan".to_string()),
+                            content: OneOrMany::one(message::ToolResultContent::text("output")),
+                        },
+                    )),
+                },
             ])
+            .expect("history should be non-empty"),
+            documents: vec![],
+            tools: vec![],
+            temperature: None,
+            max_tokens: None,
+            tool_choice: None,
+            additional_params: None,
+            output_schema: None,
+            record_telemetry_content: false,
+        };
+
+        let error = CompletionRequest::try_from(OpenAIRequestParams {
+            model: "gpt-4o-mini".to_string(),
+            request,
+            strict_tools: false,
+            tool_result_array_content: false,
+            supports_response_format: true,
+            supports_tools: true,
+        })
+        .expect_err("an orphan tool result must fail request conversion");
+        assert!(
+            error.to_string().contains(
+                "tool result \"call-orphan\" has no matching tool call in the conversation history"
+            ),
+            "unexpected error: {error}"
+        );
+        assert!(
+            error.to_string().contains("history index 1"),
+            "the error must name the message index: {error}"
         );
     }
 

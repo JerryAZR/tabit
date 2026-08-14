@@ -488,10 +488,18 @@ pub struct Usage {
     pub output_tokens: u64,
     /// We store this separately as some providers may only report one number
     pub total_tokens: u64,
-    /// The number of input tokens read from a provider-managed cache
+    /// The number of input tokens written to a provider-managed cache
     pub cached_input_tokens: u64,
     /// The number of input tokens written to a provider-managed cache
     pub cache_creation_input_tokens: u64,
+    /// The number of input tokens written to a *1-hour* cache entry
+    /// (Anthropic's `cache_creation.ephemeral_1h_input_tokens`).
+    /// `cache_creation_input_tokens` remains the all-TTL aggregate — the 1h
+    /// figure is a breakdown of it, not an addition to it, so it is carried
+    /// for accounting and excluded from `total_tokens` (which would otherwise
+    /// double-count).
+    #[serde(default)]
+    pub cache_creation_1h_input_tokens: u64,
     /// The number of tool-use prompt tokens used in a given request.
     #[serde(default)]
     pub tool_use_prompt_tokens: u64,
@@ -509,6 +517,7 @@ impl Usage {
             total_tokens: 0,
             cached_input_tokens: 0,
             cache_creation_input_tokens: 0,
+            cache_creation_1h_input_tokens: 0,
             tool_use_prompt_tokens: 0,
             reasoning_tokens: 0,
         }
@@ -540,6 +549,8 @@ impl Add for Usage {
             cached_input_tokens: self.cached_input_tokens + other.cached_input_tokens,
             cache_creation_input_tokens: self.cache_creation_input_tokens
                 + other.cache_creation_input_tokens,
+            cache_creation_1h_input_tokens: self.cache_creation_1h_input_tokens
+                + other.cache_creation_1h_input_tokens,
             tool_use_prompt_tokens: self.tool_use_prompt_tokens + other.tool_use_prompt_tokens,
             reasoning_tokens: self.reasoning_tokens + other.reasoning_tokens,
         }
@@ -553,6 +564,7 @@ impl AddAssign for Usage {
         self.total_tokens += other.total_tokens;
         self.cached_input_tokens += other.cached_input_tokens;
         self.cache_creation_input_tokens += other.cache_creation_input_tokens;
+        self.cache_creation_1h_input_tokens += other.cache_creation_1h_input_tokens;
         self.tool_use_prompt_tokens += other.tool_use_prompt_tokens;
         self.reasoning_tokens += other.reasoning_tokens;
     }
@@ -1187,6 +1199,7 @@ mod tests {
                 total_tokens: 5,
                 cached_input_tokens: 1,
                 cache_creation_input_tokens: 0,
+                cache_creation_1h_input_tokens: 0,
                 tool_use_prompt_tokens: 0,
                 reasoning_tokens: 1,
             },

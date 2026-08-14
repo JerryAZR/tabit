@@ -6,8 +6,8 @@ use tracing::{Level, enabled};
 use tracing_futures::Instrument;
 
 use super::completion::{
-    AnthropicCompatibleProvider, AnthropicCompletionRequest, AnthropicRequestParams, CacheTtl,
-    Content, GenericCompletionModel, Usage, map_finish_reason,
+    AnthropicCompatibleProvider, AnthropicCompletionRequest, AnthropicRequestParams, CacheCreationDetail,
+    CacheTtl, Content, GenericCompletionModel, Usage, map_finish_reason,
 };
 use crate::completion::{CompletionError, CompletionRequest};
 use crate::http_client::sse::{Event, GenericEventSource};
@@ -175,6 +175,20 @@ pub enum ContentDelta {
     Unknown(serde_json::Value),
 }
 
+impl ContentDelta {
+    /// The delta's `type` tag on the wire, for guard and warn messages.
+    fn wire_tag(&self) -> &'static str {
+        match self {
+            Self::TextDelta { .. } => "text_delta",
+            Self::InputJsonDelta { .. } => "input_json_delta",
+            Self::ThinkingDelta { .. } => "thinking_delta",
+            Self::SignatureDelta { .. } => "signature_delta",
+            Self::CitationsDelta { .. } => "citations_delta",
+            Self::Unknown(_) => "unknown",
+        }
+    }
+}
+
 /// Hand-written tag dispatch instead of a trailing `#[serde(untagged)]`
 /// variant: on an internally-tagged enum the untagged fallback also swallows
 /// a *known* tag with an invalid payload, silently demoting a data-level
@@ -263,6 +277,11 @@ pub struct PartialUsage {
     pub cache_creation_input_tokens: Option<u64>,
     #[serde(default)]
     pub cache_read_input_tokens: Option<u64>,
+    /// TTL breakdown of `cache_creation_input_tokens` (Anthropic reports it
+    /// on `message_start`'s usage; `message_delta`'s carries only the
+    /// aggregate). Absent on the wire decodes to `None`.
+    #[serde(default)]
+    pub cache_creation: Option<super::completion::CacheCreationDetail>,
 }
 
 impl From<&PartialUsage> for crate::completion::Usage {
@@ -273,6 +292,13 @@ impl From<&PartialUsage> for crate::completion::Usage {
         usage.output_tokens = value.output_tokens as u64;
         usage.cached_input_tokens = value.cache_read_input_tokens.unwrap_or(0);
         usage.cache_creation_input_tokens = value.cache_creation_input_tokens.unwrap_or(0);
+        // The 1h figure is a breakdown of `cache_creation_input_tokens`, not
+        // an addition to it: carried for accounting, excluded from the total.
+        usage.cache_creation_1h_input_tokens = value
+            .cache_creation
+            .as_ref()
+            .and_then(|detail| detail.ephemeral_1h_input_tokens)
+            .unwrap_or(0);
         usage.total_tokens = usage.input_tokens
             + usage.cached_input_tokens
             + usage.cache_creation_input_tokens
@@ -296,6 +322,49 @@ struct ServerToolUseState {
     id: String,
     initial_input: Value,
     input_json: String,
+}
+
+/// The open content block at one stream index, keyed by the wire's
+/// `content_block_*` `index` (the same keying as the OpenAI Responses
+/// adapter's `output_index` slots).
+///
+/// Anthropic's stream is sequential in practice (a block's `content_block_start`
+/// … `content_block_stop` never overlap another's), but the wire format is
+/// indexed, not ordered: every delta and stop names the block it belongs to.
+/// Routing each block's fragments to *that block's* state — instead of a
+/// single "the open block" slot — makes interleaved blocks (a hypothetical
+/// future, or an Anthropic-compatible relay) assemble correctly instead of
+/// silently dropping text or merging two tool calls' arguments.
+enum OpenBlock {
+    /// A text block. No per-delta assembly state: text deltas emit directly
+    /// and citations ride the start/stop events.
+    Text,
+    /// A client tool-use block. Assembly of the `input_json_delta` fragments
+    /// lives in the shared accumulator; the adapter routes each fragment by
+    /// this block's own wire id.
+    ClientToolUse { id: String },
+    /// An Anthropic-hosted (server) tool-use block assembling raw metadata.
+    ServerToolUse(ServerToolUseState),
+    /// An extended-thinking block accumulating its text and signature.
+    Thinking(ThinkingState),
+    /// Blocks with no per-delta state (raw server-tool result blocks,
+    /// redacted thinking, and content types without special handling):
+    /// registered so the open-block bookkeeping stays honest, inert
+    /// otherwise.
+    Opaque,
+}
+
+impl OpenBlock {
+    /// This block's wire kind, for guard messages.
+    fn kind(&self) -> &'static str {
+        match self {
+            Self::Text => "text",
+            Self::ClientToolUse { .. } => "tool_use",
+            Self::ServerToolUse(_) => "server_tool_use",
+            Self::Thinking(_) => "thinking",
+            Self::Opaque => "opaque",
+        }
+    }
 }
 
 #[derive(Default)]
@@ -329,23 +398,34 @@ impl ThinkingState {
 
 /// The Anthropic Messages SSE wire as a [`WireAdapter`].
 ///
-/// Holds the per-stream assembly state (open tool call, server tool uses,
-/// open thinking block, terminal metadata); frame-triage policy lives in
+/// Holds the per-stream assembly state (per-index open content blocks,
+/// terminal metadata); frame-triage policy lives in
 /// [`run_wire_stream`](crate::providers::internal::adapter::run_wire_stream),
 /// not here.
 #[derive(Default)]
 struct AnthropicAdapter {
-    /// Wire id of the open client tool-use block, when one is streaming.
-    current_tool_call: Option<String>,
-    server_tool_uses: HashMap<usize, ServerToolUseState>,
-    current_thinking: Option<ThinkingState>,
+    /// The stream's open content blocks, keyed by the wire's block `index`.
+    open_blocks: HashMap<usize, OpenBlock>,
+    /// `input_tokens` captured from `message_start`; the terminal
+    /// `message_delta` usage omits it.
     input_tokens: u64,
+    /// The `cache_creation` TTL breakdown captured from `message_start`'s
+    /// usage (the terminal `message_delta` carries only the aggregate).
+    start_cache_creation: Option<CacheCreationDetail>,
     message_id: Option<String>,
     response_model: Option<String>,
-    /// A provider `error` event ended the turn; later frames are dead — the
-    /// provider aborted, and interpreting more output (or a terminal) would
-    /// dress the failure up as a completed turn.
+    /// The wire ended in a failure this adapter consumed: either a provider
+    /// `error` event or an interleave-guard violation. Later frames are
+    /// dead — interpreting more output (or a terminal) would dress the
+    /// failure up as a completed turn.
     failed: bool,
+}
+
+/// An interleave/protocol guard violation: a content-block event sequence
+/// the per-index routing cannot make sense of. Surfaced as an external
+/// (provider wire) error naming the index and the event; the stream fails.
+fn malformed_stream(message: impl std::fmt::Display) -> CompletionError {
+    CompletionError::ProviderError(format!("malformed stream: {message}"))
 }
 
 impl WireAdapter for AnthropicAdapter {
@@ -370,6 +450,7 @@ impl WireAdapter for AnthropicAdapter {
                 // body is a no-op, not an error.
                 let Some(message) = message else { return };
                 self.input_tokens = message.usage.input_tokens;
+                self.start_cache_creation = message.usage.cache_creation.clone();
                 self.message_id = Some(message.id.clone());
                 self.response_model = Some(message.model.clone());
 
@@ -392,6 +473,12 @@ impl WireAdapter for AnthropicAdapter {
                     input_tokens: usize::try_from(self.input_tokens).ok(),
                     cache_creation_input_tokens: usage.cache_creation_input_tokens,
                     cache_read_input_tokens: usage.cache_read_input_tokens,
+                    // The TTL breakdown rides `message_start`'s usage; fall
+                    // back to it when the terminal event repeats it.
+                    cache_creation: usage
+                        .cache_creation
+                        .clone()
+                        .or_else(|| self.start_cache_creation.clone()),
                 };
 
                 let span = tracing::Span::current();
@@ -422,12 +509,7 @@ impl WireAdapter for AnthropicAdapter {
             _ => {}
         }
 
-        if let Some(result) = handle_event(
-            &event,
-            &mut self.current_tool_call,
-            &mut self.server_tool_uses,
-            &mut self.current_thinking,
-        ) {
+        if let Some(result) = self.handle_content_event(&event) {
             out.push(result);
         }
     }
@@ -590,209 +672,302 @@ where
     }
 }
 
-fn handle_event(
-    event: &StreamingEvent,
-    current_tool_call: &mut Option<String>,
-    server_tool_uses: &mut HashMap<usize, ServerToolUseState>,
-    current_thinking: &mut Option<ThinkingState>,
-) -> Option<Result<RawStreamingChoice<StreamingCompletionResponse>, CompletionError>> {
-    match event {
-        StreamingEvent::ContentBlockDelta { index, delta } => match delta {
-            ContentDelta::TextDelta { text } => {
-                if current_tool_call.is_none() {
-                    return Some(Ok(RawStreamingChoice::Message(text.clone())));
-                }
-                None
-            }
-            ContentDelta::InputJsonDelta { partial_json } => {
-                if let Some(server_tool_use) = server_tool_uses.get_mut(index) {
-                    server_tool_use.input_json.push_str(partial_json);
+impl AnthropicAdapter {
+    /// Record an interleave/protocol guard violation: surface it as an
+    /// external malformed-stream error and end the turn — the wire violated
+    /// its own block protocol, so later frames must not dress the failure
+    /// up as a completed turn.
+    fn fail_malformed(
+        &mut self,
+        message: impl std::fmt::Display,
+    ) -> Option<Result<RawStreamingChoice<StreamingCompletionResponse>, CompletionError>> {
+        self.failed = true;
+        Some(Err(malformed_stream(message)))
+    }
+
+    /// Interpret one content-block event against the per-index open-block
+    /// state, with an interleave GUARD for sequences the routing cannot make
+    /// sense of.
+    ///
+    /// Guarded violations (each fails the stream — see [`malformed_stream`]):
+    ///
+    /// - a `content_block_delta` for an index with no open block;
+    /// - a `content_block_stop` for a non-open index;
+    /// - a second `content_block_start` for an already-open index;
+    /// - a delta whose kind does not match the open block's kind where the
+    ///   delta carries per-block state (`input_json_delta` off a tool block,
+    ///   `thinking_delta`/`signature_delta` off a thinking block).
+    ///
+    /// Sequential streams — all real Anthropic traffic — never trip these:
+    /// every block is started before its deltas, stopped once, and its delta
+    /// kinds match its block kind.
+    fn handle_content_event(
+        &mut self,
+        event: &StreamingEvent,
+    ) -> Option<Result<RawStreamingChoice<StreamingCompletionResponse>, CompletionError>> {
+        match event {
+            StreamingEvent::ContentBlockDelta { index, delta } => {
+                // Forward-compat carve-out FIRST: a novel nested delta type is
+                // a warned no-op regardless of block state — Anthropic
+                // reserves the right to add delta types without notice, so
+                // one must not fail a stream whose blocks it precedes.
+                if let ContentDelta::Unknown(value) = delta {
+                    // Structural metadata only: a novel delta type can carry
+                    // model output, which must not leak into production WARN
+                    // logs (same policy as the adapter's unknown-event warn).
+                    tracing::warn!(
+                        delta_type = value.get("type").and_then(serde_json::Value::as_str),
+                        "skipping unrecognized Anthropic content delta type"
+                    );
                     return None;
                 }
 
-                if let Some(id) = current_tool_call {
-                    // Emit the delta so UI can show progress; the shared
-                    // accumulator assembles the fragments.
-                    return Some(Ok(RawStreamingChoice::ToolCallDelta {
-                        id: PartId::wire(id.clone()),
-                        content: ToolCallDeltaContent::Delta(partial_json.clone()),
-                    }));
-                }
-                None
-            }
-            ContentDelta::ThinkingDelta { thinking } => {
-                current_thinking
-                    .get_or_insert_with(ThinkingState::default)
-                    .thinking
-                    .push_str(thinking);
-
-                Some(Ok(RawStreamingChoice::ReasoningDelta {
-                    // Anthropic has no reasoning item id; the content-block
-                    // index is stable across a block's deltas and its stop.
-                    id: MintKind::Block.for_wire_index(*index as u64),
-                    reasoning: thinking.clone(),
-                }))
-            }
-            ContentDelta::SignatureDelta { signature } => {
-                current_thinking
-                    .get_or_insert_with(ThinkingState::default)
-                    .signature
-                    .push_str(signature);
-
-                // Wire quirk: the signature is not emitted as its own chunk —
-                // it closes the thinking block, riding on the completed
-                // `Reasoning` the `content_block_stop` restatement emits.
-                None
-            }
-            ContentDelta::CitationsDelta { citation } => {
-                Some(Ok(RawStreamingChoice::TextAdditionalParams(json!({
-                    "citations": [citation]
-                }))))
-            }
-            ContentDelta::Unknown(value) => {
-                // Structural metadata only: a novel delta type can carry
-                // model output, which must not leak into production WARN
-                // logs (same policy as the adapter's unknown-event warn).
-                tracing::warn!(
-                    delta_type = value.get("type").and_then(serde_json::Value::as_str),
-                    "skipping unrecognized Anthropic content delta type"
-                );
-                None
-            }
-        },
-        StreamingEvent::ContentBlockStart {
-            index,
-            content_block,
-        } => match content_block {
-            Content::Text { citations, .. } => {
-                let additional_params = (!citations.is_empty()).then(|| {
-                    json!({
-                        "citations": citations
-                    })
-                });
-                Some(Ok(RawStreamingChoice::TextStart {
-                    // Anthropic has no text item id; the content-block index
-                    // is stable for the block's lifetime.
-                    id: MintKind::Block.for_wire_index(*index as u64),
-                    additional_params,
-                }))
-            }
-            Content::ServerToolUse { id, name, input } => {
-                server_tool_uses.insert(
-                    *index,
-                    ServerToolUseState {
-                        name: name.clone(),
-                        id: id.clone(),
-                        initial_input: input.clone(),
-                        input_json: String::new(),
-                    },
-                );
-                None
-            }
-            raw @ (Content::WebSearchToolResult { .. }
-            | Content::CodeExecutionToolResult { .. }) => Some(Ok(RawStreamingChoice::TextStart {
-                id: MintKind::Block.for_wire_index(*index as u64),
-                additional_params: Some(json!({
-                    super::completion::ANTHROPIC_RAW_CONTENT_KEY: raw
-                })),
-            })),
-            Content::ToolUse { id, name, .. } => {
-                *current_tool_call = Some(id.clone());
-                Some(Ok(RawStreamingChoice::ToolCallDelta {
-                    id: PartId::wire(id.clone()),
-                    content: ToolCallDeltaContent::Name(name.clone()),
-                }))
-            }
-            Content::Thinking {
-                thinking,
-                signature,
-            } => {
-                // `content_block_start` opens the block with its initial
-                // payload; the old `..` discarded both fields. Adaptive
-                // thinking opens with an empty `thinking`, emits no
-                // `thinking_delta` at all, and delivers the whole signature
-                // by `signature_delta` — so the block's only content is a
-                // signature, which `content_block_stop` must still restate.
-                *current_thinking = Some(ThinkingState {
-                    thinking: thinking.clone(),
-                    signature: String::new(),
-                    initial_signature: signature.clone().unwrap_or_default(),
-                });
-                None
-            }
-            Content::RedactedThinking { data } => Some(Ok(RawStreamingChoice::Reasoning {
-                // Derive identity from the content-block index (no wire id).
-                id: MintKind::Block.for_wire_index(*index as u64),
-                content: ReasoningContent::Redacted { data: data.clone() },
-            })),
-            // Handle other content types - they don't need special handling
-            _ => None,
-        },
-        StreamingEvent::ContentBlockStop { index } => {
-            // Drop only a wholly empty block. A signature-only thinking block
-            // (empty text, complete signature) is the adaptive-thinking wire
-            // shape, and its signature is replay-required provider state that
-            // Anthropic accepts back verbatim (the paired non-streaming
-            // cassette replays that exact empty-text signed block). The
-            // non-streaming path has never gated on text, so gating here was
-            // a unary/streaming divergence that silently dropped the
-            // signature.
-            if let Some(thinking_state) = Option::take(current_thinking) {
-                let (text, signature) = thinking_state.into_parts();
-
-                if !(text.is_empty() && signature.is_none()) {
-                    return Some(Ok(RawStreamingChoice::Reasoning {
-                        // Same block index as this block's ThinkingDeltas, so
-                        // the full block supersedes the accumulated deltas.
-                        id: MintKind::Block.for_wire_index(*index as u64),
-                        content: ReasoningContent::Text { text, signature },
-                    }));
-                }
-            }
-
-            if let Some(server_tool_use) = server_tool_uses.remove(index) {
-                let input = if server_tool_use.input_json.is_empty() {
-                    if server_tool_use.initial_input.is_null() {
-                        json!({})
-                    } else {
-                        server_tool_use.initial_input
-                    }
-                } else {
-                    match serde_json::from_str(&server_tool_use.input_json) {
-                        Ok(json_value) => json_value,
-                        Err(e) => return Some(Err(CompletionError::from(e))),
-                    }
+                let index = *index;
+                let Some(block) = self.open_blocks.get_mut(&index) else {
+                    return self.fail_malformed(format!(
+                        "content_block_delta ({}) for index {index} has no open content block",
+                        delta.wire_tag()
+                    ));
                 };
 
-                return Some(Ok(RawStreamingChoice::TextStart {
-                    id: MintKind::Block.for_wire_index(*index as u64),
-                    additional_params: Some(json!({
-                        super::completion::ANTHROPIC_RAW_CONTENT_KEY: Content::ServerToolUse {
-                            id: server_tool_use.id,
-                            name: server_tool_use.name,
-                            input,
+                match delta {
+                    ContentDelta::TextDelta { text } => {
+                        // Routed to this block's own index: interleaved text
+                        // blocks stream alongside tool calls instead of being
+                        // dropped while one is open.
+                        Some(Ok(RawStreamingChoice::Message(text.clone())))
+                    }
+                    ContentDelta::InputJsonDelta { partial_json } => match block {
+                        OpenBlock::ServerToolUse(server_tool_use) => {
+                            server_tool_use.input_json.push_str(partial_json);
+                            None
                         }
-                    })),
-                }));
-            }
+                        OpenBlock::ClientToolUse { id } => {
+                            // Emit the delta so UI can show progress; the
+                            // shared accumulator assembles the fragments.
+                            Some(Ok(RawStreamingChoice::ToolCallDelta {
+                                id: PartId::wire(id.clone()),
+                                content: ToolCallDeltaContent::Delta(partial_json.clone()),
+                            }))
+                        }
+                        open => {
+                            let kind = open.kind();
+                            self.fail_malformed(format!(
+                                "content_block_delta (input_json_delta) for index {index} arrived \
+                                 for an open {kind} content block"
+                            ))
+                        }
+                    },
+                    ContentDelta::ThinkingDelta { thinking } => match block {
+                        OpenBlock::Thinking(state) => {
+                            state.thinking.push_str(thinking);
 
-            // `content_block_stop` promises a complete block: empty input
-            // finalizes to `{}`, malformed input surfaces as an error item
-            // (`UnparseableToolInput::Error`) in the accumulator.
-            Option::take(current_tool_call).map(|id| {
-                Ok(RawStreamingChoice::ToolInputEnd(ToolInputEnd::new(
-                    id,
-                    UnparseableToolInput::Error,
-                )))
-            })
+                            Some(Ok(RawStreamingChoice::ReasoningDelta {
+                                // Anthropic has no reasoning item id; the
+                                // content-block index is stable across a
+                                // block's deltas and its stop.
+                                id: MintKind::Block.for_wire_index(index as u64),
+                                reasoning: thinking.clone(),
+                            }))
+                        }
+                        open => {
+                            let kind = open.kind();
+                            self.fail_malformed(format!(
+                                "content_block_delta (thinking_delta) for index {index} arrived \
+                                 for an open {kind} content block"
+                            ))
+                        }
+                    },
+                    ContentDelta::SignatureDelta { signature } => match block {
+                        OpenBlock::Thinking(state) => {
+                            state.signature.push_str(signature);
+
+                            // Wire quirk: the signature is not emitted as its
+                            // own chunk — it closes the thinking block, riding
+                            // on the completed `Reasoning` the
+                            // `content_block_stop` restatement emits.
+                            None
+                        }
+                        open => {
+                            let kind = open.kind();
+                            self.fail_malformed(format!(
+                                "content_block_delta (signature_delta) for index {index} arrived \
+                                 for an open {kind} content block"
+                            ))
+                        }
+                    },
+                    ContentDelta::CitationsDelta { citation } => {
+                        Some(Ok(RawStreamingChoice::TextAdditionalParams(json!({
+                            "citations": [citation]
+                        }))))
+                    }
+                    ContentDelta::Unknown(_) => None,
+                }
+            }
+            StreamingEvent::ContentBlockStart {
+                index,
+                content_block,
+            } => {
+                if self.open_blocks.contains_key(index) {
+                    return self.fail_malformed(format!(
+                        "content_block_start for index {index}: that content block is already open"
+                    ));
+                }
+
+                match content_block {
+                    Content::Text { citations, .. } => {
+                        self.open_blocks.insert(*index, OpenBlock::Text);
+                        let additional_params = (!citations.is_empty()).then(|| {
+                            json!({
+                                "citations": citations
+                            })
+                        });
+                        Some(Ok(RawStreamingChoice::TextStart {
+                            // Anthropic has no text item id; the content-block
+                            // index is stable for the block's lifetime.
+                            id: MintKind::Block.for_wire_index(*index as u64),
+                            additional_params,
+                        }))
+                    }
+                    Content::ServerToolUse { id, name, input } => {
+                        self.open_blocks.insert(
+                            *index,
+                            OpenBlock::ServerToolUse(ServerToolUseState {
+                                name: name.clone(),
+                                id: id.clone(),
+                                initial_input: input.clone(),
+                                input_json: String::new(),
+                            }),
+                        );
+                        None
+                    }
+                    raw @ (Content::WebSearchToolResult { .. }
+                    | Content::CodeExecutionToolResult { .. }) => {
+                        self.open_blocks.insert(*index, OpenBlock::Opaque);
+                        Some(Ok(RawStreamingChoice::TextStart {
+                            id: MintKind::Block.for_wire_index(*index as u64),
+                            additional_params: Some(json!({
+                                super::completion::ANTHROPIC_RAW_CONTENT_KEY: raw
+                            })),
+                        }))
+                    }
+                    Content::ToolUse { id, name, .. } => {
+                        self.open_blocks
+                            .insert(*index, OpenBlock::ClientToolUse { id: id.clone() });
+                        Some(Ok(RawStreamingChoice::ToolCallDelta {
+                            id: PartId::wire(id.clone()),
+                            content: ToolCallDeltaContent::Name(name.clone()),
+                        }))
+                    }
+                    Content::Thinking {
+                        thinking,
+                        signature,
+                    } => {
+                        // `content_block_start` opens the block with its initial
+                        // payload; the old `..` discarded both fields. Adaptive
+                        // thinking opens with an empty `thinking`, emits no
+                        // `thinking_delta` at all, and delivers the whole signature
+                        // by `signature_delta` — so the block's only content is a
+                        // signature, which `content_block_stop` must still restate.
+                        self.open_blocks.insert(
+                            *index,
+                            OpenBlock::Thinking(ThinkingState {
+                                thinking: thinking.clone(),
+                                signature: String::new(),
+                                initial_signature: signature.clone().unwrap_or_default(),
+                            }),
+                        );
+                        None
+                    }
+                    Content::RedactedThinking { data } => {
+                        self.open_blocks.insert(*index, OpenBlock::Opaque);
+                        Some(Ok(RawStreamingChoice::Reasoning {
+                            // Derive identity from the content-block index (no wire id).
+                            id: MintKind::Block.for_wire_index(*index as u64),
+                            content: ReasoningContent::Redacted { data: data.clone() },
+                        }))
+                    }
+                    // Handle other content types - they don't need special handling
+                    _ => {
+                        self.open_blocks.insert(*index, OpenBlock::Opaque);
+                        None
+                    }
+                }
+            }
+            StreamingEvent::ContentBlockStop { index } => {
+                // Drop only a wholly empty block. A signature-only thinking block
+                // (empty text, complete signature) is the adaptive-thinking wire
+                // shape, and its signature is replay-required provider state that
+                // Anthropic accepts back verbatim (the paired non-streaming
+                // cassette replays that exact empty-text signed block). The
+                // non-streaming path has never gated on text, so gating here was
+                // a unary/streaming divergence that silently dropped the
+                // signature.
+                let Some(block) = self.open_blocks.remove(index) else {
+                    return self.fail_malformed(format!(
+                        "content_block_stop for index {index} has no open content block"
+                    ));
+                };
+
+                match block {
+                    OpenBlock::Thinking(thinking_state) => {
+                        let (text, signature) = thinking_state.into_parts();
+
+                        if !(text.is_empty() && signature.is_none()) {
+                            return Some(Ok(RawStreamingChoice::Reasoning {
+                                // Same block index as this block's ThinkingDeltas, so
+                                // the full block supersedes the accumulated deltas.
+                                id: MintKind::Block.for_wire_index(*index as u64),
+                                content: ReasoningContent::Text { text, signature },
+                            }));
+                        }
+                        None
+                    }
+                    OpenBlock::ServerToolUse(server_tool_use) => {
+                        let input = if server_tool_use.input_json.is_empty() {
+                            if server_tool_use.initial_input.is_null() {
+                                json!({})
+                            } else {
+                                server_tool_use.initial_input
+                            }
+                        } else {
+                            match serde_json::from_str(&server_tool_use.input_json) {
+                                Ok(json_value) => json_value,
+                                Err(e) => return Some(Err(CompletionError::from(e))),
+                            }
+                        };
+
+                        Some(Ok(RawStreamingChoice::TextStart {
+                            id: MintKind::Block.for_wire_index(*index as u64),
+                            additional_params: Some(json!({
+                                super::completion::ANTHROPIC_RAW_CONTENT_KEY: Content::ServerToolUse {
+                                    id: server_tool_use.id,
+                                    name: server_tool_use.name,
+                                    input,
+                                }
+                            })),
+                        }))
+                    }
+                    // `content_block_stop` promises a complete block: empty input
+                    // finalizes to `{}`, malformed input surfaces as an error item
+                    // (`UnparseableToolInput::Error`) in the accumulator.
+                    OpenBlock::ClientToolUse { id } => {
+                        Some(Ok(RawStreamingChoice::ToolInputEnd(ToolInputEnd::new(
+                            id,
+                            UnparseableToolInput::Error,
+                        ))))
+                    }
+                    OpenBlock::Text | OpenBlock::Opaque => None,
+                }
+            }
+            // Interpreted by the adapter (`message_start`/`message_delta`/the
+            // `error` envelope) or Known no-ops (`message_stop`, `ping`).
+            StreamingEvent::MessageStart { .. }
+            | StreamingEvent::MessageDelta { .. }
+            | StreamingEvent::MessageStop
+            | StreamingEvent::Ping
+            | StreamingEvent::Error { .. } => None,
         }
-        // Interpreted by the adapter (`message_start`/`message_delta`/the
-        // `error` envelope) or Known no-ops (`message_stop`, `ping`).
-        StreamingEvent::MessageStart { .. }
-        | StreamingEvent::MessageDelta { .. }
-        | StreamingEvent::MessageStop
-        | StreamingEvent::Ping
-        | StreamingEvent::Error { .. } => None,
     }
 }
 
@@ -1112,18 +1287,66 @@ mod tests {
         assert!(additional_params.get("cache_control").is_none());
     }
 
+    /// Drive one event through an adapter, mirroring the driver's interpret
+    /// step for a single content-block event.
     fn handle_event(
+        adapter: &mut AnthropicAdapter,
         event: &StreamingEvent,
-        current_tool_call: &mut Option<String>,
-        current_thinking: &mut Option<ThinkingState>,
     ) -> Option<Result<RawStreamingChoice<StreamingCompletionResponse>, CompletionError>> {
-        let mut server_tool_uses = HashMap::new();
-        super::handle_event(
-            event,
-            current_tool_call,
-            &mut server_tool_uses,
-            current_thinking,
-        )
+        adapter.handle_content_event(event)
+    }
+
+    /// Open a thinking block at `index` so its deltas have a block to route to.
+    fn open_thinking_block(adapter: &mut AnthropicAdapter, index: usize) {
+        let start = StreamingEvent::ContentBlockStart {
+            index,
+            content_block: Content::Thinking {
+                thinking: String::new(),
+                signature: None,
+            },
+        };
+        assert!(
+            handle_event(adapter, &start).is_none(),
+            "opening a thinking block emits nothing"
+        );
+    }
+
+    /// Open a text block at `index` so its deltas have a block to route to.
+    fn open_text_block(adapter: &mut AnthropicAdapter, index: usize) {
+        let start = StreamingEvent::ContentBlockStart {
+            index,
+            content_block: Content::Text {
+                text: String::new(),
+                citations: Vec::new(),
+                cache_control: None,
+            },
+        };
+        assert!(
+            handle_event(adapter, &start).is_some(),
+            "opening a text block emits a TextStart choice"
+        );
+    }
+
+    /// Open a client tool-use block at `index` so its deltas have a block to
+    /// route to.
+    fn open_tool_use_block(adapter: &mut AnthropicAdapter, index: usize, id: &str, name: &str) {
+        let start = StreamingEvent::ContentBlockStart {
+            index,
+            content_block: Content::ToolUse {
+                id: id.to_string(),
+                name: name.to_string(),
+                input: serde_json::Value::Null,
+            },
+        };
+        let Some(Ok(RawStreamingChoice::ToolCallDelta { content, .. })) =
+            handle_event(adapter, &start)
+        else {
+            panic!("opening a tool_use block must emit the name delta");
+        };
+        assert!(matches!(
+            content,
+            ToolCallDeltaContent::Name(n) if n == name
+        ));
     }
 
     #[test]
@@ -1215,9 +1438,9 @@ mod tests {
             },
         };
 
-        let mut tool_call_state = None;
-        let mut thinking_state = None;
-        let result = handle_event(&event, &mut tool_call_state, &mut thinking_state);
+        let mut adapter = AnthropicAdapter::default();
+        open_thinking_block(&mut adapter, 0);
+        let result = handle_event(&mut adapter, &event);
 
         assert!(result.is_some());
         let choice = result.unwrap().unwrap();
@@ -1230,9 +1453,11 @@ mod tests {
             _ => panic!("Expected ReasoningDelta choice"),
         }
 
-        // Verify thinking state was updated
-        assert!(thinking_state.is_some());
-        assert_eq!(thinking_state.unwrap().thinking, "Analyzing the request...");
+        // Verify the open block accumulated the thinking text.
+        assert!(matches!(
+            adapter.open_blocks.get(&0),
+            Some(OpenBlock::Thinking(state)) if state.thinking == "Analyzing the request..."
+        ));
     }
 
     #[test]
@@ -1244,16 +1469,17 @@ mod tests {
             },
         };
 
-        let mut tool_call_state = None;
-        let mut thinking_state = None;
-        let result = handle_event(&event, &mut tool_call_state, &mut thinking_state);
+        let mut adapter = AnthropicAdapter::default();
+        open_thinking_block(&mut adapter, 0);
 
         // SignatureDelta should not yield anything (returns None)
-        assert!(result.is_none());
+        assert!(handle_event(&mut adapter, &event).is_none());
 
-        // But signature should be captured in thinking state
-        assert!(thinking_state.is_some());
-        assert_eq!(thinking_state.unwrap().signature, "test_signature");
+        // But the open block's thinking state captured the signature
+        assert!(matches!(
+            adapter.open_blocks.get(&0),
+            Some(OpenBlock::Thinking(state)) if state.signature == "test_signature"
+        ));
     }
 
     #[test]
@@ -1264,9 +1490,8 @@ mod tests {
                 data: "redacted_blob".to_string(),
             },
         };
-        let mut tool_call_state = None;
-        let mut thinking_state = None;
-        let result = handle_event(&event, &mut tool_call_state, &mut thinking_state);
+        let mut adapter = AnthropicAdapter::default();
+        let result = handle_event(&mut adapter, &event);
 
         assert!(result.is_some());
         match result.unwrap().unwrap() {
@@ -1288,8 +1513,7 @@ mod tests {
     /// signature, and it must survive `content_block_stop`.
     #[test]
     fn signature_only_thinking_block_survives_content_block_stop() {
-        let mut tool_call_state = None;
-        let mut thinking_state = None;
+        let mut adapter = AnthropicAdapter::default();
 
         let start = StreamingEvent::ContentBlockStart {
             index: 0,
@@ -1298,7 +1522,7 @@ mod tests {
                 signature: Some(String::new()),
             },
         };
-        assert!(handle_event(&start, &mut tool_call_state, &mut thinking_state).is_none());
+        assert!(handle_event(&mut adapter, &start).is_none());
 
         let signature = StreamingEvent::ContentBlockDelta {
             index: 0,
@@ -1306,10 +1530,10 @@ mod tests {
                 signature: "the_whole_signature".to_string(),
             },
         };
-        assert!(handle_event(&signature, &mut tool_call_state, &mut thinking_state).is_none());
+        assert!(handle_event(&mut adapter, &signature).is_none());
 
         let stop = StreamingEvent::ContentBlockStop { index: 0 };
-        let result = handle_event(&stop, &mut tool_call_state, &mut thinking_state)
+        let result = handle_event(&mut adapter, &stop)
             .expect("signature-only thinking block must not be dropped")
             .expect("thinking block should not be an error");
 
@@ -1330,8 +1554,7 @@ mod tests {
     /// `content_block_start` and sends no `signature_delta` keeps it.
     #[test]
     fn signature_delivered_only_on_content_block_start_is_kept() {
-        let mut tool_call_state = None;
-        let mut thinking_state = None;
+        let mut adapter = AnthropicAdapter::default();
 
         let start = StreamingEvent::ContentBlockStart {
             index: 0,
@@ -1340,10 +1563,10 @@ mod tests {
                 signature: Some("up_front_signature".to_string()),
             },
         };
-        assert!(handle_event(&start, &mut tool_call_state, &mut thinking_state).is_none());
+        assert!(handle_event(&mut adapter, &start).is_none());
 
         let stop = StreamingEvent::ContentBlockStop { index: 0 };
-        match handle_event(&stop, &mut tool_call_state, &mut thinking_state)
+        match handle_event(&mut adapter, &stop)
             .expect("an up-front signature must not be dropped")
             .expect("thinking block should not be an error")
         {
@@ -1363,8 +1586,7 @@ mod tests {
     /// assembled, or the value replayed to Anthropic is corrupt.
     #[test]
     fn signature_deltas_supersede_the_opening_signature() {
-        let mut tool_call_state = None;
-        let mut thinking_state = None;
+        let mut adapter = AnthropicAdapter::default();
 
         let start = StreamingEvent::ContentBlockStart {
             index: 0,
@@ -1373,7 +1595,7 @@ mod tests {
                 signature: Some("opening".to_string()),
             },
         };
-        assert!(handle_event(&start, &mut tool_call_state, &mut thinking_state).is_none());
+        assert!(handle_event(&mut adapter, &start).is_none());
 
         for fragment in ["delta_", "assembled"] {
             let signature = StreamingEvent::ContentBlockDelta {
@@ -1382,11 +1604,11 @@ mod tests {
                     signature: fragment.to_string(),
                 },
             };
-            assert!(handle_event(&signature, &mut tool_call_state, &mut thinking_state).is_none());
+            assert!(handle_event(&mut adapter, &signature).is_none());
         }
 
         let stop = StreamingEvent::ContentBlockStop { index: 0 };
-        match handle_event(&stop, &mut tool_call_state, &mut thinking_state)
+        match handle_event(&mut adapter, &stop)
             .expect("thinking block should be restated")
             .expect("thinking block should not be an error")
         {
@@ -1402,8 +1624,7 @@ mod tests {
     /// would truncate the restatement the accumulator supersedes deltas with.
     #[test]
     fn thinking_block_start_text_seeds_the_restatement() {
-        let mut tool_call_state = None;
-        let mut thinking_state = None;
+        let mut adapter = AnthropicAdapter::default();
 
         let start = StreamingEvent::ContentBlockStart {
             index: 2,
@@ -1412,7 +1633,7 @@ mod tests {
                 signature: None,
             },
         };
-        assert!(handle_event(&start, &mut tool_call_state, &mut thinking_state).is_none());
+        assert!(handle_event(&mut adapter, &start).is_none());
 
         let delta = StreamingEvent::ContentBlockDelta {
             index: 2,
@@ -1420,10 +1641,10 @@ mod tests {
                 thinking: "rest".to_string(),
             },
         };
-        assert!(handle_event(&delta, &mut tool_call_state, &mut thinking_state).is_some());
+        assert!(handle_event(&mut adapter, &delta).is_some());
 
         let stop = StreamingEvent::ContentBlockStop { index: 2 };
-        match handle_event(&stop, &mut tool_call_state, &mut thinking_state)
+        match handle_event(&mut adapter, &stop)
             .expect("thinking block should be restated")
             .expect("thinking block should not be an error")
         {
@@ -1442,8 +1663,7 @@ mod tests {
     /// A block with neither text nor signature carries nothing to replay.
     #[test]
     fn wholly_empty_thinking_block_is_dropped() {
-        let mut tool_call_state = None;
-        let mut thinking_state = None;
+        let mut adapter = AnthropicAdapter::default();
 
         let start = StreamingEvent::ContentBlockStart {
             index: 0,
@@ -1452,10 +1672,10 @@ mod tests {
                 signature: None,
             },
         };
-        assert!(handle_event(&start, &mut tool_call_state, &mut thinking_state).is_none());
+        assert!(handle_event(&mut adapter, &start).is_none());
 
         let stop = StreamingEvent::ContentBlockStop { index: 0 };
-        assert!(handle_event(&stop, &mut tool_call_state, &mut thinking_state).is_none());
+        assert!(handle_event(&mut adapter, &stop).is_none());
     }
 
     #[test]
@@ -1467,9 +1687,9 @@ mod tests {
             },
         };
 
-        let mut tool_call_state = None;
-        let mut thinking_state = None;
-        let result = handle_event(&event, &mut tool_call_state, &mut thinking_state);
+        let mut adapter = AnthropicAdapter::default();
+        open_text_block(&mut adapter, 0);
+        let result = handle_event(&mut adapter, &event);
 
         assert!(result.is_some());
         let choice = result.unwrap().unwrap();
@@ -1493,9 +1713,8 @@ mod tests {
             },
         };
 
-        let mut tool_call_state = None;
-        let mut thinking_state = None;
-        let result = handle_event(&event, &mut tool_call_state, &mut thinking_state);
+        let mut adapter = AnthropicAdapter::default();
+        let result = handle_event(&mut adapter, &event);
 
         assert!(result.is_some());
         let choice = result.unwrap().unwrap();
@@ -1518,10 +1737,11 @@ mod tests {
             },
         };
 
-        let mut tool_call_state = Some("tool_123".to_string());
-        let mut thinking_state = None;
+        let mut adapter = AnthropicAdapter::default();
+        open_tool_use_block(&mut adapter, 1, "tool_123", "get_weather");
+        open_thinking_block(&mut adapter, 0);
 
-        let result = handle_event(&event, &mut tool_call_state, &mut thinking_state);
+        let result = handle_event(&mut adapter, &event);
 
         assert!(result.is_some());
         let choice = result.unwrap().unwrap();
@@ -1534,7 +1754,10 @@ mod tests {
         }
 
         // Tool call state should remain unchanged
-        assert!(tool_call_state.is_some());
+        assert!(
+            adapter.open_blocks.contains_key(&1),
+            "the interleaved tool block stays open"
+        );
     }
 
     #[test]
@@ -1546,10 +1769,10 @@ mod tests {
             },
         };
 
-        let mut tool_call_state = Some("tool_123".to_string());
-        let mut thinking_state = None;
+        let mut adapter = AnthropicAdapter::default();
+        open_tool_use_block(&mut adapter, 0, "tool_123", "get_weather");
 
-        let result = handle_event(&event, &mut tool_call_state, &mut thinking_state);
+        let result = handle_event(&mut adapter, &event);
 
         // Should emit a ToolCallDelta
         assert!(result.is_some());
@@ -1568,13 +1791,16 @@ mod tests {
 
         // The open block stays open; assembly of the fragment happens in the
         // shared accumulator.
-        assert!(tool_call_state.is_some());
+        assert!(
+            adapter.open_blocks.contains_key(&0),
+            "the tool block stays open while its input streams"
+        );
     }
 
     #[test]
     fn test_tool_call_accumulation_with_multiple_deltas() {
-        let mut tool_call_state = Some("tool_123".to_string());
-        let mut thinking_state = None;
+        let mut adapter = AnthropicAdapter::default();
+        open_tool_use_block(&mut adapter, 0, "tool_123", "get_weather");
 
         // First delta
         let event1 = StreamingEvent::ContentBlockDelta {
@@ -1583,7 +1809,7 @@ mod tests {
                 partial_json: "{\"location\":".to_string(),
             },
         };
-        let result1 = handle_event(&event1, &mut tool_call_state, &mut thinking_state);
+        let result1 = handle_event(&mut adapter, &event1);
         assert!(result1.is_some());
 
         // Second delta
@@ -1593,7 +1819,7 @@ mod tests {
                 partial_json: "\"Paris\",".to_string(),
             },
         };
-        let result2 = handle_event(&event2, &mut tool_call_state, &mut thinking_state);
+        let result2 = handle_event(&mut adapter, &event2);
         assert!(result2.is_some());
 
         // Third delta
@@ -1603,17 +1829,20 @@ mod tests {
                 partial_json: "\"temp\":\"20C\"}".to_string(),
             },
         };
-        let result3 = handle_event(&event3, &mut tool_call_state, &mut thinking_state);
+        let result3 = handle_event(&mut adapter, &event3);
         assert!(result3.is_some());
 
-        assert!(tool_call_state.is_some());
+        assert!(
+            adapter.open_blocks.contains_key(&0),
+            "the tool block stays open while its input streams"
+        );
 
         // Final ContentBlockStop hands the block to the shared accumulator,
         // which finalizes the assembled fragments (`Error` policy: a stopped
         // block promised complete input). End-to-end assembly of exactly this
         // fragment sequence is pinned in `streaming::parts` unit tests.
         let stop_event = StreamingEvent::ContentBlockStop { index: 0 };
-        let final_result = handle_event(&stop_event, &mut tool_call_state, &mut thinking_state);
+        let final_result = handle_event(&mut adapter, &stop_event);
         assert!(final_result.is_some());
 
         match final_result.unwrap().unwrap() {
@@ -1628,7 +1857,7 @@ mod tests {
         }
 
         // Tool call state should be taken
-        assert!(tool_call_state.is_none());
+        assert!(!adapter.open_blocks.contains_key(&0));
     }
 
     #[test]
@@ -1879,18 +2108,11 @@ mod tests {
             }
         }))
         .unwrap();
-        let mut tool_call_state = None;
-        let mut server_tool_uses = HashMap::new();
-        let mut thinking_state = None;
+        let mut adapter = AnthropicAdapter::default();
 
-        let choice = super::handle_event(
-            &event,
-            &mut tool_call_state,
-            &mut server_tool_uses,
-            &mut thinking_state,
-        )
-        .expect("code_execution_tool_result block should produce raw metadata")
-        .unwrap();
+        let choice = handle_event(&mut adapter, &event)
+            .expect("code_execution_tool_result block should produce raw metadata")
+            .unwrap();
 
         let RawStreamingChoice::TextStart {
             id,
@@ -1914,54 +2136,36 @@ mod tests {
     #[tokio::test]
     async fn test_streaming_web_search_blocks_are_preserved_on_final_choice() {
         let raw_stream = stream! {
-            let mut tool_call_state = None;
-            let mut server_tool_uses = HashMap::new();
-            let mut thinking_state = None;
+            let mut adapter = AnthropicAdapter::default();
 
-            let server_tool_use_start = super::handle_event(
-                &StreamingEvent::ContentBlockStart {
+            let server_tool_use_start = handle_event(&mut adapter, &StreamingEvent::ContentBlockStart {
                     index: 0,
                     content_block: Content::ServerToolUse {
                         id: "srvtoolu_01".to_string(),
                         name: "web_search".to_string(),
                         input: serde_json::Value::Null,
                     },
-                },
-                &mut tool_call_state,
-                &mut server_tool_uses,
-                &mut thinking_state,
-            );
+                });
             assert!(
                 server_tool_use_start.is_none(),
                 "server_tool_use start should be accumulated until its input JSON is complete"
             );
 
-            let server_tool_use_delta = super::handle_event(
-                &StreamingEvent::ContentBlockDelta {
+            let server_tool_use_delta = handle_event(&mut adapter, &StreamingEvent::ContentBlockDelta {
                     index: 0,
                     delta: ContentDelta::InputJsonDelta {
                         partial_json: r#"{"query":"claude shannon birth date"}"#.to_string(),
                     },
-                },
-                &mut tool_call_state,
-                &mut server_tool_uses,
-                &mut thinking_state,
-            );
+                });
             assert!(
                 server_tool_use_delta.is_none(),
                 "server_tool_use input JSON should not be emitted as a Rig tool-call delta"
             );
 
-            yield super::handle_event(
-                &StreamingEvent::ContentBlockStop { index: 0 },
-                &mut tool_call_state,
-                &mut server_tool_uses,
-                &mut thinking_state,
-            )
+            yield handle_event(&mut adapter, &StreamingEvent::ContentBlockStop { index: 0 })
             .expect("server_tool_use stop should produce completed raw metadata");
 
-            yield super::handle_event(
-                &StreamingEvent::ContentBlockStart {
+            yield handle_event(&mut adapter, &StreamingEvent::ContentBlockStart {
                     index: 1,
                     content_block: Content::WebSearchToolResult {
                         tool_use_id: "srvtoolu_01".to_string(),
@@ -1972,43 +2176,28 @@ mod tests {
                             "encrypted_content": "encrypted-content"
                         }]),
                     },
-                },
-                &mut tool_call_state,
-                &mut server_tool_uses,
-                &mut thinking_state,
-            )
+                })
             .expect("web_search_tool_result block should produce raw metadata");
 
-            yield super::handle_event(
-                &StreamingEvent::ContentBlockStart {
+            yield handle_event(&mut adapter, &StreamingEvent::ContentBlockStart {
                     index: 2,
                     content_block: Content::Text {
                         text: String::new(),
                         citations: Vec::new(),
                         cache_control: None,
                     },
-                },
-                &mut tool_call_state,
-                &mut server_tool_uses,
-                &mut thinking_state,
-            )
+                })
             .expect("text block start should produce a raw choice");
 
-            yield super::handle_event(
-                &StreamingEvent::ContentBlockDelta {
+            yield handle_event(&mut adapter, &StreamingEvent::ContentBlockDelta {
                     index: 2,
                     delta: ContentDelta::TextDelta {
                         text: "Claude Shannon was born on April 30, 1916.".to_string(),
                     },
-                },
-                &mut tool_call_state,
-                &mut server_tool_uses,
-                &mut thinking_state,
-            )
+                })
             .expect("text delta should produce a raw choice");
 
-            yield super::handle_event(
-                &StreamingEvent::ContentBlockDelta {
+            yield handle_event(&mut adapter, &StreamingEvent::ContentBlockDelta {
                     index: 2,
                     delta: ContentDelta::CitationsDelta {
                         citation: crate::providers::anthropic::completion::Citation::WebSearchResultLocation {
@@ -2018,11 +2207,7 @@ mod tests {
                             encrypted_index: "encrypted-index".to_string(),
                         },
                     },
-                },
-                &mut tool_call_state,
-                &mut server_tool_uses,
-                &mut thinking_state,
-            )
+                })
             .expect("citation delta should produce a raw choice");
 
             yield Ok(RawStreamingChoice::FinalResponse(StreamingCompletionResponse::default()));
@@ -2100,9 +2285,9 @@ mod tests {
             },
         };
 
-        let mut tool_call_state = None;
-        let mut thinking_state = None;
-        let result = handle_event(&event, &mut tool_call_state, &mut thinking_state);
+        let mut adapter = AnthropicAdapter::default();
+        open_text_block(&mut adapter, 0);
+        let result = handle_event(&mut adapter, &event);
 
         assert!(result.is_some());
         let choice = result.unwrap().unwrap();
@@ -2123,37 +2308,27 @@ mod tests {
         };
 
         let raw_stream = stream! {
-            let mut tool_call_state = None;
-            let mut thinking_state = None;
+            let mut adapter = AnthropicAdapter::default();
 
-            yield handle_event(
-                &StreamingEvent::ContentBlockStart {
+            yield handle_event(&mut adapter, &StreamingEvent::ContentBlockStart {
                     index: 0,
                     content_block: Content::Text {
                         text: String::new(),
                         citations: Vec::new(),
                         cache_control: None,
                     },
-                },
-                &mut tool_call_state,
-                &mut thinking_state,
-            )
+                })
             .expect("text block start should produce a raw choice");
 
-            yield handle_event(
-                &StreamingEvent::ContentBlockDelta {
+            yield handle_event(&mut adapter, &StreamingEvent::ContentBlockDelta {
                     index: 0,
                     delta: ContentDelta::TextDelta {
                         text: "the grass is green".to_string(),
                     },
-                },
-                &mut tool_call_state,
-                &mut thinking_state,
-            )
+                })
             .expect("text delta should produce a raw choice");
 
-            yield handle_event(
-                &StreamingEvent::ContentBlockDelta {
+            yield handle_event(&mut adapter, &StreamingEvent::ContentBlockDelta {
                     index: 0,
                     delta: ContentDelta::CitationsDelta {
                         citation: crate::providers::anthropic::completion::Citation::CharLocation {
@@ -2164,10 +2339,7 @@ mod tests {
                             end_char_index: 20,
                         },
                     },
-                },
-                &mut tool_call_state,
-                &mut thinking_state,
-            )
+                })
             .expect("citation delta should produce a raw choice");
 
             yield Ok(RawStreamingChoice::FinalResponse(StreamingCompletionResponse::default()));
@@ -2335,8 +2507,12 @@ mod tests {
                 usage: PartialUsage {
                     output_tokens: 5,
                     input_tokens: Some(3),
-                    cache_creation_input_tokens: None,
+                    cache_creation_input_tokens: Some(7),
                     cache_read_input_tokens: Some(2),
+                    cache_creation: Some(super::super::completion::CacheCreationDetail {
+                        ephemeral_5m_input_tokens: Some(3),
+                        ephemeral_1h_input_tokens: Some(4),
+                    }),
                 },
                 stop_reason: Some("max_tokens".to_string()),
                 message_id: Some("msg_1".to_string()),
@@ -2361,7 +2537,10 @@ mod tests {
         assert_eq!(terminal.usage.input_tokens, 3);
         assert_eq!(terminal.usage.output_tokens, 5);
         assert_eq!(terminal.usage.cached_input_tokens, 2);
-        assert_eq!(terminal.usage.total_tokens, 10);
+        assert_eq!(terminal.usage.cache_creation_input_tokens, 7);
+        assert_eq!(terminal.usage.cache_creation_1h_input_tokens, 4);
+        // The 1h figure is a breakdown of the aggregate, not an addition.
+        assert_eq!(terminal.usage.total_tokens, 17);
     }
 
     #[tokio::test]
@@ -2461,6 +2640,10 @@ mod tests {
             input_tokens: Some(3),
             cache_creation_input_tokens: Some(7),
             cache_read_input_tokens: Some(2),
+            cache_creation: Some(super::super::completion::CacheCreationDetail {
+                ephemeral_5m_input_tokens: Some(7),
+                ephemeral_1h_input_tokens: Some(0),
+            }),
         }
         .into();
 
@@ -2468,7 +2651,62 @@ mod tests {
         assert_eq!(usage.output_tokens, 5);
         assert_eq!(usage.cached_input_tokens, 2);
         assert_eq!(usage.cache_creation_input_tokens, 7);
+        assert_eq!(usage.cache_creation_1h_input_tokens, 0);
         assert_eq!(usage.total_tokens, 17);
+    }
+
+    /// `message_start` carries the TTL breakdown the terminal
+    /// `message_delta` omits: the adapter captures it there and threads it
+    /// onto the terminal record's usage.
+    #[tokio::test]
+    async fn message_start_cache_creation_breakdown_reaches_the_terminal_record() {
+        let adapter = AnthropicAdapter::default();
+        let frame = WireFrame::Text(
+            r#"{"type":"message_start","message":{"id":"msg_1","role":"assistant","content":[],"model":"claude-sonnet-4-6","stop_reason":null,"stop_sequence":null,"usage":{"input_tokens":4772,"output_tokens":1,"cache_creation":{"ephemeral_1h_input_tokens":9,"ephemeral_5m_input_tokens":11}}}}"#
+                .into(),
+        );
+        let crate::providers::internal::wire::WireEvent::Known(event) = adapter.classify(frame)
+        else {
+            panic!("message_start must classify as Known");
+        };
+
+        let mut adapter = AnthropicAdapter::default();
+        let mut out = Vec::new();
+        adapter.interpret(event, &mut out);
+        assert!(out.is_empty(), "message_start emits nothing by itself");
+
+        let terminal = WireFrame::Text(
+            r#"{"type":"message_delta","delta":{"stop_reason":"end_turn"},"usage":{"output_tokens":20,"cache_creation_input_tokens":20,"cache_read_input_tokens":0}}"#
+                .into(),
+        );
+        let crate::providers::internal::wire::WireEvent::Known(event) = adapter.classify(terminal)
+        else {
+            panic!("message_delta must classify as Known");
+        };
+        adapter.interpret(event, &mut out);
+
+        let Some(Ok(RawStreamingChoice::FinalResponse(response))) =
+            out.into_iter().next()
+        else {
+            panic!("a stop-bearing message_delta emits the terminal record");
+        };
+        assert_eq!(response.usage.cache_creation_input_tokens, Some(20));
+        assert_eq!(
+            response
+                .usage
+                .cache_creation
+                .as_ref()
+                .and_then(|detail| detail.ephemeral_1h_input_tokens),
+            Some(9),
+            "the message_start breakdown must survive onto the terminal record"
+        );
+        let normalized = crate::completion::Usage::from(&response.usage);
+        assert_eq!(normalized.cache_creation_1h_input_tokens, 9);
+        assert_eq!(
+            normalized.total_tokens,
+            4772 + 0 + 20 + 20,
+            "the 1h breakdown must not inflate the total"
+        );
     }
 
     #[test]
@@ -2515,28 +2753,311 @@ mod tests {
         );
     }
 
+    /// The per-index fix: a text delta for its own open block streams even
+    /// while a client tool call is open at another index. (The old single
+    /// "open block" slot silently dropped the text.)
     #[test]
-    fn text_delta_while_a_tool_call_is_open_is_suppressed() {
+    fn text_delta_while_a_tool_call_is_open_is_emitted() {
         let event: StreamingEvent = serde_json::from_str(
-            r#"{"type":"content_block_delta","index":1,"delta":{"type":"text_delta","text":"ignored"}}"#,
+            r#"{"type":"content_block_delta","index":1,"delta":{"type":"text_delta","text":"streamed alongside"}}"#,
         )
         .unwrap();
-        let mut current_tool_call = Some("toolu_1".to_string());
-        let mut current_thinking = None;
+        let mut adapter = AnthropicAdapter::default();
+        open_tool_use_block(&mut adapter, 0, "toolu_1", "get_weather");
+        open_text_block(&mut adapter, 1);
 
-        assert!(handle_event(&event, &mut current_tool_call, &mut current_thinking).is_none());
+        let Some(Ok(RawStreamingChoice::Message(text))) = handle_event(&mut adapter, &event)
+        else {
+            panic!("an interleaved text delta must not be dropped");
+        };
+        assert_eq!(text, "streamed alongside");
     }
 
+    /// A delta for an index with no open block is a protocol violation the
+    /// per-index routing cannot make sense of: it fails the stream loudly
+    /// instead of being silently dropped (the old behavior this test pins as
+    /// replaced).
     #[test]
-    fn input_json_delta_without_a_matching_slot_or_tool_call_is_dropped() {
+    fn input_json_delta_without_an_open_block_fails_the_stream() {
         let event: StreamingEvent = serde_json::from_str(
             r#"{"type":"content_block_delta","index":7,"delta":{"type":"input_json_delta","partial_json":"{\"x\":"}}"#,
         )
         .unwrap();
-        let mut current_tool_call = None;
-        let mut current_thinking = None;
+        let mut adapter = AnthropicAdapter::default();
 
-        assert!(handle_event(&event, &mut current_tool_call, &mut current_thinking).is_none());
+        let Some(Err(error)) = handle_event(&mut adapter, &event) else {
+            panic!("a delta for a non-open index must be an error");
+        };
+        assert_eq!(
+            error.to_string(),
+            "ProviderError: malformed stream: content_block_delta (input_json_delta) for \
+             index 7 has no open content block"
+        );
+        assert!(
+            adapter.failed,
+            "the guard must fail the stream: later frames are dead"
+        );
+    }
+
+    /// A `content_block_stop` for a non-open index is a protocol violation:
+    /// it fails the stream naming the index and the event.
+    #[test]
+    fn content_block_stop_for_a_non_open_index_fails_the_stream() {
+        let event: StreamingEvent = serde_json::from_str(
+            r#"{"type":"content_block_stop","index":3}"#,
+        )
+        .unwrap();
+        let mut adapter = AnthropicAdapter::default();
+
+        let Some(Err(error)) = handle_event(&mut adapter, &event) else {
+            panic!("a stop for a non-open index must be an error");
+        };
+        assert_eq!(
+            error.to_string(),
+            "ProviderError: malformed stream: content_block_stop for index 3 has no open \
+             content block"
+        );
+        assert!(adapter.failed, "the guard must fail the stream");
+    }
+
+    /// A second `content_block_start` for an already-open index is a protocol
+    /// violation: it fails the stream naming the index and the event.
+    #[test]
+    fn duplicate_content_block_start_fails_the_stream() {
+        let start = r#"{"type":"content_block_start","index":0,"content_block":{"type":"text","text":""}}"#;
+        let mut adapter = AnthropicAdapter::default();
+        let first: StreamingEvent = serde_json::from_str(start).unwrap();
+        assert!(handle_event(&mut adapter, &first).is_some());
+
+        let second: StreamingEvent = serde_json::from_str(start).unwrap();
+        let Some(Err(error)) = handle_event(&mut adapter, &second) else {
+            panic!("a second start for an open index must be an error");
+        };
+        assert_eq!(
+            error.to_string(),
+            "ProviderError: malformed stream: content_block_start for index 0: that content \
+             block is already open"
+        );
+        assert!(adapter.failed, "the guard must fail the stream");
+    }
+
+    /// A delta whose kind does not match the open block's kind (here
+    /// `thinking_delta` on an open text block) is a protocol violation.
+    #[test]
+    fn delta_kind_mismatch_fails_the_stream() {
+        let event: StreamingEvent = serde_json::from_str(
+            r#"{"type":"content_block_delta","index":0,"delta":{"type":"thinking_delta","thinking":"..."}}"#,
+        )
+        .unwrap();
+        let mut adapter = AnthropicAdapter::default();
+        open_text_block(&mut adapter, 0);
+
+        let Some(Err(error)) = handle_event(&mut adapter, &event) else {
+            panic!("a thinking delta on a text block must be an error");
+        };
+        assert_eq!(
+            error.to_string(),
+            "ProviderError: malformed stream: content_block_delta (thinking_delta) for index 0 \
+             arrived for an open text content block"
+        );
+        assert!(adapter.failed, "the guard must fail the stream");
+    }
+
+    /// Frames after a guard failure are dead, exactly like frames after a
+    /// provider `error` event: the aborted turn must not be dressed up as a
+    /// completed one by a later well-formed frame.
+    #[test]
+    fn frames_after_a_guard_failure_are_ignored() {
+        let mut adapter = AnthropicAdapter::default();
+        let stop: StreamingEvent =
+            serde_json::from_str(r#"{"type":"content_block_stop","index":9}"#).unwrap();
+        assert!(matches!(handle_event(&mut adapter, &stop), Some(Err(_))));
+
+        let mut out = Vec::new();
+        adapter.interpret(StreamingEvent::Ping, &mut out);
+        assert!(
+            out.is_empty(),
+            "frames after a guard failure must not produce output"
+        );
+    }
+
+    /// Interleaved text and tool-use blocks route per index: the text is not
+    /// dropped while a tool call is open, and the two calls' argument
+    /// fragments are not merged into one call.
+    #[tokio::test]
+    async fn interleaved_text_and_tool_use_blocks_route_per_index() {
+        let raw_stream = stream! {
+            let mut adapter = AnthropicAdapter::default();
+
+            // Text block 0 and tool blocks 1 and 2 all open before any stops.
+            yield handle_event(&mut adapter, &StreamingEvent::ContentBlockStart {
+                index: 0,
+                content_block: Content::Text {
+                    text: String::new(),
+                    citations: Vec::new(),
+                    cache_control: None,
+                },
+            }).expect("a choice should be emitted");
+            yield handle_event(&mut adapter, &StreamingEvent::ContentBlockStart {
+                index: 1,
+                content_block: Content::ToolUse {
+                    id: "toolu_a".to_string(),
+                    name: "add".to_string(),
+                    input: serde_json::Value::Null,
+                },
+            }).expect("a choice should be emitted");
+            yield handle_event(&mut adapter, &StreamingEvent::ContentBlockStart {
+                index: 2,
+                content_block: Content::ToolUse {
+                    id: "toolu_b".to_string(),
+                    name: "divide".to_string(),
+                    input: serde_json::Value::Null,
+                },
+            }).expect("a choice should be emitted");
+
+            // Fragments interleave across all three open blocks.
+            yield handle_event(&mut adapter, &StreamingEvent::ContentBlockDelta {
+                index: 1,
+                delta: ContentDelta::InputJsonDelta {
+                    partial_json: "{\"x\":\"".to_string(),
+                },
+            }).expect("a choice should be emitted");
+            yield handle_event(&mut adapter, &StreamingEvent::ContentBlockDelta {
+                index: 0,
+                delta: ContentDelta::TextDelta {
+                    text: "Running ".to_string(),
+                },
+            }).expect("a choice should be emitted");
+            yield handle_event(&mut adapter, &StreamingEvent::ContentBlockDelta {
+                index: 2,
+                delta: ContentDelta::InputJsonDelta {
+                    partial_json: "{\"y\":\"".to_string(),
+                },
+            }).expect("a choice should be emitted");
+            yield handle_event(&mut adapter, &StreamingEvent::ContentBlockDelta {
+                index: 1,
+                delta: ContentDelta::InputJsonDelta {
+                    partial_json: r#"1"}"#.to_string(),
+                },
+            }).expect("a choice should be emitted");
+            yield handle_event(&mut adapter, &StreamingEvent::ContentBlockDelta {
+                index: 0,
+                delta: ContentDelta::TextDelta {
+                    text: "tools.".to_string(),
+                },
+            }).expect("a choice should be emitted");
+            yield handle_event(&mut adapter, &StreamingEvent::ContentBlockDelta {
+                index: 2,
+                delta: ContentDelta::InputJsonDelta {
+                    partial_json: r#"2"}"#.to_string(),
+                },
+            }).expect("a choice should be emitted");
+
+            yield handle_event(&mut adapter, &StreamingEvent::ContentBlockStop { index: 1 }).expect("a stopped tool block ends its input");
+            yield handle_event(&mut adapter, &StreamingEvent::ContentBlockStop { index: 2 }).expect("a stopped tool block ends its input");
+            // A plain text block's stop carries no completion payload.
+            assert!(handle_event(&mut adapter, &StreamingEvent::ContentBlockStop { index: 0 }).is_none());
+
+            yield Ok(RawStreamingChoice::FinalResponse(StreamingCompletionResponse::default()));
+        };
+
+        let mut stream = crate::streaming::StreamingCompletionResponse::stream(
+            "anthropic",
+            to_stream_result(raw_stream),
+        );
+        while stream.next().await.is_some() {}
+
+        let choice_items: Vec<crate::message::AssistantContent> =
+            stream.choice.clone().into_iter().collect();
+
+        let texts: Vec<&str> = choice_items
+            .iter()
+            .filter_map(|item| match item {
+                crate::message::AssistantContent::Text(text) => Some(text.text.as_str()),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(texts, ["Running tools."], "interleaved text must survive");
+
+        let tool_calls: Vec<&crate::message::ToolCall> = choice_items
+            .iter()
+            .filter_map(|item| match item {
+                crate::message::AssistantContent::ToolCall(call) => Some(call),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(tool_calls.len(), 2, "two interleaved calls must stay two");
+        assert_eq!(tool_calls[0].id, "toolu_a");
+        assert_eq!(tool_calls[0].function.name, "add");
+        assert_eq!(tool_calls[0].function.arguments, json!({"x": "1"}));
+        assert_eq!(tool_calls[1].id, "toolu_b");
+        assert_eq!(tool_calls[1].function.name, "divide");
+        assert_eq!(tool_calls[1].function.arguments, json!({"y": "2"}));
+    }
+
+    /// Interleaved thinking blocks accumulate separately: each block's
+    /// thinking fragments and signature stay in that block's state, and each
+    /// stop restates its own (text, signature) pair.
+    #[test]
+    fn interleaved_thinking_blocks_accumulate_separately() {
+        let mut adapter = AnthropicAdapter::default();
+        open_thinking_block(&mut adapter, 0);
+        open_thinking_block(&mut adapter, 1);
+
+        let delta = |index: usize, thinking: &str| StreamingEvent::ContentBlockDelta {
+            index,
+            delta: ContentDelta::ThinkingDelta {
+                thinking: thinking.to_string(),
+            },
+        };
+        let signature = |index: usize, sig: &str| StreamingEvent::ContentBlockDelta {
+            index,
+            delta: ContentDelta::SignatureDelta {
+                signature: sig.to_string(),
+            },
+        };
+
+        // Every thinking delta streams as a ReasoningDelta keyed by its own
+        // block index.
+        for (index, thinking) in [(0, "first "), (1, "second "), (0, "block"), (1, "block")] {
+            match handle_event(&mut adapter, &delta(index, thinking)).expect("a thinking delta streams") {
+                Ok(RawStreamingChoice::ReasoningDelta { id, reasoning }) => {
+                    assert_eq!(id, crate::streaming::MintKind::Block.for_wire_index(index as u64));
+                    assert_eq!(reasoning, thinking);
+                }
+                other => panic!("Expected a ReasoningDelta, got {other:?}"),
+            }
+        }
+        assert!(handle_event(&mut adapter, &signature(0, "sig_zero")).is_none());
+        assert!(handle_event(&mut adapter, &signature(1, "sig_one")).is_none());
+
+        match handle_event(&mut adapter, &StreamingEvent::ContentBlockStop { index: 1 })
+            .expect("the second block's stop must restate it")
+            .expect("stop should not error")
+        {
+            RawStreamingChoice::Reasoning {
+                content: ReasoningContent::Text { text, signature },
+                ..
+            } => {
+                assert_eq!(text, "second block");
+                assert_eq!(signature.as_deref(), Some("sig_one"));
+            }
+            other => panic!("Expected a Reasoning chunk, got {other:?}"),
+        }
+
+        match handle_event(&mut adapter, &StreamingEvent::ContentBlockStop { index: 0 })
+            .expect("the first block's stop must restate it")
+            .expect("stop should not error")
+        {
+            RawStreamingChoice::Reasoning {
+                content: ReasoningContent::Text { text, signature },
+                ..
+            } => {
+                assert_eq!(text, "first block");
+                assert_eq!(signature.as_deref(), Some("sig_zero"));
+            }
+            other => panic!("Expected a Reasoning chunk, got {other:?}"),
+        }
     }
 
     #[test]
@@ -2556,10 +3077,9 @@ mod tests {
             r#"{"type":"content_block_delta","index":0,"delta":{"type":"banana_delta","x":1}}"#,
         )
         .unwrap();
-        let mut current_tool_call = None;
-        let mut current_thinking = None;
+        let mut adapter = AnthropicAdapter::default();
 
-        assert!(handle_event(&event, &mut current_tool_call, &mut current_thinking).is_none());
+        assert!(handle_event(&mut adapter, &event).is_none());
     }
 
     #[test]
@@ -2568,12 +3088,11 @@ mod tests {
             r#"{"type":"content_block_start","index":0,"content_block":{"type":"text","text":"","citations":[{"type":"char_location","cited_text":"cit","document_index":0,"start_char_index":0,"end_char_index":3}]}}"#,
         )
         .unwrap();
-        let mut current_tool_call = None;
-        let mut current_thinking = None;
+        let mut adapter = AnthropicAdapter::default();
 
         let Some(Ok(RawStreamingChoice::TextStart {
             additional_params, ..
-        })) = handle_event(&event, &mut current_tool_call, &mut current_thinking)
+        })) = handle_event(&mut adapter, &event)
         else {
             panic!("a text block start must emit a TextStart choice");
         };
@@ -2589,11 +3108,10 @@ mod tests {
             r#"{"type":"content_block_start","index":0,"content_block":{"type":"tool_use","id":"toolu_1","name":"get_weather","input":{}}}"#,
         )
         .unwrap();
-        let mut current_tool_call = None;
-        let mut current_thinking = None;
+        let mut adapter = AnthropicAdapter::default();
 
         let Some(Ok(RawStreamingChoice::ToolCallDelta { id, content })) =
-            handle_event(&event, &mut current_tool_call, &mut current_thinking)
+            handle_event(&mut adapter, &event)
         else {
             panic!("a tool_use block start must emit a tool-call delta");
         };
@@ -2603,10 +3121,12 @@ mod tests {
             content,
             ToolCallDeltaContent::Name(name) if name == "get_weather"
         ));
-        assert_eq!(
-            current_tool_call.as_deref(),
-            Some("toolu_1"),
-            "the adapter must track the open call's wire id"
+        assert!(
+            matches!(
+                adapter.open_blocks.get(&0),
+                Some(OpenBlock::ClientToolUse { id }) if id == "toolu_1"
+            ),
+            "the adapter must track the open block's wire id at its index"
         );
     }
 
@@ -2617,11 +3137,10 @@ mod tests {
             r#"{"type":"content_block_start","index":1,"content_block":{"type":"tool_result","tool_use_id":"toolu_1","content":"ok"}}"#,
         ] {
             let event: StreamingEvent = serde_json::from_str(json).unwrap();
-            let mut current_tool_call = None;
-            let mut current_thinking = None;
+            let mut adapter = AnthropicAdapter::default();
 
             assert!(
-                handle_event(&event, &mut current_tool_call, &mut current_thinking).is_none(),
+                handle_event(&mut adapter, &event).is_none(),
                 "content block starts without special handling must be a no-op: {json}"
             );
         }
@@ -2635,83 +3154,50 @@ mod tests {
                 r#"{{"type":"content_block_start","index":1,"content_block":{{"type":"server_tool_use","id":"srv_1","name":"web_search","input":{input}}}}}"#
             )
         };
-
-        // Null initial input and no argument deltas finalize to `{}`.
-        let mut server_tool_uses = HashMap::new();
-        let mut current_tool_call = None;
-        let mut current_thinking = None;
-        let start: StreamingEvent = serde_json::from_str(&start_with("null")).unwrap();
-        assert!(super::handle_event(
-            &start,
-            &mut current_tool_call,
-            &mut server_tool_uses,
-            &mut current_thinking
-        )
-        .is_none());
-
         let stop: StreamingEvent =
             serde_json::from_str(r#"{"type":"content_block_stop","index":1}"#).unwrap();
+
+        // Null initial input and no argument deltas finalize to `{}`.
+        let mut adapter = AnthropicAdapter::default();
+        let start: StreamingEvent = serde_json::from_str(&start_with("null")).unwrap();
+        assert!(handle_event(&mut adapter, &start).is_none());
+
         let Some(Ok(RawStreamingChoice::TextStart {
             additional_params: Some(params),
             ..
-        })) = super::handle_event(
-            &stop,
-            &mut current_tool_call,
-            &mut server_tool_uses,
-            &mut current_thinking,
-        ) else {
+        })) = handle_event(&mut adapter, &stop)
+        else {
             panic!("a closed server tool use must emit its raw content");
         };
         assert_eq!(params[raw_content_key]["name"], "web_search");
         assert_eq!(params[raw_content_key]["input"], json!({}));
 
         // A non-null initial input survives when no deltas stream.
-        let mut server_tool_uses = HashMap::new();
+        let mut adapter = AnthropicAdapter::default();
         let start: StreamingEvent =
             serde_json::from_str(&start_with(r#"{"query":"claude"}"#)).unwrap();
-        assert!(super::handle_event(
-            &start,
-            &mut current_tool_call,
-            &mut server_tool_uses,
-            &mut current_thinking
-        )
-        .is_none());
+        assert!(handle_event(&mut adapter, &start).is_none());
         let Some(Ok(RawStreamingChoice::TextStart {
             additional_params: Some(params),
             ..
-        })) = super::handle_event(
-            &stop,
-            &mut current_tool_call,
-            &mut server_tool_uses,
-            &mut current_thinking,
-        ) else {
+        })) = handle_event(&mut adapter, &stop)
+        else {
             panic!("a closed server tool use must emit its raw content");
         };
         assert_eq!(params[raw_content_key]["input"], json!({"query": "claude"}));
 
         // Accumulated deltas that never parse surface as an error item.
-        let mut server_tool_uses = HashMap::new();
+        let mut adapter = AnthropicAdapter::default();
         let start: StreamingEvent = serde_json::from_str(&start_with("null")).unwrap();
         let delta: StreamingEvent = serde_json::from_str(
             r#"{"type":"content_block_delta","index":1,"delta":{"type":"input_json_delta","partial_json":"{bad"}}"#,
         )
         .unwrap();
         for event in [&start, &delta] {
-            assert!(super::handle_event(
-                event,
-                &mut current_tool_call,
-                &mut server_tool_uses,
-                &mut current_thinking
-            )
-            .is_none());
+            assert!(handle_event(&mut adapter, &event).is_none());
         }
         assert!(matches!(
-            super::handle_event(
-                &stop,
-                &mut current_tool_call,
-                &mut server_tool_uses,
-                &mut current_thinking
-            ),
+            handle_event(&mut adapter, &stop),
             Some(Err(_))
         ));
     }

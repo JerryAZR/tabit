@@ -9,7 +9,7 @@ pub mod sse;
 use crate::wasm_compat::*;
 pub use multipart::MultipartForm;
 pub use reqwest::Client as ReqwestClient;
-use std::pin::Pin;
+use std::{pin::Pin, time::Duration};
 
 #[derive(Debug, thiserror::Error)]
 pub enum Error {
@@ -19,6 +19,34 @@ pub enum Error {
     InvalidStatusCode(StatusCode),
     #[error("Invalid status code {0} with message: {1}")]
     InvalidStatusCodeWithMessage(StatusCode, String),
+    /// A non-success HTTP response, preserving the response headers so retry
+    /// metadata (`retry-after`, `retry-after-ms`, `x-should-retry`) stays
+    /// consumable via [`Error::non_success_headers`].
+    #[error("Invalid status code {status} with message: {message}")]
+    NonSuccessResponse {
+        /// HTTP status of the response.
+        status: StatusCode,
+        /// Response body, preserved verbatim when it could be read.
+        message: String,
+        /// Response headers.
+        headers: HeaderMap,
+    },
+    /// The server requested a retry delay longer than the configured cap, so
+    /// the request fails instead of sleeping. See
+    /// [`retry::DEFAULT_MAX_SERVER_DELAY`](crate::http_client::retry::DEFAULT_MAX_SERVER_DELAY).
+    #[error("server requested a retry delay of {requested:?}, which exceeds the {cap:?} cap; failing the request instead of retrying")]
+    RetryDelayTooLong {
+        /// The error that triggered the rejected retry.
+        #[source]
+        source: Box<Error>,
+        /// Delay the server asked the client to wait.
+        requested: Duration,
+        /// Configured maximum server-requested delay.
+        cap: Duration,
+    },
+    /// No response data arrived within the configured idle timeout.
+    #[error("no data arrived within the configured idle timeout of {0:?}; the connection stalled")]
+    IdleTimeout(Duration),
     #[error("Header value outside of legal range: {0}")]
     InvalidHeaderValue(#[from] http::header::InvalidHeaderValue),
     #[error("Request in error state, cannot access headers")]
@@ -36,21 +64,116 @@ pub enum Error {
     Instance(#[from] Box<dyn std::error::Error + 'static>),
 }
 
+/// A coarse classification of a transport-level (reqwest) failure, used to
+/// branch on retryability without matching on the boxed source.
+///
+/// Recovered from [`Error::transport_error_kind`], which classifies the
+/// reqwest error preserved inside [`Error::Instance`]. Timeout, connect, and
+/// request failures happen before any response body exists and are safe to
+/// retry; body transfer errors mean bytes may already have been consumed.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum TransportErrorKind {
+    /// The request timed out (connect timeout or overall request timeout).
+    Timeout,
+    /// The connection could not be established (DNS, TCP, TLS, proxy).
+    Connect,
+    /// The request failed at the transport layer before a response arrived
+    /// (e.g. connection reset while sending).
+    RequestFailed,
+    /// The response body failed to transfer or decode after the response
+    /// started. Never safe to retry.
+    BodyTransfer,
+    /// The request was malformed (builder error) or hit a redirect loop —
+    /// deterministic failures that retrying cannot fix.
+    InvalidRequest,
+}
+
+impl TransportErrorKind {
+    /// Whether a request that failed with this kind may be retried without
+    /// duplicating already-consumed response content.
+    pub fn is_retryable(self) -> bool {
+        matches!(
+            self,
+            Self::Timeout | Self::Connect | Self::RequestFailed
+        )
+    }
+}
+
 impl Error {
-    pub(crate) fn non_success_status(&self) -> Option<StatusCode> {
+    pub fn non_success_status(&self) -> Option<StatusCode> {
         match self {
-            Self::InvalidStatusCode(status) | Self::InvalidStatusCodeWithMessage(status, _) => {
-                Some(*status)
-            }
+            Self::InvalidStatusCode(status)
+            | Self::InvalidStatusCodeWithMessage(status, _)
+            | Self::NonSuccessResponse { status, .. } => Some(*status),
+            Self::RetryDelayTooLong { source, .. } => source.non_success_status(),
             _ => None,
         }
     }
 
-    pub(crate) fn non_success_body(&self) -> Option<&str> {
+    pub fn non_success_body(&self) -> Option<&str> {
         match self {
             Self::InvalidStatusCodeWithMessage(_, body) => Some(body.as_str()),
+            Self::NonSuccessResponse { message, .. } => Some(message.as_str()),
+            Self::RetryDelayTooLong { source, .. } => source.non_success_body(),
             _ => None,
         }
+    }
+
+    /// Response headers preserved alongside a non-success status, when the
+    /// failing response was captured with them.
+    ///
+    /// Rate-limit metadata (`retry-after`, `x-should-retry`) is kept here so
+    /// callers can react to it without re-inspecting the failed response.
+    pub fn non_success_headers(&self) -> Option<&HeaderMap> {
+        match self {
+            Self::NonSuccessResponse { headers, .. } => Some(headers),
+            Self::RetryDelayTooLong { source, .. } => source.non_success_headers(),
+            _ => None,
+        }
+    }
+
+    /// Classify a transport-level reqwest failure.
+    ///
+    /// Returns `None` when this error is not a reqwest failure (e.g. a status
+    /// or protocol error). On wasm, reqwest's fetch backend does not expose
+    /// failure classification, so this always returns `None` there.
+    pub fn transport_error_kind(&self) -> Option<TransportErrorKind> {
+        let Self::Instance(instance) = self else {
+            return None;
+        };
+        let error = instance.downcast_ref::<reqwest::Error>()?;
+        classify_reqwest_error(error)
+    }
+}
+
+/// Map a reqwest failure onto [`TransportErrorKind`], checking the most
+/// specific kinds first.
+#[cfg(not(target_family = "wasm"))]
+fn classify_reqwest_error(error: &reqwest::Error) -> Option<TransportErrorKind> {
+    Some(if error.is_builder() || error.is_redirect() {
+        TransportErrorKind::InvalidRequest
+    } else if error.is_timeout() {
+        TransportErrorKind::Timeout
+    } else if error.is_connect() {
+        TransportErrorKind::Connect
+    } else if error.is_body() || error.is_decode() {
+        TransportErrorKind::BodyTransfer
+    } else {
+        TransportErrorKind::RequestFailed
+    })
+}
+
+/// reqwest's wasm (fetch) backend does not expose failure classification.
+#[cfg(target_family = "wasm")]
+fn classify_reqwest_error(_error: &reqwest::Error) -> Option<TransportErrorKind> {
+    None
+}
+
+/// Reqwest failures are preserved (boxed) inside [`Error::Instance`] while
+/// remaining classifiable via [`Error::transport_error_kind`].
+impl From<reqwest::Error> for Error {
+    fn from(error: reqwest::Error) -> Self {
+        instance_error(error)
     }
 }
 
@@ -68,11 +191,39 @@ fn instance_error<E: std::error::Error + 'static>(error: E) -> Error {
 
 async fn non_success_status_error(response: reqwest::Response) -> Error {
     let status = response.status();
+    let headers = response.headers().clone();
     let message = response
         .text()
         .await
         .unwrap_or_else(|error| format!("failed to read error response body: {error}"));
-    Error::InvalidStatusCodeWithMessage(status, message)
+    Error::NonSuccessResponse {
+        status,
+        message,
+        headers,
+    }
+}
+
+/// Wrap a streaming body so each chunk must arrive within `idle_timeout`.
+///
+/// If no chunk arrives within the window, the stream yields
+/// [`Error::IdleTimeout`] once and ends. The wrapper only observes the stream;
+/// chunk contents pass through unchanged.
+pub(crate) fn idle_timeout_stream(stream: BoxedStream, idle_timeout: Duration) -> BoxedStream {
+    use futures::StreamExt;
+
+    Box::pin(async_stream::stream! {
+        let mut stream = stream;
+        loop {
+            match crate::wasm_compat::timeout(idle_timeout, stream.next()).await {
+                Ok(Some(chunk)) => yield chunk,
+                Ok(None) => break,
+                Err(_elapsed) => {
+                    yield Err(Error::IdleTimeout(idle_timeout));
+                    break;
+                }
+            }
+        }
+    })
 }
 
 pub type LazyBytes = WasmBoxedFuture<'static, Result<Bytes>>;
@@ -315,13 +466,105 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn non_success_status_error_captures_status_and_body() {
-        let response = http::Response::builder().status(404).body("not found").unwrap();
+    async fn non_success_status_error_captures_status_body_and_headers() {
+        let response = http::Response::builder()
+            .status(429)
+            .header("retry-after", "12")
+            .header("x-should-retry", "true")
+            .body("slow down")
+            .unwrap();
         let err = non_success_status_error(reqwest::Response::from(response)).await;
         assert!(
-            matches!(err, Error::InvalidStatusCodeWithMessage(status, ref message)
-                if status == StatusCode::NOT_FOUND && message == "not found")
+            matches!(
+                &err,
+                Error::NonSuccessResponse { status, message, headers }
+                    if *status == StatusCode::TOO_MANY_REQUESTS
+                        && message == "slow down"
+                        && headers.get("retry-after").and_then(|v| v.to_str().ok()) == Some("12")
+                        && headers.get("x-should-retry").and_then(|v| v.to_str().ok()) == Some("true")
+            ),
+            "status, body, and headers must all be preserved: {err}"
         );
+        assert_eq!(err.non_success_status(), Some(StatusCode::TOO_MANY_REQUESTS));
+        assert_eq!(err.non_success_body(), Some("slow down"));
+        assert!(err.non_success_headers().is_some());
+    }
+
+    #[tokio::test]
+    async fn reqwest_failures_convert_and_classify() {
+        // Loopback port with nothing listening: connection refused. The
+        // client must bypass any system proxy so the connection is direct.
+        let direct_client = reqwest::Client::builder()
+            .no_proxy()
+            .build()
+            .expect("plain client builds");
+        let error = direct_client
+            .get("http://127.0.0.1:1/")
+            .send()
+            .await
+            .err()
+            .expect("connection to a closed loopback port must fail");
+
+        let converted = Error::from(error);
+        assert!(
+            matches!(converted, Error::Instance(_)),
+            "reqwest errors stay boxed in Instance"
+        );
+        let kind = converted
+            .transport_error_kind()
+            .expect("reqwest failures classify");
+        assert!(
+            kind == TransportErrorKind::Connect || kind == TransportErrorKind::Timeout,
+            "a refused loopback connection is connect/timeout, got {kind:?}"
+        );
+        assert!(kind.is_retryable());
+        assert!(
+            !TransportErrorKind::BodyTransfer.is_retryable(),
+            "body transfer errors are never retryable"
+        );
+    }
+
+    #[tokio::test]
+    async fn idle_timeout_stream_errors_on_a_stalled_stream() {
+        use futures::StreamExt;
+
+        let stalled: BoxedStream = Box::pin(futures::stream::pending());
+        let mut guarded = idle_timeout_stream(stalled, Duration::from_millis(25));
+
+        let error = guarded
+            .next()
+            .await
+            .expect("timeout must surface an error item")
+            .expect_err("the error names the idle timeout");
+        assert!(
+            matches!(error, Error::IdleTimeout(timeout) if timeout == Duration::from_millis(25)),
+            "got: {error}"
+        );
+        assert!(
+            guarded.next().await.is_none(),
+            "the stream ends after the timeout"
+        );
+    }
+
+    #[tokio::test]
+    async fn idle_timeout_stream_passes_chunks_through() {
+        use futures::StreamExt;
+
+        let chunks: BoxedStream = Box::pin(futures::stream::iter([
+            Ok(Bytes::from_static(b"one")),
+            Ok(Bytes::from_static(b"two")),
+        ]));
+        let mut guarded = idle_timeout_stream(chunks, Duration::from_secs(60));
+
+        match guarded.next().await {
+            Some(Ok(chunk)) => assert_eq!(chunk, Bytes::from_static(b"one")),
+            other => panic!("expected first chunk, got {other:?}"),
+        }
+        match guarded.next().await {
+            Some(Ok(chunk)) => assert_eq!(chunk, Bytes::from_static(b"two")),
+            other => panic!("expected second chunk, got {other:?}"),
+        }
+        assert_eq!(guarded.count().await, 0, "no items remain");
     }
 
     #[test]
@@ -377,8 +620,9 @@ mod tests {
             .map(|_| ())
             .unwrap_err();
         assert!(
-            matches!(err, Error::InvalidStatusCodeWithMessage(status, ref message)
-                if status == StatusCode::INTERNAL_SERVER_ERROR && message == "boom")
+            matches!(&err,
+                Error::NonSuccessResponse { status, message, .. }
+                    if *status == StatusCode::INTERNAL_SERVER_ERROR && message == "boom")
         );
     }
 
@@ -498,8 +742,9 @@ mod tests {
             .map(|_| ())
             .unwrap_err();
         assert!(
-            matches!(err, Error::InvalidStatusCodeWithMessage(status, ref message)
-                if status == StatusCode::INTERNAL_SERVER_ERROR && message == "nope")
+            matches!(&err,
+                Error::NonSuccessResponse { status, message, .. }
+                    if *status == StatusCode::INTERNAL_SERVER_ERROR && message == "nope")
         );
     }
 

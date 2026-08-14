@@ -108,11 +108,33 @@ impl ProviderResponseExt for CompletionResponse {
     }
 }
 
+/// Anthropic's TTL breakdown of `cache_creation_input_tokens`, carried on the
+/// Messages API usage payload (`message_start`/`message_delta` in streaming,
+/// the unary response's `usage`).
+///
+/// The two figures partition `cache_creation_input_tokens` (the all-TTL
+/// aggregate); they are a breakdown of it, not an addition, so the normalized
+/// conversion keeps `total_tokens` computed from the aggregate alone.
+#[derive(Clone, Debug, Default, Deserialize, Serialize, PartialEq)]
+pub struct CacheCreationDetail {
+    /// Input tokens written to a 5-minute ephemeral cache entry.
+    #[serde(default)]
+    pub ephemeral_5m_input_tokens: Option<u64>,
+    /// Input tokens written to a 1-hour ephemeral cache entry.
+    #[serde(default)]
+    pub ephemeral_1h_input_tokens: Option<u64>,
+}
+
 #[derive(Clone, Debug, Deserialize, Serialize)]
 pub struct Usage {
     pub input_tokens: u64,
     pub cache_read_input_tokens: Option<u64>,
     pub cache_creation_input_tokens: Option<u64>,
+    /// TTL breakdown of `cache_creation_input_tokens`, when the API reports
+    /// one (the recorded wire always carries both ephemeral figures, at 0
+    /// when no cache entry of that TTL was written).
+    #[serde(default)]
+    pub cache_creation: Option<CacheCreationDetail>,
     pub output_tokens: u64,
 }
 
@@ -120,7 +142,7 @@ impl std::fmt::Display for Usage {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         write!(
             f,
-            "Input tokens: {}\nCache read input tokens: {}\nCache creation input tokens: {}\nOutput tokens: {}",
+            "Input tokens: {}\nCache read input tokens: {}\nCache creation input tokens: {}\n1h cache creation input tokens: {}\nOutput tokens: {}",
             self.input_tokens,
             match self.cache_read_input_tokens {
                 Some(token) => token.to_string(),
@@ -130,6 +152,10 @@ impl std::fmt::Display for Usage {
                 Some(token) => token.to_string(),
                 None => "n/a".to_string(),
             },
+            self.cache_creation
+                .as_ref()
+                .and_then(|detail| detail.ephemeral_1h_input_tokens)
+                .map_or_else(|| "n/a".to_string(), |token| token.to_string()),
             self.output_tokens
         )
     }
@@ -143,6 +169,13 @@ impl From<&Usage> for crate::completion::Usage {
         usage.output_tokens = value.output_tokens;
         usage.cached_input_tokens = value.cache_read_input_tokens.unwrap_or_default();
         usage.cache_creation_input_tokens = value.cache_creation_input_tokens.unwrap_or_default();
+        // The 1h figure is a breakdown of `cache_creation_input_tokens`, not
+        // an addition to it: carried for accounting, excluded from the total.
+        usage.cache_creation_1h_input_tokens = value
+            .cache_creation
+            .as_ref()
+            .and_then(|detail| detail.ephemeral_1h_input_tokens)
+            .unwrap_or_default();
         usage.total_tokens = value.input_tokens
             + value.cache_read_input_tokens.unwrap_or_default()
             + value.cache_creation_input_tokens.unwrap_or_default()
@@ -2251,6 +2284,14 @@ impl TryFrom<AnthropicRequestParams<'_>> for AnthropicCompletionRequest {
         } = params;
         let chat_history = req.chat_history_with_documents();
 
+        // An orphan tool result (no prior assistant `tool_use` carrying the
+        // same id) is rejected up front: Anthropic would 400 on it, and the
+        // alternative — forwarding it — risks attributing the result to the
+        // wrong call. Fail loud, at the conversion boundary.
+        crate::providers::validate_tool_result_correlation(&chat_history, |call| {
+            call.id.as_str()
+        }, |result| result.id.as_str())?;
+
         // Anthropic requires `max_tokens` on every request; requests that
         // don't carry one get the provider default (config can override).
         let max_tokens = req.max_tokens.unwrap_or(DEFAULT_MAX_TOKENS);
@@ -3036,8 +3077,67 @@ mod tests {
         }
     }
 
-    fn system_has_cache_control(value: &serde_json::Value) -> bool {
-        value["system"]
+    /// A tool result whose id matches no prior assistant `tool_use` is an
+    /// orphan: the conversion fails loudly, naming the id and the history
+    /// index, instead of forwarding a request Anthropic would reject (or
+    /// worse, attribute to the wrong call).
+    #[test]
+    fn orphan_tool_result_history_fails_request_conversion() {
+        let request = completion_request_with_history(
+            vec![
+                message::Message::user("What is the weather in London?"),
+                message::Message::tool_result("toolu_orphan", "15 degrees"),
+            ],
+            None,
+        );
+
+        let error = AnthropicCompletionRequest::try_from(AnthropicRequestParams {
+            model: "claude-sonnet-4-6",
+            request,
+            prompt_caching: false,
+            automatic_caching: false,
+            automatic_caching_ttl: None,
+        })
+        .expect_err("an orphan tool result must fail request conversion");
+        assert!(
+            error.to_string().contains(
+                "tool result \"toolu_orphan\" has no matching tool call in the conversation \
+                 history"
+            ),
+            "unexpected error: {error}"
+        );
+        assert!(
+            error.to_string().contains("history index 1"),
+            "the error must name the message index: {error}"
+        );
+
+        // A correlated history (assistant tool call before the result) passes.
+        let request = completion_request_with_history(
+            vec![
+                message::Message::user("What is the weather in London?"),
+                message::Message::Assistant {
+                    id: None,
+                    content: OneOrMany::one(message::AssistantContent::tool_call(
+                        "toolu_ok",
+                        "get_weather",
+                        json!({"city": "London"}),
+                    )),
+                },
+                message::Message::tool_result("toolu_ok", "15 degrees"),
+            ],
+            None,
+        );
+        let converted = AnthropicCompletionRequest::try_from(AnthropicRequestParams {
+            model: "claude-sonnet-4-6",
+            request,
+            prompt_caching: false,
+            automatic_caching: false,
+            automatic_caching_ttl: None,
+        });
+        assert!(converted.is_ok(), "a correlated history must convert");
+    }
+
+    fn system_has_cache_control(value: &serde_json::Value) -> bool {        value["system"]
             .as_array()
             .and_then(|blocks| blocks.last())
             .and_then(|block| block.get("cache_control"))
@@ -4705,6 +4805,7 @@ mod tests {
                 input_tokens: 7,
                 cache_read_input_tokens: None,
                 cache_creation_input_tokens: None,
+                cache_creation: None,
                 output_tokens: 2,
             },
         };
@@ -4737,6 +4838,7 @@ mod tests {
                 input_tokens: 7,
                 cache_read_input_tokens: None,
                 cache_creation_input_tokens: None,
+                cache_creation: None,
                 output_tokens: 2,
             },
         };
@@ -4809,6 +4911,7 @@ mod tests {
                 input_tokens: 7,
                 cache_read_input_tokens: None,
                 cache_creation_input_tokens: None,
+                cache_creation: None,
                 output_tokens: 2,
             },
         };
@@ -5427,6 +5530,7 @@ mod tests {
                 input_tokens: 1,
                 cache_read_input_tokens: None,
                 cache_creation_input_tokens: None,
+                cache_creation: None,
                 output_tokens: 1,
             },
         };
@@ -5861,6 +5965,10 @@ mod tests {
             input_tokens: 3,
             cache_read_input_tokens: Some(5),
             cache_creation_input_tokens: Some(7),
+            cache_creation: Some(CacheCreationDetail {
+                ephemeral_5m_input_tokens: Some(3),
+                ephemeral_1h_input_tokens: Some(4),
+            }),
             output_tokens: 11,
         }
     }
@@ -5910,25 +6018,66 @@ mod tests {
         assert!(display.contains("Input tokens: 3"));
         assert!(display.contains("Cache read input tokens: 5"));
         assert!(display.contains("Cache creation input tokens: 7"));
+        assert!(display.contains("1h cache creation input tokens: 4"));
         assert!(display.contains("Output tokens: 11"));
 
         // Absent cache counts render as `n/a`.
         let bare = Usage {
             cache_read_input_tokens: None,
             cache_creation_input_tokens: None,
+            cache_creation: None,
             ..sample_usage()
         };
         assert!(bare.to_string().contains("Cache read input tokens: n/a"));
         assert!(bare
             .to_string()
             .contains("Cache creation input tokens: n/a"));
+        assert!(bare
+            .to_string()
+            .contains("1h cache creation input tokens: n/a"));
 
         let generic = crate::completion::Usage::from(usage);
         assert_eq!(generic.input_tokens, 3);
         assert_eq!(generic.output_tokens, 11);
         assert_eq!(generic.cached_input_tokens, 5);
         assert_eq!(generic.cache_creation_input_tokens, 7);
+        assert_eq!(generic.cache_creation_1h_input_tokens, 4);
+        // The 1h figure is a breakdown of the aggregate, not an addition:
+        // the total stays computed from the aggregate alone.
         assert_eq!(generic.total_tokens, 3 + 5 + 7 + 11);
+    }
+
+    /// The recorded Messages wire always carries the TTL breakdown on the
+    /// usage payload (`"cache_creation":{"ephemeral_5m_input_tokens":0,
+    /// "ephemeral_1h_input_tokens":0}`); it must decode, and a payload
+    /// without it (older relays) must still decode via `#[serde(default)]`.
+    #[test]
+    fn usage_decodes_the_wire_cache_creation_breakdown() {
+        let usage: Usage = serde_json::from_value(json!({
+            "input_tokens": 37,
+            "output_tokens": 75,
+            "cache_creation_input_tokens": 0,
+            "cache_read_input_tokens": 0,
+            "cache_creation": {
+                "ephemeral_1h_input_tokens": 0,
+                "ephemeral_5m_input_tokens": 0
+            }
+        }))
+        .expect("the recorded wire shape should decode");
+        assert_eq!(
+            usage.cache_creation,
+            Some(CacheCreationDetail {
+                ephemeral_5m_input_tokens: Some(0),
+                ephemeral_1h_input_tokens: Some(0),
+            })
+        );
+
+        let without_breakdown: Usage = serde_json::from_value(json!({
+            "input_tokens": 37,
+            "output_tokens": 75
+        }))
+        .expect("a usage payload without the breakdown should still decode");
+        assert_eq!(without_breakdown.cache_creation, None);
     }
 
     #[test]

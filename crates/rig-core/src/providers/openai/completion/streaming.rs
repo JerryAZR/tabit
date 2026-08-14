@@ -73,6 +73,12 @@ where
 struct StreamingDelta {
     #[serde(default, deserialize_with = "deserialize_delta_content")]
     content: Option<String>,
+    /// The model's refusal payload (content-filter turns). Modeled rather
+    /// than serde-dropped: a refusal is visible output the consumer must
+    /// see, mapped onto text exactly like the Responses API's
+    /// `response.refusal.delta` path (which streams it as message text).
+    #[serde(default)]
+    refusal: Option<String>,
     #[serde(default)]
     reasoning_content: Option<String>,
     // Not part of the official OpenAI API; some compatible providers (e.g.
@@ -385,7 +391,16 @@ where
                     // deprecated pre-tools finish reason some compatible
                     // providers still emit — onto `ToolCalls`.
                     finish_reason: map_finish_reason(choice.finish_reason.as_ref()),
-                    text: choice.delta.content.clone(),
+                    // A refusal delta is visible output: it streams as text
+                    // (same mapping as the Responses API's refusal deltas),
+                    // so a refused turn is not a silent empty completion.
+                    // `content_filter` finish reasons already normalize via
+                    // `map_finish_reason`.
+                    text: choice
+                        .delta
+                        .content
+                        .clone()
+                        .or_else(|| choice.delta.refusal.clone()),
                     reasoning: choice
                         .delta
                         .reasoning_content
@@ -670,6 +685,67 @@ mod tests {
         let delta: StreamingDelta = serde_json::from_str(json).unwrap();
         assert_eq!(delta.content, Some("Hello".to_string()));
         assert!(delta.tool_calls.is_empty());
+    }
+
+    #[test]
+    fn test_streaming_delta_deserializes_refusal() {
+        // OpenAI streams refusals on `delta.refusal` (content-filter turns);
+        // it must survive deserialization instead of being serde-dropped.
+        let json = r#"{"refusal": "I can't help with that."}"#;
+        let delta: StreamingDelta = serde_json::from_str(json).unwrap();
+        assert_eq!(
+            delta.refusal.as_deref(),
+            Some("I can't help with that.")
+        );
+        assert!(delta.content.is_none());
+    }
+
+    /// A streamed refusal delta must produce visible refusal text — mapped
+    /// onto message content exactly like the Responses API's refusal deltas —
+    /// and the wire's `content_filter` finish reason survives to the terminal
+    /// record. Before the field was modeled, serde dropped it silently and a
+    /// refused turn read as an empty completion.
+    #[tokio::test]
+    async fn streamed_refusal_delta_produces_visible_text() {
+        use crate::providers::openai::send_compatible_streaming_request;
+        use crate::streaming::StreamedAssistantContent;
+        use crate::test_utils::MockStreamingClient;
+        use futures::StreamExt;
+
+        let client = MockStreamingClient {
+            sse_bytes: sse_bytes_from_data_lines([
+                r#"{"choices":[{"delta":{"role":"assistant","refusal":"I can't help with that."},"finish_reason":null}]}"#,
+                r#"{"choices":[{"delta":{},"finish_reason":"content_filter"}]}"#,
+                "[DONE]",
+            ]),
+        };
+
+        let mut stream = send_compatible_streaming_request(client, streaming_request(), "openai")
+            .await
+            .expect("stream should start");
+
+        let mut texts = Vec::new();
+        let mut finish_reason = None;
+        while let Some(item) = stream.next().await {
+            match item.expect("stream item should be ok") {
+                StreamedAssistantContent::Text(text) => texts.push(text.text),
+                StreamedAssistantContent::Final(final_record) => {
+                    finish_reason = final_record.finish_reason;
+                }
+                _ => {}
+            }
+        }
+
+        assert_eq!(
+            texts,
+            vec!["I can't help with that.".to_string()],
+            "the refusal must be visible as text, not silently dropped"
+        );
+        assert_eq!(
+            finish_reason,
+            Some(NormalizedFinishReason::ContentFilter),
+            "the wire's content_filter finish reason must survive"
+        );
     }
 
     #[test]

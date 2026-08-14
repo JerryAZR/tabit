@@ -1,12 +1,16 @@
-//! An SSE implementation that leverages [`crate::http_client::HttpClientExt`] to allow streaming with automatic retry handling for any implementor of HttpClientExt.
+//! An SSE implementation that leverages [`crate::http_client::HttpClientExt`] for streaming with any implementor.
 //!
 //! Primarily intended for internal usage. However if you also wish to implement generic HTTP streaming for your custom completion model,
 //! you may find this helpful.
+//!
+//! This source deliberately does **not** reconnect: no shipped provider supports
+//! SSE resumption, and replaying a `POST` (even with `last-event-id`) would
+//! re-send side effects and duplicate content. A transport or parse error is
+//! surfaced once and the stream closes — retry decisions belong to the
+//! request-layer retry policy in [`crate::http_client::retry`], which only
+//! ever fires before a response has started yielding.
 use crate::{
-    http_client::{
-        HttpClientExt, Result as StreamResult,
-        retry::{DEFAULT_RETRY, ExponentialBackoff, RetryPolicy},
-    },
+    http_client::{HttpClientExt, Result as StreamResult},
     wasm_compat::{WasmCompatSend, WasmCompatSendStream},
 };
 use bytes::Bytes;
@@ -16,16 +20,11 @@ use futures::Stream;
 use futures::{future::BoxFuture, stream::BoxStream};
 #[cfg(all(target_arch = "wasm32", target_os = "unknown"))]
 use futures::{future::LocalBoxFuture, stream::LocalBoxStream};
-use futures_timer::Delay;
 use http::Response;
-use http::{HeaderName, HeaderValue, Request, StatusCode};
+use http::{HeaderValue, Request, StatusCode};
 use mime_guess::mime;
 use pin_project_lite::pin_project;
-use std::{
-    pin::Pin,
-    task::{Context, Poll},
-    time::Duration,
-};
+use std::{marker::PhantomData, pin::Pin, task::{Context, Poll}};
 
 pub type BoxedStream = Pin<Box<dyn WasmCompatSendStream<InnerItem = StreamResult<Bytes>>>>;
 
@@ -43,27 +42,15 @@ pin_project! {
     /// Internal state variants for the SSE state machine.
     #[project = SourceStateProjection]
     enum SourceState {
-        /// Initial connection attempt (no retry history yet)
+        /// Initial connection attempt
         Connecting {
             #[pin]
             response_future: ResponseFuture,
-        },
-        /// Reconnection attempt after a retry delay (always has retry history)
-        Reconnecting {
-            #[pin]
-            response_future: ResponseFuture,
-            last_retry: (usize, Duration),
         },
         /// Actively receiving SSE events
         Open {
             #[pin]
             event_stream: EventStream,
-        },
-        /// Waiting before retry after an error
-        WaitingToRetry {
-            #[pin]
-            retry_delay: Delay,
-            current_retry: (usize, Duration),
         },
         /// Terminal state
         Closed,
@@ -72,15 +59,20 @@ pin_project! {
 
 pin_project! {
     /// A generic SSE event source that works with any [`HttpClientExt`] implementation.
+    ///
+    /// The source connects once. Any error — connect failure, non-OK status,
+    /// wrong content type, transport error mid-stream, or a malformed SSE
+    /// frame — is surfaced exactly once and then the source closes. See the
+    /// module docs for why it never reconnects.
+    ///
+    /// The `HttpClient` and `RequestBody` parameters only tag the types used to
+    /// build the initial request; they carry no state.
     #[project = GenericEventSourceProjection]
-    pub struct GenericEventSource<HttpClient, RequestBody, Retry = ExponentialBackoff> {
-        client: HttpClient,
-        req: Request<RequestBody>,
-        retry_policy: Retry,
-        last_event_id: Option<String>,
+    pub struct GenericEventSource<HttpClient, RequestBody> {
         allow_missing_content_type: bool,
         #[pin]
         state: SourceState,
+        _request_types: PhantomData<fn(HttpClient, RequestBody)>,
     }
 }
 
@@ -91,16 +83,13 @@ where
 {
     /// Create a new event source that will connect to the given request.
     pub fn new(client: HttpClient, req: Request<RequestBody>) -> Self {
-        let response_future = Self::create_response_future(&client, &req, None);
+        let response_future = Self::create_response_future(&client, &req);
         let state = SourceState::Connecting { response_future };
 
         Self {
-            client,
-            req,
-            retry_policy: DEFAULT_RETRY,
-            last_event_id: None,
             allow_missing_content_type: false,
             state,
+            _request_types: PhantomData,
         }
     }
 
@@ -109,11 +98,10 @@ where
         self
     }
 
-    /// Create a response future for connecting/reconnecting
+    /// Create the response future for the single connection attempt
     fn create_response_future(
         client: &HttpClient,
         req: &Request<RequestBody>,
-        last_event_id: Option<&str>,
     ) -> ResponseFuture {
         let mut req_clone = req.clone();
         req_clone
@@ -121,21 +109,8 @@ where
             .entry("Accept")
             .or_insert(HeaderValue::from_static("text/event-stream"));
 
-        if let Some(id) = last_event_id
-            && let Ok(value) = HeaderValue::from_str(id)
-        {
-            req_clone
-                .headers_mut()
-                .insert(HeaderName::from_static("last-event-id"), value);
-        }
-
         let client_clone = client.clone();
         Box::pin(async move { client_clone.send_streaming(req_clone).await })
-    }
-
-    /// Get the last event id
-    pub fn last_event_id(&self) -> Option<&str> {
-        self.last_event_id.as_deref()
     }
 
     /// Close the event source, transitioning to the Closed state.
@@ -160,11 +135,7 @@ impl From<MessageEvent> for Event {
     }
 }
 
-impl<HttpClient, RequestBody> Stream for GenericEventSource<HttpClient, RequestBody>
-where
-    HttpClient: HttpClientExt + Clone + 'static,
-    RequestBody: Into<Bytes> + Clone + WasmCompatSend + 'static,
-{
+impl<HttpClient, RequestBody> Stream for GenericEventSource<HttpClient, RequestBody> {
     type Item = Result<Event, super::Error>;
 
     fn poll_next(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Option<Self::Item>> {
@@ -179,91 +150,25 @@ where
                             match check_response(response, *this.allow_missing_content_type) {
                                 Ok(response) => {
                                     // Transition: Connecting -> Open
-                                    let mut event_stream = response.into_body().eventsource();
-                                    if let Some(id) = &this.last_event_id {
-                                        event_stream.set_last_event_id(id.clone());
-                                    }
+                                    let event_stream = response.into_body().eventsource();
                                     this.state.set(SourceState::Open {
                                         event_stream: Box::pin(event_stream),
                                     });
                                     return Poll::Ready(Some(Ok(Event::Open)));
                                 }
                                 Err(err) => {
-                                    // Transition: Connecting -> Closed (non-retryable error)
+                                    // Transition: Connecting -> Closed (no reconnection)
                                     this.state.set(SourceState::Closed);
                                     return Poll::Ready(Some(Err(err)));
                                 }
                             }
                         }
                         Poll::Ready(Err(err)) => {
-                            // First connection attempt failed - start retry cycle
-                            if let Some(delay_duration) = this.retry_policy.retry(&err, None) {
-                                // Transition: Connecting -> WaitingToRetry
-                                this.state.set(SourceState::WaitingToRetry {
-                                    retry_delay: Delay::new(delay_duration),
-                                    current_retry: (1, delay_duration),
-                                });
-                                return Poll::Ready(Some(Err(err)));
-                            } else {
-                                // The retry policy declined to schedule a
-                                // retry (exhausted max retries, or a custom
-                                // policy giving up): close the source while
-                                // still surfacing the error — never swallow it.
-                                // Transition: Connecting -> Closed
-                                this.state.set(SourceState::Closed);
-                                return Poll::Ready(Some(Err(err)));
-                            }
-                        }
-                    }
-                }
-
-                SourceStateProjection::Reconnecting {
-                    response_future,
-                    last_retry,
-                } => {
-                    match response_future.poll(cx) {
-                        Poll::Pending => return Poll::Pending,
-                        Poll::Ready(Ok(response)) => {
-                            match check_response(response, *this.allow_missing_content_type) {
-                                Ok(response) => {
-                                    // Transition: Reconnecting -> Open (retry cycle complete)
-                                    let mut event_stream = response.into_body().eventsource();
-                                    if let Some(id) = &this.last_event_id {
-                                        event_stream.set_last_event_id(id.clone());
-                                    }
-                                    this.state.set(SourceState::Open {
-                                        event_stream: Box::pin(event_stream),
-                                    });
-                                    return Poll::Ready(Some(Ok(Event::Open)));
-                                }
-                                Err(err) => {
-                                    // Transition: Reconnecting -> Closed (non-retryable error)
-                                    this.state.set(SourceState::Closed);
-                                    return Poll::Ready(Some(Err(err)));
-                                }
-                            }
-                        }
-                        Poll::Ready(Err(err)) => {
-                            // Reconnection attempt failed - continue retry cycle
-                            if let Some(delay_duration) =
-                                this.retry_policy.retry(&err, Some(*last_retry))
-                            {
-                                let (retry_num, _) = *last_retry;
-                                // Transition: Reconnecting -> WaitingToRetry
-                                this.state.set(SourceState::WaitingToRetry {
-                                    retry_delay: Delay::new(delay_duration),
-                                    current_retry: (retry_num + 1, delay_duration),
-                                });
-                                return Poll::Ready(Some(Err(err)));
-                            } else {
-                                // The retry policy declined to schedule a
-                                // retry (exhausted max retries, or a custom
-                                // policy giving up): close the source while
-                                // still surfacing the error — never swallow it.
-                                // Transition: Reconnecting -> Closed
-                                this.state.set(SourceState::Closed);
-                                return Poll::Ready(Some(Err(err)));
-                            }
+                            // The connection attempt failed; surface the error
+                            // and close. Retrying is the request layer's call.
+                            // Transition: Connecting -> Closed
+                            this.state.set(SourceState::Closed);
+                            return Poll::Ready(Some(Err(err)));
                         }
                     }
                 }
@@ -272,32 +177,14 @@ where
                     match event_stream.poll_next(cx) {
                         Poll::Pending => return Poll::Pending,
                         Poll::Ready(Some(Ok(event))) => {
-                            if !event.id.is_empty() {
-                                *this.last_event_id = Some(event.id.clone());
-                            }
-                            if let Some(duration) = event.retry {
-                                this.retry_policy.set_reconnection_time(duration);
-                            }
                             return Poll::Ready(Some(Ok(Event::Message(event))));
                         }
                         Poll::Ready(Some(Err(EventStreamError::Transport(err)))) => {
-                            // Connection error while open - start fresh retry cycle
-                            if let Some(delay_duration) = this.retry_policy.retry(&err, None) {
-                                // Transition: Open -> WaitingToRetry
-                                this.state.set(SourceState::WaitingToRetry {
-                                    retry_delay: Delay::new(delay_duration),
-                                    current_retry: (1, delay_duration),
-                                });
-                                return Poll::Ready(Some(Err(err)));
-                            } else {
-                                // The retry policy declined to schedule a
-                                // retry (exhausted max retries, or a custom
-                                // policy giving up): close the source while
-                                // still surfacing the error — never swallow it.
-                                // Transition: Open -> Closed
-                                this.state.set(SourceState::Closed);
-                                return Poll::Ready(Some(Err(err)));
-                            }
+                            // Connection error while open: surfaced once, then
+                            // the source closes (no reconnection).
+                            // Transition: Open -> Closed
+                            this.state.set(SourceState::Closed);
+                            return Poll::Ready(Some(Err(err)));
                         }
                         Poll::Ready(Some(Err(EventStreamError::Parser(err)))) => {
                             // A malformed SSE frame from the provider is a
@@ -322,31 +209,6 @@ where
                             // Transition: Open -> Closed
                             this.state.set(SourceState::Closed);
                             return Poll::Ready(None);
-                        }
-                    }
-                }
-
-                SourceStateProjection::WaitingToRetry {
-                    retry_delay,
-                    current_retry,
-                } => {
-                    // Copy before polling to avoid borrow conflicts
-                    let retry_info = *current_retry;
-                    match retry_delay.poll(cx) {
-                        Poll::Pending => return Poll::Pending,
-                        Poll::Ready(()) => {
-                            // Transition: WaitingToRetry -> Reconnecting
-                            let response_future =
-                                GenericEventSource::<HttpClient, RequestBody>::create_response_future(
-                                    this.client,
-                                    this.req,
-                                    this.last_event_id.as_deref(),
-                                );
-                            this.state.set(SourceState::Reconnecting {
-                                response_future,
-                                last_retry: retry_info,
-                            });
-                            continue;
                         }
                     }
                 }
@@ -404,7 +266,7 @@ mod tests {
     use std::collections::VecDeque;
     use std::sync::{Arc, Mutex};
 
-    /// A scripted outcome for one `send_streaming` attempt.
+    /// A scripted outcome for the `send_streaming` attempt.
     enum MockOutcome {
         Response {
             status: StatusCode,
@@ -414,24 +276,26 @@ mod tests {
         Fail(Error),
     }
 
-    /// A [`HttpClientExt`] mock that replays a scripted list of outcomes,
-    /// recording the `last-event-id` header of every attempt.
+    /// A [`HttpClientExt`] mock that replays a scripted list of outcomes.
     #[derive(Clone, Default)]
     struct MockClient {
         outcomes: Arc<Mutex<VecDeque<MockOutcome>>>,
-        seen_last_event_ids: Arc<Mutex<Vec<Option<String>>>>,
+        send_streaming_calls: Arc<Mutex<usize>>,
     }
 
     impl MockClient {
         fn with(outcomes: Vec<MockOutcome>) -> Self {
             Self {
                 outcomes: Arc::new(Mutex::new(outcomes.into())),
-                seen_last_event_ids: Arc::new(Mutex::new(Vec::new())),
+                send_streaming_calls: Arc::new(Mutex::new(0)),
             }
         }
 
-        fn last_event_ids(&self) -> Vec<Option<String>> {
-            self.seen_last_event_ids.lock().unwrap().clone()
+        fn send_streaming_calls(&self) -> usize {
+            match self.send_streaming_calls.lock() {
+                Ok(guard) => *guard,
+                Err(poisoned) => *poisoned.into_inner(),
+            }
         }
     }
 
@@ -466,21 +330,19 @@ mod tests {
 
         fn send_streaming<T>(
             &self,
-            req: Request<T>,
+            _req: Request<T>,
         ) -> impl Future<Output = crate::http_client::Result<StreamingResponse>> + WasmCompatSend
         where
             T: Into<Bytes> + WasmCompatSend,
         {
-            let last_event_id = req
-                .headers()
-                .get("last-event-id")
-                .and_then(|value| value.to_str().ok())
-                .map(str::to_owned);
-            self.seen_last_event_ids
-                .lock()
-                .unwrap()
-                .push(last_event_id);
-            let outcome = self.outcomes.lock().unwrap().pop_front();
+            match self.send_streaming_calls.lock() {
+                Ok(mut guard) => *guard += 1,
+                Err(poisoned) => *poisoned.into_inner() += 1,
+            }
+            let outcome = match self.outcomes.lock() {
+                Ok(mut guard) => guard.pop_front(),
+                Err(poisoned) => poisoned.into_inner().pop_front(),
+            };
 
             async move {
                 match outcome {
@@ -522,31 +384,6 @@ mod tests {
         Box::pin(GenericEventSource::new(client.clone(), test_request()))
     }
 
-    fn boxed_source_with_policy(
-        client: &MockClient,
-        retry_policy: ExponentialBackoff,
-        last_event_id: Option<String>,
-    ) -> Pin<Box<GenericEventSource<MockClient, Bytes>>> {
-        let req = test_request();
-        let state = SourceState::Connecting {
-            response_future: GenericEventSource::<MockClient, Bytes>::create_response_future(
-                client, &req, None,
-            ),
-        };
-        Box::pin(GenericEventSource {
-            client: client.clone(),
-            req,
-            retry_policy,
-            last_event_id,
-            allow_missing_content_type: false,
-            state,
-        })
-    }
-
-    fn fast_backoff(max_retries: Option<usize>) -> ExponentialBackoff {
-        ExponentialBackoff::new(Duration::from_millis(1), 2., None, max_retries)
-    }
-
     #[test]
     fn event_converts_from_message_event() {
         let message = MessageEvent {
@@ -571,42 +408,16 @@ mod tests {
         };
         assert_eq!(event.data, "first");
         assert_eq!(event.id, "abc");
-        assert_eq!(source.last_event_id(), Some("abc"));
 
         let Some(Ok(Event::Message(event))) = source.next().await else {
             panic!("expected second message");
         };
         assert_eq!(event.data, "second");
-        // Empty ids do not overwrite the last event id.
-        assert_eq!(source.last_event_id(), Some("abc"));
 
         // Source ended: the event source closes and stays closed.
         assert!(source.next().await.is_none());
         assert!(source.next().await.is_none());
-    }
-
-    #[tokio::test]
-    async fn retry_field_updates_reconnection_time() {
-        let client = MockClient::with(vec![sse_ok(vec![Ok(Bytes::from_static(
-            b"retry: 2000\ndata: hi\n\n",
-        ))])]);
-        let mut source = boxed_source(&client);
-
-        assert!(matches!(source.next().await, Some(Ok(Event::Open))));
-        let Some(Ok(Event::Message(event))) = source.next().await else {
-            panic!("expected message");
-        };
-        assert_eq!(event.data, "hi");
-        assert_eq!(
-            source.retry_policy.start,
-            Duration::from_millis(2000),
-            "retry field should update the backoff start"
-        );
-        // The pre-existing 5s cap is preserved (raised only if exceeded).
-        assert_eq!(
-            source.retry_policy.max_duration,
-            Some(Duration::from_secs(5))
-        );
+        assert_eq!(client.send_streaming_calls(), 1);
     }
 
     #[tokio::test]
@@ -678,98 +489,43 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn transport_error_triggers_reconnect_with_last_event_id() {
-        let client = MockClient::with(vec![
-            // Initial connection attempt fails.
-            MockOutcome::Fail(Error::StreamEnded),
-            // Reconnect succeeds, yields an event with an id, then breaks.
-            sse_ok(vec![
-                Ok(Bytes::from_static(b"id: e1\ndata: first\n\n")),
-                Err(Error::StreamEnded),
-            ]),
-            // Second reconnect succeeds and completes cleanly.
-            sse_ok(vec![Ok(Bytes::from_static(b"data: second\n\n"))]),
-        ]);
-        let mut source = boxed_source_with_policy(&client, fast_backoff(None), None);
+    async fn connect_failure_surfaces_error_and_closes_without_reconnecting() {
+        let client = MockClient::with(vec![MockOutcome::Fail(Error::StreamEnded)]);
+        let mut source = boxed_source(&client);
 
-        // Initial connection failure is surfaced and retried.
         assert!(matches!(source.next().await, Some(Err(Error::StreamEnded))));
-        // Reconnect succeeds.
+        // The source closes; it never re-issues the request.
+        assert!(source.next().await.is_none());
+        assert_eq!(
+            client.send_streaming_calls(),
+            1,
+            "a failed connect must not be replayed by the SSE layer"
+        );
+    }
+
+    #[tokio::test]
+    async fn transport_error_while_open_closes_the_source() {
+        let client = MockClient::with(vec![sse_ok(vec![
+            Ok(Bytes::from_static(b"data: first\n\n")),
+            Err(Error::StreamEnded),
+        ])]);
+        let mut source = boxed_source(&client);
+
         assert!(matches!(source.next().await, Some(Ok(Event::Open))));
         let Some(Ok(Event::Message(event))) = source.next().await else {
             panic!("expected first message");
         };
         assert_eq!(event.data, "first");
-        assert_eq!(source.last_event_id(), Some("e1"));
-        // Transport error while open is surfaced and retried.
-        assert!(matches!(source.next().await, Some(Err(Error::StreamEnded))));
-        // Second reconnect succeeds.
-        assert!(matches!(source.next().await, Some(Ok(Event::Open))));
-        let Some(Ok(Event::Message(event))) = source.next().await else {
-            panic!("expected second message");
-        };
-        assert_eq!(event.data, "second");
-        assert!(source.next().await.is_none());
 
-        // The last event id is replayed on reconnections that happen after the
-        // id was received (the first reconnect happens before any event, so it
-        // has no id to replay).
+        // Mid-stream transport errors are surfaced once, then the source
+        // closes — content already delivered is never replayed.
+        assert!(matches!(source.next().await, Some(Err(Error::StreamEnded))));
+        assert!(source.next().await.is_none());
         assert_eq!(
-            client.last_event_ids(),
-            vec![None, None, Some("e1".to_string())]
+            client.send_streaming_calls(),
+            1,
+            "a stream that already yielded content must not be re-requested"
         );
-    }
-
-    #[tokio::test]
-    async fn reconnect_with_bad_response_closes_the_source() {
-        let client = MockClient::with(vec![
-            MockOutcome::Fail(Error::StreamEnded),
-            // The reconnection attempt gets a non-OK response: the source must
-            // close instead of retrying (check_response errors are terminal).
-            MockOutcome::Response {
-                status: StatusCode::INTERNAL_SERVER_ERROR,
-                content_type: Some("text/event-stream"),
-                chunks: vec![],
-            },
-        ]);
-        let mut source = boxed_source_with_policy(&client, fast_backoff(None), None);
-
-        assert!(matches!(source.next().await, Some(Err(Error::StreamEnded))));
-        assert!(matches!(
-            source.next().await,
-            Some(Err(Error::InvalidStatusCode(StatusCode::INTERNAL_SERVER_ERROR)))
-        ));
-        assert!(source.next().await.is_none());
-    }
-
-    #[tokio::test]
-    async fn reconnect_gives_up_after_max_retries() {
-        let client = MockClient::with(vec![
-            MockOutcome::Fail(Error::StreamEnded),
-            MockOutcome::Fail(Error::StreamEnded),
-        ]);
-        // max_retries = 1: one reconnect attempt, then give up.
-        let mut source = boxed_source_with_policy(&client, fast_backoff(Some(1)), None);
-
-        assert!(matches!(source.next().await, Some(Err(Error::StreamEnded))));
-        assert!(matches!(source.next().await, Some(Err(Error::StreamEnded))));
-        assert!(source.next().await.is_none());
-    }
-
-    #[tokio::test]
-    async fn initial_connect_seeds_last_event_id_into_stream() {
-        let client = MockClient::with(vec![sse_ok(vec![Ok(Bytes::from_static(
-            b"data: hi\n\n",
-        ))])]);
-        let mut source =
-            boxed_source_with_policy(&client, DEFAULT_RETRY, Some("seed".to_string()));
-
-        assert!(matches!(source.next().await, Some(Ok(Event::Open))));
-        let Some(Ok(Event::Message(event))) = source.next().await else {
-            panic!("expected message");
-        };
-        assert_eq!(event.data, "hi");
-        assert!(source.next().await.is_none());
     }
 
     #[tokio::test]

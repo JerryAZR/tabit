@@ -62,7 +62,6 @@ reqwest-middleware = { workspace = true, features = [
     "http2",
     "rustls",
 ] }
-reqwest-retry = { workspace = true }
 schemars = { workspace = true }
 serde = { workspace = true, features = ["derive"] }
 # `float_roundtrip` keeps cassette scrubbing idempotent on float-heavy bodies

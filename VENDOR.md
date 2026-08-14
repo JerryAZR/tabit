@@ -242,19 +242,33 @@ deleted (the hoisting path is still covered by
 ## Known deviations summary
 
 1. Providers trimmed to anthropic + openai (+ compat engine) as above.
-2. Facade has no companion crates/features; `rmcp`/`discord-bot` deferred.
+2. Facade has no companion crates/features; `rmcp`/`discord-bot` deleted.
 3. `streaming_conformance.rs` provider scenarios trimmed (fallback approach).
-4. Openai network-only live tests dropped (`mod live {}` kept, documented).
+4. Openai network-only live tests dropped (`mod live {}` later removed).
 5. `serde_json` `preserve_order` enabled on `rig-core`'s real dependency
    (insertion-ordered maps are shipped behavior; see the cassette-fidelity
    section).
 6. `driver_adoption.rs` / serde allowlist / facade_renamed fixture adjusted for
    the trimmed tree (documented above).
-7. Dead code left by the provider trim (internal engine items, ChatGPT-replay
-   helpers, etc.) was deleted once the tree was owned; the websocket feature
-   was removed outright. The Responses replay/merge helpers whose shipped
-   callers disappeared survive as `#[cfg(test)]` harnesses for the inline
-   tests. The default build compiles with zero warnings.
+7. Dead code left by the provider trim was deleted once the tree was owned; the
+   websocket feature was removed outright. The Responses replay/merge helpers
+   whose shipped callers disappeared survive as `#[cfg(test)]` harnesses for
+   the inline tests. The default build compiles with zero warnings.
+8. Transport layer rewritten (phase 1 hardening): the SSE reconnect /
+   last-event-id machinery and the old `ExponentialBackoff` are deleted —
+   providers fail the stream on the first transport error, and retry belongs
+   to the request layer. A status-aware retry (pi's policy: 408/409/429/5xx +
+   `x-should-retry`, `retry-after-ms`/`retry-after` incl. HTTP-date with a
+   60 s server-delay cap, jittered bounded backoff, default 2 retries,
+   zero-body-bytes retry boundary) plus connect/idle timeouts
+   (`ClientBuilder::connect_timeout`/`idle_timeout`) were added to the
+   generic `Client`. HTTP error variants preserve response headers.
+9. Provider hardening (phase 1): Anthropic content blocks route per index
+   with loud interleave guards (malformed streams fail, never silently
+   corrupt); orphan tool results fail request conversion naming the id;
+   `Usage` carries the `cache_creation` 1 h/5 min breakdown; chat-completions
+   `delta.refusal` is modeled (refusal text visible, `ContentFilter`
+   finish reason).
 8. Doctests: all green (0 failures; 10 ignored upstream-marked).
 9. Model catalog removed: no model-name constants or name-keyed behavior in
    the vendored providers (see "Model catalog removal"); callers supply model

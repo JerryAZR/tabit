@@ -1109,6 +1109,7 @@ mod tests {
             total_tokens: input_tokens + output_tokens,
             cached_input_tokens: 0,
             cache_creation_input_tokens: 0,
+            cache_creation_1h_input_tokens: 0,
             tool_use_prompt_tokens: 0,
             reasoning_tokens: 0,
         }
@@ -1124,6 +1125,7 @@ mod tests {
                 total_tokens: 3,
                 cached_input_tokens: 0,
                 cache_creation_input_tokens: 0,
+                cache_creation_1h_input_tokens: 0,
                 tool_use_prompt_tokens: 0,
                 reasoning_tokens: 0,
             },
@@ -1136,7 +1138,7 @@ mod tests {
     #[test]
     fn typed_prompt_response_deserializes_with_deserialize_only_output() {
         let response: TypedPromptResponse<DeserializeOnly> = serde_json::from_str(
-            r#"{"output":{"value":"ok"},"usage":{"input_tokens":1,"output_tokens":2,"total_tokens":3,"cached_input_tokens":0,"cache_creation_input_tokens":0,"reasoning_tokens":0}}"#,
+            r#"{"output":{"value":"ok"},"usage":{"input_tokens":1,"output_tokens":2,"total_tokens":3,"cached_input_tokens":0,"cache_creation_input_tokens":0,"cache_creation_1h_input_tokens":0,"reasoning_tokens":0}}"#,
         )
         .expect("deserialize typed prompt response");
 
@@ -1170,7 +1172,7 @@ mod tests {
                         "output_tokens": 0,
                         "total_tokens": 0,
                         "cached_input_tokens": 0,
-                        "cache_creation_input_tokens": 0,
+                        "cache_creation_input_tokens": 0,"cache_creation_1h_input_tokens": 0,
                         "tool_use_prompt_tokens": 0,
                         "reasoning_tokens": 0,
                     }
@@ -1182,7 +1184,7 @@ mod tests {
                         "output_tokens": 4,
                         "total_tokens": 7,
                         "cached_input_tokens": 0,
-                        "cache_creation_input_tokens": 0,
+                        "cache_creation_input_tokens": 0,"cache_creation_1h_input_tokens": 0,
                         "tool_use_prompt_tokens": 0,
                         "reasoning_tokens": 0,
                     }
@@ -1218,7 +1220,7 @@ mod tests {
     fn prompt_response_deserializes_pre_monoid_null_usage_format() {
         // Fixture captured from rig before CompletionCall.usage dropped its
         // Option encoding; `"usage": null` must map to zero-valued usage.
-        let fixture = r#"{"output":"ok","usage":{"input_tokens":3,"output_tokens":4,"total_tokens":7,"cached_input_tokens":0,"cache_creation_input_tokens":0,"tool_use_prompt_tokens":0,"reasoning_tokens":0},"completion_calls":[{"call_index":0,"usage":null},{"call_index":1,"usage":{"input_tokens":3,"output_tokens":4,"total_tokens":7,"cached_input_tokens":0,"cache_creation_input_tokens":0,"tool_use_prompt_tokens":0,"reasoning_tokens":0}}],"messages":[{"role":"user","content":[{"type":"text","text":"add things"}]}]}"#;
+        let fixture = r#"{"output":"ok","usage":{"input_tokens":3,"output_tokens":4,"total_tokens":7,"cached_input_tokens":0,"cache_creation_input_tokens":0,"cache_creation_1h_input_tokens":0,"tool_use_prompt_tokens":0,"reasoning_tokens":0},"completion_calls":[{"call_index":0,"usage":null},{"call_index":1,"usage":{"input_tokens":3,"output_tokens":4,"total_tokens":7,"cached_input_tokens":0,"cache_creation_input_tokens":0,"cache_creation_1h_input_tokens":0,"tool_use_prompt_tokens":0,"reasoning_tokens":0}}],"messages":[{"role":"user","content":[{"type":"text","text":"add things"}]}]}"#;
 
         let response: PromptResponse =
             serde_json::from_str(fixture).expect("old-format response should deserialize");
@@ -1358,6 +1360,7 @@ mod tests {
             total_tokens: 10,
             cached_input_tokens: 0,
             cache_creation_input_tokens: 0,
+            cache_creation_1h_input_tokens: 0,
             tool_use_prompt_tokens: 0,
             reasoning_tokens: 0,
         };
@@ -2277,6 +2280,7 @@ mod tests {
             total_tokens: 2,
             cached_input_tokens: 0,
             cache_creation_input_tokens: 0,
+            cache_creation_1h_input_tokens: 0,
             tool_use_prompt_tokens: 0,
             reasoning_tokens: 0,
         };
@@ -2286,6 +2290,7 @@ mod tests {
             total_tokens: 2,
             cached_input_tokens: 0,
             cache_creation_input_tokens: 0,
+            cache_creation_1h_input_tokens: 0,
             tool_use_prompt_tokens: 0,
             reasoning_tokens: 0,
         };
@@ -2313,6 +2318,7 @@ mod tests {
                 total_tokens: 4,
                 cached_input_tokens: 0,
                 cache_creation_input_tokens: 0,
+                cache_creation_1h_input_tokens: 0,
                 tool_use_prompt_tokens: 0,
                 reasoning_tokens: 0,
             }

@@ -16,9 +16,34 @@ pub use embeddings::EmbeddingsClient;
 use http::{HeaderMap, HeaderName, HeaderValue};
 pub use model_listing::{ModelLister, ModelListingClient};
 pub use rerank::RerankingClient;
-use std::{env::VarError, fmt::Debug, marker::PhantomData, sync::Arc};
+use std::{env::VarError, fmt::Debug, marker::PhantomData, sync::Arc, time::Duration};
 use thiserror::Error;
 pub use verify::{VerifyClient, VerifyError};
+
+/// Transport behavior owned by the generic [`Client`]: request retries and
+/// timeouts applied uniformly on top of whatever [`HttpClientExt`] backend the
+/// client was built with.
+#[derive(Clone, Debug)]
+struct TransportOptions {
+    /// Status-aware request retry configuration.
+    retry: http_client::retry::RetryConfig,
+    /// Timeout for establishing the connection. Applied when the builder
+    /// constructs the default `reqwest::Client` backend.
+    connect_timeout: Duration,
+    /// Maximum time without inbound data before a request fails: per-chunk for
+    /// streaming bodies, overall for unary bodies.
+    idle_timeout: Duration,
+}
+
+impl Default for TransportOptions {
+    fn default() -> Self {
+        Self {
+            retry: http_client::retry::RetryConfig::default(),
+            connect_timeout: Duration::from_secs(10),
+            idle_timeout: Duration::from_secs(120),
+        }
+    }
+}
 
 #[cfg(feature = "image")]
 use crate::image_generation::ImageGenerationModel;
@@ -173,8 +198,12 @@ impl ApiKey for Nothing {}
 pub struct Client<Ext = Nothing, H = reqwest::Client> {
     base_url: Arc<str>,
     headers: Arc<HeaderMap>,
-    http_client: H,
+    /// The HTTP backend, shared so the retry loop in the [`HttpClientExt`]
+    /// impl can hold a handle to it inside its `'static` future without
+    /// requiring `H: Clone`.
+    http_client: Arc<H>,
     ext: Ext,
+    transport: TransportOptions,
 }
 
 /// Provider extension hook for redacted [`Debug`] output.
@@ -356,13 +385,15 @@ impl<Ext, H> Client<Ext, H> {
         &self.ext
     }
 
-    /// Reuse this client's base URL, headers, and HTTP backend with a different extension.
+    /// Reuse this client's base URL, headers, HTTP backend, and transport
+    /// options with a different extension.
     pub fn with_ext<NewExt>(self, new_ext: NewExt) -> Client<NewExt, H> {
         Client {
             base_url: self.base_url,
             headers: self.headers,
             http_client: self.http_client,
             ext: new_ext,
+            transport: self.transport,
         }
     }
 }
@@ -386,7 +417,30 @@ where
             http::HeaderValue::from_static("application/json"),
         );
 
-        self.http_client.send(req)
+        // Freeze the request into cheaply-clonable parts so every retry
+        // attempt is a fresh, byte-identical request (the body is `Bytes`).
+        let (parts, body) = req.into_parts();
+        let body: Bytes = body.into();
+        let http = Arc::clone(&self.http_client);
+        let retry = self.transport.retry.clone();
+        let idle_timeout = self.transport.idle_timeout;
+
+        async move {
+            let response = retry
+                .execute(|| http.send::<Bytes, U>(Request::from_parts(parts.clone(), body.clone())))
+                .await?;
+
+            // The response (2xx) is about to be handed to the caller, so no
+            // more retries from here on; instead bound how long the deferred
+            // body read may stall.
+            Ok(response.map(|body| -> LazyBody<U> {
+                Box::pin(async move {
+                    crate::wasm_compat::timeout(idle_timeout, body)
+                        .await
+                        .unwrap_or_else(|_elapsed| Err(http_client::Error::IdleTimeout(idle_timeout)))
+                })
+            }))
+        }
     }
 
     fn send_multipart<U>(
@@ -397,6 +451,8 @@ where
         U: From<Bytes>,
         U: WasmCompatSend + 'static,
     {
+        // Multipart bodies are streamed forms, not cheaply-clonable bytes, so
+        // they are intentionally outside the retry machinery.
         self.http_client.send_multipart(req)
     }
 
@@ -412,7 +468,27 @@ where
             http::HeaderValue::from_static("application/json"),
         );
 
-        self.http_client.send_streaming(req)
+        let (parts, body) = req.into_parts();
+        let body: Bytes = body.into();
+        let http = Arc::clone(&self.http_client);
+        let retry = self.transport.retry.clone();
+        let idle_timeout = self.transport.idle_timeout;
+
+        async move {
+            // Retry boundary: once a 2xx response is returned below, the
+            // stream owns it and no retry can occur — a stream that yields
+            // chunks and then errors is terminal.
+            let response = retry
+                .execute(|| {
+                    http.send_streaming::<Bytes>(Request::from_parts(parts.clone(), body.clone()))
+                })
+                .await?;
+
+            // Guard each chunk with the idle timeout so a stalled stream fails
+            // loudly instead of hanging forever.
+            Ok(response
+                .map(|stream| http_client::idle_timeout_stream(stream, idle_timeout)))
+        }
     }
 }
 
@@ -582,6 +658,7 @@ pub struct ClientBuilder<Ext, ApiKey = Missing, H = Missing> {
     headers: HeaderMap,
     http_client: H,
     ext: Ext,
+    transport: TransportOptions,
 }
 
 impl<ExtBuilder> Default for ClientBuilder<ExtBuilder, Missing, Missing>
@@ -595,6 +672,7 @@ where
             base_url: ExtBuilder::BASE_URL.into(),
             http_client: Missing,
             ext: Default::default(),
+            transport: TransportOptions::default(),
         }
     }
 }
@@ -609,6 +687,7 @@ impl<Ext, H> ClientBuilder<Ext, Missing, H> {
             headers: self.headers,
             http_client: self.http_client,
             ext: self.ext,
+            transport: self.transport,
         }
     }
 }
@@ -628,6 +707,7 @@ where
             headers,
             http_client,
             ext,
+            transport,
         } = self;
 
         let new_ext = f(ext.clone());
@@ -638,6 +718,7 @@ where
             headers,
             http_client,
             ext: new_ext,
+            transport,
         }
     }
 
@@ -663,12 +744,49 @@ where
             api_key: self.api_key,
             headers: self.headers,
             ext: self.ext,
+            transport: self.transport,
         }
     }
 
     /// Set the HTTP headers used in this client
     pub fn http_headers(self, headers: HeaderMap) -> Self {
         Self { headers, ..self }
+    }
+
+    /// Set the maximum number of retries for retryable request failures.
+    ///
+    /// Retryable failures are connect/timeout errors before any response and
+    /// non-2xx responses with status 408, 409, 429, any 5xx, or an
+    /// `x-should-retry: true` header; server-requested `retry-after*` delays
+    /// are honored. See [`http_client::retry`] for the full policy.
+    ///
+    /// Defaults to 2 retries (3 attempts total); `0` disables retries.
+    pub fn max_retries(mut self, max_retries: u32) -> Self {
+        self.transport.retry.max_retries = max_retries;
+        self
+    }
+
+    /// Set the timeout for establishing a connection. Defaults to 10 seconds.
+    ///
+    /// This is applied when the builder constructs its default
+    /// `reqwest::Client` backend (i.e. when [`Self::http_client`] was not
+    /// called). A user-supplied backend owns its own connect configuration.
+    pub fn connect_timeout(mut self, connect_timeout: Duration) -> Self {
+        self.transport.connect_timeout = connect_timeout;
+        self
+    }
+
+    /// Set the maximum time a request may go without inbound data. Defaults to
+    /// 120 seconds — generous, because reasoning models can be quiet between
+    /// chunks, but finite.
+    ///
+    /// For streaming responses this is a per-chunk timeout: if no chunk
+    /// arrives within the window the stream fails with an error naming the
+    /// timeout. For regular (non-streaming) requests it bounds the overall
+    /// body read.
+    pub fn idle_timeout(mut self, idle_timeout: Duration) -> Self {
+        self.transport.idle_timeout = idle_timeout;
+        self
     }
 
     pub(crate) fn headers_mut(&mut self) -> &mut HeaderMap {
@@ -699,10 +817,24 @@ where
     Key: ApiKey,
 {
     /// Build a client using the default `reqwest::Client` backend.
+    ///
+    /// The backend is constructed with the configured
+    /// [`ClientBuilder::connect_timeout`]; the idle timeout is enforced by the
+    /// generic client regardless of backend.
     pub fn build(
         self,
     ) -> http_client::Result<Client<ExtBuilder::Extension<reqwest::Client>, reqwest::Client>> {
-        self.http_client(reqwest::Client::default()).build()
+        // reqwest's wasm (fetch) backend does not expose connect timeouts.
+        #[cfg(not(target_family = "wasm"))]
+        let backend = reqwest::Client::builder()
+            .connect_timeout(self.transport.connect_timeout)
+            .build()
+            .map_err(http_client::Error::from)?;
+        #[cfg(target_family = "wasm")]
+        let backend = reqwest::Client::builder()
+            .build()
+            .map_err(http_client::Error::from)?;
+        self.http_client(backend).build()
     }
 }
 
@@ -726,6 +858,7 @@ where
             base_url,
             mut headers,
             api_key,
+            transport,
             ..
         } = self;
 
@@ -736,10 +869,11 @@ where
         }
 
         Ok(Client {
-            http_client,
+            http_client: Arc::new(http_client),
             base_url: Arc::from(base_url.as_str()),
             headers: Arc::new(headers),
             ext,
+            transport,
         })
     }
 }
@@ -1260,6 +1394,674 @@ mod tests {
                 error,
                 RerankError::ResponseError(message) if message.contains("rerank-mock")
             ));
+        }
+    }
+
+    /// Coverage for the transport layer owned by the generic [`Client`]:
+    /// status-aware retries (with server-requested delays) and idle timeouts.
+    mod transport {
+        use super::*;
+        use crate::http_client::{
+            self, HttpClientExt, LazyBody, MultipartForm, StreamingResponse,
+        };
+        use crate::wasm_compat::WasmCompatSend;
+        use bytes::Bytes;
+        use futures::StreamExt;
+        use std::{
+            collections::VecDeque,
+            future,
+            sync::{
+                Arc, Mutex,
+                atomic::{AtomicUsize, Ordering},
+            },
+            time::Instant,
+        };
+
+        /// Minimal provider extension so a [`Client`] can be built over any
+        /// scripted backend.
+        #[derive(Debug, Default, Clone, Copy)]
+        struct TestExt;
+        #[derive(Debug, Default, Clone, Copy)]
+        struct TestExtBuilder;
+
+        impl Provider for TestExt {
+            type Builder = TestExtBuilder;
+            const VERIFY_PATH: &'static str = "/";
+        }
+
+        impl ProviderBuilder for TestExtBuilder {
+            type Extension<H> = TestExt where H: HttpClientExt;
+            type ApiKey = BearerAuth;
+
+            const BASE_URL: &'static str = "https://transport.invalid";
+
+            fn build<H>(
+                _builder: &ClientBuilder<Self, Self::ApiKey, H>,
+            ) -> http_client::Result<TestExt>
+            where
+                H: HttpClientExt,
+            {
+                Ok(TestExt)
+            }
+        }
+
+        impl DebugExt for TestExt {}
+
+        /// One scripted outcome for a unary `send` attempt.
+        enum UnaryOutcome {
+            Response {
+                status: http::StatusCode,
+                headers: http::HeaderMap,
+                body: Bytes,
+            },
+            /// A success response whose body never resolves.
+            BodyPending,
+        }
+
+        /// One scripted outcome for a `send_streaming` attempt.
+        enum StreamOutcome {
+            /// A success response yielding scripted chunks.
+            Chunks(Vec<http_client::Result<Bytes>>),
+            /// A failed attempt (transport or non-success status error).
+            Fail(http_client::Error),
+            /// A success response whose stream never yields.
+            Pending,
+        }
+
+        /// A scripted [`HttpClientExt`] backend that counts attempts and
+        /// records the request body bytes of every unary attempt.
+        #[derive(Clone, Default)]
+        struct ScriptedTransport {
+            unary: Arc<Mutex<VecDeque<UnaryOutcome>>>,
+            streaming: Arc<Mutex<VecDeque<StreamOutcome>>>,
+            unary_calls: Arc<AtomicUsize>,
+            streaming_calls: Arc<AtomicUsize>,
+            unary_bodies: Arc<Mutex<Vec<Bytes>>>,
+        }
+
+        impl ScriptedTransport {
+            fn new(
+                unary: Vec<UnaryOutcome>,
+                streaming: Vec<StreamOutcome>,
+            ) -> Self {
+                Self {
+                    unary: Arc::new(Mutex::new(unary.into())),
+                    streaming: Arc::new(Mutex::new(streaming.into())),
+                    ..Self::default()
+                }
+            }
+
+            fn unary_calls(&self) -> usize {
+                self.unary_calls.load(Ordering::SeqCst)
+            }
+
+            fn streaming_calls(&self) -> usize {
+                self.streaming_calls.load(Ordering::SeqCst)
+            }
+
+            fn unary_bodies(&self) -> Vec<Bytes> {
+                match self.unary_bodies.lock() {
+                    Ok(guard) => guard.clone(),
+                    Err(poisoned) => poisoned.into_inner().clone(),
+                }
+            }
+
+            fn next_unary(&self) -> Option<UnaryOutcome> {
+                match self.unary.lock() {
+                    Ok(mut guard) => guard.pop_front(),
+                    Err(poisoned) => poisoned.into_inner().pop_front(),
+                }
+            }
+
+            fn next_streaming(&self) -> Option<StreamOutcome> {
+                match self.streaming.lock() {
+                    Ok(mut guard) => guard.pop_front(),
+                    Err(poisoned) => poisoned.into_inner().pop_front(),
+                }
+            }
+        }
+
+        fn status_outcome(
+            status: http::StatusCode,
+            headers: &'static [(&'static str, &'static str)],
+            body: &str,
+        ) -> UnaryOutcome {
+            let mut map = http::HeaderMap::new();
+            for (name, value) in headers {
+                map.insert(
+                    http::HeaderName::from_static(name),
+                    http::HeaderValue::from_str(value).expect("static test header value"),
+                );
+            }
+            UnaryOutcome::Response {
+                status,
+                headers: map,
+                body: Bytes::copy_from_slice(body.as_bytes()),
+            }
+        }
+
+        fn streaming_status_error(
+            status: http::StatusCode,
+            headers: &'static [(&'static str, &'static str)],
+        ) -> StreamOutcome {
+            let mut map = http::HeaderMap::new();
+            for (name, value) in headers {
+                map.insert(
+                    http::HeaderName::from_static(name),
+                    http::HeaderValue::from_str(value).expect("static test header value"),
+                );
+            }
+            StreamOutcome::Fail(http_client::Error::NonSuccessResponse {
+                status,
+                message: String::new(),
+                headers: map,
+            })
+        }
+
+        impl HttpClientExt for ScriptedTransport {
+            fn send<T, U>(
+                &self,
+                req: Request<T>,
+            ) -> impl Future<Output = http_client::Result<Response<LazyBody<U>>>> + WasmCompatSend + 'static
+            where
+                T: Into<Bytes>,
+                T: WasmCompatSend,
+                U: From<Bytes>,
+                U: WasmCompatSend + 'static,
+            {
+                self.unary_calls.fetch_add(1, Ordering::SeqCst);
+                let outcome = self.next_unary();
+                let (parts, body) = req.into_parts();
+                let body: Bytes = body.into();
+                match self.unary_bodies.lock() {
+                    Ok(mut guard) => guard.push(body.clone()),
+                    Err(poisoned) => poisoned.into_inner().push(body),
+                }
+                let _ = parts;
+
+                async move {
+                    match outcome {
+                        Some(UnaryOutcome::Response { status, headers, body }) => {
+                            if !status.is_success() {
+                                return Err(http_client::Error::NonSuccessResponse {
+                                    status,
+                                    message: String::from_utf8_lossy(&body).into_owned(),
+                                    headers,
+                                });
+                            }
+                            let lazy: LazyBody<U> =
+                                Box::pin(async move { Ok(U::from(body)) });
+                            Response::builder()
+                                .status(status)
+                                .body(lazy)
+                                .map_err(http_client::Error::Protocol)
+                        }
+                        Some(UnaryOutcome::BodyPending) => {
+                            let lazy: LazyBody<U> = Box::pin(future::pending());
+                            Response::builder()
+                                .status(http::StatusCode::OK)
+                                .body(lazy)
+                                .map_err(http_client::Error::Protocol)
+                        }
+                        None => Err(http_client::Error::StreamEnded),
+                    }
+                }
+            }
+
+            fn send_multipart<U>(
+                &self,
+                _req: Request<MultipartForm>,
+            ) -> impl Future<Output = http_client::Result<Response<LazyBody<U>>>> + WasmCompatSend + 'static
+            where
+                U: From<Bytes>,
+                U: WasmCompatSend + 'static,
+            {
+                async { Err(http_client::Error::StreamEnded) }
+            }
+
+            fn send_streaming<T>(
+                &self,
+                _req: Request<T>,
+            ) -> impl Future<Output = http_client::Result<StreamingResponse>> + WasmCompatSend
+            where
+                T: Into<Bytes> + WasmCompatSend,
+            {
+                self.streaming_calls.fetch_add(1, Ordering::SeqCst);
+                let outcome = self.next_streaming();
+
+                async move {
+                    match outcome {
+                        Some(StreamOutcome::Chunks(chunks)) => {
+                            let stream: http_client::sse::BoxedStream =
+                                Box::pin(futures::stream::iter(chunks));
+                            Response::builder()
+                                .status(http::StatusCode::OK)
+                                .header(http::header::CONTENT_TYPE, "text/event-stream")
+                                .body(stream)
+                                .map_err(http_client::Error::Protocol)
+                        }
+                        Some(StreamOutcome::Fail(error)) => Err(error),
+                        Some(StreamOutcome::Pending) => {
+                            let stream: http_client::sse::BoxedStream =
+                                Box::pin(futures::stream::pending());
+                            Response::builder()
+                                .status(http::StatusCode::OK)
+                                .header(http::header::CONTENT_TYPE, "text/event-stream")
+                                .body(stream)
+                                .map_err(http_client::Error::Protocol)
+                        }
+                        None => Err(http_client::Error::StreamEnded),
+                    }
+                }
+            }
+        }
+
+        fn client_over(backend: ScriptedTransport) -> Client<TestExt, ScriptedTransport> {
+            Client::<TestExt, reqwest::Client>::builder()
+                .api_key("test-key")
+                .http_client(backend)
+                .build()
+                .expect("client should build over the scripted backend")
+        }
+
+        fn unary_request<H>(client: &Client<TestExt, H>) -> Request<Bytes> {
+            client
+                .post("/v1/echo")
+                .expect("post builder")
+                .body(Bytes::from_static(b"ping"))
+                .expect("static body builds")
+        }
+
+        fn streaming_request<H>(client: &Client<TestExt, H>) -> Request<Bytes> {
+            client
+                .post_sse("/v1/stream")
+                .expect("post_sse builder")
+                .body(Bytes::from_static(b"ping"))
+                .expect("static body builds")
+        }
+
+        #[test]
+        fn transport_defaults_match_the_documented_values() {
+            let defaults = TransportOptions::default();
+            assert_eq!(defaults.retry.max_retries, 2);
+            assert_eq!(defaults.retry.max_server_delay, Duration::from_secs(60));
+            assert_eq!(defaults.connect_timeout, Duration::from_secs(10));
+            assert_eq!(defaults.idle_timeout, Duration::from_secs(120));
+        }
+
+        #[tokio::test]
+        async fn retryable_429_is_retried_with_identical_request_bytes() {
+            let backend = ScriptedTransport::new(
+                vec![
+                    status_outcome(
+                        http::StatusCode::TOO_MANY_REQUESTS,
+                        &[("retry-after-ms", "1")],
+                        "slow down",
+                    ),
+                    status_outcome(http::StatusCode::OK, &[], "finally"),
+                ],
+                vec![],
+            );
+            let client = client_over(backend.clone());
+
+            let response = client
+                .send::<_, Bytes>(unary_request(&client))
+                .await
+                .expect("second attempt succeeds");
+            let body = response.into_body().await.expect("body resolves");
+
+            assert_eq!(body, Bytes::from_static(b"finally"));
+            assert_eq!(backend.unary_calls(), 2, "one retry after the initial attempt");
+            let bodies = backend.unary_bodies();
+            assert_eq!(bodies.len(), 2);
+            assert_eq!(
+                bodies[0], bodies[1],
+                "every retry must replay byte-identical request bodies"
+            );
+        }
+
+        #[tokio::test]
+        async fn non_retryable_4xx_fails_fast_and_preserves_metadata() {
+            let backend = ScriptedTransport::new(
+                vec![status_outcome(
+                    http::StatusCode::BAD_REQUEST,
+                    &[("x-request-id", "req-7")],
+                    "bad input",
+                )],
+                vec![],
+            );
+            let client = client_over(backend.clone());
+
+            let error = client
+                .send::<_, Bytes>(unary_request(&client))
+                .await
+                .err()
+                .expect("400 must fail");
+
+            assert_eq!(backend.unary_calls(), 1, "400 must not be re-attempted");
+            assert_eq!(error.non_success_status(), Some(http::StatusCode::BAD_REQUEST));
+            assert_eq!(error.non_success_body(), Some("bad input"));
+            assert_eq!(
+                error
+                    .non_success_headers()
+                    .and_then(|h| h.get("x-request-id"))
+                    .and_then(|v| v.to_str().ok()),
+                Some("req-7"),
+                "response headers must stay consumable on the error"
+            );
+        }
+
+        #[tokio::test]
+        async fn x_should_retry_opt_in_retries_another_4xx() {
+            let backend = ScriptedTransport::new(
+                vec![
+                    status_outcome(
+                        http::StatusCode::NOT_FOUND,
+                        &[("x-should-retry", "true"), ("retry-after-ms", "1")],
+                        "transient",
+                    ),
+                    status_outcome(http::StatusCode::OK, &[], "ok"),
+                ],
+                vec![],
+            );
+            let client = client_over(backend.clone());
+
+            client
+                .send::<_, Bytes>(unary_request(&client))
+                .await
+                .expect("opt-in header makes the 404 retryable");
+
+            assert_eq!(backend.unary_calls(), 2);
+        }
+
+        #[tokio::test]
+        async fn retry_after_seconds_header_is_honored() {
+            let backend = ScriptedTransport::new(
+                vec![
+                    status_outcome(
+                        http::StatusCode::TOO_MANY_REQUESTS,
+                        &[("retry-after", "1")],
+                        "slow down",
+                    ),
+                    status_outcome(http::StatusCode::OK, &[], "ok"),
+                ],
+                vec![],
+            );
+            let client = client_over(backend.clone());
+
+            let started = Instant::now();
+            client
+                .send::<_, Bytes>(unary_request(&client))
+                .await
+                .expect("retry after the server-requested delay succeeds");
+
+            assert_eq!(backend.unary_calls(), 2);
+            assert!(
+                started.elapsed() >= Duration::from_millis(950),
+                "the 1s retry-after delay must be respected before retrying"
+            );
+        }
+
+        #[tokio::test]
+        async fn oversized_retry_after_fails_naming_the_requested_delay() {
+            let backend = ScriptedTransport::new(
+                vec![status_outcome(
+                    http::StatusCode::TOO_MANY_REQUESTS,
+                    &[("retry-after", "3600")],
+                    "slow down",
+                )],
+                vec![],
+            );
+            let client = client_over(backend.clone());
+
+            let started = Instant::now();
+            let error = client
+                .send::<_, Bytes>(unary_request(&client))
+                .await
+                .err()
+                .expect("a 3600s server delay must fail the request");
+
+            assert!(
+                matches!(
+                    &error,
+                    http_client::Error::RetryDelayTooLong { requested, cap, .. }
+                        if *requested == Duration::from_secs(3600)
+                            && *cap == Duration::from_secs(60)
+                ),
+                "error must name the requested delay, got: {error}"
+            );
+            assert!(
+                started.elapsed() < Duration::from_secs(5),
+                "must fail instead of sleeping"
+            );
+            assert_eq!(backend.unary_calls(), 1);
+        }
+
+        #[tokio::test]
+        async fn max_retries_zero_disables_retrying() {
+            let backend = ScriptedTransport::new(
+                vec![status_outcome(
+                    http::StatusCode::SERVICE_UNAVAILABLE,
+                    &[("retry-after-ms", "1")],
+                    "down",
+                )],
+                vec![],
+            );
+            let client = Client::<TestExt, reqwest::Client>::builder()
+                .api_key("test-key")
+                .max_retries(0)
+                .http_client(backend.clone())
+                .build()
+                .expect("client builds with retries disabled");
+
+            let error = client
+                .send::<_, Bytes>(unary_request(&client))
+                .await
+                .err()
+                .expect("still fails after the single attempt");
+
+            assert_eq!(backend.unary_calls(), 1);
+            assert_eq!(
+                error.non_success_status(),
+                Some(http::StatusCode::SERVICE_UNAVAILABLE)
+            );
+        }
+
+        #[tokio::test]
+        async fn exhausted_retries_surface_the_last_error() {
+            let backend = ScriptedTransport::new(
+                vec![
+                    status_outcome(
+                        http::StatusCode::TOO_MANY_REQUESTS,
+                        &[("retry-after-ms", "1")],
+                        "one",
+                    ),
+                    status_outcome(
+                        http::StatusCode::TOO_MANY_REQUESTS,
+                        &[("retry-after-ms", "1")],
+                        "two",
+                    ),
+                    status_outcome(
+                        http::StatusCode::TOO_MANY_REQUESTS,
+                        &[("retry-after-ms", "1")],
+                        "three",
+                    ),
+                ],
+                vec![],
+            );
+            let client = client_over(backend.clone());
+
+            let error = client
+                .send::<_, Bytes>(unary_request(&client))
+                .await
+                .err()
+                .expect("all attempts fail");
+
+            assert_eq!(backend.unary_calls(), 3, "2 retries after the initial attempt");
+            assert_eq!(error.non_success_body(), Some("three"));
+        }
+
+        #[tokio::test]
+        async fn streaming_retries_a_retryable_status_before_any_chunk() {
+            let backend = ScriptedTransport::new(
+                vec![],
+                vec![
+                    streaming_status_error(
+                        http::StatusCode::BAD_GATEWAY,
+                        &[("retry-after-ms", "1")],
+                    ),
+                    StreamOutcome::Chunks(vec![
+                        Ok(Bytes::from_static(b"data: hi\n\n")),
+                        Ok(Bytes::from_static(b"data: bye\n\n")),
+                    ]),
+                ],
+            );
+            let client = client_over(backend.clone());
+
+            let response = client
+                .send_streaming(streaming_request(&client))
+                .await
+                .expect("retry succeeds before any chunk was yielded");
+
+            assert_eq!(backend.streaming_calls(), 2);
+            let chunks: Vec<_> = response
+                .into_body()
+                .map(|chunk| chunk.expect("chunk survives the timeout wrapper"))
+                .collect()
+                .await;
+            assert_eq!(chunks.len(), 2);
+            assert_eq!(chunks[0], Bytes::from_static(b"data: hi\n\n"));
+        }
+
+        #[tokio::test]
+        async fn stream_that_yielded_then_errored_is_never_retried() {
+            let backend = ScriptedTransport::new(
+                vec![],
+                vec![StreamOutcome::Chunks(vec![
+                    Ok(Bytes::from_static(b"data: partial\n\n")),
+                    Err(http_client::Error::StreamEnded),
+                ])],
+            );
+            let client = client_over(backend.clone());
+
+            let response = client
+                .send_streaming(streaming_request(&client))
+                .await
+                .expect("the response itself is a success");
+
+            let mut stream = response.into_body();
+            match stream.next().await {
+                Some(Ok(chunk)) => assert_eq!(
+                    chunk,
+                    Bytes::from_static(b"data: partial\n\n"),
+                    "already-yielded content passes through"
+                ),
+                other => panic!("expected the first chunk to pass through, got {other:?}"),
+            }
+            assert!(
+                matches!(stream.next().await, Some(Err(http_client::Error::StreamEnded))),
+                "the mid-stream error surfaces verbatim"
+            );
+            assert_eq!(
+                backend.streaming_calls(),
+                1,
+                "a stream that already yielded content must never be retried"
+            );
+        }
+
+        #[tokio::test]
+        async fn stalled_stream_fails_with_the_idle_timeout() {
+            let backend = ScriptedTransport::new(vec![], vec![StreamOutcome::Pending]);
+            let client = Client::<TestExt, reqwest::Client>::builder()
+                .api_key("test-key")
+                .idle_timeout(Duration::from_millis(25))
+                .http_client(backend.clone())
+                .build()
+                .expect("client builds with a short idle timeout");
+
+            let response = client
+                .send_streaming(streaming_request(&client))
+                .await
+                .expect("the stalled stream still connects");
+
+            let mut stream = response.into_body();
+            let error = stream
+                .next()
+                .await
+                .expect("timeout surfaces an error item")
+                .expect_err("no chunk arrived in time");
+            assert!(
+                matches!(
+                    error,
+                    http_client::Error::IdleTimeout(timeout)
+                        if timeout == Duration::from_millis(25)
+                ),
+                "error must name the timeout, got: {error}"
+            );
+            assert!(stream.next().await.is_none(), "the stream ends");
+        }
+
+        #[tokio::test]
+        async fn stalled_unary_body_fails_with_the_idle_timeout() {
+            let backend = ScriptedTransport::new(vec![UnaryOutcome::BodyPending], vec![]);
+            let client = Client::<TestExt, reqwest::Client>::builder()
+                .api_key("test-key")
+                .idle_timeout(Duration::from_millis(25))
+                .http_client(backend)
+                .build()
+                .expect("client builds with a short idle timeout");
+
+            let response = client
+                .send::<_, Bytes>(unary_request(&client))
+                .await
+                .expect("the response headers arrive");
+
+            let error = response
+                .into_body()
+                .await
+                .expect_err("the body never resolves");
+            assert!(
+                matches!(error, http_client::Error::IdleTimeout(_)),
+                "overall body read is bounded by the idle timeout, got: {error}"
+            );
+        }
+
+        #[tokio::test]
+        async fn connect_failure_is_classified_and_retried() {
+            // Loopback port with nothing listening: the connection is
+            // refused. The backend bypasses any system proxy so the failure
+            // is a direct connect error.
+            let direct_backend = reqwest::Client::builder()
+                .no_proxy()
+                .build()
+                .expect("plain client builds");
+            let client = Client::<TestExt, reqwest::Client>::builder()
+                .base_url("http://127.0.0.1:1")
+                .api_key("test-key")
+                .max_retries(1)
+                .http_client(direct_backend)
+                .build()
+                .expect("client builds over a direct backend");
+
+            let started = Instant::now();
+            let error = client
+                .send::<_, Bytes>(unary_request(&client))
+                .await
+                .err()
+                .expect("connection to a closed loopback port fails");
+
+            let kind = error
+                .transport_error_kind()
+                .expect("reqwest failures classify");
+            assert!(
+                kind == http_client::TransportErrorKind::Connect
+                    || kind == http_client::TransportErrorKind::Timeout,
+                "refused loopback connections classify as connect/timeout, got {kind:?}"
+            );
+            assert!(
+                started.elapsed() >= Duration::from_millis(300),
+                "the retry backoff (>=0.375s at minimum jitter) fired before the final failure"
+            );
         }
     }
 }

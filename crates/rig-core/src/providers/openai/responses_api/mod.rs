@@ -975,6 +975,7 @@ impl From<&ResponsesUsage> for crate::completion::Usage {
                 .map(|details| details.cached_tokens)
                 .unwrap_or(0),
             cache_creation_input_tokens: 0,
+            cache_creation_1h_input_tokens: 0,
             tool_use_prompt_tokens: 0,
             reasoning_tokens: usage
                 .output_tokens_details
@@ -1240,6 +1241,17 @@ impl TryFrom<ResponsesRequestParams> for CompletionRequest {
             system_instructions_placement,
         } = params;
         let chat_history = req.chat_history_with_documents();
+
+        // An orphan tool result (no prior assistant function call carrying
+        // the same correlation key) is rejected up front: the Responses API
+        // would 400 on it, and the alternative — forwarding it — risks
+        // attributing the output to the wrong call. Fail loud, at the
+        // conversion boundary.
+        crate::providers::validate_tool_result_correlation(&chat_history, |call| {
+            call.call_id.as_deref().unwrap_or(call.id.as_str())
+        }, |result| {
+            result.call_id.as_deref().unwrap_or(result.id.as_str())
+        })?;
         let model = req.model.clone().unwrap_or(model);
         let preamble = req.preamble.take();
         let mut instruction_parts = Vec::new();
@@ -3751,6 +3763,49 @@ mod tests {
             "placement configured before completions_api() should survive responses_api()"
         );
         assert_eq!(serialized["input"][0]["role"], "system");
+    }
+
+    /// A tool result whose correlation key matches no prior assistant
+    /// function call is an orphan: the conversion fails loudly, naming the id
+    /// and the history index, instead of forwarding a request the Responses
+    /// API would reject.
+    #[test]
+    fn orphan_tool_result_history_fails_request_conversion() {
+        let request = crate::completion::CompletionRequest {
+            model: None,
+            preamble: None,
+            chat_history: OneOrMany::many(vec![
+                crate::completion::Message::user("Run the report."),
+                rig_tool_result(message::ToolResultContent::text("output")),
+            ])
+            .expect("history should be non-empty"),
+            documents: vec![],
+            tools: vec![],
+            temperature: None,
+            max_tokens: None,
+            tool_choice: None,
+            additional_params: None,
+            output_schema: None,
+            record_telemetry_content: false,
+        };
+
+        let err = CompletionRequest::try_from(ResponsesRequestParams {
+            model: "gpt-4o-mini".to_string(),
+            request,
+            system_instructions_placement: SystemInstructionsPlacement::Instructions,
+        })
+        .expect_err("an orphan tool result must fail request conversion");
+
+        assert!(
+            err.to_string().contains(
+                "tool result \"call-id\" has no matching tool call in the conversation history"
+            ),
+            "unexpected error: {err}"
+        );
+        assert!(
+            err.to_string().contains("history index 1"),
+            "the error must name the message index: {err}"
+        );
     }
 
     #[test]

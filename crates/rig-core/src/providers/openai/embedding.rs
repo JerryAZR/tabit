@@ -235,6 +235,7 @@ where
                                 .as_ref()
                                 .map_or(0, |details| details.cached_tokens as u64),
                             cache_creation_input_tokens: 0,
+                            cache_creation_1h_input_tokens: 0,
                             tool_use_prompt_tokens: 0,
                             reasoning_tokens: 0,
                         },
