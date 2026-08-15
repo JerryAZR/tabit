@@ -11,6 +11,8 @@
 use crate::entry::{EntryKind, SESSION_FORMAT_VERSION, SessionEntry, SessionHeader};
 use crate::error::SessionError;
 use crate::ids;
+use crate::model::ModelSelection;
+use crate::projection;
 use std::fs::{self, OpenOptions};
 use std::io::Write as _;
 use std::path::{Path, PathBuf};
@@ -160,6 +162,22 @@ impl SessionStore {
             source,
         })?;
         Self::parse_and_repair(raw, path)
+    }
+
+    /// The model a session file last used, for default-selection hints
+    /// (see [`crate::ModelRegistry::default_selection`]). `None` when the
+    /// log records no model change.
+    pub fn last_model(&self, path: &Path) -> Result<Option<ModelSelection>, SessionError> {
+        let loaded = self.open_path(path)?;
+        Ok(
+            projection::last_model_change(&loaded.entries).map(|(provider, model, level)| {
+                ModelSelection {
+                    provider: provider.to_string(),
+                    model: model.to_string(),
+                    thinking_level: level.map(str::to_string),
+                }
+            }),
+        )
     }
 
     /// Every stored session, newest first (by creation timestamp in the

@@ -437,7 +437,7 @@ async fn set_model_records_the_change_and_splits_stats() -> Result<(), SessionEr
 }
 
 #[tokio::test]
-async fn resume_picks_up_the_model_from_the_log() -> Result<(), SessionError> {
+async fn resume_uses_the_builder_selection_and_records_the_switch() -> Result<(), SessionError> {
     let store = temp_store("resume-model");
     let factory = Factory::new(vec![text_turn("a")]);
     let mut session = factory.into_builder(store.clone()).create("C:/w")?;
@@ -466,17 +466,23 @@ async fn resume_picks_up_the_model_from_the_log() -> Result<(), SessionError> {
         )))
     });
     let (session, report) = builder.resume(&path).expect("resume");
+    // The report still says what the log last used...
     let resumed = report.resumed_model.expect("log carried the switch");
     assert_eq!(
         (resumed.provider.as_str(), resumed.model.as_str()),
         ("q", "m2")
     );
-    assert_eq!(session.selection().provider, "q");
-    // The factory was consulted for q/m2, not the builder default p/m.
+    // ...but the builder's selection (the caller's explicit choice, or
+    // the registry-resolved default) is what continues.
+    assert_eq!(session.selection().provider, "p");
     assert_eq!(
         requested.lock().expect("sink").as_slice(),
-        [("q".to_string(), "m2".to_string())]
+        [("p".to_string(), "m".to_string())]
     );
+    // The switch is durable: the log records p/m as the model in effect.
+    let loaded = store.open_path(&path).expect("reload");
+    let last = crate::projection::last_model_change(&loaded.entries).expect("recorded");
+    assert_eq!(last, ("p", "m", None));
     std::fs::remove_dir_all(store.dir()).ok();
     Ok(())
 }

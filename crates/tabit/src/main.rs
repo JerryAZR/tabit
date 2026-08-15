@@ -28,7 +28,9 @@ use std::path::PathBuf;
 use std::sync::Arc;
 use tabit_config::{AuthConfig, TabitConfig};
 use tabit_session::SessionEvent;
-use tabit_session::{ModelSelection, Session, SessionBuilder, SessionStore, build_system_prompt};
+use tabit_session::{
+    ModelRegistry, ModelSelection, Session, SessionBuilder, SessionStore, build_system_prompt,
+};
 use tabit_tools::dynamic;
 
 #[derive(Debug)]
@@ -46,8 +48,10 @@ usage: tabit [PROMPT]
        tabit --continue PROMPT          resume this project's newest session
        tabit --session <path> PROMPT    resume a specific session file
        tabit --list                     list this project's sessions
-       tabit --model <provider/model>   select the model for this run
-                                       (default: default_model in providers.toml)
+       tabit --model <model-id|provider/model> select the model for this run
+                                       (default: the resumed session's model,
+                                       then default_model in providers.toml,
+                                       then the first configured model)
 
 config: providers.toml / auth.toml under ~/.tabit (override with
         TABIT_CONFIG / TABIT_AUTH); sessions live in <project>/.tabit/sessions";
@@ -111,33 +115,15 @@ where
     Ok(parsed)
 }
 
-fn parse_model(raw: &str) -> Result<ModelSelection, String> {
-    let (provider, model) = raw
-        .split_once('/')
-        .ok_or_else(|| format!("--model expects provider/model, got `{raw}` (no `/`)"))?;
-    if provider.is_empty() || model.is_empty() {
-        return Err(format!("--model expects provider/model, got `{raw}`"));
-    }
+/// Resolve a `--model` value against the config: `provider/model` when
+/// the text before the first `/` names a configured provider, otherwise
+/// a bare model id that must be unambiguous (see
+/// `TabitConfig::resolve_model_ref`).
+fn parse_model(raw: &str, config: &TabitConfig) -> Result<ModelSelection, String> {
+    let (provider, model) = config
+        .resolve_model_ref(raw)
+        .map_err(|message| format!("--model: {message}"))?;
     Ok(ModelSelection::new(provider, model))
-}
-
-fn resolve_selection(args: &Args, config: &TabitConfig) -> Result<ModelSelection, String> {
-    if let Some(raw) = &args.model {
-        return parse_model(raw);
-    }
-    config
-        .default_model
-        .as_ref()
-        .map(|d| ModelSelection {
-            provider: d.provider.clone(),
-            model: d.model.clone(),
-            thinking_level: d.thinking_level.clone(),
-        })
-        .ok_or_else(|| {
-            "no model selected: pass --model provider/model or set \
-             default_model in providers.toml"
-                .to_string()
-        })
 }
 
 fn list_sessions(store: &SessionStore) -> Result<(), String> {
@@ -193,9 +179,9 @@ fn print_event(event: &SessionEvent) {
 
 fn assemble_session(
     args: &Args,
-    config: Arc<TabitConfig>,
-    auth: Arc<AuthConfig>,
+    registry: ModelRegistry,
     selection: ModelSelection,
+    resume_target: Option<PathBuf>,
 ) -> Result<Session, String> {
     let store = SessionStore::project_default();
     let cwd = std::env::current_dir()
@@ -203,17 +189,26 @@ fn assemble_session(
     // Built once per process: the prompt must stay byte-stable for the
     // provider's prompt cache (see the prompt module docs).
     let preamble = build_system_prompt(&cwd).map_err(|e| e.to_string())?;
-    let mut builder = SessionBuilder::new(store.clone(), config, auth, selection)
-        .map_err(|e| e.to_string())?
-        .preamble(preamble)
-        .dynamic_tool(dynamic(tabit_tools::Read))
-        .dynamic_tool(dynamic(tabit_tools::Ls))
-        .dynamic_tool(dynamic(tabit_tools::Bash));
+    let mut builder = SessionBuilder::new(
+        store.clone(),
+        registry.config().clone(),
+        registry.auth().clone(),
+        selection,
+    )
+    .map_err(|e| e.to_string())?
+    .preamble(preamble)
+    .dynamic_tool(dynamic(tabit_tools::Read))
+    .dynamic_tool(dynamic(tabit_tools::Ls))
+    .dynamic_tool(dynamic(tabit_tools::Bash))
+    .model_factory({
+        let factory = registry.factory();
+        move |provider, model| factory(provider, model)
+    });
     if let Some(max_turns) = args.max_turns {
         builder = builder.max_turns(max_turns);
     }
 
-    if let Some(path) = &args.session {
+    if let Some(path) = &resume_target {
         let (session, report) = builder.resume(path).map_err(|e| e.to_string())?;
         for repair in &report.file_repairs {
             eprintln!(
@@ -229,24 +224,8 @@ fn assemble_session(
             );
         }
         Ok(session)
-    } else if args.continue_newest {
-        let summaries = store.list().map_err(|e| e.to_string())?;
-        let newest = summaries
-            .first()
-            .ok_or_else(|| format!("no sessions yet in {}", store.dir().display()))?;
-        let (session, report) = builder.resume(&newest.path).map_err(|e| e.to_string())?;
-        if report.repaired_tool_calls > 0 {
-            eprintln!(
-                "repaired {} interrupted tool call(s) with synthetic \
-                 results before continuing",
-                report.repaired_tool_calls
-            );
-        }
-        Ok(session)
     } else {
-        let cwd = std::env::current_dir()
-            .map(|p| p.display().to_string())
-            .unwrap_or_default();
+        let cwd = cwd.display().to_string();
         builder.create(&cwd).map_err(|e| e.to_string())
     }
 }
@@ -265,8 +244,38 @@ fn run() -> Result<(), String> {
         .prompt
         .clone()
         .ok_or_else(|| format!("no prompt given\n{USAGE}"))?;
-    let selection = resolve_selection(&args, &config)?;
-    let mut session = assemble_session(&args, config, auth, selection)?;
+
+    // Default-model resolution (registry): an explicit --model wins,
+    // then the resumed session's last model, then default_model in
+    // providers.toml, then the first configured model.
+    let registry = ModelRegistry::new(config, auth);
+    let store = SessionStore::project_default();
+    let resume_target = match (&args.session, args.continue_newest) {
+        (Some(path), _) => Some(path.clone()),
+        (None, true) => {
+            let newest = store
+                .list()
+                .map_err(|e| e.to_string())?
+                .into_iter()
+                .next()
+                .ok_or_else(|| format!("no sessions yet in {}", store.dir().display()))?;
+            Some(newest.path)
+        }
+        (None, false) => None,
+    };
+    let resumed = match &resume_target {
+        Some(path) => store.last_model(path).map_err(|e| e.to_string())?,
+        None => None,
+    };
+    let explicit = args
+        .model
+        .as_deref()
+        .map(|raw| parse_model(raw, registry.config()))
+        .transpose()?;
+    let selection = registry
+        .default_selection(explicit, resumed)
+        .map_err(|e| e.to_string())?;
+    let mut session = assemble_session(&args, registry, selection, resume_target)?;
 
     let stats = session.stats().ok();
     if stats
@@ -351,40 +360,70 @@ mod tests {
     }
 
     #[test]
-    fn model_strings_require_provider_slash_model() {
+    fn model_strings_resolve_against_the_config() {
+        let config = test_config();
         assert_eq!(
-            parse_model("lmstudio/openai/gpt-oss-20b")
-                .expect("three-part ok")
-                .model,
-            "openai/gpt-oss-20b",
-            "the first `/` splits; model ids may contain slashes"
-        );
-        assert!(parse_model("noprovider").is_err());
-        assert!(parse_model("/m").is_err());
-        assert!(parse_model("p/").is_err());
-    }
-
-    #[test]
-    fn selection_resolution_prefers_flag_then_config_default() {
-        let mut parsed = args(&["--model", "p/m2", "hi"]).expect("valid");
-        assert_eq!(
-            resolve_selection(&parsed, &test_config())
-                .expect("flag wins")
+            parse_model("lmstudio/m2", &config)
+                .expect("qualified")
                 .model,
             "m2"
         );
-
-        parsed.model = None;
+        // A bare id works when it is unambiguous.
         assert_eq!(
-            resolve_selection(&parsed, &test_config())
-                .expect("default")
+            parse_model("m2", &config).expect("bare").provider,
+            "lmstudio"
+        );
+        assert!(parse_model("nope", &config).is_err());
+        assert!(parse_model("lmstudio/nope", &config).is_err());
+    }
+
+    #[test]
+    fn selection_defaults_follow_the_registry_chain() {
+        let registry = ModelRegistry::new(
+            std::sync::Arc::new(test_config()),
+            std::sync::Arc::new(AuthConfig::default()),
+        );
+        assert_eq!(
+            registry
+                .default_selection(None, None)
+                .expect("preference from default_model")
                 .provider,
             "lmstudio"
         );
 
-        let empty = tabit_config::TabitConfig::default();
-        let error = resolve_selection(&parsed, &empty).expect_err("no selection");
-        assert!(error.contains("default_model"), "{error}");
+        // No preference: the first configured model is the default.
+        let bare = TabitConfig::from_toml_str(
+            r#"
+[providers.lmstudio]
+base_url = "http://127.0.0.1:1234/v1"
+api = "openai-completions"
+
+[[providers.lmstudio.models]]
+id = "m"
+"#,
+            std::path::Path::new("providers.toml"),
+        )
+        .expect("bare config");
+        let registry = ModelRegistry::new(
+            std::sync::Arc::new(bare),
+            std::sync::Arc::new(AuthConfig::default()),
+        );
+        assert_eq!(
+            registry
+                .default_selection(None, None)
+                .expect("first-seen")
+                .model,
+            "m"
+        );
+
+        let empty = ModelRegistry::new(
+            std::sync::Arc::new(TabitConfig::default()),
+            std::sync::Arc::new(AuthConfig::default()),
+        );
+        let error = empty
+            .default_selection(None, None)
+            .expect_err("nothing configured");
+        assert!(error.to_string().contains("no models"), "{error}");
     }
 
     fn test_config() -> TabitConfig {

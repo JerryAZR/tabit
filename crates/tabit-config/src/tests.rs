@@ -671,3 +671,95 @@ name = "high"
         "{err}"
     );
 }
+
+#[test]
+fn resolve_model_ref_qualifies_by_known_provider_prefix() {
+    let config = parse(VALID);
+    // `lmstudio` is a configured provider, so the remainder — which itself
+    // contains a slash — is the model id.
+    assert_eq!(
+        config.resolve_model_ref("lmstudio/openai/gpt-oss-20b"),
+        Ok(("lmstudio".to_string(), "openai/gpt-oss-20b".to_string()))
+    );
+    assert_eq!(
+        config.resolve_model_ref("anthropic/claude-some-model"),
+        Ok(("anthropic".to_string(), "claude-some-model".to_string()))
+    );
+}
+
+#[test]
+fn resolve_model_ref_bare_id_must_be_unique() {
+    let config = parse(VALID);
+    // `openai` is not a configured provider, so the whole string is a
+    // model id.
+    assert_eq!(
+        config.resolve_model_ref("openai/gpt-oss-20b"),
+        Ok(("lmstudio".to_string(), "openai/gpt-oss-20b".to_string()))
+    );
+    let err = config
+        .resolve_model_ref("no-such-model")
+        .expect_err("unknown");
+    assert_eq!(err, "no configured model matches `no-such-model`");
+
+    let ambiguous = VALID.replace(
+        r#"
+[[providers.anthropic.models]]
+id = "claude-some-model""#,
+        r#"
+[[providers.anthropic.models]]
+id = "openai/gpt-oss-20b""#,
+    );
+    let config = parse(&ambiguous);
+    let err = config
+        .resolve_model_ref("openai/gpt-oss-20b")
+        .expect_err("ambiguous");
+    assert!(err.contains("multiple providers"), "{err}");
+}
+
+#[test]
+fn resolve_model_ref_rejects_unknown_model_under_known_provider() {
+    let config = parse(VALID);
+    let err = config
+        .resolve_model_ref("lmstudio/other-model")
+        .expect_err("missing under provider");
+    assert_eq!(
+        err,
+        "provider `lmstudio` has no model `other-model` (check providers.toml)"
+    );
+}
+
+#[test]
+fn first_model_is_first_provider_first_model() {
+    let config = parse(VALID);
+    assert_eq!(
+        config.first_model(),
+        Some(("anthropic".to_string(), "claude-some-model".to_string()))
+    );
+    assert_eq!(parse("").first_model(), None);
+}
+
+#[test]
+fn default_model_without_provider_resolves_or_fails_loudly() {
+    // Prepend: a trailing key would attach to the last table array.
+    let raw = format!("default_model = {{ model = \"openai/gpt-oss-20b\" }}\n{VALID}");
+    let config = parse(&raw);
+    assert_eq!(
+        config
+            .default_model
+            .as_ref()
+            .and_then(|d| d.provider.as_ref()),
+        None
+    );
+
+    let ambiguous = format!(
+        "default_model = {{ model = \"claude-some-model\" }}\n{VALID}\n[providers.second]\n\
+         name = \"Second\"\nbase_url = \"http://second\"\napi = \"openai-responses\"\n\n\
+         [[providers.second.models]]\nid = \"claude-some-model\"\n"
+    );
+    let err = validation_error(&ambiguous);
+    assert!(
+        err.to_string()
+            .contains("default_model.model: model id `claude-some-model`"),
+        "{err}"
+    );
+}

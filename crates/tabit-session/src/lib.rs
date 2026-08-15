@@ -68,15 +68,17 @@ mod model;
 mod projection;
 mod prompt;
 mod recorder;
+mod registry;
 mod session;
 mod store;
 
 pub use entry::{EntryKind, SESSION_FORMAT_VERSION, SessionEntry, SessionHeader};
 pub use error::SessionError;
 pub use events::SessionEvent;
-pub use model::{ModelSelection, build_model};
+pub use model::ModelSelection;
 pub use projection::DanglingToolCalls;
 pub use prompt::build_system_prompt;
+pub use registry::ModelRegistry;
 pub use session::{
     DEFAULT_MAX_TURNS, ModelStats, RunSummary, Session, SessionBuilder, SessionStats,
 };

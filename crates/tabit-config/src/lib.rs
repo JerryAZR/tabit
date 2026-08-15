@@ -110,9 +110,13 @@ use std::path::{Path, PathBuf};
 #[derive(Debug, Clone, PartialEq, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct DefaultModel {
-    /// Provider id.
-    pub provider: String,
-    /// Model id within the provider.
+    /// Provider id. Optional: when absent, `model` must resolve to exactly
+    /// one provider's model — qualify with the provider only when the same
+    /// model id is configured under more than one.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub provider: Option<String>,
+    /// Model id within the provider (may itself contain `/`, as in
+    /// `openai/gpt-oss-20b`).
     pub model: String,
     /// Thinking level name, when the model defines levels.
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -200,19 +204,82 @@ impl TabitConfig {
     pub fn validation_issues(&self) -> Vec<String> {
         let mut issues = Vec::new();
         if let Some(default) = &self.default_model {
-            validate_model_reference(
-                "default_model",
-                &default.provider,
-                &default.model,
-                default.thinking_level.as_deref(),
-                self,
-                &mut issues,
-            );
+            match &default.provider {
+                Some(provider) => validate_model_reference(
+                    "default_model",
+                    provider,
+                    &default.model,
+                    default.thinking_level.as_deref(),
+                    self,
+                    &mut issues,
+                ),
+                None => match self.resolve_model_ref(&default.model) {
+                    Ok((provider, _)) => validate_model_reference(
+                        "default_model",
+                        &provider,
+                        &default.model,
+                        default.thinking_level.as_deref(),
+                        self,
+                        &mut issues,
+                    ),
+                    Err(message) => {
+                        issues.push(format!("default_model.model: {message}"));
+                    }
+                },
+            }
         }
         for (provider_id, provider) in &self.providers {
             validate_provider(provider_id, provider, &mut issues);
         }
         issues
+    }
+
+    /// Resolve a model reference to `(provider id, model id)`.
+    ///
+    /// `provider/model` applies when the text before the first `/` names a
+    /// configured provider; otherwise the whole string is a model id, which
+    /// must match exactly one provider (model ids may themselves contain
+    /// `/`, as in `lmstudio/openai/gpt-oss-20b` where `openai/gpt-oss-20b`
+    /// is the id). An ambiguous or unknown reference is an error naming the
+    /// candidates.
+    pub fn resolve_model_ref(&self, reference: &str) -> Result<(String, String), String> {
+        if let Some((prefix, rest)) = reference.split_once('/')
+            && self.providers.contains_key(prefix)
+            && !rest.is_empty()
+        {
+            return if self
+                .provider(prefix)
+                .is_some_and(|p| p.model(rest).is_some())
+            {
+                Ok((prefix.to_string(), rest.to_string()))
+            } else {
+                Err(format!(
+                    "provider `{prefix}` has no model `{rest}` (check providers.toml)"
+                ))
+            };
+        }
+        let mut matches = self
+            .providers
+            .iter()
+            .filter(|(_, provider)| provider.model(reference).is_some());
+        let first = matches.next().map(|(id, _)| id.clone());
+        match (first, matches.next().map(|(id, _)| id)) {
+            (Some(provider), None) => Ok((provider, reference.to_string())),
+            (Some(_), Some(_)) => Err(format!(
+                "model id `{reference}` is configured under multiple providers; \
+                 qualify as `provider/model`"
+            )),
+            _ => Err(format!("no configured model matches `{reference}`")),
+        }
+    }
+
+    /// The first model the loader sees: the alphabetically-first provider's
+    /// first model (`providers` is a `BTreeMap`; model arrays keep file
+    /// order). The fallback default when no preference exists.
+    pub fn first_model(&self) -> Option<(String, String)> {
+        let (provider_id, provider) = self.providers.iter().next()?;
+        let model = provider.models.first()?;
+        Some((provider_id.clone(), model.id.clone()))
     }
 }
 

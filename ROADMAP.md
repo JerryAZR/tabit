@@ -52,6 +52,11 @@ model catalog). Decisions:
   `context_window`, `max_tokens`, `sampling_params`, `cost` (4 required
   $/M-token rates), ordered `thinking_levels` (each a named `extra_body`
   merge — array shape so a UI can cycle), per-model `headers`/`extra_body`.
+- `default_model` is the preferred-model slot: a bare model id (must be
+  unambiguous), optional `provider` qualifier for conflicts, optional
+  `thinking_level`. Reference resolution (`provider/model` when the text
+  before the first `/` names a configured provider, else a unique bare
+  model id) lives in `TabitConfig::resolve_model_ref`.
 - Reference survey behind the compat decision: pi ships an explicit compat
   schema (11 thinking formats etc.); opencode absorbs quirks in per-provider
   packages/hardcoded transforms; codex ships zero compat flags and only
@@ -71,6 +76,15 @@ The application-level conversation layer pi builds over its agent loop:
 - Persistence: session log format (JSONL event log first — replayable,
   diff-friendly; sqlite backend later if needed).
 - Session listing/resume across runs.
+- **Model registry shipped** (`tabit-session::ModelRegistry`): the single
+  construction site for models — cached provider HTTP clients (switching
+  models reuses the connection pool) and the default-selection chain:
+  explicit choice > the resumed session's last model > `default_model` >
+  the first configured model. A resumed reference that no longer resolves
+  fails loudly. Reload and dynamic model listing merge into the registry
+  when a consumer exists; per-model `sampling_params`/`thinking_levels`/
+  `extra_body` application happens in the registry's build path (with
+  item 6).
 
 ### 3. System prompt builder + skills & AGENTS.md discovery
 

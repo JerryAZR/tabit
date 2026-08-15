@@ -14,9 +14,10 @@
 use crate::entry::{EntryKind, SessionEntry};
 use crate::error::SessionError;
 use crate::events::SessionEvent;
-use crate::model::{ModelSelection, build_model};
+use crate::model::ModelSelection;
 use crate::projection;
 use crate::recorder::{RecorderHook, SessionRecorder};
+use crate::registry::ModelRegistry;
 use crate::store::{Repair, SessionStore, SessionWriter};
 use futures::StreamExt;
 use rig_agent::agent::{Agent, AgentBuilder, ModelHandle};
@@ -114,11 +115,8 @@ impl SessionBuilder {
         selection: ModelSelection,
     ) -> Result<Self, SessionError> {
         selection.validate(&config)?;
-        let default_factory: ModelFactory = {
-            let config = config.clone();
-            let auth = auth.clone();
-            Arc::new(move |provider, model| build_model(&config, &auth, provider, model))
-        };
+        let default_factory: ModelFactory =
+            ModelRegistry::new(config.clone(), auth.clone()).factory();
         drop(auth);
         Ok(Self {
             store,
@@ -175,8 +173,11 @@ impl SessionBuilder {
     }
 
     /// Resume the session stored at `path`: replay entries into context,
-    /// repair a dangling tool-use roundtrip, and continue with the model the
-    /// log last used (falling back to the builder's selection).
+    /// repair a dangling tool-use roundtrip, and continue with the
+    /// builder's selection. Callers resolve that selection through
+    /// [`ModelRegistry::default_selection`] (explicit choice > the log's
+    /// last model > configured preference); when it differs from the
+    /// log's last model the switch is recorded as a `model_change` entry.
     pub fn resume(self, path: &Path) -> Result<(Session, ResumeReport), SessionError> {
         let loaded = self.store.open_path(path)?;
         let mut report = ResumeReport {
@@ -187,22 +188,33 @@ impl SessionBuilder {
         let (context, _dangling) = projection::project(&loaded.entries);
         let writer = SessionWriter::open_existing(&loaded.path)?;
 
-        let selection = match projection::last_model_change(&loaded.entries) {
-            Some((provider, model, thinking_level)) => {
-                let selection = ModelSelection {
-                    provider: provider.to_string(),
-                    model: model.to_string(),
-                    thinking_level: thinking_level.map(str::to_string),
-                };
-                selection.validate(&self.config)?;
-                report.resumed_model = Some(selection.clone());
-                selection
-            }
-            None => self.selection.clone(),
-        };
-
-        let builder = Self { selection, ..self };
-        let mut session = Session::assemble(builder, writer, context)?;
+        let last = projection::last_model_change(&loaded.entries);
+        if let Some((provider, model, thinking_level)) = last {
+            report.resumed_model = Some(ModelSelection {
+                provider: provider.to_string(),
+                model: model.to_string(),
+                thinking_level: thinking_level.map(str::to_string),
+            });
+        }
+        self.selection.validate(&self.config)?;
+        let mut session = Session::assemble(self, writer, context)?;
+        let same_model = matches!(
+            last,
+            Some((provider, model, level))
+                if provider == session.selection.provider
+                    && model == session.selection.model
+                    && level == session.selection.thinking_level.as_deref()
+        );
+        if !same_model {
+            // Either a caller-directed switch at resume time, or a log
+            // without any model_change yet — either way the session's
+            // opening state is durable from here on.
+            session.recorder.record(EntryKind::ModelChange {
+                provider: session.selection.provider.clone(),
+                model: session.selection.model.clone(),
+                thinking_level: session.selection.thinking_level.clone(),
+            });
+        }
         // One repair path for everyone: reload_context synthesizes results
         // for a dangling trailing roundtrip (and fails loudly if they
         // cannot be persisted) and re-derives the context from the log.

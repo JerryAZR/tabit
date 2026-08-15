@@ -1,71 +1,9 @@
-//! Building rig models from tabit config: the config crate's provider and
-//! model entries become a [`ModelHandle`] the session can switch at
-//! runtime.
-//!
-//! v1 wiring covers endpoint, credential, and model id. The config crate's
-//! `extra_body`, `thinking_levels`, `sampling_params`, and per-model
-//! headers are parsed and validated there but are not yet merged into
-//! requests — the engine gains that merge when compaction/overflow work
-//! lands (see ROADMAP.md item 6).
+//! The session's model selection type: the `(provider, model,
+//! thinking level)` triple the session layer switches between.
+//! Construction lives in the [`crate::ModelRegistry`].
 
 use crate::error::SessionError;
-use rig_agent::agent::ModelHandle;
-use rig_core::client::CompletionClient;
-use rig_core::providers::{anthropic, openai};
-use tabit_config::{AuthConfig, Provider, TabitConfig, WireApi};
-
-/// Resolve `(provider, model)` ids against the config into a labeled,
-/// type-erased model handle.
-pub fn build_model(
-    config: &TabitConfig,
-    auth: &AuthConfig,
-    provider_id: &str,
-    model_id: &str,
-) -> Result<ModelHandle, SessionError> {
-    let provider = config
-        .provider(provider_id)
-        .ok_or_else(|| SessionError::Config {
-            message: format!("provider `{provider_id}` (check providers.toml)"),
-        })?;
-    let model = provider
-        .model(model_id)
-        .ok_or_else(|| SessionError::Config {
-            message: format!("model `{model_id}` for provider `{provider_id}`"),
-        })?;
-    let api_key =
-        config
-            .resolve_api_key(provider_id, auth)
-            .ok_or_else(|| SessionError::ModelBuild {
-                provider: provider_id.to_string(),
-                model: model_id.to_string(),
-                message: format!(
-                    "no API key for provider `{provider_id}`: set one in auth.toml \
-                 ([providers.{provider_id}] api_key = ...) or point the provider's \
-                 api_key_env at an environment variable (a placeholder key is fine \
-                 for local servers)"
-                ),
-            })?;
-    let handle = match provider.api {
-        WireApi::AnthropicMessages => ModelHandle::named(
-            format!("{provider_id}/{model_id}"),
-            anthropic_client(provider, &api_key)?.completion_model(&model.id),
-        ),
-        WireApi::OpenaiResponses => ModelHandle::named(
-            format!("{provider_id}/{model_id}"),
-            openai_client(provider, &api_key)?.completion_model(&model.id),
-        ),
-        WireApi::OpenaiCompletions => ModelHandle::named(
-            format!("{provider_id}/{model_id}"),
-            openai::CompletionsClient::builder()
-                .base_url(provider.base_url.clone())
-                .api_key(api_key.clone())
-                .build()
-                .map_err(|source| build_error(provider_id, model_id, source))?
-                .completion_model(&model.id),
-        ),
-    };
-    Ok(handle)
-}
+use tabit_config::TabitConfig;
 
 /// A `(provider, model)` pair the session can switch between.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -118,30 +56,6 @@ impl ModelSelection {
             });
         }
         Ok(())
-    }
-}
-
-fn anthropic_client(provider: &Provider, api_key: &str) -> Result<anthropic::Client, SessionError> {
-    anthropic::Client::builder()
-        .base_url(provider.base_url.clone())
-        .api_key(api_key)
-        .build()
-        .map_err(|source| build_error(&provider.base_url, "", source))
-}
-
-fn openai_client(provider: &Provider, api_key: &str) -> Result<openai::Client, SessionError> {
-    openai::Client::builder()
-        .base_url(provider.base_url.clone())
-        .api_key(api_key)
-        .build()
-        .map_err(|source| build_error(&provider.base_url, "", source))
-}
-
-fn build_error(provider_id: &str, model_id: &str, source: impl std::error::Error) -> SessionError {
-    SessionError::ModelBuild {
-        provider: provider_id.to_string(),
-        model: model_id.to_string(),
-        message: source.to_string(),
     }
 }
 
