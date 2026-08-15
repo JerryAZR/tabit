@@ -722,8 +722,10 @@ mod tests {
         assert_eq!(body, Bytes::from_static(b"hello"));
 
         let raw_request_bytes = rx.await.unwrap();
-        let raw_request = String::from_utf8_lossy(&raw_request_bytes);
-        assert!(raw_request.contains("Content-Type: multipart/form-data; boundary="));
+        // hyper emits request header names in lowercase (header names are
+        // case-insensitive per RFC 9110), so compare case-insensitively.
+        let raw_request = String::from_utf8_lossy(&raw_request_bytes).to_ascii_lowercase();
+        assert!(raw_request.contains("content-type: multipart/form-data; boundary="));
         assert!(raw_request.contains("name=\"field\""));
         assert!(raw_request.contains("value"));
         assert!(raw_request.contains("name=\"upload\""));
