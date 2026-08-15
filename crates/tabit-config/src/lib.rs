@@ -106,10 +106,26 @@ use serde::Deserialize;
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 
+/// The model a session uses when the caller does not pick one.
+#[derive(Debug, Clone, PartialEq, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct DefaultModel {
+    /// Provider id.
+    pub provider: String,
+    /// Model id within the provider.
+    pub model: String,
+    /// Thinking level name, when the model defines levels.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub thinking_level: Option<String>,
+}
+
 /// A parsed and validated tabit configuration.
 #[derive(Debug, Clone, PartialEq, Default, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct TabitConfig {
+    /// The model a session uses when the caller does not pick one.
+    #[serde(default)]
+    pub default_model: Option<DefaultModel>,
     /// All configured providers, keyed by their config id.
     #[serde(default)]
     pub providers: BTreeMap<String, Provider>,
@@ -183,10 +199,51 @@ impl TabitConfig {
     /// path. Empty means valid.
     pub fn validation_issues(&self) -> Vec<String> {
         let mut issues = Vec::new();
+        if let Some(default) = &self.default_model {
+            validate_model_reference(
+                "default_model",
+                &default.provider,
+                &default.model,
+                default.thinking_level.as_deref(),
+                self,
+                &mut issues,
+            );
+        }
         for (provider_id, provider) in &self.providers {
             validate_provider(provider_id, provider, &mut issues);
         }
         issues
+    }
+}
+
+/// Validate a `provider`/`model`(/`thinking_level`) reference against the
+/// configured providers; shared by `default_model` validation.
+fn validate_model_reference(
+    key: &str,
+    provider_id: &str,
+    model_id: &str,
+    thinking_level: Option<&str>,
+    config: &TabitConfig,
+    issues: &mut Vec<String>,
+) {
+    let Some(provider) = config.providers.get(provider_id) else {
+        issues.push(format!(
+            "{key}.provider: `{provider_id}` is not defined under [providers]"
+        ));
+        return;
+    };
+    let Some(model) = provider.models.iter().find(|m| m.id == model_id) else {
+        issues.push(format!(
+            "{key}.model: `{model_id}` is not defined for provider `{provider_id}`"
+        ));
+        return;
+    };
+    if let Some(level) = thinking_level
+        && model.thinking_level(level).is_none()
+    {
+        issues.push(format!(
+            "{key}.thinking_level: `{level}` is not one of the levels defined for              provider `{provider_id}` model `{model_id}`"
+        ));
     }
 }
 

@@ -607,3 +607,67 @@ fn auth_load_reports_missing_file() {
     assert!(matches!(err, ConfigError::Io { .. }));
     assert!(err.to_string().contains("definitely/no/auth.toml"), "{err}");
 }
+
+#[test]
+fn default_model_validates_against_providers() {
+    let ok = r#"
+default_model = { provider = "x", model = "m" }
+
+[providers.x]
+base_url = "https://example.com"
+api = "openai-responses"
+
+[[providers.x.models]]
+id = "m"
+
+[[providers.x.models.thinking_levels]]
+name = "high"
+"#;
+    assert!(TabitConfig::from_toml_str(ok, Path::new("providers.toml")).is_ok());
+
+    let unknown_provider = r#"
+default_model = { provider = "nope", model = "m" }
+
+[providers.x]
+base_url = "https://example.com"
+api = "openai-responses"
+"#;
+    let err = validation_error(unknown_provider);
+    assert!(
+        err.to_string().contains("default_model.provider: `nope`"),
+        "{err}"
+    );
+
+    let unknown_model = r#"
+default_model = { provider = "x", model = "missing" }
+
+[providers.x]
+base_url = "https://example.com"
+api = "openai-responses"
+"#;
+    let err = validation_error(unknown_model);
+    assert!(
+        err.to_string().contains("default_model.model: `missing`"),
+        "{err}"
+    );
+
+    let bad_level = r#"
+default_model = { provider = "x", model = "m", thinking_level = "max" }
+
+[providers.x]
+base_url = "https://example.com"
+api = "openai-responses"
+
+[[providers.x.models]]
+id = "m"
+
+[[providers.x.models.thinking_levels]]
+name = "high"
+"#;
+    let err = validation_error(bad_level);
+    assert!(
+        err.to_string()
+            .contains("default_model.thinking_level: `max`"),
+        "{err}"
+    );
+}

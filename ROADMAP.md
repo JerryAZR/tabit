@@ -87,13 +87,12 @@ The application-level conversation layer pi builds over its agent loop:
 
 ### 4. Coding tools
 
-The standard toolset as `#[rig_tool]` implementations:
-
-- bash (exec with timeout/output capture), read, edit (with diff preview),
-  glob, grep, write.
-- Windows-first correctness (paths, encodings — UTF-8 explicitly), but
-  portable.
-- Permission/approval hooks ride on the existing rig-agent hook system.
+The standard toolset as `#[rig_tool]` implementations. **Started:
+`crates/tabit-tools` ships `read`, `ls`, and `bash`** (timeout, output
+caps, Git Bash preferred on Windows with PowerShell fallback, via the
+PortableTool→DynamicTool erasure). Still to add: edit (with diff preview),
+glob, grep, write. Permission/approval rides on the existing hook system
+(as a first-party extension — see item 9).
 
 ### 5. Native subagents
 
@@ -116,10 +115,12 @@ The known deviation from pi's subprocess model:
 
 ### 7. CLI / interface layer
 
-- Headless JSON/RPC mode first (scriptable, testable — same order pi
-  evolved in): one-shot prompt, streaming events on stdout.
+- **Print mode shipped** (`crates/tabit`): one prompt in, live events out,
+  project-local sessions, `--continue` / `--session <path>` / `--list`,
+  `--model provider/model` or `default_model` in providers.toml.
+- Headless JSON/RPC mode next (scriptable, testable — same order pi
+  evolved in): the same SessionEvent stream, JSON-framed on stdout.
 - Interactive REPL; TUI on top only after the JSON surface is stable.
-- Model/provider flags resolving through the config crate.
 
 ### 8. Client/server + protocol
 

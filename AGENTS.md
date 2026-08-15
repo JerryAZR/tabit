@@ -22,6 +22,10 @@ Current workspace layout:
 - `crates/tabit-config` — provider/model configuration (see `ROADMAP.md`)
 - `crates/tabit-session` — persistent sessions over the outer loop (native
   only: filesystem-backed; the rig crates keep wasm support)
+- `crates/tabit-tools` — coding tools (`read`, `ls`, `bash`) as
+  `#[rig_tool]` PortableTools, erasable to DynamicTools (native only)
+- `crates/tabit` — the `tabit` binary: print mode over a session
+  (create / `--continue` / `--session <path>` / `--list`)
 
 ## Design rules
 

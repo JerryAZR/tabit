@@ -250,14 +250,27 @@ impl Session {
     /// still leaves an honest log; the in-memory context is re-derived from
     /// the log afterwards either way.
     pub async fn prompt(&mut self, prompt: impl Into<Message>) -> Result<RunSummary, SessionError> {
+        self.prompt_with(prompt, &mut |_| {}).await
+    }
+
+    /// [`Session::prompt`] with a live observer: `on_event` receives each
+    /// event as it is produced (frontends print from here instead of
+    /// waiting for the run to finish).
+    pub async fn prompt_with(
+        &mut self,
+        prompt: impl Into<Message>,
+        on_event: &mut dyn FnMut(SessionEvent),
+    ) -> Result<RunSummary, SessionError> {
         let message: Message = prompt.into();
         self.recorder.record(EntryKind::UserMessage {
             message: message.clone(),
         });
 
-        let mut events = vec![SessionEvent::UserMessage {
+        let user_event = SessionEvent::UserMessage {
             text: user_text(&message),
-        }];
+        };
+        on_event(user_event.clone());
+        let mut events = vec![user_event];
         let history = self.context.clone();
         let request = self
             .agent
@@ -281,24 +294,29 @@ impl Session {
                     self.recorder.record(EntryKind::ToolResult {
                         result: tool_result,
                     });
-                    events.push(SessionEvent::ToolResult {
+                    let event = SessionEvent::ToolResult {
                         name: tool_names
                             .get(&internal_call_id)
                             .cloned()
                             .unwrap_or_default(),
                         internal_call_id,
-                    });
+                    };
+                    on_event(event.clone());
+                    events.push(event);
                 }
                 Ok(MultiTurnStreamItem::FinalResponse(response)) => {
                     output = response.output;
                     usage = response.usage;
-                    events.push(SessionEvent::RunFinished {
+                    let event = SessionEvent::RunFinished {
                         output: output.clone(),
                         usage,
-                    });
+                    };
+                    on_event(event.clone());
+                    events.push(event);
                 }
                 Ok(item) => {
                     if let Some(event) = stream_item_event(item, &mut tool_names) {
+                        on_event(event.clone());
                         events.push(event);
                     }
                 }

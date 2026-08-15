@@ -1,0 +1,23 @@
+[package]
+name = "tabit"
+version.workspace = true
+edition.workspace = true
+license = "MIT"
+description = "Tabit: a minimal coding agent (print mode)."
+
+[lints]
+workspace = true
+
+[[bin]]
+name = "tabit"
+path = "src/main.rs"
+
+[dependencies]
+rig-agent = { path = "../rig-agent", version = "0.41.0", default-features = false }
+rig-core = { path = "../rig-core", version = "0.41.0", default-features = false }
+tabit-config = { path = "../tabit-config", version = "0.41.0" }
+tabit-session = { path = "../tabit-session", version = "0.41.0" }
+tabit-tools = { path = "../tabit-tools", version = "0.41.0" }
+tokio = { workspace = true, features = ["rt-multi-thread", "macros"] }
+
+[dev-dependencies]

@@ -1,0 +1,25 @@
+[package]
+name = "tabit-tools"
+version.workspace = true
+edition.workspace = true
+license = "MIT"
+description = "Tabit coding tools: read, ls, and shell execution as PortableTools."
+
+[lints]
+workspace = true
+
+[lib]
+name = "tabit_tools"
+path = "src/lib.rs"
+doctest = true
+
+[dependencies]
+rig-agent = { path = "../rig-agent", version = "0.41.0", default-features = false, features = ["derive"] }
+rig-derive = { path = "../rig-derive", version = "0.41.0" }
+humantime = { workspace = true }
+rig-core = { path = "../rig-core", version = "0.41.0", default-features = false }
+serde = { workspace = true, features = ["derive"] }
+serde_json = { workspace = true }
+
+[dev-dependencies]
+tokio = { workspace = true, features = ["rt-multi-thread", "macros"] }

@@ -11,6 +11,8 @@ default-members = [
     "crates/rig",
     "crates/tabit-config",
     "crates/tabit-session",
+    "crates/tabit-tools",
+    "crates/tabit",
 ]
 exclude = []
 
