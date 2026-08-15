@@ -66,6 +66,7 @@ mod events;
 mod ids;
 mod model;
 mod projection;
+mod prompt;
 mod recorder;
 mod session;
 mod store;
@@ -75,6 +76,7 @@ pub use error::SessionError;
 pub use events::SessionEvent;
 pub use model::{ModelSelection, build_model};
 pub use projection::DanglingToolCalls;
+pub use prompt::build_system_prompt;
 pub use session::{
     DEFAULT_MAX_TURNS, ModelStats, RunSummary, Session, SessionBuilder, SessionStats,
 };

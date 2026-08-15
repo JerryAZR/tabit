@@ -28,16 +28,8 @@ use std::path::PathBuf;
 use std::sync::Arc;
 use tabit_config::{AuthConfig, TabitConfig};
 use tabit_session::SessionEvent;
-use tabit_session::{ModelSelection, Session, SessionBuilder, SessionStore};
+use tabit_session::{ModelSelection, Session, SessionBuilder, SessionStore, build_system_prompt};
 use tabit_tools::dynamic;
-
-/// The minimal system preamble until the prompt builder lands
-/// (ROADMAP item 3).
-const PREAMBLE: &str = "\
-You are tabit, a coding agent running in the user's terminal.
-Use the read, ls, and bash tools to inspect and change the workspace \
-before answering. Prefer reading files over guessing. Keep answers short \
-and factual; report commands you ran and files you changed.";
 
 #[derive(Debug)]
 struct Args {
@@ -206,9 +198,14 @@ fn assemble_session(
     selection: ModelSelection,
 ) -> Result<Session, String> {
     let store = SessionStore::project_default();
+    let cwd = std::env::current_dir()
+        .map_err(|e| format!("cannot determine the working directory: {e}"))?;
+    // Built once per process: the prompt must stay byte-stable for the
+    // provider's prompt cache (see the prompt module docs).
+    let preamble = build_system_prompt(&cwd).map_err(|e| e.to_string())?;
     let mut builder = SessionBuilder::new(store.clone(), config, auth, selection)
         .map_err(|e| e.to_string())?
-        .preamble(PREAMBLE)
+        .preamble(preamble)
         .dynamic_tool(dynamic(tabit_tools::Read))
         .dynamic_tool(dynamic(tabit_tools::Ls))
         .dynamic_tool(dynamic(tabit_tools::Bash));

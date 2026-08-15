@@ -106,6 +106,9 @@ Current workspace layout:
   into the preamble.
 - SSE reconnect/resumption for completion streams (retry belongs at the
   request layer, only before any body bytes are consumed).
+- Vendor instruction files (CLAUDE.md etc.): **AGENTS.md only**.
+- Instruction-file directory walking: home (`~/.tabit/AGENTS.md` with a
+  `~/.agents/AGENTS.md` fallback) and cwd only — no upward/child scans.
 
 ## Open items for the owner
 

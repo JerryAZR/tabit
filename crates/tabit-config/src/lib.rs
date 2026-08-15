@@ -310,7 +310,10 @@ fn default_config_paths() -> Vec<PathBuf> {
 }
 
 /// The user's home directory (`$USERPROFILE` on Windows, `$HOME` elsewhere).
-pub(crate) fn home_dir() -> Option<PathBuf> {
+///
+/// Shared by every home-relative tabit location (config files, the
+/// home-level AGENTS.md), so there is exactly one home-resolution rule.
+pub fn home_dir() -> Option<PathBuf> {
     std::env::var_os("USERPROFILE")
         .or_else(|| std::env::var_os("HOME"))
         .map(PathBuf::from)

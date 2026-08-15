@@ -31,14 +31,14 @@ Defensive ("unreachable") arms follow a stricter rule:
 - The whole suite runs offline (cassette replay + test doubles). Doctests
   are NOT included in these numbers (`llvm-cov` was run without
   `--doctests`); they are gated by the same CI run.
-- Current state: **96.1% lines / 96.6% regions** (2,187 of 56,068 lines;
-  re-measured after the tabit-session / tabit-tools / CLI additions — the
-  rig crates' residue is unchanged, the new crates carry their own
-  itemization below). The residue is itemized below. `crates/tabit-config`
-  sits at 100% branch coverage with no fully unexecuted line. The new
-  tabit crates: tabit-session 91.3% (session.rs) / 83.3% (store.rs),
-  tabit-tools 90.5%; their residue is almost entirely error arms (see
-  "Justified residue" item 9).
+- Current state: **96.08% lines / 96.60% regions** (2,201 of 56,219 lines;
+  re-measured after the system prompt builder — item 3 v1, `prompt.rs` at
+  100% branch coverage — and the clippy-1.96 lint fixes). The rig crates'
+  residue is unchanged, the tabit crates carry their own itemization below.
+  `crates/tabit-config` sits at 100% branch coverage with no fully
+  unexecuted line. The tabit crates: tabit-session 91.3% (session.rs) /
+  83.3% (store.rs), tabit-tools 90.5%; their residue is almost entirely
+  error arms (see "Justified residue" item 9).
 
 ## Filled
 

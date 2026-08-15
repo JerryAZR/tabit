@@ -74,14 +74,23 @@ The application-level conversation layer pi builds over its agent loop:
 
 ### 3. System prompt builder + skills & AGENTS.md discovery
 
-- Compose the system prompt from parts: base prompt, environment info (cwd,
-  platform, date), tool descriptions, session/config contributions.
-- AGENTS.md discovery: walk cwd upward to the workspace root (and home-level
-  file), respecting pi's/standard precedence; content injected into the
-  preamble.
-- Skills discovery: `SKILL.md` files with frontmatter (name, description);
-  discovered from user-level and workspace-level directories; exposed to the
-  model as on-demand instructions (load-on-trigger, not always-inlined).
+- **v1 shipped** (`tabit-session::build_system_prompt`): a minimal,
+  stable prompt — short base identity + `<environment_context>` (cwd,
+  platform, UTC date) + discovered instruction files wrapped in
+  `<project_context>`. Built once per process, never rebuilt mid-session:
+  byte-stability keeps provider prompt caches valid, and date-level
+  staleness is accepted (people work overnight). No opinionated
+  guardrails or guidelines in the base prompt.
+- Discovery policy (decided): **AGENTS.md only** (no CLAUDE.md or other
+  vendor files); **no directory walking** — the home level
+  (`~/.tabit/AGENTS.md`, falling back to `~/.agents/AGENTS.md`) plus the
+  cwd file, cwd last so closest wins; **no size cap**; subdirectories
+  are the model's job (the base prompt tells it to check for AGENTS.md
+  as it descends). This replaces the CLI's stopgap `PREAMBLE`.
+- Skills discovery: still to add — `SKILL.md` files with frontmatter
+  (name, description), discovered from user-level and workspace-level
+  directories, exposed as an on-demand listing (load-on-trigger, not
+  always-inlined) in the same prompt module.
 - This is where mid-conversation system messages would tempt us — they are
   unsupported by design; everything hoists into the preamble (AGENTS.md).
 
@@ -145,6 +154,9 @@ The known deviation from pi's subprocess model:
 - rmcp integration (deleted).
 - Mid-conversation system messages.
 - Model catalog / name-keyed behavior.
+- Vendor instruction files (CLAUDE.md etc.) — AGENTS.md only.
+- Instruction-file directory walking — home (`~/.tabit` → `~/.agents`
+  fallback) and cwd only.
 
 ## Deferred until a consumer exists (phase 4 leftovers)
 
