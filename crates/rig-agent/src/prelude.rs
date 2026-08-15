@@ -3,13 +3,7 @@
 pub use rig_core::client::ProviderClient;
 pub use rig_core::client::embeddings::EmbeddingsClient;
 pub use rig_core::client::model_listing::ModelListingClient;
-pub use rig_core::client::transcription::TranscriptionClient;
 pub use rig_core::client::verify::{VerifyClient, VerifyError};
-
-#[cfg(feature = "audio")]
-pub use rig_core::client::audio_generation::AudioGenerationClient;
-#[cfg(feature = "image")]
-pub use rig_core::client::image_generation::ImageGenerationClient;
 
 pub use crate::agent::{
     Agent, AgentHook, HookContext, ModelHandle, ModelSelection, ModelSelectionAction,

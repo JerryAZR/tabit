@@ -17,18 +17,6 @@ pub mod embedding;
 pub mod model_listing;
 pub mod responses_api;
 
-#[cfg(feature = "audio")]
-#[cfg_attr(docsrs, doc(cfg(feature = "audio")))]
-pub mod audio_generation;
-
-#[cfg(feature = "image")]
-#[cfg_attr(docsrs, doc(cfg(feature = "image")))]
-pub mod image_generation;
-#[cfg(feature = "image")]
-pub use image_generation::*;
-
-pub mod transcription;
-
 pub use client::*;
 pub use completion::*;
 pub use embedding::*;
@@ -117,7 +105,6 @@ pub(crate) fn sanitize_schema(schema: &mut serde_json::Value) {
 }
 
 pub use streaming::*;
-pub use transcription::*;
 
 #[cfg(test)]
 mod tests {

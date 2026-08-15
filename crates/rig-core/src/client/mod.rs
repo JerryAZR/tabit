@@ -1,13 +1,9 @@
 //! This module provides traits for defining and creating provider clients.
 //! Clients are used to create models for completion, embeddings, etc.
 
-pub mod audio_generation;
 pub mod completion;
 pub mod embeddings;
-pub mod image_generation;
 pub mod model_listing;
-pub mod rerank;
-pub mod transcription;
 pub mod verify;
 
 use bytes::Bytes;
@@ -15,7 +11,6 @@ pub use completion::{CompletionClient, ConstructCompletionModel};
 pub use embeddings::EmbeddingsClient;
 use http::{HeaderMap, HeaderName, HeaderValue};
 pub use model_listing::{ModelLister, ModelListingClient};
-pub use rerank::RerankingClient;
 use std::{env::VarError, fmt::Debug, marker::PhantomData, sync::Arc, time::Duration};
 use thiserror::Error;
 pub use verify::{VerifyClient, VerifyError};
@@ -45,16 +40,6 @@ impl Default for TransportOptions {
     }
 }
 
-#[cfg(feature = "image")]
-use crate::image_generation::ImageGenerationModel;
-#[cfg(feature = "image")]
-use image_generation::ImageGenerationClient;
-
-#[cfg(feature = "audio")]
-use crate::audio_generation::*;
-#[cfg(feature = "audio")]
-use audio_generation::*;
-
 use crate::{
     completion::CompletionModel,
     embeddings::EmbeddingModel,
@@ -62,9 +47,6 @@ use crate::{
         self, Builder, HttpClientExt, LazyBody, MultipartForm, Request, Response, make_auth_header,
     },
     markers::Missing,
-    prelude::TranscriptionClient,
-    rerank::RerankModel,
-    transcription::TranscriptionModel,
     wasm_compat::{WasmCompatSend, WasmCompatSync},
 };
 
@@ -301,24 +283,14 @@ impl Capability for Nothing {
     const CAPABLE: bool = false;
 }
 
-/// The capabilities of a given provider, i.e. embeddings, audio transcriptions, text completion
+/// The capabilities of a given provider, i.e. embeddings, text completion
 pub trait Capabilities<H = reqwest::Client> {
     /// Completion model capability marker.
     type Completion: Capability;
     /// Embedding model capability marker.
     type Embeddings: Capability;
-    /// Rerank model capability marker.
-    type Rerank: Capability;
-    /// Audio transcription model capability marker.
-    type Transcription: Capability;
     /// Model listing capability marker.
     type ModelListing: Capability;
-    #[cfg(feature = "image")]
-    /// Image generation model capability marker.
-    type ImageGeneration: Capability;
-    #[cfg(feature = "audio")]
-    /// Audio generation model capability marker.
-    type AudioGeneration: Capability;
 }
 
 /// An API provider extension *builder*, this abstracts over provider-specific builders which are
@@ -910,56 +882,6 @@ where
     }
 }
 
-impl<M, Ext, H> RerankingClient for Client<Ext, H>
-where
-    Ext: Capabilities<H, Rerank = Capable<M>>,
-    M: RerankModel<Client = Self>,
-{
-    type RerankModel = M;
-
-    fn rerank_model(&self, model: impl Into<String>) -> Self::RerankModel {
-        M::make(self, model)
-    }
-}
-
-impl<M, Ext, H> TranscriptionClient for Client<Ext, H>
-where
-    Ext: Capabilities<H, Transcription = Capable<M>>,
-    M: TranscriptionModel<Client = Self> + WasmCompatSend,
-{
-    type TranscriptionModel = M;
-
-    fn transcription_model(&self, model: impl Into<String>) -> Self::TranscriptionModel {
-        M::make(self, model)
-    }
-}
-
-#[cfg(feature = "image")]
-impl<M, Ext, H> ImageGenerationClient for Client<Ext, H>
-where
-    Ext: Capabilities<H, ImageGeneration = Capable<M>>,
-    M: ImageGenerationModel<Client = Self>,
-{
-    type ImageGenerationModel = M;
-
-    fn image_generation_model(&self, model: impl Into<String>) -> Self::ImageGenerationModel {
-        M::make(self, model)
-    }
-}
-
-#[cfg(feature = "audio")]
-impl<M, Ext, H> AudioGenerationClient for Client<Ext, H>
-where
-    Ext: Capabilities<H, AudioGeneration = Capable<M>>,
-    M: AudioGenerationModel<Client = Self>,
-{
-    type AudioGenerationModel = M;
-
-    fn audio_generation_model(&self, model: impl Into<String>) -> Self::AudioGenerationModel {
-        M::make(self, model)
-    }
-}
-
 impl<M, Ext, H> ModelListingClient for Client<Ext, H>
 where
     Ext: Capabilities<H, ModelListing = Capable<M>> + Clone,
@@ -1292,109 +1214,6 @@ mod tests {
             .verify()
             .await
             .expect("any 2xx status should verify successfully");
-    }
-
-    /// Runtime coverage for the blanket [`RerankingClient`] implementation over
-    /// the generic [`Client`], using a local provider extension that only
-    /// declares the rerank capability.
-    mod rerank_capability {
-        use super::*;
-        use crate::http_client;
-        use crate::http_client::HttpClientExt;
-        use crate::rerank::{RerankError, RerankModel, RerankResponse};
-
-        #[derive(Debug, Default, Clone, Copy)]
-        struct RerankExt;
-        #[derive(Debug, Default, Clone, Copy)]
-        struct RerankExtBuilder;
-
-        impl Provider for RerankExt {
-            type Builder = RerankExtBuilder;
-            const VERIFY_PATH: &'static str = "/";
-        }
-
-        impl ProviderBuilder for RerankExtBuilder {
-            type Extension<H> = RerankExt where H: HttpClientExt;
-            type ApiKey = BearerAuth;
-
-            const BASE_URL: &'static str = "https://rerank.invalid";
-
-            fn build<H>(
-                _builder: &ClientBuilder<Self, Self::ApiKey, H>,
-            ) -> http_client::Result<Self::Extension<H>>
-            where
-                H: HttpClientExt,
-            {
-                Ok(RerankExt)
-            }
-        }
-
-        impl<H> Capabilities<H> for RerankExt {
-            type Completion = Nothing;
-            type Embeddings = Nothing;
-            type Transcription = Nothing;
-            type ModelListing = Nothing;
-            #[cfg(feature = "image")]
-            type ImageGeneration = Nothing;
-            #[cfg(feature = "audio")]
-            type AudioGeneration = Nothing;
-            type Rerank = Capable<MockRerankModel<H>>;
-        }
-
-        impl DebugExt for RerankExt {}
-
-        #[derive(Clone, Debug)]
-        struct MockRerankModel<H> {
-            model: String,
-            _client: Client<RerankExt, H>,
-        }
-
-        impl<H> RerankModel for MockRerankModel<H>
-        where
-            H: Clone + Send + Sync + 'static,
-        {
-            const MAX_DOCUMENTS: usize = 16;
-
-            type Client = Client<RerankExt, H>;
-
-            fn make(client: &Self::Client, model: impl Into<String>) -> Self {
-                Self {
-                    model: model.into(),
-                    _client: client.clone(),
-                }
-            }
-
-            async fn rerank(
-                &self,
-                _query: &str,
-                _documents: Vec<String>,
-            ) -> Result<RerankResponse, RerankError> {
-                Err(RerankError::ResponseError(format!(
-                    "{} is a mock rerank model",
-                    self.model
-                )))
-            }
-        }
-
-        #[tokio::test]
-        async fn blanket_reranking_client_constructs_and_uses_the_model() {
-            let client = Client::<RerankExt, reqwest::Client>::builder()
-                .api_key("test-key")
-                .http_client(RecordingHttpClient::new(""))
-                .build()
-                .expect("client should build over a scripted backend");
-
-            let model = client.rerank_model("rerank-mock");
-
-            let error = model
-                .rerank("query", vec!["document".to_string()])
-                .await
-                .expect_err("mock rerank model should fail");
-            assert!(matches!(
-                error,
-                RerankError::ResponseError(message) if message.contains("rerank-mock")
-            ));
-        }
     }
 
     /// Coverage for the transport layer owned by the generic [`Client`]:

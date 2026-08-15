@@ -433,13 +433,7 @@ mod tests {
         impl<H> Capabilities<H> for CompatExt {
             type Completion = Nothing;
             type Embeddings = Capable<GenericEmbeddingModel<CompatExt, H>>;
-            type Transcription = Nothing;
             type ModelListing = Nothing;
-            #[cfg(feature = "image")]
-            type ImageGeneration = Nothing;
-            #[cfg(feature = "audio")]
-            type AudioGeneration = Nothing;
-            type Rerank = Nothing;
         }
 
         impl DebugExt for CompatExt {}

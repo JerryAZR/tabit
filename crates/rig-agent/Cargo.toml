@@ -55,8 +55,6 @@ tracing-subscriber = { workspace = true, features = ["env-filter"] }
 
 [features]
 default = ["derive"]
-audio = ["rig-core/audio"]
-image = ["rig-core/image"]
 derive = ["dep:rig-derive", "rig-core/derive"]
 test-utils = ["rig-core/test-utils"]
 rmcp = ["dep:rmcp"]

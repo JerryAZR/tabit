@@ -243,12 +243,6 @@ mod tests {
     fn funnel_preserves_status_and_body_for_every_capability_error() {
         assert_funnel!(crate::completion::CompletionError);
         assert_funnel!(crate::embeddings::embedding::EmbeddingError);
-        assert_funnel!(crate::transcription::TranscriptionError);
         assert_funnel!(crate::client::verify::VerifyError);
-        assert_funnel!(crate::rerank::RerankError);
-        #[cfg(feature = "image")]
-        assert_funnel!(crate::image_generation::ImageGenerationError);
-        #[cfg(feature = "audio")]
-        assert_funnel!(crate::audio_generation::AudioGenerationError);
     }
 }

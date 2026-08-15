@@ -17,18 +17,6 @@ pub fn merge(a: serde_json::Value, b: serde_json::Value) -> serde_json::Value {
     }
 }
 
-// Only the feature-gated `image` / `audio` provider request builders call this
-// now; the default feature set has no caller, so allow it to be unused there
-// rather than warning on an otherwise-live utility.
-#[cfg_attr(not(any(feature = "image", feature = "audio")), allow(dead_code))]
-pub fn merge_inplace(a: &mut serde_json::Value, b: serde_json::Value) {
-    if let (serde_json::Value::Object(a_map), serde_json::Value::Object(b_map)) = (a, b) {
-        b_map.into_iter().for_each(|(key, value)| {
-            a_map.insert(key, value);
-        });
-    }
-}
-
 /// Normalize a provider-wire field that may contain encoded JSON in a string.
 ///
 /// This deliberately unwraps [`serde_json::Value::String`] and is only for
@@ -312,15 +300,6 @@ mod tests {
     }
 
     #[test]
-    fn test_merge_inplace() {
-        let mut a = serde_json::json!({"key1": "value1"});
-        let b = serde_json::json!({"key2": "value2"});
-        merge_inplace(&mut a, b);
-        let expected = serde_json::json!({"key1": "value1", "key2": "value2"});
-        assert_eq!(a, expected);
-    }
-
-    #[test]
     fn test_stringified_json_serialize() {
         let dummy = Dummy {
             data: serde_json::json!({"key": "value"}),
@@ -401,19 +380,6 @@ mod tests {
         let a = serde_json::json!([1, 2]);
         let b = serde_json::json!({"key": "value"});
         assert_eq!(merge(a.clone(), b), a);
-    }
-
-    #[test]
-    fn test_merge_inplace_ignores_non_object_inputs() {
-        let mut a = serde_json::json!([1, 2]);
-        let b = serde_json::json!({"key": "value"});
-        merge_inplace(&mut a, b);
-        assert_eq!(a, serde_json::json!([1, 2]));
-
-        let mut a = serde_json::json!({"key": "value"});
-        let b = serde_json::json!("scalar");
-        merge_inplace(&mut a, b);
-        assert_eq!(a, serde_json::json!({"key": "value"}));
     }
 
     #[derive(Debug, serde::Deserialize)]

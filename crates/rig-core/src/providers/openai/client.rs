@@ -1,7 +1,7 @@
 use super::responses_api::{ResponsesProviderExt, SystemInstructionsPlacement};
 use crate::{
     client::{
-        self, BearerAuth, Capabilities, Capable, DebugExt, Nothing, Provider, ProviderBuilder,
+        self, BearerAuth, Capabilities, Capable, DebugExt, Provider, ProviderBuilder,
         ProviderClient,
     },
     http_client::{self, HttpClientExt},
@@ -71,25 +71,13 @@ impl Provider for OpenAICompletionsExt {
 impl<H> Capabilities<H> for OpenAIResponsesExt {
     type Completion = Capable<super::responses_api::ResponsesCompletionModel<H>>;
     type Embeddings = Capable<super::EmbeddingModel<H>>;
-    type Transcription = Capable<super::TranscriptionModel<H>>;
     type ModelListing = Capable<super::OpenAIModelLister<H>>;
-    #[cfg(feature = "image")]
-    type ImageGeneration = Capable<super::ImageGenerationModel<H>>;
-    #[cfg(feature = "audio")]
-    type AudioGeneration = Capable<super::audio_generation::AudioGenerationModel<H>>;
-    type Rerank = Nothing;
 }
 
 impl<H> Capabilities<H> for OpenAICompletionsExt {
     type Completion = Capable<super::completion::CompletionModel<H>>;
     type Embeddings = Capable<super::GenericEmbeddingModel<OpenAICompletionsExt, H>>;
-    type Transcription = Capable<super::TranscriptionModel<H>>;
     type ModelListing = Capable<super::OpenAIModelLister<H>>;
-    #[cfg(feature = "image")]
-    type ImageGeneration = Capable<super::ImageGenerationModel<H>>;
-    #[cfg(feature = "audio")]
-    type AudioGeneration = Capable<super::audio_generation::AudioGenerationModel<H>>;
-    type Rerank = Nothing;
 }
 
 impl DebugExt for OpenAIResponsesExt {}

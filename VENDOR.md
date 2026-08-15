@@ -275,6 +275,37 @@ deleted (the hoisting path is still covered by
    ids via config, and `max_tokens` via config with the 64K provider default
    when unset.
 
+### Unconsumed-concern deletions (rig-core shrink)
+
+Deleted outright after a workspace-wide consumer audit (no live consumers
+outside the deleted concern itself; grep evidence in the task report):
+
+- `loaders/` (epub, pdf, file, `test_fixtures.rs`) — nothing outside the
+  module referenced `FileLoader`/`loaders` (facade `support.rs` carried only
+  dead `allow(dead_code)` constants for a `tests/data/loaders/` fixture dir
+  that was never vendored; removed with it). Features `pdf`, `epub` and deps
+  `epub`, `lopdf`, `quick-xml`, `glob` removed; `assert_fs` dev-dep became
+  unused and was pruned (workspace entry too).
+- `rerank.rs` + `client/rerank.rs` — no provider declares the rerank
+  capability (anthropic and openai both `Nothing`); only the blanket
+  `RerankingClient` impl and its own mock test consumed the types.
+- `transcription.rs` + `client/transcription.rs` +
+  `providers/openai/transcription.rs` — the OpenAI impl had no caller outside
+  the concern; deleted as a unit.
+- `audio_generation.rs` + `client/audio_generation.rs` +
+  `providers/openai/audio_generation.rs`, and the `image` equivalents — the
+  `audio`/`image` features were non-default and enabled by nothing in the
+  workspace (facade/agent only forwarded them). Features removed everywhere.
+- `Capabilities` lost the `Rerank`/`Transcription` (and feature-gated
+  `ImageGeneration`/`AudioGeneration`) associated types; the four blanket
+  client impls and `json_utils::merge_inplace` (whose only callers were the
+  image/audio request builders) went with them.
+- `vector_store`: kept `VectorStoreIndex`/`VectorStoreIndexDyn`/
+  `VectorSearchRequest`/`Filter` and `InMemoryVectorStore` (consumed by
+  rig-agent RAG paths and doctests); deleted `lsh.rs`, `builder.rs`
+  (`InMemoryVectorStoreBuilder`), and the `IndexStrategy` enum —
+  `InMemoryVectorStore` is brute-force only now.
+
 ## Cherry-picking from upstream (optional)
 
 The tree is owned and diverges freely, so there is no obligation to track

@@ -28,15 +28,11 @@ as-any = { workspace = true }
 async-stream = { workspace = true }
 base64 = { workspace = true }
 bytes = { workspace = true }
-epub = { workspace = true, optional = true }
 futures = { workspace = true }
-glob = { workspace = true }
 httpdate = { workspace = true }
 indexmap = { workspace = true }
-lopdf = { workspace = true, optional = true }
 mime_guess = { workspace = true }
 ordered-float = { workspace = true }
-quick-xml = { workspace = true, optional = true }
 rayon = { workspace = true, optional = true }
 reqwest = { workspace = true, features = ["json", "stream", "multipart"] }
 rig-derive = { version = "0.41.0", path = "../rig-derive", optional = true }
@@ -82,7 +78,6 @@ anyhow = { workspace = true }
 trybuild = "1.0"
 # streaming identity/merge law property tests
 proptest = "1"
-assert_fs = { workspace = true }
 futures = { workspace = true }
 tokio = { workspace = true, features = ["full"] }
 tracing-subscriber = { workspace = true, features = ["env-filter"] }
@@ -101,12 +96,8 @@ reqwest-middleware = { workspace = true, features = [
 
 [features]
 default = ["reqwest", "derive", "rustls"]
-audio = []
-image = []
 derive = ["dep:rig-derive"]
 test-utils = []
-pdf = ["dep:lopdf"]
-epub = ["dep:epub", "dep:quick-xml"]
 rayon = ["dep:rayon"]
 socks = ["reqwest/socks"]
 reqwest = [

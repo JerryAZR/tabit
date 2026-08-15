@@ -55,8 +55,7 @@ use thiserror::Error;
 /// [`Self::provider_response_json`], and [`Self::provider_response_status`].
 /// These recover the provider's raw HTTP status and response body so you can
 /// branch on a provider error code or surface a precise diagnostic. The same
-/// helpers are available on `EmbeddingError`, `ImageGenerationError`,
-/// `AudioGenerationError`, `TranscriptionError`, and `RerankError`.
+/// helpers are available on `EmbeddingError`.
 ///
 /// ```
 /// use rig_core::completion::CompletionError;

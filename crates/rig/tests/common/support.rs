@@ -32,10 +32,6 @@ pub(crate) const CONTEXT_PROMPT: &str = "What does \"glarb-glarb\" mean?";
 pub(crate) const TOOLS_PREAMBLE: &str = "You are a calculator here to help the user perform arithmetic operations. Use the tools provided to answer the user's question.";
 pub(crate) const TOOLS_PROMPT: &str = "Calculate 2 - 5.";
 
-pub(crate) const LOADERS_GLOB: &str =
-    concat!(env!("CARGO_MANIFEST_DIR"), "/tests/data/loaders/*.rs");
-pub(crate) const LOADERS_PROMPT: &str = "Which fixture file builds an agent from the loaders test fixtures? Answer with just the file name.";
-
 pub(crate) const STREAMING_PREAMBLE: &str =
     "You are a concise assistant. Answer directly in plain text.";
 pub(crate) const STREAMING_PROMPT: &str =
@@ -71,22 +67,10 @@ pub(crate) const STRUCTURED_OUTPUT_PROMPT: &str =
 pub(crate) const EXTRACTOR_TEXT: &str =
     "Hello, my name is Ada Lovelace and I work as a mathematician.";
 
-pub(crate) const IMAGE_PROMPT: &str =
-    "A lighthouse on a rocky cliff at sunrise, painted in a clean illustrative style.";
-
-pub(crate) const AUDIO_TEXT: &str = "The quick brown fox jumps over the lazy dog.";
-pub(crate) const AUDIO_FIXTURE_PATH: &str = concat!(
-    env!("CARGO_MANIFEST_DIR"),
-    "/tests/data/en-us-natural-speech.mp3"
-);
 pub(crate) const IMAGE_FIXTURE_PATH: &str = concat!(
     env!("CARGO_MANIFEST_DIR"),
     "/tests/data/camponotus_flavomarginatus_ant.jpg"
 );
-pub(crate) const PDF_FIXTURE_PATH: &str =
-    concat!(env!("CARGO_MANIFEST_DIR"), "/tests/data/pages.pdf");
-pub(crate) const VIDEO_FIXTURE_PATH: &str =
-    concat!(env!("CARGO_MANIFEST_DIR"), "/tests/data/sample_video.mp4");
 
 pub(crate) const EMBEDDING_INPUTS: [&str; 3] = [
     "Rust values memory safety and predictable performance.",
@@ -1039,17 +1023,6 @@ pub(crate) fn assert_raw_stream_text_contains(
         "raw stream should emit a final response"
     );
     assert_contains_all_case_insensitive(&observation.text, expected);
-}
-
-pub(crate) fn assert_loader_answer_is_relevant(response: &str) {
-    assert_contains_any_case_insensitive(
-        response,
-        &[
-            "agent_with_loaders",
-            "agent_with_loaders.rs",
-            "agent with loaders",
-        ],
-    );
 }
 
 pub(crate) fn assert_smoke_structured_output(output: &SmokeStructuredOutput) {

@@ -6,7 +6,7 @@
 //!
 //! This is deliberately the *common* path, not the whole crate. Advanced
 //! surfaces — the hook system, the run-loop stepping types, message content
-//! blocks, tool authoring internals, extraction/loaders/memory, etc. — are
+//! blocks, tool authoring internals, extraction/memory, etc. — are
 //! imported explicitly from their modules so those imports document intent.
 
 // Provider-client traits.
@@ -14,14 +14,7 @@ pub use crate::client::ProviderClient;
 pub use crate::client::completion::CompletionClient;
 pub use crate::client::embeddings::EmbeddingsClient;
 pub use crate::client::model_listing::ModelListingClient;
-pub use crate::client::transcription::TranscriptionClient;
 pub use crate::client::verify::{VerifyClient, VerifyError};
-
-#[cfg(feature = "image")]
-pub use crate::client::image_generation::ImageGenerationClient;
-
-#[cfg(feature = "audio")]
-pub use crate::client::audio_generation::AudioGenerationClient;
 
 pub use crate::completion::{CompletionError, CompletionModel, Message};
 

@@ -26,13 +26,7 @@ impl<H> Capabilities<H> for AnthropicExt {
     type Completion = Capable<CompletionModel<H>>;
 
     type Embeddings = Nothing;
-    type Transcription = Nothing;
     type ModelListing = Capable<AnthropicModelLister<H>>;
-    #[cfg(feature = "image")]
-    type ImageGeneration = Nothing;
-    #[cfg(feature = "audio")]
-    type AudioGeneration = Nothing;
-    type Rerank = Nothing;
 }
 
 #[derive(Debug, Clone)]

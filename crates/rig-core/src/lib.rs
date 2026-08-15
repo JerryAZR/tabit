@@ -101,22 +101,15 @@
 // address `::rig::core` when a user depends on rig-core without the facade.
 extern crate self as rig;
 
-#[cfg(feature = "audio")]
-#[cfg_attr(docsrs, doc(cfg(feature = "audio")))]
-pub mod audio_generation;
 pub mod client;
 pub mod completion;
 pub mod embeddings;
 pub mod http_client;
 pub mod id;
-#[cfg(feature = "image")]
-#[cfg_attr(docsrs, doc(cfg(feature = "image")))]
-pub mod image_generation;
 /// Internal JSON helpers shared with sibling runtime crates (e.g. `rig-agent`).
 /// Not part of rig-core's stable public API.
 #[doc(hidden)]
 pub mod json_utils;
-pub mod loaders;
 pub mod markers;
 pub mod memory;
 pub mod model;
@@ -124,14 +117,12 @@ pub mod one_or_many;
 pub mod prelude;
 pub(crate) mod provider_response;
 pub mod providers;
-pub mod rerank;
 
 pub mod streaming;
 #[cfg(any(test, feature = "test-utils"))]
 #[cfg_attr(docsrs, doc(cfg(feature = "test-utils")))]
 pub mod test_utils;
 pub mod tool;
-pub mod transcription;
 pub mod vector_store;
 pub mod wasm_compat;
 
