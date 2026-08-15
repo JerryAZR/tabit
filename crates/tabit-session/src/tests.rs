@@ -37,6 +37,12 @@ api = "openai-completions"
 id = "m"
 cost = { input = 2.0, output = 4.0, cache_read = 0.2, cache_write = 2.0 }
 
+[[providers.p.models.thinking_levels]]
+name = "off"
+
+[[providers.p.models.thinking_levels]]
+name = "high"
+
 [providers.q]
 base_url = "http://127.0.0.1:9998/v1"
 api = "openai-completions"
@@ -490,6 +496,163 @@ async fn selection_errors_are_loud_at_builder_time() -> Result<(), SessionError>
         }
         other => panic!("expected config error, got {}", matches!(other, Err(_))),
     }
+    std::fs::remove_dir_all(store.dir()).ok();
+    Ok(())
+}
+
+#[tokio::test]
+async fn builder_options_reach_the_request_and_the_budget_enforces() -> Result<(), SessionError> {
+    let store = temp_store("builder");
+    let mut session = Factory::new(vec![text_turn("ok")])
+        .into_builder(store.clone())
+        .preamble("you are a test agent")
+        .max_turns(1)
+        .create("C:/w")?;
+    assert!(!session.id().is_empty(), "session exposes its id");
+
+    // The preamble rides on the outgoing request.
+    let run = session.prompt("hi").await.expect("run");
+    assert_eq!(run.output, "ok");
+
+    // max_turns(1) means a follow-up outer loop with a tool turn cannot
+    // get its second model call: the budget error surfaces loudly.
+    let mut budgeted = Factory::new(vec![tool_turn("c1", "echo"), text_turn("never")])
+        .into_builder(store.clone())
+        .max_turns(1)
+        .dynamic_tool(echo_tool())
+        .create("C:/w")?;
+    match budgeted.prompt("go").await {
+        Err(SessionError::Prompt(error)) => {
+            let text = error.to_string();
+            assert!(
+                text.to_lowercase().contains("max"),
+                "expected a max-turns failure, got: {text}"
+            );
+        }
+        other => panic!("expected budget failure, got {:?}", other.err()),
+    }
+    std::fs::remove_dir_all(store.dir()).ok();
+    Ok(())
+}
+
+#[tokio::test]
+async fn reasoning_deltas_surface_as_events() -> Result<(), SessionError> {
+    let store = temp_store("reasoning");
+    let reasoning_turn = vec![
+        MockStreamEvent::reasoning_delta_with_id("r0", "pondering..."),
+        MockStreamEvent::text("the answer"),
+        MockStreamEvent::final_response(Usage::default()),
+    ];
+    let mut session = Factory::new(vec![reasoning_turn])
+        .into_builder(store.clone())
+        .create("C:/w")?;
+    let run = session.prompt("deep question").await.expect("run");
+    assert!(
+        run.events.iter().any(|e| matches!(
+            e,
+            SessionEvent::ReasoningDelta { id, reasoning }
+                if id == "r0" && reasoning == "pondering..."
+        )),
+        "reasoning delta must surface: {:?}",
+        run.events
+    );
+    std::fs::remove_dir_all(store.dir()).ok();
+    Ok(())
+}
+
+#[tokio::test]
+async fn repeated_runs_under_one_model_share_a_stats_slot() -> Result<(), SessionError> {
+    let store = temp_store("stats-slot");
+    let factory = Factory::new(vec![text_turn("a"), text_turn("b")]);
+    let mut session = factory.into_builder(store.clone()).create("C:/w")?;
+    session.prompt("one").await.expect("run 1");
+    session.prompt("two").await.expect("run 2");
+
+    let stats = session.stats().expect("stats");
+    assert_eq!(stats.per_model.len(), 1, "same model, one slot");
+    assert_eq!(stats.per_model[0].usage.input_tokens, 200);
+    assert_eq!(
+        stats.per_model[0].key(),
+        "p/m",
+        "display key is provider/model"
+    );
+    std::fs::remove_dir_all(store.dir()).ok();
+    Ok(())
+}
+
+#[tokio::test]
+async fn persistence_failure_fails_the_run_loudly() -> Result<(), SessionError> {
+    let store = temp_store("persist-fail");
+    // A tool that deletes the session log mid-run: the next record the
+    // recorder tries to append must fail, and prompt() must surface it
+    // instead of returning a success the disk does not back.
+    let session_dir = store.dir().to_path_buf();
+    let destroyer = DynamicTool::new(
+        "selfdestruct",
+        "Deletes the session log",
+        serde_json::Value::Object(serde_json::Map::new()),
+        move |_ctx, _args| {
+            let dir = session_dir.clone();
+            Box::pin(async move {
+                if let Ok(entries) = std::fs::read_dir(&dir) {
+                    for entry in entries.flatten() {
+                        let path = entry.path();
+                        if path.extension().and_then(|e| e.to_str()) == Some("jsonl") {
+                            std::fs::remove_file(&path).ok();
+                        }
+                    }
+                }
+                Ok(rig_agent::tool::ToolOutput::text("log deleted"))
+            })
+        },
+    );
+    let mut session = Factory::new(vec![tool_turn("c1", "selfdestruct"), text_turn("done")])
+        .into_builder(store.clone())
+        .dynamic_tool(destroyer)
+        .create("C:/w")?;
+
+    match session.prompt("destroy the log").await {
+        // Which arm fires first is platform-dependent (on Windows the
+        // writer keeps writing to the unlinked handle, so the reload read
+        // fails before the recorder does); either way the run must fail
+        // loudly instead of reporting success the disk does not back.
+        Err(SessionError::Persist(message)) => assert!(!message.is_empty()),
+        Err(SessionError::Io { path, .. }) => {
+            assert!(path.to_string_lossy().contains(".jsonl"), "{path:?}")
+        }
+        Err(other) => panic!("expected Persist or Io, got {other}"),
+        Ok(run) => panic!("run must not succeed with an unwritable log: {run:?}"),
+    }
+    let _ = std::fs::remove_dir_all(store.dir());
+    Ok(())
+}
+
+#[tokio::test]
+async fn thinking_level_changes_are_validated_and_recorded() -> Result<(), SessionError> {
+    let store = temp_store("level");
+    let mut session = Factory::new(vec![text_turn("a")])
+        .into_builder(store.clone())
+        .create("C:/w")?;
+    session
+        .set_thinking_level(Some("high"))
+        .expect("defined level switches");
+    assert_eq!(session.selection().thinking_level.as_deref(), Some("high"));
+    session.set_thinking_level(None).expect("clearing works");
+    assert_eq!(session.selection().thinking_level, None);
+    match session.set_thinking_level(Some("maximum")) {
+        Err(SessionError::Config { message }) => {
+            assert!(message.contains("`maximum`"), "{message}")
+        }
+        other => panic!("expected config error, got {:?}", other.err()),
+    }
+    // Every accepted switch left a model_change entry in the log.
+    let loaded = store.open_path(session.path())?;
+    let changes = loaded
+        .entries
+        .iter()
+        .filter(|e| matches!(e.kind, EntryKind::ModelChange { .. }))
+        .count();
+    assert_eq!(changes, 3, "initial + two switches");
     std::fs::remove_dir_all(store.dir()).ok();
     Ok(())
 }

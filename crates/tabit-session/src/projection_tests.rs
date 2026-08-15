@@ -171,3 +171,18 @@ fn last_model_change_wins() {
     assert_eq!((provider, model, level), ("p", "second", Some("high")));
     assert!(last_model_change(&[entry(user("no changes"))]).is_none());
 }
+
+#[test]
+fn assistant_entry_holding_a_non_assistant_message_is_not_dangling() {
+    // The entry schema permits any Message inside AssistantMessage; only a
+    // genuine assistant message can dangle tool calls.
+    let entries = vec![entry(EntryKind::AssistantMessage {
+        message: Message::User {
+            content: OneOrMany::one(UserContent::Text(Text::new("odd but legal"))),
+        },
+        usage: rig_core::completion::Usage::default(),
+    })];
+    let (messages, dangling) = project(&entries);
+    assert_eq!(messages.len(), 1);
+    assert!(dangling.is_none());
+}

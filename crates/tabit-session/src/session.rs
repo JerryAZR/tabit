@@ -57,13 +57,23 @@ pub struct ResumeReport {
 /// Per-model token and cost totals for a session.
 #[derive(Debug, Clone, Default, PartialEq)]
 pub struct ModelStats {
-    /// Provider/model key in effect (`provider/model`, plus the thinking
-    /// level when one was set).
+    /// Provider id in effect.
+    pub provider: String,
+    /// Model id in effect.
     pub model: String,
+    /// Thinking level in effect, when one was set.
+    pub thinking_level: Option<String>,
     /// Summed usage.
     pub usage: Usage,
     /// Cost in USD, when the config carries rates for the model.
     pub cost: Option<f64>,
+}
+
+impl ModelStats {
+    /// The `provider/model` display key.
+    pub fn key(&self) -> String {
+        format!("{}/{}", self.provider, self.model)
+    }
 }
 
 /// Session-level totals.
@@ -174,15 +184,8 @@ impl SessionBuilder {
             ..ResumeReport::default()
         };
 
-        let (context, dangling) = projection::project(&loaded.entries);
-        let mut writer = SessionWriter::open_existing(&loaded.path)?;
-        if let Some(dangling) = &dangling {
-            let results = projection::interrupted_results(dangling);
-            report.repaired_tool_calls = results.len();
-            for result in results {
-                writer.append(EntryKind::ToolResult { result })?;
-            }
-        }
+        let (context, _dangling) = projection::project(&loaded.entries);
+        let writer = SessionWriter::open_existing(&loaded.path)?;
 
         let selection = match projection::last_model_change(&loaded.entries) {
             Some((provider, model, thinking_level)) => {
@@ -199,32 +202,13 @@ impl SessionBuilder {
         };
 
         let builder = Self { selection, ..self };
-        // The synthesized results only complete the trailing roundtrip;
-        // extend the projected context with them rather than re-reading.
-        let context = match dangling {
-            Some(dangling) => {
-                let mut context = context;
-                context.extend(interrupted_user_messages(&dangling));
-                context
-            }
-            None => context,
-        };
-        let session = Session::assemble(builder, writer, context)?;
+        let mut session = Session::assemble(builder, writer, context)?;
+        // One repair path for everyone: reload_context synthesizes results
+        // for a dangling trailing roundtrip (and fails loudly if they
+        // cannot be persisted) and re-derives the context from the log.
+        report.repaired_tool_calls = session.reload_context()?;
         Ok((session, report))
     }
-}
-
-/// The user message carrying a dangling turn's synthesized results, in the
-/// same merged form projection produces for committed results.
-fn interrupted_user_messages(dangling: &projection::DanglingToolCalls) -> Vec<Message> {
-    let results: Vec<rig_core::message::UserContent> = projection::interrupted_results(dangling)
-        .into_iter()
-        .map(rig_core::message::UserContent::ToolResult)
-        .collect();
-    vec![Message::User {
-        content: rig_core::OneOrMany::many(results)
-            .unwrap_or_else(|_| rig_core::OneOrMany::one(placeholder_user_content())),
-    }]
 }
 
 /// A persistent, resumable conversation.
@@ -398,26 +382,32 @@ impl Session {
     /// dangling tool-use roundtrip (an interrupted run), repair it with
     /// synthesized results — the same fix resume applies — so the context
     /// stays replayable.
-    fn reload_context(&mut self) -> Result<(), SessionError> {
+    fn reload_context(&mut self) -> Result<usize, SessionError> {
         let loaded = self.store.open_path(&self.path)?;
         let (_, dangling) = projection::project(&loaded.entries);
+        let mut repaired = 0;
         if let Some(dangling) = &dangling {
             for result in projection::interrupted_results(dangling) {
                 self.recorder.record(EntryKind::ToolResult { result });
+            }
+            repaired = dangling.calls.len();
+            // A repair that cannot reach the disk leaves the log
+            // unreplayable; surface it instead of projecting around it.
+            if let Some(error) = self.recorder.first_error() {
+                return Err(SessionError::Persist(error));
             }
         }
         let reloaded = self.store.open_path(&self.path)?;
         let (context, _) = projection::project(&reloaded.entries);
         self.context = context;
-        Ok(())
+        Ok(repaired)
     }
 
     fn fold_stats(&self, entries: &[SessionEntry]) -> SessionStats {
         let mut stats = SessionStats::default();
-        // Attributed by the log's own model_change entries: empty until the
-        // first one appears (a log without any change entries attributes to
-        // an empty key, which carries no cost).
-        let mut current = String::new();
+        // Attributed by the log's own model_change entries; assistant turns
+        // before any change entry attribute to empty ids (uncosted).
+        let mut current = (String::new(), String::new(), None);
         let mut per_model: Vec<ModelStats> = Vec::new();
         for entry in entries {
             match &entry.kind {
@@ -426,13 +416,19 @@ impl Session {
                     model,
                     thinking_level,
                 } => {
-                    current = self.model_key(provider, model, thinking_level.as_deref());
+                    current = (provider.clone(), model.clone(), thinking_level.clone());
                 }
                 EntryKind::AssistantMessage { usage, .. } => {
-                    match per_model.iter_mut().find(|s| s.model == current) {
+                    let (provider, model, level) = &current;
+                    match per_model
+                        .iter_mut()
+                        .find(|s| &s.provider == provider && &s.model == model)
+                    {
                         Some(slot) => add_usage(&mut slot.usage, usage),
                         None => per_model.push(ModelStats {
-                            model: current.clone(),
+                            provider: provider.clone(),
+                            model: model.clone(),
+                            thinking_level: level.clone(),
                             usage: *usage,
                             cost: None,
                         }),
@@ -443,28 +439,19 @@ impl Session {
             }
         }
         for model_stats in &mut per_model {
-            if let Some((provider, model, _)) = split_model_key(&model_stats.model) {
-                if let Some(cost) = self
-                    .config
-                    .provider(provider)
-                    .and_then(|p| p.model(model))
-                    .and_then(|m| m.cost)
-                {
-                    let dollars = cost_of(&model_stats.usage, &cost);
-                    stats.total_cost += dollars;
-                    model_stats.cost = Some(dollars);
-                }
+            if let Some(cost) = self
+                .config
+                .provider(&model_stats.provider)
+                .and_then(|p| p.model(&model_stats.model))
+                .and_then(|m| m.cost)
+            {
+                let dollars = cost_of(&model_stats.usage, &cost);
+                stats.total_cost += dollars;
+                model_stats.cost = Some(dollars);
             }
         }
         stats.per_model = per_model;
         stats
-    }
-
-    fn model_key(&self, provider: &str, model: &str, level: Option<&str>) -> String {
-        format!(
-            "{provider}/{model}{}",
-            level.map(|l| format!(" ({l})")).unwrap_or_default()
-        )
     }
 
     fn rebuild_agent(&mut self, selection: &ModelSelection) -> Result<(), SessionError> {
@@ -579,15 +566,6 @@ fn cost_of(usage: &Usage, cost: &tabit_config::Cost) -> f64 {
         + (usage.cache_creation_input_tokens as f64 / 1_000_000.0) * cost.cache_write
 }
 
-fn split_model_key(key: &str) -> Option<(&str, &str, Option<&str>)> {
-    let (model_part, level) = match key.split_once(" (") {
-        Some((model, rest)) => (model, Some(rest.strip_suffix(')').unwrap_or(rest))),
-        None => (key, None),
-    };
-    let (provider, model) = model_part.split_once('/')?;
-    Some((provider, model, level))
-}
-
 /// A model that is never called: every assembled session rebuilds its real
 /// agent from config immediately after construction, so this exists only
 /// to satisfy the field initializer.
@@ -628,15 +606,4 @@ fn internal_placeholder_error() -> rig_core::completion::CompletionError {
     rig_core::completion::CompletionError::ProviderError(
         "internal invariant violated: placeholder model was called".to_string(),
     )
-}
-
-/// A neutral single item for the `OneOrMany::many` fallback - unreachable
-/// in practice (only called with a non-empty vec), but `OneOrMany` has no
-/// empty constructor.
-fn placeholder_user_content() -> rig_core::message::UserContent {
-    rig_core::message::UserContent::ToolResult(rig_core::message::ToolResult {
-        id: String::new(),
-        call_id: None,
-        content: rig_core::OneOrMany::one(rig_core::message::ToolResultContent::text("")),
-    })
 }

@@ -31,13 +31,14 @@ Defensive ("unreachable") arms follow a stricter rule:
 - The whole suite runs offline (cassette replay + test doubles). Doctests
   are NOT included in these numbers (`llvm-cov` was run without
   `--doctests`); they are gated by the same CI run.
-- Current state: **96.8% lines / 97.2% regions** (1,750 of 53,984 lines
-  uncovered; re-measured after phase 3's ~4.4k-line shrink and the tabit-config
-  addition — the percentage dip is denominator loss, absolute misses grew by
-  six and were filled). The residue is itemized below. `crates/tabit-config`
-  sits at 100% branch coverage; its residue is three partial-line regions in
-  tiny helpers (`auth.rs` load/default-path arms, `lib.rs` home-resolution
-  arm), with no fully unexecuted line or branch.
+- Current state: **96.1% lines / 96.6% regions** (2,187 of 56,068 lines;
+  re-measured after the tabit-session / tabit-tools / CLI additions — the
+  rig crates' residue is unchanged, the new crates carry their own
+  itemization below). The residue is itemized below. `crates/tabit-config`
+  sits at 100% branch coverage with no fully unexecuted line. The new
+  tabit crates: tabit-session 91.3% (session.rs) / 83.3% (store.rs),
+  tabit-tools 90.5%; their residue is almost entirely error arms (see
+  "Justified residue" item 9).
 
 ## Filled
 
@@ -106,6 +107,33 @@ named, the classification applies to its current lcov-uncovered ranges.
 8. **Region/line-mapping artifacts**: closing-brace regions, multi-line
    let-chain counters, and macro-expansion line zeros on paths that
    demonstrably execute (adjacent lines covered).
+9. **tabit-crate error arms** (tabit-session / tabit-tools / CLI):
+   - Filesystem `.map_err` arms that need faults a test cannot portably
+     create: append/write to an unlinked-open handle *succeeds* on Windows
+     (verified empirically — the persist-failure test documents it), and
+     disk-full / uuid-collision / `create_new` races cannot be staged.
+   - Poisoned-`Mutex` arms in `recorder.rs` — reachable only after a panic
+     inside the lock, which the workspace lint policy forbids in shipped
+     code.
+   - Placeholder arms documented as unreachable by construction:
+     `UnreachableModel` (every assembled session rebuilds its real agent
+     immediately; its bodies error loudly as internal-invariant guards) and
+     `user_placeholder` (guarded by an `is_empty` check; `OneOrMany` has no
+     empty constructor).
+   - Platform-absent arms in `tabit-tools`: the PowerShell interpreter
+     fallback (this machine has Git Bash), interpreter spawn failure, the
+     `try_wait` OS-error arm, and the abnormal-signal exit description.
+   - Engine-driven event arms in `stream_item_event`: `TurnRetried` (needs
+     a hook that rejects a turn — rig-agent's hook tests cover that engine
+     path), `NativeItem` from `Unknown` stream items (no mock builder
+     emits them), and the `FinalResponse`/`StreamUserItem` catch-arms the
+     caller handles directly.
+   - `build_model`'s `build_error` arm: provider client constructors cannot
+     fail once config validation has checked URL scheme and key presence.
+   - The repair-path `Persist` return in `reload_context` — the same
+     first-error check `prompt()` performs post-run (covered there); the
+     repair variant needs a dangling log whose writer fails exactly at
+     repair time.
 
 ## Deferred (explicit)
 

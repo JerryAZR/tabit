@@ -1,5 +1,4 @@
 use super::*;
-use rig_agent::tool::tool_definition;
 use rig_core::tool::PortableTool;
 use std::fs;
 
@@ -180,5 +179,26 @@ async fn dynamic_tool_executes_the_portable_body() {
     assert!(result.is_success(), "dynamic call: {:?}", result);
     let text = result.output().as_text().unwrap_or_default();
     assert!(text.contains("via-dynamic"), "{text}");
+    fs::remove_dir_all(&dir).ok();
+}
+
+#[tokio::test]
+async fn read_truncates_on_a_character_boundary() {
+    let dir = temp_dir("read-utf8-cap");
+    let path = dir.join("wide.txt");
+    // Two-byte characters past the boundary: the byte cap lands mid-char.
+    let body = "x".repeat(READ_CAP_BYTES - 5) + "\u{e9}".repeat(10).as_str();
+    debug_assert!(body.len() > READ_CAP_BYTES);
+    fs::write(&path, body).expect("write");
+    let out = read(path.to_string_lossy().to_string())
+        .await
+        .expect("read");
+    assert!(out.contains("[file truncated"), "notice present");
+    // The truncated text must itself be valid UTF-8 (it was produced from a
+    // String, but the guarantee is the point of the boundary walk).
+    assert!(
+        out.chars()
+            .all(|c| !c.is_ascii_control() || c == '\n' || c == '\r')
+    );
     fs::remove_dir_all(&dir).ok();
 }

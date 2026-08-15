@@ -210,6 +210,11 @@ fn exit_description(status: &std::process::ExitStatus) -> String {
 
 /// Wait for `child`, capturing piped stdout/stderr on reader threads, and
 /// kill it if it exceeds `timeout`.
+///
+/// Hand-rolled over `std::process` on purpose: this crate is sync (the
+/// async tool surface awaits at the dispatch boundary), `tokio::process`
+/// would drag a runtime dependency into a std-only tool crate, and the
+/// poll-try_wait loop below is the entire algorithm.
 fn run_with_timeout(
     child: &mut std::process::Child,
     timeout: Duration,

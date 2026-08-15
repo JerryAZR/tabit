@@ -256,3 +256,67 @@ fn project_root_discovery_prefers_git_ancestor() {
     );
     fs::remove_dir_all(&base).ok();
 }
+
+#[test]
+fn fs_failures_are_loud_io_errors() {
+    let store = temp_store("io");
+    // create under a path occupied by a file -> create_dir_all fails.
+    let blocker = store.dir().with_extension("blocker");
+    fs::write(&blocker, "i am a file").expect("blocker");
+    let nested = SessionStore::new(blocker.join("sessions"));
+    match nested.create("C:/w") {
+        Err(SessionError::Io { .. }) => {}
+        other => panic!("expected Io, got {other:?}"),
+    }
+
+    // open of a missing file.
+    match store.open_path(&store.dir().join("missing.jsonl")) {
+        Err(SessionError::Io { .. }) => {}
+        other => panic!("expected Io, got {other:?}"),
+    }
+
+    // list when the store path is a plain file.
+    match nested.list() {
+        Err(SessionError::Io { .. }) => {}
+        other => panic!("expected Io, got {other:?}"),
+    }
+
+    fs::remove_file(&blocker).ok();
+    fs::remove_dir_all(store.dir()).ok();
+}
+
+#[test]
+fn listing_rejects_files_with_bad_headers() {
+    let store = temp_store("bad-header");
+    fs::create_dir_all(store.dir()).expect("dir");
+    // A file with no header line at all.
+    fs::write(store.dir().join("empty.jsonl"), "").expect("empty");
+    match store.list() {
+        Err(SessionError::Corrupt { message, .. }) => {
+            assert!(message.contains("empty"), "{message}")
+        }
+        other => panic!("expected corrupt, got {other:?}"),
+    }
+    fs::remove_dir_all(store.dir()).ok();
+
+    // A file whose first line is not a header (its own store so listing
+    // hits it deterministically).
+    let store = temp_store("bad-header-garbage");
+    fs::create_dir_all(store.dir()).expect("dir");
+    fs::write(store.dir().join("garbage.jsonl"), "not a header\n").expect("garbage");
+    match store.list() {
+        Err(SessionError::Parse { line, .. }) => assert_eq!(line, 1),
+        other => panic!("expected parse error, got {other:?}"),
+    }
+    fs::remove_dir_all(store.dir()).ok();
+}
+
+#[test]
+fn project_default_resolves_under_the_current_directory() {
+    let store = SessionStore::project_default();
+    let dir = store.dir().to_string_lossy().to_string();
+    assert!(
+        dir.replace('\\', "/").ends_with("/.tabit/sessions"),
+        "default store sits at <root>/.tabit/sessions: {dir}"
+    );
+}

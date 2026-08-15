@@ -119,6 +119,14 @@ fn selection_validation_covers_thinking_levels() {
         thinking_level: Some("high".to_string()),
     };
     leveled.validate(&config).expect("valid with level");
+    let missing_model = ModelSelection::new("local", "nope");
+    match missing_model.validate(&config) {
+        Err(SessionError::Config { message }) => {
+            assert!(message.contains("model `nope`"), "{message}")
+        }
+        other => panic!("expected config error, got {other:?}"),
+    }
+
     let bogus = ModelSelection {
         provider: "local".to_string(),
         model: "m".to_string(),

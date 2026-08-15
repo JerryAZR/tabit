@@ -1,3 +1,15 @@
+#![cfg_attr(
+    test,
+    allow(
+        clippy::err_expect,
+        clippy::expect_used,
+        clippy::indexing_slicing,
+        clippy::panic,
+        clippy::panic_in_result_fn,
+        clippy::unreachable,
+        clippy::unwrap_used
+    )
+)]
 //! `tabit` — a minimal coding agent, print mode.
 //!
 //! One prompt in, one outer loop out: events print as they happen, the
@@ -27,6 +39,7 @@ Use the read, ls, and bash tools to inspect and change the workspace \
 before answering. Prefer reading files over guessing. Keep answers short \
 and factual; report commands you ran and files you changed.";
 
+#[derive(Debug)]
 struct Args {
     prompt: Option<String>,
     session: Option<PathBuf>,
@@ -48,7 +61,16 @@ config: providers.toml / auth.toml under ~/.tabit (override with
         TABIT_CONFIG / TABIT_AUTH); sessions live in <project>/.tabit/sessions";
 
 fn parse_args() -> Result<Args, String> {
-    let mut args = Args {
+    parse_args_from(std::env::args().skip(1))
+}
+
+/// Manual parsing over an injectable iterator (no clap: four flags do not
+/// justify the dependency); `parse_args_from` is the testable core.
+fn parse_args_from<I>(args: I) -> Result<Args, String>
+where
+    I: Iterator<Item = String>,
+{
+    let mut parsed = Args {
         prompt: None,
         session: None,
         continue_newest: false,
@@ -56,28 +78,28 @@ fn parse_args() -> Result<Args, String> {
         model: None,
         max_turns: None,
     };
-    let mut it = std::env::args().skip(1);
+    let mut it = args;
     while let Some(arg) = it.next() {
         match arg.as_str() {
             "-h" | "--help" => {
                 println!("{USAGE}");
                 std::process::exit(0);
             }
-            "--continue" | "-c" => args.continue_newest = true,
-            "--list" => args.list = true,
+            "--continue" | "-c" => parsed.continue_newest = true,
+            "--list" => parsed.list = true,
             "--session" => {
                 let value = it.next().ok_or("--session needs a path (see --help)")?;
-                args.session = Some(PathBuf::from(value));
+                parsed.session = Some(PathBuf::from(value));
             }
             "--model" | "-m" => {
                 let value = it
                     .next()
                     .ok_or("--model needs provider/model (see --help)")?;
-                args.model = Some(value);
+                parsed.model = Some(value);
             }
             "--max-turns" => {
                 let value = it.next().ok_or("--max-turns needs a number (see --help)")?;
-                args.max_turns = Some(
+                parsed.max_turns = Some(
                     value
                         .parse()
                         .map_err(|_| format!("--max-turns: `{value}` is not a number"))?,
@@ -87,14 +109,14 @@ fn parse_args() -> Result<Args, String> {
                 return Err(format!("unknown flag `{other}`\n{USAGE}"));
             }
             prompt => {
-                if args.prompt.is_some() {
+                if parsed.prompt.is_some() {
                     return Err(format!("two prompts given; expected one\n{USAGE}"));
                 }
-                args.prompt = Some(prompt.to_string());
+                parsed.prompt = Some(prompt.to_string());
             }
         }
     }
-    Ok(args)
+    Ok(parsed)
 }
 
 fn parse_model(raw: &str) -> Result<ModelSelection, String> {
@@ -291,5 +313,100 @@ fn main() {
     if let Err(error) = run() {
         eprintln!("tabit: {error}");
         std::process::exit(1);
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn args(list: &[&str]) -> Result<Args, String> {
+        parse_args_from(list.iter().map(|s| s.to_string()))
+    }
+
+    #[test]
+    fn parses_prompt_and_flags() {
+        let parsed = args(&["--continue", "--model", "p/m", "hello world"]).expect("valid");
+        assert_eq!(parsed.prompt.as_deref(), Some("hello world"));
+        assert!(parsed.continue_newest);
+        assert_eq!(parsed.model.as_deref(), Some("p/m"));
+
+        let parsed = args(&["--session", "s.jsonl", "--max-turns", "5", "go"]).expect("valid");
+        assert_eq!(
+            parsed.session.as_deref(),
+            Some(std::path::Path::new("s.jsonl"))
+        );
+        assert_eq!(parsed.max_turns, Some(5));
+
+        let parsed = args(&["--list"]).expect("valid");
+        assert!(parsed.list);
+    }
+
+    #[test]
+    fn rejects_missing_values_unknown_flags_and_double_prompts() {
+        assert!(args(&["--session"]).is_err());
+        assert!(args(&["--model"]).is_err());
+        assert!(args(&["--max-turns", "x"]).is_err());
+        let unknown = args(&["--bogus"]).expect_err("unknown flag");
+        assert!(unknown.contains("--bogus"), "{unknown}");
+        let two = args(&["one", "two"]).expect_err("two prompts");
+        assert!(two.contains("two prompts"), "{two}");
+    }
+
+    #[test]
+    fn model_strings_require_provider_slash_model() {
+        assert_eq!(
+            parse_model("lmstudio/openai/gpt-oss-20b")
+                .expect("three-part ok")
+                .model,
+            "openai/gpt-oss-20b",
+            "the first `/` splits; model ids may contain slashes"
+        );
+        assert!(parse_model("noprovider").is_err());
+        assert!(parse_model("/m").is_err());
+        assert!(parse_model("p/").is_err());
+    }
+
+    #[test]
+    fn selection_resolution_prefers_flag_then_config_default() {
+        let mut parsed = args(&["--model", "p/m2", "hi"]).expect("valid");
+        assert_eq!(
+            resolve_selection(&parsed, &test_config())
+                .expect("flag wins")
+                .model,
+            "m2"
+        );
+
+        parsed.model = None;
+        assert_eq!(
+            resolve_selection(&parsed, &test_config())
+                .expect("default")
+                .provider,
+            "lmstudio"
+        );
+
+        let empty = tabit_config::TabitConfig::default();
+        let error = resolve_selection(&parsed, &empty).expect_err("no selection");
+        assert!(error.contains("default_model"), "{error}");
+    }
+
+    fn test_config() -> TabitConfig {
+        TabitConfig::from_toml_str(
+            r#"
+default_model = { provider = "lmstudio", model = "m" }
+
+[providers.lmstudio]
+base_url = "http://127.0.0.1:1234/v1"
+api = "openai-completions"
+
+[[providers.lmstudio.models]]
+id = "m"
+
+[[providers.lmstudio.models]]
+id = "m2"
+"#,
+            std::path::Path::new("providers.toml"),
+        )
+        .expect("test config")
     }
 }

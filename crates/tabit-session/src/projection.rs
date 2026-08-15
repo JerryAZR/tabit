@@ -34,13 +34,7 @@ pub fn project(entries: &[SessionEntry]) -> (Vec<Message>, Option<DanglingToolCa
         if pending.is_empty() {
             return;
         }
-        let results: Vec<rig_core::message::UserContent> = pending
-            .drain(..)
-            .map(rig_core::message::UserContent::ToolResult)
-            .collect();
-        let content =
-            OneOrMany::many(results).unwrap_or_else(|_| OneOrMany::one(user_placeholder()));
-        messages.push(Message::User { content });
+        messages.push(tool_results_message(pending.drain(..).collect()));
     };
 
     for entry in entries {
@@ -98,6 +92,20 @@ pub fn interrupted_results(dangling: &DanglingToolCalls) -> Vec<ToolResult> {
             )),
         })
         .collect()
+}
+
+/// The user message carrying one tool batch's results — the single shape
+/// providers expect, shared by projection and the dangling-roundtrip
+/// repair. Only called with a non-empty batch; the placeholder arm exists
+/// because `OneOrMany` has no empty constructor.
+pub(crate) fn tool_results_message(results: Vec<ToolResult>) -> Message {
+    let content: Vec<rig_core::message::UserContent> = results
+        .into_iter()
+        .map(rig_core::message::UserContent::ToolResult)
+        .collect();
+    Message::User {
+        content: OneOrMany::many(content).unwrap_or_else(|_| OneOrMany::one(user_placeholder())),
+    }
 }
 
 /// The tool calls carried by an assistant message.
