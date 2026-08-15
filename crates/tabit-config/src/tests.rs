@@ -250,8 +250,9 @@ fn load_default_lists_candidates_when_nothing_exists() {
     // candidates from play by checking only that the error is NotFound and
     // names the env-provided candidate. A real home file would make this
     // test environment-dependent, so we only assert on the env candidate.
+    let _guard = OVERRIDE_ENV_LOCK.lock().expect("env lock");
     let missing = std::env::temp_dir().join("tabit-config-tests/nope.toml");
-    // SAFETY: single-threaded test setup; the variable is unique to this test.
+    // SAFETY: serialized by OVERRIDE_ENV_LOCK.
     unsafe {
         std::env::set_var("TABIT_CONFIG", &missing);
     }
@@ -270,6 +271,68 @@ fn load_default_lists_candidates_when_nothing_exists() {
         Ok(_) => {}
         Err(other) => panic!("unexpected error: {other}"),
     }
+}
+
+/// Guards the process-global `TABIT_CONFIG`/`TABIT_AUTH` variables: tests
+/// that touch them run serially.
+static OVERRIDE_ENV_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
+#[test]
+fn load_default_honors_tabit_config_env() {
+    let _guard = OVERRIDE_ENV_LOCK.lock().expect("env lock");
+    let dir = std::env::temp_dir().join("tabit-config-tests");
+    std::fs::create_dir_all(&dir).expect("temp dir");
+    let path = dir.join("override_providers.toml");
+    std::fs::write(
+        &path,
+        r#"
+[providers.overridden]
+base_url = "http://127.0.0.1:9999/v1"
+api = "openai-completions"
+"#,
+    )
+    .expect("write temp config");
+    // SAFETY: serialized by OVERRIDE_ENV_LOCK.
+    unsafe {
+        std::env::set_var("TABIT_CONFIG", &path);
+    }
+    let config = TabitConfig::load_default().expect("env override should be loaded");
+    // SAFETY: see above.
+    unsafe {
+        std::env::remove_var("TABIT_CONFIG");
+    }
+    let provider = config
+        .provider("overridden")
+        .expect("config came from the override file, not the home default");
+    assert_eq!(provider.base_url, "http://127.0.0.1:9999/v1");
+    std::fs::remove_file(&path).expect("cleanup");
+}
+
+#[test]
+fn auth_load_default_honors_tabit_auth_env() {
+    let _guard = OVERRIDE_ENV_LOCK.lock().expect("env lock");
+    let dir = std::env::temp_dir().join("tabit-config-tests");
+    std::fs::create_dir_all(&dir).expect("temp dir");
+    let path = dir.join("override_auth.toml");
+    std::fs::write(
+        &path,
+        r#"
+[providers.overridden]
+api_key = "file-secret"
+"#,
+    )
+    .expect("write temp auth");
+    // SAFETY: serialized by OVERRIDE_ENV_LOCK.
+    unsafe {
+        std::env::set_var("TABIT_AUTH", &path);
+    }
+    let auth = AuthConfig::load_default().expect("env override should be loaded");
+    // SAFETY: see above.
+    unsafe {
+        std::env::remove_var("TABIT_AUTH");
+    }
+    assert_eq!(auth.api_key("overridden"), Some("file-secret"));
+    std::fs::remove_file(&path).expect("cleanup");
 }
 
 #[test]
@@ -376,7 +439,8 @@ oauth = "radius"
 
 #[test]
 fn auth_load_default_missing_file_is_empty_not_an_error() {
-    // SAFETY: unique value; removed immediately after the call.
+    let _guard = OVERRIDE_ENV_LOCK.lock().expect("env lock");
+    // SAFETY: serialized by OVERRIDE_ENV_LOCK.
     unsafe {
         std::env::set_var(
             "TABIT_AUTH",

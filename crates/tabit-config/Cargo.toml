@@ -19,3 +19,7 @@ serde_json = { workspace = true }
 thiserror = { workspace = true }
 toml = { workspace = true }
 url = { workspace = true }
+
+[dev-dependencies]
+rig-core = { path = "../rig-core", version = "0.41.0", default-features = false }
+tokio = { workspace = true, features = ["rt-multi-thread", "macros"] }
