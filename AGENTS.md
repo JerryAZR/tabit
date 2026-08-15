@@ -70,6 +70,9 @@ Current workspace layout:
   (see rule 5); some tests carry upstream-marked `#[ignore]`s
   (live-network scenarios). Don't record pass counts here — they change
   constantly; run the suite for current numbers.
+- In shell commands, avoid `;` chaining — it runs the next step regardless
+  of the previous one's failure. Prefer `&&` (proceed only on success) or
+  `||` (fallback), so a failed step can never be talked past.
 - The workspace denies `panic`/`unwrap`/`expect`/indexing in shipped code;
   test code relaxes those via an identical `#![cfg_attr(test, allow(..))]`
   header at the top of each crate's lib.rs — new crates copy the current
