@@ -20,6 +20,34 @@
 //! errors): clear, graceful, and never a panic.
 //!
 //! Native only: these tools touch the filesystem and spawn processes.
+//!
+//! # Cancellation contract (tool authors read this)
+//!
+//! Cancellation is cooperative and split by ownership — the engine owns
+//! *when* to stop, the tool owns *how* to stop what it started:
+//!
+//! - **When**: the runtime cancels a per-invocation
+//!   [`CancellationToken`](tokio_util::sync::CancellationToken) on abort
+//!   (user stop, session shutdown). Tools receive it through
+//!   [`ToolContext`]; plain `#[rig_tool]` functions that never spawn OS
+//!   resources can ignore it.
+//! - **How**: a tool that starts OS-level work must make its [`Drop`]
+//!   leak nothing, *in addition to* watching the token. Cancellation is
+//!   implemented by dropping the tool's future; a drop-safe tool needs no
+//!   other abort handling. The `bash` tool is the reference
+//!   implementation: it spawns its child through `process-wrap`
+//!   (`JobObject` on Windows, a process-group leader on Unix) so an
+//!   explicit `kill()` — and the drop backstop — take down the whole
+//!   process tree, and it reads both output pipes up front so a dead
+//!   child's pipe never deadlocks the reader.
+//! - **Force, no grace**: kills go straight to force (no SIGTERM grace
+//!   period). Tool calls are user-cancellable and the model is told the
+//!   call was interrupted, so there is no cleanup contract with the
+//!   child.
+//! - **Report shape**: a cancelled call returns a clear "interrupted"
+//!   error/result (or is simply dropped mid-flight — the session layer
+//!   synthesizes the model-visible record); it never returns output that
+//!   looks like a completed run.
 
 use rig_agent::tool::{DynamicTool, ToolContext};
 use rig_core::tool::{IntoToolOutput, PortableTool, ToolExecutionError};
@@ -107,13 +135,16 @@ pub async fn ls(path: Option<String>) -> Result<String, ToolExecutionError> {
 /// Run a shell command. On Windows the tool prefers `bash` on PATH (Git
 /// Bash) so commands keep POSIX syntax; it falls back to PowerShell only
 /// when no bash exists. Combined output (stdout, then stderr) is capped at
-/// [`OUTPUT_CAP_BYTES`], and commands that exceed their timeout are killed.
+/// [`OUTPUT_CAP_BYTES`]; commands that exceed their timeout, or are
+/// cancelled through the run's cancellation token, are killed — process
+/// tree included (see the crate-level cancellation contract).
 #[rig_tool(description = "Run a shell command and return its combined output. \
                    Commands run through bash (on Windows: Git Bash when on PATH, \
                    else PowerShell). Non-zero exits report the exit code. \
                    Output is capped at 128 KiB; commands time out after 30 seconds \
                    unless timeout_secs says otherwise.")]
 pub async fn bash(
+    #[rig(context)] context: &mut ToolContext,
     command: String,
     timeout_secs: Option<u64>,
 ) -> Result<String, ToolExecutionError> {
@@ -122,18 +153,58 @@ pub async fn bash(
             .unwrap_or(DEFAULT_TIMEOUT_SECS)
             .min(MAX_TIMEOUT_SECS),
     );
+    // A pre-cancelled token refuses before spawning: "the command never
+    // ran" is structural, not a race against a fast command.
+    if context
+        .get::<tokio_util::sync::CancellationToken>()
+        .is_some_and(|token| token.is_cancelled())
+    {
+        return Err(ToolExecutionError::other(
+            "command was interrupted before starting — it did not run".to_string(),
+        ));
+    }
     let interpreter = interpreter();
-    let mut child = std::process::Command::new(&interpreter.argv0)
-        .args(interpreter.args)
-        .arg(&command)
-        .stdout(std::process::Stdio::piped())
-        .stderr(std::process::Stdio::piped())
-        .stdin(std::process::Stdio::null())
-        .spawn()
-        .map_err(|e| {
-            ToolExecutionError::other(format!("cannot start `{}`: {e}", interpreter.argv0))
-        })?;
-    let output = run_with_timeout(&mut child, timeout, &interpreter.argv0)?;
+    let mut wrapped = process_wrap::std::CommandWrap::with_new(&interpreter.argv0, |cmd| {
+        cmd.args(interpreter.args)
+            .arg(&command)
+            .stdout(std::process::Stdio::piped())
+            .stderr(std::process::Stdio::piped())
+            .stdin(std::process::Stdio::null());
+    });
+    // Tree kill: the process group dies with its leader on Unix; the job
+    // object takes the whole tree down on Windows. The drop guard below is
+    // the drop-without-cancel backstop (the tokio-only KillOnDrop shim is
+    // not available in the std flavor).
+    #[cfg(unix)]
+    wrapped.wrap(process_wrap::std::ProcessGroup::leader());
+    #[cfg(windows)]
+    wrapped.wrap(process_wrap::std::JobObject);
+    let mut child = wrapped.spawn().map_err(|e| {
+        ToolExecutionError::other(format!("cannot start `{}`: {e}", interpreter.argv0))
+    })?;
+
+    // Both pipes up front: a full undrained pipe would block the child
+    // while the other stream is still being read.
+    // The pipes were configured on the command; a missing one means the
+    // wrapper dropped them — surface it as an external error, not a panic.
+    let stdout_pipe = child
+        .stdout()
+        .take()
+        .ok_or_else(|| ToolExecutionError::other("stdout pipe missing after spawn"))?;
+    let stderr_pipe = child
+        .stderr()
+        .take()
+        .ok_or_else(|| ToolExecutionError::other("stderr pipe missing after spawn"))?;
+    let stdout_reader = spawn_reader(Some(stdout_pipe));
+    let stderr_reader = spawn_reader(Some(stderr_pipe));
+    let output = run_with_deadlines(
+        child,
+        timeout,
+        context.get::<tokio_util::sync::CancellationToken>(),
+        &interpreter.argv0,
+        stdout_reader,
+        stderr_reader,
+    )?;
     let mut combined = String::from_utf8_lossy(&output.stdout).to_string();
     if !output.stderr.is_empty() {
         combined.push_str("\n--- stderr ---\n");
@@ -208,31 +279,71 @@ fn exit_description(status: &std::process::ExitStatus) -> String {
     }
 }
 
-/// Wait for `child`, capturing piped stdout/stderr on reader threads, and
-/// kill it if it exceeds `timeout`.
+/// Kills the process tree when dropped while armed — the std-flavor
+/// stand-in for process-wrap's tokio-only `KillOnDrop`: if the tool's
+/// future is dropped mid-run, the child must not outlive it. Disarmed on
+/// every path that observes the exit.
+struct TreeKillGuard {
+    child: Box<dyn process_wrap::std::ChildWrapper + Send + Sync>,
+    armed: bool,
+}
+
+impl TreeKillGuard {
+    fn try_wait(&mut self) -> std::io::Result<Option<std::process::ExitStatus>> {
+        self.child.try_wait()
+    }
+
+    /// Force-kill the tree and reap it.
+    fn kill_tree(&mut self) {
+        let _ = self.child.kill();
+        let _ = self.child.wait();
+    }
+}
+
+impl Drop for TreeKillGuard {
+    fn drop(&mut self) {
+        if self.armed {
+            self.kill_tree();
+        }
+    }
+}
+
+/// Wait for the child under both deadlines — the command timeout and the
+/// run's cancellation token — force-killing the process *tree* when either
+/// fires (no grace period: a killed command's partial effects are reported
+/// as an interruption, not cleaned up). Piped output is captured by the
+/// reader threads handed in by the caller; the guard's Drop is the
+/// cancel-without-poll backstop.
 ///
-/// Hand-rolled over `std::process` on purpose: this crate is sync (the
-/// async tool surface awaits at the dispatch boundary), `tokio::process`
-/// would drag a runtime dependency into a std-only tool crate, and the
-/// poll-try_wait loop below is the entire algorithm.
-fn run_with_timeout(
-    child: &mut std::process::Child,
+/// Hand-rolled over the wrapper's `try_wait` on purpose: this crate is
+/// sync, `tokio::process` would drag a runtime into a std-only tool crate,
+/// and the poll loop below is the entire algorithm. The kill itself is
+/// `process-wrap`'s (`killpg` on Unix, job-object termination on Windows).
+fn run_with_deadlines(
+    child: Box<dyn process_wrap::std::ChildWrapper + Send + Sync>,
     timeout: Duration,
+    cancel: Option<&tokio_util::sync::CancellationToken>,
     argv0: &str,
+    stdout_reader: ReaderJoin,
+    stderr_reader: ReaderJoin,
 ) -> Result<CapturedOutput, ToolExecutionError> {
-    let stdout_reader = spawn_reader(child.stdout.take());
-    let stderr_reader = spawn_reader(child.stderr.take());
+    let mut guard = TreeKillGuard { child, armed: true };
     let deadline = Instant::now() + timeout;
     let status = loop {
-        match child.try_wait() {
+        if cancel.is_some_and(|token| token.is_cancelled()) {
+            guard.kill_tree();
+            return Err(ToolExecutionError::other(
+                "command was interrupted before completing — its effects may be                  partial; check before relying on anything it wrote"
+                    .to_string(),
+            ));
+        }
+        match guard.try_wait() {
             Ok(Some(status)) => break status,
             Ok(None) => {
                 if Instant::now() >= deadline {
-                    let _ = child.kill();
-                    let _ = child.wait();
+                    guard.kill_tree();
                     return Err(ToolExecutionError::other(format!(
-                        "command exceeded its {}s timeout and was killed \
-                         (raise timeout_secs if it legitimately needs longer)",
+                        "command exceeded its {}s timeout and was killed                          (raise timeout_secs if it legitimately needs longer)",
                         timeout.as_secs()
                     )));
                 }
@@ -245,6 +356,7 @@ fn run_with_timeout(
             }
         }
     };
+    guard.armed = false;
     Ok(CapturedOutput {
         status,
         stdout: join_reader(stdout_reader),
@@ -309,6 +421,38 @@ where
                 let typed: <T as PortableTool>::Args = serde_json::from_value(args)
                     .map_err(|e| ToolExecutionError::other(format!("invalid arguments: {e}")))?;
                 let output = <T as PortableTool>::call(tool.as_ref(), typed)
+                    .await
+                    .map_err(|e| tool.map_error(e))?;
+                output.into_tool_output()
+            })
+        },
+    )
+}
+
+/// Erase a contextual `#[rig_tool]` (one taking `#[rig(context)]
+/// &mut ToolContext`) into a [`DynamicTool`], cloning the tool per call so
+/// the context stays per-dispatch. The contextual counterpart of
+/// [`dynamic`].
+pub fn dynamic_contextual<T>(tool: T) -> DynamicTool
+where
+    T: rig_agent::tool::Tool + Send + Sync + 'static,
+{
+    // One shared instance per call site; contextual tools are stateless
+    // (`call` takes `&self`), so no per-call clone is needed.
+    let tool = std::sync::Arc::new(tool);
+    let name = <T as rig_agent::tool::Tool>::NAME.to_string();
+    let description = tool.description();
+    let parameters = tool.parameters();
+    DynamicTool::new(
+        name,
+        description,
+        parameters,
+        move |ctx: &mut ToolContext, args: serde_json::Value| {
+            let tool = tool.clone();
+            Box::pin(async move {
+                let typed: <T as rig_agent::tool::Tool>::Args = serde_json::from_value(args)
+                    .map_err(|e| ToolExecutionError::other(format!("invalid arguments: {e}")))?;
+                let output = <T as rig_agent::tool::Tool>::call(tool.as_ref(), ctx, typed)
                     .await
                     .map_err(|e| tool.map_error(e))?;
                 output.into_tool_output()

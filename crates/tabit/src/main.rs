@@ -31,7 +31,7 @@ use tabit_session::SessionEvent;
 use tabit_session::{
     ModelRegistry, ModelSelection, Session, SessionBuilder, SessionStore, build_system_prompt,
 };
-use tabit_tools::dynamic;
+use tabit_tools::{dynamic, dynamic_contextual};
 
 #[derive(Debug)]
 struct Args {
@@ -149,6 +149,13 @@ fn print_event(event: &SessionEvent) {
     let mut out = stdout.lock();
     match event {
         SessionEvent::UserMessage { .. } => {}
+        SessionEvent::RunAborted { .. } => {
+            let _ = writeln!(
+                out,
+                "
+[aborted]"
+            );
+        }
         SessionEvent::TextDelta { text } => {
             let _ = out.write_all(text.as_bytes());
             let _ = out.flush();
@@ -199,7 +206,7 @@ fn assemble_session(
     .preamble(preamble)
     .dynamic_tool(dynamic(tabit_tools::Read))
     .dynamic_tool(dynamic(tabit_tools::Ls))
-    .dynamic_tool(dynamic(tabit_tools::Bash))
+    .dynamic_tool(dynamic_contextual(tabit_tools::Bash))
     .model_factory({
         let factory = registry.factory();
         move |provider, model| factory(provider, model)

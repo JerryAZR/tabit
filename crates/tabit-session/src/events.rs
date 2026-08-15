@@ -13,6 +13,9 @@ use serde_json::Value;
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(tag = "type", rename_all = "snake_case")]
 pub enum SessionEvent {
+    /// The user aborted the run; `output` carries whatever assistant text
+    /// had arrived before the abort.
+    RunAborted { output: String },
     /// A user message was accepted and recorded.
     UserMessage {
         /// The message text.

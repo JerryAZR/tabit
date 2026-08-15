@@ -101,6 +101,11 @@ pub enum EntryKind {
         #[serde(default, skip_serializing_if = "Option::is_none")]
         thinking_level: Option<String>,
     },
+    /// The user aborted the outer loop mid-run. Bookkeeping only: the
+    /// turns that completed before the abort are already recorded; calls
+    /// the abort interrupted are repaired on the next open, exactly like a
+    /// crash. Not part of model context.
+    Aborted,
     /// A human-facing bookmark. Reserved; not part of model context.
     Label {
         /// Bookmark name.

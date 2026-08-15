@@ -53,7 +53,10 @@ pub fn project(entries: &[SessionEntry]) -> (Vec<Message>, Option<DanglingToolCa
                 dangling = None;
                 pending_results.push(result.clone());
             }
-            EntryKind::ModelChange { .. } | EntryKind::Label { .. } | EntryKind::Custom { .. } => {
+            EntryKind::ModelChange { .. }
+            | EntryKind::Aborted
+            | EntryKind::Label { .. }
+            | EntryKind::Custom { .. } => {
                 continue;
             }
         }
@@ -87,8 +90,9 @@ pub fn interrupted_results(dangling: &DanglingToolCalls) -> Vec<ToolResult> {
             id: call.id.clone(),
             call_id: call.call_id.clone(),
             content: OneOrMany::one(ToolResultContent::text(
-                "[tool execution was interrupted before completing; the session \
-                 was resumed and no result was recorded — treat this call as failed]",
+                "[tool execution was interrupted before completing — the call \"
+                 may have had partial effects; verify them before relying on \"
+                 anything it did]",
             )),
         })
         .collect()

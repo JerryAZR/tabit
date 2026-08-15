@@ -64,7 +64,9 @@ Current workspace layout:
    consumption contract reached via the blanket bridge. OpenAI code targets
    the Responses API; chat completions is the compat-gateway wire format.
    Tool-call arguments parse strictly — truncated JSON is an error, never a
-   silent partial call.
+   silent partial call. Tool cancellation follows the contract documented
+   in `tabit-tools`'s crate docs (engine owns *when*, tool owns *how*;
+   drop-safety required; `bash` is the reference implementation).
 
 ## Environment / commands
 
