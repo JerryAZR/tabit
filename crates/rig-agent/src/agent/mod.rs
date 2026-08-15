@@ -101,6 +101,7 @@
 //! ```
 mod builder;
 mod completion;
+pub(crate) mod drive;
 pub mod hook;
 pub mod model;
 pub(crate) mod prompt_request;
