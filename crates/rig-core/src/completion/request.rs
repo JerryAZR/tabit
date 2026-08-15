@@ -116,6 +116,12 @@ pub enum CompletionError {
 }
 
 crate::provider_response::impl_provider_response_helpers!(CompletionError);
+// Error payloads are not on hot paths, so plain (unboxed) variants keep
+// matches readable; clippy's `result_large_err` is allowed workspace-wide
+// for the same reason. The size is pinned at its current value so any
+// growth is a deliberate decision that updates this bound, not drift.
+const _: () = assert!(std::mem::size_of::<CompletionError>() <= 128);
+
 
 impl CompletionError {
     /// Maps an SSE transport error into a completion error without flattening HTTP failures.

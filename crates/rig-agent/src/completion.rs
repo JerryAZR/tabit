@@ -58,6 +58,12 @@ pub enum PromptError {
     },
 }
 
+// Error payloads are not on hot paths, so plain (unboxed) variants keep
+// matches readable; clippy's `result_large_err` is allowed workspace-wide
+// for the same reason. The size is pinned at its current value so any
+// growth is a deliberate decision that updates this bound, not drift.
+const _: () = assert!(std::mem::size_of::<PromptError>() <= 128);
+
 impl PromptError {
     /// Returns the provider response body exposed by a wrapped completion error.
     pub fn provider_response_body(&self) -> Option<&str> {

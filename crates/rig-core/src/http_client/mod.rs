@@ -66,6 +66,12 @@ pub enum Error {
     Instance(#[from] Box<dyn std::error::Error + 'static>),
 }
 
+// Error payloads are not on hot paths, so plain (unboxed) variants keep
+// matches readable; clippy's `result_large_err` is allowed workspace-wide
+// for the same reason. Sizes are pinned at their current values so any
+// growth is a deliberate decision that updates this bound, not drift.
+const _: () = assert!(std::mem::size_of::<Error>() <= 128);
+
 /// A coarse classification of a transport-level (reqwest) failure, used to
 /// branch on retryability without matching on the boxed source.
 ///
