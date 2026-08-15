@@ -3,3 +3,6 @@
 
 # llvm-cov raw profiles
 *.profraw
+
+# local dogfooding sessions (tabit CLI run inside this repo)
+/.tabit/
