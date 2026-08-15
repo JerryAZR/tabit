@@ -29,16 +29,27 @@ subprocess model. Everything else follows pi's minimal path.
 
 ### 1. Config crate (`tabit-config`)
 
-Provider/model configuration schema, loaded from user config files:
+Provider/model configuration schema, loaded from user config files.
+**Shipped as `crates/tabit-config`** (TOML; loud parse/validation; env-var +
+inline API keys with inline winning; `extra_body` as the sole compat escape
+hatch — no compat-flag taxonomy, no model catalog). Decisions:
 
-- Provider entries: `base_url`, `api_key_env` (name of env var — never inline
-  secrets), wire format (anthropic / openai-responses / openai-completions).
-- Per-model settings: model id, context window, max output tokens,
-  thinking/reasoning budget. No model catalog — every value is
-  caller-supplied (this is a workspace rule); the schema just carries them.
-- Embedding `ndims`/`dimensions` explicitly (see AGENTS.md open item).
-- Resolution + validation with loud, precise errors on missing/ambiguous
-  config. Fail loud, no silent defaults.
+- Provider entries: `base_url`, `api` (closed enum: anthropic-messages /
+  openai-responses / openai-completions), `api_key_env` + `api_key`,
+  `headers`, shared `extra_body` (merged into every request body).
+- Per-model settings: id, display name, `reasoning`, `input` modalities,
+  `context_window`, `max_tokens`, `sampling_params`, `cost` (4 required
+  $/M-token rates), ordered `thinking_levels` (each a named `extra_body`
+  merge — array shape so a UI can cycle), per-model `headers`/`extra_body`.
+- Reference survey behind the compat decision: pi ships an explicit compat
+  schema (11 thinking formats etc.); opencode absorbs quirks in per-provider
+  packages/hardcoded transforms; codex ships zero compat flags and only
+  speaks the Responses API. Tabit sides with codex on strictness but keeps
+  `extra_body` as the generic escape hatch.
+- Embedding `ndims`/`dimensions` explicitly (see AGENTS.md open item) —
+  still to add when embeddings enter the config story.
+- Dynamic model listing (fetch from endpoint and merge with local config) —
+  planned; design deferred until the CLI exists.
 
 ### 2. Session layer
 

@@ -2584,6 +2584,17 @@ dependencies = [
 ]
 
 [[package]]
+name = "tabit-config"
+version = "0.41.0"
+dependencies = [
+ "serde",
+ "serde_json",
+ "thiserror",
+ "toml",
+ "url",
+]
+
+[[package]]
 name = "tabwriter"
 version = "1.4.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"

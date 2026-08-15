@@ -4,7 +4,13 @@
 [workspace]
 resolver = "3"
 members = ["crates/*"]
-default-members = ["crates/rig-core", "crates/rig-agent", "crates/rig-derive", "crates/rig"]
+default-members = [
+    "crates/rig-core",
+    "crates/rig-agent",
+    "crates/rig-derive",
+    "crates/rig",
+    "crates/tabit-config",
+]
 exclude = []
 
 [workspace.package]
@@ -65,6 +71,7 @@ syn = "2.0.104"
 thiserror = "2.0.12"
 tokio = "1.52.3"
 tokio-test = "0.4.4"
+toml = "1.1"
 tracing = "0.1.41"
 tracing-futures = "0.2.5"
 tracing-subscriber = "0.3.19"
