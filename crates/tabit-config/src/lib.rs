@@ -103,7 +103,7 @@ pub use provider::Provider;
 pub use wire::WireApi;
 
 use serde::Deserialize;
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, HashMap};
 use std::path::{Path, PathBuf};
 
 /// The model a session uses when the caller does not pick one.
@@ -236,41 +236,57 @@ impl TabitConfig {
 
     /// Resolve a model reference to `(provider id, model id)`.
     ///
-    /// `provider/model` applies when the text before the first `/` names a
-    /// configured provider; otherwise the whole string is a model id, which
-    /// must match exactly one provider (model ids may themselves contain
-    /// `/`, as in `lmstudio/openai/gpt-oss-20b` where `openai/gpt-oss-20b`
-    /// is the id). An ambiguous or unknown reference is an error naming the
-    /// candidates.
+    /// Resolution is one exact-match lookup over an index that registers
+    /// every model under two keys: its bare model id and its qualified
+    /// `provider/model` id (model ids may themselves contain `/`, as in
+    /// `openai/gpt-oss-20b` under a `lmstudio` provider). A key matching
+    /// exactly one model resolves. A key matching several — the same id
+    /// under multiple providers, or a bare id colliding with another
+    /// provider's qualified id — is an ambiguity error listing the
+    /// candidates, so the reference must be qualified. An unknown key is
+    /// an error naming the reference.
     pub fn resolve_model_ref(&self, reference: &str) -> Result<(String, String), String> {
-        if let Some((prefix, rest)) = reference.split_once('/')
-            && self.providers.contains_key(prefix)
-            && !rest.is_empty()
+        let index = self.model_index();
+        let matches = match index.get(reference) {
+            Some(matches) => matches,
+            None => return Err(format!("no configured model matches `{reference}`")),
+        };
+        if let Some((provider, model)) = matches.first()
+            && matches.len() == 1
         {
-            return if self
-                .provider(prefix)
-                .is_some_and(|p| p.model(rest).is_some())
-            {
-                Ok((prefix.to_string(), rest.to_string()))
-            } else {
-                Err(format!(
-                    "provider `{prefix}` has no model `{rest}` (check providers.toml)"
-                ))
-            };
+            return Ok((provider.clone(), model.clone()));
         }
-        let mut matches = self
-            .providers
-            .iter()
-            .filter(|(_, provider)| provider.model(reference).is_some());
-        let first = matches.next().map(|(id, _)| id.clone());
-        match (first, matches.next().map(|(id, _)| id)) {
-            (Some(provider), None) => Ok((provider, reference.to_string())),
-            (Some(_), Some(_)) => Err(format!(
-                "model id `{reference}` is configured under multiple providers; \
-                 qualify as `provider/model`"
-            )),
-            _ => Err(format!("no configured model matches `{reference}`")),
+        Err(format!(
+            "model reference `{reference}` is ambiguous (matches: {}); \
+             qualify as `provider/model`",
+            matches
+                .iter()
+                .map(|(provider, model)| format!("{provider}/{model}"))
+                .collect::<Vec<_>>()
+                .join(", ")
+        ))
+    }
+
+    /// The resolution index: every model registered under both its bare
+    /// id and its qualified `provider/model` key. Registration order
+    /// (alphabetical providers, file-order models) keeps candidate lists
+    /// in the config's own order.
+    fn model_index(&self) -> HashMap<String, Vec<(String, String)>> {
+        let mut index: HashMap<String, Vec<(String, String)>> = HashMap::new();
+        for (provider_id, provider) in &self.providers {
+            for model in &provider.models {
+                let entry = (provider_id.clone(), model.id.clone());
+                index
+                    .entry(model.id.clone())
+                    .or_default()
+                    .push(entry.clone());
+                index
+                    .entry(format!("{provider_id}/{}", model.id))
+                    .or_default()
+                    .push(entry);
+            }
         }
+        index
     }
 
     /// The first model the loader sees: the alphabetically-first provider's

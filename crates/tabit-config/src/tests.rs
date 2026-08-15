@@ -673,10 +673,10 @@ name = "high"
 }
 
 #[test]
-fn resolve_model_ref_qualifies_by_known_provider_prefix() {
+fn resolve_model_ref_matches_qualified_keys_exactly() {
     let config = parse(VALID);
-    // `lmstudio` is a configured provider, so the remainder — which itself
-    // contains a slash — is the model id.
+    // Qualified keys are registered per model; the model id itself
+    // contains a slash.
     assert_eq!(
         config.resolve_model_ref("lmstudio/openai/gpt-oss-20b"),
         Ok(("lmstudio".to_string(), "openai/gpt-oss-20b".to_string()))
@@ -685,13 +685,19 @@ fn resolve_model_ref_qualifies_by_known_provider_prefix() {
         config.resolve_model_ref("anthropic/claude-some-model"),
         Ok(("anthropic".to_string(), "claude-some-model".to_string()))
     );
+    // A qualified-looking string nobody registered is simply unknown —
+    // there is no provider-prefix probing.
+    let err = config
+        .resolve_model_ref("lmstudio/other-model")
+        .expect_err("unknown");
+    assert_eq!(err, "no configured model matches `lmstudio/other-model`");
 }
 
 #[test]
 fn resolve_model_ref_bare_id_must_be_unique() {
     let config = parse(VALID);
-    // `openai` is not a configured provider, so the whole string is a
-    // model id.
+    // `openai` is not a configured provider, so only the bare-id
+    // registration matches.
     assert_eq!(
         config.resolve_model_ref("openai/gpt-oss-20b"),
         Ok(("lmstudio".to_string(), "openai/gpt-oss-20b".to_string()))
@@ -713,18 +719,49 @@ id = "openai/gpt-oss-20b""#,
     let err = config
         .resolve_model_ref("openai/gpt-oss-20b")
         .expect_err("ambiguous");
-    assert!(err.contains("multiple providers"), "{err}");
+    assert!(err.contains("ambiguous"), "{err}");
+    assert!(err.contains("lmstudio/openai/gpt-oss-20b"), "{err}");
+    // Qualifying resolves it.
+    assert_eq!(
+        config.resolve_model_ref("lmstudio/openai/gpt-oss-20b"),
+        Ok(("lmstudio".to_string(), "openai/gpt-oss-20b".to_string()))
+    );
 }
 
 #[test]
-fn resolve_model_ref_rejects_unknown_model_under_known_provider() {
-    let config = parse(VALID);
-    let err = config
-        .resolve_model_ref("lmstudio/other-model")
-        .expect_err("missing under provider");
+fn resolve_model_ref_survives_a_provider_named_like_an_id_prefix() {
+    // The motivating case: an `openai` provider is added while another
+    // provider (lmstudio) serves a model whose id starts `openai/`.
+    let with_openai = format!(
+        "{VALID}\n[providers.openai]\nbase_url = \"https://api.openai.com/v1\"\n\
+         api = \"openai-responses\"\n\n[[providers.openai.models]]\nid = \"gpt-4o\"\n"
+    );
+    let config = parse(&with_openai);
+    // `openai/gpt-oss-20b` is only registered (bare) by lmstudio, so it
+    // resolves — no misread as provider `openai` + model `gpt-oss-20b`.
     assert_eq!(
-        err,
-        "provider `lmstudio` has no model `other-model` (check providers.toml)"
+        config.resolve_model_ref("openai/gpt-oss-20b"),
+        Ok(("lmstudio".to_string(), "openai/gpt-oss-20b".to_string()))
+    );
+    // The openai provider's own model resolves qualified or bare.
+    assert_eq!(
+        config.resolve_model_ref("openai/gpt-4o"),
+        Ok(("openai".to_string(), "gpt-4o".to_string()))
+    );
+
+    // If openai *also* serves `gpt-oss-20b`, the key holds two
+    // registrations and is ambiguous until qualified.
+    let colliding = format!("{with_openai}\n[[providers.openai.models]]\nid = \"gpt-oss-20b\"\n");
+    let config = parse(&colliding);
+    let err = config
+        .resolve_model_ref("openai/gpt-oss-20b")
+        .expect_err("collision is ambiguous");
+    assert!(err.contains("ambiguous"), "{err}");
+    assert!(err.contains("lmstudio/openai/gpt-oss-20b"), "{err}");
+    assert!(err.contains("openai/gpt-oss-20b"), "{err}");
+    assert_eq!(
+        config.resolve_model_ref("lmstudio/openai/gpt-oss-20b"),
+        Ok(("lmstudio".to_string(), "openai/gpt-oss-20b".to_string()))
     );
 }
 
@@ -759,7 +796,7 @@ fn default_model_without_provider_resolves_or_fails_loudly() {
     let err = validation_error(&ambiguous);
     assert!(
         err.to_string()
-            .contains("default_model.model: model id `claude-some-model`"),
+            .contains("default_model.model: model reference `claude-some-model`"),
         "{err}"
     );
 }

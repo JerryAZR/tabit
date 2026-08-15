@@ -54,9 +54,12 @@ model catalog). Decisions:
   merge — array shape so a UI can cycle), per-model `headers`/`extra_body`.
 - `default_model` is the preferred-model slot: a bare model id (must be
   unambiguous), optional `provider` qualifier for conflicts, optional
-  `thinking_level`. Reference resolution (`provider/model` when the text
-  before the first `/` names a configured provider, else a unique bare
-  model id) lives in `TabitConfig::resolve_model_ref`.
+  `thinking_level`. Reference resolution
+  (`TabitConfig::resolve_model_ref`) is an exact-match lookup over an
+  index registering every model under two keys — its bare id and its
+  qualified `provider/model` id (model ids may contain `/`); a key with
+  one registration resolves, several is an ambiguity error listing the
+  candidates.
 - Reference survey behind the compat decision: pi ships an explicit compat
   schema (11 thinking formats etc.); opencode absorbs quirks in per-provider
   packages/hardcoded transforms; codex ships zero compat flags and only
