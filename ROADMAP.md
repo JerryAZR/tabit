@@ -30,13 +30,24 @@ subprocess model. Everything else follows pi's minimal path.
 ### 1. Config crate (`tabit-config`)
 
 Provider/model configuration schema, loaded from user config files.
-**Shipped as `crates/tabit-config`** (TOML; loud parse/validation; env-var +
-inline API keys with inline winning; `extra_body` as the sole compat escape
-hatch — no compat-flag taxonomy, no model catalog). Decisions:
+**Shipped as `crates/tabit-config`** (TOML; loud parse/validation;
+`extra_body` as the sole compat escape hatch — no compat-flag taxonomy, no
+model catalog). Decisions:
 
+- File split, all under `~/.tabit/`: `providers.toml` (providers + models —
+  secret-free by construction, safe to share and edit with agent help),
+  `auth.toml` (provider id -> api key; user-created, tabit never writes it),
+  and `settings.toml` later (item 9). Debug overrides: `$TABIT_CONFIG`
+  (providers file) and `$TABIT_AUTH` (auth file); a future CLI flag will
+  outrank both.
 - Provider entries: `base_url`, `api` (closed enum: anthropic-messages /
-  openai-responses / openai-completions), `api_key_env` + `api_key`,
-  `headers`, shared `extra_body` (merged into every request body).
+  openai-responses / openai-completions), `api_key_env` (env var *name*),
+  `headers`, shared `extra_body` (merged into every request body). No
+  inline keys in the provider file.
+- Key resolution: `auth.toml` entry wins, else the env var named by
+  `api_key_env`, else none (local endpoints run keyless; requiring a key is
+  the consumer's loud decision). Command-backed auth (keychain) is a
+  deferred future source.
 - Per-model settings: id, display name, `reasoning`, `input` modalities,
   `context_window`, `max_tokens`, `sampling_params`, `cost` (4 required
   $/M-token rates), ordered `thinking_levels` (each a named `extra_body`

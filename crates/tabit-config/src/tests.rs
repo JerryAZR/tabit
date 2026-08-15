@@ -1,13 +1,13 @@
-use crate::{ConfigError, InputModality, Provider, TabitConfig, WireApi};
+use crate::{AuthConfig, ConfigError, InputModality, Provider, TabitConfig, WireApi};
 use serde_json::json;
 use std::collections::BTreeMap;
+use std::path::Path;
 
 const VALID: &str = r#"
 [providers.lmstudio]
 name = "LM Studio"
 base_url = "http://127.0.0.1:1234/v1"
 api = "openai-completions"
-api_key = "lm-studio"
 
 [[providers.lmstudio.models]]
 id = "openai/gpt-oss-20b"
@@ -32,27 +32,42 @@ name = "off"
 name = "high"
 "#;
 
+const VALID_AUTH: &str = r#"
+[providers.lmstudio]
+api_key = "lm-studio"
+"#;
+
 fn parse(raw: &str) -> TabitConfig {
-    TabitConfig::from_toml_str(raw, Path::new("tabit.toml")).expect("config should be valid")
+    TabitConfig::from_toml_str(raw, Path::new("providers.toml")).expect("config should be valid")
+}
+
+fn parse_auth(raw: &str) -> AuthConfig {
+    AuthConfig::from_toml_str(raw, Path::new("auth.toml")).expect("auth should be valid")
 }
 
 fn validation_error(raw: &str) -> ConfigError {
-    match TabitConfig::from_toml_str(raw, Path::new("tabit.toml")) {
+    match TabitConfig::from_toml_str(raw, Path::new("providers.toml")) {
         Err(err @ ConfigError::Validation { .. }) => err,
         other => panic!("expected a validation error, got {other:?}"),
     }
 }
 
-use std::path::Path;
-
 #[test]
 fn parses_a_full_config() {
     let config = parse(VALID);
+    let auth = parse_auth(VALID_AUTH);
     let lmstudio = config.provider("lmstudio").expect("provider exists");
     assert_eq!(lmstudio.display_name("lmstudio"), "LM Studio");
     assert_eq!(lmstudio.api, WireApi::OpenaiCompletions);
     assert_eq!(lmstudio.base_url, "http://127.0.0.1:1234/v1");
-    assert_eq!(lmstudio.resolve_api_key().as_deref(), Some("lm-studio"));
+    assert_eq!(
+        lmstudio.resolve_api_key("lmstudio", &auth).as_deref(),
+        Some("lm-studio")
+    );
+    assert_eq!(
+        config.resolve_api_key("lmstudio", &auth).as_deref(),
+        Some("lm-studio")
+    );
 
     let model = lmstudio.model("openai/gpt-oss-20b").expect("model exists");
     assert!(model.reasoning);
@@ -188,7 +203,7 @@ fn all_validation_issues_are_reported_at_once() {
     let raw = r#"
 [providers.x]
 base_url = "bad"
-api_key = ""
+api_key_env = ""
 api = "openai-responses"
 
 [providers.y]
@@ -204,7 +219,7 @@ id = "m"
     let err = validation_error(raw);
     let msg = err.to_string();
     assert!(msg.contains("providers.x.base_url"), "{msg}");
-    assert!(msg.contains("providers.x.api_key"), "{msg}");
+    assert!(msg.contains("providers.x.api_key_env"), "{msg}");
     assert!(msg.contains("duplicate model id `m`"), "{msg}");
 }
 
@@ -270,7 +285,12 @@ api = "openai-responses"
 api_key_env = "{var}""#
     ))
     .expect("valid provider");
-    assert_eq!(provider.resolve_api_key().as_deref(), Some("env-secret"));
+    assert_eq!(
+        provider
+            .resolve_api_key("x", &AuthConfig::default())
+            .as_deref(),
+        Some("env-secret")
+    );
     // SAFETY: see above.
     unsafe {
         std::env::remove_var(var);
@@ -278,8 +298,8 @@ api_key_env = "{var}""#
 }
 
 #[test]
-fn resolve_api_key_inline_wins_over_env() {
-    let var = "TABIT_CONFIG_TEST_KEY_VAR_INLINE";
+fn resolve_api_key_auth_entry_wins_over_env() {
+    let var = "TABIT_CONFIG_TEST_KEY_VAR_AUTH";
     // SAFETY: unique variable name; set and removed around the assertion.
     unsafe {
         std::env::set_var(var, "env-secret");
@@ -287,11 +307,19 @@ fn resolve_api_key_inline_wins_over_env() {
     let provider: Provider = toml::from_str(&format!(
         r#"base_url = "https://example.com"
 api = "openai-responses"
-api_key = "inline-secret"
 api_key_env = "{var}""#
     ))
     .expect("valid provider");
-    assert_eq!(provider.resolve_api_key().as_deref(), Some("inline-secret"));
+    let auth = parse_auth(
+        r#"
+[providers.x]
+api_key = "file-secret"
+"#,
+    );
+    assert_eq!(
+        provider.resolve_api_key("x", &auth).as_deref(),
+        Some("file-secret")
+    );
     // SAFETY: see above.
     unsafe {
         std::env::remove_var(var);
@@ -306,14 +334,61 @@ api = "openai-responses"
 api_key_env = "TABIT_CONFIG_TEST_KEY_DEFINITELY_UNSET""#,
     )
     .expect("valid provider");
-    assert!(unset.resolve_api_key().is_none());
+    assert!(unset.resolve_api_key("x", &AuthConfig::default()).is_none());
 
     let bare: Provider = toml::from_str(
         r#"base_url = "http://127.0.0.1:1234/v1"
 api = "openai-completions""#,
     )
     .expect("valid provider");
-    assert!(bare.resolve_api_key().is_none());
+    assert!(bare.resolve_api_key("x", &AuthConfig::default()).is_none());
+
+    // A key configured for a different provider does not leak.
+    let auth = parse_auth(
+        r#"
+[providers.other]
+api_key = "other-secret"
+"#,
+    );
+    assert!(bare.resolve_api_key("x", &auth).is_none());
+}
+
+#[test]
+fn auth_config_parses_and_looks_up() {
+    let auth = parse_auth(VALID_AUTH);
+    assert_eq!(auth.api_key("lmstudio"), Some("lm-studio"));
+    assert_eq!(auth.api_key("anthropic"), None);
+}
+
+#[test]
+fn auth_config_rejects_unknown_fields() {
+    let err = AuthConfig::from_toml_str(
+        r#"
+[providers.x]
+api_key = "k"
+oauth = "radius"
+"#,
+        Path::new("auth.toml"),
+    )
+    .expect_err("unknown field should fail");
+    assert!(err.to_string().contains("auth.toml"), "{}", err);
+}
+
+#[test]
+fn auth_load_default_missing_file_is_empty_not_an_error() {
+    // SAFETY: unique value; removed immediately after the call.
+    unsafe {
+        std::env::set_var(
+            "TABIT_AUTH",
+            std::env::temp_dir().join("tabit-config-tests/no-auth.toml"),
+        );
+    }
+    let auth = AuthConfig::load_default().expect("missing auth file is fine");
+    assert_eq!(auth, AuthConfig::default());
+    // SAFETY: see above.
+    unsafe {
+        std::env::remove_var("TABIT_AUTH");
+    }
 }
 
 #[test]

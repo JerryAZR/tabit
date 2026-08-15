@@ -1,5 +1,7 @@
-//! Provider-level configuration: endpoint, auth, wire protocol, and models.
+//! Provider-level configuration: endpoint, auth wiring, wire protocol, and
+//! models.
 
+use crate::auth::AuthConfig;
 use crate::model::Model;
 use crate::wire::WireApi;
 use serde::Deserialize;
@@ -8,10 +10,10 @@ use std::collections::BTreeMap;
 
 /// A provider entry: everything needed to construct a wire client for it.
 ///
-/// Auth is intentionally two-sourced: `api_key` (inline, convenient for local
-/// endpoints like LM Studio where the key is a placeholder) and `api_key_env`
-/// (the *name* of an environment variable, for real secrets). When both are
-/// set the inline key wins, as the more specific setting.
+/// Key material is deliberately absent — this file is safe to display,
+/// share, and edit with agent assistance. Auth comes from [`AuthConfig`]
+/// (`~/.tabit/auth.toml`) or from the environment variable named by
+/// `api_key_env`.
 #[derive(Debug, Clone, PartialEq, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct Provider {
@@ -23,10 +25,8 @@ pub struct Provider {
     pub base_url: String,
     /// The wire protocol this provider speaks.
     pub api: WireApi,
-    /// Inline API key. Wins over `api_key_env` when both are set.
-    #[serde(default)]
-    pub api_key: Option<String>,
-    /// Name of the environment variable holding the API key.
+    /// Name of the environment variable holding the API key. Loses to an
+    /// `auth.toml` entry for the same provider.
     #[serde(default)]
     pub api_key_env: Option<String>,
     /// Extra headers sent with every request to this provider.
@@ -54,16 +54,16 @@ impl Provider {
         self.models.iter().find(|model| model.id == id)
     }
 
-    /// Resolve the API key for this provider: the inline `api_key` wins;
+    /// Resolve the API key for this provider: an `auth.toml` entry wins;
     /// otherwise the environment variable named by `api_key_env` is read.
     ///
-    /// Returns `Ok(None)` when neither source is configured or the
-    /// environment variable is unset — local endpoints legitimately need no
-    /// key, so the decision to require one belongs to the consumer, which
-    /// can fail loudly with its own context.
-    pub fn resolve_api_key(&self) -> Option<String> {
-        if let Some(key) = &self.api_key {
-            return Some(key.clone());
+    /// Returns `None` when neither source is configured or the environment
+    /// variable is unset — local endpoints legitimately need no key, so the
+    /// decision to require one belongs to the consumer, which can fail
+    /// loudly with its own context.
+    pub fn resolve_api_key(&self, id: &str, auth: &AuthConfig) -> Option<String> {
+        if let Some(key) = auth.api_key(id) {
+            return Some(key.to_string());
         }
         self.api_key_env
             .as_deref()

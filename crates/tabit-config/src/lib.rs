@@ -27,6 +27,11 @@
 //! validation fail loudly, naming the exact file and setting at fault, and
 //! validation reports *all* issues in one pass.
 //!
+//! Provider config is secret-free by construction: keys live in a separate
+//! [`AuthConfig`] file (`~/.tabit/auth.toml`) or in environment variables
+//! named by `api_key_env`, so `providers.toml` is safe to display, share,
+//! and edit with agent assistance.
+//!
 //! # Example
 //!
 //! ```toml
@@ -34,7 +39,6 @@
 //! name = "LM Studio"
 //! base_url = "http://127.0.0.1:1234/v1"
 //! api = "openai-completions"
-//! api_key = "lm-studio"
 //!
 //! [[providers.lmstudio.models]]
 //! id = "openai/gpt-oss-20b"
@@ -64,8 +68,10 @@
 //!
 //! Loading uses [`TabitConfig::load`] with an explicit path, or
 //! [`TabitConfig::load_default`], which checks `$TABIT_CONFIG` (the
-//! debugging/local override), then `<home>/.tabit/tabit.toml` (the single
-//! canonical location).
+//! debugging/local override), then `<home>/.tabit/providers.toml` (the
+//! single canonical location). Keys are resolved separately through
+//! [`AuthConfig::load_default`] (`$TABIT_AUTH`, then
+//! `<home>/.tabit/auth.toml`; a missing auth file is not an error).
 //!
 //! ```
 //! use tabit_config::TabitConfig;
@@ -84,11 +90,13 @@
 //! [`Model`]: crate::Model
 //! [`ThinkingLevel`]: crate::ThinkingLevel
 
+mod auth;
 mod error;
 mod model;
 mod provider;
 mod wire;
 
+pub use auth::{AuthConfig, AuthEntry};
 pub use error::ConfigError;
 pub use model::{Cost, InputModality, Model, SamplingParams, ThinkingLevel};
 pub use provider::Provider;
@@ -137,11 +145,11 @@ impl TabitConfig {
     }
 
     /// Load the default config: the file named by `$TABIT_CONFIG`, else
-    /// `<home>/.tabit/tabit.toml`. `$TABIT_CONFIG` is the debugging/local
-    /// override — point it at a scratch config instead of touching the real
-    /// one. (A future CLI flag will outrank the env var; more specific
-    /// scopes win.) Fails with [`ConfigError::NotFound`] listing every
-    /// candidate when none exists.
+    /// `<home>/.tabit/providers.toml`. `$TABIT_CONFIG` is the
+    /// debugging/local override — point it at a scratch config instead of
+    /// touching the real one. (A future CLI flag will outrank the env var;
+    /// more specific scopes win.) Fails with [`ConfigError::NotFound`]
+    /// listing every candidate when none exists.
     pub fn load_default() -> Result<Self, ConfigError> {
         let candidates = default_config_paths();
         for path in &candidates {
@@ -161,6 +169,14 @@ impl TabitConfig {
     pub fn model(&self, provider_id: &str, model_id: &str) -> Option<(&Provider, &Model)> {
         self.provider(provider_id)
             .and_then(|provider| provider.model(model_id).map(|model| (provider, model)))
+    }
+
+    /// Resolve a provider's API key: an `auth.toml` entry for it wins, else
+    /// the environment variable named by its `api_key_env`. See
+    /// [`Provider::resolve_api_key`].
+    pub fn resolve_api_key(&self, provider_id: &str, auth: &AuthConfig) -> Option<String> {
+        self.provider(provider_id)?
+            .resolve_api_key(provider_id, auth)
     }
 
     /// All semantic validation issues, each prefixed with its config key
@@ -192,9 +208,6 @@ fn validate_provider(provider_id: &str, provider: &Provider, issues: &mut Vec<St
         )),
     }
 
-    if provider.api_key.as_deref() == Some("") {
-        issues.push(format!("{provider_key}.api_key: must not be empty"));
-    }
     if provider.api_key_env.as_deref() == Some("") {
         issues.push(format!("{provider_key}.api_key_env: must not be empty"));
     }
@@ -227,20 +240,20 @@ fn validate_provider(provider_id: &str, provider: &Provider, issues: &mut Vec<St
 }
 
 /// The default config search path: `$TABIT_CONFIG`, then
-/// `<home>/.tabit/tabit.toml`.
+/// `<home>/.tabit/providers.toml`.
 fn default_config_paths() -> Vec<PathBuf> {
     let mut paths = Vec::new();
     if let Some(from_env) = std::env::var_os("TABIT_CONFIG") {
         paths.push(PathBuf::from(from_env));
     }
     if let Some(home) = home_dir() {
-        paths.push(home.join(".tabit").join("tabit.toml"));
+        paths.push(home.join(".tabit").join("providers.toml"));
     }
     paths
 }
 
 /// The user's home directory (`$USERPROFILE` on Windows, `$HOME` elsewhere).
-fn home_dir() -> Option<PathBuf> {
+pub(crate) fn home_dir() -> Option<PathBuf> {
     std::env::var_os("USERPROFILE")
         .or_else(|| std::env::var_os("HOME"))
         .map(PathBuf::from)
