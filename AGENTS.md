@@ -72,10 +72,7 @@ Current workspace layout:
    unintuitive workaround for a recurring error, or ping-ponging between
    two designs — assume the design is wrong, not the code. Do not "make it
    work" with a dirty hack. Stop, then summarize for the user: the goal,
-   the problem, and why it is hard — and ask for a design discussion
-   first. (Lesson from the steering implementation: several rounds of
-   gating/ordering hacks dissolved once the real model — delivery-to-
-   history vs. delivery-to-model — was stated plainly.)
+   the problem, and why it is hard — and ask for a design discussion first.
 
 ## Environment / commands
 
