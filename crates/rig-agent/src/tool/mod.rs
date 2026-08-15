@@ -112,7 +112,7 @@ use std::{collections::HashMap, sync::Arc};
 
 pub mod builtin;
 
-use futures::Future;
+use futures::{Future, FutureExt};
 use indexmap::IndexMap;
 use serde::{Deserialize, Serialize};
 
@@ -570,12 +570,73 @@ pub(crate) struct ToolDispatch {
     pub(crate) context: ToolContext,
 }
 
+/// Await one boxed tool execution, converting an unwinding panic into a
+/// model-visible error result.
+///
+/// Tool bodies are user code and may panic — an out-of-bounds index, a failed
+/// `assert!`. Without containment the unwind propagates through the agent
+/// drive loop and kills the whole run. Wrapping the boxed dispatch future in
+/// `catch_unwind` here — the single dispatch boundary every surface (the agent
+/// drive loop, [`ToolSet::execute`], `ToolServerHandle::execute`) shares —
+/// turns the panic into an ordinary [`ToolExecutionError`] result, so it flows
+/// back to the model as tool feedback through exactly the same path as a
+/// normal tool error (result hooks, telemetry, history) and the run recovers
+/// on the next turn.
+///
+/// `AssertUnwindSafe` is sound because a panicked future is never resumed, so
+/// nothing can observe a torn interior state.
+///
+/// NOTE(panic strategy): containment relies on the default
+/// `panic = "unwind"` strategy. A `panic = "abort"` build still aborts at the
+/// panic site — nothing can contain that; the workspace sets no such profile.
+async fn contain_tool_panic<Execution>(tool_name: &str, execution: Execution) -> ToolResult
+where
+    Execution: Future<Output = ToolResult>,
+{
+    match std::panic::AssertUnwindSafe(execution).catch_unwind().await {
+        Ok(result) => result,
+        Err(payload) => {
+            let panic_message = panic_payload_message(&*payload);
+            tracing::error!(
+                target: "rig",
+                tool_name,
+                panic_message = %panic_message,
+                "tool panicked during execution; containing as a tool error"
+            );
+            ToolResult::failed(ToolExecutionError::other(format!(
+                "tool \"{tool_name}\" panicked: {panic_message}"
+            )))
+        }
+    }
+}
+
+/// Best-effort readable text from a panic payload.
+///
+/// `panic!("literal")` and the standard library's `assert!`/bounds panics
+/// carry `&'static str` payloads; `panic!("{}", formatted)` carries a `String`.
+/// Any other payload (a custom type, `panic_any`) falls back to a stable
+/// placeholder.
+fn panic_payload_message(payload: &(dyn std::any::Any + Send)) -> &str {
+    if let Some(message) = payload.downcast_ref::<&'static str>() {
+        message
+    } else if let Some(message) = payload.downcast_ref::<String>() {
+        message
+    } else {
+        "tool panicked"
+    }
+}
+
 /// Execute a resolved registry entry through the single dispatch boundary.
 ///
 /// Every surface enters here with its caller-owned context. The helper clones
 /// inbound values exactly once, clears prior result metadata, and returns the
 /// per-dispatch context so callers can expose its metadata without publishing
 /// mutations the tool made to its local inbound snapshot.
+///
+/// Tool panics are contained here (see [`contain_tool_panic`]): the boxed
+/// execution future is awaited under `catch_unwind`, so a panicking tool body
+/// surfaces as a structured error result rather than unwinding into the
+/// caller's run.
 pub(crate) async fn dispatch_tool(
     name: &str,
     args: String,
@@ -586,7 +647,7 @@ pub(crate) async fn dispatch_tool(
     let result = match tool {
         Some(tool) => {
             tracing::debug!(target: "rig", tool_name = name, "calling tool with args:\n{args}");
-            tool.execute(args, &mut dispatch_context).await
+            contain_tool_panic(name, tool.execute(args, &mut dispatch_context)).await
         }
         None => ToolResult::failed(
             ToolExecutionError::not_found(format!("no tool named `{name}` is registered"))
@@ -1005,6 +1066,74 @@ mod tests {
             result.output().as_text(),
             result.error().and_then(ToolExecutionError::model_feedback)
         );
+    }
+
+    struct PanickingTool;
+
+    impl Tool for PanickingTool {
+        const NAME: &'static str = "panicking";
+        type Error = ToolExecutionError;
+        type Args = serde_json::Value;
+        type Output = String;
+
+        fn description(&self) -> String {
+            "panics before producing output".into()
+        }
+
+        fn parameters(&self) -> serde_json::Value {
+            serde_json::json!({"type": "object"})
+        }
+
+        async fn call(
+            &self,
+            _context: &mut ToolContext,
+            args: Self::Args,
+        ) -> Result<Self::Output, ToolExecutionError> {
+            // Three payload shapes: a formatted `String`, a `&'static str`
+            // literal, and a custom `panic_any` payload.
+            match args
+                .get("mode")
+                .and_then(serde_json::Value::as_str)
+                .unwrap_or_default()
+            {
+                "formatted" => panic!("{}", "formatted boom".to_uppercase()),
+                "custom" => std::panic::panic_any(vec!["custom"]),
+                _ => panic!("boom"),
+            }
+        }
+    }
+
+    #[tokio::test]
+    async fn panicking_tools_surface_as_model_visible_error_results() {
+        let mut set = ToolSet::default();
+        set.add_tool(PanickingTool);
+
+        for (mode, expected) in [
+            // A formatted panic carries a `String` payload.
+            ("formatted", "tool \"panicking\" panicked: FORMATTED BOOM"),
+            // A literal panic carries a `&'static str` payload.
+            ("default", "tool \"panicking\" panicked: boom"),
+            // A custom `panic_any` payload falls back to a stable placeholder.
+            ("custom", "tool \"panicking\" panicked: tool panicked"),
+        ] {
+            let result = set
+                .execute(
+                    PanickingTool::NAME,
+                    &serde_json::json!({"mode": mode}).to_string(),
+                    &mut ToolContext::new(),
+                )
+                .await;
+
+            assert!(
+                result.is_error_kind(ToolErrorKind::Other),
+                "mode {mode}: a panic must surface as an error result"
+            );
+            assert_eq!(
+                result.output().as_text(),
+                Some(expected),
+                "mode {mode}: the panic message must stay model-visible"
+            );
+        }
     }
 
     struct ForeignErrorTool;

@@ -397,6 +397,108 @@ async fn blocking_and_streaming_preserve_raw_failure_while_rewriting_presentatio
     assert!(!history.contains("raw timeout failure"));
 }
 
+/// A user tool whose body panics with an out-of-bounds index — the classic
+/// uncaught bug the dispatch boundary must contain.
+struct IndexPanickingTool;
+
+impl Tool for IndexPanickingTool {
+    const NAME: &'static str = "index_panicking_tool";
+    type Error = ToolExecutionError;
+    type Args = serde_json::Value;
+    type Output = String;
+
+    fn description(&self) -> String {
+        "Panics with an out-of-bounds index mid-execution".into()
+    }
+
+    fn parameters(&self) -> serde_json::Value {
+        json!({"type": "object", "properties": {}})
+    }
+
+    async fn call(
+        &self,
+        _context: &mut ToolContext,
+        _args: Self::Args,
+    ) -> Result<Self::Output, ToolExecutionError> {
+        let empty: [u32; 0] = [];
+        Ok(empty[0].to_string())
+    }
+}
+
+#[tokio::test]
+async fn a_panicking_tool_yields_an_error_result_the_model_sees_and_the_run_recovers() {
+    let model = MockCompletionModel::from_turns([
+        MockTurn::tool_call("tc1", IndexPanickingTool::NAME, json!({})),
+        MockTurn::text("recovered"),
+    ]);
+    let response = AgentBuilder::new(model.clone())
+        .tool(IndexPanickingTool)
+        .build()
+        .runner("go")
+        .max_turns(3)
+        .run()
+        .await
+        .expect("a panicking tool must not kill the run");
+
+    // The run continued past the panic and completed on the next turn.
+    assert_eq!(response.output, "recovered");
+    assert_eq!(
+        model.request_count(),
+        2,
+        "the panic must not terminate the loop before the second model turn"
+    );
+
+    // The panic message reached the model as the turn-1 tool result.
+    let history = serde_json::to_value(
+        &model
+            .requests()
+            .get(1)
+            .expect("second request")
+            .chat_history,
+    )
+    .unwrap()
+    .to_string();
+    // The JSON-serialized history escapes the quotes around the tool name, so
+    // match on the stable, quote-free tail of the panic message.
+    assert!(
+        history.contains("panicked: index out of bounds: the len is 0 but the index is 0")
+            && history.contains(IndexPanickingTool::NAME),
+        "the model must see the panic as tool feedback; history was: {history}"
+    );
+}
+
+#[tokio::test]
+async fn a_normal_tool_error_still_flows_to_the_model_unchanged() {
+    let model = MockCompletionModel::from_turns([
+        MockTurn::tool_call("tc1", "flaky_tool", json!({})),
+        MockTurn::text("done"),
+    ]);
+    let response = AgentBuilder::new(model.clone())
+        .tool(MetadataFailingTool)
+        .build()
+        .runner("go")
+        .max_turns(3)
+        .run()
+        .await
+        .expect("a normal tool error must not kill the run");
+
+    assert_eq!(response.output, "done");
+    let history = serde_json::to_value(
+        &model
+            .requests()
+            .get(1)
+            .expect("second request")
+            .chat_history,
+    )
+    .unwrap()
+    .to_string();
+    assert!(
+        history.contains("raw timeout failure"),
+        "an ordinary tool error keeps its model-visible message; history was: {history}"
+    );
+    assert!(!history.contains("panicked"));
+}
+
 #[tokio::test]
 async fn agent_dispatch_snapshot_clones_once_and_isolates_tool_mutations() {
     let clones = Arc::new(AtomicUsize::new(0));
