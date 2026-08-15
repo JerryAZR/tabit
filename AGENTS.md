@@ -82,6 +82,15 @@ Current workspace layout:
   and policy live in `COVERAGE.md`.
 - Cassettes are byte-sensitive (LF endings enforced via `.gitattributes`).
 
+## Terminology
+
+- **Outer loop** — what the user feels: prompt → agent thinks → calls tools →
+  repeat until done. One outer loop = one `AgentRun`.
+- **Turn** — one model call within a run.
+- **Tool-use roundtrip** — the boundary between a model turn's tool calls and
+  the next model call (execute tools → feed results back). This is where
+  steering, permission checks, and future extension hooks intervene.
+
 ## Not planned
 
 - WebSocket streaming: **removed** — HTTP SSE only.
