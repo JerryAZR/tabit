@@ -122,7 +122,6 @@ crate::provider_response::impl_provider_response_helpers!(CompletionError);
 // growth is a deliberate decision that updates this bound, not drift.
 const _: () = assert!(std::mem::size_of::<CompletionError>() <= 128);
 
-
 impl CompletionError {
     /// Maps an SSE transport error into a completion error without flattening HTTP failures.
     ///

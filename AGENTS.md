@@ -19,6 +19,7 @@ Current workspace layout:
 - `crates/rig-agent` — agent loop / runtime
 - `crates/rig-derive` — `#[rig_tool]` proc macros
 - `crates/rig` — facade crate re-exporting the three above
+- `crates/tabit-config` — provider/model configuration (see `ROADMAP.md`)
 
 ## Design rules
 
@@ -62,10 +63,17 @@ Current workspace layout:
 ## Environment / commands
 
 - **Windows.** Use `python` (not `python3`); read/write files as UTF-8 explicitly.
-- `cargo build` / `cargo test` — the suite runs fully offline (see rule 5);
-  some tests carry upstream-marked `#[ignore]`s (live-network scenarios).
-  Don't record pass counts here — they change constantly; run the suite for
-  current numbers.
+- The green gate (verify by **exit code**, not by grepping output — a piped
+  grep once masked a failing suite): `cargo fmt --check`,
+  `cargo clippy --workspace --all-targets`, and
+  `cargo test --workspace --no-fail-fast`. The suite runs fully offline
+  (see rule 5); some tests carry upstream-marked `#[ignore]`s
+  (live-network scenarios). Don't record pass counts here — they change
+  constantly; run the suite for current numbers.
+- The workspace denies `panic`/`unwrap`/`expect`/indexing in shipped code;
+  test code relaxes those via an identical `#![cfg_attr(test, allow(..))]`
+  header at the top of each crate's lib.rs — new crates copy the current
+  version from an existing crate rather than an old one.
 - Coverage: `cargo llvm-cov --workspace --html --output-dir target/llvm-cov/html`.
   Every gap must be filled, justified, or explicitly deferred — the ledger
   and policy live in `COVERAGE.md`.

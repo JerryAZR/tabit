@@ -578,3 +578,32 @@ id = "m"
     assert!(model.max_tokens.is_none());
     assert!(model.cost.is_none());
 }
+
+#[test]
+fn empty_model_id_and_thinking_level_name_are_reported() {
+    let raw = r#"
+[providers.x]
+base_url = "https://example.com"
+api = "openai-responses"
+
+[[providers.x.models]]
+id = ""
+
+[[providers.x.models.thinking_levels]]
+name = ""
+"#;
+    let err = validation_error(raw);
+    let msg = err.to_string();
+    assert!(msg.contains("id must not be empty"), "{msg}");
+    assert!(
+        msg.contains("thinking level name must not be empty"),
+        "{msg}"
+    );
+}
+
+#[test]
+fn auth_load_reports_missing_file() {
+    let err = AuthConfig::load("definitely/no/auth.toml").expect_err("missing file");
+    assert!(matches!(err, ConfigError::Io { .. }));
+    assert!(err.to_string().contains("definitely/no/auth.toml"), "{err}");
+}

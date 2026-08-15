@@ -31,8 +31,13 @@ Defensive ("unreachable") arms follow a stricter rule:
 - The whole suite runs offline (cassette replay + test doubles). Doctests
   are NOT included in these numbers (`llvm-cov` was run without
   `--doctests`); they are gated by the same CI run.
-- Current state: **97.3% lines / 97.0% regions** (1,744 of 64,731 lines
-  uncovered). The residue is itemized below.
+- Current state: **96.8% lines / 97.2% regions** (1,750 of 53,984 lines
+  uncovered; re-measured after phase 3's ~4.4k-line shrink and the tabit-config
+  addition — the percentage dip is denominator loss, absolute misses grew by
+  six and were filled). The residue is itemized below. `crates/tabit-config`
+  sits at 100% branch coverage; its residue is three partial-line regions in
+  tiny helpers (`auth.rs` load/default-path arms, `lib.rs` home-resolution
+  arm), with no fully unexecuted line or branch.
 
 ## Filled
 

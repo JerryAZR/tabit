@@ -1,4 +1,3 @@
-
 /// Boundary-minted tool ids (`tool-{index}`, from id-less streamed calls)
 /// replay to the chat wire as a self-consistent pair: the assistant
 /// message's `tool_calls[].id` and the tool result's `tool_call_id` carry

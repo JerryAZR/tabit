@@ -1,4 +1,3 @@
-
 use super::*;
 use crate::completion::CompletionRequestBuilder;
 use crate::message;
