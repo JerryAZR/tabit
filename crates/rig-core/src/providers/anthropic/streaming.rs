@@ -3205,7 +3205,7 @@ mod tests {
         )
         .unwrap();
         for event in [&start, &delta] {
-            assert!(handle_event(&mut adapter, &event).is_none());
+            assert!(handle_event(&mut adapter, event).is_none());
         }
         assert!(matches!(handle_event(&mut adapter, &stop), Some(Err(_))));
     }

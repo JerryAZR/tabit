@@ -37,7 +37,7 @@ fn create_writes_header_and_appends_chain_parents() {
     assert_eq!(second.parent_id, Some(first.id.clone()));
     assert_eq!(writer.leaf(), Some(second.id.as_str()));
 
-    let loaded = store.open_path(&writer.path().to_path_buf()).expect("open");
+    let loaded = store.open_path(writer.path()).expect("open");
     assert_eq!(loaded.entries.len(), 2);
     assert_eq!(loaded.header.cwd, "C:/work");
     assert!(loaded.repairs.is_empty());

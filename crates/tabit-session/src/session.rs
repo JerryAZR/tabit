@@ -310,7 +310,7 @@ impl Session {
                 }
                 Err(StreamingError::Prompt(error)) => {
                     self.reload_context()?;
-                    return Err(SessionError::Prompt((*error).into()));
+                    return Err(SessionError::Prompt(*error));
                 }
             }
         }

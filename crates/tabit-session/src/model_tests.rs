@@ -72,7 +72,7 @@ id = "m"
         let auth = auth_with_key();
         let handle = build_model(&config, &auth, "p", "m").expect("model builds");
         // The label carries the selection for diagnostics.
-        assert_eq!(format!("{handle:?}").len() > 0, true);
+        assert!(!format!("{handle:?}").is_empty());
     }
 }
 

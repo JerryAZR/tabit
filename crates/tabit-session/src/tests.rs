@@ -494,7 +494,7 @@ async fn selection_errors_are_loud_at_builder_time() -> Result<(), SessionError>
         Err(SessionError::Config { message }) => {
             assert!(message.contains("provider `missing`"), "{message}")
         }
-        other => panic!("expected config error, got {}", matches!(other, Err(_))),
+        other => panic!("expected config error, got {}", other.is_err()),
     }
     std::fs::remove_dir_all(store.dir()).ok();
     Ok(())

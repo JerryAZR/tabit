@@ -141,6 +141,7 @@ impl SessionStore {
         })
     }
 
+    /// Load the session file with the given session id.
     pub fn open(&self, session_id: &str) -> Result<LoadedSession, SessionError> {
         for summary in self.list()? {
             if summary.id == session_id {
@@ -241,16 +242,16 @@ impl SessionStore {
                             message: format!("duplicate entry id `{}`", entry.id),
                         });
                     }
-                    if let Some(parent) = &entry.parent_id {
-                        if !seen_ids.contains(parent) {
-                            return Err(SessionError::Corrupt {
-                                path: path.to_path_buf(),
-                                message: format!(
-                                    "entry `{}` references unknown parent `{}`",
-                                    entry.id, parent
-                                ),
-                            });
-                        }
+                    if let Some(parent) = &entry.parent_id
+                        && !seen_ids.contains(parent)
+                    {
+                        return Err(SessionError::Corrupt {
+                            path: path.to_path_buf(),
+                            message: format!(
+                                "entry `{}` references unknown parent `{}`",
+                                entry.id, parent
+                            ),
+                        });
                     }
                     entries.push(entry);
                 }
@@ -303,8 +304,6 @@ impl SessionWriter {
             id: header.id,
         })
     }
-
-    /// Load the session file with the given session id.
 
     /// Append one record and return the persisted entry.
     pub fn append(&mut self, kind: EntryKind) -> Result<SessionEntry, SessionError> {

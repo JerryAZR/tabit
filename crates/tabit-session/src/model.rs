@@ -101,21 +101,21 @@ impl ModelSelection {
             .ok_or_else(|| SessionError::Config {
                 message: format!("model `{}` for provider `{}`", self.model, self.provider),
             })?;
-        if let Some(level) = &self.thinking_level {
-            if model.thinking_level(level).is_none() {
-                return Err(SessionError::Config {
-                    message: format!(
-                        "thinking level `{level}` for model `{}` (defined levels: {})",
-                        self.model,
-                        model
-                            .thinking_levels
-                            .iter()
-                            .map(|l| l.name.as_str())
-                            .collect::<Vec<_>>()
-                            .join(", ")
-                    ),
-                });
-            }
+        if let Some(level) = &self.thinking_level
+            && model.thinking_level(level).is_none()
+        {
+            return Err(SessionError::Config {
+                message: format!(
+                    "thinking level `{level}` for model `{}` (defined levels: {})",
+                    self.model,
+                    model
+                        .thinking_levels
+                        .iter()
+                        .map(|l| l.name.as_str())
+                        .collect::<Vec<_>>()
+                        .join(", ")
+                ),
+            });
         }
         Ok(())
     }

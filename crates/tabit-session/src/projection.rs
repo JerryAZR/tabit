@@ -34,7 +34,7 @@ pub fn project(entries: &[SessionEntry]) -> (Vec<Message>, Option<DanglingToolCa
         if pending.is_empty() {
             return;
         }
-        messages.push(tool_results_message(pending.drain(..).collect()));
+        messages.push(tool_results_message(std::mem::take(pending)));
     };
 
     for entry in entries {
