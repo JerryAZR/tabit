@@ -776,3 +776,19 @@ async fn steering_when_idle_is_a_loud_error() -> Result<(), SessionError> {
     std::fs::remove_dir_all(store.dir()).ok();
     Ok(())
 }
+
+#[tokio::test]
+async fn abort_while_idle_does_nothing() -> Result<(), SessionError> {
+    // Each run mints a fresh token before any observable activity, so a
+    // stray cancel between runs (or before the first) hits a dead token.
+    let store = temp_store("abort-idle");
+    let factory = Factory::new(vec![text_turn("fine")]);
+    let mut session = factory.into_builder(store.clone()).create("C:/w")?;
+    session.abort_handle().abort();
+    session.abort_handle().abort();
+    let run = session.prompt("hello").await?;
+    assert_eq!(run.outcome, crate::session::RunOutcome::Completed);
+    assert_eq!(run.output, "fine");
+    std::fs::remove_dir_all(store.dir()).ok();
+    Ok(())
+}
