@@ -67,6 +67,15 @@ Current workspace layout:
    silent partial call. Tool cancellation follows the contract documented
    in `tabit-tools`'s crate docs (engine owns *when*, tool owns *how*;
    drop-safety required; `bash` is the reference implementation).
+9. **Fighting the architecture is a stop signal.** If the work feels like
+   fighting the design — wrestling the borrow checker, reaching for an
+   unintuitive workaround for a recurring error, or ping-ponging between
+   two designs — assume the design is wrong, not the code. Do not "make it
+   work" with a dirty hack. Stop, then summarize for the user: the goal,
+   the problem, and why it is hard — and ask for a design discussion
+   first. (Lesson from the steering implementation: several rounds of
+   gating/ordering hacks dissolved once the real model — delivery-to-
+   history vs. delivery-to-model — was stated plainly.)
 
 ## Environment / commands
 
