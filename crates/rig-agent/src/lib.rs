@@ -81,7 +81,7 @@ pub mod tool;
 
 pub use agent::{
     Agent, AgentBuilder, AgentHook, AgentRun, AgentRunner, HookContext, ModelHandle,
-    ModelSelection, ModelSelectionAction,
+    ModelSelection, ModelSelectionAction, SteeringSource,
 };
 pub use extractor::ExtractionResponse;
 

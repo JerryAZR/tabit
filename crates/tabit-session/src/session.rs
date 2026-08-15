@@ -28,13 +28,26 @@ use rig_agent::tool::DynamicTool;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use tabit_config::{AuthConfig, TabitConfig};
+use tokio_util::sync::CancellationToken;
 
 /// Default model-call budget for one outer loop.
 pub const DEFAULT_MAX_TURNS: usize = 32;
 
-/// One completed outer loop.
+/// How an outer loop ended.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum RunOutcome {
+    /// The run produced a final response.
+    Completed,
+    /// The user aborted the run mid-flight; `output` holds whatever
+    /// assistant text had arrived.
+    Aborted,
+}
+
+/// One outer loop's outcome and artifacts.
 #[derive(Debug, Clone, PartialEq)]
 pub struct RunSummary {
+    /// How the run ended.
+    pub outcome: RunOutcome,
     /// The final assistant text.
     pub output: String,
     /// Aggregated usage across the whole run.
@@ -223,6 +236,82 @@ impl SessionBuilder {
     }
 }
 
+/// The run-scoped steer queue state.
+#[derive(Default)]
+enum SteerSlot {
+    #[default]
+    Idle,
+    /// An outer loop is in flight; queued steers await the next turn end.
+    Running(std::collections::VecDeque<Message>),
+}
+
+/// Submit steering messages to the run currently in flight. Obtained from
+/// [`Session::steer_handle`]; valid only while that outer loop runs —
+/// submitting when no run is in flight is a loud error (idle input is a
+/// prompt, not a steer).
+#[derive(Clone)]
+pub struct SteerHandle {
+    slot: std::sync::Arc<std::sync::Mutex<SteerSlot>>,
+}
+
+impl SteerHandle {
+    /// Queue a steering message for the run in flight.
+    pub fn submit(&self, text: impl Into<String>) -> Result<(), SessionError> {
+        let text = text.into();
+        match &mut *lock(&self.slot) {
+            SteerSlot::Running(queue) => {
+                queue.push_back(Message::user(text));
+                Ok(())
+            }
+            SteerSlot::Idle => Err(SessionError::Config {
+                message: format!(
+                    "no run in flight to steer (`{text}`) — send it as a prompt                      instead"
+                ),
+            }),
+        }
+    }
+}
+
+/// Cancel the run currently in flight. Cheap to hold; cancelling when no
+/// run is in flight does nothing.
+#[derive(Clone)]
+pub struct AbortHandle {
+    token: std::sync::Arc<std::sync::Mutex<CancellationToken>>,
+}
+
+impl AbortHandle {
+    /// Abort the current run, if any.
+    pub fn abort(&self) {
+        lock(&self.token).cancel();
+    }
+}
+
+/// Lock, recovering from poisoning (no code panics while holding it).
+fn lock<T>(mutex: &std::sync::Mutex<T>) -> std::sync::MutexGuard<'_, T> {
+    match mutex.lock() {
+        Ok(guard) => guard,
+        Err(poisoned) => poisoned.into_inner(),
+    }
+}
+
+/// The engine-side view of the run-scoped steer queue.
+struct SessionSteers {
+    slot: std::sync::Arc<std::sync::Mutex<SteerSlot>>,
+}
+
+impl rig_agent::SteeringSource for SessionSteers {
+    fn has_pending(&self) -> bool {
+        matches!(&*lock(&self.slot), SteerSlot::Running(q) if !q.is_empty())
+    }
+
+    fn drain(&self) -> Vec<Message> {
+        match &mut *lock(&self.slot) {
+            SteerSlot::Running(queue) => queue.drain(..).collect(),
+            SteerSlot::Idle => Vec::new(),
+        }
+    }
+}
+
 /// A persistent, resumable conversation.
 pub struct Session {
     store: SessionStore,
@@ -234,6 +323,13 @@ pub struct Session {
     model_factory: ModelFactory,
     agent: Arc<Agent>,
     recorder: Arc<SessionRecorder>,
+    /// Per-run cancellation token, refreshed by every outer loop; the
+    /// abort handle cancels whatever run is current.
+    abort: std::sync::Arc<std::sync::Mutex<CancellationToken>>,
+    /// The run-scoped steer queue: `Running` only while an outer loop is
+    /// in flight (empty by construction outside it — idle input is a
+    /// prompt, not a steer).
+    steer_slot: std::sync::Arc<std::sync::Mutex<SteerSlot>>,
     context: Vec<Message>,
     path: PathBuf,
     id: String,
@@ -257,6 +353,14 @@ impl Session {
         prompt: impl Into<Message>,
         on_event: &mut dyn FnMut(SessionEvent),
     ) -> Result<RunSummary, SessionError> {
+        // Run-scoped machinery: a fresh abort token for this loop, the
+        // steer queue opened for the run's lifetime.
+        let run_token = {
+            let mut slot = lock(&self.abort);
+            *slot = CancellationToken::new();
+            slot.clone()
+        };
+        *lock(&self.steer_slot) = SteerSlot::Running(std::collections::VecDeque::new());
         let message: Message = prompt.into();
         self.recorder.record(EntryKind::UserMessage {
             message: message.clone(),
@@ -268,11 +372,17 @@ impl Session {
         on_event(user_event.clone());
         let mut events = vec![user_event];
         let history = self.context.clone();
+        let mut tool_context = rig_agent::tool::ToolContext::new();
+        tool_context.insert(run_token.clone());
         let request = self
             .agent
             .stream_chat(message, history)
             .max_turns(self.max_turns)
-            .add_hook(RecorderHook(self.recorder.clone()));
+            .add_hook(RecorderHook(self.recorder.clone()))
+            .steering(std::sync::Arc::new(SessionSteers {
+                slot: self.steer_slot.clone(),
+            }))
+            .tool_context(tool_context);
         let mut stream = request.await;
 
         let mut output = String::new();
@@ -281,7 +391,19 @@ impl Session {
         // internal id but not its name.
         let mut tool_names: std::collections::BTreeMap<String, String> =
             std::collections::BTreeMap::new();
-        while let Some(item) = stream.next().await {
+        let mut aborted = false;
+        loop {
+            let item = tokio::select! {
+                biased;
+                _ = run_token.cancelled() => {
+                    aborted = true;
+                    break;
+                }
+                item = stream.next() => match item {
+                    Some(item) => item,
+                    None => break,
+                },
+            };
             match item {
                 Ok(MultiTurnStreamItem::StreamUserItem(StreamedUserContent::ToolResult {
                     tool_result,
@@ -310,6 +432,16 @@ impl Session {
                     on_event(event.clone());
                     events.push(event);
                 }
+                Ok(MultiTurnStreamItem::Steer { text }) => {
+                    // One steer, one user_message entry: the log keeps 1:1
+                    // fidelity with what the model saw.
+                    self.recorder.record(EntryKind::UserMessage {
+                        message: Message::user(text.clone()),
+                    });
+                    let event = SessionEvent::UserMessage { text };
+                    on_event(event.clone());
+                    events.push(event);
+                }
                 Ok(item) => {
                     if let Some(event) = stream_item_event(item, &mut tool_names) {
                         on_event(event.clone());
@@ -327,15 +459,49 @@ impl Session {
             }
         }
 
+        if aborted {
+            // Dropping the stream cancels in-flight tool futures; their
+            // drop guards kill process trees. Completed turns and results
+            // are already recorded; anything dangling repairs on next
+            // open, exactly like a crash.
+            drop(stream);
+            self.recorder.record(EntryKind::Aborted);
+            let event = SessionEvent::RunAborted {
+                output: output.clone(),
+            };
+            on_event(event.clone());
+            events.push(event);
+        }
+        *lock(&self.steer_slot) = SteerSlot::Idle;
         self.reload_context()?;
         if let Some(persist_error) = self.recorder.first_error() {
             return Err(SessionError::Persist(persist_error));
         }
         Ok(RunSummary {
+            outcome: if aborted {
+                RunOutcome::Aborted
+            } else {
+                RunOutcome::Completed
+            },
             output,
             usage,
             events,
         })
+    }
+
+    /// A handle for submitting steering messages while the current outer
+    /// loop is in flight. See [`SteerHandle`].
+    pub fn steer_handle(&mut self) -> SteerHandle {
+        SteerHandle {
+            slot: self.steer_slot.clone(),
+        }
+    }
+
+    /// A handle for aborting the current outer loop. See [`AbortHandle`].
+    pub fn abort_handle(&self) -> AbortHandle {
+        AbortHandle {
+            token: self.abort.clone(),
+        }
     }
 
     /// Switch the provider/model/thinking level from the next outer loop
@@ -497,6 +663,8 @@ impl Session {
             model_factory: builder.model_factory,
             agent: Arc::new(AgentBuilder::new(ModelHandle::new(placeholder_model())).build()),
             recorder,
+            abort: std::sync::Arc::new(std::sync::Mutex::new(CancellationToken::new())),
+            steer_slot: std::sync::Arc::new(std::sync::Mutex::new(SteerSlot::Idle)),
             context,
             path,
             id,

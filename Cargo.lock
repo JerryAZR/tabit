@@ -2651,6 +2651,7 @@ dependencies = [
  "tabit-config",
  "thiserror",
  "tokio",
+ "tokio-util",
  "uuid",
 ]
 

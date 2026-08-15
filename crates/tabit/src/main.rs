@@ -48,6 +48,8 @@ usage: tabit [PROMPT]
        tabit --continue PROMPT          resume this project's newest session
        tabit --session <path> PROMPT    resume a specific session file
        tabit --list                     list this project's sessions
+
+Esc aborts the running turn (line-buffered stdin: Esc then Enter).
        tabit --model <model-id|provider/model> select the model for this run
                                        (default: the resumed session's model,
                                        then default_model in providers.toml,
@@ -300,6 +302,22 @@ fn run() -> Result<(), String> {
         );
     } else {
         eprintln!("session {} started", session.path().display());
+    }
+
+    // Esc aborts the running turn (stdin is line-buffered in print mode:
+    // press Esc, then Enter; real key handling arrives with the TUI). The
+    // watcher thread is the single Esc consumer.
+    {
+        let abort = session.abort_handle();
+        std::thread::spawn(move || {
+            use std::io::Read as _;
+            for byte in std::io::stdin().lock().bytes() {
+                if matches!(byte, Ok(0x1b)) {
+                    abort.abort();
+                    return;
+                }
+            }
+        });
     }
 
     let summary = tokio::runtime::Builder::new_current_thread()

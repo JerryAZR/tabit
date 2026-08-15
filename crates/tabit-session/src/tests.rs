@@ -662,3 +662,117 @@ async fn thinking_level_changes_are_validated_and_recorded() -> Result<(), Sessi
     std::fs::remove_dir_all(store.dir()).ok();
     Ok(())
 }
+
+#[tokio::test]
+async fn abort_mid_run_records_marker_and_stays_resumable() -> Result<(), SessionError> {
+    let store = temp_store("abort");
+    let factory = Factory::new(vec![text_turn("never reached")]);
+    let mut session = factory.into_builder(store.clone()).create("C:/w")?;
+    let abort = session.abort_handle();
+    let mut armed = false;
+    let summary = session
+        .prompt_with("hello", &mut |event| {
+            // Abort as soon as the run is in flight — the token is
+            // per-run, so cancelling must happen after it starts.
+            if !armed {
+                armed = true;
+                abort.abort();
+            }
+            let _ = event;
+        })
+        .await
+        .expect("aborted run");
+    assert_eq!(summary.outcome, crate::session::RunOutcome::Aborted);
+
+    // The log carries the prompt, the abort marker, and nothing partial.
+    let loaded = store.open_path(session.path())?;
+    let kinds: Vec<&str> = loaded
+        .entries
+        .iter()
+        .map(|e| match &e.kind {
+            EntryKind::UserMessage { .. } => "user",
+            EntryKind::Aborted => "aborted",
+            EntryKind::AssistantMessage { .. } => "assistant",
+            EntryKind::ModelChange { .. } => "model",
+            _ => "other",
+        })
+        .collect();
+    // `create` records the opening model_change; the aborted run adds the
+    // prompt and the marker, nothing partial.
+    assert_eq!(kinds, vec!["model", "user", "aborted"]);
+
+    // A fresh token lets the next run proceed normally.
+    let run = session.prompt("again").await?;
+    assert_eq!(run.outcome, crate::session::RunOutcome::Completed);
+    std::fs::remove_dir_all(store.dir()).ok();
+    Ok(())
+}
+
+#[tokio::test]
+async fn steering_during_a_run_is_recorded_one_to_one() -> Result<(), SessionError> {
+    let store = temp_store("steer");
+    let factory = Factory::new(vec![tool_turn("t1", "echo"), text_turn("done after steer")]);
+    let mut session = factory
+        .into_builder(store.clone())
+        .dynamic_tool(echo_tool())
+        .create("C:/w")?;
+    let steer = session.steer_handle();
+
+    let mut seen_call = false;
+    let run = session
+        .prompt_with("run the tool", &mut |event| {
+            // Submit while the run is in flight: the turn-end drain
+            // delivers it right after the tool results commit.
+            if matches!(event, SessionEvent::ToolCall { .. }) && !seen_call {
+                seen_call = true;
+                steer.submit("also this").expect("run in flight");
+            }
+        })
+        .await?;
+    assert_eq!(run.outcome, crate::session::RunOutcome::Completed);
+
+    // One steer: one event, one entry, and the replayed context carries it
+    // after the tool results.
+    assert_eq!(
+        run.events
+            .iter()
+            .filter(|e| matches!(e, SessionEvent::UserMessage { text } if text == "also this"))
+            .count(),
+        1
+    );
+    let loaded = store.open_path(session.path())?;
+    let steers: Vec<&crate::SessionEntry> = loaded
+        .entries
+        .iter()
+        .filter(|e| matches!(&e.kind, EntryKind::UserMessage { message } if message.user_text().as_deref() == Some("also this")))
+        .collect();
+    assert_eq!(steers.len(), 1);
+    let texts: Vec<Option<String>> = session.context().iter().map(|m| m.user_text()).collect();
+    let tool_results_at = texts
+        .iter()
+        .position(|t| t.is_none())
+        .expect("tool-results message in context");
+    let steer_at = texts
+        .iter()
+        .position(|t| t.as_deref() == Some("also this"))
+        .expect("steer in context");
+    assert!(steer_at > tool_results_at, "steer follows the results");
+    std::fs::remove_dir_all(store.dir()).ok();
+    Ok(())
+}
+
+#[tokio::test]
+async fn steering_when_idle_is_a_loud_error() -> Result<(), SessionError> {
+    let store = temp_store("steer-idle");
+    let factory = Factory::new(vec![text_turn("a")]);
+    let mut session = factory.into_builder(store.clone()).create("C:/w")?;
+    let steer = session.steer_handle();
+    match steer.submit("while idle") {
+        Err(SessionError::Config { message }) => {
+            assert!(message.contains("prompt"), "{message}");
+        }
+        other => panic!("expected config error, got {other:?}"),
+    }
+    std::fs::remove_dir_all(store.dir()).ok();
+    Ok(())
+}
