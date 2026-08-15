@@ -1,0 +1,29 @@
+[package]
+name = "tabit-session"
+version.workspace = true
+edition.workspace = true
+license = "MIT"
+description = "Tabit session layer: persistent agent sessions over the rig-agent outer loop."
+
+[lints]
+workspace = true
+
+[lib]
+name = "tabit_session"
+path = "src/lib.rs"
+doctest = true
+
+[dependencies]
+futures = { workspace = true }
+humantime = { workspace = true }
+rig-agent = { path = "../rig-agent", version = "0.41.0", default-features = false }
+rig-core = { path = "../rig-core", version = "0.41.0", default-features = false }
+serde = { workspace = true, features = ["derive"] }
+serde_json = { workspace = true }
+tabit-config = { path = "../tabit-config", version = "0.41.0" }
+thiserror = { workspace = true }
+uuid = { workspace = true, features = ["v7"] }
+
+[dev-dependencies]
+rig-agent = { path = "../rig-agent", version = "0.41.0", default-features = false, features = ["test-utils"] }
+tokio = { workspace = true, features = ["rt-multi-thread", "macros"] }

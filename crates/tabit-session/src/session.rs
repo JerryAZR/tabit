@@ -1,0 +1,624 @@
+//! The session facade: owns the entry log, the model selection, and the
+//! outer loop's policy, and consumes the rig-agent item stream as its
+//! driver.
+//!
+//! Each [`Session::prompt`] is one outer loop: the user message is
+//! recorded, the rig-agent engine runs the turns (with a recorder hook
+//! persisting every completed assistant turn and tool result as it
+//! happens), and the item stream is folded into the serializable event
+//! list a frontend will consume. After every run — success or failure —
+//! the in-memory context is re-derived from the log, which stays the
+//! single source of truth. Steering, permissions, and extensions later
+//! plug into this same seam.
+
+use crate::entry::{EntryKind, SessionEntry};
+use crate::error::SessionError;
+use crate::events::SessionEvent;
+use crate::model::{ModelSelection, build_model};
+use crate::projection;
+use crate::recorder::{RecorderHook, SessionRecorder};
+use crate::store::{Repair, SessionStore, SessionWriter};
+use futures::StreamExt;
+use rig_agent::agent::{Agent, AgentBuilder, ModelHandle};
+use rig_agent::agent::{MultiTurnStreamItem, StreamingError};
+use rig_agent::completion::{Message, Usage};
+use rig_agent::streaming::{StreamedUserContent, StreamingChat};
+use rig_agent::tool::DynamicTool;
+use std::path::{Path, PathBuf};
+use std::sync::Arc;
+use tabit_config::{AuthConfig, TabitConfig};
+
+/// Default model-call budget for one outer loop.
+pub const DEFAULT_MAX_TURNS: usize = 32;
+
+/// One completed outer loop.
+#[derive(Debug, Clone, PartialEq)]
+pub struct RunSummary {
+    /// The final assistant text.
+    pub output: String,
+    /// Aggregated usage across the whole run.
+    pub usage: Usage,
+    /// Everything the run emitted, in order.
+    pub events: Vec<SessionEvent>,
+}
+
+/// What happened while resuming a session.
+#[derive(Debug, Clone, Default, PartialEq)]
+pub struct ResumeReport {
+    /// Repairs applied to the session file itself.
+    pub file_repairs: Vec<Repair>,
+    /// How many interrupted tool calls had synthetic results appended.
+    pub repaired_tool_calls: usize,
+    /// The model selection the session resumed with (from the last
+    /// `model_change` entry, if any).
+    pub resumed_model: Option<ModelSelection>,
+}
+
+/// Per-model token and cost totals for a session.
+#[derive(Debug, Clone, Default, PartialEq)]
+pub struct ModelStats {
+    /// Provider/model key in effect (`provider/model`, plus the thinking
+    /// level when one was set).
+    pub model: String,
+    /// Summed usage.
+    pub usage: Usage,
+    /// Cost in USD, when the config carries rates for the model.
+    pub cost: Option<f64>,
+}
+
+/// Session-level totals.
+#[derive(Debug, Clone, Default, PartialEq)]
+pub struct SessionStats {
+    /// Usage and cost per model that served this session.
+    pub per_model: Vec<ModelStats>,
+    /// Totals across all models.
+    pub total_usage: Usage,
+    /// Total cost in USD (models without rates contribute tokens but no
+    /// cost).
+    pub total_cost: f64,
+}
+
+/// Builds a [`Session`], either fresh or resumed from a log.
+pub struct SessionBuilder {
+    store: SessionStore,
+    config: Arc<TabitConfig>,
+    selection: ModelSelection,
+    preamble: Option<String>,
+    tools: Vec<DynamicTool>,
+    max_turns: usize,
+    model_factory: ModelFactory,
+}
+
+/// Builds the model behind a selection: `(provider, model)` ids to a
+/// type-erased handle. Overridable for callers that construct models
+/// themselves (and for tests).
+pub type ModelFactory = Arc<dyn Fn(&str, &str) -> Result<ModelHandle, SessionError> + Send + Sync>;
+
+impl SessionBuilder {
+    /// Start building a session that will use `selection`. The selection is
+    /// validated against the config immediately.
+    pub fn new(
+        store: SessionStore,
+        config: Arc<TabitConfig>,
+        auth: Arc<AuthConfig>,
+        selection: ModelSelection,
+    ) -> Result<Self, SessionError> {
+        selection.validate(&config)?;
+        let default_factory: ModelFactory = {
+            let config = config.clone();
+            let auth = auth.clone();
+            Arc::new(move |provider, model| build_model(&config, &auth, provider, model))
+        };
+        drop(auth);
+        Ok(Self {
+            store,
+            config,
+            selection,
+            preamble: None,
+            tools: Vec::new(),
+            max_turns: DEFAULT_MAX_TURNS,
+            model_factory: default_factory,
+        })
+    }
+
+    /// The system preamble hoisted into every request.
+    pub fn preamble(mut self, preamble: impl Into<String>) -> Self {
+        self.preamble = Some(preamble.into());
+        self
+    }
+
+    /// Register a runtime-defined tool available to every outer loop.
+    pub fn dynamic_tool(mut self, tool: DynamicTool) -> Self {
+        self.tools.push(tool);
+        self
+    }
+
+    /// Model-call budget per outer loop.
+    pub fn max_turns(mut self, max_turns: usize) -> Self {
+        self.max_turns = max_turns;
+        self
+    }
+
+    /// Supply models yourself instead of through tabit config. The factory
+    /// receives `(provider, model)` ids; it is consulted on session
+    /// creation, on resume, and on every model switch.
+    pub fn model_factory(
+        mut self,
+        factory: impl Fn(&str, &str) -> Result<ModelHandle, SessionError> + Send + Sync + 'static,
+    ) -> Self {
+        self.model_factory = Arc::new(factory);
+        self
+    }
+
+    /// Create a fresh session (a new log file). The log opens with the
+    /// initial model selection recorded, so usage attribution and resume
+    /// never depend on in-memory state.
+    pub fn create(self, cwd: &str) -> Result<Session, SessionError> {
+        let writer = self.store.create(cwd)?;
+        let session = Session::assemble(self, writer, Vec::new())?;
+        session.recorder.record(EntryKind::ModelChange {
+            provider: session.selection.provider.clone(),
+            model: session.selection.model.clone(),
+            thinking_level: session.selection.thinking_level.clone(),
+        });
+        Ok(session)
+    }
+
+    /// Resume the session stored at `path`: replay entries into context,
+    /// repair a dangling tool-use roundtrip, and continue with the model the
+    /// log last used (falling back to the builder's selection).
+    pub fn resume(self, path: &Path) -> Result<(Session, ResumeReport), SessionError> {
+        let loaded = self.store.open_path(path)?;
+        let mut report = ResumeReport {
+            file_repairs: loaded.repairs,
+            ..ResumeReport::default()
+        };
+
+        let (context, dangling) = projection::project(&loaded.entries);
+        let mut writer = SessionWriter::open_existing(&loaded.path)?;
+        if let Some(dangling) = &dangling {
+            let results = projection::interrupted_results(dangling);
+            report.repaired_tool_calls = results.len();
+            for result in results {
+                writer.append(EntryKind::ToolResult { result })?;
+            }
+        }
+
+        let selection = match projection::last_model_change(&loaded.entries) {
+            Some((provider, model, thinking_level)) => {
+                let selection = ModelSelection {
+                    provider: provider.to_string(),
+                    model: model.to_string(),
+                    thinking_level: thinking_level.map(str::to_string),
+                };
+                selection.validate(&self.config)?;
+                report.resumed_model = Some(selection.clone());
+                selection
+            }
+            None => self.selection.clone(),
+        };
+
+        let builder = Self { selection, ..self };
+        // The synthesized results only complete the trailing roundtrip;
+        // extend the projected context with them rather than re-reading.
+        let context = match dangling {
+            Some(dangling) => {
+                let mut context = context;
+                context.extend(interrupted_user_messages(&dangling));
+                context
+            }
+            None => context,
+        };
+        let session = Session::assemble(builder, writer, context)?;
+        Ok((session, report))
+    }
+}
+
+/// The user message carrying a dangling turn's synthesized results, in the
+/// same merged form projection produces for committed results.
+fn interrupted_user_messages(dangling: &projection::DanglingToolCalls) -> Vec<Message> {
+    let results: Vec<rig_core::message::UserContent> = projection::interrupted_results(dangling)
+        .into_iter()
+        .map(rig_core::message::UserContent::ToolResult)
+        .collect();
+    vec![Message::User {
+        content: rig_core::OneOrMany::many(results)
+            .unwrap_or_else(|_| rig_core::OneOrMany::one(placeholder_user_content())),
+    }]
+}
+
+/// A persistent, resumable conversation.
+pub struct Session {
+    store: SessionStore,
+    config: Arc<TabitConfig>,
+    selection: ModelSelection,
+    preamble: Option<String>,
+    tools: Vec<DynamicTool>,
+    max_turns: usize,
+    model_factory: ModelFactory,
+    agent: Arc<Agent>,
+    recorder: Arc<SessionRecorder>,
+    context: Vec<Message>,
+    path: PathBuf,
+    id: String,
+}
+
+impl Session {
+    /// Run one outer loop for `prompt` and return everything about it.
+    ///
+    /// The user message is recorded before the run starts, so a failed run
+    /// still leaves an honest log; the in-memory context is re-derived from
+    /// the log afterwards either way.
+    pub async fn prompt(&mut self, prompt: impl Into<Message>) -> Result<RunSummary, SessionError> {
+        let message: Message = prompt.into();
+        self.recorder.record(EntryKind::UserMessage {
+            message: message.clone(),
+        });
+
+        let mut events = vec![SessionEvent::UserMessage {
+            text: user_text(&message),
+        }];
+        let history = self.context.clone();
+        let request = self
+            .agent
+            .stream_chat(message, history)
+            .max_turns(self.max_turns)
+            .add_hook(RecorderHook(self.recorder.clone()));
+        let mut stream = request.await;
+
+        let mut output = String::new();
+        let mut usage = Usage::default();
+        // Tool names by correlation id: the result items carry the call's
+        // internal id but not its name.
+        let mut tool_names: std::collections::BTreeMap<String, String> =
+            std::collections::BTreeMap::new();
+        while let Some(item) = stream.next().await {
+            match item {
+                Ok(MultiTurnStreamItem::StreamUserItem(StreamedUserContent::ToolResult {
+                    tool_result,
+                    internal_call_id,
+                })) => {
+                    self.recorder.record(EntryKind::ToolResult {
+                        result: tool_result,
+                    });
+                    events.push(SessionEvent::ToolResult {
+                        name: tool_names
+                            .get(&internal_call_id)
+                            .cloned()
+                            .unwrap_or_default(),
+                        internal_call_id,
+                    });
+                }
+                Ok(MultiTurnStreamItem::FinalResponse(response)) => {
+                    output = response.output;
+                    usage = response.usage;
+                    events.push(SessionEvent::RunFinished {
+                        output: output.clone(),
+                        usage,
+                    });
+                }
+                Ok(item) => {
+                    if let Some(event) = stream_item_event(item, &mut tool_names) {
+                        events.push(event);
+                    }
+                }
+                Err(StreamingError::Completion(error)) => {
+                    self.reload_context()?;
+                    return Err(SessionError::Prompt(error.into()));
+                }
+                Err(StreamingError::Prompt(error)) => {
+                    self.reload_context()?;
+                    return Err(SessionError::Prompt((*error).into()));
+                }
+            }
+        }
+
+        self.reload_context()?;
+        if let Some(persist_error) = self.recorder.first_error() {
+            return Err(SessionError::Persist(persist_error));
+        }
+        Ok(RunSummary {
+            output,
+            usage,
+            events,
+        })
+    }
+
+    /// Switch the provider/model/thinking level from the next outer loop
+    /// on. Recorded as a `model_change` entry.
+    pub fn set_model(&mut self, selection: ModelSelection) -> Result<(), SessionError> {
+        selection.validate(&self.config)?;
+        self.rebuild_agent(&selection)?;
+        self.recorder.record(EntryKind::ModelChange {
+            provider: selection.provider.clone(),
+            model: selection.model.clone(),
+            thinking_level: selection.thinking_level.clone(),
+        });
+        self.selection = selection;
+        Ok(())
+    }
+
+    /// Change the thinking level without changing provider/model. `None`
+    /// clears it.
+    pub fn set_thinking_level(&mut self, level: Option<&str>) -> Result<(), SessionError> {
+        let selection = ModelSelection {
+            provider: self.selection.provider.clone(),
+            model: self.selection.model.clone(),
+            thinking_level: level.map(str::to_string),
+        };
+        self.set_model(selection)
+    }
+
+    /// The active model selection.
+    pub fn selection(&self) -> &ModelSelection {
+        &self.selection
+    }
+
+    /// The session id.
+    pub fn id(&self) -> &str {
+        &self.id
+    }
+
+    /// The session file.
+    pub fn path(&self) -> &Path {
+        &self.path
+    }
+
+    /// The projected model-visible context (what the next outer loop sees).
+    pub fn context(&self) -> &[Message] {
+        &self.context
+    }
+
+    /// Usage and cost totals, folded from the log. Re-reads the session
+    /// file so the answer is always consistent with what is on disk.
+    pub fn stats(&self) -> Result<SessionStats, SessionError> {
+        let loaded = self.store.open_path(&self.path)?;
+        Ok(self.fold_stats(&loaded.entries))
+    }
+
+    /// Re-derive the in-memory context from the log. If the log ends on a
+    /// dangling tool-use roundtrip (an interrupted run), repair it with
+    /// synthesized results — the same fix resume applies — so the context
+    /// stays replayable.
+    fn reload_context(&mut self) -> Result<(), SessionError> {
+        let loaded = self.store.open_path(&self.path)?;
+        let (_, dangling) = projection::project(&loaded.entries);
+        if let Some(dangling) = &dangling {
+            for result in projection::interrupted_results(dangling) {
+                self.recorder.record(EntryKind::ToolResult { result });
+            }
+        }
+        let reloaded = self.store.open_path(&self.path)?;
+        let (context, _) = projection::project(&reloaded.entries);
+        self.context = context;
+        Ok(())
+    }
+
+    fn fold_stats(&self, entries: &[SessionEntry]) -> SessionStats {
+        let mut stats = SessionStats::default();
+        // Attributed by the log's own model_change entries: empty until the
+        // first one appears (a log without any change entries attributes to
+        // an empty key, which carries no cost).
+        let mut current = String::new();
+        let mut per_model: Vec<ModelStats> = Vec::new();
+        for entry in entries {
+            match &entry.kind {
+                EntryKind::ModelChange {
+                    provider,
+                    model,
+                    thinking_level,
+                } => {
+                    current = self.model_key(provider, model, thinking_level.as_deref());
+                }
+                EntryKind::AssistantMessage { usage, .. } => {
+                    match per_model.iter_mut().find(|s| s.model == current) {
+                        Some(slot) => add_usage(&mut slot.usage, usage),
+                        None => per_model.push(ModelStats {
+                            model: current.clone(),
+                            usage: *usage,
+                            cost: None,
+                        }),
+                    }
+                    add_usage(&mut stats.total_usage, usage);
+                }
+                _ => continue,
+            }
+        }
+        for model_stats in &mut per_model {
+            if let Some((provider, model, _)) = split_model_key(&model_stats.model) {
+                if let Some(cost) = self
+                    .config
+                    .provider(provider)
+                    .and_then(|p| p.model(model))
+                    .and_then(|m| m.cost)
+                {
+                    let dollars = cost_of(&model_stats.usage, &cost);
+                    stats.total_cost += dollars;
+                    model_stats.cost = Some(dollars);
+                }
+            }
+        }
+        stats.per_model = per_model;
+        stats
+    }
+
+    fn model_key(&self, provider: &str, model: &str, level: Option<&str>) -> String {
+        format!(
+            "{provider}/{model}{}",
+            level.map(|l| format!(" ({l})")).unwrap_or_default()
+        )
+    }
+
+    fn rebuild_agent(&mut self, selection: &ModelSelection) -> Result<(), SessionError> {
+        let handle = (self.model_factory)(&selection.provider, &selection.model)?;
+        // `dynamic_tools` (even with an empty vec) moves the builder to
+        // its tool-configured state, keeping one concrete type through
+        // the preamble/build chain.
+        let mut builder = AgentBuilder::new(handle).dynamic_tools(self.tools.clone());
+        if let Some(preamble) = &self.preamble {
+            builder = builder.preamble(preamble.as_str());
+        }
+        self.agent = Arc::new(builder.build());
+        Ok(())
+    }
+
+    fn assemble(
+        builder: SessionBuilder,
+        writer: SessionWriter,
+        context: Vec<Message>,
+    ) -> Result<Self, SessionError> {
+        let path = writer.path().to_path_buf();
+        let id = writer.session_id().to_string();
+        let recorder = Arc::new(SessionRecorder::new(writer));
+        let mut session = Self {
+            store: builder.store,
+            config: builder.config,
+            selection: builder.selection,
+            preamble: builder.preamble,
+            tools: builder.tools,
+            max_turns: builder.max_turns,
+            model_factory: builder.model_factory,
+            agent: Arc::new(AgentBuilder::new(ModelHandle::new(placeholder_model())).build()),
+            recorder,
+            context,
+            path,
+            id,
+        };
+        let selection = session.selection.clone();
+        session.rebuild_agent(&selection)?;
+        Ok(session)
+    }
+}
+
+/// Map an engine item to a session event; `None` means "not surfaced in
+/// v1".
+fn stream_item_event(
+    item: MultiTurnStreamItem,
+    tool_names: &mut std::collections::BTreeMap<String, String>,
+) -> Option<SessionEvent> {
+    use rig_agent::streaming::StreamedAssistantContent as A;
+    match item {
+        MultiTurnStreamItem::StreamAssistantItem(A::Text(text)) => {
+            Some(SessionEvent::TextDelta { text: text.text })
+        }
+        MultiTurnStreamItem::StreamAssistantItem(A::ReasoningDelta { id, reasoning }) => {
+            Some(SessionEvent::ReasoningDelta { id, reasoning })
+        }
+        MultiTurnStreamItem::StreamAssistantItem(A::ToolCall {
+            tool_call,
+            internal_call_id,
+        }) => {
+            tool_names.insert(internal_call_id.clone(), tool_call.function.name.clone());
+            Some(SessionEvent::ToolCall {
+                name: tool_call.function.name,
+                call_id: tool_call.id,
+                arguments: Some(tool_call.function.arguments.to_string()),
+                internal_call_id,
+            })
+        }
+        MultiTurnStreamItem::StreamAssistantItem(A::Unknown(item)) => {
+            Some(SessionEvent::NativeItem { item })
+        }
+        MultiTurnStreamItem::StreamAssistantItem(_) => None,
+        MultiTurnStreamItem::ToolExecutionCommitted { .. } => None,
+        MultiTurnStreamItem::StreamUserItem(_) => None,
+        MultiTurnStreamItem::CompletionCall(call) => Some(SessionEvent::CompletionCall {
+            input_tokens: call.usage.input_tokens,
+            output_tokens: call.usage.output_tokens,
+        }),
+        MultiTurnStreamItem::ModelTurnRetried { turn } => Some(SessionEvent::TurnRetried { turn }),
+        MultiTurnStreamItem::FinalResponse(_) => None, // handled by the caller
+        _ => None,
+    }
+}
+
+/// The text of a user message (joined text parts).
+fn user_text(message: &Message) -> String {
+    let Message::User { content } = message else {
+        return String::new();
+    };
+    content
+        .iter()
+        .filter_map(|part| match part {
+            rig_core::message::UserContent::Text(text) => Some(text.text.as_str()),
+            _ => None,
+        })
+        .collect()
+}
+
+fn add_usage(target: &mut Usage, source: &Usage) {
+    target.input_tokens += source.input_tokens;
+    target.output_tokens += source.output_tokens;
+    target.total_tokens += source.total_tokens;
+    target.cached_input_tokens += source.cached_input_tokens;
+    target.cache_creation_input_tokens += source.cache_creation_input_tokens;
+}
+
+fn cost_of(usage: &Usage, cost: &tabit_config::Cost) -> f64 {
+    (usage.input_tokens as f64 / 1_000_000.0) * cost.input
+        + (usage.output_tokens as f64 / 1_000_000.0) * cost.output
+        + (usage.cached_input_tokens as f64 / 1_000_000.0) * cost.cache_read
+        + (usage.cache_creation_input_tokens as f64 / 1_000_000.0) * cost.cache_write
+}
+
+fn split_model_key(key: &str) -> Option<(&str, &str, Option<&str>)> {
+    let (model_part, level) = match key.split_once(" (") {
+        Some((model, rest)) => (model, Some(rest.strip_suffix(')').unwrap_or(rest))),
+        None => (key, None),
+    };
+    let (provider, model) = model_part.split_once('/')?;
+    Some((provider, model, level))
+}
+
+/// A model that is never called: every assembled session rebuilds its real
+/// agent from config immediately after construction, so this exists only
+/// to satisfy the field initializer.
+fn placeholder_model() -> impl rig_core::completion::CompletionModel {
+    UnreachableModel
+}
+
+/// See [`placeholder_model`].
+struct UnreachableModel;
+
+impl rig_core::completion::CompletionModel for UnreachableModel {
+    fn completion(
+        &self,
+        _request: rig_core::completion::CompletionRequest,
+    ) -> impl std::future::Future<
+        Output = Result<
+            rig_core::completion::CompletionResponse,
+            rig_core::completion::CompletionError,
+        >,
+    > + rig_core::wasm_compat::WasmCompatSend {
+        std::future::ready(Err(internal_placeholder_error()))
+    }
+
+    fn stream(
+        &self,
+        _request: rig_core::completion::CompletionRequest,
+    ) -> impl std::future::Future<
+        Output = Result<
+            rig_core::streaming::StreamingCompletionResponse,
+            rig_core::completion::CompletionError,
+        >,
+    > + rig_core::wasm_compat::WasmCompatSend {
+        std::future::ready(Err(internal_placeholder_error()))
+    }
+}
+
+fn internal_placeholder_error() -> rig_core::completion::CompletionError {
+    rig_core::completion::CompletionError::ProviderError(
+        "internal invariant violated: placeholder model was called".to_string(),
+    )
+}
+
+/// A neutral single item for the `OneOrMany::many` fallback - unreachable
+/// in practice (only called with a non-empty vec), but `OneOrMany` has no
+/// empty constructor.
+fn placeholder_user_content() -> rig_core::message::UserContent {
+    rig_core::message::UserContent::ToolResult(rig_core::message::ToolResult {
+        id: String::new(),
+        call_id: None,
+        content: rig_core::OneOrMany::one(rig_core::message::ToolResultContent::text("")),
+    })
+}
