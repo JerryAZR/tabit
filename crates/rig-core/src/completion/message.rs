@@ -629,6 +629,20 @@ pub enum ImageDetail {
 // ================================================================
 
 impl Message {
+    /// The message's full text when it is a user message carrying exactly one
+    /// text item; `None` otherwise. The inverse of
+    /// [`Message::user`](Self::user).
+    pub fn user_text(&self) -> Option<String> {
+        let Message::User { content } = self else {
+            return None;
+        };
+        let mut items = content.iter();
+        match (items.next(), items.next()) {
+            (Some(UserContent::Text(Text { text, .. })), None) => Some(text.clone()),
+            _ => None,
+        }
+    }
+
     /// This helper method is primarily used to extract the first string prompt from a `Message`.
     /// Since `Message` might have more than just text content, we need to find the first text.
     pub fn rag_text(&self) -> Option<String> {

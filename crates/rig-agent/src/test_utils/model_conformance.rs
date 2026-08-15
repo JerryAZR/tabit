@@ -1829,7 +1829,8 @@ where
             }
             MultiTurnStreamItem::StreamAssistantItem(_)
             | MultiTurnStreamItem::ToolExecutionCommitted { .. }
-            | MultiTurnStreamItem::ModelTurnRetried { .. } => {}
+            | MultiTurnStreamItem::ModelTurnRetried { .. }
+            | MultiTurnStreamItem::Steer { .. } => {}
         }
     }
     let result = final_response.ok_or_else(|| {

@@ -845,6 +845,72 @@ impl AgentRun {
         }
     }
 
+    /// Whether the machine sits at a point where steering can change what the
+    /// next model call sees: after a tool batch committed its results, or
+    /// after a **final** model turn that would otherwise end the run. The
+    /// run's opening state is deliberately *not* a steering point — the
+    /// initial prompt is the run's input, and messages queued before it are
+    /// the caller's to fold into that input. Steering between a tool-calling
+    /// turn and its execution is not a point either — the tools run first.
+    pub fn ready_for_steering(&self) -> bool {
+        match &self.state {
+            RunState::PreparingRequest => true,
+            RunState::AwaitingAdvance(turn) => !turn.has_tool_calls,
+            _ => false,
+        }
+    }
+
+    /// Inject user messages the model sees as separate user turns in the next
+    /// model call. Legal exactly at the points described by
+    /// [`ready_for_steering`](Self::ready_for_steering); at an
+    /// `AwaitingAdvance` point the pending final turn is committed to history
+    /// first, so a steered run continues instead of finalizing.
+    ///
+    /// Each message keeps its own identity in the request (one steer, one
+    /// user message). Appending is unconditional; the model-call budget
+    /// gates only the next send, surfacing as `MaxTurnsError` there.
+    pub fn steer(&mut self, messages: Vec<Message>) -> Result<(), PromptError> {
+        if !matches!(&self.state, RunState::PreparingRequest)
+            && !matches!(&self.state, RunState::AwaitingAdvance(turn) if !turn.has_tool_calls)
+        {
+            return Err(self.protocol_violation(
+                "steer called outside a steering point (after a tool batch, or \
+                 after a final model turn)",
+            ));
+        }
+        match std::mem::replace(&mut self.state, RunState::Failed) {
+            RunState::PreparingRequest => {
+                self.new_messages.extend(messages);
+                self.state = RunState::PreparingRequest;
+                Ok(())
+            }
+            RunState::AwaitingAdvance(turn) => {
+                let TurnState {
+                    message_id, items, ..
+                } = *turn;
+                // Commit the pending final turn exactly as `next_step`
+                // would: skip turns with no effective content.
+                if let Some(choice) = OneOrMany::from_iter_optional(items)
+                    && !is_empty_assistant_turn(&choice)
+                {
+                    self.new_messages.push(Message::Assistant {
+                        id: message_id,
+                        content: choice,
+                    });
+                }
+                self.new_messages.extend(messages);
+                self.state = RunState::PreparingRequest;
+                Ok(())
+            }
+            // Unreachable behind the state guard above; kept loud rather
+            // than swapping in a panic if a future state is added.
+            state => {
+                self.state = state;
+                Err(self.protocol_violation("steer called outside a steering point"))
+            }
+        }
+    }
+
     /// Feed the model's response for the pending [`AgentRunStep::CallModel`].
     ///
     /// Records the completion call and aggregates usage, then validates the

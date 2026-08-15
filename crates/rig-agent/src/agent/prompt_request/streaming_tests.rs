@@ -5466,3 +5466,103 @@ async fn streaming_empty_final_turn_logs_a_warning_under_a_subscriber() {
         "expected the textless-turn warning to be logged, got: {logged}"
     );
 }
+
+/// A steering source that becomes pending when the test arms it — steering
+/// is only ever submitted while a run is in flight, so the queue starts
+/// empty and the test flips `armed` mid-run (deterministically, from the
+/// item stream the test itself drives).
+struct ArmedSteers {
+    armed: std::sync::atomic::AtomicBool,
+    pending: std::sync::Mutex<Vec<Message>>,
+}
+
+impl ArmedSteers {
+    fn new() -> Arc<Self> {
+        Arc::new(Self {
+            armed: std::sync::atomic::AtomicBool::new(false),
+            pending: std::sync::Mutex::new(Vec::new()),
+        })
+    }
+
+    fn submit(&self, text: &str) {
+        self.pending
+            .lock()
+            .expect("steer lock")
+            .push(Message::user(text));
+    }
+
+    fn arm(&self) {
+        self.armed.store(true, std::sync::atomic::Ordering::SeqCst);
+    }
+}
+
+impl crate::agent::SteeringSource for ArmedSteers {
+    fn has_pending(&self) -> bool {
+        self.armed.load(std::sync::atomic::Ordering::SeqCst)
+            && !self.pending.lock().expect("steer lock").is_empty()
+    }
+
+    fn drain(&self) -> Vec<Message> {
+        std::mem::take(&mut self.pending.lock().expect("steer lock"))
+    }
+}
+
+#[tokio::test]
+async fn steering_after_a_final_turn_gets_another_model_call() {
+    let model = MockCompletionModel::from_stream_turns([
+        vec![
+            MockStreamEvent::text("first answer"),
+            MockStreamEvent::final_response(Usage::new()),
+        ],
+        vec![
+            MockStreamEvent::text("steered answer"),
+            MockStreamEvent::final_response(Usage::new()),
+        ],
+    ]);
+    let agent = Arc::new(AgentBuilder::new(model.clone()).build());
+    let steers = ArmedSteers::new();
+
+    let stream = StreamingPromptRequest::new(agent, "go")
+        .max_turns(4)
+        .steering(steers.clone())
+        .await;
+    let mut items = Vec::new();
+    let mut submitted = false;
+    let mut stream = Box::pin(stream);
+    while let Some(item) = stream.next().await {
+        let item = item.expect("stream item");
+        // Submit the steer while the first turn is streaming — before its
+        // turn end can drain it.
+        if !submitted
+            && matches!(
+                &item,
+                MultiTurnStreamItem::StreamAssistantItem(
+                    crate::streaming::StreamedAssistantContent::Text(_),
+                )
+            )
+        {
+            steers.submit("and also?");
+            steers.arm();
+            submitted = true;
+        }
+        items.push(item);
+    }
+
+    assert_eq!(model.request_count(), 2, "the steer drove a second call");
+    let steered: Vec<&String> = items
+        .iter()
+        .filter_map(|item| match item {
+            MultiTurnStreamItem::Steer { text } => Some(text),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(steered, [&"and also?".to_string()]);
+    let final_text = items
+        .iter()
+        .find_map(|item| match item {
+            MultiTurnStreamItem::FinalResponse(response) => Some(response.output.clone()),
+            _ => None,
+        })
+        .expect("final response");
+    assert_eq!(final_text, "steered answer");
+}

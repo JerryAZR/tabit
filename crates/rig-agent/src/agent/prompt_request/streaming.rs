@@ -119,6 +119,15 @@ pub enum MultiTurnStreamItem {
     /// The final result from the stream: the unified [`PromptResponse`] shared
     /// with the blocking surface.
     FinalResponse(PromptResponse),
+    /// A steering message the user queued while the run was in flight,
+    /// injected at a tool-use roundtrip or after a final model turn. This is
+    /// an observation event: the message is already part of the model's
+    /// context (and of the final response's history) — session layers record
+    /// it as its own user message.
+    Steer {
+        /// The message text.
+        text: String,
+    },
 }
 
 /// Build the unified [`PromptResponse`] for the streaming surface from the
@@ -316,6 +325,15 @@ impl StreamingPromptRequest {
         H: AgentHook + 'static,
     {
         self.runner = self.runner.add_hook(hook);
+        self
+    }
+
+    /// Attach the steering source whose queued user messages join the run at
+    /// tool-use roundtrips and after final model turns (each surfaced as a
+    /// [`Steer`](MultiTurnStreamItem::Steer) item). Messages beyond the
+    /// model-call budget stay queued in the source.
+    pub fn steering(mut self, steering: Arc<dyn crate::agent::runner::SteeringSource>) -> Self {
+        self.runner = self.runner.steering(steering);
         self
     }
 

@@ -57,6 +57,7 @@ use super::{
 use rig_core::{
     memory::ConversationMemory,
     message::{ToolCall, ToolChoice, UserContent},
+    wasm_compat::{WasmCompatSend, WasmCompatSync},
 };
 
 use crate::{
@@ -185,6 +186,21 @@ pub(crate) fn completion_call_decision(action: CompletionCallAction) -> Completi
     }
 }
 
+/// Where the driver drains queued steering messages: user input that joins
+/// the run at a tool-use roundtrip or after a final model turn (see
+/// [`AgentRun::steer`](crate::agent::run::AgentRun::steer)).
+///
+/// The driver polls `has_pending` at each steering point and only then calls
+/// `drain` (all-or-nothing: messages either enter the next model call or stay
+/// queued). The contract is single-consumer — one driver per source — so the
+/// two calls cannot race.
+pub trait SteeringSource: WasmCompatSend + WasmCompatSync {
+    /// Whether any steering message is queued.
+    fn has_pending(&self) -> bool;
+    /// Take every queued steering message, in the order they arrived.
+    fn drain(&self) -> Vec<Message>;
+}
+
 /// A hook-aware driver over [`AgentRun`].
 ///
 /// Construct one from an [`Agent`] with [`Agent::runner`], attach hooks with
@@ -224,6 +240,9 @@ pub struct AgentRunner {
     pub(crate) conversation_id: Option<String>,
     pub(crate) hooks: HookStack,
     pub(crate) error_usage: Option<Arc<Mutex<Usage>>>,
+    /// Queued user input injected at steering points; `None` disables
+    /// steering for this request.
+    pub(crate) steering: Option<Arc<dyn SteeringSource>>,
 }
 
 impl AgentRunner {
@@ -257,7 +276,16 @@ impl AgentRunner {
             conversation_id: agent.default_conversation_id.clone(),
             hooks: agent.hooks.clone(),
             error_usage: None,
+            steering: None,
         }
+    }
+
+    /// Attach the steering source whose queued messages join the run at
+    /// tool-use roundtrips and after final model turns (budget permitting —
+    /// messages that do not fit stay queued in the source).
+    pub fn steering(mut self, steering: Arc<dyn SteeringSource>) -> Self {
+        self.steering = Some(steering);
+        self
     }
 
     /// Append a hook to the stack (on top of any the agent already carries).

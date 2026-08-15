@@ -162,6 +162,26 @@ pub(crate) fn store_error_usage(runner: &AgentRunner, run: &AgentRun) {
     }
 }
 
+/// Deliver queued steering to the run's history at a turn end. No budget
+/// check: appending to history is unconditional — the max-turn budget
+/// gates only the next model call, discovered (and reported as
+/// `MaxTurnsError`) when the loop tries to send. Returns the steered
+/// texts for the driver to surface.
+fn drain_steers(runner: &AgentRunner, run: &mut AgentRun) -> Result<Vec<String>, PromptError> {
+    let Some(steering) = &runner.steering else {
+        return Ok(Vec::new());
+    };
+    if !run.ready_for_steering() || !steering.has_pending() {
+        return Ok(Vec::new());
+    }
+    let messages = steering.drain();
+    run.steer(messages.clone())?;
+    Ok(messages
+        .iter()
+        .filter_map(|message| message.user_text())
+        .collect())
+}
+
 /// The single agent drive loop, shared by the blocking and streaming surfaces.
 ///
 /// Owns the medium-independent loop — `next_step` dispatch, the `CompletionCall`
@@ -337,6 +357,19 @@ where
                         break 'outer;
                     }
                     pending_tool_snapshot = Some(turn_tool_snapshot);
+                    // Turn end: deliver steering to history (a turn with
+                    // tool calls is not steerable yet — its tools run
+                    // first; the drain below the tool arm catches those).
+                    for text in match drain_steers(&runner, &mut run) {
+                        Ok(texts) => texts,
+                        Err(err) => {
+                            store_error_usage(&runner, &run);
+                            yield Err(Box::new(err).into());
+                            break 'outer;
+                        }
+                    } {
+                        yield Ok(DriveItem::Item(MultiTurnStreamItem::Steer { text }));
+                    }
                 }
                 AgentRunStep::CallTools { calls } => {
                     let Some(tool_snapshot) = pending_tool_snapshot.take() else {
@@ -369,6 +402,19 @@ where
                         store_error_usage(&runner, &run);
                         yield Err(err);
                         break 'outer;
+                    }
+                    // Turn end: results are in history; steers append
+                    // after them, before the loop decides whether another
+                    // model call fits the budget.
+                    for text in match drain_steers(&runner, &mut run) {
+                        Ok(texts) => texts,
+                        Err(err) => {
+                            store_error_usage(&runner, &run);
+                            yield Err(Box::new(err).into());
+                            break 'outer;
+                        }
+                    } {
+                        yield Ok(DriveItem::Item(MultiTurnStreamItem::Steer { text }));
                     }
                 }
                 AgentRunStep::Done(response) => {

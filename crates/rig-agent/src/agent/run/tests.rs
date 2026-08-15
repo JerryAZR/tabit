@@ -1454,3 +1454,72 @@ fn streamed_skip_under_tool_choice_none_fails() {
 
     assert!(matches!(err, PromptError::UnknownToolCall { .. }));
 }
+
+#[test]
+fn steer_past_the_budget_appends_then_reports_max_turns() {
+    // Delivery-to-history is unconditional; the budget gates only the next
+    // send — so the steer is in history and the run stops with
+    // MaxTurnsError when it tries to loop back.
+    let mut run = AgentRun::new("first").max_turns(1);
+    run.next_step().expect("call");
+    run.model_response(text_turn("final")).expect("response");
+    run.steer(vec![Message::user("and also?")]).expect("append");
+    match run.next_step() {
+        Err(PromptError::MaxTurnsError { chat_history, .. }) => {
+            let steers: Vec<String> = chat_history
+                .iter()
+                .filter_map(|m| m.user_text())
+                .filter(|t| t == "and also?")
+                .collect();
+            assert_eq!(steers.len(), 1, "the steer lives in history");
+        }
+        other => panic!("expected MaxTurnsError, got {other:?}"),
+    }
+}
+
+#[test]
+fn steer_after_a_final_turn_continues_the_run() {
+    let mut run = AgentRun::new("first").max_turns(3);
+    run.next_step().expect("call");
+    run.model_response(text_turn("final answer"))
+        .expect("response");
+    // The turn would finalize; steering keeps it going.
+    assert!(run.ready_for_steering());
+    run.steer(vec![Message::user("and also?")])
+        .expect("steer at final");
+    run.next_step().expect("second call");
+    run.model_response(text_turn("answered twice"))
+        .expect("response");
+    let AgentRunStep::Done(response) = run.next_step().expect("step") else {
+        panic!("expected Done")
+    };
+    let texts: Vec<String> = response
+        .messages
+        .as_deref()
+        .unwrap_or_default()
+        .iter()
+        .filter_map(|m| m.user_text())
+        .collect();
+    assert_eq!(texts, ["first".to_string(), "and also?".to_string()]);
+    // The finalized turn is in history ahead of the steer.
+    let assistant = response
+        .messages
+        .as_deref()
+        .unwrap_or_default()
+        .iter()
+        .any(|m| matches!(m, Message::Assistant { .. }));
+    assert!(assistant);
+}
+
+#[test]
+fn steer_rejected_between_a_tool_turn_and_its_execution() {
+    let mut run = AgentRun::new("do it").max_turns(3);
+    run.next_step().expect("call");
+    run.model_response(tool_call_turn("t1", "add"))
+        .expect("tool turn");
+    assert!(!run.ready_for_steering(), "tools must run first");
+    match run.steer(vec![Message::user("wait")]) {
+        Err(PromptError::PromptCancelled { .. }) => {}
+        other => panic!("expected protocol violation, got {other:?}"),
+    }
+}

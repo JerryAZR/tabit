@@ -133,4 +133,4 @@ pub use prompt_request::{
 };
 pub use rig_core::message::Text;
 pub use run::{AgentRun, AgentRunStep, ModelTurn, ModelTurnOutcome, OutputMode, PendingToolCall};
-pub use runner::AgentRunner;
+pub use runner::{AgentRunner, SteeringSource};
