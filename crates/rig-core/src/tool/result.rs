@@ -798,7 +798,10 @@ mod migrated_tests {
                 "the tool failed",
             ),
         ] {
-            assert_eq!(error.redact_model_feedback().model_feedback(), Some(feedback));
+            assert_eq!(
+                error.redact_model_feedback().model_feedback(),
+                Some(feedback)
+            );
         }
     }
 

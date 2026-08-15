@@ -409,7 +409,9 @@ where
                 Box::pin(async move {
                     crate::wasm_compat::timeout(idle_timeout, body)
                         .await
-                        .unwrap_or_else(|_elapsed| Err(http_client::Error::IdleTimeout(idle_timeout)))
+                        .unwrap_or_else(|_elapsed| {
+                            Err(http_client::Error::IdleTimeout(idle_timeout))
+                        })
                 })
             }))
         }
@@ -458,8 +460,7 @@ where
 
             // Guard each chunk with the idle timeout so a stalled stream fails
             // loudly instead of hanging forever.
-            Ok(response
-                .map(|stream| http_client::idle_timeout_stream(stream, idle_timeout)))
+            Ok(response.map(|stream| http_client::idle_timeout_stream(stream, idle_timeout)))
         }
     }
 }
@@ -1049,9 +1050,11 @@ mod tests {
             .expect("build client");
 
         assert_eq!(
-            client
-                .ext()
-                .build_uri("https://api.anthropic.com/", "/v1/messages", Transport::Http),
+            client.ext().build_uri(
+                "https://api.anthropic.com/",
+                "/v1/messages",
+                Transport::Http
+            ),
             "https://api.anthropic.com/v1/messages",
             "a trailing slash must not be doubled"
         );
@@ -1175,10 +1178,8 @@ mod tests {
     #[tokio::test]
     async fn verify_maps_unlisted_non_success_status_to_http_error() {
         let body = r#"{"error":{"message":"not found"}}"#;
-        let http_backend = RecordingHttpClient::with_error_response(
-            http::StatusCode::NOT_FOUND,
-            body,
-        );
+        let http_backend =
+            RecordingHttpClient::with_error_response(http::StatusCode::NOT_FOUND, body);
         let client = openai::Client::builder()
             .api_key("test-key")
             .http_client(http_backend)
@@ -1200,10 +1201,7 @@ mod tests {
 
     #[tokio::test]
     async fn verify_accepts_any_success_status() {
-        let http_backend = RecordingHttpClient::with_error_response(
-            http::StatusCode::CREATED,
-            "",
-        );
+        let http_backend = RecordingHttpClient::with_error_response(http::StatusCode::CREATED, "");
         let client = openai::Client::builder()
             .api_key("test-key")
             .http_client(http_backend)
@@ -1220,9 +1218,7 @@ mod tests {
     /// status-aware retries (with server-requested delays) and idle timeouts.
     mod transport {
         use super::*;
-        use crate::http_client::{
-            self, HttpClientExt, LazyBody, MultipartForm, StreamingResponse,
-        };
+        use crate::http_client::{self, HttpClientExt, LazyBody, MultipartForm, StreamingResponse};
         use crate::wasm_compat::WasmCompatSend;
         use bytes::Bytes;
         use futures::StreamExt;
@@ -1249,7 +1245,10 @@ mod tests {
         }
 
         impl ProviderBuilder for TestExtBuilder {
-            type Extension<H> = TestExt where H: HttpClientExt;
+            type Extension<H>
+                = TestExt
+            where
+                H: HttpClientExt;
             type ApiKey = BearerAuth;
 
             const BASE_URL: &'static str = "https://transport.invalid";
@@ -1299,10 +1298,7 @@ mod tests {
         }
 
         impl ScriptedTransport {
-            fn new(
-                unary: Vec<UnaryOutcome>,
-                streaming: Vec<StreamOutcome>,
-            ) -> Self {
+            fn new(unary: Vec<UnaryOutcome>, streaming: Vec<StreamOutcome>) -> Self {
                 Self {
                     unary: Arc::new(Mutex::new(unary.into())),
                     streaming: Arc::new(Mutex::new(streaming.into())),
@@ -1381,7 +1377,9 @@ mod tests {
             fn send<T, U>(
                 &self,
                 req: Request<T>,
-            ) -> impl Future<Output = http_client::Result<Response<LazyBody<U>>>> + WasmCompatSend + 'static
+            ) -> impl Future<Output = http_client::Result<Response<LazyBody<U>>>>
+            + WasmCompatSend
+            + 'static
             where
                 T: Into<Bytes>,
                 T: WasmCompatSend,
@@ -1400,7 +1398,11 @@ mod tests {
 
                 async move {
                     match outcome {
-                        Some(UnaryOutcome::Response { status, headers, body }) => {
+                        Some(UnaryOutcome::Response {
+                            status,
+                            headers,
+                            body,
+                        }) => {
                             if !status.is_success() {
                                 return Err(http_client::Error::NonSuccessResponse {
                                     status,
@@ -1408,8 +1410,7 @@ mod tests {
                                     headers,
                                 });
                             }
-                            let lazy: LazyBody<U> =
-                                Box::pin(async move { Ok(U::from(body)) });
+                            let lazy: LazyBody<U> = Box::pin(async move { Ok(U::from(body)) });
                             Response::builder()
                                 .status(status)
                                 .body(lazy)
@@ -1430,12 +1431,14 @@ mod tests {
             fn send_multipart<U>(
                 &self,
                 _req: Request<MultipartForm>,
-            ) -> impl Future<Output = http_client::Result<Response<LazyBody<U>>>> + WasmCompatSend + 'static
+            ) -> impl Future<Output = http_client::Result<Response<LazyBody<U>>>>
+            + WasmCompatSend
+            + 'static
             where
                 U: From<Bytes>,
                 U: WasmCompatSend + 'static,
             {
-                async { Err(http_client::Error::StreamEnded) }
+                std::future::ready(Err(http_client::Error::StreamEnded))
             }
 
             fn send_streaming<T>(
@@ -1530,7 +1533,11 @@ mod tests {
             let body = response.into_body().await.expect("body resolves");
 
             assert_eq!(body, Bytes::from_static(b"finally"));
-            assert_eq!(backend.unary_calls(), 2, "one retry after the initial attempt");
+            assert_eq!(
+                backend.unary_calls(),
+                2,
+                "one retry after the initial attempt"
+            );
             let bodies = backend.unary_bodies();
             assert_eq!(bodies.len(), 2);
             assert_eq!(
@@ -1558,7 +1565,10 @@ mod tests {
                 .expect("400 must fail");
 
             assert_eq!(backend.unary_calls(), 1, "400 must not be re-attempted");
-            assert_eq!(error.non_success_status(), Some(http::StatusCode::BAD_REQUEST));
+            assert_eq!(
+                error.non_success_status(),
+                Some(http::StatusCode::BAD_REQUEST)
+            );
             assert_eq!(error.non_success_body(), Some("bad input"));
             assert_eq!(
                 error
@@ -1716,7 +1726,11 @@ mod tests {
                 .err()
                 .expect("all attempts fail");
 
-            assert_eq!(backend.unary_calls(), 3, "2 retries after the initial attempt");
+            assert_eq!(
+                backend.unary_calls(),
+                3,
+                "2 retries after the initial attempt"
+            );
             assert_eq!(error.non_success_body(), Some("three"));
         }
 
@@ -1778,7 +1792,10 @@ mod tests {
                 other => panic!("expected the first chunk to pass through, got {other:?}"),
             }
             assert!(
-                matches!(stream.next().await, Some(Err(http_client::Error::StreamEnded))),
+                matches!(
+                    stream.next().await,
+                    Some(Err(http_client::Error::StreamEnded))
+                ),
                 "the mid-stream error surfaces verbatim"
             );
             assert_eq!(

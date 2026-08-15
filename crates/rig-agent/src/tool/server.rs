@@ -598,8 +598,8 @@ mod tests {
             MockSubtractTool, MockToolIndex,
         },
         tool::{
-            DynamicTool, PortableDynamicTool, Tool, ToolContext, ToolEmbedding,
-            ToolExecutionError, ToolOutput, ToolSet,
+            DynamicTool, PortableDynamicTool, Tool, ToolContext, ToolEmbedding, ToolExecutionError,
+            ToolOutput, ToolSet,
             server::{ToolServer, ToolServerError, ToolServerHandle},
         },
     };
@@ -1294,11 +1294,15 @@ mod tests {
             ["builder_dynamic", "builder_portable"]
         );
         assert_eq!(
-            execute_tool(&handle, "builder_dynamic", "{}").await.unwrap(),
+            execute_tool(&handle, "builder_dynamic", "{}")
+                .await
+                .unwrap(),
             "builder_dynamic"
         );
         assert_eq!(
-            execute_tool(&handle, "builder_portable", "{}").await.unwrap(),
+            execute_tool(&handle, "builder_portable", "{}")
+                .await
+                .unwrap(),
             "builder_portable"
         );
     }
@@ -1323,7 +1327,9 @@ mod tests {
             "handle_dynamic"
         );
         assert_eq!(
-            execute_tool(&handle, "handle_portable", "{}").await.unwrap(),
+            execute_tool(&handle, "handle_portable", "{}")
+                .await
+                .unwrap(),
             "handle_portable"
         );
     }

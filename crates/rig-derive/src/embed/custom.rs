@@ -132,17 +132,14 @@ mod tests {
     fn group_wrapped_string_literals_resolve_to_the_path() {
         // Invisible `Delimiter::None` groups (how macro-passed expressions
         // reach the derive) cannot be typed in source text, so build one.
-        let mut input =
-            syn::parse_str::<syn::DeriveInput>(r#"struct S { #[embed(embed_with = "my_embed")] a: String }"#)
-                .expect("test input parses");
+        let mut input = syn::parse_str::<syn::DeriveInput>(
+            r#"struct S { #[embed(embed_with = "my_embed")] a: String }"#,
+        )
+        .expect("test input parses");
         let syn::Data::Struct(ref mut data_struct) = input.data else {
             panic!("test input must be a struct");
         };
-        let field = data_struct
-            .fields
-            .iter_mut()
-            .next()
-            .expect("one field");
+        let field = data_struct.fields.iter_mut().next().expect("one field");
         for attribute in &mut field.attrs {
             if !attribute.path().is_ident(EMBED) {
                 continue;
@@ -187,7 +184,9 @@ mod tests {
         let error = custom_fields(r#"struct S { #[embed(bogus = "x")] a: String }"#)
             .expect_err("unknown attribute key must fail");
         assert!(
-            error.to_string().contains("unknown embedding field attribute `bogus`"),
+            error
+                .to_string()
+                .contains("unknown embedding field attribute `bogus`"),
             "unexpected error: {error}"
         );
     }
@@ -197,16 +196,17 @@ mod tests {
         let error = custom_fields(r#"struct S { #[embed(embed_with = 42)] a: String }"#)
             .expect_err("a non-string value must fail");
         assert!(
-            error.to_string().contains("expected embed_with attribute to be a string"),
+            error
+                .to_string()
+                .contains("expected embed_with attribute to be a string"),
             "unexpected error: {error}"
         );
     }
 
     #[test]
     fn string_literal_suffixes_are_rejected() {
-        let error =
-            custom_fields(r#"struct S { #[embed(embed_with = "my_embed"sfx)] a: String }"#)
-                .expect_err("a suffixed string literal must fail");
+        let error = custom_fields(r#"struct S { #[embed(embed_with = "my_embed"sfx)] a: String }"#)
+            .expect_err("a suffixed string literal must fail");
         assert!(
             error.to_string().contains("unexpected suffix `sfx`"),
             "unexpected error: {error}"
@@ -219,18 +219,12 @@ mod tests {
         // empty `Delimiter::None` group — not expressible in source text. The
         // non-empty check sees the group, so parsing must surface it as an
         // error rather than silently reporting the field as not custom.
-        let mut input = syn::parse_str::<syn::DeriveInput>(
-            r#"struct S { #[embed()] a: String }"#,
-        )
-        .expect("test input parses");
+        let mut input = syn::parse_str::<syn::DeriveInput>(r#"struct S { #[embed()] a: String }"#)
+            .expect("test input parses");
         let syn::Data::Struct(ref mut data_struct) = input.data else {
             panic!("test input must be a struct");
         };
-        let field = data_struct
-            .fields
-            .iter_mut()
-            .next()
-            .expect("one field");
+        let field = data_struct.fields.iter_mut().next().expect("one field");
         for attribute in &mut field.attrs {
             if let syn::Meta::List(list) = &mut attribute.meta {
                 let empty = proc_macro2::Group::new(proc_macro2::Delimiter::None, quote::quote!());
@@ -241,9 +235,6 @@ mod tests {
         let error = custom_embed_fields(data_struct)
             .map(|fields| fields.len())
             .expect_err("an empty invisible group must fail, not skip");
-        assert!(
-            !error.to_string().is_empty(),
-            "unexpected error: {error}"
-        );
+        assert!(!error.to_string().is_empty(), "unexpected error: {error}");
     }
 }

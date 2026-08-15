@@ -151,12 +151,16 @@ mod tests {
         let error = marker("fn f(#[rig(bogus)] a: &mut T) {}")
             .err()
             .expect("unknown marker rejected");
-        assert!(error.to_string().contains("only supported parameter marker"));
+        assert!(
+            error
+                .to_string()
+                .contains("only supported parameter marker")
+        );
     }
 
     #[test]
     fn plain_parameters_carry_no_marker() {
-        assert_eq!(marker("fn f(a: i32) {}").expect("unmarked parses"), false);
+        assert!(!marker("fn f(a: i32) {}").expect("unmarked parses"));
     }
 
     fn wrapped(inner: &str, group: bool) -> Type {
@@ -199,8 +203,6 @@ mod tests {
         // A transparent wrapper around an explicitly marked shared reference
         // is reported as a context (with the mutability checked separately).
         let marked = wrapped("&mut Context", false);
-        assert!(
-            is_tool_context_parameter(&marked, true, &refs).expect("paren classified")
-        );
+        assert!(is_tool_context_parameter(&marked, true, &refs).expect("paren classified"));
     }
 }

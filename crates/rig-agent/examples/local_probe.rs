@@ -25,8 +25,10 @@ fn show(tag: &str, response: &rig_core::completion::CompletionResponse) {
         .choice
         .iter()
         .any(|c| matches!(c, rig_core::message::AssistantContent::Reasoning(_)));
-    println!("[{tag}] text={text:?} reasoning_present={reasoning} usage={:?}/{:?}", 
-        response.usage.input_tokens, response.usage.output_tokens);
+    println!(
+        "[{tag}] text={text:?} reasoning_present={reasoning} usage={:?}/{:?}",
+        response.usage.input_tokens, response.usage.output_tokens
+    );
 }
 
 #[tokio::main]
@@ -38,7 +40,11 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         .build()?;
     let model = client.completion_model(MODEL);
     let response = model
-        .completion(model.completion_request("Reply with exactly: CHAT-OK").build())
+        .completion(
+            model
+                .completion_request("Reply with exactly: CHAT-OK")
+                .build(),
+        )
         .await?;
     show("openai-chat", &response);
 
@@ -49,7 +55,11 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         .build()?;
     let model = client.completion_model(MODEL);
     let response = model
-        .completion(model.completion_request("Reply with exactly: RESP-OK").build())
+        .completion(
+            model
+                .completion_request("Reply with exactly: RESP-OK")
+                .build(),
+        )
         .await?;
     show("openai-responses", &response);
 

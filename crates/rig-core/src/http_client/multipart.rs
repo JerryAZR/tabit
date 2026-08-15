@@ -314,23 +314,22 @@ mod tests {
         let ct = b"Content-Type: application/octet-stream";
         assert!(body.windows(ct.len()).any(|w| w == ct));
         assert!(body.windows(PAYLOAD.len()).any(|w| w == PAYLOAD));
-        assert!(body.windows(b"\r\n\r\n".len() + PAYLOAD.len()).any(|w| {
-            w.ends_with(PAYLOAD) && w.starts_with(b"\r\n\r\n")
-        }));
+        assert!(
+            body.windows(b"\r\n\r\n".len() + PAYLOAD.len())
+                .any(|w| { w.ends_with(PAYLOAD) && w.starts_with(b"\r\n\r\n") })
+        );
         // Binary parts without a filename omit the filename clause.
         assert!(!body.windows(b"filename".len()).any(|w| w == b"filename"));
     }
 
     #[test]
     fn test_convert_to_reqwest_form() {
-        let form = MultipartForm::new()
-            .text("field", "value")
-            .file(
-                "upload",
-                "test.txt",
-                "text/plain".parse().unwrap(),
-                Bytes::from("file contents"),
-            );
+        let form = MultipartForm::new().text("field", "value").file(
+            "upload",
+            "test.txt",
+            "text/plain".parse().unwrap(),
+            Bytes::from("file contents"),
+        );
         // Conversion of both text and binary (mime + filename) parts must succeed.
         let converted = reqwest::multipart::Form::from(form);
         let _ = converted;

@@ -37,9 +37,7 @@ impl<D: Serialize + Eq> InMemoryVectorStore<D> {
                 store.insert(format!("doc{i}"), (doc, embeddings));
             });
 
-        Self {
-            embeddings: store,
-        }
+        Self { embeddings: store }
     }
 
     /// Create a new [InMemoryVectorStore] from documents and their corresponding embeddings with ids.
@@ -51,9 +49,7 @@ impl<D: Serialize + Eq> InMemoryVectorStore<D> {
             store.insert(i.to_string(), (doc, embeddings));
         });
 
-        Self {
-            embeddings: store,
-        }
+        Self { embeddings: store }
     }
 
     /// Create a new [InMemoryVectorStore] from documents and their corresponding embeddings.
@@ -67,9 +63,7 @@ impl<D: Serialize + Eq> InMemoryVectorStore<D> {
             store.insert(f(&doc), (doc, embeddings));
         });
 
-        Self {
-            embeddings: store,
-        }
+        Self { embeddings: store }
     }
 
     /// Tests whether a document satisfies the (optional) metadata filter.
@@ -371,28 +365,28 @@ mod tests {
     #[test]
     fn test_auto_ids() {
         let mut vector_store = InMemoryVectorStore::from_documents(vec![
-                (
-                    "glarb-garb",
-                    OneOrMany::one(Embedding {
-                        document: "glarb-garb".to_string(),
-                        vec: vec![0.1, 0.1, 0.5],
-                    }),
-                ),
-                (
-                    "marble-marble",
-                    OneOrMany::one(Embedding {
-                        document: "marble-marble".to_string(),
-                        vec: vec![0.7, -0.3, 0.0],
-                    }),
-                ),
-                (
-                    "flumb-flumb",
-                    OneOrMany::one(Embedding {
-                        document: "flumb-flumb".to_string(),
-                        vec: vec![0.3, 0.7, 0.1],
-                    }),
-                ),
-            ]);
+            (
+                "glarb-garb",
+                OneOrMany::one(Embedding {
+                    document: "glarb-garb".to_string(),
+                    vec: vec![0.1, 0.1, 0.5],
+                }),
+            ),
+            (
+                "marble-marble",
+                OneOrMany::one(Embedding {
+                    document: "marble-marble".to_string(),
+                    vec: vec![0.7, -0.3, 0.0],
+                }),
+            ),
+            (
+                "flumb-flumb",
+                OneOrMany::one(Embedding {
+                    document: "flumb-flumb".to_string(),
+                    vec: vec![0.3, 0.7, 0.1],
+                }),
+            ),
+        ]);
 
         vector_store.add_documents(vec![
             (
@@ -474,31 +468,31 @@ mod tests {
     #[test]
     fn test_single_embedding() {
         let vector_store = InMemoryVectorStore::from_documents_with_ids(vec![
-                (
-                    "doc1",
-                    "glarb-garb",
-                    OneOrMany::one(Embedding {
-                        document: "glarb-garb".to_string(),
-                        vec: vec![0.1, 0.1, 0.5],
-                    }),
-                ),
-                (
-                    "doc2",
-                    "marble-marble",
-                    OneOrMany::one(Embedding {
-                        document: "marble-marble".to_string(),
-                        vec: vec![0.7, -0.3, 0.0],
-                    }),
-                ),
-                (
-                    "doc3",
-                    "flumb-flumb",
-                    OneOrMany::one(Embedding {
-                        document: "flumb-flumb".to_string(),
-                        vec: vec![0.3, 0.7, 0.1],
-                    }),
-                ),
-            ]);
+            (
+                "doc1",
+                "glarb-garb",
+                OneOrMany::one(Embedding {
+                    document: "glarb-garb".to_string(),
+                    vec: vec![0.1, 0.1, 0.5],
+                }),
+            ),
+            (
+                "doc2",
+                "marble-marble",
+                OneOrMany::one(Embedding {
+                    document: "marble-marble".to_string(),
+                    vec: vec![0.7, -0.3, 0.0],
+                }),
+            ),
+            (
+                "doc3",
+                "flumb-flumb",
+                OneOrMany::one(Embedding {
+                    document: "flumb-flumb".to_string(),
+                    vec: vec![0.3, 0.7, 0.1],
+                }),
+            ),
+        ]);
 
         let ranking = vector_store
             .vector_search(
@@ -534,52 +528,52 @@ mod tests {
     #[test]
     fn test_multiple_embeddings() {
         let vector_store = InMemoryVectorStore::from_documents_with_ids(vec![
-                (
-                    "doc1",
-                    "glarb-garb",
-                    OneOrMany::many(vec![
-                        Embedding {
-                            document: "glarb-garb".to_string(),
-                            vec: vec![0.1, 0.1, 0.5],
-                        },
-                        Embedding {
-                            document: "don't-choose-me".to_string(),
-                            vec: vec![-0.5, 0.9, 0.1],
-                        },
-                    ])
-                    .unwrap(),
-                ),
-                (
-                    "doc2",
-                    "marble-marble",
-                    OneOrMany::many(vec![
-                        Embedding {
-                            document: "marble-marble".to_string(),
-                            vec: vec![0.7, -0.3, 0.0],
-                        },
-                        Embedding {
-                            document: "sandwich".to_string(),
-                            vec: vec![0.5, 0.5, -0.7],
-                        },
-                    ])
-                    .unwrap(),
-                ),
-                (
-                    "doc3",
-                    "flumb-flumb",
-                    OneOrMany::many(vec![
-                        Embedding {
-                            document: "flumb-flumb".to_string(),
-                            vec: vec![0.3, 0.7, 0.1],
-                        },
-                        Embedding {
-                            document: "banana".to_string(),
-                            vec: vec![0.1, -0.5, -0.5],
-                        },
-                    ])
-                    .unwrap(),
-                ),
-            ]);
+            (
+                "doc1",
+                "glarb-garb",
+                OneOrMany::many(vec![
+                    Embedding {
+                        document: "glarb-garb".to_string(),
+                        vec: vec![0.1, 0.1, 0.5],
+                    },
+                    Embedding {
+                        document: "don't-choose-me".to_string(),
+                        vec: vec![-0.5, 0.9, 0.1],
+                    },
+                ])
+                .unwrap(),
+            ),
+            (
+                "doc2",
+                "marble-marble",
+                OneOrMany::many(vec![
+                    Embedding {
+                        document: "marble-marble".to_string(),
+                        vec: vec![0.7, -0.3, 0.0],
+                    },
+                    Embedding {
+                        document: "sandwich".to_string(),
+                        vec: vec![0.5, 0.5, -0.7],
+                    },
+                ])
+                .unwrap(),
+            ),
+            (
+                "doc3",
+                "flumb-flumb",
+                OneOrMany::many(vec![
+                    Embedding {
+                        document: "flumb-flumb".to_string(),
+                        vec: vec![0.3, 0.7, 0.1],
+                    },
+                    Embedding {
+                        document: "banana".to_string(),
+                        vec: vec![0.1, -0.5, -0.5],
+                    },
+                ])
+                .unwrap(),
+            ),
+        ]);
 
         let ranking = vector_store
             .vector_search(
@@ -820,7 +814,10 @@ mod tests {
 
         assert!(!store.is_empty());
         assert_eq!(store.len(), 2);
-        assert_eq!(sorted_ids(&store), vec!["doc0".to_string(), "doc1".to_string()]);
+        assert_eq!(
+            sorted_ids(&store),
+            vec!["doc0".to_string(), "doc1".to_string()]
+        );
     }
 
     #[test]
@@ -837,7 +834,10 @@ mod tests {
             upper_name,
         );
 
-        assert_eq!(sorted_ids(&store), vec!["ONE".to_string(), "TWO".to_string()]);
+        assert_eq!(
+            sorted_ids(&store),
+            vec!["ONE".to_string(), "TWO".to_string()]
+        );
     }
 
     #[test]
@@ -941,22 +941,18 @@ mod tests {
         use crate::vector_store::VectorStoreIndex;
         use crate::vector_store::request::VectorSearchRequest;
 
-        let (alpha_doc, alpha_embeddings) =
-            item_doc("alpha", vec![0.0, 0.1, 0.2, 0.3, 0.4, 0.5, 0.6, 0.7, 0.8, 0.9]);
-        let index = InMemoryVectorStore::from_documents_with_ids(vec![(
-            "a",
-            alpha_doc,
-            alpha_embeddings,
-        )])
-        .index(MockEmbeddingModel);
+        let (alpha_doc, alpha_embeddings) = item_doc(
+            "alpha",
+            vec![0.0, 0.1, 0.2, 0.3, 0.4, 0.5, 0.6, 0.7, 0.8, 0.9],
+        );
+        let index =
+            InMemoryVectorStore::from_documents_with_ids(vec![("a", alpha_doc, alpha_embeddings)])
+                .index(MockEmbeddingModel);
 
         // `top_n` returns the document payload deserialized into `T`.
         let results = index
             .top_n::<serde_json::Value>(
-                VectorSearchRequest::builder()
-                    .query("q")
-                    .samples(5)
-                    .build(),
+                VectorSearchRequest::builder().query("q").samples(5).build(),
             )
             .await
             .unwrap();

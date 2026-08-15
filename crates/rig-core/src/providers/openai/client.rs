@@ -325,7 +325,10 @@ mod tests {
 
         let completions =
             super::CompletionsClient::from_env().expect("completions client should build from env");
-        assert_eq!(completions.base_url(), "https://openai-compatible.example/v1");
+        assert_eq!(
+            completions.base_url(),
+            "https://openai-compatible.example/v1"
+        );
     }
 
     #[test]
@@ -337,8 +340,7 @@ mod tests {
         // A second guard over the same variable captures the preexisting value
         // as its `original`, so dropping it restores that value.
         {
-            let _overridden =
-                EnvVarGuard::set("OPENAI_BASE_URL", "https://overridden.example");
+            let _overridden = EnvVarGuard::set("OPENAI_BASE_URL", "https://overridden.example");
             assert_eq!(
                 std::env::var("OPENAI_BASE_URL").as_deref(),
                 Ok("https://overridden.example")

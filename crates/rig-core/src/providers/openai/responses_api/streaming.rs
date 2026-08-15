@@ -1,16 +1,14 @@
 //! The streaming module for the OpenAI Responses API.
 //! Please see the `openai_streaming` or `openai_streaming_with_tools` example for more practical usage.
-use crate::completion::CompletionError;
 #[cfg(test)]
 use crate::completion;
+use crate::completion::CompletionError;
 use crate::http_client::HttpClientExt;
 use crate::http_client::sse::{Event, GenericEventSource};
 use crate::message::ReasoningContent;
-use crate::providers::internal::adapter::{
-    AdapterOutput, WireAdapter, WireFrame, run_wire_stream,
-};
 #[cfg(test)]
 use crate::providers::internal::adapter::run_wire_buffered;
+use crate::providers::internal::adapter::{AdapterOutput, WireAdapter, WireFrame, run_wire_stream};
 use crate::providers::internal::wire::{self, WireEvent};
 use crate::providers::openai::responses_api::{
     IncompleteDetailsReason, ReasoningSummary, ResponseStatus, ResponsesUsage,
@@ -585,7 +583,8 @@ impl RawChoiceAccumulator {
                 end.call_id = Some(func.call_id);
                 // Completed calls are buffered and flushed at the terminal
                 // (see `self.tool_calls`), matching the live SSE loop.
-                self.tool_calls.push(streaming::RawStreamingChoice::ToolInputEnd(end));
+                self.tool_calls
+                    .push(streaming::RawStreamingChoice::ToolInputEnd(end));
             }
             Output::Reasoning {
                 id,

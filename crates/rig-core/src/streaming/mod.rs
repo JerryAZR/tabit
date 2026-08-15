@@ -2005,10 +2005,7 @@ mod tests {
         stream.pause();
 
         let mut task = tokio_test::task::spawn(stream);
-        assert!(
-            task.poll_next().is_pending(),
-            "the first paused poll parks"
-        );
+        assert!(task.poll_next().is_pending(), "the first paused poll parks");
         assert!(
             !task.is_woken(),
             "a paused stream must idle, not re-wake itself"
@@ -2089,10 +2086,7 @@ mod tests {
 
         let mut items = 0;
         while let Some(item) = stream.next().await {
-            assert!(
-                item.is_ok(),
-                "a signature is not an error: {item:?}"
-            );
+            assert!(item.is_ok(), "a signature is not an error: {item:?}");
             items += 1;
         }
         assert_eq!(items, 2, "only the reasoning block and the terminal record");
@@ -2132,7 +2126,10 @@ mod tests {
             }
         }
 
-        assert_eq!(final_records, 1, "only the first terminal record is yielded");
+        assert_eq!(
+            final_records, 1,
+            "only the first terminal record is yielded"
+        );
         assert_eq!(stream.usage().total_tokens, 7, "the first record wins");
     }
 
@@ -2172,15 +2169,18 @@ mod tests {
             "probe".to_string(),
             serde_json::json!({}),
         )
-            .with_internal_call_id("internal_1".to_string())
-            .with_call_id("call_abc".to_string())
-            .with_signature(Some("sig".to_string()))
-            .with_additional_params(Some(serde_json::json!({"extra": true})));
+        .with_internal_call_id("internal_1".to_string())
+        .with_call_id("call_abc".to_string())
+        .with_signature(Some("sig".to_string()))
+        .with_additional_params(Some(serde_json::json!({"extra": true})));
 
         assert_eq!(full.internal_call_id, "internal_1");
         assert_eq!(full.call_id.as_deref(), Some("call_abc"));
         assert_eq!(full.signature.as_deref(), Some("sig"));
-        assert_eq!(full.additional_params, Some(serde_json::json!({"extra": true})));
+        assert_eq!(
+            full.additional_params,
+            Some(serde_json::json!({"extra": true}))
+        );
     }
 
     /// The provider name is known when the stream opens and surfaced as-is.

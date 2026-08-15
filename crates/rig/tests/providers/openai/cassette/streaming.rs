@@ -12,10 +12,7 @@ use crate::support::{
 #[tokio::test]
 async fn streaming_smoke() {
     with_openai_cassette("streaming/streaming_smoke", |client| async move {
-        let agent = client
-            .agent("gpt-4o")
-            .preamble(STREAMING_PREAMBLE)
-            .build();
+        let agent = client.agent("gpt-4o").preamble(STREAMING_PREAMBLE).build();
 
         let mut stream = agent.stream_prompt(STREAMING_PROMPT).await;
         let (response, provider_final) =

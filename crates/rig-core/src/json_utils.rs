@@ -367,10 +367,7 @@ mod tests {
 
     #[test]
     fn test_serialize_json_value_keeps_string_scalars_quoted() {
-        assert_eq!(
-            serialize_json_value(&serde_json::json!("text")),
-            "\"text\""
-        );
+        assert_eq!(serialize_json_value(&serde_json::json!("text")), "\"text\"");
         assert_eq!(serialize_json_value(&serde_json::json!(7)), "7");
         assert_eq!(serialize_json_value(&serde_json::json!([1, 2])), "[1,2]");
     }

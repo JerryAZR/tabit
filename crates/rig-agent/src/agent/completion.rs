@@ -1174,8 +1174,8 @@ mod tests {
     /// name is reused and the stall is only warned about, not errored on.
     #[tokio::test]
     async fn committed_tool_mode_with_forbidding_choice_builds_but_warns() {
-        use crate::tool::server::ToolServer;
         use crate::test_utils::MockCompletionModel;
+        use crate::tool::server::ToolServer;
 
         let model = ModelHandle::new(MockCompletionModel::text("ignored"));
         let tool_server_handle = ToolServer::new().run();
@@ -1227,7 +1227,10 @@ mod tests {
         agent.set_model(MockCompletionModel::text("second"));
         let replaced = agent
             .with_model(MockCompletionModel::text("third"))
-            .with_model_handle(ModelHandle::named("named", MockCompletionModel::text("fourth")));
+            .with_model_handle(ModelHandle::named(
+                "named",
+                MockCompletionModel::text("fourth"),
+            ));
         assert_eq!(replaced.model_handle().label(), Some("named"));
     }
 
@@ -1244,7 +1247,10 @@ mod tests {
             .await
             .expect("tool definitions should resolve");
         assert_eq!(
-            definitions.iter().map(|def| def.name.as_str()).collect::<Vec<_>>(),
+            definitions
+                .iter()
+                .map(|def| def.name.as_str())
+                .collect::<Vec<_>>(),
             vec!["add"]
         );
     }
@@ -1256,7 +1262,9 @@ mod tests {
         use crate::test_utils::MockCompletionModel;
 
         let agent = crate::AgentBuilder::new(MockCompletionModel::text("ok")).build();
-        let output = (&agent).prompt("hi").await.expect("prompt should succeed");
+        let output = crate::completion::Prompt::prompt(&agent, "hi")
+            .await
+            .expect("prompt should succeed");
         assert_eq!(output, "ok");
     }
 

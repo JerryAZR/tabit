@@ -1,3 +1,15 @@
+#![cfg_attr(
+    test,
+    allow(
+        clippy::err_expect,
+        clippy::expect_used,
+        clippy::indexing_slicing,
+        clippy::panic,
+        clippy::panic_in_result_fn,
+        clippy::unreachable,
+        clippy::unwrap_used
+    )
+)]
 extern crate proc_macro;
 
 use proc_macro::TokenStream;

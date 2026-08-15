@@ -809,13 +809,17 @@ mod test {
     fn test_deserialize_rejects_non_sequence_and_empty_sequence() {
         let type_err = serde_json::from_value::<OneOrMany<i32>>(json!(5)).unwrap_err();
         assert!(
-            type_err.to_string().contains("a sequence of at least one element"),
+            type_err
+                .to_string()
+                .contains("a sequence of at least one element"),
             "unexpected error: {type_err}"
         );
 
         let length_err = serde_json::from_value::<OneOrMany<i32>>(json!([])).unwrap_err();
         assert!(
-            length_err.to_string().contains("a sequence of at least one element"),
+            length_err
+                .to_string()
+                .contains("a sequence of at least one element"),
             "unexpected error: {length_err}"
         );
     }

@@ -866,7 +866,10 @@ mod tests {
         let agent = AgentBuilder::new(MockCompletionModel::text("ok"))
             .output_schema_raw(schema.clone())
             .build();
-        assert_eq!(agent.output_schema.as_ref().map(schemars::Schema::as_value), Some(schema.as_value()));
+        assert_eq!(
+            agent.output_schema.as_ref().map(schemars::Schema::as_value),
+            Some(schema.as_value())
+        );
     }
 
     fn portable_tool(name: &str) -> PortableDynamicTool {
@@ -888,7 +891,9 @@ mod tests {
             "dynamic tool for builder coverage",
             serde_json::json!({"type": "object", "properties": {}}),
             |_context, _arguments| {
-                Box::pin(async { Ok(crate::tool::ToolOutput::text("ok")) as Result<_, ToolExecutionError> })
+                Box::pin(async {
+                    Ok(crate::tool::ToolOutput::text("ok")) as Result<_, ToolExecutionError>
+                })
             },
         )
     }
@@ -911,7 +916,10 @@ mod tests {
         let agent = AgentBuilder::new(MockCompletionModel::text("ok"))
             .portable_dynamic_tool(portable_tool("from_scratch"))
             .build();
-        assert_eq!(advertised_names(&agent).await, vec!["from_scratch".to_string()]);
+        assert_eq!(
+            advertised_names(&agent).await,
+            vec!["from_scratch".to_string()]
+        );
     }
 
     /// Once in the builder-tools state, the `dynamic_tool`,

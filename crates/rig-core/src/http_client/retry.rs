@@ -139,7 +139,9 @@ pub(crate) fn server_retry_delay(
         }
         if let Ok(http_date) = httpdate::parse_http_date(value) {
             // Dates in the past mean "retry now".
-            let delay = http_date.duration_since(SystemTime::now()).unwrap_or_default();
+            let delay = http_date
+                .duration_since(SystemTime::now())
+                .unwrap_or_default();
             return validated(delay, cap);
         }
     }
@@ -243,10 +245,7 @@ mod tests {
     use crate::http_client::{Error, TransportErrorKind};
     use std::time::Instant;
 
-    fn status_error(
-        status: StatusCode,
-        headers: &'static [(&'static str, &'static str)],
-    ) -> Error {
+    fn status_error(status: StatusCode, headers: &'static [(&'static str, &'static str)]) -> Error {
         let mut map = HeaderMap::new();
         for (name, value) in headers {
             map.insert(
@@ -440,7 +439,11 @@ mod tests {
         assert_eq!(backoff_delay(1, 1.0), Duration::from_secs(1));
         assert_eq!(backoff_delay(2, 1.0), Duration::from_secs(2));
         assert_eq!(backoff_delay(4, 1.0), Duration::from_secs(8));
-        assert_eq!(backoff_delay(9, 1.0), Duration::from_secs(8), "capped at 8s");
+        assert_eq!(
+            backoff_delay(9, 1.0),
+            Duration::from_secs(8),
+            "capped at 8s"
+        );
     }
 
     #[tokio::test]

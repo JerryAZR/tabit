@@ -1247,11 +1247,11 @@ impl TryFrom<ResponsesRequestParams> for CompletionRequest {
         // would 400 on it, and the alternative — forwarding it — risks
         // attributing the output to the wrong call. Fail loud, at the
         // conversion boundary.
-        crate::providers::validate_tool_result_correlation(&chat_history, |call| {
-            call.call_id.as_deref().unwrap_or(call.id.as_str())
-        }, |result| {
-            result.call_id.as_deref().unwrap_or(result.id.as_str())
-        })?;
+        crate::providers::validate_tool_result_correlation(
+            &chat_history,
+            |call| call.call_id.as_deref().unwrap_or(call.id.as_str()),
+            |result| result.call_id.as_deref().unwrap_or(result.id.as_str()),
+        )?;
         let model = req.model.clone().unwrap_or(model);
         let preamble = req.preamble.take();
         let mut instruction_parts = Vec::new();

@@ -415,6 +415,9 @@ impl Tool for IndexPanickingTool {
         json!({"type": "object", "properties": {}})
     }
 
+    // The out-of-bounds index in `call` is deliberate: this tool exists
+    // to panic mid-execution and exercise the run's panic containment.
+    #[allow(clippy::out_of_bounds_indexing)]
     async fn call(
         &self,
         _context: &mut ToolContext,

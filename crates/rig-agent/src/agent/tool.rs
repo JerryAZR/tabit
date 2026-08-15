@@ -135,9 +135,7 @@ mod tests {
             MockTurn::tool_call("bad", "researcher", json!({"not_prompt": true})),
             MockTurn::text("recovered"),
         ]);
-        let outer = AgentBuilder::new(outer_model)
-            .dynamic_tool(tool)
-            .build();
+        let outer = AgentBuilder::new(outer_model).dynamic_tool(tool).build();
 
         let out = outer
             .prompt("start")

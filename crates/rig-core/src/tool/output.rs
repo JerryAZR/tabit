@@ -391,7 +391,9 @@ mod tests {
         let error = Unserializable.into_tool_output().unwrap_err();
 
         assert!(
-            error.to_string().contains("failed to serialize tool output"),
+            error
+                .to_string()
+                .contains("failed to serialize tool output"),
             "unexpected message: {error}"
         );
         assert!(error.is::<serde_json::Error>());

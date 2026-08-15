@@ -210,11 +210,14 @@ impl PartialStreamedTurn {
             feedback,
         ));
         for call in self.pending_tool_calls.iter().rev() {
-            retry_results.insert(0, tool_result_message(
-                call.id.clone(),
-                call.call_id.clone(),
-                TOOL_NOT_EXECUTED_DUE_TO_INVALID_PEER.to_string(),
-            ));
+            retry_results.insert(
+                0,
+                tool_result_message(
+                    call.id.clone(),
+                    call.call_id.clone(),
+                    TOOL_NOT_EXECUTED_DUE_TO_INVALID_PEER.to_string(),
+                ),
+            );
         }
         let user_message = Message::User {
             content: retry_results,

@@ -1,15 +1,11 @@
-use rig_core::{
-    OneOrMany,
-    message::AssistantContent,
-    wasm_compat::WasmBoxedFuture,
-};
+use rig_core::{OneOrMany, message::AssistantContent, wasm_compat::WasmBoxedFuture};
 
 use crate::{
     agent::completion::PreparedCompletionRequest,
     agent::drive::{DriveStream, TurnSource, drive_tool_calls, record_usage_on_span},
     agent::hook::{
-        AgentHook, HookContext, HookStack, InvalidToolCallAction, ModelTurnFinished,
-        StepEventKind, StreamResponseFinish, TextDelta, ToolCallDelta,
+        AgentHook, HookContext, HookStack, InvalidToolCallAction, ModelTurnFinished, StepEventKind,
+        StreamResponseFinish, TextDelta, ToolCallDelta,
     },
     agent::prompt_request::{assistant_text_from_choice, is_empty_assistant_turn},
     agent::run::{
@@ -17,8 +13,7 @@ use crate::{
         streamed::{StreamedResolution, StreamedTurnAssembler, StreamedTurnEvent},
     },
     agent::runner::{
-        AgentRunner, ModelTurnDecision, build_chat_span, observe_action,
-        resolve_model_turn_action,
+        AgentRunner, ModelTurnDecision, build_chat_span, observe_action, resolve_model_turn_action,
     },
     streaming::{StreamedAssistantContent, StreamedUserContent, ToolCallDeltaContent},
     tool::{ToolContext, server::ToolRegistrySnapshot},
@@ -29,7 +24,10 @@ use std::{collections::VecDeque, pin::Pin, sync::Arc};
 use tracing_futures::Instrument;
 
 use super::{CompletionCall, PromptResponse, forward_prompt_setters};
-use crate::{agent::Agent, completion::{CompletionError, PromptError}};
+use crate::{
+    agent::Agent,
+    completion::{CompletionError, PromptError},
+};
 use rig_core::message::{Message, Text};
 
 // The `Send` bound is dropped exactly where `rig-core`'s `WasmCompat*` markers
@@ -201,7 +199,6 @@ async fn drain_stream_usage(
     Ok(crate::completion::Usage::new())
 }
 
-
 /// Build the final streamed content for a finished run (#1928).
 ///
 /// When the finishing turn carries a tool call it is a Tool-mode output-tool
@@ -328,7 +325,6 @@ impl StreamingPromptRequest {
         self.runner.stream().await
     }
 }
-
 
 /// [`TurnSource`] for the streaming surface: each turn opens a provider stream,
 /// drives a [`StreamedTurnAssembler`], and yields assistant/tool deltas.
@@ -845,7 +841,6 @@ impl TurnSource for StreamingTurnSource {
         ))
     }
 }
-
 
 impl IntoFuture for StreamingPromptRequest {
     type Output = StreamingResult; // what `.await` returns

@@ -2093,6 +2093,7 @@ where
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::tool::ToolOutput;
     use crate::{
         completion::Usage,
         test_utils::{MockCompletionModel, MockStreamEvent, MockTurn, mock_final},
@@ -2106,7 +2107,6 @@ mod tests {
         streaming::StreamingCompletionResponse,
         tool::ToolResult as ExecutionResult,
     };
-    use crate::tool::ToolOutput;
 
     fn tool_call(id: &str, name: &str, arguments: serde_json::Value) -> AssistantContent {
         AssistantContent::ToolCall(ToolCall::new(
@@ -2327,9 +2327,8 @@ mod tests {
 
     #[test]
     fn validators_reject_wrong_error_shapes() {
-        let wrong = PromptError::CompletionError(CompletionError::ProviderError(
-            "wrong shape".to_string(),
-        ));
+        let wrong =
+            PromptError::CompletionError(CompletionError::ProviderError("wrong shape".to_string()));
         assert!(matches!(
             validate_unknown_tool_failure(&wrong, "add", &["add"]),
             Err(ScenarioError::Contract { .. })
@@ -2446,12 +2445,14 @@ mod tests {
             ),
             Err(ScenarioError::Contract { .. })
         ));
-        assert!(validate_rewritten_arguments(
-            SCENARIO,
-            &[serde_json::json!({"x": 7, "z": 9})],
-            &serde_json::json!({"x": 7}),
-        )
-        .is_ok());
+        assert!(
+            validate_rewritten_arguments(
+                SCENARIO,
+                &[serde_json::json!({"x": 7, "z": 9})],
+                &serde_json::json!({"x": 7}),
+            )
+            .is_ok()
+        );
     }
 
     #[test]
@@ -2578,8 +2579,7 @@ mod tests {
         let dangling = vec![
             call("c1"),
             Message::User {
-                content: OneOrMany::many(vec![result("c1"), result("extra")])
-                    .expect("non-empty"),
+                content: OneOrMany::many(vec![result("c1"), result("extra")]).expect("non-empty"),
             },
         ];
         assert!(matches!(
@@ -2652,7 +2652,9 @@ mod tests {
             tool_context: &ToolContext::new(),
         };
         assert!(matches!(
-            ReplaceResult("redacted").on_tool_result(&context, result_event).await,
+            ReplaceResult("redacted")
+                .on_tool_result(&context, result_event)
+                .await,
             ToolResultAction::Keep
         ));
         assert!(matches!(
@@ -2660,7 +2662,9 @@ mod tests {
             ToolResultAction::Keep
         ));
         assert!(matches!(
-            StopAfterResult("reason").on_tool_result(&context, result_event).await,
+            StopAfterResult("reason")
+                .on_tool_result(&context, result_event)
+                .await,
             ToolResultAction::Keep
         ));
     }
@@ -2719,8 +2723,19 @@ mod tests {
         };
         let report = buffered_streaming_text_parity(model).await?;
         fixture_contract(report.response.contains("Paris"), "parity streamed text")?;
-        assert!(fixture_contract(true, "probe").is_ok());
-        assert!(fixture_contract(false, "probe").is_err());
+        // Probe the helper itself: a satisfied contract passes and an
+        // unsatisfied one reports the failure as a contract error.
+        fixture_contract(true, "probe")?;
+        match fixture_contract(false, "probe") {
+            Err(ScenarioError::Contract { .. }) => {}
+            Err(other) => return Err(other),
+            Ok(()) => {
+                return Err(ScenarioError::contract(
+                    "test_fixture",
+                    "fixture_contract accepted an unsatisfied contract",
+                ));
+            }
+        }
         Ok(())
     }
 
@@ -2728,7 +2743,11 @@ mod tests {
     async fn parallel_contract_passes_with_default_concurrency() -> Result<(), ScenarioError> {
         let first = MockTurn::from_contents([
             tool_call("call_add", "add", serde_json::json!({"x": 3, "y": 4})),
-            tool_call("call_subtract", "subtract", serde_json::json!({"x": 10, "y": 2})),
+            tool_call(
+                "call_subtract",
+                "subtract",
+                serde_json::json!({"x": 10, "y": 2}),
+            ),
         ])
         .map_err(|error| ScenarioError::contract("test_fixture", error.to_string()))?;
         let report = parallel_tools(
@@ -2890,10 +2909,9 @@ mod tests {
         // The tool is never invoked: history has no correlated call/result
         // round trip to validate.
         assert!(matches!(
-            zero_argument_tool(
-                MockCompletionModel::text("answered directly"),
-                |builder| builder,
-            )
+            zero_argument_tool(MockCompletionModel::text("answered directly"), |builder| {
+                builder
+            },)
             .await,
             Err(ScenarioError::Contract { .. })
         ));
@@ -2953,10 +2971,9 @@ mod tests {
         // The tool is never invoked, so there are no rewritten arguments to
         // observe.
         assert!(matches!(
-            hook_rewrites_and_request_patch(
-                MockCompletionModel::text("no tool used"),
-                |builder| builder,
-            )
+            hook_rewrites_and_request_patch(MockCompletionModel::text("no tool used"), |builder| {
+                builder
+            },)
             .await,
             Err(ScenarioError::Contract { .. })
         ));
@@ -3115,10 +3132,8 @@ mod tests {
         ));
 
         // `required` mode must emit at least one call.
-        let required_silent = MockCompletionModel::new([
-            MockTurn::text("4"),
-            MockTurn::text("still no call"),
-        ]);
+        let required_silent =
+            MockCompletionModel::new([MockTurn::text("4"), MockTurn::text("still no call")]);
         assert!(matches!(
             tool_choice_modes(required_silent).await,
             Err(ScenarioError::Contract { .. })
@@ -3166,7 +3181,11 @@ mod tests {
     async fn parallel_contract_rejects_protocol_marker_leaks_in_summary() {
         let batch = MockTurn::from_contents([
             tool_call("call_add", "add", serde_json::json!({"x": 3, "y": 4})),
-            tool_call("call_subtract", "subtract", serde_json::json!({"x": 10, "y": 2})),
+            tool_call(
+                "call_subtract",
+                "subtract",
+                serde_json::json!({"x": 10, "y": 2}),
+            ),
         ])
         .expect("fixture");
         assert!(matches!(
@@ -3184,7 +3203,11 @@ mod tests {
     async fn parallel_contract_rejects_unexpected_extra_executions() {
         let batch = MockTurn::from_contents([
             tool_call("call_add", "add", serde_json::json!({"x": 3, "y": 4})),
-            tool_call("call_subtract", "subtract", serde_json::json!({"x": 10, "y": 2})),
+            tool_call(
+                "call_subtract",
+                "subtract",
+                serde_json::json!({"x": 10, "y": 2}),
+            ),
         ])
         .expect("fixture");
         assert!(matches!(
@@ -3230,17 +3253,16 @@ mod tests {
         let model = BufferedAndStreamMock {
             buffered: MockCompletionModel::new([buffered_turn.with_usage(usage(3, 1))]),
             streaming: MockCompletionModel::from_stream_turns([vec![
-                MockStreamEvent::tool_call(
-                    "parity_call",
-                    "alpha",
-                    serde_json::json!({"value": 1}),
-                ),
+                MockStreamEvent::tool_call("parity_call", "alpha", serde_json::json!({"value": 1})),
                 MockStreamEvent::text("Paris"),
                 MockStreamEvent::FinalResponse(mock_final(usage(3, 1))),
             ]]),
         };
         let report = buffered_streaming_text_parity(model).await?;
-        fixture_contract(report.response.contains("Paris"), "parity ignores non-text items")?;
+        fixture_contract(
+            report.response.contains("Paris"),
+            "parity ignores non-text items",
+        )?;
         Ok(())
     }
 
@@ -3248,7 +3270,9 @@ mod tests {
     async fn parity_contract_rejects_streams_without_final_metadata() {
         let model = BufferedAndStreamMock {
             buffered: MockCompletionModel::new([MockTurn::text("Paris").with_usage(usage(3, 1))]),
-            streaming: MockCompletionModel::from_stream_turns([vec![MockStreamEvent::text("Paris")]]),
+            streaming: MockCompletionModel::from_stream_turns([vec![MockStreamEvent::text(
+                "Paris",
+            )]]),
         };
         assert!(matches!(
             buffered_streaming_text_parity(model).await,

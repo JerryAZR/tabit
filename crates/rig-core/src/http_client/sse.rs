@@ -24,7 +24,11 @@ use http::Response;
 use http::{HeaderValue, Request, StatusCode};
 use mime_guess::mime;
 use pin_project_lite::pin_project;
-use std::{marker::PhantomData, pin::Pin, task::{Context, Poll}};
+use std::{
+    marker::PhantomData,
+    pin::Pin,
+    task::{Context, Poll},
+};
 
 pub type BoxedStream = Pin<Box<dyn WasmCompatSendStream<InnerItem = StreamResult<Bytes>>>>;
 
@@ -99,10 +103,7 @@ where
     }
 
     /// Create the response future for the single connection attempt
-    fn create_response_future(
-        client: &HttpClient,
-        req: &Request<RequestBody>,
-    ) -> ResponseFuture {
+    fn create_response_future(client: &HttpClient, req: &Request<RequestBody>) -> ResponseFuture {
         let mut req_clone = req.clone();
         req_clone
             .headers_mut()
@@ -306,7 +307,9 @@ mod tests {
         fn send<T, U>(
             &self,
             _req: Request<T>,
-        ) -> impl Future<Output = crate::http_client::Result<Response<LazyBody<U>>>> + WasmCompatSend + 'static
+        ) -> impl Future<Output = crate::http_client::Result<Response<LazyBody<U>>>>
+        + WasmCompatSend
+        + 'static
         where
             T: Into<Bytes>,
             T: WasmCompatSend,
@@ -320,7 +323,9 @@ mod tests {
         fn send_multipart<U>(
             &self,
             _req: Request<MultipartForm>,
-        ) -> impl Future<Output = crate::http_client::Result<Response<LazyBody<U>>>> + WasmCompatSend + 'static
+        ) -> impl Future<Output = crate::http_client::Result<Response<LazyBody<U>>>>
+        + WasmCompatSend
+        + 'static
         where
             U: From<Bytes>,
             U: WasmCompatSend + 'static,

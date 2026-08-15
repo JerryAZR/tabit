@@ -381,8 +381,7 @@ mod tests {
         let triaged = triage_frame::<u8>(WireEvent::Known(1));
         assert!(matches!(triaged, Ok(TriagedFrame::Event(1))));
 
-        let corrupt =
-            <serde_json::Error as serde::de::Error>::custom("data-level defect");
+        let corrupt = <serde_json::Error as serde::de::Error>::custom("data-level defect");
         let triaged = triage_frame::<u8>(WireEvent::Corrupt(corrupt));
         assert!(matches!(
             triaged,
@@ -431,9 +430,9 @@ mod tests {
             let data = data.as_ref();
             match data {
                 "term" => WireEvent::Known(()),
-                "bad" => WireEvent::Corrupt(
-                    <serde_json::Error as serde::de::Error>::custom("bad frame"),
-                ),
+                "bad" => {
+                    WireEvent::Corrupt(<serde_json::Error as serde::de::Error>::custom("bad frame"))
+                }
                 other => WireEvent::Unknown {
                     event_type: other.to_string(),
                     value: serde_json::Value::String(other.to_string()),
@@ -451,7 +450,10 @@ mod tests {
     #[test]
     fn run_wire_buffered_stops_after_the_terminal_record() {
         let choices = run_wire_buffered(
-            [WireFrame::Text("term".into()), WireFrame::Text("term".into())],
+            [
+                WireFrame::Text("term".into()),
+                WireFrame::Text("term".into()),
+            ],
             StubAdapter,
         )
         .expect("buffered run should succeed");
@@ -475,11 +477,8 @@ mod tests {
             .finish();
         let _guard = tracing::subscriber::set_default(subscriber);
 
-        let choices = run_wire_buffered(
-            [WireFrame::Text("future.event".into())],
-            StubAdapter,
-        )
-        .expect("unknown frames are warn-and-skip, not failures");
+        let choices = run_wire_buffered([WireFrame::Text("future.event".into())], StubAdapter)
+            .expect("unknown frames are warn-and-skip, not failures");
 
         assert!(
             choices.is_empty(),

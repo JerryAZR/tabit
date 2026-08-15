@@ -96,9 +96,9 @@ fn unknown_with_value<T>(data: &str, event_type: String) -> WireEvent<T> {
         // (including its trailing-content check), so it is valid JSON that
         // `Value` accepts. Flag it as the internal invariant violation it
         // would be rather than papering over it.
-        Err(error) => WireEvent::Corrupt(<serde_json::Error as serde::de::Error>::custom(
-            format!("internal invariant violated: frame re-parse failed after a successful scan: {error}"),
-        )),
+        Err(error) => WireEvent::Corrupt(<serde_json::Error as serde::de::Error>::custom(format!(
+            "internal invariant violated: frame re-parse failed after a successful scan: {error}"
+        ))),
     }
 }
 
@@ -169,7 +169,9 @@ where
             // internal invariant violation it would be.
             Err(error) => {
                 return WireEvent::Corrupt(<serde_json::Error as serde::de::Error>::custom(
-                    format!("internal invariant violated: frame re-parse failed after a successful scan: {error}"),
+                    format!(
+                        "internal invariant violated: frame re-parse failed after a successful scan: {error}"
+                    ),
                 ));
             }
         };

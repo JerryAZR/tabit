@@ -233,8 +233,9 @@ mod tests {
     }
 
     fn rejects(input: &str, fragment: &str) {
-        let error =
-            parse(input).err().unwrap_or_else(|| panic!("`{input}` should be rejected"));
+        let error = parse(input)
+            .err()
+            .unwrap_or_else(|| panic!("`{input}` should be rejected"));
         assert!(
             error.to_string().contains(fragment),
             "`{input}` produced: {error}"
@@ -252,10 +253,9 @@ mod tests {
 
     #[test]
     fn full_argument_grammar_round_trips() {
-        let args = parse(
-            r#"name = "tool", description = "d", params(x = "px", y = "py"), required(x)"#,
-        )
-        .expect("full grammar parses");
+        let args =
+            parse(r#"name = "tool", description = "d", params(x = "px", y = "py"), required(x)"#)
+                .expect("full grammar parses");
         assert_eq!(args.name.as_deref(), Some("tool"));
         assert_eq!(args.description.as_deref(), Some("d"));
         assert_eq!(args.description_for("y"), Some("py"));
@@ -283,7 +283,10 @@ mod tests {
 
     #[test]
     fn params_entries_must_be_name_value_pairs() {
-        rejects(r#"params(alpha)"#, "`params(...)` entries must have the form");
+        rejects(
+            r#"params(alpha)"#,
+            "`params(...)` entries must have the form",
+        );
     }
 
     #[test]
@@ -293,15 +296,15 @@ mod tests {
 
     #[test]
     fn unknown_list_arguments_are_rejected() {
-        rejects(r#"bogus(x = "y")"#, "unsupported top-level #[rig_tool] argument `bogus`");
+        rejects(
+            r#"bogus(x = "y")"#,
+            "unsupported top-level #[rig_tool] argument `bogus`",
+        );
     }
 
     #[test]
     fn bare_path_arguments_are_rejected() {
         rejects("flag", "unsupported top-level #[rig_tool] argument `flag`");
-        rejects(
-            "other::path",
-            "unsupported top-level #[rig_tool] argument",
-        );
+        rejects("other::path", "unsupported top-level #[rig_tool] argument");
     }
 }

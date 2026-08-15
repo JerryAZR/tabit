@@ -21,7 +21,6 @@ use tracing::{Instrument, Level, enabled};
 // Anthropic Completion API
 // ================================================================
 
-
 pub const ANTHROPIC_VERSION_2023_01_01: &str = "2023-01-01";
 pub const ANTHROPIC_VERSION_2023_06_01: &str = "2023-06-01";
 pub const ANTHROPIC_VERSION_LATEST: &str = ANTHROPIC_VERSION_2023_06_01;
@@ -1173,9 +1172,8 @@ fn reasoning_block_from_content(block: message::ReasoningContent) -> Content {
             thinking: summary,
             signature: None,
         },
-        message::ReasoningContent::Redacted { data } | message::ReasoningContent::Encrypted(data) => {
-            Content::RedactedThinking { data }
-        }
+        message::ReasoningContent::Redacted { data }
+        | message::ReasoningContent::Encrypted(data) => Content::RedactedThinking { data },
     }
 }
 
@@ -1715,7 +1713,6 @@ where
     }
 }
 
-
 #[derive(Debug, Deserialize, Serialize)]
 pub struct Metadata {
     user_id: Option<String>,
@@ -2054,8 +2051,12 @@ fn apply_tool_cache_control(
     // `ToolDefinition`s (always JSON objects), so this yields the object
     // directly without a secondary object guard.
     let Some(tool) = tools.iter_mut().rev().find_map(|tool| {
-        tool.as_object_mut()
-            .filter(|tool| !matches!(tool.get("defer_loading"), Some(serde_json::Value::Bool(true))))
+        tool.as_object_mut().filter(|tool| {
+            !matches!(
+                tool.get("defer_loading"),
+                Some(serde_json::Value::Bool(true))
+            )
+        })
     }) else {
         return Ok(());
     };
@@ -2288,9 +2289,11 @@ impl TryFrom<AnthropicRequestParams<'_>> for AnthropicCompletionRequest {
         // same id) is rejected up front: Anthropic would 400 on it, and the
         // alternative — forwarding it — risks attributing the result to the
         // wrong call. Fail loud, at the conversion boundary.
-        crate::providers::validate_tool_result_correlation(&chat_history, |call| {
-            call.id.as_str()
-        }, |result| result.id.as_str())?;
+        crate::providers::validate_tool_result_correlation(
+            &chat_history,
+            |call| call.id.as_str(),
+            |result| result.id.as_str(),
+        )?;
 
         // Anthropic requires `max_tokens` on every request; requests that
         // don't carry one get the provider default (config can override).

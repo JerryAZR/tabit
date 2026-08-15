@@ -278,9 +278,7 @@ mod conformance_law_tests {
     use super::assert_valid_event_stream;
     use crate::OneOrMany;
     use crate::completion::Usage;
-    use crate::completion::message::{
-        AssistantContent, Reasoning, ReasoningContent, Text,
-    };
+    use crate::completion::message::{AssistantContent, Reasoning, ReasoningContent, Text};
     use crate::streaming::{StreamFinal, StreamedAssistantContent as Item};
 
     fn final_record() -> StreamFinal {

@@ -34,15 +34,15 @@ use tracing::{Instrument, info_span, span::Id};
 
 use super::{
     completion::{Agent, PreparedCompletionRequest},
+    drive::{
+        DriveItem, DriveStream, TurnSource, drive_agent, drive_tool_calls, record_usage_on_span,
+        streaming_error_into_prompt,
+    },
     hook::{
         AgentHook, CompletionCall, CompletionCallAction,
         CompletionResponse as CompletionResponseEvent, HookContext, HookStack,
         InvalidToolCallAction, ModelTurnAction, ModelTurnFinished, ObservationAction, RequestPatch,
         ToolCall as ToolCallEvent, ToolCallAction, ToolResultAction, ToolResultEvent,
-    },
-    drive::{
-        DriveItem, DriveStream, TurnSource, drive_agent, drive_tool_calls, record_usage_on_span,
-        streaming_error_into_prompt,
     },
     model::ModelHandle,
     prompt_request::{
@@ -1222,8 +1222,7 @@ impl AgentRunner {
                         // (`tracing_futures::Instrument` — the stream trait, not
                         // the futures-only `tracing::Instrument` above.)
                         return Box::pin(tracing_futures::Instrument::instrument(
-                            stream,
-                            agent_span,
+                            stream, agent_span,
                         ));
                     }
                 },

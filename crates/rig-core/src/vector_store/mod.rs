@@ -366,10 +366,7 @@ mod tests {
     #[tokio::test]
     async fn dyn_top_n_prunes_oversized_arrays_from_documents() {
         let index = PruningIndex;
-        let request = VectorSearchRequest::builder()
-            .query("q")
-            .samples(1)
-            .build();
+        let request = VectorSearchRequest::builder().query("q").samples(1).build();
 
         let results = VectorStoreIndexDyn::top_n(&index, request)
             .await

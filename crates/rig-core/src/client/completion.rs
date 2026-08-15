@@ -55,10 +55,10 @@ pub trait ConstructCompletionModel<C>: Sized {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::OneOrMany;
     use crate::completion::{CompletionError, CompletionRequest, CompletionResponse};
     use crate::message::Message;
     use crate::streaming::StreamingCompletionResponse;
-    use crate::OneOrMany;
 
     fn minimal_request(prompt: &str) -> CompletionRequest {
         CompletionRequest {

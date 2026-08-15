@@ -39,17 +39,6 @@ where
     content.serialize(serializer)
 }
 
-
-
-
-
-
-
-
-
-
-
-
 #[derive(Debug, Serialize, Deserialize, PartialEq, Clone)]
 #[serde(tag = "role", rename_all = "lowercase")]
 pub enum Message {
@@ -1607,11 +1596,11 @@ impl TryFrom<OpenAIRequestParams> for CompletionRequest {
         // same correlation key) is rejected up front: OpenAI would 400 on it,
         // and the alternative — forwarding it — risks attributing the result
         // to the wrong call. Fail loud, at the conversion boundary.
-        crate::providers::validate_tool_result_correlation(&chat_history, |call| {
-            call.call_id.as_deref().unwrap_or(call.id.as_str())
-        }, |result| {
-            result.call_id.as_deref().unwrap_or(result.id.as_str())
-        })?;
+        crate::providers::validate_tool_result_correlation(
+            &chat_history,
+            |call| call.call_id.as_deref().unwrap_or(call.id.as_str()),
+            |result| result.call_id.as_deref().unwrap_or(result.id.as_str()),
+        )?;
 
         let CoreCompletionRequest {
             model: request_model,

@@ -11,13 +11,15 @@ use crate::reasoning::{self, ReasoningRoundtripAgent};
 #[tokio::test]
 async fn streaming() {
     with_anthropic_cassette("reasoning_roundtrip/streaming", |client| async move {
-        reasoning::run_reasoning_roundtrip_streaming(ReasoningRoundtripAgent::new(
-            client.completion_model("claude-sonnet-4-6"),
-            Some(serde_json::json!({
-                "thinking": { "type": "adaptive" }
-            })),
+        reasoning::run_reasoning_roundtrip_streaming(
+            ReasoningRoundtripAgent::new(
+                client.completion_model("claude-sonnet-4-6"),
+                Some(serde_json::json!({
+                    "thinking": { "type": "adaptive" }
+                })),
+            )
+            .with_max_tokens(64_000),
         )
-        .with_max_tokens(64_000))
         .await;
     })
     .await;
@@ -26,13 +28,15 @@ async fn streaming() {
 #[tokio::test]
 async fn nonstreaming() {
     with_anthropic_cassette("reasoning_roundtrip/nonstreaming", |client| async move {
-        reasoning::run_reasoning_roundtrip_nonstreaming(ReasoningRoundtripAgent::new(
-            client.completion_model("claude-sonnet-4-6"),
-            Some(serde_json::json!({
-                "thinking": { "type": "adaptive" }
-            })),
+        reasoning::run_reasoning_roundtrip_nonstreaming(
+            ReasoningRoundtripAgent::new(
+                client.completion_model("claude-sonnet-4-6"),
+                Some(serde_json::json!({
+                    "thinking": { "type": "adaptive" }
+                })),
+            )
+            .with_max_tokens(64_000),
         )
-        .with_max_tokens(64_000))
         .await;
     })
     .await;

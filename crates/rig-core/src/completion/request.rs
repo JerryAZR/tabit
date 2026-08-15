@@ -1853,11 +1853,9 @@ mod tests {
         use crate::test_utils::MockStreamEvent;
 
         let model = std::sync::Arc::new(MockCompletionModel::text("hello"));
-        let request = CompletionRequestBuilder::new(
-            MockCompletionModel::default(),
-            Message::user("Prompt"),
-        )
-        .build();
+        let request =
+            CompletionRequestBuilder::new(MockCompletionModel::default(), Message::user("Prompt"))
+                .build();
 
         let response = model
             .completion(request)
@@ -1873,8 +1871,11 @@ mod tests {
         ]]));
         let mut streamed = streamed_model
             .stream(
-                CompletionRequestBuilder::new(MockCompletionModel::default(), Message::user("Prompt"))
-                    .build(),
+                CompletionRequestBuilder::new(
+                    MockCompletionModel::default(),
+                    Message::user("Prompt"),
+                )
+                .build(),
             )
             .await
             .expect("Arc forwards stream");
@@ -1906,7 +1907,10 @@ mod tests {
             output_schema: Some(titled),
             ..base_request()
         };
-        assert_eq!(request.output_schema_name(), Some("WeatherResponse".to_string()));
+        assert_eq!(
+            request.output_schema_name(),
+            Some("WeatherResponse".to_string())
+        );
 
         let request = CompletionRequest {
             output_schema: Some(untitled),
@@ -1961,7 +1965,10 @@ mod tests {
             additional_params: Some(serde_json::json!({"top_p": 0.9})),
             ..object_params
         }
-        .with_provider_tools(vec![provider_tool("web_search"), provider_tool("file_search")]);
+        .with_provider_tools(vec![
+            provider_tool("web_search"),
+            provider_tool("file_search"),
+        ]);
         assert_eq!(
             request.additional_params,
             Some(serde_json::json!({
@@ -2000,8 +2007,7 @@ mod tests {
         );
 
         // An empty tool list leaves the payload untouched.
-        let request =
-            base_request().with_provider_tools(Vec::new());
+        let request = base_request().with_provider_tools(Vec::new());
         assert_eq!(request.additional_params, None);
     }
 

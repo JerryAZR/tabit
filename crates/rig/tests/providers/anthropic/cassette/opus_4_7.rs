@@ -220,11 +220,13 @@ async fn messages_adaptive_thinking_nonstreaming_smoke() {
     super::super::support::with_anthropic_cassette(
         "opus_4_7/messages_adaptive_thinking_nonstreaming_smoke",
         |client| async move {
-            reasoning::run_reasoning_roundtrip_nonstreaming(ReasoningRoundtripAgent::new(
-                client.completion_model("claude-opus-4-7"),
-                Some(opus_4_7_thinking_params()),
+            reasoning::run_reasoning_roundtrip_nonstreaming(
+                ReasoningRoundtripAgent::new(
+                    client.completion_model("claude-opus-4-7"),
+                    Some(opus_4_7_thinking_params()),
+                )
+                .with_max_tokens(128_000),
             )
-            .with_max_tokens(128_000))
             .await;
         },
     )

@@ -693,10 +693,7 @@ mod tests {
         // it must survive deserialization instead of being serde-dropped.
         let json = r#"{"refusal": "I can't help with that."}"#;
         let delta: StreamingDelta = serde_json::from_str(json).unwrap();
-        assert_eq!(
-            delta.refusal.as_deref(),
-            Some("I can't help with that.")
-        );
+        assert_eq!(delta.refusal.as_deref(), Some("I can't help with that."));
         assert!(delta.content.is_none());
     }
 
@@ -1386,7 +1383,8 @@ mod tests {
         assert_eq!(delta.content.as_deref(), Some("Hello world"));
 
         // Only non-text parts join to an empty string, which reads as no content.
-        let json = r#"{"content":[{"type":"image_url","image_url":{"url":"https://example.com/x.png"}}]}"#;
+        let json =
+            r#"{"content":[{"type":"image_url","image_url":{"url":"https://example.com/x.png"}}]}"#;
         let delta: StreamingDelta = serde_json::from_str(json).unwrap();
         assert_eq!(delta.content, None);
 
@@ -1407,9 +1405,10 @@ mod tests {
 
     #[test]
     fn test_openai_profile_defines_no_detail_hooks() {
-        let profile =
-            OpenAICompatibleProfile::<crate::providers::openai::OpenAICompletionsExt, Usage>::default(
-            );
+        let profile = OpenAICompatibleProfile::<
+            crate::providers::openai::OpenAICompletionsExt,
+            Usage,
+        >::default();
 
         assert!(
             profile
@@ -1427,8 +1426,7 @@ mod tests {
     /// scripted byte chunks, so tests can assert on the serialized wire request.
     #[derive(Clone, Default, Debug)]
     struct CapturingStreamingClient {
-        chunks:
-            std::sync::Arc<std::sync::Mutex<Option<Vec<http_client::Result<bytes::Bytes>>>>>,
+        chunks: std::sync::Arc<std::sync::Mutex<Option<Vec<http_client::Result<bytes::Bytes>>>>>,
         bodies: std::sync::Arc<std::sync::Mutex<Vec<Vec<u8>>>>,
     }
 
@@ -1451,7 +1449,10 @@ mod tests {
         fn send<T, U>(
             &self,
             _req: http::Request<T>,
-        ) -> impl std::future::Future<Output = http_client::Result<http::Response<crate::http_client::LazyBody<U>>>> + crate::wasm_compat::WasmCompatSend + 'static
+        ) -> impl std::future::Future<
+            Output = http_client::Result<http::Response<crate::http_client::LazyBody<U>>>,
+        > + crate::wasm_compat::WasmCompatSend
+        + 'static
         where
             T: Into<bytes::Bytes> + crate::wasm_compat::WasmCompatSend,
             U: From<bytes::Bytes> + crate::wasm_compat::WasmCompatSend + 'static,
@@ -1464,7 +1465,10 @@ mod tests {
         fn send_multipart<U>(
             &self,
             _req: http::Request<crate::http_client::MultipartForm>,
-        ) -> impl std::future::Future<Output = http_client::Result<http::Response<crate::http_client::LazyBody<U>>>> + crate::wasm_compat::WasmCompatSend + 'static
+        ) -> impl std::future::Future<
+            Output = http_client::Result<http::Response<crate::http_client::LazyBody<U>>>,
+        > + crate::wasm_compat::WasmCompatSend
+        + 'static
         where
             U: From<bytes::Bytes> + crate::wasm_compat::WasmCompatSend + 'static,
         {
@@ -1476,7 +1480,9 @@ mod tests {
         fn send_streaming<T>(
             &self,
             req: http::Request<T>,
-        ) -> impl std::future::Future<Output = http_client::Result<crate::http_client::StreamingResponse>> + crate::wasm_compat::WasmCompatSend
+        ) -> impl std::future::Future<
+            Output = http_client::Result<crate::http_client::StreamingResponse>,
+        > + crate::wasm_compat::WasmCompatSend
         where
             T: Into<bytes::Bytes> + crate::wasm_compat::WasmCompatSend,
         {
@@ -1485,11 +1491,7 @@ mod tests {
                 .lock()
                 .unwrap_or_else(|p| p.into_inner())
                 .push(body.to_vec());
-            let chunks = self
-                .chunks
-                .lock()
-                .unwrap_or_else(|p| p.into_inner())
-                .take();
+            let chunks = self.chunks.lock().unwrap_or_else(|p| p.into_inner()).take();
 
             async move {
                 let Some(chunks) = chunks else {
@@ -1517,9 +1519,8 @@ mod tests {
         use crate::client::CompletionClient;
         use crate::completion::CompletionModel;
 
-        let http_client = CapturingStreamingClient::new(vec![Ok(bytes::Bytes::from_static(
-            b"data: [DONE]\n\n",
-        ))]);
+        let http_client =
+            CapturingStreamingClient::new(vec![Ok(bytes::Bytes::from_static(b"data: [DONE]\n\n"))]);
         let client = crate::providers::openai::CompletionsClient::builder()
             .http_client(http_client.clone())
             .api_key("test-key")
@@ -1549,7 +1550,9 @@ mod tests {
         let unary: http_client::Result<http::Response<crate::http_client::LazyBody<bytes::Bytes>>> =
             crate::http_client::HttpClientExt::send(
                 &client,
-                http::Request::post("http://localhost").body(Vec::new()).unwrap(),
+                http::Request::post("http://localhost")
+                    .body(Vec::new())
+                    .unwrap(),
             )
             .await;
         assert!(unary.is_err());
@@ -1568,14 +1571,18 @@ mod tests {
         // The streaming path works exactly once, then reports misuse loudly.
         let first = crate::http_client::HttpClientExt::send_streaming(
             &client,
-            http::Request::post("http://localhost").body(Vec::new()).unwrap(),
+            http::Request::post("http://localhost")
+                .body(Vec::new())
+                .unwrap(),
         )
         .await;
         assert!(first.is_ok());
 
         let second = crate::http_client::HttpClientExt::send_streaming(
             &client,
-            http::Request::post("http://localhost").body(Vec::new()).unwrap(),
+            http::Request::post("http://localhost")
+                .body(Vec::new())
+                .unwrap(),
         )
         .await;
         let Err(error) = second else {
@@ -1641,8 +1648,7 @@ mod tests {
     async fn a_non_object_stream_options_is_left_alone() {
         // A scalar `stream_options` cannot be extended, so it is passed through
         // verbatim rather than replaced.
-        let body =
-            captured_stream_request_body(serde_json::json!({"stream_options": true})).await;
+        let body = captured_stream_request_body(serde_json::json!({"stream_options": true})).await;
 
         assert_eq!(body["stream"], true);
         assert_eq!(body["stream_options"], serde_json::Value::Bool(true));

@@ -568,8 +568,7 @@ mod tests {
         assert!(rendered.contains("InMemoryConversationMemory"));
         assert!(!rendered.contains("<filter>"));
 
-        let filtered =
-            InMemoryConversationMemory::new().with_filter(|msgs: Vec<Message>| msgs);
+        let filtered = InMemoryConversationMemory::new().with_filter(|msgs: Vec<Message>| msgs);
         assert!(format!("{filtered:?}").contains("<filter>"));
     }
 }

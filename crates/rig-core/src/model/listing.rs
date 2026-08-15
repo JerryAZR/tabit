@@ -708,7 +708,10 @@ mod tests {
 
         match error {
             ModelListingError::RequestError { message } => {
-                assert!(message.contains("502"), "message should carry the status: {message}");
+                assert!(
+                    message.contains("502"),
+                    "message should carry the status: {message}"
+                );
                 assert!(message.contains("upstream blew up"));
             }
             other => panic!("Expected RequestError, got {other:?}"),
@@ -733,8 +736,8 @@ mod tests {
 
     #[test]
     fn test_from_serde_json_error() {
-        let error = serde_json::from_str::<serde_json::Value>("{")
-            .expect_err("malformed JSON must fail");
+        let error =
+            serde_json::from_str::<serde_json::Value>("{").expect_err("malformed JSON must fail");
         let error = ModelListingError::from(error);
 
         match error {

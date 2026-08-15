@@ -377,12 +377,11 @@ mod tests {
         // Construction through the public erasure seams type-checks without a
         // `Clone` impl; the bounds are the test, but the closure is also
         // invoked once so the construction bodies themselves stay exercised.
-        let _ = (|| {
-            let handle = ModelHandle::new(NonCloneModel);
-            let named = ModelHandle::named("probe", NonCloneModel);
-            let via_arc = std::sync::Arc::new(NonCloneModel).completion_request("go");
-            let builder = crate::AgentBuilder::new(NonCloneModel);
-            (handle, named, via_arc, builder)
-        })();
+        let _ = (
+            ModelHandle::new(NonCloneModel),
+            ModelHandle::named("probe", NonCloneModel),
+            std::sync::Arc::new(NonCloneModel).completion_request("go"),
+            crate::AgentBuilder::new(NonCloneModel),
+        );
     }
 }

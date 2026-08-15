@@ -668,7 +668,10 @@ mod tests {
             .send_multipart::<Bytes>(multipart_request())
             .await
             .expect("second scripted response should serve multipart too");
-        assert_eq!(multipart.into_body().await.expect("body resolves"), "second");
+        assert_eq!(
+            multipart.into_body().await.expect("body resolves"),
+            "second"
+        );
         assert_eq!(client.remaining_responses(), 0);
         assert_eq!(client.requests().len(), 2);
 

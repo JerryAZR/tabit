@@ -420,7 +420,10 @@ impl PartsAccumulator {
         // `ensure_open_tool_input` just guaranteed an open input for `id`,
         // so the lookup always finds it.
         if !name.is_empty()
-            && let Some(input) = self.open_tool_inputs.iter_mut().find(|input| input.id == *id)
+            && let Some(input) = self
+                .open_tool_inputs
+                .iter_mut()
+                .find(|input| input.id == *id)
         {
             name.clone_into(&mut input.name);
         }
@@ -435,7 +438,11 @@ impl PartsAccumulator {
         let internal_call_id = self.ensure_open_tool_input(id);
         // `ensure_open_tool_input` just guaranteed an open input for `id`,
         // so the lookup always finds it.
-        if let Some(input) = self.open_tool_inputs.iter_mut().find(|input| input.id == *id) {
+        if let Some(input) = self
+            .open_tool_inputs
+            .iter_mut()
+            .find(|input| input.id == *id)
+        {
             match input.buffer.as_mut() {
                 Some(buffer) => {
                     // Some OpenAI-compatible gateways emit a literal
@@ -1976,7 +1983,12 @@ mod tests {
         let mut accumulator = PartsAccumulator::new();
         accumulator.reasoning_full(
             &pid("rs_1"),
-            full("rs_1", ReasoningContent::Redacted { data: "redacted-payload".to_owned() }),
+            full(
+                "rs_1",
+                ReasoningContent::Redacted {
+                    data: "redacted-payload".to_owned(),
+                },
+            ),
         );
 
         let parts = accumulator.finish();

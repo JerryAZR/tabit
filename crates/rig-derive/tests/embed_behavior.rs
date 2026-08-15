@@ -68,7 +68,10 @@ fn basic_embeds_multiple_fields_in_declaration_order() {
 
     assert_eq!(
         to_texts(chapter).unwrap(),
-        vec!["Intro".to_string(), "It was a dark and stormy night.".to_string()],
+        vec![
+            "Intro".to_string(),
+            "It was a dark and stormy night.".to_string()
+        ],
         "every #[embed] field contributes, in field order"
     );
 }
@@ -209,9 +212,7 @@ struct Tokenized {
 
 #[test]
 fn custom_embed_with_accepts_a_function_path_and_non_embed_types() {
-    let item = Tokenized {
-        tokens: vec![4, 2],
-    };
+    let item = Tokenized { tokens: vec![4, 2] };
 
     assert_eq!(
         to_texts(item).unwrap(),
@@ -293,16 +294,15 @@ struct WithFailingField {
 
 #[test]
 fn basic_path_propagates_field_errors() {
-    let result = to_texts(WithFailingField { failing: FailingEmbed });
+    let result = to_texts(WithFailingField {
+        failing: FailingEmbed,
+    });
 
     let error = result.expect_err("the `?` on the basic field's embed call must propagate");
     assert_eq!(error.to_string(), "basic path boom");
 }
 
-fn failing_custom_embed(
-    _embedder: &mut TextEmbedder,
-    value: String,
-) -> Result<(), EmbedError> {
+fn failing_custom_embed(_embedder: &mut TextEmbedder, value: String) -> Result<(), EmbedError> {
     Err(EmbedError::new(std::io::Error::other(format!(
         "custom path boom: {value}"
     ))))

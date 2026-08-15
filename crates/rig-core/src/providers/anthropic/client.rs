@@ -297,15 +297,13 @@ mod tests {
     #[test]
     fn from_env_restores_a_preexisting_base_url_value() {
         let _guard = ENV_LOCK.lock().expect("env lock should not be poisoned");
-        let _preexisting =
-            EnvVarGuard::set("ANTHROPIC_BASE_URL", "https://preexisting.example");
+        let _preexisting = EnvVarGuard::set("ANTHROPIC_BASE_URL", "https://preexisting.example");
         let _api_key = EnvVarGuard::set("ANTHROPIC_API_KEY", "dummy-key");
 
         // A second guard over the same variable captures the preexisting value
         // as its `original`, so dropping it restores that value.
         {
-            let _overridden =
-                EnvVarGuard::set("ANTHROPIC_BASE_URL", "https://overridden.example");
+            let _overridden = EnvVarGuard::set("ANTHROPIC_BASE_URL", "https://overridden.example");
             assert_eq!(
                 std::env::var("ANTHROPIC_BASE_URL").as_deref(),
                 Ok("https://overridden.example")
@@ -326,7 +324,10 @@ mod tests {
 
         assert_eq!(client.base_url(), "https://api.anthropic.com");
         assert_eq!(
-            client.headers().get("x-api-key").and_then(|value| value.to_str().ok()),
+            client
+                .headers()
+                .get("x-api-key")
+                .and_then(|value| value.to_str().ok()),
             Some("dummy-key")
         );
     }
@@ -342,7 +343,10 @@ mod tests {
             .expect("builder should apply anthropic version and betas");
 
         assert_eq!(
-            client.headers().get("anthropic-version").and_then(|v| v.to_str().ok()),
+            client
+                .headers()
+                .get("anthropic-version")
+                .and_then(|v| v.to_str().ok()),
             Some("2023-01-01")
         );
         assert_eq!(

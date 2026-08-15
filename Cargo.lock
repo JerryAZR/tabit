@@ -2587,9 +2587,11 @@ dependencies = [
 name = "tabit-config"
 version = "0.41.0"
 dependencies = [
+ "rig-core",
  "serde",
  "serde_json",
  "thiserror",
+ "tokio",
  "toml",
  "url",
 ]

@@ -17,7 +17,7 @@ pub use rig_core::test_utils::*;
 pub use tools::{
     BarrierMockToolIndex, MockAddTool, MockBarrierTool, MockContextProbeTool, MockControlledTool,
     MockDeniedTool, MockExampleTool, MockFailingTool, MockFailure, MockHandledFailureTool,
-    MockImageOutputTool, MockMetadataTool, MockObjectOutputTool, MockOperationArgs,
-    MockRequestId, MockStringOutputTool, MockSubtractTool, MockToolError, MockToolIndex,
-    SessionId, mock_math_toolset,
+    MockImageOutputTool, MockMetadataTool, MockObjectOutputTool, MockOperationArgs, MockRequestId,
+    MockStringOutputTool, MockSubtractTool, MockToolError, MockToolIndex, SessionId,
+    mock_math_toolset,
 };

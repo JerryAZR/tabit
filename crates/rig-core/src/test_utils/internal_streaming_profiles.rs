@@ -95,7 +95,8 @@ mod tests {
 
     #[test]
     fn unmatched_frames_classify_as_unknown_for_every_profile() {
-        let profiles: [&dyn CompatibleStreamProfile<Usage = Usage, Detail = (), FinalResponse = StreamFinal>; 3] = [
+        let profiles: [&dyn CompatibleStreamProfile<Usage = Usage, Detail = (), FinalResponse = StreamFinal>;
+            3] = [
             &ErrorAfterPendingToolCallProfile,
             &DistinctToolCallEvictionProfile,
             &FinishReasonCleanupProfile,

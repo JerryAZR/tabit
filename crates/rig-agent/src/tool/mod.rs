@@ -1889,7 +1889,10 @@ mod migrated_tests {
         let schemas = toolset.schemas().unwrap();
         assert_eq!(schemas.len(), 1);
         assert_eq!(schemas[0].name, RetrievedTool::NAME);
-        assert_eq!(schemas[0].embedding_docs, vec!["dynamic tool docs".to_string()]);
+        assert_eq!(
+            schemas[0].embedding_docs,
+            vec!["dynamic tool docs".to_string()]
+        );
 
         // Definitions and execution go through the same registration, and the
         // embedding tool reconstructs through `ToolEmbedding::init`.
@@ -1960,14 +1963,8 @@ mod migrated_tests {
         let context = ToolEmbedding::context(&tool);
         let restored: PortableEmbeddingFixture =
             ToolEmbedding::init((), context).expect("init should reconstruct");
-        assert_eq!(
-            Tool::description(&restored),
-            Tool::description(&tool)
-        );
-        assert_eq!(
-            Tool::parameters(&restored),
-            Tool::parameters(&tool)
-        );
+        assert_eq!(Tool::description(&restored), Tool::description(&tool));
+        assert_eq!(Tool::parameters(&restored), Tool::parameters(&tool));
     }
 
     #[tokio::test]

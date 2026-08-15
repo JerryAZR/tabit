@@ -94,9 +94,7 @@ mod tests {
     fn page_json(ids: &[(&str, &str)], has_more: bool, last_id: Option<&str>) -> Vec<u8> {
         let data: Vec<serde_json::Value> = ids
             .iter()
-            .map(|(id, display_name)| {
-                serde_json::json!({ "id": id, "display_name": display_name })
-            })
+            .map(|(id, display_name)| serde_json::json!({ "id": id, "display_name": display_name }))
             .collect();
         serde_json::json!({
             "data": data,
@@ -158,17 +156,22 @@ mod tests {
         };
 
         assert_eq!(requests.len(), 2);
-        assert!(requests[0].uri.ends_with("/v1/models"), "{}", requests[0].uri);
         assert!(
-            requests[1]
-                .uri
-                .ends_with("/v1/models?after_id=claude-a"),
+            requests[0].uri.ends_with("/v1/models"),
+            "{}",
+            requests[0].uri
+        );
+        assert!(
+            requests[1].uri.ends_with("/v1/models?after_id=claude-a"),
             "the cursor page must follow the last model id of the previous page: {}",
             requests[1].uri
         );
         for request in &requests {
             assert_eq!(
-                request.headers.get("x-api-key").and_then(|v| v.to_str().ok()),
+                request
+                    .headers
+                    .get("x-api-key")
+                    .and_then(|v| v.to_str().ok()),
                 Some("test-key")
             );
         }

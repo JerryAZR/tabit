@@ -188,17 +188,17 @@ mod tests {
     async fn failing_memory_fails_load_and_no_ops_append_and_clear() {
         let memory = FailingMemory::new("cannot reach store");
 
-        let error = memory
-            .load("conv-1")
-            .await
-            .expect_err("load must fail");
+        let error = memory.load("conv-1").await.expect_err("load must fail");
         assert!(error.to_string().contains("cannot reach store"));
 
         memory
             .append("conv-1", vec![Message::user("hello")])
             .await
             .expect("append is a no-op success");
-        memory.clear("conv-1").await.expect("clear is a no-op success");
+        memory
+            .clear("conv-1")
+            .await
+            .expect("clear is a no-op success");
     }
 
     #[tokio::test]
@@ -214,6 +214,9 @@ mod tests {
             .expect_err("append must fail");
         assert!(error.to_string().contains("append boom"));
 
-        memory.clear("conv-1").await.expect("clear is a no-op success");
+        memory
+            .clear("conv-1")
+            .await
+            .expect("clear is a no-op success");
     }
 }

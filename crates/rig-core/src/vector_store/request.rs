@@ -447,14 +447,10 @@ mod tests {
 
     #[test]
     fn interpret_compiles_every_filter_variant() {
-        let filter = F::eq("a", json!(1))
-            .and(F::gt("b", json!(2)).or(F::lt("c", json!(3))));
+        let filter = F::eq("a", json!(1)).and(F::gt("b", json!(2)).or(F::lt("c", json!(3))));
 
         let compiled: StringFilter = filter.interpret();
-        assert_eq!(
-            compiled,
-            StringFilter("(a=1&(b>2|c<3))".to_string())
-        );
+        assert_eq!(compiled, StringFilter("(a=1&(b>2|c<3))".to_string()));
     }
 
     #[test]

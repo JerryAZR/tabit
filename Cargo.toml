@@ -30,6 +30,9 @@ todo = "forbid"
 unimplemented = "forbid"
 unreachable = "deny"
 unwrap_used = "deny"
+# Error enums (CompletionError etc.) exceed clippy's 128-byte threshold; the
+# size is irrelevant on error paths and boxing variants would blur matches.
+result_large_err = "allow"
 
 [workspace.dependencies]
 anyhow = "1.0.102"

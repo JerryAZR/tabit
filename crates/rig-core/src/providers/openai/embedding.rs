@@ -250,7 +250,7 @@ where
                     let embeddings = response
                         .data
                         .into_iter()
-                        .zip(documents.into_iter())
+                        .zip(documents)
                         .map(|(embedding, document)| embeddings::Embedding {
                             document,
                             vec: embedding
@@ -415,7 +415,10 @@ mod tests {
         }
 
         impl ProviderBuilder for CompatExtBuilder {
-            type Extension<H> = CompatExt where H: HttpClientExt;
+            type Extension<H>
+                = CompatExt
+            where
+                H: HttpClientExt;
             type ApiKey = BearerAuth;
 
             const BASE_URL: &'static str = "https://compat.invalid";

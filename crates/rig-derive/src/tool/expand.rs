@@ -476,13 +476,16 @@ mod tests {
         // constructed one instead of indexing.
         let mut function = syn::parse_str::<syn::ItemFn>("fn f() -> Result<i32, E> {}")
             .expect("test function parses");
-        function.sig.output = syn::ReturnType::Type(Default::default(), Box::new(Type::Path(syn::TypePath {
-            qself: None,
-            path: syn::Path {
-                leading_colon: None,
-                segments: Default::default(),
-            },
-        })));
+        function.sig.output = syn::ReturnType::Type(
+            Default::default(),
+            Box::new(Type::Path(syn::TypePath {
+                qself: None,
+                path: syn::Path {
+                    leading_colon: None,
+                    segments: Default::default(),
+                },
+            })),
+        );
 
         let error = result_type_tokens(&function.sig.output)
             .err()

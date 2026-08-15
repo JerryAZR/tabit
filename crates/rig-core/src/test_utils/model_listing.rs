@@ -40,8 +40,10 @@ mod tests {
 
     #[tokio::test]
     async fn model_lister_constructor_round_trips_through_list_all() {
-        let lister =
-            <MockModelLister as ModelLister>::new(vec![Model::from_id("m-1"), Model::from_id("m-2")]);
+        let lister = <MockModelLister as ModelLister>::new(vec![
+            Model::from_id("m-1"),
+            Model::from_id("m-2"),
+        ]);
 
         let list = lister.list_all().await.unwrap();
 

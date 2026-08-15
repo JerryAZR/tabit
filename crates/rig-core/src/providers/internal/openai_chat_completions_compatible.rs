@@ -1419,11 +1419,8 @@ mod tests {
             &self,
             terminal: super::CompatibleTerminal<Self::Usage>,
         ) -> Self::FinalResponse {
-            crate::streaming::StreamFinal::new(
-                crate::test_utils::MOCK_PROVIDER,
-                terminal.usage,
-            )
-            .with_optional_finish_reason(terminal.finish_reason)
+            crate::streaming::StreamFinal::new(crate::test_utils::MOCK_PROVIDER, terminal.usage)
+                .with_optional_finish_reason(terminal.finish_reason)
         }
 
         fn emits_complete_single_chunk_tool_calls(&self) -> bool {
@@ -1442,10 +1439,9 @@ mod tests {
             .body(Vec::new())
             .expect("request should build");
 
-        let mut stream =
-            send_compatible_streaming_request(client, req, CompleteSingleChunkProfile)
-                .await
-                .expect("stream should start");
+        let mut stream = send_compatible_streaming_request(client, req, CompleteSingleChunkProfile)
+            .await
+            .expect("stream should start");
 
         let mut collected_tool_calls = Vec::new();
         let mut saw_final = false;
@@ -1505,14 +1501,12 @@ mod tests {
                     }],
                     Vec::new(),
                 )),
-                "reasoning" => {
-                    WireEvent::Known(choice_chunk(
-                        super::CompatibleFinishReason::Absent,
-                        None,
-                        Vec::new(),
-                        vec![("reasoning", "thinking hard")],
-                    ))
-                }
+                "reasoning" => WireEvent::Known(choice_chunk(
+                    super::CompatibleFinishReason::Absent,
+                    None,
+                    Vec::new(),
+                    vec![("reasoning", "thinking hard")],
+                )),
                 "decorate" => WireEvent::Known(choice_chunk(
                     super::CompatibleFinishReason::Absent,
                     None,
@@ -1535,11 +1529,8 @@ mod tests {
             &self,
             terminal: super::CompatibleTerminal<Self::Usage>,
         ) -> Self::FinalResponse {
-            crate::streaming::StreamFinal::new(
-                crate::test_utils::MOCK_PROVIDER,
-                terminal.usage,
-            )
-            .with_optional_finish_reason(terminal.finish_reason)
+            crate::streaming::StreamFinal::new(crate::test_utils::MOCK_PROVIDER, terminal.usage)
+                .with_optional_finish_reason(terminal.finish_reason)
         }
 
         fn detail_reasoning(
@@ -1604,7 +1595,10 @@ mod tests {
         assert_eq!(decorated_tool_calls.len(), 1);
         assert_eq!(decorated_tool_calls[0].id, "call_9");
         assert!(
-            decorated_tool_calls[0].signature.as_deref().is_some_and(|s| s == "sig-1"),
+            decorated_tool_calls[0]
+                .signature
+                .as_deref()
+                .is_some_and(|s| s == "sig-1"),
             "the decoration must attach the provider signature to the open call, got {:?}",
             decorated_tool_calls[0].signature
         );
@@ -1674,11 +1668,8 @@ mod tests {
             &self,
             terminal: super::CompatibleTerminal<Self::Usage>,
         ) -> Self::FinalResponse {
-            crate::streaming::StreamFinal::new(
-                crate::test_utils::MOCK_PROVIDER,
-                terminal.usage,
-            )
-            .with_optional_finish_reason(terminal.finish_reason)
+            crate::streaming::StreamFinal::new(crate::test_utils::MOCK_PROVIDER, terminal.usage)
+                .with_optional_finish_reason(terminal.finish_reason)
         }
     }
 
@@ -1830,10 +1821,7 @@ mod tests {
         tracing::subscriber::with_default(subscriber, || {
             let span = tracing::info_span!(target: "rig::completions", "interpret_span");
             let _guard = span.enter();
-            adapter.interpret(
-                super::CompatEvent::Chunk(chunk),
-                &mut out,
-            );
+            adapter.interpret(super::CompatEvent::Chunk(chunk), &mut out);
         });
         assert!(out.is_empty(), "a choice-less chunk emits nothing");
     }

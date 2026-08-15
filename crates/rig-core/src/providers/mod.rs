@@ -86,8 +86,8 @@
 //! # }
 //! ```
 pub mod anthropic;
-pub mod openai;
 pub mod internal;
+pub mod openai;
 
 use crate::completion::{CompletionError, Message};
 

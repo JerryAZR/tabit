@@ -168,7 +168,11 @@ mod tests {
         let refs = refs();
         assert!(!refs.is_context_path(&segments(&["rig_agent", "tool"])));
         assert!(!refs.is_context_path(&segments(&[
-            "rig", "agent", "tool", "ToolContext", "extra"
+            "rig",
+            "agent",
+            "tool",
+            "ToolContext",
+            "extra"
         ])));
         assert!(!refs.is_context_path(&segments(&["ToolContext"])));
         assert!(!refs.is_context_path(&[]));
@@ -176,6 +180,9 @@ mod tests {
 
     #[test]
     fn crate_attr_strings_strip_whitespace() {
-        assert_eq!(crate_attr_string(&quote!(::rig :: core), "serde"), "::rig::core::serde");
+        assert_eq!(
+            crate_attr_string(&quote!(::rig::core), "serde"),
+            "::rig::core::serde"
+        );
     }
 }

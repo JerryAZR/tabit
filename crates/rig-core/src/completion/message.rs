@@ -405,10 +405,10 @@ impl Image {
                     ));
                 };
 
-            Ok(format!(
-                "data:{ty};base64,{data}",
-                ty = media_type.to_mime_type()
-            ))
+                Ok(format!(
+                    "data:{ty};base64,{data}",
+                    ty = media_type.to_mime_type()
+                ))
             }
             unknown => Err(MessageError::ConversionError(format!(
                 "Tried to convert unknown type to a URL: {unknown:?}"
@@ -1340,13 +1340,13 @@ mod tests {
     use serde::{Deserialize, Serialize};
 
     use super::{
-        AssistantContent, Audio, AudioMediaType, Document, DocumentMediaType,
-        DocumentSourceKind, Image, ImageDetail, ImageMediaType, MediaType, Message, MessageError,
-        MimeType, Reasoning, ReasoningContent, Text, ToolCall, ToolFunction, ToolResult,
-        ToolResultContent, UserContent, Video, VideoMediaType,
+        AssistantContent, Audio, AudioMediaType, Document, DocumentMediaType, DocumentSourceKind,
+        Image, ImageDetail, ImageMediaType, MediaType, Message, MessageError, MimeType, Reasoning,
+        ReasoningContent, Text, ToolCall, ToolFunction, ToolResult, ToolResultContent, UserContent,
+        Video, VideoMediaType,
     };
-    use crate::completion::CompletionError;
     use crate::OneOrMany;
+    use crate::completion::CompletionError;
 
     #[test]
     fn reasoning_constructors_and_accessors_work() {
@@ -1867,7 +1867,10 @@ mod tests {
             (DocumentMediaType::Python, "application/x-python"),
         ];
         for (variant, mime) in variants {
-            assert_eq!(DocumentMediaType::from_mime_type(mime), Some(variant.clone()));
+            assert_eq!(
+                DocumentMediaType::from_mime_type(mime),
+                Some(variant.clone())
+            );
             assert_eq!(variant.to_mime_type(), mime);
         }
         // Accepted aliases.
@@ -2013,9 +2016,7 @@ mod tests {
             OneOrMany::many(vec![UserContent::text("u1"), UserContent::text("u2")]).unwrap();
         assert_eq!(
             Message::from(user_many.clone()),
-            Message::User {
-                content: user_many
-            }
+            Message::User { content: user_many }
         );
 
         let tool_call = ToolCall::new(

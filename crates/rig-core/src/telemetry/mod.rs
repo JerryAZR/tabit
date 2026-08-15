@@ -2040,11 +2040,7 @@ mod tests {
             let _guard = span.enter();
 
             record_model_input(&span, &[Message::user("hi")], true);
-            record_model_output(
-                &span,
-                &OneOrMany::one(AssistantContent::text("done")),
-                true,
-            );
+            record_model_output(&span, &OneOrMany::one(AssistantContent::text("done")), true);
             record_model_output(
                 &span,
                 &OneOrMany::one(AssistantContent::tool_call(

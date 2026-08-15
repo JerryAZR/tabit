@@ -241,7 +241,11 @@ mod tests {
 
         assert!(schema.get("oneOf").is_none());
         let merged = schema["anyOf"].as_array().unwrap();
-        assert_eq!(merged.len(), 3, "oneOf variants append to anyOf: {merged:?}");
+        assert_eq!(
+            merged.len(),
+            3,
+            "oneOf variants append to anyOf: {merged:?}"
+        );
         assert!(merged.contains(&json!({ "type": "string" })));
         assert!(merged.contains(&json!({ "type": "number" })));
         assert!(merged.contains(&json!({ "type": "boolean" })));

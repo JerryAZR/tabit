@@ -1,4 +1,16 @@
 #![cfg_attr(docsrs, feature(doc_cfg))]
+#![cfg_attr(
+    test,
+    allow(
+        clippy::err_expect,
+        clippy::expect_used,
+        clippy::indexing_slicing,
+        clippy::panic,
+        clippy::panic_in_result_fn,
+        clippy::unreachable,
+        clippy::unwrap_used
+    )
+)]
 //! Public facade for Rig.
 //!
 //! The `rig` crate is the user-facing entry point for Rig. It re-exports the

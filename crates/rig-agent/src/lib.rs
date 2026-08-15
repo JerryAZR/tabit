@@ -2,11 +2,13 @@
 #![cfg_attr(
     test,
     allow(
+        clippy::err_expect,
         clippy::expect_used,
         clippy::indexing_slicing,
         clippy::panic,
-        clippy::unwrap_used,
-        clippy::unreachable
+        clippy::panic_in_result_fn,
+        clippy::unreachable,
+        clippy::unwrap_used
     )
 )]
 //! Rig's classic agent runtime.

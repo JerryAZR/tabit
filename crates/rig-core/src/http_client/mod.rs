@@ -34,7 +34,9 @@ pub enum Error {
     /// The server requested a retry delay longer than the configured cap, so
     /// the request fails instead of sleeping. See
     /// [`retry::DEFAULT_MAX_SERVER_DELAY`](crate::http_client::retry::DEFAULT_MAX_SERVER_DELAY).
-    #[error("server requested a retry delay of {requested:?}, which exceeds the {cap:?} cap; failing the request instead of retrying")]
+    #[error(
+        "server requested a retry delay of {requested:?}, which exceeds the {cap:?} cap; failing the request instead of retrying"
+    )]
     RetryDelayTooLong {
         /// The error that triggered the rejected retry.
         #[source]
@@ -92,10 +94,7 @@ impl TransportErrorKind {
     /// Whether a request that failed with this kind may be retried without
     /// duplicating already-consumed response content.
     pub fn is_retryable(self) -> bool {
-        matches!(
-            self,
-            Self::Timeout | Self::Connect | Self::RequestFailed
-        )
+        matches!(self, Self::Timeout | Self::Connect | Self::RequestFailed)
     }
 }
 
@@ -485,7 +484,10 @@ mod tests {
             ),
             "status, body, and headers must all be preserved: {err}"
         );
-        assert_eq!(err.non_success_status(), Some(StatusCode::TOO_MANY_REQUESTS));
+        assert_eq!(
+            err.non_success_status(),
+            Some(StatusCode::TOO_MANY_REQUESTS)
+        );
         assert_eq!(err.non_success_body(), Some("slow down"));
         assert!(err.non_success_headers().is_some());
     }
@@ -600,7 +602,10 @@ mod tests {
     fn with_bearer_auth_sets_header_on_builder() {
         let builder = with_bearer_auth(Request::post("http://localhost"), "sk-123").unwrap();
         let req = builder.body(()).unwrap();
-        assert_eq!(req.headers().get(http::header::AUTHORIZATION).unwrap(), "Bearer sk-123");
+        assert_eq!(
+            req.headers().get(http::header::AUTHORIZATION).unwrap(),
+            "Bearer sk-123"
+        );
     }
 
     #[test]
@@ -619,11 +624,9 @@ mod tests {
             .await
             .map(|_| ())
             .unwrap_err();
-        assert!(
-            matches!(&err,
+        assert!(matches!(&err,
                 Error::NonSuccessResponse { status, message, .. }
-                    if *status == StatusCode::INTERNAL_SERVER_ERROR && message == "boom")
-        );
+                    if *status == StatusCode::INTERNAL_SERVER_ERROR && message == "boom"));
     }
 
     #[tokio::test]
@@ -654,19 +657,19 @@ mod tests {
             let mut chunk = [0u8; 4096];
 
             loop {
-                let complete = buf
-                    .windows(4)
-                    .position(|w| w == b"\r\n\r\n")
-                    .is_some_and(|header_end| {
-                        let headers =
-                            String::from_utf8_lossy(&buf[..header_end]).to_ascii_lowercase();
-                        let content_length = headers
-                            .lines()
-                            .find_map(|line| line.strip_prefix("content-length:"))
-                            .and_then(|value| value.trim().parse::<usize>().ok())
-                            .unwrap_or(0);
-                        buf.len() >= header_end + 4 + content_length
-                    });
+                let complete =
+                    buf.windows(4)
+                        .position(|w| w == b"\r\n\r\n")
+                        .is_some_and(|header_end| {
+                            let headers =
+                                String::from_utf8_lossy(&buf[..header_end]).to_ascii_lowercase();
+                            let content_length = headers
+                                .lines()
+                                .find_map(|line| line.strip_prefix("content-length:"))
+                                .and_then(|value| value.trim().parse::<usize>().ok())
+                                .unwrap_or(0);
+                            buf.len() >= header_end + 4 + content_length
+                        });
                 if complete {
                     break;
                 }
@@ -693,14 +696,12 @@ mod tests {
         .await;
 
         let client = ReqwestClient::new();
-        let form = MultipartForm::new()
-            .text("field", "value")
-            .file(
-                "upload",
-                "test.txt",
-                "text/plain".parse().unwrap(),
-                Bytes::from_static(b"file contents"),
-            );
+        let form = MultipartForm::new().text("field", "value").file(
+            "upload",
+            "test.txt",
+            "text/plain".parse().unwrap(),
+            Bytes::from_static(b"file contents"),
+        );
         let request = Request::post(format!("http://{addr}/upload"))
             .body(form)
             .unwrap();
@@ -741,11 +742,9 @@ mod tests {
             .await
             .map(|_| ())
             .unwrap_err();
-        assert!(
-            matches!(&err,
+        assert!(matches!(&err,
                 Error::NonSuccessResponse { status, message, .. }
-                    if *status == StatusCode::INTERNAL_SERVER_ERROR && message == "nope")
-        );
+                    if *status == StatusCode::INTERNAL_SERVER_ERROR && message == "nope"));
     }
 
     #[tokio::test]

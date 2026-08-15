@@ -6,8 +6,8 @@ use tracing::{Level, enabled};
 use tracing_futures::Instrument;
 
 use super::completion::{
-    AnthropicCompatibleProvider, AnthropicCompletionRequest, AnthropicRequestParams, CacheCreationDetail,
-    CacheTtl, Content, GenericCompletionModel, Usage, map_finish_reason,
+    AnthropicCompatibleProvider, AnthropicCompletionRequest, AnthropicRequestParams,
+    CacheCreationDetail, CacheTtl, Content, GenericCompletionModel, Usage, map_finish_reason,
 };
 use crate::completion::{CompletionError, CompletionRequest};
 use crate::http_client::sse::{Event, GenericEventSource};
@@ -951,12 +951,9 @@ impl AnthropicAdapter {
                     // `content_block_stop` promises a complete block: empty input
                     // finalizes to `{}`, malformed input surfaces as an error item
                     // (`UnparseableToolInput::Error`) in the accumulator.
-                    OpenBlock::ClientToolUse { id } => {
-                        Some(Ok(RawStreamingChoice::ToolInputEnd(ToolInputEnd::new(
-                            id,
-                            UnparseableToolInput::Error,
-                        ))))
-                    }
+                    OpenBlock::ClientToolUse { id } => Some(Ok(RawStreamingChoice::ToolInputEnd(
+                        ToolInputEnd::new(id, UnparseableToolInput::Error),
+                    ))),
                     OpenBlock::Text | OpenBlock::Opaque => None,
                 }
             }
@@ -2606,7 +2603,9 @@ mod tests {
         let error = serde_json::from_str::<ContentDelta>("42")
             .expect_err("a scalar content delta payload must be rejected");
         assert!(
-            error.to_string().contains("content delta must be an object"),
+            error
+                .to_string()
+                .contains("content delta must be an object"),
             "unexpected error: {error}"
         );
     }
@@ -2628,7 +2627,9 @@ mod tests {
         let error = serde_json::from_str::<ContentDelta>(r#"{"type":42}"#)
             .expect_err("a non-string discriminator must be rejected");
         assert!(
-            error.to_string().contains("content delta `type` must be a string"),
+            error
+                .to_string()
+                .contains("content delta `type` must be a string"),
             "unexpected error: {error}"
         );
     }
@@ -2685,9 +2686,7 @@ mod tests {
         };
         adapter.interpret(event, &mut out);
 
-        let Some(Ok(RawStreamingChoice::FinalResponse(response))) =
-            out.into_iter().next()
-        else {
+        let Some(Ok(RawStreamingChoice::FinalResponse(response))) = out.into_iter().next() else {
             panic!("a stop-bearing message_delta emits the terminal record");
         };
         assert_eq!(response.usage.cache_creation_input_tokens, Some(20));
@@ -2702,9 +2701,13 @@ mod tests {
         );
         let normalized = crate::completion::Usage::from(&response.usage);
         assert_eq!(normalized.cache_creation_1h_input_tokens, 9);
+        let input_tokens = 4772;
+        let cache_write_5m = 0; // the fixture writes no 5m cache entries
+        let cache_write_1h = 20;
+        let output_tokens = 20;
         assert_eq!(
             normalized.total_tokens,
-            4772 + 0 + 20 + 20,
+            input_tokens + cache_write_5m + cache_write_1h + output_tokens,
             "the 1h breakdown must not inflate the total"
         );
     }
@@ -2713,8 +2716,7 @@ mod tests {
     fn events_after_a_provider_error_are_ignored() {
         let adapter = AnthropicAdapter::default();
         let frame = WireFrame::Text(
-            r#"{"type":"error","error":{"type":"overloaded_error","message":"Overloaded"}}"#
-                .into(),
+            r#"{"type":"error","error":{"type":"overloaded_error","message":"Overloaded"}}"#.into(),
         );
         let crate::providers::internal::wire::WireEvent::Known(event) = adapter.classify(frame)
         else {
@@ -2724,7 +2726,11 @@ mod tests {
         let mut adapter = AnthropicAdapter::default();
         let mut out = Vec::new();
         adapter.interpret(event, &mut out);
-        assert_eq!(out.len(), 1, "the error envelope surfaces as one error item");
+        assert_eq!(
+            out.len(),
+            1,
+            "the error envelope surfaces as one error item"
+        );
 
         let mut out_after = Vec::new();
         adapter.interpret(StreamingEvent::Ping, &mut out_after);
@@ -2737,8 +2743,10 @@ mod tests {
     #[test]
     fn message_delta_without_stop_reason_is_a_noop() {
         let adapter = AnthropicAdapter::default();
-        let frame =
-            WireFrame::Text(r#"{"type":"message_delta","delta":{"stop_reason":null},"usage":{"output_tokens":3}}"#.into());
+        let frame = WireFrame::Text(
+            r#"{"type":"message_delta","delta":{"stop_reason":null},"usage":{"output_tokens":3}}"#
+                .into(),
+        );
         let crate::providers::internal::wire::WireEvent::Known(event) = adapter.classify(frame)
         else {
             panic!("a modeled event must classify as Known");
@@ -2766,8 +2774,7 @@ mod tests {
         open_tool_use_block(&mut adapter, 0, "toolu_1", "get_weather");
         open_text_block(&mut adapter, 1);
 
-        let Some(Ok(RawStreamingChoice::Message(text))) = handle_event(&mut adapter, &event)
-        else {
+        let Some(Ok(RawStreamingChoice::Message(text))) = handle_event(&mut adapter, &event) else {
             panic!("an interleaved text delta must not be dropped");
         };
         assert_eq!(text, "streamed alongside");
@@ -2803,10 +2810,8 @@ mod tests {
     /// it fails the stream naming the index and the event.
     #[test]
     fn content_block_stop_for_a_non_open_index_fails_the_stream() {
-        let event: StreamingEvent = serde_json::from_str(
-            r#"{"type":"content_block_stop","index":3}"#,
-        )
-        .unwrap();
+        let event: StreamingEvent =
+            serde_json::from_str(r#"{"type":"content_block_stop","index":3}"#).unwrap();
         let mut adapter = AnthropicAdapter::default();
 
         let Some(Err(error)) = handle_event(&mut adapter, &event) else {
@@ -2824,7 +2829,8 @@ mod tests {
     /// violation: it fails the stream naming the index and the event.
     #[test]
     fn duplicate_content_block_start_fails_the_stream() {
-        let start = r#"{"type":"content_block_start","index":0,"content_block":{"type":"text","text":""}}"#;
+        let start =
+            r#"{"type":"content_block_start","index":0,"content_block":{"type":"text","text":""}}"#;
         let mut adapter = AnthropicAdapter::default();
         let first: StreamingEvent = serde_json::from_str(start).unwrap();
         assert!(handle_event(&mut adapter, &first).is_some());
@@ -3020,9 +3026,14 @@ mod tests {
         // Every thinking delta streams as a ReasoningDelta keyed by its own
         // block index.
         for (index, thinking) in [(0, "first "), (1, "second "), (0, "block"), (1, "block")] {
-            match handle_event(&mut adapter, &delta(index, thinking)).expect("a thinking delta streams") {
+            match handle_event(&mut adapter, &delta(index, thinking))
+                .expect("a thinking delta streams")
+            {
                 Ok(RawStreamingChoice::ReasoningDelta { id, reasoning }) => {
-                    assert_eq!(id, crate::streaming::MintKind::Block.for_wire_index(index as u64));
+                    assert_eq!(
+                        id,
+                        crate::streaming::MintKind::Block.for_wire_index(index as u64)
+                    );
                     assert_eq!(reasoning, thinking);
                 }
                 other => panic!("Expected a ReasoningDelta, got {other:?}"),
@@ -3196,10 +3207,7 @@ mod tests {
         for event in [&start, &delta] {
             assert!(handle_event(&mut adapter, &event).is_none());
         }
-        assert!(matches!(
-            handle_event(&mut adapter, &stop),
-            Some(Err(_))
-        ));
+        assert!(matches!(handle_event(&mut adapter, &stop), Some(Err(_))));
     }
 
     #[cfg(not(all(target_arch = "wasm32", target_os = "unknown")))]
@@ -3279,10 +3287,7 @@ mod tests {
                 .build()
                 .expect("build client");
             let model = client.completion_model("claude-sonnet-4-6");
-            let request = model
-                .completion_request("hello")
-                .max_tokens(1024)
-                .build();
+            let request = model.completion_request("hello").max_tokens(1024).build();
             let mut stream = crate::completion::CompletionModel::stream(&model, request)
                 .await
                 .expect("stream should open");
@@ -3334,10 +3339,7 @@ mod tests {
                 .build()
                 .expect("build client");
             let model = client.completion_model("claude-sonnet-4-6");
-            let request = model
-                .completion_request("hello")
-                .max_tokens(1024)
-                .build();
+            let request = model.completion_request("hello").max_tokens(1024).build();
             let mut stream = crate::completion::CompletionModel::stream(&model, request)
                 .await
                 .expect("stream should open");
