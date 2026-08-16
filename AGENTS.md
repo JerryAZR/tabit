@@ -73,6 +73,11 @@ Current workspace layout:
    two designs — assume the design is wrong, not the code. Do not "make it
    work" with a dirty hack. Stop, then summarize for the user: the goal,
    the problem, and why it is hard — and ask for a design discussion first.
+10. **License split.** Backend crates are MIT; `tabit-tui` (the claurst
+    harvest — see ROADMAP item 7) and the released binary are
+    GPL-3.0-only. GPL code never enters an MIT crate: dependencies run
+    frontend → backend only, and the protocol vocabulary lives on the MIT
+    side (tabit-session).
 
 ## Environment / commands
 

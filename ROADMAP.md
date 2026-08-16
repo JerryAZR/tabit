@@ -153,17 +153,45 @@ The known deviation from pi's subprocess model:
 ### 7. CLI / interface layer
 
 - **Print mode shipped** (`crates/tabit`): one prompt in, live events out,
-  project-local sessions, `--continue` / `--session <path>` / `--list`,
-  `--model provider/model` or `default_model` in providers.toml.
-- Headless JSON/RPC mode next (scriptable, testable — same order pi
-  evolved in): the same SessionEvent stream, JSON-framed on stdout.
-- Interactive REPL; TUI on top only after the JSON surface is stable.
+  project-local sessions, `-p <PROMPT>` / `--continue` /
+  `--session <path>` / `--list` / `--rewind <n>`, `--model provider/model`
+  or `default_model` in providers.toml. TUI is the eventual default mode;
+  `-p` and `--rewind` opt out into print mode.
+- **Frontend architecture (decided): TUI-through-protocol.** One typed
+  vocabulary, four quadrants — commands, events, frontend round-trip
+  requests (permission asks first), client notifications. Typed serde
+  enums over in-process channels, serialized only at a transport edge
+  (LF-JSONL on stdio). Tagged frames, not JSON-RPC 2.0; versioned
+  `initialize` handshake; prompts ack at submission with run outcomes
+  arriving as events (`SessionEvent` gains a run-failure variant).
+  Informed by codex (single-table protocol crates) and pi (one dumb
+  command switch over the shared event union); claurst proved the channel
+  seam across three frontends.
+- Headless JSON mode next — the first protocol consumer and its test
+  harness. No separate REPL; the TUI is the interactive mode.
+- **TUI: build, harvesting claurst** (reuse question closed: codex's TUI
+  is a porting project — ~40 path-dep crates, ratatui-0.30/crossterm-fork
+  skew; claurst's decomposes into ~19K LOC of near-verbatim leaves — the
+  `prompt_input` editor, `overlays` + dialog framework, virtual list,
+  markdown, diff viewer, tests in-file — plus ~5K ported with a
+  data-model swap). App state machine, protocol-driven loop, and layout
+  are ours. Codex (Apache-2.0) is the secondary borrow source for widgets
+  the harvest doesn't cover — research at that point, mind the skew.
+- **License split (decided)**: backend crates stay MIT; `tabit-tui` (the
+  claurst harvest) and the released binary are GPL-3.0-only. Valid
+  because dependencies run GPL→MIT only — frontends are leaves consuming
+  the protocol, and the vocabulary lives on the MIT side
+  (tabit-session). A no-TUI feature build remains all-MIT. At TUI time:
+  dep-direction CI check (`tabit-tui` reachable only from the binary),
+  cargo-deny license audit, `HARVEST.md` provenance alongside VENDOR.md.
 
 ### 8. Client/server + protocol
 
-- Split frontend/backend: a server process owning sessions, a thin client.
-- Protocol = the JSON event stream from item 7, over a transport (named
-  pipe / local socket / stdio).
+- The protocol is the item-7 vocabulary, defined once and shared by every
+  transport: in-process channels first, stdio JSONL with the JSON mode,
+  named pipe / local socket only when a remote client exists. Extracting
+  the vocabulary from tabit-session into a `tabit-protocol` crate happens
+  at that same trigger.
 
 ### 9. Extensions
 
