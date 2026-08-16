@@ -294,11 +294,20 @@ fn fs_failures_are_loud_io_errors() {
     }
 
     // list when the store path cannot exist (its parent is a plain
-    // file): indistinguishable from "directory not created yet" at read
-    // time, so it reads as empty — the loud failure belongs to the write
-    // side, where materialization cannot create the directory (asserted
-    // above).
-    assert_eq!(nested.list().expect("missing dir reads as empty").len(), 0);
+    // file): Linux reports ENOTDIR, a loud Io error; Windows reports
+    // NotFound — indistinguishable from "directory not created yet",
+    // which must read as empty — so the loud failure stays on the write
+    // side (asserted above), where materialization cannot create the
+    // directory.
+    let listed = nested.list();
+    if cfg!(windows) {
+        assert_eq!(listed.expect("missing dir reads as empty").len(), 0);
+    } else {
+        assert!(
+            matches!(listed, Err(SessionError::Io { .. })),
+            "ENOTDIR is a loud failure"
+        );
+    }
 
     fs::remove_file(&blocker).ok();
     fs::remove_dir_all(store.dir()).ok();
