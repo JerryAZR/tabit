@@ -12,7 +12,7 @@
 //! listing from endpoints are deferred until a consumer exists.
 
 use std::collections::HashMap;
-use std::sync::{Arc, Mutex, MutexGuard};
+use std::sync::{Arc, Mutex};
 
 use crate::lock::lock;
 use rig_agent::agent::ModelHandle;

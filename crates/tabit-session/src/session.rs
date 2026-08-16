@@ -272,10 +272,6 @@ impl Mailbox {
         lock(&self.queue).push_back(message);
     }
 
-    fn take_next(&self) -> Option<Message> {
-        lock(&self.queue).pop_front()
-    }
-
     pub(crate) fn is_empty(&self) -> bool {
         lock(&self.queue).is_empty()
     }
