@@ -3,10 +3,11 @@
 //! Construction lives in the [`crate::ModelRegistry`].
 
 use crate::error::SessionError;
+use serde::{Deserialize, Serialize};
 use tabit_config::TabitConfig;
 
 /// A `(provider, model)` pair the session can switch between.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ModelSelection {
     /// Provider id from tabit config.
     pub provider: String,

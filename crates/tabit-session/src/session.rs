@@ -2,13 +2,18 @@
 //! outer loop's policy, and consumes the rig-agent item stream as its
 //! driver.
 //!
-//! Each [`Session::prompt`] is one outer loop: the user message is
-//! recorded, the rig-agent engine runs the turns (with a recorder hook
-//! persisting every completed assistant turn and tool result as it
-//! happens), and the item stream is folded into the serializable event
-//! list a frontend will consume. After every run — success or failure —
-//! the in-memory context is re-derived from the log, which stays the
-//! single source of truth. Steering, permissions, and extensions later
+//! User messages enter through one door — the run-agnostic mailbox
+//! ([`Session::submit`]) — and are drained by [`Session::pump`]: as the
+//! next run's initial prompt, or — while a run is in flight — as a steer
+//! injected at the next turn boundary. Because the mailbox outlives runs,
+//! a message submitted at any instant is never lost; only abort discards
+//! queued messages. Each pump iteration is one outer loop: the user
+//! message is recorded, the rig-agent engine runs the turns (with a
+//! recorder hook persisting every completed assistant turn and tool
+//! result as it happens), and the item stream is folded into the
+//! serializable event list a frontend consumes. After every run — success
+//! or failure — the in-memory context is re-derived from the log, which
+//! stays the single source of truth. Permissions and extensions later
 //! plug into this same seam.
 
 use crate::entry::{EntryKind, SessionEntry};
@@ -247,39 +252,63 @@ impl SessionBuilder {
     }
 }
 
-/// The run-scoped steer queue state.
-#[derive(Default)]
-enum SteerSlot {
-    #[default]
-    Idle,
-    /// An outer loop is in flight; queued steers await the next turn end.
-    Running(std::collections::VecDeque<Message>),
+/// The run-agnostic message mailbox: the one door every user message
+/// enters ([`Session::submit`], or an engine drain mid-run), emptied by
+/// [`Session::pump`] — as the next run's initial prompt or, while a run
+/// is in flight, as a steer injected at the next turn boundary. The
+/// mailbox outlives runs, so a message submitted at any instant is never
+/// lost; only abort discards queued messages.
+#[derive(Clone, Default)]
+pub(crate) struct Mailbox {
+    queue: std::sync::Arc<std::sync::Mutex<std::collections::VecDeque<Message>>>,
 }
 
-/// Submit steering messages to the run currently in flight. Obtained from
-/// [`Session::steer_handle`]; valid only while that outer loop runs —
-/// submitting when no run is in flight is a loud error (idle input is a
-/// prompt, not a steer).
+impl Mailbox {
+    pub(crate) fn push(&self, message: Message) {
+        lock(&self.queue).push_back(message);
+    }
+
+    fn take_next(&self) -> Option<Message> {
+        lock(&self.queue).pop_front()
+    }
+
+    pub(crate) fn is_empty(&self) -> bool {
+        lock(&self.queue).is_empty()
+    }
+
+    pub(crate) fn clear(&self) {
+        lock(&self.queue).clear();
+    }
+
+    fn drain_all(&self) -> Vec<Message> {
+        lock(&self.queue).drain(..).collect()
+    }
+}
+
+/// Submit messages to the session's mailbox from anywhere — including
+/// from inside a run's event callback, where the session itself is
+/// borrowed. A cheap clone of the mailbox; see [`Session::submit`] for
+/// the semantics (steers the run in flight, otherwise queues for the
+/// next one).
 #[derive(Clone)]
-pub struct SteerHandle {
-    slot: std::sync::Arc<std::sync::Mutex<SteerSlot>>,
+pub struct MailboxHandle {
+    mailbox: Mailbox,
 }
 
-impl SteerHandle {
-    /// Queue a steering message for the run in flight.
-    pub fn submit(&self, text: impl Into<String>) -> Result<(), SessionError> {
-        let text = text.into();
-        match &mut *lock(&self.slot) {
-            SteerSlot::Running(queue) => {
-                queue.push_back(Message::user(text));
-                Ok(())
-            }
-            SteerSlot::Idle => Err(SessionError::Config {
-                message: format!(
-                    "no run in flight to steer (`{text}`) — send it as a prompt                      instead"
-                ),
-            }),
-        }
+impl MailboxHandle {
+    /// Queue a user message. Always accepted.
+    pub fn submit(&self, text: impl Into<String>) {
+        self.mailbox.push(Message::user(text.into()));
+    }
+
+    /// Whether anything is queued (the actor's idle check).
+    pub(crate) fn is_empty(&self) -> bool {
+        self.mailbox.is_empty()
+    }
+
+    /// Discard everything queued (abort semantics).
+    pub(crate) fn clear(&self) {
+        self.mailbox.clear();
     }
 }
 
@@ -305,21 +334,19 @@ fn lock<T>(mutex: &std::sync::Mutex<T>) -> std::sync::MutexGuard<'_, T> {
     }
 }
 
-/// The engine-side view of the run-scoped steer queue.
+/// The engine-side view of the mailbox: what an outer loop drains at
+/// each turn boundary.
 struct SessionSteers {
-    slot: std::sync::Arc<std::sync::Mutex<SteerSlot>>,
+    mailbox: Mailbox,
 }
 
 impl rig_agent::SteeringSource for SessionSteers {
     fn has_pending(&self) -> bool {
-        matches!(&*lock(&self.slot), SteerSlot::Running(q) if !q.is_empty())
+        !self.mailbox.is_empty()
     }
 
     fn drain(&self) -> Vec<Message> {
-        match &mut *lock(&self.slot) {
-            SteerSlot::Running(queue) => queue.drain(..).collect(),
-            SteerSlot::Idle => Vec::new(),
-        }
+        self.mailbox.drain_all()
     }
 }
 
@@ -337,10 +364,10 @@ pub struct Session {
     /// Per-run cancellation token, refreshed by every outer loop; the
     /// abort handle cancels whatever run is current.
     abort: std::sync::Arc<std::sync::Mutex<CancellationToken>>,
-    /// The run-scoped steer queue: `Running` only while an outer loop is
-    /// in flight (empty by construction outside it — idle input is a
-    /// prompt, not a steer).
-    steer_slot: std::sync::Arc<std::sync::Mutex<SteerSlot>>,
+    /// The run-agnostic message mailbox: the one door user messages enter
+    /// (see [`Session::submit`]); drained by [`Session::pump`] and by the
+    /// engine's turn-boundary steering.
+    mailbox: Mailbox,
     context: Vec<Message>,
     path: PathBuf,
     id: String,
@@ -357,22 +384,56 @@ impl Session {
     }
 
     /// [`Session::prompt`] with a live observer: `on_event` receives each
-    /// event as it is produced (frontends print from here instead of
-    /// waiting for the run to finish).
+    /// event as it is produced. Single-shot — exactly one outer loop for
+    /// `prompt`, failures returned as `Err` — for direct embedders; the
+    /// mailbox-looping form frontends drive is [`Session::pump`].
     pub async fn prompt_with(
         &mut self,
         prompt: impl Into<Message>,
-        on_event: &mut dyn FnMut(SessionEvent),
+        on_event: &mut (dyn FnMut(SessionEvent) + Send),
     ) -> Result<RunSummary, SessionError> {
-        // Run-scoped machinery: a fresh abort token for this loop, the
-        // steer queue opened for the run's lifetime.
+        let message: Message = prompt.into();
+        self.run_one(message, on_event).await
+    }
+
+    /// Submit a user message to the mailbox. While an outer loop is in
+    /// flight the message steers it (injected at the next turn boundary);
+    /// otherwise [`Session::pump`] runs it as the next prompt. Always
+    /// accepted — the mailbox is the one door every message enters, which
+    /// is what makes "no message is ever lost" structural.
+    pub fn submit(&self, text: impl Into<String>) {
+        self.mailbox.push(Message::user(text.into()));
+    }
+
+    /// Drain the mailbox to quiescence: each queued message runs as one
+    /// outer loop (steers included, at the turn boundaries). A failed run
+    /// emits [`SessionEvent::RunFailed`] and the next queued message still
+    /// runs; an aborted run discards the remaining queue and stops. This
+    /// is the drive loop for frontends ([`crate::SessionHandle`]).
+    pub async fn pump(&mut self, on_event: &mut (dyn FnMut(SessionEvent) + Send)) {
+        while let Some(message) = self.mailbox.take_next() {
+            if let Err(error) = self.run_one(message, on_event).await {
+                on_event(SessionEvent::RunFailed {
+                    message: error.to_string(),
+                });
+            }
+        }
+    }
+
+    /// One outer loop for `message`: record it, run the engine to
+    /// completion, re-derive the context from the log, and report.
+    async fn run_one(
+        &mut self,
+        message: Message,
+        on_event: &mut (dyn FnMut(SessionEvent) + Send),
+    ) -> Result<RunSummary, SessionError> {
+        // Run-scoped machinery: a fresh abort token for this loop; steers
+        // arrive through the run-agnostic mailbox.
         let run_token = {
             let mut slot = lock(&self.abort);
             *slot = CancellationToken::new();
             slot.clone()
         };
-        *lock(&self.steer_slot) = SteerSlot::Running(std::collections::VecDeque::new());
-        let message: Message = prompt.into();
         self.recorder.record(EntryKind::UserMessage {
             message: message.clone(),
         });
@@ -391,7 +452,7 @@ impl Session {
             .max_turns(self.max_turns)
             .add_hook(RecorderHook(self.recorder.clone()))
             .steering(std::sync::Arc::new(SessionSteers {
-                slot: self.steer_slot.clone(),
+                mailbox: self.mailbox.clone(),
             }))
             .tool_context(tool_context);
         let mut stream = request.await;
@@ -482,8 +543,11 @@ impl Session {
             };
             on_event(event.clone());
             events.push(event);
+            // Abort means stop: discard anything queued behind the run.
+            // Nothing queued was ever acknowledged by an event, so
+            // nothing observable vanishes.
+            self.mailbox.clear();
         }
-        *lock(&self.steer_slot) = SteerSlot::Idle;
         self.reload_context()?;
         if let Some(persist_error) = self.recorder.first_error() {
             return Err(SessionError::Persist(persist_error));
@@ -500,11 +564,11 @@ impl Session {
         })
     }
 
-    /// A handle for submitting steering messages while the current outer
-    /// loop is in flight. See [`SteerHandle`].
-    pub fn steer_handle(&mut self) -> SteerHandle {
-        SteerHandle {
-            slot: self.steer_slot.clone(),
+    /// The session's mailbox as a clonable handle: submits work while a
+    /// run borrows the session (frontends' actor holds one).
+    pub(crate) fn mailbox_handle(&self) -> MailboxHandle {
+        MailboxHandle {
+            mailbox: self.mailbox.clone(),
         }
     }
 
@@ -803,7 +867,7 @@ impl Session {
             agent: Arc::new(AgentBuilder::new(ModelHandle::new(placeholder_model())).build()),
             recorder,
             abort: std::sync::Arc::new(std::sync::Mutex::new(CancellationToken::new())),
-            steer_slot: std::sync::Arc::new(std::sync::Mutex::new(SteerSlot::Idle)),
+            mailbox: Mailbox::default(),
             context,
             path,
             id,

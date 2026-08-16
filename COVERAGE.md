@@ -31,15 +31,16 @@ Defensive ("unreachable") arms follow a stricter rule:
 - The whole suite runs offline (cassette replay + test doubles). Doctests
   are NOT included in these numbers (`llvm-cov` was run without
   `--doctests`); they are gated by the same CI run.
-- Current state: **95.86% lines / 96.42% regions** (2,365 of 57,159 lines;
-  re-measured after session rewind/branch: entry-level `Rewound` markers,
-  chain-aware load/projection/stats, partial-batch dangling repair, and the
-  `-p`/`--rewind` CLI). The rig crates' residue is unchanged, the tabit
-  crates carry their own itemization below. `crates/tabit-config` sits at
-  100% branch coverage with no fully unexecuted line. The tabit crates:
-  tabit-session 93.2% (session.rs) / 84.9% (store.rs), tabit-tools 90.5%;
-  their residue is almost entirely error arms (see "Justified residue"
-  item 9).
+- Current state: **95.73% lines / 96.29% regions** (2,474 of 57,893 lines;
+  re-measured after JSON mode: the always-queue mailbox/pump session
+  refactor, the protocol vocabulary (`protocol.rs` 100%), the session
+  actor (`endpoint.rs` 95.9%), the stdio bridge (`json.rs`), and print
+  mode moved onto `SessionHandle`). The rig crates' residue is
+  unchanged, the tabit crates carry their own itemization below.
+  `crates/tabit-config` sits at 100% branch coverage with no fully
+  unexecuted line. The tabit crates: tabit-session 93.6% (session.rs) /
+  84.9% (store.rs), tabit-tools 90.5%; their residue is almost entirely
+  error arms (see "Justified residue" item 9).
 
 ## Filled
 
@@ -144,6 +145,23 @@ named, the classification applies to its current lcov-uncovered ranges.
      (parent validation at parse time resolves every link) and
      `Session::rewind`'s boundary-parent-off-chain arm (the boundary comes
      from the chain, so its parent is an ancestor on it).
+   - Actor defensive arms in `endpoint.rs`: the poison-recovery `lock`
+     (same policy as `recorder.rs`); the commands-channel `None` arm
+     (every current caller closes via the shutdown token while the
+     handle itself holds a sender, so the all-senders-dropped path
+     cannot be observed through the public API); the
+     leftover-message re-pump branch after a pump returns (the pump's
+     own loop already drains the mailbox, so the branch is belt-and-
+     braces for a message landing in the exact return window); and
+     `start_pump`'s `Option::take` guard (both call sites check
+     `session.is_some()` first).
+   - `json.rs`'s serialize-failure `continue` in `write_loop`:
+     `ServerFrame` contains only strings/numbers/serde-derived types,
+     so `serde_json::to_string` cannot fail (no non-string map keys, no
+     unserializable floats); the arm is the minimal handling of an
+     infallible `Result`. The broken-transport edges around it
+     (panicking reader, erroring reader, failing writer) are exercised
+     by `broken_transport_edges_fail_or_end_cleanly`.
 
 ## Deferred (explicit)
 

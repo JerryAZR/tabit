@@ -60,6 +60,7 @@
 //!
 //! [`Session::prompt`]: crate::Session::prompt
 
+mod endpoint;
 mod entry;
 mod error;
 mod events;
@@ -67,21 +68,27 @@ mod ids;
 mod model;
 mod projection;
 mod prompt;
+mod protocol;
 mod recorder;
 mod registry;
 mod session;
 mod store;
 
+pub use endpoint::{SessionCommandLink, SessionHandle, SessionInfo};
 pub use entry::{EntryKind, SESSION_FORMAT_VERSION, SessionEntry, SessionHeader};
 pub use error::SessionError;
 pub use events::SessionEvent;
 pub use model::ModelSelection;
 pub use projection::DanglingToolCalls;
 pub use prompt::build_system_prompt;
+pub use protocol::{
+    ClientFrame, EventFrame, PROTOCOL_VERSION, ServerControlFrame, ServerFrame, SessionCommand,
+    StreamId,
+};
 pub use registry::ModelRegistry;
 pub use session::{
-    AbortHandle, DEFAULT_MAX_TURNS, ModelStats, RewindSummary, RunOutcome, RunSummary, Session,
-    SessionBuilder, SessionStats, SteerHandle,
+    AbortHandle, DEFAULT_MAX_TURNS, MailboxHandle, ModelStats, RewindSummary, RunOutcome,
+    RunSummary, Session, SessionBuilder, SessionStats,
 };
 pub use store::{LoadedSession, Repair, SessionStore, SessionSummary, SessionWriter};
 

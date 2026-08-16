@@ -17,7 +17,7 @@ use serde_json::json;
 use std::path::Path;
 use std::sync::{Arc, Mutex};
 
-fn temp_store(tag: &str) -> SessionStore {
+pub(crate) fn temp_store(tag: &str) -> SessionStore {
     let dir = std::env::temp_dir()
         .join("tabit-session-tests")
         .join(format!("{tag}-{}", std::process::id()));
@@ -25,7 +25,7 @@ fn temp_store(tag: &str) -> SessionStore {
     SessionStore::new(&dir)
 }
 
-fn test_config() -> Arc<tabit_config::TabitConfig> {
+pub(crate) fn test_config() -> Arc<tabit_config::TabitConfig> {
     Arc::new(
         tabit_config::TabitConfig::from_toml_str(
             r#"
@@ -57,7 +57,7 @@ cost = { input = 1.0, output = 1.0, cache_read = 0.1, cache_write = 1.0 }
     )
 }
 
-fn test_auth() -> Arc<tabit_config::AuthConfig> {
+pub(crate) fn test_auth() -> Arc<tabit_config::AuthConfig> {
     Arc::new(
         tabit_config::AuthConfig::from_toml_str(
             r#"
@@ -74,7 +74,7 @@ api_key = "dummy"
 }
 
 /// Stream-scripted turn: text chunks then the terminal record.
-fn text_turn(text: &str) -> Vec<MockStreamEvent> {
+pub(crate) fn text_turn(text: &str) -> Vec<MockStreamEvent> {
     vec![
         MockStreamEvent::text(text),
         MockStreamEvent::final_response(Usage {
@@ -87,7 +87,7 @@ fn text_turn(text: &str) -> Vec<MockStreamEvent> {
 }
 
 /// Stream-scripted turn: a complete tool call, then the terminal record.
-fn tool_turn(call_id: &str, tool: &str) -> Vec<MockStreamEvent> {
+pub(crate) fn tool_turn(call_id: &str, tool: &str) -> Vec<MockStreamEvent> {
     vec![
         MockStreamEvent::tool_call(call_id, tool, json!({"value": "x"})),
         MockStreamEvent::final_response(Usage {
@@ -99,7 +99,7 @@ fn tool_turn(call_id: &str, tool: &str) -> Vec<MockStreamEvent> {
     ]
 }
 
-fn echo_tool() -> DynamicTool {
+pub(crate) fn echo_tool() -> DynamicTool {
     DynamicTool::new(
         "echo",
         "Echoes its input",
@@ -116,20 +116,20 @@ fn echo_tool() -> DynamicTool {
 
 /// Counting factory: hands out scripted models and records which selections
 /// were requested.
-struct Factory {
+pub(crate) struct Factory {
     turns: Vec<Vec<MockStreamEvent>>,
     requested: Mutex<Vec<(String, String)>>,
 }
 
 impl Factory {
-    fn new(turns: Vec<Vec<MockStreamEvent>>) -> Arc<Self> {
+    pub(crate) fn new(turns: Vec<Vec<MockStreamEvent>>) -> Arc<Self> {
         Arc::new(Self {
             turns,
             requested: Mutex::new(Vec::new()),
         })
     }
 
-    fn into_builder(self: Arc<Self>, store: SessionStore) -> SessionBuilder {
+    pub(crate) fn into_builder(self: Arc<Self>, store: SessionStore) -> SessionBuilder {
         SessionBuilder::new(
             store,
             test_config(),
@@ -716,7 +716,7 @@ async fn steering_during_a_run_is_recorded_one_to_one() -> Result<(), SessionErr
         .into_builder(store.clone())
         .dynamic_tool(echo_tool())
         .create("C:/w")?;
-    let steer = session.steer_handle();
+    let mailbox = session.mailbox_handle();
 
     let mut seen_call = false;
     let run = session
@@ -725,7 +725,7 @@ async fn steering_during_a_run_is_recorded_one_to_one() -> Result<(), SessionErr
             // delivers it right after the tool results commit.
             if matches!(event, SessionEvent::ToolCall { .. }) && !seen_call {
                 seen_call = true;
-                steer.submit("also this").expect("run in flight");
+                mailbox.submit("also this");
             }
         })
         .await?;
@@ -762,17 +762,130 @@ async fn steering_during_a_run_is_recorded_one_to_one() -> Result<(), SessionErr
 }
 
 #[tokio::test]
-async fn steering_when_idle_is_a_loud_error() -> Result<(), SessionError> {
-    let store = temp_store("steer-idle");
-    let factory = Factory::new(vec![text_turn("a")]);
+async fn messages_queued_before_pump_all_join_the_first_run() -> Result<(), SessionError> {
+    // Both messages are in the mailbox when the run starts: the first is
+    // the prompt, the second is drained as a steer at the first turn
+    // boundary — one run carries both. (Serial runs happen when the
+    // second message arrives after the first run ends.)
+    let store = temp_store("mailbox-serial");
+    let factory = Factory::new(vec![text_turn("first answer"), text_turn("second answer")]);
     let mut session = factory.into_builder(store.clone()).create("C:/w")?;
-    let steer = session.steer_handle();
-    match steer.submit("while idle") {
-        Err(SessionError::Config { message }) => {
-            assert!(message.contains("prompt"), "{message}");
-        }
-        other => panic!("expected config error, got {other:?}"),
-    }
+    session.submit("one");
+    session.submit("two");
+
+    let mut user_texts = Vec::new();
+    let mut outputs = Vec::new();
+    session
+        .pump(&mut |event| match event {
+            SessionEvent::UserMessage { text } => user_texts.push(text),
+            SessionEvent::RunFinished { output, .. } => outputs.push(output),
+            _ => {}
+        })
+        .await;
+    assert_eq!(user_texts, vec!["one", "two"]);
+    assert_eq!(outputs, vec!["second answer"]);
+    std::fs::remove_dir_all(store.dir()).ok();
+    Ok(())
+}
+
+#[tokio::test]
+async fn a_message_landing_after_the_last_drain_runs_as_the_next_prompt() -> Result<(), SessionError>
+{
+    // The no-lost-messages invariant: a message submitted after the
+    // engine's final steer drain but before the run fully ends — staged
+    // on RunFinished, which is emitted inside the run after the engine
+    // stream is done — must surface as a new run, not vanish.
+    let store = temp_store("mailbox-tail");
+    let factory = Factory::new(vec![text_turn("a"), text_turn("b")]);
+    let mut session = factory.into_builder(store.clone()).create("C:/w")?;
+    let mailbox = session.mailbox_handle();
+    session.submit("first");
+    let mut finished = 0;
+    session
+        .pump(&mut |event| {
+            if matches!(event, SessionEvent::RunFinished { .. }) {
+                finished += 1;
+                if finished == 1 {
+                    mailbox.submit("arrived too late to steer");
+                }
+            }
+        })
+        .await;
+    assert_eq!(finished, 2, "the late message ran as the next prompt");
+    let loaded = store.open_path(session.path())?;
+    let late: Vec<&crate::SessionEntry> = loaded
+        .entries
+        .iter()
+        .filter(|e| {
+            matches!(&e.kind, EntryKind::UserMessage { message } if message.user_text().as_deref() == Some("arrived too late to steer"))
+        })
+        .collect();
+    assert_eq!(late.len(), 1, "the late message was recorded once");
+    std::fs::remove_dir_all(store.dir()).ok();
+    Ok(())
+}
+
+#[tokio::test]
+async fn abort_discards_messages_queued_behind_the_run() -> Result<(), SessionError> {
+    let store = temp_store("mailbox-abort");
+    let factory = Factory::new(vec![tool_turn("t1", "echo"), text_turn("never")]);
+    let mut session = factory
+        .into_builder(store.clone())
+        .dynamic_tool(echo_tool())
+        .create("C:/w")?;
+    let mailbox = session.mailbox_handle();
+    let abort = session.abort_handle();
+    session.submit("run the tool");
+    let mut saw_aborted = false;
+    let mut queued_user_messages = 0;
+    session
+        .pump(&mut |event| match event {
+            SessionEvent::ToolCall { .. } => {
+                // Queued behind the run, then stopped: abort discards the
+                // queue (nothing queued was ever acknowledged).
+                mailbox.submit("queued behind");
+                abort.abort();
+            }
+            SessionEvent::RunAborted { .. } => saw_aborted = true,
+            SessionEvent::UserMessage { text } if text != "run the tool" => {
+                queued_user_messages += 1;
+            }
+            _ => {}
+        })
+        .await;
+    assert!(saw_aborted);
+    assert_eq!(queued_user_messages, 0, "queued messages were discarded");
+    std::fs::remove_dir_all(store.dir()).ok();
+    Ok(())
+}
+
+#[tokio::test]
+async fn pump_continues_with_the_next_message_after_a_failed_run() -> Result<(), SessionError> {
+    // max_turns(1) makes the first message's run fail (a tool turn needs
+    // a second model call); a message submitted after the failure still
+    // runs — one failed prompt does not strand the session.
+    let store = temp_store("mailbox-failure");
+    let mut session = Factory::new(vec![tool_turn("c1", "echo"), text_turn("recovered")])
+        .into_builder(store.clone())
+        .max_turns(1)
+        .dynamic_tool(echo_tool())
+        .create("C:/w")?;
+    let mailbox = session.mailbox_handle();
+    session.submit("will fail");
+    let mut failures = 0;
+    let mut outputs = Vec::new();
+    session
+        .pump(&mut |event| match event {
+            SessionEvent::RunFailed { .. } => {
+                failures += 1;
+                mailbox.submit("still runs");
+            }
+            SessionEvent::RunFinished { output, .. } => outputs.push(output),
+            _ => {}
+        })
+        .await;
+    assert_eq!(failures, 1);
+    assert_eq!(outputs, vec!["recovered"]);
     std::fs::remove_dir_all(store.dir()).ok();
     Ok(())
 }

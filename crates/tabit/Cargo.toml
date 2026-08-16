@@ -18,6 +18,8 @@ rig-core = { path = "../rig-core", version = "0.41.0", default-features = false 
 tabit-config = { path = "../tabit-config", version = "0.41.0" }
 tabit-session = { path = "../tabit-session", version = "0.41.0" }
 tabit-tools = { path = "../tabit-tools", version = "0.41.0" }
+serde_json = { workspace = true }
 tokio = { workspace = true, features = ["rt-multi-thread", "macros"] }
 
 [dev-dependencies]
+rig-agent = { path = "../rig-agent", version = "0.41.0", default-features = false, features = ["test-utils"] }

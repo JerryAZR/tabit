@@ -24,9 +24,9 @@ tabit-config = { path = "../tabit-config", version = "0.41.0" }
 thiserror = { workspace = true }
 uuid = { workspace = true, features = ["v7"] }
 
-tokio = { workspace = true, features = ["macros"] }
+tokio = { workspace = true, features = ["macros", "rt", "sync"] }
 tokio-util = { version = "0.7", default-features = false }
 
 [dev-dependencies]
 rig-agent = { path = "../rig-agent", version = "0.41.0", default-features = false, features = ["test-utils"] }
-tokio = { workspace = true, features = ["rt-multi-thread", "macros"] }
+tokio = { workspace = true, features = ["rt-multi-thread", "macros", "time"] }

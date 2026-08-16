@@ -32,6 +32,9 @@ fn events_round_trip_through_json() {
             output: "done".to_string(),
             usage: rig_core::completion::Usage::default(),
         },
+        SessionEvent::RunFailed {
+            message: "provider stream ended early".to_string(),
+        },
         SessionEvent::NativeItem {
             item: serde_json::json!({"web_search_call": {}}),
         },

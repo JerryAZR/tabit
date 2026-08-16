@@ -2619,6 +2619,7 @@ version = "0.41.0"
 dependencies = [
  "rig-agent",
  "rig-core",
+ "serde_json",
  "tabit-config",
  "tabit-session",
  "tabit-tools",

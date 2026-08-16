@@ -157,21 +157,28 @@ The known deviation from pi's subprocess model:
   `--session <path>` / `--list` / `--rewind <n>`, `--model provider/model`
   or `default_model` in providers.toml. TUI is the eventual default mode;
   `-p` and `--rewind` opt out into print mode.
-- **Frontend architecture (decided): TUI-through-protocol.** One typed
-  vocabulary: fire-and-forget commands (no request/response — the channels
-  are FIFO, lossless, single-client, so outcomes arrive as events:
-  rejection via a `CommandRejected` variant, acceptance via the events the
-  command causes) plus the event stream; ids exist only on frontend
-  round-trips (permission asks) and return to commands solely with
-  multi-client remote transports. Typed serde enums over in-process
-  channels, serialized only at a transport edge (LF-JSONL on stdio).
-  Tagged frames, not JSON-RPC 2.0; versioned `initialize` handshake at
-  the stdio edge; `SessionEvent` gains run-failure and command-rejection
-  variants. Informed by codex (single-table protocol crates), pi (ids
-  optional, clients run on events), and claurst (the channel seam proven
-  across three frontends).
-- Headless JSON mode next — the first protocol consumer and its test
-  harness. No separate REPL; the TUI is the interactive mode.
+- **Frontend architecture (decided, v1 shipped): TUI-through-protocol.**
+  One typed vocabulary. Commands are fire-and-forget with total
+  semantics — `message { text }` (steers the run in flight, or starts
+  one) and `abort` (aborts + discards the queue) — nothing can be
+  rejected, so there are no ids and no request/response; outcomes are
+  events. Every event is stamped with a `StreamId` ("main" today;
+  subagents mint siblings). Typed serde enums over in-process channels
+  (`SessionHandle` actor in tabit-session), serialized only at a
+  transport edge (LF-JSONL on stdio). Tagged frames, not JSON-RPC 2.0;
+  versioned `initialize` handshake at the stdio edge. Informed by codex
+  (single-table protocol crates, thread stamps), pi (ids optional,
+  clients run on events), claurst (the channel seam across three
+  frontends), and the protocol-design discussions that eliminated
+  acks/rejections as cases that cannot fire.
+- **JSON mode shipped** (`--json`): the first protocol consumer and its
+  test harness — `initialize`/`message`/`abort` in, stamped events out
+  on stdout, human banners on stderr, stay-alive between runs. The
+  always-queue refactor underneath: a run-agnostic `Mailbox` replaces
+  the run-scoped steer slot (messages can never be lost — the only
+  discard is abort), `pump`/`run_one` extracted from `prompt_with`,
+  `RunFailed` joins the event vocabulary, and print mode drives the same
+  `SessionHandle` path.
 - **TUI: build, harvesting claurst** (reuse question closed: codex's TUI
   is a porting project — ~40 path-dep crates, ratatui-0.30/crossterm-fork
   skew; claurst's decomposes into ~19K LOC of near-verbatim leaves — the

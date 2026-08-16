@@ -71,6 +71,14 @@ pub enum SessionEvent {
         /// Aggregated usage across the whole run.
         usage: Usage,
     },
+    /// An outer loop failed: provider stream errors, or a persistence
+    /// failure after a completed run — in which case this follows
+    /// `RunFinished`. Not a command outcome (commands cannot fail); the
+    /// mailbox keeps draining, so later messages still run.
+    RunFailed {
+        /// The failure, in display form.
+        message: String,
+    },
     /// A provider-native output item rig does not model, preserved
     /// verbatim for forwarding.
     NativeItem {
