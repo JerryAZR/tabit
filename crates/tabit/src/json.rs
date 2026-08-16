@@ -35,10 +35,8 @@ where
         tokio::task::spawn_blocking(move || read_loop(reader, link, reader_tx, &info));
     let writer_task = tokio::spawn(write_loop(writer_rx, writer));
 
-    let exit = match reader_task.await {
-        Ok(code) => code,
-        Err(_) => 1, // reader thread panicked: treat as a broken edge
-    };
+    // A panicked reader thread is a broken edge: exit nonzero.
+    let exit = reader_task.await.unwrap_or(1);
     handle.close_commands();
     // Forward everything the actor emits while it winds down (accepted
     // messages still run), then let the writer drain and flush.
