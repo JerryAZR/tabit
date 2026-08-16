@@ -157,6 +157,9 @@ The known deviation from pi's subprocess model:
   `--session <path>` / `--list` / `--rewind <n>`, `--model provider/model`
   or `default_model` in providers.toml. TUI is the eventual default mode;
   `-p` and `--rewind` opt out into print mode.
+- The protocol's design record — locked decisions plus every open
+  flag with options — lives in ; flags are resolved in
+  discussion order there.
 - **Frontend architecture (decided, v1 shipped): TUI-through-protocol.**
   One typed vocabulary. Commands are fire-and-forget with total
   semantics — `message { text }` (steers the run in flight, or starts
