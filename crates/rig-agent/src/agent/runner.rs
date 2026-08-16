@@ -210,7 +210,8 @@ pub(crate) enum RunInput {
     /// (the same rule the engine applies to every turn — its latest
     /// message is that turn's prompt) and the rest precede it as
     /// context. Retry-ready: the same list can be resent verbatim.
-    Conversation(Vec<Message>),
+    /// Boxed: conversations are unbounded, the prompt is not.
+    Conversation(Box<[Message]>),
 }
 
 impl RunInput {
@@ -278,7 +279,7 @@ impl AgentRunner {
     /// Build a runner from an agent whose input is a full conversation —
     /// see [`RunInput::Conversation`].
     pub fn from_agent_conversation(agent: &Agent, conversation: Vec<Message>) -> Self {
-        Self::from_input(agent, RunInput::Conversation(conversation))
+        Self::from_input(agent, RunInput::Conversation(conversation.into_boxed_slice()))
     }
 
     fn from_input(agent: &Agent, input: RunInput) -> Self {
