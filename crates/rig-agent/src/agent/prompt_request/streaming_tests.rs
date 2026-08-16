@@ -84,6 +84,74 @@ async fn public_streaming_request_constructor_preserves_agent_hooks() {
 }
 
 #[tokio::test]
+async fn stream_chat_sends_the_whole_conversation_with_the_final_message_as_the_turn() {
+    use crate::streaming::StreamingChat;
+
+    let model = MockCompletionModel::from_stream_turns([[
+        MockStreamEvent::text("done"),
+        MockStreamEvent::final_response(Usage::new()),
+    ]]);
+    let agent = Arc::new(AgentBuilder::new(model.clone()).build());
+
+    let conversation = vec![
+        Message::user("first"),
+        Message::user("second"),
+        Message::user("third"),
+    ];
+    let mut stream = agent.stream_chat(conversation).await;
+    let mut finished = false;
+    while let Some(item) = stream.next().await {
+        if let Ok(crate::agent::MultiTurnStreamItem::FinalResponse(_)) = item {
+            finished = true;
+        }
+    }
+    assert!(finished, "the run completed");
+
+    // Every conversation message went out, in order, none duplicated: the
+    // final message is the turn's prompt (the request's own rule), the
+    // rest precede it.
+    assert_eq!(model.request_count(), 1);
+    let history = &model.requests()[0].chat_history;
+    let texts: Vec<&str> = history
+        .iter()
+        .filter_map(|message| match message {
+            Message::User { content } => content.iter().find_map(|part| match part {
+                UserContent::Text(text) => Some(text.text.as_str()),
+                _ => None,
+            }),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(texts, vec!["first", "second", "third"]);
+}
+
+#[tokio::test]
+async fn an_empty_conversation_fails_loudly_at_send() {
+    use crate::streaming::StreamingChat;
+
+    let model = MockCompletionModel::from_stream_turns([[
+        MockStreamEvent::text("should not run"),
+        MockStreamEvent::final_response(Usage::new()),
+    ]]);
+    let agent = Arc::new(AgentBuilder::new(model.clone()).build());
+
+    let mut stream = agent.stream_chat(Vec::<Message>::new()).await;
+    let error = stream
+        .try_next()
+        .await
+        .expect_err("an empty conversation cannot be sent");
+    assert!(
+        error.to_string().contains("empty conversation"),
+        "got: {error}"
+    );
+    assert_eq!(
+        model.request_count(),
+        0,
+        "no model call is made for an empty conversation"
+    );
+}
+
+#[tokio::test]
 async fn text_only_stream_without_terminal_record_is_rejected_as_truncated() {
     let model = MockCompletionModel::from_stream_turns([[MockStreamEvent::text("partial answer")]]);
     let agent = Arc::new(AgentBuilder::new(model.clone()).build());

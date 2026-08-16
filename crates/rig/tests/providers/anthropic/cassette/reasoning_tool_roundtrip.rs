@@ -28,7 +28,7 @@ async fn streaming() {
             .build();
 
         let stream = agent
-            .stream_chat(reasoning::TOOL_USER_PROMPT, Vec::<Message>::new())
+            .stream_chat(vec![Message::user(reasoning::TOOL_USER_PROMPT)])
             .max_turns(3)
             .await;
 

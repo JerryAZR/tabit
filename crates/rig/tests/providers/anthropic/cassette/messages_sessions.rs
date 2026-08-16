@@ -156,7 +156,7 @@ async fn sequential_tool_calls_streaming() {
                 .build();
 
             let mut stream = agent
-                .stream_chat(SEQUENTIAL_TOOLS_PROMPT, Vec::<Message>::new())
+                .stream_chat(vec![Message::user(SEQUENTIAL_TOOLS_PROMPT)])
                 .max_turns(6)
                 .await;
             let observation = collect_stream_observation(&mut stream).await;

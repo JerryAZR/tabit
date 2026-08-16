@@ -36,8 +36,10 @@ Defensive ("unreachable") arms follow a stricter rule:
   batches, `prompt`/`prompt_with` unified onto `pump` with failures as
   events (`RunOutcome::Failed`, no `Err` return), deferred session-file
   creation (materializes at the first user message), the shared
-  poison-lock helper, and `list()` reading a missing directory as
-  empty). The rig crates' residue is unchanged, the tabit crates carry
+  poison-lock helper, `list()` reading a missing directory as empty, and
+  `StreamingChat::stream_chat` taking a full conversation whose final
+  message is the turn being sent — the session no longer splits the
+  batch). The rig crates' residue is unchanged, the tabit crates carry
   their own itemization below. `crates/tabit-config` sits at 100%
   branch coverage with no fully unexecuted line. The tabit crates:
   tabit-session 93.6% (session.rs) / 84.9% (store.rs), tabit-tools

@@ -726,16 +726,15 @@ impl StreamingPrompt for Agent {
 }
 
 impl StreamingChat for Agent {
-    fn stream_chat<I, T>(
-        &self,
-        prompt: impl Into<Message> + WasmCompatSend,
-        chat_history: I,
-    ) -> StreamingPromptRequest
+    fn stream_chat<I, T>(&self, chat_history: I) -> StreamingPromptRequest
     where
         I: IntoIterator<Item = T>,
         T: Into<Message>,
     {
-        StreamingPromptRequest::from_agent(self, prompt).history(chat_history)
+        StreamingPromptRequest::from_agent_history(
+            self,
+            chat_history.into_iter().map(Into::into).collect(),
+        )
     }
 }
 

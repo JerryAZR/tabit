@@ -411,10 +411,10 @@ impl Session {
         };
         loop {
             let batch = self.mailbox.drain_all();
-            let Some((initial, earlier)) = batch.split_last() else {
+            if batch.is_empty() {
                 break;
-            };
-            let run = self.run_one(initial, earlier, on_event).await;
+            }
+            let run = self.run_one(&batch, on_event).await;
             // The last terminal decides the outcome; usage and events
             // accumulate across runs.
             total.output = run.output;
@@ -432,8 +432,7 @@ impl Session {
     /// `run_failed` when durability checks fail after a terminal.
     async fn run_one(
         &mut self,
-        initial: &Message,
-        earlier: &[Message],
+        batch: &[Message],
         on_event: &mut (dyn FnMut(SessionEvent) + Send),
     ) -> RunSummary {
         // Run-scoped machinery: a fresh abort token for this loop; steers
@@ -446,10 +445,10 @@ impl Session {
         let mut events = Vec::new();
         // Drain-all at idle entry: the whole batch becomes this run's
         // opening user input — one entry each, 1:1 with what the model
-        // saw, the last message as the request and the rest preceding it
-        // in history.
+        // saw — recorded first, then handed to the engine as one
+        // conversation whose final message is the turn being sent.
         let mut history = self.context.clone();
-        for message in earlier {
+        for message in batch {
             self.recorder.record(EntryKind::UserMessage {
                 message: message.clone(),
             });
@@ -460,19 +459,11 @@ impl Session {
             events.push(event);
             history.push(message.clone());
         }
-        self.recorder.record(EntryKind::UserMessage {
-            message: initial.clone(),
-        });
-        let user_event = SessionEvent::UserMessage {
-            text: user_text(initial),
-        };
-        on_event(user_event.clone());
-        events.push(user_event);
         let mut tool_context = rig_agent::tool::ToolContext::new();
         tool_context.insert(run_token.clone());
         let request = self
             .agent
-            .stream_chat(initial.clone(), history)
+            .stream_chat(history)
             .max_turns(self.max_turns)
             .add_hook(RecorderHook(self.recorder.clone()))
             .steering(std::sync::Arc::new(SessionSteers {

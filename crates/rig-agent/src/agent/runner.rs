@@ -201,6 +201,29 @@ pub trait SteeringSource: WasmCompatSend + WasmCompatSync {
     fn drain(&self) -> Vec<Message>;
 }
 
+/// What a runner sends: one new message, or a whole conversation.
+#[derive(Debug, Clone)]
+pub(crate) enum RunInput {
+    /// A single new user message, with no caller-provided context.
+    Prompt(Message),
+    /// A full conversation: the final message is the turn being sent
+    /// (the same rule the engine applies to every turn — its latest
+    /// message is that turn's prompt) and the rest precede it as
+    /// context. Retry-ready: the same list can be resent verbatim.
+    Conversation(Vec<Message>),
+}
+
+impl RunInput {
+    /// The message being sent this turn, if any: the prompt, or the
+    /// conversation's final message.
+    fn prompt_for_turn(&self) -> Option<&Message> {
+        match self {
+            RunInput::Prompt(message) => Some(message),
+            RunInput::Conversation(messages) => messages.last(),
+        }
+    }
+}
+
 /// A hook-aware driver over [`AgentRun`].
 ///
 /// Construct one from an [`Agent`] with [`Agent::runner`], attach hooks with
@@ -213,7 +236,7 @@ pub trait SteeringSource: WasmCompatSend + WasmCompatSync {
 /// events the medium adds.
 #[non_exhaustive]
 pub struct AgentRunner {
-    pub(crate) prompt: Message,
+    pub(crate) input: RunInput,
     pub(crate) chat_history: Option<Vec<Message>>,
     pub(crate) max_turns: usize,
     pub(crate) max_invalid_tool_call_retries: usize,
@@ -249,8 +272,18 @@ impl AgentRunner {
     /// Build a runner from an agent, seeding it with the agent's default hook
     /// stack. Prefer [`Agent::runner`].
     pub fn from_agent(agent: &Agent, prompt: impl Into<Message>) -> Self {
+        Self::from_input(agent, RunInput::Prompt(prompt.into()))
+    }
+
+    /// Build a runner from an agent whose input is a full conversation —
+    /// see [`RunInput::Conversation`].
+    pub fn from_agent_conversation(agent: &Agent, conversation: Vec<Message>) -> Self {
+        Self::from_input(agent, RunInput::Conversation(conversation))
+    }
+
+    fn from_input(agent: &Agent, input: RunInput) -> Self {
         Self {
-            prompt: prompt.into(),
+            input,
             chat_history: None,
             max_turns: agent.default_max_turns.unwrap_or(1),
             max_invalid_tool_call_retries: 0,
@@ -532,21 +565,55 @@ impl AgentRunner {
 
     /// Build the sans-IO [`AgentRun`] for this runner's configuration.
     /// `history_override` replaces the configured chat history (e.g. with
-    /// memory-loaded history). Delegates to [`build_agent_run`] — the single
+    /// memory-loaded history; never in conversation mode — a conversation
+    /// IS its history). Delegates to [`build_agent_run`] — the single
     /// construction site shared with the streaming driver.
-    pub(crate) fn build_run(&self, history_override: Option<Vec<Message>>) -> AgentRun {
+    pub(crate) fn build_run(
+        &self,
+        history_override: Option<Vec<Message>>,
+    ) -> Result<AgentRun, PromptError> {
+        let (prompt, history) = match &self.input {
+            RunInput::Prompt(message) => {
+                (message.clone(), self.configured_history(history_override))
+            }
+            RunInput::Conversation(messages) => {
+                let Some((prompt, earlier)) = messages.split_last() else {
+                    // Reached only at send time (the builder is
+                    // infallible); loud, with the contract in the message.
+                    return Err(PromptError::prompt_cancelled(
+                        Vec::new(),
+                        "empty conversation: stream_chat history must end with the \
+                         message being sent",
+                    ));
+                };
+                (prompt.clone(), Some(earlier.to_vec()))
+            }
+        };
         let run = build_agent_run(
-            self.prompt.clone(),
+            prompt,
             self.max_turns,
             self.max_invalid_tool_call_retries,
             self.output_schema.as_ref(),
-            history_override.or_else(|| self.chat_history.clone()),
+            history,
             self.tool_choice.clone(),
         );
-        match &self.output_tool_name {
+        let run = match &self.output_tool_name {
             Some(name) => run.with_output_tool_name(name.clone()),
             None => run,
-        }
+        };
+        Ok(run)
+    }
+
+    /// The run's input history for prompt mode: an override (memory) or
+    /// the configured chat history, if either exists.
+    fn configured_history(&self, history_override: Option<Vec<Message>>) -> Option<Vec<Message>> {
+        history_override.or_else(|| self.chat_history.clone())
+    }
+
+    /// Whether the caller supplied the conversation explicitly (chat
+    /// history or a conversation input): memory is fully bypassed then.
+    pub(crate) fn has_explicit_history(&self) -> bool {
+        self.chat_history.is_some() || matches!(self.input, RunInput::Conversation(_))
     }
 }
 
@@ -1152,7 +1219,7 @@ impl AgentRunner {
         );
 
         if self.record_telemetry_content
-            && let Some(text) = self.prompt.rag_text()
+            && let Some(text) = self.input.prompt_for_turn().and_then(Message::rag_text)
         {
             agent_span.record("gen_ai.prompt", text);
         }
@@ -1160,18 +1227,19 @@ impl AgentRunner {
         // When the caller passes explicit history, memory is fully bypassed for
         // this run (no load AND no save). Otherwise, if a memory backend and
         // conversation id are both configured, load prior history.
-        let (history_override, memory_handle) = match &self.chat_history {
-            Some(_) => (None, None),
-            None => match (&self.memory, &self.conversation_id) {
+        let (history_override, memory_handle) = if self.has_explicit_history() {
+            (None, None)
+        } else {
+            match (&self.memory, &self.conversation_id) {
                 (Some(memory), Some(id)) => {
                     let loaded = memory.load(id).await?;
                     (Some(loaded), Some((memory.clone(), id.clone())))
                 }
                 _ => (None, None),
-            },
+            }
         };
 
-        let run = self.build_run(history_override);
+        let run = self.build_run(history_override)?;
 
         // Fold the shared engine to its final response. The blocking surface
         // uses a unary model transport and ignores the intermediate items the
@@ -1228,7 +1296,7 @@ impl AgentRunner {
         );
 
         if self.record_telemetry_content
-            && let Some(text) = self.prompt.rag_text()
+            && let Some(text) = self.input.prompt_for_turn().and_then(Message::rag_text)
         {
             agent_span.record("gen_ai.prompt", text);
         }
@@ -1236,9 +1304,10 @@ impl AgentRunner {
         // When the caller passes explicit history, memory is fully bypassed for
         // this request (no load AND no save). Otherwise, if a memory backend and
         // conversation id are both configured, load prior history.
-        let (history_override, memory_handle) = match &self.chat_history {
-            Some(_) => (None, None),
-            None => match (&self.memory, &self.conversation_id) {
+        let (history_override, memory_handle) = if self.has_explicit_history() {
+            (None, None)
+        } else {
+            match (&self.memory, &self.conversation_id) {
                 (Some(memory), Some(id)) => match memory.load(id).await {
                     Ok(loaded) => (Some(loaded), Some((memory.clone(), id.clone()))),
                     Err(err) => {
@@ -1255,10 +1324,20 @@ impl AgentRunner {
                     }
                 },
                 _ => (None, None),
-            },
+            }
         };
 
-        let run = self.build_run(history_override);
+        let run = match self.build_run(history_override) {
+            Ok(run) => run,
+            Err(err) => {
+                let stream = async_stream::stream! {
+                    yield Err(StreamingError::from(Box::new(err)));
+                };
+                // Instrument under the agent span like the load-failure
+                // path above so the error stays tied to invoke_agent.
+                return Box::pin(tracing_futures::Instrument::instrument(stream, agent_span));
+            }
+        };
         let source = StreamingTurnSource::new(
             &self.hooks,
             self.agent_name_or_default().to_string(),

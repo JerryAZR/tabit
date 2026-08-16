@@ -289,6 +289,15 @@ impl StreamingPromptRequest {
         }
     }
 
+    /// Build a request from a full conversation: the history's final
+    /// message is the turn being sent, the rest precede it as context.
+    /// An empty conversation fails loudly when the request is sent.
+    pub fn from_agent_history(agent: &Agent, conversation: Vec<Message>) -> StreamingPromptRequest {
+        StreamingPromptRequest {
+            runner: AgentRunner::from_agent_conversation(agent, conversation),
+        }
+    }
+
     /// Set the total model-call budget, including the initial call and every
     /// retry or continuation. Zero emits no model calls; one permits only the
     /// initial call.
