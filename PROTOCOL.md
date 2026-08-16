@@ -130,11 +130,13 @@ Send` or an owned box reads better.
 JSON mode returns `i32`; print mode signals via `Err` that `main`
 converts. Two paths for one concept.
 
-### 20. CI clippy skew — infra, now 3-for-3
+### 20. CI clippy skew — RESOLVED
 
 Every code push needed a follow-up for a lint the local toolchain
-lacks. Fix the machine: match the local toolchain to CI (and record it
-in AGENTS.md), or pin both.
+lacked. Resolved by restoring the local stable toolchain to match CI
+(rustc 1.97.1) and recording the rule in AGENTS.md: CI rides latest
+stable; keep local current — a CI-only clippy failure is skew, update
+first.
 
 ## Resolved
 

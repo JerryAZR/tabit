@@ -102,6 +102,9 @@ Current workspace layout:
   Every gap must be filled, justified, or explicitly deferred — the ledger
   and policy live in `COVERAGE.md`.
 - Cassettes are byte-sensitive (LF endings enforced via `.gitattributes`).
+- CI rides the latest stable toolchain; keep the local one current
+  (`rustup update`) — if CI clippy fails on a lint local passes, that is
+  skew, not a flake: update first, then fix.
 
 ## Terminology
 
