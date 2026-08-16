@@ -59,8 +59,9 @@ No-loss and ordering hold across both.
 
 Entry is **Preparing**: it takes the existing history and constructs
 the request. Every later iteration is preceded by exactly one drain
-and one decision. The three turn outcomes — final, broken, tools —
-converge at the same drain, because steering is independent of tools.
+and one decision. **Every** turn outcome — final, broken, tools, and
+failure — converges at the same drain, because steering is
+independent of everything the model does.
 
 ```mermaid
 stateDiagram-v2
@@ -69,44 +70,41 @@ stateDiagram-v2
     ModelTurn --> FinalTurn : committed, no tool calls
     ModelTurn --> BrokenTurn : typed defect — never committed
     ModelTurn --> ValidatingTools : committed, tool calls
-    ModelTurn --> Failed : fatal error (bypass — see rule)
+    ModelTurn --> DrainingSteers : provider/transport error (flagged)<br/>the queue still drains
     FinalTurn --> DrainingSteers
     BrokenTurn --> DrainingSteers
     ValidatingTools --> ExecutingTools : batch admitted
-    ValidatingTools --> DrainingSteers : recovery retry (feedback queued)
-    ValidatingTools --> Failed : recovery fail / stop (bypass)
+    ValidatingTools --> DrainingSteers : recovery — retry feedback<br/>or policy stop (flagged)
     ExecutingTools --> DrainingSteers : results appended
     DrainingSteers --> Deciding
-    Deciding --> Preparing : loop — another turn
+    Deciding --> Preparing : loop — another turn<br/>(steers/tools/retry budget left)
     Deciding --> Done : final turn, queue silent
-    Deciding --> Failed : streak exhausted / budget gone / terminating
+    Deciding --> Failed : terminal error / budgets exhausted / terminating
     Done --> [*]
     Failed --> [*]
 ```
 
-**The bypass rule:** exactly two edges skip the drain, and both are
-families of *nothing settled* — no turn committed, nothing to
-converge:
+**The drain is unconditional.** Steering messages are information the
+user sent *for the model* — extra context, or a correction when the
+user noticed the model on (or about to be on) a wrong path. A
+model-side failure does not invalidate them, so nothing except abort
+(a user action) ever discards or strands them: every outcome drains
+the queue into history first, and a run that then fails carries that
+history forward — the messages are recorded, surfaced as events, and
+seen by the next attempt. There are **no bypass edges**.
 
-- **Fatal (provider/transport) errors** — everything the model turn
-  can fail with except the typed defect: connection failures and
-  resets mid-stream, timeouts, HTTP/provider errors (5xx, auth,
-  rate-limit), malformed SSE the adapter rejects, and failures to
-  issue the turn at all (request construction). The turn never
-  completed; the provider error surfaces as the failure.
-- **Recovery fail/stop** — the two terminal answers of invalid-tool-call
-  resolution: the hook answers `Fail` (an unknown tool name with no
-  recovery → `UnknownToolCall` error) or `Stop` (a policy stop with
-  the hook's reason). The other answers — `Repair`, `Skip`,
-  `Retry` — stay inside the loop; `Retry` re-queues with corrective
-  feedback and converges at the drain like any turn outcome.
+### Error taxonomy (what a model turn can fail with)
 
-Bypassing is deliberate: a steer arriving while a run is dying must
-survive queued for the next run, not be recorded into a dead one (the
-owner's ruling against dead-lettering). Everything that settles — all
-three outcomes, recovery retries, output re-prompt feedback — passes
-through the drain before the decision. Hook `terminate` stops are not
-bypasses either: they set the flag and exit at the next decision.
+| class | examples | handling |
+|---|---|---|
+| model-side defect | tool-call arguments that cannot be parsed | BrokenTurn; bounded retry; steers reset the streak |
+| retryable provider/transport | rate-limit, transient connection failures, timeouts | drained, then bounded retry through the normal loop |
+| terminal provider | auth failure, permanent quota, context overflow | drained, then exit-Failed — history (with steers) carries forward |
+| internal (ours) | request construction failures | fail loud — not a designed path; they ride the same convergence so nothing strands, and their classification is `internal`, never papered over |
+
+A drained steer resets every retry streak, for the same reason as the
+defect streak: new user input changes the situation, and the budgets
+bound unattended loops. Retry budgets are small named constants.
 
 ### The machine contract
 
@@ -117,15 +115,18 @@ bypasses either: they set the flag and exit at the next decision.
 | `Final { turn }` | committed turn, no tool calls | FinalTurn |
 | `Tools { turn }` | committed turn with tool calls | ValidatingTools |
 | `Broken { defect }` | typed malformed-tool-call defect; nothing committed | BrokenTurn |
-| `fatal { error }` | transport/provider failure | Failed (bypass) |
+| `error { class, reason }` | a provider/transport failure, classified per the taxonomy | flagged → DrainingSteers |
 | `terminate { reason }` | a hook stopped the run | flag, read at Deciding |
 
 **Flags owned by the machine** (the "data collected earlier" that
 Deciding reads):
 
-- `defect_streak` — consecutive discarded turns; reset by any committed
-  turn and by any drained steer (a present, steering user is their own
-  circuit breaker); capped at a named constant (currently 1).
+- `pending_error` — the classified error from the last turn, if it
+  failed; Deciding retries it (budget permitting) or exits with it.
+- retry streaks — consecutive failed attempts per retryable class
+  (defects, retryable provider errors); each capped at a small named
+  constant; reset by any committed turn and by any drained steer (a
+  present, steering user is their own circuit breaker).
 - `terminating` — set by hook stops; exits at the next decision.
 - `steers_drained` — set by the drain; distinguishes "queue was silent"
   from "queue drained into history".
@@ -163,10 +164,15 @@ during design review, the verdict is recorded.
   responsibilities.*
 - **BrokenTurn** — discard the defective turn (it never entered
   history, on any provider), bump `defect_streak`. Simple path.
-- **ValidatingTools** — scan the turn's calls for admission: invalid
-  tool names go through recovery (repair / skip / fail / retry with
-  feedback), which may pause the state awaiting the hook's answer.
-  *Single concern: admission. Absorbs `ResolvingToolCalls`.*
+- **ValidatingTools** — scan the turn's calls for admission. An
+  unknown tool name is a *model-side mistake*: the model is told
+  (a synthetic result naming the problem, or corrective feedback) and
+  gets to fix it — the run does not stop on the model's own error,
+  because there is nothing a user could do about it. Recovery may
+  pause the state awaiting a hook's answer (`Repair`, `Skip`,
+  `Retry`); a hook `Stop` is a policy stop (flag → drain → decide).
+  *Single concern: admission. Absorbs `ResolvingToolCalls`. The
+  fail-the-run recovery answer is deleted.*
 - **ExecutingTools** — hold the admitted batch; receive paired results
   (`tool_results` is the closing transition into the convergence).
   *Single concern: custody. Execution itself (concurrency, drop
@@ -204,19 +210,24 @@ during design review, the verdict is recorded.
 - The driver's three inline drains and its streak counter.
 - `AwaitingAdvance`'s five-way conditional arm.
 - `discard_turn` as a public transition (BrokenTurn's entry action).
+- The fail-the-run invalid-tool-call answer (unknown tools are told to
+  the model, in-band).
+- Every failure path that skips the drain — there are none.
 
 ### Behavior deltas (documented, intended)
 
-1. **One drain point** (was three), at the convergence. The run's
-   opening input is settled by the outer layer before entry — matching
-   today's session semantics exactly; no opening-window delta.
-2. **Exhaustion only fires on a silent queue** — a drained steer resets
-   the streak (owner ruling).
-3. **The final turn commits at classification**, not lazily on the
+1. **One drain point** (was three), at the convergence — and it is
+   unconditional: failures drain too; only abort discards.
+2. **Retryable provider errors** (rate-limit, transient transport)
+   are retried through the normal loop, bounded, with steers riding
+   along — not an immediate hard stop.
+3. **Exhaustion only fires on a silent queue** — a drained steer
+   resets the streaks (owner ruling).
+4. **The final turn commits at classification**, not lazily on the
    first steer.
-4. **`max_turns` fires at Deciding** (after the drain), same observable
+5. **`max_turns` fires at Deciding** (after the drain), same observable
    outcome, one exit site instead of two.
-5. **Hook stops unify** as the `terminating` flag read at Deciding
+6. **Hook stops unify** as the `terminating` flag read at Deciding
    (and at classification for pre-turn stops).
 
 ## Future branch points
@@ -243,6 +254,8 @@ ones.
 | `ExecutingTools` + `tool_results` | ExecutingTools (+ closing transition) |
 | `Done` / `Failed` | Done / Failed |
 | driver defect path + `discard_turn` | BrokenTurn |
+| driver hard-fail on provider errors | `error { class }` input → drain → bounded retry or exit |
+| `InvalidToolCallAction::Fail` (fail the run) | deleted — unknown tools are told to the model in-band |
 | driver `drain_steers` × 3 | DrainingSteers |
 | driver streak counter | machine `defect_streak` flag |
 | driver hook-stop exits | machine `terminating` flag |
