@@ -97,7 +97,10 @@ Current workspace layout:
 - The workspace denies `panic`/`unwrap`/`expect`/indexing in shipped code;
   test code relaxes those via an identical `#![cfg_attr(test, allow(..))]`
   header at the top of each crate's lib.rs — new crates copy the current
-  version from an existing crate rather than an old one.
+  version from an existing crate rather than an old one. One sanctioned
+  exception (ENGINE.md's error taxonomy): *internal* errors — our own
+  invariants, request construction — panic deliberately and hard-stop;
+  everything external is a typed error.
 - Coverage: `cargo llvm-cov --workspace --html --output-dir target/llvm-cov/html`.
   Every gap must be filled, justified, or explicitly deferred — the ledger
   and policy live in `COVERAGE.md`.
