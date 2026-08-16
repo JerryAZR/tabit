@@ -18,18 +18,25 @@ loop; the session actor implements the outer layer.)
 
 ```mermaid
 stateDiagram-v2
-    Idle --> Running : queue non-empty — drain-all batch<br/>becomes the run's opening input
+    Idle --> Draining : work signal — queue non-empty
+    Draining --> Running : the batch joins the history —<br/>enter the inner loop at Preparing
     Running --> Idle : Done — emit run_finished
     Running --> Idle : Failed — emit run_failed
-    Running --> Idle : abort preempts (token race at any await)<br/>— emit run_aborted, discard the queue
+    Running --> Idle : abort preempts (token race at any await)<br/>— emit run_aborted, queue discarded
     Idle --> Idle : abort while idle — discard the queue<br/>(no-op when empty)
 ```
 
+The **Draining** step is the outer loop's single responsibility between
+idle and running: take the whole queue, join it into the history, and
+yield each message's `user_message` event (the 1:1 invariant). It is
+synchronous — no await between the take and entering the inner loop —
+so nothing interleaves, and batching is exact.
+
 **Entry contract** (what the outer layer hands the black box):
 
-- the conversation history as it stands, plus the opening batch — the
-  whole queue drained at entry, joined into one history the machine
-  sends as-is;
+- the history **already joined** with the opening batch — the outer
+  loop's Draining step did the join, so the inner loop receives one
+  history and sends it as-is;
 - at least one turn of budget (`max_turns ≥ 1` — entering a run that
   cannot run is unrepresentable).
 
@@ -46,16 +53,17 @@ stateDiagram-v2
 
 **Outer-layer responsibilities:** queue custody (the always-queue
 invariant — every message yields exactly one user event or steers the
-run in flight; the only discard is abort), opening-input construction
-(drain-all at entry), terminal-event emission, preemption. Implemented
-today by the tabit-session actor (`pump`/`run_one` + the mailbox and
-cancel token); documented here because the entry/exit contracts above
-are what the inner machine is designed against.
+run in flight; the only discard is abort), the Draining step
+(opening-input construction), terminal-event emission, preemption.
+Implemented today by the tabit-session actor (`pump`/`run_one` + the
+mailbox and cancel token); documented here because the entry/exit
+contracts above are what the inner machine is designed against.
 
-**One queue, two layers:** a message arriving while idle becomes the
-next run's opening input (drained by the outer layer at entry); a
-message arriving during a run lands at the inner loop's drain points.
-No-loss and ordering hold across both.
+**One queue, two drains:** the outer drain opens runs (Idle →
+Draining → Running); the inner drain converges turn outcomes. Both
+take the whole queue at their instant. A message arriving while idle
+lands in the outer drain; during a run, in the inner one. No-loss and
+ordering hold across both.
 
 ## Layer 2 — the inner loop (one run's turn machine)
 
@@ -67,7 +75,7 @@ independent of everything the model does.
 
 ```mermaid
 stateDiagram-v2
-    [*] --> Preparing : enter — history + opening batch<br/>join into one history
+    [*] --> Preparing : enter — one history,<br/>drained and joined by the outer loop
     Preparing --> ModelTurn : request issued
     ModelTurn --> FinalTurn : committed, no tool calls
     ModelTurn --> BrokenTurn : typed defect — never committed
