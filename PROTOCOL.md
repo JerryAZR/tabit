@@ -99,10 +99,18 @@ a single follow-up), keeping "one terminal per run" true.
 Recommendation: one terminal per run — the invariant is worth more
 than the event's simplicity.
 
-### 9. Empty conversation rides `PromptCancelled` — rename
+### 9. Empty conversation rides `PromptCancelled` — rename (broadened)
 
-An empty history is not a cancellation; the variant name misleads. Add
-a dedicated error variant or a malformed-input home.
+An empty history is not a cancellation; the variant name misleads. The
+flag-21 pass widened the problem: `PromptCancelled` is now the de-facto
+generic "run stopped early" carrier — a hook terminating the run, the
+empty-conversation error, and malformed-tool-call exhaustion all ride
+`run.cancel_error`, and the display string reads "PromptCancelled: …"
+for none of them. (Abort does not ride it — preemption via the token.)
+
+Open discussion, not settled: per-cause variants, or one honest
+`RunStopped { reason, history }`-shaped arm with cancellation as just
+one reason, or keep the umbrella and rename only.
 
 ### 10. `list()` platform divergence — documented, tested
 
@@ -208,6 +216,24 @@ a resample, and the two must not be conflated.
 - **What survives where** — `Drop` only where a transport error already
   outranks the defect (pre-error flushes, no-terminal truncation);
   `EmptyObject` only for same-slot supersession (a different event).
+- **Accepted edge** (owner-confirmed): a `finish_reason=tool_calls`
+  frame followed by a transport death attributes to the defect and
+  costs one retry. Fine either way — a persistent network error
+  resurfaces on the retry; a transient one didn't matter.
+
+### 22. Discarded-attempt usage never reaches the session log
+
+The engine keeps a discarded turn's completion-call usage (the tokens
+were spent; telemetry sees them), but the log records nothing —
+`RecorderHook` fires only at `on_model_turn_finished`, which a
+discarded turn never reaches — so `fold_stats` undercounts real spend
+whenever a retry happened. Live providers bill the defective turn.
+
+Options: (a) a `discarded` entry kind carrying usage — projection
+skips it, stats count it, the log stays the cost source of truth;
+(b) accept — session stats price committed turns only, engine
+telemetry carries the full picture. Recommendation: (a), deferrable
+until the stats view becomes a product surface (the TUI cost display).
 
 ## Resolved
 
@@ -245,4 +271,11 @@ a resample, and the two must not be conflated.
 - **21 — Malformed tool-call arguments**: see the open-flags entry
   above for the full ruling — typed `MalformedToolCall` defect signal
   from all three providers, engine discards the turn and retries once,
-  exhaustion fails the run with history clean.
+  exhaustion fails the run with history clean. **Open deviation, ruling
+  wanted**: on exhaustion the shipped driver does *not* drain queued
+  messages into the failed run (the approved flow ran its `if steer`
+  block before the exhaustion check) — the mailbox keeps them and the
+  pump starts the next run with them as its opening batch. Shipped this
+  way without the owner's sign-off; awaiting the ruling: keep (they are
+  fresh prompts to a live session) or match the approved flow (record
+  them into the failed run's history).
