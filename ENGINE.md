@@ -28,8 +28,8 @@ stateDiagram-v2
 **Entry contract** (what the outer layer hands the black box):
 
 - the conversation history as it stands, plus the opening batch — the
-  whole queue drained at entry, whose final message is the first
-  turn's prompt;
+  whole queue drained at entry, joined into one history the machine
+  sends as-is;
 - at least one turn of budget (`max_turns ≥ 1` — entering a run that
   cannot run is unrepresentable).
 
@@ -64,7 +64,7 @@ converge at the same drain, because steering is independent of tools.
 
 ```mermaid
 stateDiagram-v2
-    [*] --> Preparing : enter — history + opening batch,<br/>the final message is the turn's prompt
+    [*] --> Preparing : enter — history + opening batch<br/>join into one history
     Preparing --> ModelTurn : request issued
     ModelTurn --> FinalTurn : committed, no tool calls
     ModelTurn --> BrokenTurn : typed defect — never committed
@@ -84,13 +84,29 @@ stateDiagram-v2
     Failed --> [*]
 ```
 
-**The bypass rule:** exactly two edges skip the drain — fatal errors
-and recovery fail/stop — and both leave *nothing settled* (no turn
-committed, nothing to converge). This is deliberate: a steer arriving
-while a run is dying must survive queued for the next run, not be
-recorded into a dead one (the owner's ruling against dead-lettering).
-Everything else — all three outcomes, recovery retries, output
-re-prompt feedback — passes through the drain before the decision.
+**The bypass rule:** exactly two edges skip the drain, and both are
+families of *nothing settled* — no turn committed, nothing to
+converge:
+
+- **Fatal (provider/transport) errors** — everything the model turn
+  can fail with except the typed defect: connection failures and
+  resets mid-stream, timeouts, HTTP/provider errors (5xx, auth,
+  rate-limit), malformed SSE the adapter rejects, and failures to
+  issue the turn at all (request construction). The turn never
+  completed; the provider error surfaces as the failure.
+- **Recovery fail/stop** — the two terminal answers of invalid-tool-call
+  resolution: the hook answers `Fail` (an unknown tool name with no
+  recovery → `UnknownToolCall` error) or `Stop` (a policy stop with
+  the hook's reason). The other answers — `Repair`, `Skip`,
+  `Retry` — stay inside the loop; `Retry` re-queues with corrective
+  feedback and converges at the drain like any turn outcome.
+
+Bypassing is deliberate: a steer arriving while a run is dying must
+survive queued for the next run, not be recorded into a dead one (the
+owner's ruling against dead-lettering). Everything that settles — all
+three outcomes, recovery retries, output re-prompt feedback — passes
+through the drain before the decision. Hook `terminate` stops are not
+bypasses either: they set the flag and exit at the next decision.
 
 ### The machine contract
 
@@ -128,11 +144,14 @@ compatibility constraints, only the discipline.
 Each state has exactly one. Where a state was considered for splitting
 during design review, the verdict is recorded.
 
-- **Preparing** — take the existing history and construct the request:
-  the latest message is the turn's prompt, the rest precede it as
-  context; emit the model-call step. *Self-review: the max-turns
-  budget gate currently hiding in `PreparingRequest`'s `next_step`
-  moves to Deciding — Preparing keeps nothing conditional.*
+- **Preparing** — take the existing history and construct the request.
+  **The request is the history — no prompt/context split** ("just send
+  the history", the same ruling that shaped `stream_chat`); consumers
+  that need "the message being answered" (hooks, cancel errors) derive
+  it as the history's last message, a view, not a field. Emits the
+  model-call step carrying the whole history. *Self-review: the
+  max-turns budget gate currently hiding in `PreparingRequest`'s
+  `next_step` moves to Deciding — Preparing keeps nothing conditional.*
 - **ModelTurn** — the provider turn is in flight; the driver drives it
   (request, stream, spans). The machine waits for one input of the
   five above.
@@ -215,6 +234,7 @@ ones.
 |---|---|
 | tabit-session `pump`/`run_one` + mailbox + token | Layer 1 (already implemented; documented here for the contracts) |
 | `PreparingRequest` | Preparing (split only; budget gate → Deciding) |
+| `CallModel { prompt, history }` step split | deleted — the step carries the whole history; "the message being answered" is a derived last-message view |
 | `AwaitingModel` | ModelTurn |
 | `ResolvingToolCalls` + `resolve_invalid_tool_call` | ValidatingTools |
 | `AwaitingAdvance` (no-tool arm) | FinalTurn |
