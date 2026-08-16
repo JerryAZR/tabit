@@ -80,6 +80,12 @@ Current workspace layout:
     GPL-3.0-only. GPL code never enters an MIT crate: dependencies run
     frontend → backend only, and the protocol vocabulary lives on the MIT
     side (tabit-session).
+11. **Flow changes go through ENGINE.md.** Flow-level changes (turn
+    loop, run lifecycle, steering, failure handling) consult
+    `ENGINE.md` first and amend it before touching code. New flow
+    behavior gets new states or edges — never conditionals grown inside
+    existing states, never driver-side control flow outside the
+    machine.
 
 ## Environment / commands
 

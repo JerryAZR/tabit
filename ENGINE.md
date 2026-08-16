@@ -11,7 +11,13 @@ PROTOCOL.md's frontend contract. Two layers, kept strictly separate:
 Structure, not steps: states, each state's single responsibility, the
 machine/driver split, and the behavior deltas of the redesign. The
 implementation follows this document; changes to the machine change
-this document. (PROTOCOL.md keeps the frontend/event view of the same
+this document.
+
+**Standing rule (owner):** flow-level changes consult this document
+first and amend it before touching code. New flow behavior gets new
+states (or new edges) — never conditionals grown inside existing
+states, and never driver-side control flow outside the machine.
+(PROTOCOL.md keeps the frontend/event view of the same
 loop; the session actor implements the outer layer.)
 
 ## Layer 1 — the outer loop (the inner loop is a black box)
