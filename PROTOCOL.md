@@ -56,9 +56,9 @@ flowchart TD
         TR --> D1{{"drain queue: steers into history"}}
         D1 --> T
         T -->|"a call's arguments fail JSON parse"| DISC["discard the turn —<br/>it never enters history"]
-        DISC -->|"first discard: retry"| D2{{"drain queue: steers into history"}}
+        DISC -->|"retry budget left"| D2{{"drain queue: steers into history,<br/>a steer resets the streak"}}
         D2 --> T
-        DISC -->|"second consecutive: exhausted"| FAIL["run_failed — history stays clean,<br/>manual resend is the recovery"]
+        DISC -->|"budget gone, no steer arrived"| FAIL["run_failed — history stays clean,<br/>manual resend is the recovery"]
         FIN --> D3{{"queue drained at the final-turn boundary?"}}
         D3 -->|"steers arrived: the run continues"| T
         D3 -->|"empty"| DONE["run_finished"]
@@ -202,7 +202,10 @@ a resample, and the two must not be conflated.
   a partial batch cannot be paired with results).
 - **Steers ride along** — steers drained at the discard boundary join
   the retry request (always-queue: steers land at the next model call,
-  whatever caused it).
+  whatever caused it) **and reset the consecutive-discard streak** —
+  the retry budget bounds runs the user has gone silent on; a present,
+  steering user is their own circuit breaker (owner ruling on the
+  exhaustion branch, superseding the shipped-without-approval deviation).
 - **Counter** — consecutive discards, reset on any committed turn; cap
   1 (one retry, two attempts). Exhaustion → `run_failed` naming the
   cause and the levers (resend / raise `max_tokens`).
@@ -271,11 +274,8 @@ until the stats view becomes a product surface (the TUI cost display).
 - **21 — Malformed tool-call arguments**: see the open-flags entry
   above for the full ruling — typed `MalformedToolCall` defect signal
   from all three providers, engine discards the turn and retries once,
-  exhaustion fails the run with history clean. **Open deviation, ruling
-  wanted**: on exhaustion the shipped driver does *not* drain queued
-  messages into the failed run (the approved flow ran its `if steer`
-  block before the exhaustion check) — the mailbox keeps them and the
-  pump starts the next run with them as its opening batch. Shipped this
-  way without the owner's sign-off; awaiting the ruling: keep (they are
-  fresh prompts to a live session) or match the approved flow (record
-  them into the failed run's history).
+  exhaustion fails the run with history clean. The exhaustion-branch
+  deviation was ruled on by the owner: a steer drained at the discard
+  boundary resets the streak, so exhaustion only fires on a silent
+  queue; messages arriving after a failed run start the next run
+  through the pump.

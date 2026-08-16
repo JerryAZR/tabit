@@ -374,26 +374,28 @@ where
                     }
                     drop(turn_stream);
                     if let Some(err) = turn_error {
-                        if is_malformed_tool_call_defect(&err)
-                            && discarded_defective_turns < MAX_DISCARDED_DEFECTIVE_TURNS
-                        {
-                            discarded_defective_turns += 1;
-                            tracing::warn!(
-                                turn,
-                                discarded = discarded_defective_turns,
-                                "model turn carried a malformed tool call; \
-                                 discarding the turn and retrying the request"
-                            );
+                        if is_malformed_tool_call_defect(&err) {
+                            // The defective turn is discarded unconditionally
+                            // — it never entered history, so exhausting after
+                            // this point still leaves the conversation
+                            // unchanged. Discarding also returns the run to
+                            // a steerable state for the drain below.
                             if let Err(state_err) = run.discard_turn() {
                                 store_error_usage(&runner, &run);
                                 yield Err(Box::new(state_err).into());
                                 break 'outer;
                             }
                             // Steers that arrived during the defective turn
-                            // ride along in the retry request — this is a
-                            // turn boundary like any other.
+                            // drain here — a turn boundary like any other —
+                            // and a drained steer RESETS the streak: it is
+                            // new user input, and the retry budget exists to
+                            // bound unattended loops. A present, steering
+                            // user is their own circuit breaker.
                             match drain_steers(&runner, &mut run) {
                                 Ok(texts) => {
+                                    if !texts.is_empty() {
+                                        discarded_defective_turns = 0;
+                                    }
                                     for text in texts {
                                         yield Ok(DriveItem::Item(
                                             MultiTurnStreamItem::Steer { text },
@@ -406,10 +408,19 @@ where
                                     break 'outer;
                                 }
                             }
-                            continue 'outer;
-                        }
-                        store_error_usage(&runner, &run);
-                        if is_malformed_tool_call_defect(&err) {
+                            if discarded_defective_turns < MAX_DISCARDED_DEFECTIVE_TURNS {
+                                discarded_defective_turns += 1;
+                                tracing::warn!(
+                                    turn,
+                                    discarded = discarded_defective_turns,
+                                    "model turn carried a malformed tool call; \
+                                     discarding the turn and retrying the request"
+                                );
+                                continue 'outer;
+                            }
+                            // Only reachable when no steer drained: new user
+                            // input resets the streak above.
+                            store_error_usage(&runner, &run);
                             yield Err(StreamingError::Prompt(Box::new(run.cancel_error(
                                 format!(
                                     "the model repeatedly emitted tool calls with \
@@ -423,6 +434,7 @@ where
                             ))));
                             break 'outer;
                         }
+                        store_error_usage(&runner, &run);
                         yield Err(err);
                         break 'outer;
                     }

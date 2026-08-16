@@ -197,6 +197,78 @@ fn request_user_texts(request: &CompletionRequest) -> Vec<String> {
         .collect()
 }
 
+/// A scripted [`SteeringSource`] releasing one message per drain — the
+/// engine-visible shape of a user steering once per turn boundary.
+struct OneSteerAtATime {
+    released: Mutex<usize>,
+    remaining: Mutex<usize>,
+}
+
+impl crate::agent::runner::SteeringSource for OneSteerAtATime {
+    fn has_pending(&self) -> bool {
+        *self.remaining.lock().expect("steer remaining") > 0
+    }
+
+    fn drain(&self) -> Vec<Message> {
+        let mut remaining = self.remaining.lock().expect("steer remaining");
+        if *remaining == 0 {
+            return Vec::new();
+        }
+        *remaining -= 1;
+        let mut released = self.released.lock().expect("steer released");
+        *released += 1;
+        vec![Message::user(format!("steer {}", *released))]
+    }
+}
+
+/// A steer drained at a defect boundary resets the streak: each steering
+/// message buys the model a fresh retry, so an actively steered run never
+/// exhausts — exhaustion bounds runs the user has gone silent on.
+#[tokio::test]
+async fn steers_reset_the_defect_streak_each_buying_another_retry() {
+    use crate::streaming::StreamingChat;
+
+    let model = MockCompletionModel::from_stream_turns([
+        vec![MockStreamEvent::Error(MockError::malformed_tool_call(
+            "lookup",
+            "arguments arrived truncated",
+        ))],
+        vec![MockStreamEvent::Error(MockError::malformed_tool_call(
+            "lookup",
+            "arguments arrived truncated again",
+        ))],
+        vec![
+            MockStreamEvent::text("recovered"),
+            MockStreamEvent::final_response(Usage::new()),
+        ],
+    ]);
+    let agent = Arc::new(AgentBuilder::new(model.clone()).build());
+
+    let mut stream = agent
+        .stream_chat(vec![Message::user("go")])
+        .steering(Arc::new(OneSteerAtATime {
+            released: Mutex::new(0),
+            remaining: Mutex::new(2),
+        }))
+        .await;
+    let mut finished = false;
+    while let Some(item) = stream.next().await {
+        if let Ok(crate::agent::MultiTurnStreamItem::FinalResponse(_)) = item {
+            finished = true;
+        }
+    }
+    assert!(
+        finished,
+        "each steer resets the streak; the third attempt recovers"
+    );
+    assert_eq!(model.request_count(), 3, "defect, defect, recovery");
+    assert_eq!(
+        request_user_texts(&model.requests()[2]),
+        ["go", "steer 1", "steer 2"],
+        "each drained steer rides along and stays in the retried history"
+    );
+}
+
 /// A malformed tool call discards the turn and retries the identical
 /// request — and the discarded attempt does not consume the turn budget
 /// (max_turns 1 still allows the retry to complete the run).
