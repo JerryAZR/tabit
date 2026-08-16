@@ -31,20 +31,25 @@ Defensive ("unreachable") arms follow a stricter rule:
 - The whole suite runs offline (cassette replay + test doubles). Doctests
   are NOT included in these numbers (`llvm-cov` was run without
   `--doctests`); they are gated by the same CI run.
-- Current state: **95.75% lines / 96.26% regions** (2,464 of 57,954
-  lines; re-measured after the protocol rulings pass: drain-all mailbox
-  batches, `prompt`/`prompt_with` unified onto `pump` with failures as
-  events (`RunOutcome::Failed`, no `Err` return), deferred session-file
-  creation (materializes at the first user message), the shared
-  poison-lock helper, `list()` reading a missing directory as empty, and
+- Current state: **95.76% lines / 96.27% regions** (2,463 of 58,056
+  lines; re-measured after the flag-21 pass: the typed
+  `MalformedToolCall` defect signal unified across all three providers,
+  `AgentRun::discard_turn` with the engine's turn-discard retry (steers
+  ride along; discarded turns don't consume `max_turns`), and
+  exhaustion failing the run with history clean. `drive.rs`'s retry
+  branches are fully covered by the four new engine tests; the pass's
+  one new defensive arm joins the residue below). Prior passes: the
+  protocol rulings pass (drain-all mailbox batches,
+  `prompt`/`prompt_with` unified onto `pump` with failures as events,
+  deferred session-file creation, the shared poison-lock helper,
+  `list()` reading a missing directory as empty, and
   `StreamingChat::stream_chat` taking a full conversation whose final
-  message is the turn being sent — the session no longer splits the
-  batch). The rig crates' residue is unchanged, the tabit crates carry
-  their own itemization below. `crates/tabit-config` sits at 100%
-  branch coverage with no fully unexecuted line. The tabit crates:
-  tabit-session 93.6% (session.rs) / 84.9% (store.rs), tabit-tools
-  90.5%; their residue is almost entirely error arms (see "Justified
-  residue" item 9).
+  message is the turn being sent). The rig crates' residue is
+  unchanged, the tabit crates carry their own itemization below.
+  `crates/tabit-config` sits at 100% branch coverage with no fully
+  unexecuted line. The tabit crates: tabit-session 93.6% (session.rs) /
+  84.9% (store.rs), tabit-tools 90.5%; their residue is almost
+  entirely error arms (see "Justified residue" item 9).
 
 ## Filled
 
@@ -89,6 +94,9 @@ named, the classification applies to its current lcov-uncovered ranges.
    the driver-fold Done guarantee) and external-input errors naming the
    malformed input (deserialized run state, malformed SSE frames — the
    SSE parser-error arm surfaces a named error instead of skipping).
+   `AgentRun::discard_turn`'s called-in-wrong-state arm joins this class —
+   the driver only calls it with a turn in flight (`AwaitingModel`), the
+   same protocol-violation shape as its sibling `retry_model_turn`.
 3. **Trait-required methods on test doubles** never queried by their tests
    (`top_n_ids`/`top_n` halves of mock vector indexes, `record_debug`
    visitors, `Write::flush`, blocking-only telemetry `stream`): required

@@ -24,6 +24,9 @@ pub enum MockError {
     Provider(String),
     /// Request construction error.
     Request(String),
+    /// A tool call whose arguments cannot be parsed — the model-side
+    /// defect the engine's turn-discard retry is exercised against.
+    MalformedToolCall { tool: String, reason: String },
 }
 
 impl MockError {
@@ -37,10 +40,21 @@ impl MockError {
         Self::Request(message.into())
     }
 
+    /// Create a malformed-tool-call defect.
+    pub fn malformed_tool_call(tool: impl Into<String>, reason: impl Into<String>) -> Self {
+        Self::MalformedToolCall {
+            tool: tool.into(),
+            reason: reason.into(),
+        }
+    }
+
     pub(crate) fn into_completion_error(self) -> CompletionError {
         match self {
             Self::Provider(message) => CompletionError::ProviderError(message),
             Self::Request(message) => CompletionError::RequestError(message.into()),
+            Self::MalformedToolCall { tool, reason } => {
+                CompletionError::MalformedToolCall { tool, reason }
+            }
         }
     }
 }

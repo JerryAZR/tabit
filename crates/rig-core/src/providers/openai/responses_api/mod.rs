@@ -2186,37 +2186,36 @@ impl<'de> Deserialize<'de> for Output {
     }
 }
 
-impl From<Output> for Vec<completion::AssistantContent> {
-    fn from(value: Output) -> Self {
+impl TryFrom<Output> for Vec<completion::AssistantContent> {
+    type Error = CompletionError;
+
+    fn try_from(value: Output) -> Result<Self, Self::Error> {
         let res: Vec<completion::AssistantContent> = match value {
-            Output::Message(OutputMessage { content, .. }) => content
-                .into_iter()
-                .map(completion::AssistantContent::from)
-                .collect(),
+            Output::Message(OutputMessage { content, .. }) => output_message_content(content),
             Output::FunctionCall(OutputFunctionCall {
                 id,
                 arguments,
                 call_id,
                 name,
                 ..
-            }) => match arguments.parse() {
-                Ok(arguments) => vec![completion::AssistantContent::tool_call_with_call_id(
-                    id, call_id, name, arguments,
-                )],
-                // Truncation policy: arguments the wire never finished (a
-                // turn cut by `max_output_tokens` mid-tool-call) do not
-                // fabricate a call the model never fully made.
-                Err(_) => {
-                    // warn, not debug: main errored the whole response here,
-                    // so the quieter drop still deserves an operator-visible
-                    // signal.
-                    tracing::warn!(
-                        tool = %name,
-                        "dropping tool call whose arguments never fully arrived"
-                    );
-                    Vec::new()
+            }) => {
+                match arguments.parse() {
+                    Ok(arguments) => vec![completion::AssistantContent::tool_call_with_call_id(
+                        id, call_id, name, arguments,
+                    )],
+                    // Truncation policy: arguments the wire never finished (a
+                    // turn cut by `max_output_tokens` mid-tool-call) are a
+                    // model-side defect, not a droppable oddity — a typed
+                    // error so drivers discard the turn and retry the request
+                    // instead of silently losing the call the model made.
+                    Err(error) => {
+                        return Err(CompletionError::MalformedToolCall {
+                            tool: name,
+                            reason: error.to_string(),
+                        });
+                    }
                 }
-            },
+            }
             Output::Reasoning {
                 id,
                 summary,
@@ -2253,8 +2252,20 @@ impl From<Output> for Vec<completion::AssistantContent> {
             Output::Unknown(_) => Vec::new(),
         };
 
-        res
+        Ok(res)
     }
+}
+
+/// Convert a Responses output *message* item's content into assistant
+/// content. Shared by the full-output conversion above and the streaming
+/// replay merge, which only ever converts message items.
+pub(crate) fn output_message_content(
+    content: Vec<AssistantContent>,
+) -> Vec<completion::AssistantContent> {
+    content
+        .into_iter()
+        .map(completion::AssistantContent::from)
+        .collect()
 }
 
 #[derive(Clone, Debug, Deserialize, Serialize, PartialEq)]
@@ -2532,12 +2543,10 @@ impl crate::completion::NormalizeCompletionResponse for CompletionResponse {
             _ => None,
         });
 
-        let output_content: Vec<completion::AssistantContent> = response
-            .output
-            .iter()
-            .cloned()
-            .flat_map(<Vec<completion::AssistantContent>>::from)
-            .collect();
+        let mut output_content: Vec<completion::AssistantContent> = Vec::new();
+        for item in response.output.iter().cloned() {
+            output_content.extend(<Vec<completion::AssistantContent>>::try_from(item)?);
+        }
         let has_structured_reasoning = response
             .output
             .iter()

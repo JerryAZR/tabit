@@ -501,8 +501,11 @@ where
         }
 
         if choice.finish_reason.is_tool_calls() {
+            // The finish-reason frame completed the turn's content: a call
+            // whose arguments still don't parse is a model-side defect, not a
+            // silent drop.
             for slot in self.open_tool_calls.drain_ordered() {
-                let end = slot.end_event(UnparseableToolInput::Drop);
+                let end = slot.end_event(UnparseableToolInput::Error);
                 out.push(Ok(RawStreamingChoice::ToolInputEnd(end)));
             }
         }
@@ -510,10 +513,18 @@ where
 
     fn finish(&mut self, out: &mut AdapterOutput<Self::Response>) {
         // Tool calls the provider fully delivered are content, so a truncated
-        // stream still flushes them to the consumer. Partial calls (arguments
-        // that never parse) drop in the accumulator.
+        // stream still flushes them to the consumer. A call whose arguments
+        // don't parse: a content defect when the provider completed the turn
+        // (typed error — drivers discard the turn and retry); a drop when the
+        // stream truncated at the transport level, where the missing terminal
+        // record reports the real failure.
+        let on_unparseable = if self.saw_terminal && self.saw_any_valid_frame {
+            UnparseableToolInput::Error
+        } else {
+            UnparseableToolInput::Drop
+        };
         for slot in self.open_tool_calls.drain_ordered() {
-            let end = slot.end_event(UnparseableToolInput::Drop);
+            let end = slot.end_event(on_unparseable);
             out.push(Ok(RawStreamingChoice::ToolInputEnd(end)));
         }
 
@@ -542,7 +553,9 @@ where
 
     fn flush_before_terminal_error(&mut self, out: &mut AdapterOutput<Self::Response>) {
         // Fully-delivered tool calls flush before the terminal error reaches
-        // the consumer, so a first-`Err`-stop consumer sees them too.
+        // the consumer, so a first-`Err`-stop consumer sees them too. Partial
+        // calls drop: the transport error that follows outranks the content
+        // defect.
         for slot in self.open_tool_calls.drain_ordered() {
             let end = slot.end_event(UnparseableToolInput::Drop);
             out.push(Ok(RawStreamingChoice::ToolInputEnd(end)));
@@ -1174,7 +1187,12 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn tool_calls_finish_reason_drops_partial_argument_payloads() {
+    async fn tool_calls_finish_reason_surfaces_partial_arguments_as_defect() {
+        // `start` streams a call whose arguments never complete; `finish`
+        // reports finish_reason=tool_calls, so the wire considers the turn
+        // done. Unparseable arguments on a completed turn are a model-side
+        // defect: a typed error the engine discards the turn on — never a
+        // fabricated call, never a silent drop.
         let client = MockStreamingClient {
             sse_bytes: sse_bytes_from_data_lines(["start", "finish"]),
         };
@@ -1189,28 +1207,26 @@ mod tests {
             .await
             .expect("stream should start");
 
-        let mut saw_final = false;
-        let mut saw_tool_call = false;
-
+        let mut saw_defect = false;
         while let Some(item) = stream.next().await {
-            match item.expect("stream item should be ok") {
-                StreamedAssistantContent::ToolCallDelta { .. } => {}
-                StreamedAssistantContent::Final(_) => saw_final = true,
-                StreamedAssistantContent::ToolCall { .. } => saw_tool_call = true,
-                other => panic!(
-                    "unexpected stream item while asserting finish-reason cleanup: {other:?}"
-                ),
+            match item {
+                Ok(StreamedAssistantContent::ToolCallDelta { .. }) => {}
+                // The terminal record trails an in-band defect error (the
+                // malformed-frame contract keeps consuming); a first-Err-stop
+                // consumer — the engine — never sees it.
+                Ok(StreamedAssistantContent::Final(_)) => {}
+                Ok(other) => panic!("unexpected stream item while asserting the defect: {other:?}"),
+                Err(err) => {
+                    assert!(
+                        matches!(&err, CompletionError::MalformedToolCall { tool, .. } if tool == "ping"),
+                        "the partial-arguments call should surface as a malformed-tool-call defect, got: {err:?}"
+                    );
+                    saw_defect = true;
+                }
             }
         }
 
-        assert!(
-            saw_final,
-            "stream should still yield a final response after dropping the partial tool call"
-        );
-        assert!(
-            !saw_tool_call,
-            "finish_reason cleanup should drop partial tool calls instead of emitting them"
-        );
+        assert!(saw_defect, "the stream should surface the defect error");
     }
 
     #[tokio::test]

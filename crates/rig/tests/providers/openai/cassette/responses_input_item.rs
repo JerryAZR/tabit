@@ -172,7 +172,7 @@ fn openai_responses_reasoning_output_preserves_encrypted_content() {
     }))
     .expect("deserialize reasoning output");
 
-    let content: Vec<AssistantContent> = output.into();
+    let content: Vec<AssistantContent> = output.try_into().expect("output should convert");
     assert_eq!(content.len(), 1);
     let Some(AssistantContent::Reasoning(reasoning)) = content.first() else {
         panic!("expected reasoning output content");
@@ -201,7 +201,7 @@ fn openai_responses_reasoning_output_preserves_reasoning_text_content() {
     }))
     .expect("deserialize reasoning output");
 
-    let content: Vec<AssistantContent> = output.into();
+    let content: Vec<AssistantContent> = output.try_into().expect("output should convert");
     assert_eq!(content.len(), 1);
     let Some(AssistantContent::Reasoning(reasoning)) = content.first() else {
         panic!("expected reasoning output content");
@@ -222,7 +222,7 @@ fn openai_responses_reasoning_output_without_summary_is_not_dropped() {
     }))
     .expect("deserialize reasoning output");
 
-    let content: Vec<AssistantContent> = output.into();
+    let content: Vec<AssistantContent> = output.try_into().expect("output should convert");
     assert_eq!(content.len(), 1);
     let Some(AssistantContent::Reasoning(reasoning)) = content.first() else {
         panic!("expected reasoning output content");
@@ -239,7 +239,7 @@ fn openai_empty_reasoning_content_roundtrips_to_request_item() {
         "summary": []
     }))
     .expect("deserialize reasoning output");
-    let content: Vec<AssistantContent> = output.into();
+    let content: Vec<AssistantContent> = output.try_into().expect("output should convert");
     let Some(AssistantContent::Reasoning(reasoning)) = content.first().cloned() else {
         panic!("expected reasoning output content");
     };

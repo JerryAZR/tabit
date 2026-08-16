@@ -495,6 +495,31 @@ impl AgentRun {
         OneOrMany::from_iter_optional(turn.items.clone())
     }
 
+    /// Discard an in-flight model turn whose stream failed and prepare the
+    /// same model call again.
+    ///
+    /// The defect-retry path for a turn the model itself broke (a tool call
+    /// with arguments that cannot be parsed): the turn never committed to
+    /// history, so discarding it leaves nothing behind — the retry re-issues
+    /// the identical request, and the turn-slot its issuance consumed is
+    /// returned (`max_turns` counts turns the model answered, not attempts).
+    /// Recorded completion-call usage from the discarded attempt stays: the
+    /// tokens were spent.
+    pub fn discard_turn(&mut self) -> Result<(), PromptError> {
+        match std::mem::replace(&mut self.state, RunState::Failed) {
+            RunState::AwaitingModel => {}
+            other => {
+                self.state = other;
+                return Err(
+                    self.protocol_violation("discard_turn called without a model turn in flight")
+                );
+            }
+        }
+        self.current_turn = self.current_turn.saturating_sub(1);
+        self.state = RunState::PreparingRequest;
+        Ok(())
+    }
+
     /// Reject the accepted, tool-free model turn and prepare another model call.
     ///
     /// [`RetryRequest::Repeat`] discards the rejected assistant response and

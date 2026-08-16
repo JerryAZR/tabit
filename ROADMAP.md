@@ -193,7 +193,11 @@ The known deviation from pi's subprocess model:
   `--list` reads a missing sessions directory as empty);
   `StreamingChat::stream_chat` takes a full conversation — the final
   message is the turn being sent, callers add messages to history
-  before the call, and retries resend the same list verbatim.
+  before the call, and retries resend the same list verbatim;
+  malformed tool-call arguments are a model-side defect — the turn is
+  discarded (never entering history on any provider) and the request
+  retried once, exhaustion fails the run with history clean (PROTOCOL.md
+  flag 21, recorded with the outer-loop diagram).
 - **TUI: build, harvesting claurst** (reuse question closed: codex's TUI
   is a porting project — ~40 path-dep crates, ratatui-0.30/crossterm-fork
   skew; claurst's decomposes into ~19K LOC of near-verbatim leaves — the

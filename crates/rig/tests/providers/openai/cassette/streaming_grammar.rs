@@ -605,10 +605,13 @@ async fn three_turn_tool_session_replays_rs_ids_across_turns() {
 /// and response status `incomplete`). The typed models keep `arguments` as
 /// the raw wire string (`FunctionCallArguments`) and parse at consumption
 /// time, so both the `response.output_item.done` and `response.incomplete`
-/// frames decode; the truncation policy drops the partial call instead of
-/// fabricating one, and the terminal normalizes to `Length`.
+/// frames decode. On a completed-but-incomplete turn the truncation policy
+/// surfaces the partial call as the typed `MalformedToolCall` defect (never
+/// a fabricated call, never corrupted arguments); the terminal record trails
+/// the in-band error, which a first-Err-stop consumer — the engine — never
+/// sees.
 #[tokio::test]
-async fn incomplete_mid_tool_call_normalizes_to_length() {
+async fn incomplete_mid_tool_call_surfaces_the_malformed_call_defect() {
     with_openai_cassette(
         "streaming_grammar/incomplete_mid_tool_call",
         |client| async move {
@@ -622,27 +625,37 @@ async fn incomplete_mid_tool_call_normalizes_to_length() {
                 .max_tokens(16)
                 .additional_params(json!({ "reasoning": { "effort": "low" } }))
                 .build();
-            let run = drain_stream(model.stream(request).await.expect("stream should start")).await;
+            let mut stream = model.stream(request).await.expect("stream should start");
 
-            assert_terminal(&run, FinishReason::Length);
-            // Whatever partial output survived must be well-formed part-wise:
-            // a truncated tool call must not surface corrupted arguments.
-            for call in &run.tool_calls {
-                assert!(
-                    call.function.arguments.is_object(),
-                    "surfaced tool call must carry object arguments, got {:?}",
-                    call.function.arguments
-                );
-            }
-            for content in run.choice.iter() {
-                if let AssistantContent::ToolCall(call) = content {
-                    assert!(
-                        call.function.arguments.is_object(),
-                        "aggregated tool call must carry object arguments, got {:?}",
-                        call.function.arguments
-                    );
+            let mut saw_defect = false;
+            let mut tool_calls = Vec::new();
+            while let Some(item) = stream.next().await {
+                match item {
+                    Ok(StreamedAssistantContent::Text(_))
+                    | Ok(StreamedAssistantContent::Reasoning(_))
+                    | Ok(StreamedAssistantContent::ReasoningDelta { .. })
+                    | Ok(StreamedAssistantContent::ToolCallDelta { .. })
+                    | Ok(StreamedAssistantContent::Final(_)) => {}
+                    Ok(StreamedAssistantContent::ToolCall { tool_call, .. }) => {
+                        tool_calls.push(tool_call);
+                    }
+                    Ok(other) => panic!("unexpected stream item: {other:?}"),
+                    Err(rig::completion::CompletionError::MalformedToolCall { tool, .. }) => {
+                        assert_eq!(tool, "add", "the truncated call should name its tool");
+                        saw_defect = true;
+                    }
+                    Err(other) => panic!("unexpected stream error: {other:?}"),
                 }
             }
+
+            assert!(
+                saw_defect,
+                "the truncated tool call should surface as the malformed-call defect"
+            );
+            assert!(
+                tool_calls.is_empty(),
+                "a truncated call must not fabricate a completed tool call"
+            );
         },
     )
     .await;

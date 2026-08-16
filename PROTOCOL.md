@@ -38,6 +38,34 @@ resolved flag records its decision and stays as history.
   sender) ends the actor after the in-flight run; the event stream then
   closes. Close is not a barrier — commands already queued are honored.
 
+## The outer loop
+
+One `AgentRun`, from a user prompt to the final response. Steers are
+drained at every turn boundary; a malformed tool call discards and
+retries the turn (flag 21); abort is preemption and lives outside the
+loop.
+
+```mermaid
+flowchart TD
+    IDLE["idle entry: drain the whole queue<br/>as the run's opening batch"] --> T
+    subgraph RUN["one AgentRun"]
+        T["model turn — stream_chat(history)<br/>counts toward max_turns"]
+        T -->|"no tool calls"| FIN["commit turn to history"]
+        T -->|"tool calls, all arguments parse"| TOOLS["execute tools"]
+        TOOLS --> TR["record response + tool results"]
+        TR --> D1{{"drain queue: steers into history"}}
+        D1 --> T
+        T -->|"a call's arguments fail JSON parse"| DISC["discard the turn —<br/>it never enters history"]
+        DISC -->|"first discard: retry"| D2{{"drain queue: steers into history"}}
+        D2 --> T
+        DISC -->|"second consecutive: exhausted"| FAIL["run_failed — history stays clean,<br/>manual resend is the recovery"]
+        FIN --> D3{{"queue drained at the final-turn boundary?"}}
+        D3 -->|"steers arrived: the run continues"| T
+        D3 -->|"empty"| DONE["run_finished"]
+    end
+    ABORT["abort (preemptive, any await)"] -.-> RUN
+```
+
 ## Open flags (numbering is fixed at creation; resolved numbers are
 skipped)
 
@@ -138,6 +166,49 @@ lacked. Resolved by restoring the local stable toolchain to match CI
 stable; keep local current — a CI-only clippy failure is skew, update
 first.
 
+### 21. Malformed tool-call arguments — RESOLVED
+
+One event, three policies: Anthropic errored the run (`Error`), OpenAI
+Responses dropped the call with a warning (`Drop`), the compat gateway
+dropped-on-flush / delivered `{}`-on-eviction. The shared vocabulary
+(`UnparseableToolInput`) existed but forced no choice — an abstraction
+gap, not a wire necessity.
+
+Ruling (unified): **a malformed tool call is a model-side defect —
+discard the turn, retry the request once.** The malformed turn never
+enters history (on any provider, at any point — it is unreplayable on
+the Anthropic wire, where `tool_use.input` must be a JSON object), so
+retries resend the same conversation and exhaustion leaves the session
+alive for a manual resend. This is a *content* retry in the engine's
+turn loop, not the transport retry of the SSE note: the transport
+succeeded and the response content failed validation; the mechanism is
+a resample, and the two must not be conflated.
+
+- **Trigger** — a tool call's raw arguments fail JSON *parse* (truncated
+  mid-string, unbalanced braces, assembly-bound overflow) at turn
+  assembly. Valid JSON with wrong parameters is explicitly NOT this
+  path: tool dispatch already feeds those failures back to the model
+  in-band, like any failing tool.
+- **Turn granularity** — any unparseable call poisons the whole turn
+  (a turn carrying it is unreplayable regardless of its siblings, and
+  a partial batch cannot be paired with results).
+- **Steers ride along** — steers drained at the discard boundary join
+  the retry request (always-queue: steers land at the next model call,
+  whatever caused it).
+- **Counter** — consecutive discards, reset on any committed turn; cap
+  1 (one retry, two attempts). Exhaustion → `run_failed` naming the
+  cause and the levers (resend / raise `max_tokens`).
+- **Budget** — a discarded turn does not count toward `max_turns`; it
+  never entered history.
+- **Accepted v1 residue** — the discarded turn's streamed deltas and
+  usage were already forwarded (billing stays honest; text may visibly
+  re-stream). Future option when a consumer needs it: a rewind-to
+  event (erase below a message) or a stream cancel (drop the streamed
+  block).
+- **What survives where** — `Drop` only where a transport error already
+  outranks the defect (pre-error flushes, no-terminal truncation);
+  `EmptyObject` only for same-slot supersession (a different event).
+
 ## Resolved
 
 - **1 — Resident loop** (supersedes 4, 5, 7, 12): one worker task owns
@@ -171,3 +242,7 @@ first.
   caller yields — tests and scripts get exact batching); on multi-thread
   runtimes a push racing the drain may steer instead. The guarantee is
   no-loss + order; exact batching where it is observable.
+- **21 — Malformed tool-call arguments**: see the open-flags entry
+  above for the full ruling — typed `MalformedToolCall` defect signal
+  from all three providers, engine discards the turn and retries once,
+  exhaustion fails the run with history clean.

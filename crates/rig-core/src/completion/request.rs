@@ -106,6 +106,21 @@ pub enum CompletionError {
     #[error("ResponseError: {0}")]
     ResponseError(String),
 
+    /// A tool call arrived with arguments that cannot be parsed as JSON —
+    /// the model's own output is defective (typically a turn cut by the
+    /// output-token limit mid-tool-call, or arguments over the assembly
+    /// bound). The transport succeeded; the content cannot be replayed
+    /// (Anthropic's wire requires `tool_use.input` to be a JSON object),
+    /// so the whole turn is discarded and the request retried rather than
+    /// forwarding the defect.
+    #[error("MalformedToolCall: `{tool}`: {reason}")]
+    MalformedToolCall {
+        /// Name of the defective call.
+        tool: String,
+        /// Why the arguments were rejected.
+        reason: String,
+    },
+
     /// Error returned by the completion model provider
     #[error("ProviderError: {0}")]
     ProviderError(String),

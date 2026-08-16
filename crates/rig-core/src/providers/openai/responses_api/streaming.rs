@@ -287,8 +287,10 @@ pub(crate) struct RawChoiceAccumulator {
     /// `output_item.done`, flushed at the terminal (or before a terminal
     /// error). Assembly and internal-id correlation live in the shared
     /// accumulator, keyed by the function-call item id the added/delta/done
-    /// events share.
-    tool_calls: Vec<StreamingRawChoice>,
+    /// events share. Stored as bare ends because the unparseable policy is
+    /// only decidable at flush time: defect (`Error`) when the provider
+    /// completed the turn, drop when a terminal error outranks it.
+    tool_calls: Vec<streaming::ToolInputEnd>,
     /// Whether a genuine terminal event (`response.completed` or
     /// `response.incomplete`) arrived. Without one the stream was truncated,
     /// and `finish` withholds the terminal record.
@@ -565,10 +567,10 @@ impl RawChoiceAccumulator {
                 // turn cut by `max_output_tokens` mid-tool-call restates them
                 // truncated mid-JSON (item status `incomplete`); routing the
                 // raw string through the assembly buffer instead lets the
-                // shared accumulator apply the settled truncation policy
-                // (`UnparseableToolInput::Drop` — partial arguments never
-                // fabricate a call), including when no argument fragments
-                // preceded the done item.
+                // shared accumulator apply the truncation policy chosen at
+                // flush time (defect on a completed turn, drop on a broken
+                // one), including when no argument fragments preceded the
+                // done item.
                 match func.arguments.parse() {
                     Ok(arguments) => end.arguments = Some(arguments),
                     Err(_) => {
@@ -583,8 +585,7 @@ impl RawChoiceAccumulator {
                 end.call_id = Some(func.call_id);
                 // Completed calls are buffered and flushed at the terminal
                 // (see `self.tool_calls`), matching the live SSE loop.
-                self.tool_calls
-                    .push(streaming::RawStreamingChoice::ToolInputEnd(end));
+                self.tool_calls.push(end);
             }
             Output::Reasoning {
                 id,
@@ -627,14 +628,38 @@ impl RawChoiceAccumulator {
 
     /// Drain the buffered fully-delivered tool calls without finishing the
     /// stream. The errored-terminal path flushes these before the error and
-    /// must not produce a terminal record.
+    /// must not produce a terminal record — a call whose arguments still
+    /// don't parse drops here, because the provider error that follows
+    /// outranks the content defect.
     pub(crate) fn take_tool_calls(&mut self) -> Vec<StreamingRawChoice> {
         std::mem::take(&mut self.tool_calls)
+            .into_iter()
+            .map(|mut end| {
+                end.on_unparseable = streaming::UnparseableToolInput::Drop;
+                RawStreamingChoice::ToolInputEnd(end)
+            })
+            .collect()
     }
 
     pub(crate) fn finish(mut self) -> Vec<StreamingRawChoice> {
-        let mut choices = Vec::new();
-        choices.append(&mut self.tool_calls);
+        // A genuine terminal means the provider completed the turn: a call
+        // whose arguments still don't parse is then a content defect —
+        // surfaced as a typed error so drivers can discard the turn and
+        // retry. Without a terminal the stream truncated at the transport
+        // level; partial calls keep dropping and the missing terminal
+        // record reports the truncation.
+        let on_unparseable = if self.saw_terminal {
+            streaming::UnparseableToolInput::Error
+        } else {
+            streaming::UnparseableToolInput::Drop
+        };
+        let mut choices: Vec<_> = std::mem::take(&mut self.tool_calls)
+            .into_iter()
+            .map(|mut end| {
+                end.on_unparseable = on_unparseable;
+                RawStreamingChoice::ToolInputEnd(end)
+            })
+            .collect();
         // Only a genuine terminal event (`response.completed` or
         // `response.incomplete`) counts as the provider ending the turn; a
         // stream that ended without one was truncated,
@@ -824,13 +849,19 @@ pub(crate) async fn completion_response_from_raw_choices(
         )
     });
     if !replay_has_message_text {
+        // Message items only — a truncated function call cannot occur here,
+        // and converting it fallibly would be unreachable by construction.
         contents.extend(
             raw_response
                 .output
                 .iter()
-                .filter(|item| matches!(item, Output::Message(_)))
-                .cloned()
-                .flat_map(<Vec<completion::AssistantContent>>::from),
+                .filter_map(|item| match item {
+                    Output::Message(message) => {
+                        Some(super::output_message_content(message.content.clone()))
+                    }
+                    _ => None,
+                })
+                .flatten(),
         );
     }
     let choice = crate::OneOrMany::many(contents).unwrap_or_else(|_| stream.choice.clone());

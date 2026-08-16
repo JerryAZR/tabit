@@ -439,6 +439,47 @@ async fn failed_run_still_records_the_user_message() -> Result<(), SessionError>
 }
 
 #[tokio::test]
+async fn malformed_tool_call_exhaustion_fails_the_run_and_leaves_the_session_alive()
+-> Result<(), SessionError> {
+    use rig_agent::test_utils::MockError;
+
+    let store = temp_store("malformed-exhaustion");
+    let malformed = || {
+        vec![MockStreamEvent::Error(MockError::malformed_tool_call(
+            "lookup",
+            "arguments arrived truncated",
+        ))]
+    };
+    let factory = Factory::new(vec![malformed(), malformed(), text_turn("recovered")]);
+    let mut session = factory.into_builder(store.clone()).create("C:/w")?;
+
+    let run = session.prompt("doomed").await;
+    assert_eq!(run.outcome, crate::session::RunOutcome::Failed);
+    assert!(
+        run.events.iter().any(|e| matches!(
+            e,
+            SessionEvent::RunFailed { message }
+                if message.contains("repeatedly emitted tool calls with malformed arguments")
+        )),
+        "the exhaustion surfaces with its actionable message: {:?}",
+        run.events
+    );
+
+    // The defective turns never entered history: only the user message and
+    // the initial model change are on disk, and the next message runs.
+    let loaded = store.open_path(session.path()).expect("reload");
+    assert_eq!(
+        loaded.entries.len(),
+        2,
+        "model change + the user message; the discarded turns recorded nothing"
+    );
+    let run = session.prompt("try again").await;
+    assert_eq!(run.output, "recovered");
+    std::fs::remove_dir_all(store.dir()).ok();
+    Ok(())
+}
+
+#[tokio::test]
 async fn set_model_records_the_change_and_splits_stats() -> Result<(), SessionError> {
     let store = temp_store("switch");
     let factory = Factory::new(vec![text_turn("a"), text_turn("b")]);

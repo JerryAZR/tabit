@@ -933,7 +933,15 @@ impl AnthropicAdapter {
                         } else {
                             match serde_json::from_str(&server_tool_use.input_json) {
                                 Ok(json_value) => json_value,
-                                Err(e) => return Some(Err(CompletionError::from(e))),
+                                // Same defect class as a malformed client-tool
+                                // call: a typed error the driver can discard
+                                // the turn on.
+                                Err(e) => {
+                                    return Some(Err(CompletionError::MalformedToolCall {
+                                        tool: server_tool_use.name,
+                                        reason: e.to_string(),
+                                    }));
+                                }
                             }
                         };
 
@@ -3138,6 +3146,38 @@ mod tests {
                 Some(OpenBlock::ClientToolUse { id }) if id == "toolu_1"
             ),
             "the adapter must track the open block's wire id at its index"
+        );
+    }
+
+    /// A client tool block whose accumulated input never parses: the stop
+    /// event (which promises a complete block) ends the call in `Error`
+    /// policy, so the shared accumulator surfaces the typed
+    /// malformed-tool-call defect the engine discards the turn on.
+    #[test]
+    fn client_tool_use_stop_with_unparseable_input_ends_in_error_policy() {
+        let start: StreamingEvent = serde_json::from_str(
+            r#"{"type":"content_block_start","index":0,"content_block":{"type":"tool_use","id":"toolu_1","name":"get_weather","input":{}}}"#,
+        )
+        .unwrap();
+        let delta: StreamingEvent = serde_json::from_str(
+            r#"{"type":"content_block_delta","index":0,"delta":{"type":"input_json_delta","partial_json":"{\"location\": \"tru"}}"#,
+        )
+        .unwrap();
+        let stop: StreamingEvent =
+            serde_json::from_str(r#"{"type":"content_block_stop","index":0}"#).unwrap();
+        let mut adapter = AnthropicAdapter::default();
+
+        let _ = handle_event(&mut adapter, &start).expect("block start emits the name delta");
+        let _ = handle_event(&mut adapter, &delta).expect("the fragment emits an args delta");
+
+        let Some(Ok(RawStreamingChoice::ToolInputEnd(end))) = handle_event(&mut adapter, &stop)
+        else {
+            panic!("a client tool block stop must end the call");
+        };
+        assert_eq!(
+            end.on_unparseable,
+            crate::streaming::UnparseableToolInput::Error,
+            "the wire promised a complete block; unparseable input is a defect"
         );
     }
 

@@ -579,12 +579,15 @@ impl PartsAccumulator {
                             UnparseableToolInput::EmptyObject => {
                                 serde_json::Value::Object(serde_json::Map::new())
                             }
-                            // The wire promised a complete block; malformed input
-                            // is a response defect, never a silent drop.
+                            // The wire promised a complete block; malformed
+                            // input is a response defect, never a silent
+                            // drop — a typed error so drivers can discard
+                            // the turn and retry the request.
                             UnparseableToolInput::Error => {
-                                return Err(CompletionError::ResponseError(format!(
-                                    "tool call `{name}` arrived with malformed JSON input: {err}"
-                                )));
+                                return Err(CompletionError::MalformedToolCall {
+                                    tool: name,
+                                    reason: err.to_string(),
+                                });
                             }
                             // A completion probe: the input may still be extended.
                             UnparseableToolInput::Keep => {
@@ -1366,7 +1369,8 @@ mod tests {
     }
 
     /// Complete-block wires (Anthropic/Bedrock stop events): malformed input
-    /// surfaces as an error item rather than a silent drop.
+    /// surfaces as the typed defect error rather than a silent drop — the
+    /// error drivers discard the turn on.
     #[test]
     fn error_mode_surfaces_malformed_input_as_an_error() {
         let mut accumulator = PartsAccumulator::new();
@@ -1375,7 +1379,10 @@ mod tests {
         let err = accumulator
             .tool_input_end(end("call_1", UnparseableToolInput::Error))
             .expect_err("malformed complete input must error");
-        assert!(err.to_string().contains("get_weather"));
+        assert!(
+            matches!(&err, CompletionError::MalformedToolCall { tool, .. } if tool == "get_weather"),
+            "got: {err:?}"
+        );
     }
 
     /// Completion-probe contract (single-chunk immediate emission): a probe

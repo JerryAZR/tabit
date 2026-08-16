@@ -14,7 +14,8 @@ use crate::completion::{CompletionRequest, Prompt, PromptError, ToolDefinition, 
 use crate::streaming::{StreamingPrompt, ToolCallDeltaContent};
 use crate::test_utils::{
     AppendFailingMemory, FailingMemory, MockAddTool, MockBarrierTool, MockCompletionModel,
-    MockContextProbeTool, MockStreamEvent, MockSubtractTool, MockToolError, MockTurn, SessionId,
+    MockContextProbeTool, MockError, MockStreamEvent, MockSubtractTool, MockToolError, MockTurn,
+    SessionId,
 };
 use crate::tool::{Tool, ToolContext};
 use futures::{StreamExt, TryStreamExt};
@@ -149,6 +150,220 @@ async fn an_empty_conversation_fails_loudly_at_send() {
         0,
         "no model call is made for an empty conversation"
     );
+}
+
+/// A scripted [`SteeringSource`]: messages queued up front, drained once.
+#[derive(Default)]
+struct ScriptedSteers {
+    queue: Mutex<std::collections::VecDeque<Message>>,
+}
+
+impl ScriptedSteers {
+    fn with_texts(texts: &[&str]) -> Arc<Self> {
+        Arc::new(Self {
+            queue: Mutex::new(
+                texts
+                    .iter()
+                    .map(|text| Message::user(text.to_string()))
+                    .collect(),
+            ),
+        })
+    }
+}
+
+impl crate::agent::runner::SteeringSource for ScriptedSteers {
+    fn has_pending(&self) -> bool {
+        !self.queue.lock().expect("steer queue").is_empty()
+    }
+
+    fn drain(&self) -> Vec<Message> {
+        self.queue.lock().expect("steer queue").drain(..).collect()
+    }
+}
+
+/// The user-text sequence one request carried, for asserting what the model
+/// actually saw.
+fn request_user_texts(request: &CompletionRequest) -> Vec<String> {
+    request
+        .chat_history
+        .iter()
+        .filter_map(|message| match message {
+            Message::User { content } => content.iter().find_map(|part| match part {
+                UserContent::Text(text) => Some(text.text.clone()),
+                _ => None,
+            }),
+            _ => None,
+        })
+        .collect()
+}
+
+/// A malformed tool call discards the turn and retries the identical
+/// request — and the discarded attempt does not consume the turn budget
+/// (max_turns 1 still allows the retry to complete the run).
+#[tokio::test]
+async fn malformed_tool_call_discards_the_turn_and_retries_within_budget() {
+    use crate::streaming::StreamingChat;
+
+    let model = MockCompletionModel::from_stream_turns([
+        vec![MockStreamEvent::Error(MockError::malformed_tool_call(
+            "lookup",
+            "arguments arrived truncated",
+        ))],
+        vec![
+            MockStreamEvent::text("recovered"),
+            MockStreamEvent::final_response(Usage::new()),
+        ],
+    ]);
+    let agent = Arc::new(AgentBuilder::new(model.clone()).build());
+
+    let mut stream = agent
+        .stream_chat(vec![Message::user("go")])
+        .max_turns(1)
+        .await;
+    let mut finished = false;
+    while let Some(item) = stream.next().await {
+        if let Ok(crate::agent::MultiTurnStreamItem::FinalResponse(_)) = item {
+            finished = true;
+        }
+    }
+    assert!(finished, "the retried turn should complete the run");
+
+    assert_eq!(model.request_count(), 2, "one discard, one retry");
+    assert_eq!(
+        request_user_texts(&model.requests()[0]),
+        ["go"],
+        "the first attempt sent the conversation"
+    );
+    assert_eq!(
+        request_user_texts(&model.requests()[1]),
+        ["go"],
+        "the retry resent the identical conversation — the defective turn \
+         never entered history"
+    );
+}
+
+/// Two consecutive malformed turns exhaust the retry: the run fails with a
+/// message naming the defect and the levers, and the history stays clean.
+#[tokio::test]
+async fn two_consecutive_malformed_turns_fail_the_run() {
+    use crate::streaming::StreamingChat;
+
+    let model = MockCompletionModel::from_stream_turns([
+        vec![MockStreamEvent::Error(MockError::malformed_tool_call(
+            "lookup",
+            "arguments arrived truncated",
+        ))],
+        vec![MockStreamEvent::Error(MockError::malformed_tool_call(
+            "lookup",
+            "arguments arrived truncated again",
+        ))],
+    ]);
+    let agent = Arc::new(AgentBuilder::new(model.clone()).build());
+
+    let mut stream = agent.stream_chat(vec![Message::user("go")]).await;
+    let mut failure = None;
+    while let Some(item) = stream.next().await {
+        if let Err(error) = item {
+            failure = Some(error.to_string());
+        }
+    }
+    let failure = failure.expect("the exhausted defect should fail the run");
+    assert!(
+        failure.contains("repeatedly emitted tool calls with malformed arguments"),
+        "got: {failure}"
+    );
+    assert!(
+        failure.contains("resend the prompt"),
+        "the message should name the recovery: {failure}"
+    );
+    assert_eq!(model.request_count(), 2, "two attempts, then failure");
+}
+
+/// A steer queued behind a defective turn rides along in the retry request:
+/// the drain at the discard boundary is a turn boundary like any other.
+#[tokio::test]
+async fn a_steer_queued_during_a_defective_turn_rides_along_in_the_retry() {
+    use crate::streaming::StreamingChat;
+
+    let model = MockCompletionModel::from_stream_turns([
+        vec![MockStreamEvent::Error(MockError::malformed_tool_call(
+            "lookup",
+            "arguments arrived truncated",
+        ))],
+        vec![
+            MockStreamEvent::text("done"),
+            MockStreamEvent::final_response(Usage::new()),
+        ],
+    ]);
+    let agent = Arc::new(AgentBuilder::new(model.clone()).build());
+    let steers = ScriptedSteers::with_texts(&["wait, use python"]);
+
+    let mut stream = agent
+        .stream_chat(vec![Message::user("go")])
+        .steering(steers)
+        .await;
+    let mut finished = false;
+    while let Some(item) = stream.next().await {
+        if let Ok(crate::agent::MultiTurnStreamItem::FinalResponse(_)) = item {
+            finished = true;
+        }
+    }
+    assert!(finished, "the retried turn should complete the run");
+
+    assert_eq!(
+        request_user_texts(&model.requests()[1]),
+        ["go", "wait, use python"],
+        "the retry carries the drained steer after the original prompt"
+    );
+}
+
+/// The defect streak resets on any committed turn: a run may hit (and
+/// recover from) an independent defect per turn without ever exhausting.
+/// The middle turn carries a tool call so the run continues past it.
+#[tokio::test]
+async fn the_defect_streak_resets_on_a_committed_turn() {
+    use crate::streaming::StreamingChat;
+
+    let model = MockCompletionModel::from_stream_turns([
+        vec![MockStreamEvent::Error(MockError::malformed_tool_call(
+            "lookup",
+            "arguments arrived truncated",
+        ))],
+        vec![
+            MockStreamEvent::ToolCall {
+                id: "call_1".to_string(),
+                name: "add".to_string(),
+                arguments: serde_json::json!({ "x": 1, "y": 2 }),
+                call_id: Some("call_1".to_string()),
+            },
+            MockStreamEvent::final_response(Usage::new()),
+        ],
+        vec![MockStreamEvent::Error(MockError::malformed_tool_call(
+            "lookup",
+            "arguments arrived truncated",
+        ))],
+        vec![
+            MockStreamEvent::text("final"),
+            MockStreamEvent::final_response(Usage::new()),
+        ],
+    ]);
+    let agent = Arc::new(AgentBuilder::new(model.clone()).tool(MockAddTool).build());
+
+    let mut stream = agent
+        .stream_chat(vec![Message::user("go")])
+        .max_turns(2)
+        .await;
+    let mut finished = false;
+    while let Some(item) = stream.next().await {
+        if let Ok(crate::agent::MultiTurnStreamItem::FinalResponse(_)) = item {
+            finished = true;
+        }
+    }
+    assert!(
+        finished,
+        "two independent defects, each retried once, should both recover"
+    );
+    assert_eq!(model.request_count(), 4, "defect, retry, defect, retry");
 }
 
 #[tokio::test]

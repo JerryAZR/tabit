@@ -182,6 +182,24 @@ fn drain_steers(runner: &AgentRunner, run: &mut AgentRun) -> Result<Vec<String>,
         .collect())
 }
 
+/// How many consecutive defective model turns the driver discards and
+/// retries before failing the run — one retry, two attempts per turn. A
+/// named engine constant, not model config: the retry policy is ours, and
+/// a deterministic defect (a token limit cutting calls mid-argument) should
+/// burn it fast and fail with the actionable message.
+const MAX_DISCARDED_DEFECTIVE_TURNS: usize = 1;
+
+/// Whether a turn error is the model emitting a tool call it broke itself —
+/// arguments that cannot be parsed, so the turn can neither execute nor be
+/// replayed — as opposed to a transport failure. The defect path discards
+/// the turn and retries; transport failures fail the run.
+fn is_malformed_tool_call_defect(err: &StreamingError) -> bool {
+    matches!(
+        err,
+        StreamingError::Completion(CompletionError::MalformedToolCall { .. })
+    )
+}
+
 /// The single agent drive loop, shared by the blocking and streaming surfaces.
 ///
 /// Owns the medium-independent loop — `next_step` dispatch, the `CompletionCall`
@@ -216,6 +234,10 @@ where
         // is invoked, so a completion-call stop, selection stop, or preparation
         // failure leaves it unchanged while a provider error still counts.
         let mut previous_model: Option<ModelHandle> = None;
+        // Consecutive model turns discarded because the model emitted a tool
+        // call with unparseable arguments. Reset on any committed turn — the
+        // cap bounds the resample streak, not the run.
+        let mut discarded_defective_turns: usize = 0;
 
         'outer: loop {
             let step = match run.next_step() {
@@ -352,10 +374,60 @@ where
                     }
                     drop(turn_stream);
                     if let Some(err) = turn_error {
+                        if is_malformed_tool_call_defect(&err)
+                            && discarded_defective_turns < MAX_DISCARDED_DEFECTIVE_TURNS
+                        {
+                            discarded_defective_turns += 1;
+                            tracing::warn!(
+                                turn,
+                                discarded = discarded_defective_turns,
+                                "model turn carried a malformed tool call; \
+                                 discarding the turn and retrying the request"
+                            );
+                            if let Err(state_err) = run.discard_turn() {
+                                store_error_usage(&runner, &run);
+                                yield Err(Box::new(state_err).into());
+                                break 'outer;
+                            }
+                            // Steers that arrived during the defective turn
+                            // ride along in the retry request — this is a
+                            // turn boundary like any other.
+                            match drain_steers(&runner, &mut run) {
+                                Ok(texts) => {
+                                    for text in texts {
+                                        yield Ok(DriveItem::Item(
+                                            MultiTurnStreamItem::Steer { text },
+                                        ));
+                                    }
+                                }
+                                Err(steer_err) => {
+                                    store_error_usage(&runner, &run);
+                                    yield Err(Box::new(steer_err).into());
+                                    break 'outer;
+                                }
+                            }
+                            continue 'outer;
+                        }
                         store_error_usage(&runner, &run);
+                        if is_malformed_tool_call_defect(&err) {
+                            yield Err(StreamingError::Prompt(Box::new(run.cancel_error(
+                                format!(
+                                    "the model repeatedly emitted tool calls with \
+                                     malformed arguments ({discarded_defective_turns} \
+                                     consecutive turns discarded and retried); the \
+                                     conversation history is unchanged — resend the \
+                                     prompt to try again, or raise the model's output \
+                                     token limit if the calls keep getting cut. Last \
+                                     failure: {err}"
+                                ),
+                            ))));
+                            break 'outer;
+                        }
                         yield Err(err);
                         break 'outer;
                     }
+                    // A committed turn resets the defect streak.
+                    discarded_defective_turns = 0;
                     pending_tool_snapshot = Some(turn_tool_snapshot);
                     // Turn end: deliver steering to history (a turn with
                     // tool calls is not steerable yet — its tools run

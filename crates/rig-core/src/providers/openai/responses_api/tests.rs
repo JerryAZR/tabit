@@ -2363,7 +2363,8 @@ fn output_reasoning_conversion_omits_empty_encrypted_content() {
         status: Some(ToolStatus::Completed),
     };
 
-    let converted = Vec::<completion::AssistantContent>::from(output);
+    let converted = Vec::<completion::AssistantContent>::try_from(output)
+        .expect("reasoning output should convert");
 
     assert_eq!(converted.len(), 1);
     let completion::AssistantContent::Reasoning(reasoning) = &converted[0] else {
@@ -2388,7 +2389,8 @@ fn output_reasoning_conversion_preserves_non_empty_encrypted_content() {
         status: Some(ToolStatus::Completed),
     };
 
-    let converted = Vec::<completion::AssistantContent>::from(output);
+    let converted = Vec::<completion::AssistantContent>::try_from(output)
+        .expect("reasoning output should convert");
 
     assert_eq!(converted.len(), 1);
     let completion::AssistantContent::Reasoning(reasoning) = &converted[0] else {
@@ -3422,10 +3424,12 @@ fn assistant_tool_call_edges_on_message_conversion() {
 }
 
 /// Truncation policy on the output path: a function call whose arguments
-/// never parsed into JSON is dropped (not fabricated), and an unmodeled
-/// output item contributes no assistant content.
+/// never parsed into JSON is a model-side defect — a typed error so the
+/// engine discards the turn and retries, never a fabricated call and never
+/// a silent drop. An unmodeled output item still contributes no assistant
+/// content.
 #[test]
-fn truncated_arguments_and_unknown_outputs_contribute_no_content() {
+fn truncated_arguments_error_and_unknown_outputs_contribute_no_content() {
     let truncated: Output = serde_json::from_value(json!({
         "type": "function_call",
         "id": "fc_1",
@@ -3435,13 +3439,15 @@ fn truncated_arguments_and_unknown_outputs_contribute_no_content() {
         "status": "completed",
     }))
     .expect("truncated function call should decode");
-    let converted: Vec<completion::AssistantContent> = truncated.into();
+    let err = Vec::<completion::AssistantContent>::try_from(truncated)
+        .expect_err("a truncated call must not fabricate a tool call");
     assert!(
-        converted.is_empty(),
-        "a truncated call must not fabricate a tool call"
+        matches!(err, CompletionError::MalformedToolCall { ref tool, .. } if tool == "lookup"),
+        "got: {err:?}"
     );
 
     let unknown = Output::Unknown(json!({"type": "web_search_call", "id": "ws_1"}));
-    let converted: Vec<completion::AssistantContent> = unknown.into();
+    let converted: Vec<completion::AssistantContent> =
+        unknown.try_into().expect("unknown output should convert");
     assert!(converted.is_empty());
 }
