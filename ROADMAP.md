@@ -158,15 +158,18 @@ The known deviation from pi's subprocess model:
   or `default_model` in providers.toml. TUI is the eventual default mode;
   `-p` and `--rewind` opt out into print mode.
 - **Frontend architecture (decided): TUI-through-protocol.** One typed
-  vocabulary, four quadrants — commands, events, frontend round-trip
-  requests (permission asks first), client notifications. Typed serde
-  enums over in-process channels, serialized only at a transport edge
-  (LF-JSONL on stdio). Tagged frames, not JSON-RPC 2.0; versioned
-  `initialize` handshake; prompts ack at submission with run outcomes
-  arriving as events (`SessionEvent` gains a run-failure variant).
-  Informed by codex (single-table protocol crates) and pi (one dumb
-  command switch over the shared event union); claurst proved the channel
-  seam across three frontends.
+  vocabulary: fire-and-forget commands (no request/response — the channels
+  are FIFO, lossless, single-client, so outcomes arrive as events:
+  rejection via a `CommandRejected` variant, acceptance via the events the
+  command causes) plus the event stream; ids exist only on frontend
+  round-trips (permission asks) and return to commands solely with
+  multi-client remote transports. Typed serde enums over in-process
+  channels, serialized only at a transport edge (LF-JSONL on stdio).
+  Tagged frames, not JSON-RPC 2.0; versioned `initialize` handshake at
+  the stdio edge; `SessionEvent` gains run-failure and command-rejection
+  variants. Informed by codex (single-table protocol crates), pi (ids
+  optional, clients run on events), and claurst (the channel seam proven
+  across three frontends).
 - Headless JSON mode next — the first protocol consumer and its test
   harness. No separate REPL; the TUI is the interactive mode.
 - **TUI: build, harvesting claurst** (reuse question closed: codex's TUI
