@@ -185,12 +185,44 @@ fn assistant_texts(messages: &[Message]) -> Vec<String> {
 }
 
 #[tokio::test]
+async fn a_fresh_session_materializes_at_the_first_user_message() -> Result<(), SessionError> {
+    let store = temp_store("lazy-create");
+    let factory = Factory::new(vec![text_turn("hello")]);
+    let mut session = factory.into_builder(store.clone()).create("C:/w")?;
+
+    // Created, never run: nothing on disk (no header-only orphans), and
+    // the session still knows the path it would materialize at.
+    let path = session.path().to_path_buf();
+    assert!(!path.exists(), "no file before the first message");
+    assert!(store.list()?.is_empty(), "nothing to list yet");
+
+    // The first run materializes the file: header, the opening model
+    // selection, then the conversation.
+    session.prompt("hi").await;
+    let loaded = store.open_path(&path)?;
+    let kinds: Vec<&str> = loaded
+        .entries
+        .iter()
+        .map(|e| match &e.kind {
+            EntryKind::ModelChange { .. } => "model",
+            EntryKind::UserMessage { .. } => "user",
+            EntryKind::AssistantMessage { .. } => "assistant",
+            _ => "other",
+        })
+        .collect();
+    assert_eq!(kinds, vec!["model", "user", "assistant"]);
+    assert_eq!(loaded.header.id, session.id());
+    std::fs::remove_dir_all(store.dir()).ok();
+    Ok(())
+}
+
+#[tokio::test]
 async fn single_turn_prompt_persists_and_projects() -> Result<(), SessionError> {
     let store = temp_store("single");
     let factory = Factory::new(vec![text_turn("hello there")]);
     let mut session = factory.clone().into_builder(store.clone()).create("C:/w")?;
 
-    let run: RunSummary = session.prompt("hi").await.expect("run");
+    let run: RunSummary = session.prompt("hi").await;
     assert_eq!(run.output, "hello there");
     assert_eq!(
         run.usage.input_tokens, 100,
@@ -232,7 +264,7 @@ async fn tool_roundtrip_is_recorded_and_events_name_the_tool() -> Result<(), Ses
         .dynamic_tool(echo_tool())
         .create("C:/w")?;
 
-    let run = session.prompt("echo x").await.expect("run");
+    let run = session.prompt("echo x").await;
     assert_eq!(run.output, "did it");
 
     let loaded = store.open_path(session.path()).expect("reload");
@@ -281,7 +313,7 @@ async fn resume_continues_the_log_and_reports_the_model() -> Result<(), SessionE
     let store = temp_store("resume");
     let factory = Factory::new(vec![text_turn("one"), text_turn("two")]);
     let mut first = factory.into_builder(store.clone()).create("C:/w")?;
-    first.prompt("first question").await.expect("run 1");
+    first.prompt("first question").await;
     let path = first.path().to_path_buf();
     drop(first);
 
@@ -305,7 +337,7 @@ async fn resume_continues_the_log_and_reports_the_model() -> Result<(), SessionE
     );
 
     let mut second = second;
-    let run = second.prompt("second question").await.expect("run 2");
+    let run = second.prompt("second question").await;
     assert_eq!(run.output, "two");
 
     let loaded = store.open_path(&path).expect("reload");
@@ -323,7 +355,7 @@ async fn dangling_tool_roundtrip_is_repaired_on_resume() -> Result<(), SessionEr
     let store = temp_store("dangling");
     // Hand-write a log that ends mid tool-use roundtrip: the process died
     // after the assistant called a tool, before any result existed.
-    let mut writer = store.create("C:/w").expect("create");
+    let mut writer = store.create("C:/w");
     writer
         .append(EntryKind::UserMessage {
             message: Message::User {
@@ -366,7 +398,7 @@ async fn dangling_tool_roundtrip_is_repaired_on_resume() -> Result<(), SessionEr
     ));
 
     let mut session = session;
-    let run = session.prompt("continue").await.expect("run");
+    let run = session.prompt("continue").await;
     assert_eq!(run.output, "recovered");
     std::fs::remove_dir_all(store.dir()).ok();
     Ok(())
@@ -379,8 +411,16 @@ async fn failed_run_still_records_the_user_message() -> Result<(), SessionError>
     let factory = Factory::new(turns);
     let mut session = factory.into_builder(store.clone()).create("C:/w")?;
 
-    let result = session.prompt("doomed").await;
-    assert!(result.is_err(), "the mock provider error surfaces");
+    let run = session.prompt("doomed").await;
+    assert_eq!(run.outcome, crate::session::RunOutcome::Failed);
+    assert!(
+        run.events.iter().any(|e| matches!(
+            e,
+            SessionEvent::RunFailed { message } if message.contains("boom")
+        )),
+        "the mock provider error surfaces as an event: {:?}",
+        run.events
+    );
 
     let loaded = store.open_path(session.path()).expect("reload");
     assert!(matches!(
@@ -403,12 +443,12 @@ async fn set_model_records_the_change_and_splits_stats() -> Result<(), SessionEr
     let store = temp_store("switch");
     let factory = Factory::new(vec![text_turn("a"), text_turn("b")]);
     let mut session = factory.into_builder(store.clone()).create("C:/w")?;
-    session.prompt("one").await.expect("run 1");
+    session.prompt("one").await;
 
     session
         .set_model(ModelSelection::new("q", "m2"))
         .expect("switch");
-    session.prompt("two").await.expect("run 2");
+    session.prompt("two").await;
 
     assert_eq!(session.selection().provider, "q");
 
@@ -441,7 +481,7 @@ async fn resume_uses_the_builder_selection_and_records_the_switch() -> Result<()
     let store = temp_store("resume-model");
     let factory = Factory::new(vec![text_turn("a")]);
     let mut session = factory.into_builder(store.clone()).create("C:/w")?;
-    session.prompt("one").await.expect("run");
+    session.prompt("one").await;
     session
         .set_model(ModelSelection::new("q", "m2"))
         .expect("switch");
@@ -517,7 +557,7 @@ async fn builder_options_reach_the_request_and_the_budget_enforces() -> Result<(
     assert!(!session.id().is_empty(), "session exposes its id");
 
     // The preamble rides on the outgoing request.
-    let run = session.prompt("hi").await.expect("run");
+    let run = session.prompt("hi").await;
     assert_eq!(run.output, "ok");
 
     // max_turns(1) means a follow-up outer loop with a tool turn cannot
@@ -527,16 +567,20 @@ async fn builder_options_reach_the_request_and_the_budget_enforces() -> Result<(
         .max_turns(1)
         .dynamic_tool(echo_tool())
         .create("C:/w")?;
-    match budgeted.prompt("go").await {
-        Err(SessionError::Prompt(error)) => {
-            let text = error.to_string();
-            assert!(
-                text.to_lowercase().contains("max"),
-                "expected a max-turns failure, got: {text}"
-            );
-        }
-        other => panic!("expected budget failure, got {:?}", other.err()),
-    }
+    let run = budgeted.prompt("go").await;
+    assert_eq!(run.outcome, crate::session::RunOutcome::Failed);
+    let failure = run
+        .events
+        .iter()
+        .find_map(|e| match e {
+            SessionEvent::RunFailed { message } => Some(message.clone()),
+            _ => None,
+        })
+        .expect("a run_failed event");
+    assert!(
+        failure.to_lowercase().contains("max"),
+        "expected a max-turns failure, got: {failure}"
+    );
     std::fs::remove_dir_all(store.dir()).ok();
     Ok(())
 }
@@ -552,7 +596,7 @@ async fn reasoning_deltas_surface_as_events() -> Result<(), SessionError> {
     let mut session = Factory::new(vec![reasoning_turn])
         .into_builder(store.clone())
         .create("C:/w")?;
-    let run = session.prompt("deep question").await.expect("run");
+    let run = session.prompt("deep question").await;
     assert!(
         run.events.iter().any(|e| matches!(
             e,
@@ -571,8 +615,8 @@ async fn repeated_runs_under_one_model_share_a_stats_slot() -> Result<(), Sessio
     let store = temp_store("stats-slot");
     let factory = Factory::new(vec![text_turn("a"), text_turn("b")]);
     let mut session = factory.into_builder(store.clone()).create("C:/w")?;
-    session.prompt("one").await.expect("run 1");
-    session.prompt("two").await.expect("run 2");
+    session.prompt("one").await;
+    session.prompt("two").await;
 
     let stats = session.stats().expect("stats");
     assert_eq!(stats.per_model.len(), 1, "same model, one slot");
@@ -617,18 +661,23 @@ async fn persistence_failure_fails_the_run_loudly() -> Result<(), SessionError> 
         .dynamic_tool(destroyer)
         .create("C:/w")?;
 
-    match session.prompt("destroy the log").await {
-        // Which arm fires first is platform-dependent (on Windows the
-        // writer keeps writing to the unlinked handle, so the reload read
-        // fails before the recorder does); either way the run must fail
-        // loudly instead of reporting success the disk does not back.
-        Err(SessionError::Persist(message)) => assert!(!message.is_empty()),
-        Err(SessionError::Io { path, .. }) => {
-            assert!(path.to_string_lossy().contains(".jsonl"), "{path:?}")
-        }
-        Err(other) => panic!("expected Persist or Io, got {other}"),
-        Ok(run) => panic!("run must not succeed with an unwritable log: {run:?}"),
-    }
+    let run = session.prompt("destroy the log").await;
+    // Which failure fires first is platform-dependent (on Windows the
+    // writer keeps writing to the unlinked handle, so the reload read
+    // fails before the recorder does); either way the run must fail
+    // loudly instead of reporting success the disk does not back.
+    assert_eq!(
+        run.outcome,
+        crate::session::RunOutcome::Failed,
+        "run must not succeed with an unwritable log: {run:?}"
+    );
+    assert!(
+        run.events
+            .iter()
+            .any(|e| matches!(e, SessionEvent::RunFailed { .. })),
+        "the failure is visible as an event: {:?}",
+        run.events
+    );
     let _ = std::fs::remove_dir_all(store.dir());
     Ok(())
 }
@@ -680,8 +729,7 @@ async fn abort_mid_run_records_marker_and_stays_resumable() -> Result<(), Sessio
             }
             let _ = event;
         })
-        .await
-        .expect("aborted run");
+        .await;
     assert_eq!(summary.outcome, crate::session::RunOutcome::Aborted);
 
     // The log carries the prompt, the abort marker, and nothing partial.
@@ -702,7 +750,7 @@ async fn abort_mid_run_records_marker_and_stays_resumable() -> Result<(), Sessio
     assert_eq!(kinds, vec!["model", "user", "aborted"]);
 
     // A fresh token lets the next run proceed normally.
-    let run = session.prompt("again").await?;
+    let run = session.prompt("again").await;
     assert_eq!(run.outcome, crate::session::RunOutcome::Completed);
     std::fs::remove_dir_all(store.dir()).ok();
     Ok(())
@@ -728,7 +776,7 @@ async fn steering_during_a_run_is_recorded_one_to_one() -> Result<(), SessionErr
                 mailbox.submit("also this");
             }
         })
-        .await?;
+        .await;
     assert_eq!(run.outcome, crate::session::RunOutcome::Completed);
 
     // One steer: one event, one entry, and the replayed context carries it
@@ -763,27 +811,50 @@ async fn steering_during_a_run_is_recorded_one_to_one() -> Result<(), SessionErr
 
 #[tokio::test]
 async fn messages_queued_before_pump_all_join_the_first_run() -> Result<(), SessionError> {
-    // Both messages are in the mailbox when the run starts: the first is
-    // the prompt, the second is drained as a steer at the first turn
-    // boundary — one run carries both. (Serial runs happen when the
-    // second message arrives after the first run ends.)
+    // Drain-all at idle entry: both messages become the run's opening
+    // input — one entry each, before any deltas — so the run is a single
+    // turn answering them together. (A message arriving after a run ends
+    // starts the next run instead.)
     let store = temp_store("mailbox-serial");
-    let factory = Factory::new(vec![text_turn("first answer"), text_turn("second answer")]);
+    let factory = Factory::new(vec![text_turn("first answer")]);
     let mut session = factory.into_builder(store.clone()).create("C:/w")?;
     session.submit("one");
     session.submit("two");
 
-    let mut user_texts = Vec::new();
-    let mut outputs = Vec::new();
-    session
-        .pump(&mut |event| match event {
-            SessionEvent::UserMessage { text } => user_texts.push(text),
-            SessionEvent::RunFinished { output, .. } => outputs.push(output),
-            _ => {}
+    let run = session.pump(&mut |_| {}).await;
+    let user_texts: Vec<&str> = run
+        .events
+        .iter()
+        .filter_map(|e| match e {
+            SessionEvent::UserMessage { text } => Some(text.as_str()),
+            _ => None,
         })
-        .await;
+        .collect();
     assert_eq!(user_texts, vec!["one", "two"]);
-    assert_eq!(outputs, vec!["second answer"]);
+    // The whole batch opens the run: no delta precedes the last message.
+    let last_user = run
+        .events
+        .iter()
+        .rposition(|e| matches!(e, SessionEvent::UserMessage { .. }))
+        .expect("user messages");
+    let first_delta = run
+        .events
+        .iter()
+        .position(|e| matches!(e, SessionEvent::TextDelta { .. }))
+        .expect("deltas");
+    assert!(last_user < first_delta, "the batch precedes the run");
+    assert_eq!(run.output, "first answer");
+    assert_eq!(
+        run.events
+            .iter()
+            .filter(|e| matches!(e, SessionEvent::RunFinished { .. }))
+            .count(),
+        1,
+        "one run carries the whole batch"
+    );
+    // One entry per message: the log keeps 1:1 fidelity.
+    let loaded = store.open_path(session.path())?;
+    assert_eq!(loaded.entries.len(), 4, "model + two users + assistant");
     std::fs::remove_dir_all(store.dir()).ok();
     Ok(())
 }
@@ -899,7 +970,7 @@ async fn abort_while_idle_does_nothing() -> Result<(), SessionError> {
     let mut session = factory.into_builder(store.clone()).create("C:/w")?;
     session.abort_handle().abort();
     session.abort_handle().abort();
-    let run = session.prompt("hello").await?;
+    let run = session.prompt("hello").await;
     assert_eq!(run.outcome, crate::session::RunOutcome::Completed);
     assert_eq!(run.output, "fine");
     std::fs::remove_dir_all(store.dir()).ok();
@@ -915,8 +986,8 @@ async fn rewind_drops_the_last_turn_and_branches_the_next_prompt() -> Result<(),
         text_turn("revised answer"),
     ]);
     let mut session = factory.clone().into_builder(store.clone()).create("C:/w")?;
-    session.prompt("question one").await.expect("run one");
-    session.prompt("question two").await.expect("run two");
+    session.prompt("question one").await;
+    session.prompt("question two").await;
 
     let rewind = session.rewind(1).expect("rewind");
     assert_eq!(rewind.dropped, 1);
@@ -938,10 +1009,7 @@ async fn rewind_drops_the_last_turn_and_branches_the_next_prompt() -> Result<(),
     let first_answer_id = loaded.entries[2].id.clone();
 
     // The next prompt branches from the branch point.
-    session
-        .prompt("question two, revised")
-        .await
-        .expect("run three");
+    session.prompt("question two, revised").await;
     let loaded = store
         .open_path(session.path())
         .expect("reload after branch");
@@ -973,7 +1041,7 @@ async fn rewind_rejects_zero_and_more_than_the_chain_holds() -> Result<(), Sessi
     let store = temp_store("rewind-errors");
     let factory = Factory::new(vec![text_turn("answer")]);
     let mut session = factory.into_builder(store.clone()).create("C:/w")?;
-    session.prompt("only question").await.expect("run");
+    session.prompt("only question").await;
 
     let zero = session.rewind(0).expect_err("zero is not a rewind");
     assert!(zero.to_string().contains("at least 1"), "{zero}");
@@ -995,8 +1063,8 @@ async fn rewind_past_a_model_switch_adopts_the_chains_model() -> Result<(), Sess
     let store = temp_store("rewind-model");
     let factory = Factory::new(vec![text_turn("answer one"), text_turn("answer two")]);
     let mut session = factory.clone().into_builder(store.clone()).create("C:/w")?;
-    session.prompt("question one").await.expect("run one");
-    session.prompt("question two").await.expect("run two");
+    session.prompt("question one").await;
+    session.prompt("question two").await;
     // The switch lands after the last prompt, so rewinding one message
     // drops it with the turn.
     session
@@ -1034,8 +1102,8 @@ async fn promptless_rewind_survives_reopen() -> Result<(), SessionError> {
     let factory = Factory::new(vec![text_turn("a"), text_turn("b")]);
     let path = {
         let mut session = factory.into_builder(store.clone()).create("C:/w")?;
-        session.prompt("question one").await.expect("run one");
-        session.prompt("question two").await.expect("run two");
+        session.prompt("question one").await;
+        session.prompt("question two").await;
         session.rewind(1).expect("rewind");
         session.path().to_path_buf()
     };
@@ -1051,7 +1119,7 @@ async fn promptless_rewind_survives_reopen() -> Result<(), SessionError> {
     );
 
     let mut session = session;
-    session.prompt("question two, again").await.expect("run");
+    session.prompt("question two, again").await;
     let loaded = store.open_path(&path).expect("reload");
     let chain_texts = user_messages_from_entries(&loaded.chain);
     assert_eq!(chain_texts, vec!["question one", "question two, again"]);
@@ -1084,7 +1152,7 @@ async fn rewind_targets_steers_like_prompts() -> Result<(), SessionError> {
     let store = temp_store("rewind-steer");
     // Hand-written log whose last user message is a mid-run steer: a
     // rewind of one message drops the steer — "un-send it".
-    let mut writer = store.create("C:/w").expect("create");
+    let mut writer = store.create("C:/w");
     writer
         .append(EntryKind::UserMessage {
             message: Message::user("question"),
@@ -1127,7 +1195,7 @@ async fn rewinding_mid_batch_repairs_only_the_unanswered_call() -> Result<(), Se
     // Hand-written log with a complete two-call roundtrip; rewinding to
     // the FIRST result entry branches mid-batch — the second call dangles
     // and must be repaired on the new chain.
-    let mut writer = store.create("C:/w").expect("create");
+    let mut writer = store.create("C:/w");
     writer
         .append(EntryKind::UserMessage {
             message: Message::user("go"),
@@ -1212,7 +1280,7 @@ async fn rewinding_to_an_unknown_entry_changes_nothing() -> Result<(), SessionEr
     let store = temp_store("rewind-unknown");
     let factory = Factory::new(vec![text_turn("answer")]);
     let mut session = factory.into_builder(store.clone()).create("C:/w")?;
-    session.prompt("question").await.expect("run");
+    session.prompt("question").await;
 
     let error = session
         .rewind_to_entry("no-such-entry")
@@ -1230,7 +1298,7 @@ async fn rewind_to_the_root_records_the_current_model() -> Result<(), SessionErr
     // Hand-written log whose first entry is a user message with no
     // parent (create always records a model change first, so only a
     // hand-written log reaches a root branch).
-    let mut writer = store.create("C:/w").expect("create");
+    let mut writer = store.create("C:/w");
     writer
         .append(EntryKind::UserMessage {
             message: Message::user("question"),
@@ -1265,7 +1333,7 @@ async fn rewind_to_the_root_records_the_current_model() -> Result<(), SessionErr
     assert_eq!(loaded.chain.len(), 1);
 
     // The session is usable from the emptied chain.
-    session.prompt("fresh start").await.expect("run");
+    session.prompt("fresh start").await;
     assert_eq!(user_messages(session.context()), vec!["fresh start"]);
     std::fs::remove_dir_all(store.dir()).ok();
     Ok(())
@@ -1276,7 +1344,7 @@ async fn rewind_fails_loudly_when_the_chains_model_left_the_config() -> Result<(
     let store = temp_store("rewind-ghost-model");
     // The chain's only model change names a provider the config no longer
     // carries; adopting it must fail before anything is written.
-    let mut writer = store.create("C:/w").expect("create");
+    let mut writer = store.create("C:/w");
     writer
         .append(EntryKind::ModelChange {
             provider: "ghost".to_string(),

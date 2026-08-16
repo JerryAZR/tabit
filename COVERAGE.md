@@ -31,16 +31,18 @@ Defensive ("unreachable") arms follow a stricter rule:
 - The whole suite runs offline (cassette replay + test doubles). Doctests
   are NOT included in these numbers (`llvm-cov` was run without
   `--doctests`); they are gated by the same CI run.
-- Current state: **95.73% lines / 96.29% regions** (2,474 of 57,893 lines;
-  re-measured after JSON mode: the always-queue mailbox/pump session
-  refactor, the protocol vocabulary (`protocol.rs` 100%), the session
-  actor (`endpoint.rs` 95.9%), the stdio bridge (`json.rs`), and print
-  mode moved onto `SessionHandle`). The rig crates' residue is
-  unchanged, the tabit crates carry their own itemization below.
-  `crates/tabit-config` sits at 100% branch coverage with no fully
-  unexecuted line. The tabit crates: tabit-session 93.6% (session.rs) /
-  84.9% (store.rs), tabit-tools 90.5%; their residue is almost entirely
-  error arms (see "Justified residue" item 9).
+- Current state: **95.75% lines / 96.26% regions** (2,464 of 57,954
+  lines; re-measured after the protocol rulings pass: drain-all mailbox
+  batches, `prompt`/`prompt_with` unified onto `pump` with failures as
+  events (`RunOutcome::Failed`, no `Err` return), deferred session-file
+  creation (materializes at the first user message), the shared
+  poison-lock helper, and `list()` reading a missing directory as
+  empty). The rig crates' residue is unchanged, the tabit crates carry
+  their own itemization below. `crates/tabit-config` sits at 100%
+  branch coverage with no fully unexecuted line. The tabit crates:
+  tabit-session 93.6% (session.rs) / 84.9% (store.rs), tabit-tools
+  90.5%; their residue is almost entirely error arms (see "Justified
+  residue" item 9).
 
 ## Filled
 
@@ -162,6 +164,17 @@ named, the classification applies to its current lcov-uncovered ranges.
      infallible `Result`. The broken-transport edges around it
      (panicking reader, erroring reader, failing writer) are exercised
      by `broken_transport_edges_fail_or_end_cleanly`.
+   - Deferred-creation fault arms in `store.rs`: `ensure_open`'s
+     open/serialize/writeln/flush `.map_err` arms (the `create_dir_all`
+     arm IS exercised via the blocked-path test; the rest are the same
+     unstaged-fault class as item 9's first bullet), and
+     `append_entry`'s let-else guard (provably dead — `append` runs
+     `ensure_open` first; loud rather than silently dropping records).
+   - The post-run persist check in `run_one` (`first_error` →
+     `RunFailed`): platform-contingent — on Windows an unlinked writer
+     keeps succeeding, so the same test exercises the reload-error arm
+     instead; the failing-run outcome is asserted either way by
+     `persistence_failure_fails_the_run_loudly`.
 
 ## Deferred (explicit)
 

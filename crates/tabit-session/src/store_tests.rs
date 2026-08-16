@@ -5,6 +5,14 @@ use rig_core::completion::Message;
 use rig_core::message::{Text, UserContent};
 use std::fs;
 
+/// One entry of the least-consequential kind: enough to materialize a
+/// deferred session file without coloring what the test inspects.
+fn seed_entry() -> EntryKind {
+    EntryKind::Label {
+        name: "seed".to_string(),
+    }
+}
+
 fn temp_store(tag: &str) -> SessionStore {
     let dir = std::env::temp_dir()
         .join("tabit-session-tests")
@@ -22,7 +30,7 @@ fn user_message(text: &str) -> Message {
 #[test]
 fn create_writes_header_and_appends_chain_parents() {
     let store = temp_store("create");
-    let mut writer = store.create("C:/work").expect("create");
+    let mut writer = store.create("C:/work");
     let first = writer
         .append(EntryKind::UserMessage {
             message: user_message("one"),
@@ -47,7 +55,8 @@ fn create_writes_header_and_appends_chain_parents() {
 #[test]
 fn open_by_session_id_finds_the_file() {
     let store = temp_store("by-id");
-    let writer = store.create("C:/work").expect("create");
+    let mut writer = store.create("C:/work");
+    writer.append(seed_entry()).expect("materialize");
     let id = writer.session_id().to_string();
     let loaded = store.open(&id).expect("open by id");
     assert_eq!(loaded.header.id, id);
@@ -58,9 +67,10 @@ fn open_by_session_id_finds_the_file() {
 #[test]
 fn list_orders_newest_first_and_counts_entries() {
     let store = temp_store("list");
-    let older = store.create("C:/a").expect("create");
+    let mut older = store.create("C:/a");
+    older.append(seed_entry()).expect("materialize");
     std::thread::sleep(std::time::Duration::from_millis(1100));
-    let mut newer = store.create("C:/b").expect("create");
+    let mut newer = store.create("C:/b");
     newer
         .append(EntryKind::UserMessage {
             message: user_message("x"),
@@ -71,7 +81,9 @@ fn list_orders_newest_first_and_counts_entries() {
     assert_eq!(summaries.len(), 2);
     assert_eq!(summaries[0].id, newer.session_id());
     assert_eq!(summaries[0].entry_count, 1);
-    assert_eq!(summaries[1].entry_count, 0);
+    // Deferred creation means header-only sessions do not exist; the
+    // older file carries its materializing entry.
+    assert_eq!(summaries[1].entry_count, 1);
     assert_eq!(summaries[1].id, older.session_id());
     fs::remove_dir_all(store.dir()).ok();
 }
@@ -79,7 +91,7 @@ fn list_orders_newest_first_and_counts_entries() {
 #[test]
 fn torn_tail_is_repaired_with_report() {
     let store = temp_store("torn");
-    let mut writer = store.create("C:/work").expect("create");
+    let mut writer = store.create("C:/work");
     writer
         .append(EntryKind::UserMessage {
             message: user_message("kept"),
@@ -111,7 +123,7 @@ fn torn_tail_is_repaired_with_report() {
 #[test]
 fn malformed_middle_line_fails_loudly_with_line_number() {
     let store = temp_store("middle");
-    let mut writer = store.create("C:/work").expect("create");
+    let mut writer = store.create("C:/work");
     writer
         .append(EntryKind::UserMessage {
             message: user_message("one"),
@@ -141,7 +153,8 @@ fn malformed_middle_line_fails_loudly_with_line_number() {
 #[test]
 fn duplicate_entry_id_is_corruption() {
     let store = temp_store("dup");
-    let writer = store.create("C:/work").expect("create");
+    let mut writer = store.create("C:/work");
+    writer.append(seed_entry()).expect("materialize");
     let path = writer.path().to_path_buf();
     let header = fs::read_to_string(&path).expect("read header");
     let entry = serde_json::to_string(&SessionEntry::new(
@@ -180,7 +193,8 @@ fn entry_id_of(line: &str) -> String {
 #[test]
 fn unknown_parent_is_corruption() {
     let store = temp_store("orphan");
-    let writer = store.create("C:/work").expect("create");
+    let mut writer = store.create("C:/work");
+    writer.append(seed_entry()).expect("materialize");
     let path = writer.path().to_path_buf();
     let header = fs::read_to_string(&path).expect("read header");
     let orphan = serde_json::to_string(&SessionEntry {
@@ -205,13 +219,14 @@ fn unknown_parent_is_corruption() {
 #[test]
 fn future_format_version_is_rejected_loudly() {
     let store = temp_store("version");
-    let writer = store.create("C:/work").expect("create");
+    let mut writer = store.create("C:/work");
+    writer.append(seed_entry()).expect("materialize");
     let path = writer.path().to_path_buf();
+    let raw = fs::read_to_string(&path).expect("read");
     let mut header: serde_json::Value =
-        serde_json::from_str(&fs::read_to_string(&path).expect("read")).expect("header json");
+        serde_json::from_str(raw.lines().next().unwrap_or("")).expect("header json");
     header["version"] = json_from_u32(99);
-    let lines = fs::read_to_string(&path).expect("read all");
-    let rest = lines.split_once('\n').map(|(_, r)| r).unwrap_or("");
+    let rest = raw.split_once('\n').map(|(_, r)| r).unwrap_or("");
     fs::write(&path, format!("{}\n{}", header, rest)).expect("write");
     match store.open_path(&path) {
         Err(SessionError::Corrupt { message, .. }) => {
@@ -264,7 +279,10 @@ fn fs_failures_are_loud_io_errors() {
     let blocker = store.dir().with_extension("blocker");
     fs::write(&blocker, "i am a file").expect("blocker");
     let nested = SessionStore::new(blocker.join("sessions"));
-    match nested.create("C:/w") {
+    // Creation is deferred: the io failure surfaces on the first append,
+    // when the file would materialize under the blocked path.
+    let mut writer = nested.create("C:/w");
+    match writer.append(EntryKind::Aborted) {
         Err(SessionError::Io { .. }) => {}
         other => panic!("expected Io, got {other:?}"),
     }
@@ -275,11 +293,12 @@ fn fs_failures_are_loud_io_errors() {
         other => panic!("expected Io, got {other:?}"),
     }
 
-    // list when the store path is a plain file.
-    match nested.list() {
-        Err(SessionError::Io { .. }) => {}
-        other => panic!("expected Io, got {other:?}"),
-    }
+    // list when the store path cannot exist (its parent is a plain
+    // file): indistinguishable from "directory not created yet" at read
+    // time, so it reads as empty — the loud failure belongs to the write
+    // side, where materialization cannot create the directory (asserted
+    // above).
+    assert_eq!(nested.list().expect("missing dir reads as empty").len(), 0);
 
     fs::remove_file(&blocker).ok();
     fs::remove_dir_all(store.dir()).ok();
@@ -324,7 +343,7 @@ fn project_default_resolves_under_the_current_directory() {
 #[test]
 fn rewind_moves_the_leaf_and_branches_the_next_append() {
     let store = temp_store("rewind-writer");
-    let mut writer = store.create("C:/work").expect("create");
+    let mut writer = store.create("C:/work");
     let first = writer
         .append(EntryKind::UserMessage {
             message: user_message("one"),
@@ -388,7 +407,7 @@ fn trailing_marker_directs_the_reopened_writer() {
     // A rewind as the final write must survive reopen: nothing was
     // appended to carry the new parent implicitly.
     let store = temp_store("rewind-durable");
-    let mut writer = store.create("C:/work").expect("create");
+    let mut writer = store.create("C:/work");
     let first = writer
         .append(EntryKind::UserMessage {
             message: user_message("one"),
@@ -419,7 +438,7 @@ fn trailing_marker_directs_the_reopened_writer() {
 #[test]
 fn rewind_to_none_branches_from_the_root() {
     let store = temp_store("rewind-root");
-    let mut writer = store.create("C:/work").expect("create");
+    let mut writer = store.create("C:/work");
     writer
         .append(EntryKind::UserMessage {
             message: user_message("only"),
@@ -436,7 +455,8 @@ fn rewind_to_none_branches_from_the_root() {
 #[test]
 fn marker_targeting_an_unknown_entry_is_corrupt() {
     let store = temp_store("rewind-corrupt");
-    let writer = store.create("C:/work").expect("create");
+    let mut writer = store.create("C:/work");
+    writer.append(seed_entry()).expect("materialize");
     let path = writer.path().to_path_buf();
     let header = fs::read_to_string(&path).expect("read header");
     let marker = serde_json::to_string(&SessionEntry {
@@ -461,7 +481,7 @@ fn marker_targeting_an_unknown_entry_is_corrupt() {
 #[test]
 fn last_model_follows_the_active_chain_not_the_file() {
     let store = temp_store("rewind-model-hint");
-    let mut writer = store.create("C:/work").expect("create");
+    let mut writer = store.create("C:/work");
     writer
         .append(EntryKind::ModelChange {
             provider: "p".to_string(),

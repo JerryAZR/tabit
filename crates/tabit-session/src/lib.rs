@@ -49,11 +49,12 @@
 //!
 //! let mut session = SessionBuilder::new(store, config, auth, selection)?
 //!     .create("C:/work/project")?;
-//! let run = session.prompt("explain this repository").await?;
+//! let run = session.prompt("explain this repository").await;
 //! println!("{}", run.output);
 //!
 //! // Resuming is the same builder with `.resume(path)` instead of
-//! // `.create(cwd)` — the log is the source of truth.
+//! // `.create(cwd)` — the log is the source of truth. A fresh session
+//! // leaves no file behind until its first user message.
 //! # Ok(())
 //! # }
 //! ```
@@ -65,6 +66,7 @@ mod entry;
 mod error;
 mod events;
 mod ids;
+mod lock;
 mod model;
 mod projection;
 mod prompt;

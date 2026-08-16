@@ -364,6 +364,15 @@ fn run() -> Result<i32, String> {
 /// Print mode: assemble (rewinding first when asked), banner, one
 /// message through the session actor, events printed as they arrive,
 /// then the closing footer.
+/// What one print-mode session left behind, for the footer and exit code.
+struct PrintOutcome {
+    failed: Option<String>,
+    input_tokens: u64,
+    output_tokens: u64,
+    session_path: String,
+    stats: Option<tabit_session::SessionStats>,
+}
+
 fn print_mode(
     args: &Args,
     config: &Arc<TabitConfig>,
@@ -409,49 +418,50 @@ fn print_mode(
     // The message goes through the session actor — the same path JSON
     // mode drives — and the stream is read to its end: the actor returns
     // the session before closing, so closing stats cover this run.
-    let (failed, run_usage, session_path, stats) = tokio::runtime::Builder::new_current_thread()
+    let outcome = tokio::runtime::Builder::new_current_thread()
         .enable_all()
         .build()
         .map_err(|e| e.to_string())?
         .block_on(async {
             let mut handle = SessionHandle::spawn(session);
-            let session_path = handle.info().session_path.clone();
+            let mut outcome = PrintOutcome {
+                failed: None,
+                input_tokens: 0,
+                output_tokens: 0,
+                session_path: handle.info().session_path.clone(),
+                stats: None,
+            };
             handle.message(prompt);
             handle.close_commands();
-            let mut failed = None;
-            let (mut input, mut output) = (0u64, 0u64);
             while let Some(frame) = handle.next_event().await {
                 match &frame.event {
                     SessionEvent::CompletionCall {
                         input_tokens,
                         output_tokens,
                     } => {
-                        input += input_tokens;
-                        output += output_tokens;
+                        outcome.input_tokens += input_tokens;
+                        outcome.output_tokens += output_tokens;
                     }
-                    SessionEvent::RunFailed { message } => failed = Some(message.clone()),
+                    SessionEvent::RunFailed { message } => outcome.failed = Some(message.clone()),
                     _ => {}
                 }
                 print_event(&frame.event);
             }
-            (
-                failed,
-                (input, output),
-                session_path,
-                handle.closing_stats(),
-            )
+            outcome.stats = handle.closing_stats();
+            outcome
         });
 
     eprintln!(
         "--- session {} | tokens {} in / {} out{}",
-        session_path,
-        run_usage.0,
-        run_usage.1,
-        stats
+        outcome.session_path,
+        outcome.input_tokens,
+        outcome.output_tokens,
+        outcome
+            .stats
             .map(|s| format!(" (session total {:.4} USD)", s.total_cost))
             .unwrap_or_default()
     );
-    match failed {
+    match outcome.failed {
         Some(message) => Err(format!("run failed: {message}")),
         None => Ok(0),
     }

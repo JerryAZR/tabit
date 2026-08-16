@@ -179,6 +179,15 @@ The known deviation from pi's subprocess model:
   discard is abort), `pump`/`run_one` extracted from `prompt_with`,
   `RunFailed` joins the event vocabulary, and print mode drives the same
   `SessionHandle` path.
+- **Rulings folded in** (post-JSON-mode pass): every drain point takes
+  the whole queue at that instant (idle entry batches all pending
+  messages into one run's opening input; the engine drains the rest as
+  steers at turn boundaries); `prompt`/`prompt_with` are thin wrappers
+  over `submit` + `pump` — failures are events and
+  `RunOutcome::Failed`, no `Err` return (one drive path, one contract);
+  session files materialize at the first user message (a session that
+  never runs leaves nothing on disk — no header-only orphans, and
+  `--list` reads a missing sessions directory as empty).
 - **TUI: build, harvesting claurst** (reuse question closed: codex's TUI
   is a porting project — ~40 path-dep crates, ratatui-0.30/crossterm-fork
   skew; claurst's decomposes into ~19K LOC of near-verbatim leaves — the

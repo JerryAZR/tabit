@@ -14,6 +14,7 @@
 use std::collections::HashMap;
 use std::sync::{Arc, Mutex, MutexGuard};
 
+use crate::lock::lock;
 use rig_agent::agent::ModelHandle;
 use rig_core::client::CompletionClient;
 use rig_core::providers::{anthropic, openai};
@@ -223,13 +224,6 @@ impl ModelRegistry {
 }
 
 /// Lock, recovering from poisoning (see [`ModelRegistry::client_for`]).
-fn lock<T>(mutex: &Mutex<T>) -> MutexGuard<'_, T> {
-    match mutex.lock() {
-        Ok(guard) => guard,
-        Err(poisoned) => poisoned.into_inner(),
-    }
-}
-
 fn build_error(provider_id: &str, model_id: &str, source: impl std::error::Error) -> SessionError {
     SessionError::ModelBuild {
         provider: provider_id.to_string(),

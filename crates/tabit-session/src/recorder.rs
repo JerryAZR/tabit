@@ -36,21 +36,14 @@ impl SessionRecorder {
     /// The first persistence failure, if one occurred. `None` means every
     /// record reached the log.
     pub fn first_error(&self) -> Option<String> {
-        match self.first_error.lock() {
-            Ok(guard) => guard.clone(),
-            Err(poisoned) => poisoned.into_inner().clone(),
-        }
+        crate::lock::lock(&self.first_error).clone()
     }
 
     /// Append one record to the session log. Persistence failures are
     /// captured (first one wins) and surfaced by the session after the
     /// run - see [`SessionRecorder::first_error`].
     pub fn record(&self, kind: EntryKind) {
-        let result = match self.writer.lock() {
-            Ok(mut writer) => writer.append(kind),
-            Err(poisoned) => poisoned.into_inner().append(kind),
-        };
-        if let Err(error) = result {
+        if let Err(error) = crate::lock::lock(&self.writer).append(kind) {
             self.note_error(error);
         }
     }
@@ -59,11 +52,7 @@ impl SessionRecorder {
     /// same single writer. Persistence failures are captured like
     /// [`SessionRecorder::record`].
     pub fn rewind_to(&self, to: Option<&str>) {
-        let result = match self.writer.lock() {
-            Ok(mut writer) => writer.rewind_to(to),
-            Err(poisoned) => poisoned.into_inner().rewind_to(to),
-        };
-        if let Err(error) = result {
+        if let Err(error) = crate::lock::lock(&self.writer).rewind_to(to) {
             self.note_error(error);
         }
     }
@@ -71,10 +60,7 @@ impl SessionRecorder {
     /// Remember the first persistence failure for the session to surface.
     fn note_error(&self, error: crate::error::SessionError) {
         let message = error.to_string();
-        let mut slot = match self.first_error.lock() {
-            Ok(guard) => guard,
-            Err(poisoned) => poisoned.into_inner(),
-        };
+        let mut slot = crate::lock::lock(&self.first_error);
         if slot.is_none() {
             *slot = Some(message);
         }

@@ -151,15 +151,13 @@ async fn two_rapid_messages_both_land_in_order() {
     handle.message("second");
     let frames = drain(&mut handle).await;
 
-    // Both accepted, in submit order (the mailbox is FIFO). Whether the
-    // second steered the first run or ran as its own depends on when the
-    // pump task picked the first message up — either way nothing is lost
-    // and the final output is the scripted second turn.
+    // Both accepted, in submit order (the mailbox is FIFO). Whether they
+    // were drained as one batch (one run) or the second followed the
+    // first run depends on when the pump task picked them up — either
+    // way nothing is lost, so the assertion is the invariant: both
+    // messages acknowledged, at least one completion.
     assert_eq!(user_texts(&frames), vec!["first", "second"]);
-    assert_eq!(
-        finished_outputs(&frames).last().map(String::as_str),
-        Some("b")
-    );
+    assert!(!finished_outputs(&frames).is_empty());
     std::fs::remove_dir_all(store.dir()).ok();
 }
 

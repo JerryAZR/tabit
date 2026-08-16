@@ -13,6 +13,7 @@
 //! event stream ends.
 
 use crate::events::SessionEvent;
+use crate::lock::lock;
 use crate::model::ModelSelection;
 use crate::protocol::{EventFrame, SessionCommand, StreamId};
 use crate::session::{AbortHandle, MailboxHandle, Session, SessionStats};
@@ -140,14 +141,6 @@ impl SessionHandle {
     /// stream has ended.
     pub fn closing_stats(&self) -> Option<SessionStats> {
         lock(&self.closing_stats).clone()
-    }
-}
-
-/// Lock helper shared with `session.rs` (poison-recovering).
-fn lock<T>(mutex: &Mutex<T>) -> std::sync::MutexGuard<'_, T> {
-    match mutex.lock() {
-        Ok(guard) => guard,
-        Err(poisoned) => poisoned.into_inner(),
     }
 }
 

@@ -23,11 +23,20 @@ pub struct SessionStore {
     dir: PathBuf,
 }
 
-/// A session file opened for appending.
+/// A session file opened for appending. Creation is deferred: a writer
+/// from [`SessionStore::create`] holds its header in memory and the file
+/// materializes on the first append — a session that never records a
+/// user message leaves nothing on disk.
 #[derive(Debug)]
 pub struct SessionWriter {
     path: PathBuf,
-    file: fs::File,
+    /// `None` until the first append materializes the file.
+    file: Option<fs::File>,
+    /// The header, written when the file materializes.
+    header: SessionHeader,
+    /// An entry written immediately after the header on materialization
+    /// (the opening `model_change`).
+    opening: Option<EntryKind>,
     leaf: Option<String>,
     id: String,
 }
@@ -103,12 +112,11 @@ impl SessionStore {
         &self.dir
     }
 
-    /// Create a new session file (header only) and return its writer.
-    pub fn create(&self, cwd: &str) -> Result<SessionWriter, SessionError> {
-        fs::create_dir_all(&self.dir).map_err(|source| SessionError::Io {
-            path: self.dir.clone(),
-            source,
-        })?;
+    /// Prepare a new session. Nothing touches the disk: the file (and
+    /// the sessions directory) materialize on the writer's first append,
+    /// so a session that never records — no user message — leaves no
+    /// orphan behind.
+    pub fn create(&self, cwd: &str) -> SessionWriter {
         let header = SessionHeader {
             version: SESSION_FORMAT_VERSION,
             id: ids::new_session_id(),
@@ -117,35 +125,15 @@ impl SessionStore {
             parent_session: None,
         };
         let file_name = format!("{}_{}.jsonl", ids::filename_timestamp(), header.id.as_str());
-        let path = self.dir.join(file_name);
-        let file = OpenOptions::new()
-            .create_new(true)
-            .append(true)
-            .open(&path)
-            .map_err(|source| SessionError::Io {
-                path: path.clone(),
-                source,
-            })?;
-        let line = serde_json::to_string(&header).map_err(|source| SessionError::Io {
-            path: path.clone(),
-            source: source.into(),
-        })?;
-        let mut file = file;
-        writeln!(file, "{line}").map_err(|source| SessionError::Io {
-            path: path.clone(),
-            source,
-        })?;
-        file.flush().map_err(|source| SessionError::Io {
-            path: path.clone(),
-            source,
-        })?;
         let id = header.id.clone();
-        Ok(SessionWriter {
-            path,
-            file,
+        SessionWriter {
+            path: self.dir.join(file_name),
+            file: None,
+            header,
+            opening: None,
             leaf: None,
             id,
-        })
+        }
     }
 
     /// Load the session file with the given session id.
@@ -189,10 +177,21 @@ impl SessionStore {
     /// Every stored session, newest first (by creation timestamp in the
     /// header, file-name order as tiebreak).
     pub fn list(&self) -> Result<Vec<SessionSummary>, SessionError> {
-        let dir = fs::read_dir(&self.dir).map_err(|source| SessionError::Io {
-            path: self.dir.clone(),
-            source,
-        })?;
+        let dir = match fs::read_dir(&self.dir) {
+            Ok(dir) => dir,
+            // No sessions directory yet means no sessions (deferred
+            // creation materializes it with the first session file);
+            // anything else is a real read failure.
+            Err(source) if source.kind() == std::io::ErrorKind::NotFound => {
+                return Ok(Vec::new());
+            }
+            Err(source) => {
+                return Err(SessionError::Io {
+                    path: self.dir.clone(),
+                    source,
+                });
+            }
+        };
         let mut summaries = Vec::new();
         for entry in dir {
             let entry = entry.map_err(|source| SessionError::Io {
@@ -325,26 +324,91 @@ impl SessionWriter {
                 path: path.to_path_buf(),
                 source,
             })?;
+        let id = header.id.clone();
         Ok(SessionWriter {
             path: path.to_path_buf(),
-            file,
+            file: Some(file),
+            header,
+            opening: None,
             leaf,
-            id: header.id,
+            id,
         })
+    }
+
+    /// An entry written immediately after the header when a deferred
+    /// session materializes (the opening `model_change`); meaningless on
+    /// a writer that is already on disk.
+    pub fn set_opening_entry(&mut self, kind: EntryKind) {
+        self.opening = Some(kind);
+    }
+
+    /// Materialize the file: create the directory, write the header, and
+    /// flush the opening entry. Idempotent.
+    fn ensure_open(&mut self) -> Result<(), SessionError> {
+        if self.file.is_some() {
+            return Ok(());
+        }
+        let dir = self
+            .path
+            .parent()
+            .map(Path::to_path_buf)
+            .unwrap_or_else(|| PathBuf::from("."));
+        fs::create_dir_all(&dir).map_err(|source| SessionError::Io { path: dir, source })?;
+        let file = OpenOptions::new()
+            .create_new(true)
+            .append(true)
+            .open(&self.path)
+            .map_err(|source| SessionError::Io {
+                path: self.path.clone(),
+                source,
+            })?;
+        let line = serde_json::to_string(&self.header).map_err(|source| SessionError::Io {
+            path: self.path.clone(),
+            source: source.into(),
+        })?;
+        let mut file = file;
+        writeln!(file, "{line}").map_err(|source| SessionError::Io {
+            path: self.path.clone(),
+            source,
+        })?;
+        file.flush().map_err(|source| SessionError::Io {
+            path: self.path.clone(),
+            source,
+        })?;
+        self.file = Some(file);
+        if let Some(opening) = self.opening.take() {
+            self.append_entry(opening)?;
+        }
+        Ok(())
     }
 
     /// Append one record and return the persisted entry.
     pub fn append(&mut self, kind: EntryKind) -> Result<SessionEntry, SessionError> {
+        self.ensure_open()?;
+        self.append_entry(kind)
+    }
+
+    fn append_entry(&mut self, kind: EntryKind) -> Result<SessionEntry, SessionError> {
         let entry = SessionEntry::new(self.leaf.clone(), ids::now_rfc3339(), kind);
         let line = serde_json::to_string(&entry).map_err(|source| SessionError::Io {
             path: self.path.clone(),
             source: source.into(),
         })?;
-        writeln!(self.file, "{line}").map_err(|source| SessionError::Io {
+        let Some(file) = self.file.as_mut() else {
+            // Unreachable through `append` (ensure_open runs first);
+            // loud rather than silently dropping the record.
+            return Err(SessionError::Io {
+                path: self.path.clone(),
+                source: std::io::Error::other(
+                    "internal invariant violated: append_entry before ensure_open",
+                ),
+            });
+        };
+        writeln!(file, "{line}").map_err(|source| SessionError::Io {
             path: self.path.clone(),
             source,
         })?;
-        self.file.flush().map_err(|source| SessionError::Io {
+        file.flush().map_err(|source| SessionError::Io {
             path: self.path.clone(),
             source,
         })?;

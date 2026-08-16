@@ -19,6 +19,7 @@
 use crate::entry::{EntryKind, SessionEntry};
 use crate::error::SessionError;
 use crate::events::SessionEvent;
+use crate::lock::lock;
 use crate::model::ModelSelection;
 use crate::projection;
 use crate::recorder::{RecorderHook, SessionRecorder};
@@ -46,6 +47,9 @@ pub enum RunOutcome {
     /// The user aborted the run mid-flight; `output` holds whatever
     /// assistant text had arrived.
     Aborted,
+    /// The run failed (provider error, or a persistence failure after a
+    /// completed response — `RunFailed` events carry the messages).
+    Failed,
 }
 
 /// One outer loop's outcome and artifacts.
@@ -187,18 +191,18 @@ impl SessionBuilder {
         self
     }
 
-    /// Create a fresh session (a new log file). The log opens with the
-    /// initial model selection recorded, so usage attribution and resume
-    /// never depend on in-memory state.
+    /// Create a fresh session. Nothing touches the disk: the file (with
+    /// the opening model selection recorded right after the header)
+    /// materializes at the first user message, so a session that never
+    /// runs leaves nothing behind — not a header-only orphan.
     pub fn create(self, cwd: &str) -> Result<Session, SessionError> {
-        let writer = self.store.create(cwd)?;
-        let session = Session::assemble(self, writer, Vec::new())?;
-        session.recorder.record(EntryKind::ModelChange {
-            provider: session.selection.provider.clone(),
-            model: session.selection.model.clone(),
-            thinking_level: session.selection.thinking_level.clone(),
+        let mut writer = self.store.create(cwd);
+        writer.set_opening_entry(EntryKind::ModelChange {
+            provider: self.selection.provider.clone(),
+            model: self.selection.model.clone(),
+            thinking_level: self.selection.thinking_level.clone(),
         });
-        Ok(session)
+        Session::assemble(self, writer, Vec::new())
     }
 
     /// Resume the session stored at `path`: replay entries into context,
@@ -326,14 +330,6 @@ impl AbortHandle {
     }
 }
 
-/// Lock, recovering from poisoning (no code panics while holding it).
-fn lock<T>(mutex: &std::sync::Mutex<T>) -> std::sync::MutexGuard<'_, T> {
-    match mutex.lock() {
-        Ok(guard) => guard,
-        Err(poisoned) => poisoned.into_inner(),
-    }
-}
-
 /// The engine-side view of the mailbox: what an outer loop drains at
 /// each turn boundary.
 struct SessionSteers {
@@ -374,26 +370,24 @@ pub struct Session {
 }
 
 impl Session {
-    /// Run one outer loop for `prompt` and return everything about it.
-    ///
-    /// The user message is recorded before the run starts, so a failed run
-    /// still leaves an honest log; the in-memory context is re-derived from
-    /// the log afterwards either way.
-    pub async fn prompt(&mut self, prompt: impl Into<Message>) -> Result<RunSummary, SessionError> {
+    /// Run `prompt` through the mailbox and summarize everything that
+    /// ran. Failures are loud in two places: the [`SessionEvent::RunFailed`]
+    /// events and `outcome == RunOutcome::Failed` (there is no `Err`
+    /// return — frontends and direct callers see the same stream).
+    pub async fn prompt(&mut self, prompt: impl Into<Message>) -> RunSummary {
         self.prompt_with(prompt, &mut |_| {}).await
     }
 
     /// [`Session::prompt`] with a live observer: `on_event` receives each
-    /// event as it is produced. Single-shot — exactly one outer loop for
-    /// `prompt`, failures returned as `Err` — for direct embedders; the
-    /// mailbox-looping form frontends drive is [`Session::pump`].
+    /// event as it is produced. The prompt enters the mailbox first, so
+    /// anything submitted alongside it joins the same batch.
     pub async fn prompt_with(
         &mut self,
         prompt: impl Into<Message>,
         on_event: &mut (dyn FnMut(SessionEvent) + Send),
-    ) -> Result<RunSummary, SessionError> {
-        let message: Message = prompt.into();
-        self.run_one(message, on_event).await
+    ) -> RunSummary {
+        self.mailbox.push(prompt.into());
+        self.pump(on_event).await
     }
 
     /// Submit a user message to the mailbox. While an outer loop is in
@@ -405,28 +399,47 @@ impl Session {
         self.mailbox.push(Message::user(text.into()));
     }
 
-    /// Drain the mailbox to quiescence: each queued message runs as one
-    /// outer loop (steers included, at the turn boundaries). A failed run
-    /// emits [`SessionEvent::RunFailed`] and the next queued message still
-    /// runs; an aborted run discards the remaining queue and stops. This
-    /// is the drive loop for frontends ([`crate::SessionHandle`]).
-    pub async fn pump(&mut self, on_event: &mut (dyn FnMut(SessionEvent) + Send)) {
-        while let Some(message) = self.mailbox.take_next() {
-            if let Err(error) = self.run_one(message, on_event).await {
-                on_event(SessionEvent::RunFailed {
-                    message: error.to_string(),
-                });
-            }
+    /// Drain the mailbox to quiescence and summarize. Every drain point
+    /// takes everything queued at that instant: at idle entry the whole
+    /// batch becomes one run's opening input; mid-run the engine drains
+    /// the queue as steers at each turn boundary. A failed run emits
+    /// [`SessionEvent::RunFailed`] and the next batch still runs; an
+    /// aborted run discards the remaining queue and stops. The drive
+    /// loop for frontends ([`crate::SessionHandle`]).
+    pub async fn pump(&mut self, on_event: &mut (dyn FnMut(SessionEvent) + Send)) -> RunSummary {
+        let mut total = RunSummary {
+            outcome: RunOutcome::Completed,
+            output: String::new(),
+            usage: Usage::default(),
+            events: Vec::new(),
+        };
+        loop {
+            let batch = self.mailbox.drain_all();
+            let Some((initial, earlier)) = batch.split_last() else {
+                break;
+            };
+            let run = self.run_one(initial, earlier, on_event).await;
+            // The last terminal decides the outcome; usage and events
+            // accumulate across runs.
+            total.output = run.output;
+            add_usage(&mut total.usage, &run.usage);
+            total.events.extend(run.events);
+            total.outcome = run.outcome;
         }
+        total
     }
 
-    /// One outer loop for `message`: record it, run the engine to
-    /// completion, re-derive the context from the log, and report.
+    /// One outer loop for a drained batch: record every message, run the
+    /// engine to completion, re-derive the context from the log, and
+    /// report. Exactly one terminal event comes out
+    /// (`run_finished`/`run_aborted`/`run_failed`), plus a trailing
+    /// `run_failed` when durability checks fail after a terminal.
     async fn run_one(
         &mut self,
-        message: Message,
+        initial: &Message,
+        earlier: &[Message],
         on_event: &mut (dyn FnMut(SessionEvent) + Send),
-    ) -> Result<RunSummary, SessionError> {
+    ) -> RunSummary {
         // Run-scoped machinery: a fresh abort token for this loop; steers
         // arrive through the run-agnostic mailbox.
         let run_token = {
@@ -434,21 +447,36 @@ impl Session {
             *slot = CancellationToken::new();
             slot.clone()
         };
+        let mut events = Vec::new();
+        // Drain-all at idle entry: the whole batch becomes this run's
+        // opening user input — one entry each, 1:1 with what the model
+        // saw, the last message as the request and the rest preceding it
+        // in history.
+        let mut history = self.context.clone();
+        for message in earlier {
+            self.recorder.record(EntryKind::UserMessage {
+                message: message.clone(),
+            });
+            let event = SessionEvent::UserMessage {
+                text: user_text(message),
+            };
+            on_event(event.clone());
+            events.push(event);
+            history.push(message.clone());
+        }
         self.recorder.record(EntryKind::UserMessage {
-            message: message.clone(),
+            message: initial.clone(),
         });
-
         let user_event = SessionEvent::UserMessage {
-            text: user_text(&message),
+            text: user_text(initial),
         };
         on_event(user_event.clone());
-        let mut events = vec![user_event];
-        let history = self.context.clone();
+        events.push(user_event);
         let mut tool_context = rig_agent::tool::ToolContext::new();
         tool_context.insert(run_token.clone());
         let request = self
             .agent
-            .stream_chat(message, history)
+            .stream_chat(initial.clone(), history)
             .max_turns(self.max_turns)
             .add_hook(RecorderHook(self.recorder.clone()))
             .steering(std::sync::Arc::new(SessionSteers {
@@ -464,6 +492,9 @@ impl Session {
         let mut tool_names: std::collections::BTreeMap<String, String> =
             std::collections::BTreeMap::new();
         let mut aborted = false;
+        // The provider failure that ended the stream, if one did; the
+        // `run_failed` event is emitted after the loop.
+        let mut stream_failure: Option<SessionError> = None;
         loop {
             let item = tokio::select! {
                 biased;
@@ -521,16 +552,17 @@ impl Session {
                     }
                 }
                 Err(StreamingError::Completion(error)) => {
-                    self.reload_context()?;
-                    return Err(SessionError::Prompt(error.into()));
+                    stream_failure = Some(SessionError::Prompt(error.into()));
+                    break;
                 }
                 Err(StreamingError::Prompt(error)) => {
-                    self.reload_context()?;
-                    return Err(SessionError::Prompt(*error));
+                    stream_failure = Some(SessionError::Prompt(*error));
+                    break;
                 }
             }
         }
 
+        let mut outcome = RunOutcome::Completed;
         if aborted {
             // Dropping the stream cancels in-flight tool futures; their
             // drop guards kill process trees. Completed turns and results
@@ -547,21 +579,48 @@ impl Session {
             // Nothing queued was ever acknowledged by an event, so
             // nothing observable vanishes.
             self.mailbox.clear();
+            outcome = RunOutcome::Aborted;
+        } else if let Some(failure) = stream_failure {
+            // The log stays the source of truth: re-derive the context,
+            // and a failing reload outranks the provider error (the same
+            // precedence the pre-event failure path had).
+            let message = self
+                .reload_context()
+                .err()
+                .map(|error| error.to_string())
+                .unwrap_or_else(|| failure.to_string());
+            let event = SessionEvent::RunFailed { message };
+            on_event(event.clone());
+            events.push(event);
+            outcome = RunOutcome::Failed;
         }
-        self.reload_context()?;
+        if !matches!(outcome, RunOutcome::Failed)
+            && let Err(error) = self.reload_context()
+        {
+            let event = SessionEvent::RunFailed {
+                message: error.to_string(),
+            };
+            on_event(event.clone());
+            events.push(event);
+            outcome = RunOutcome::Failed;
+        }
+        // Durability: a record that never reached the disk fails the run
+        // even when the model answered (this `run_failed` follows the
+        // terminal event — documented on the event).
         if let Some(persist_error) = self.recorder.first_error() {
-            return Err(SessionError::Persist(persist_error));
+            let event = SessionEvent::RunFailed {
+                message: persist_error,
+            };
+            on_event(event.clone());
+            events.push(event);
+            outcome = RunOutcome::Failed;
         }
-        Ok(RunSummary {
-            outcome: if aborted {
-                RunOutcome::Aborted
-            } else {
-                RunOutcome::Completed
-            },
+        RunSummary {
+            outcome,
             output,
             usage,
             events,
-        })
+        }
     }
 
     /// The session's mailbox as a clonable handle: submits work while a
