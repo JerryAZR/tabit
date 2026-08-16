@@ -94,13 +94,20 @@ Current workspace layout:
 - In shell commands, avoid `;` chaining — it runs the next step regardless
   of the previous one's failure. Prefer `&&` (proceed only on success) or
   `||` (fallback), so a failed step can never be talked past.
-- The workspace denies `panic`/`unwrap`/`expect`/indexing in shipped code;
-  test code relaxes those via an identical `#![cfg_attr(test, allow(..))]`
-  header at the top of each crate's lib.rs — new crates copy the current
-  version from an existing crate rather than an old one. One sanctioned
-  exception (ENGINE.md's error taxonomy): *internal* errors — our own
-  invariants, request construction — panic deliberately and hard-stop;
-  everything external is a typed error.
+- Error doctrine: **internal errors (bugs, invariants, unexpected
+  state) fail hard and loud — they panic** — so they are noticed and
+  fixed; not crashing means the app runs in a broken state that could
+  damage the user's system. **External errors (invalid user input,
+  missing files, network failures, unavailable extensions) fail
+  gracefully and clearly** as typed errors. The crash-family lints
+  (`panic`, `unwrap_used`, `expect_used`, `indexing_slicing`,
+  `unreachable`, …) are warnings — they prompt a second look, they do
+  not forbid the sanctioned crash; `dbg_macro`, `todo!`,
+  `unimplemented!()` stay forbidden (leftovers, not failure
+  handling). Test code relaxes the warnings via an identical
+  `#![cfg_attr(test, allow(..))]` header at the top of each crate's
+  lib.rs — new crates copy the current version from an existing crate
+  rather than an old one.
 - Coverage: `cargo llvm-cov --workspace --html --output-dir target/llvm-cov/html`.
   Every gap must be filled, justified, or explicitly deferred — the ledger
   and policy live in `COVERAGE.md`.

@@ -24,15 +24,20 @@ edition = "2024"
 dbg_macro = "forbid"
 await_holding_lock = "deny"
 await_holding_refcell_ref = "deny"
-expect_used = "deny"
-expect_fun_call = "deny"
-indexing_slicing = "deny"
-panic = "deny"
-panic_in_result_fn = "deny"
+# The crash family is warn, not deny: internal errors (bugs, broken
+# invariants, unexpected state) MUST fail hard and loud — panic — per
+# AGENTS.md's error doctrine; running on would mean operating in a
+# broken state that could damage the user's system. The warnings prompt
+# a second look; they do not forbid the sanctioned crash.
+expect_used = "warn"
+expect_fun_call = "warn"
+indexing_slicing = "warn"
+panic = "warn"
+panic_in_result_fn = "warn"
 todo = "forbid"
 unimplemented = "forbid"
-unreachable = "deny"
-unwrap_used = "deny"
+unreachable = "warn"
+unwrap_used = "warn"
 # Error enums (CompletionError etc.) exceed clippy's 128-byte threshold; the
 # size is irrelevant on error paths and boxing variants would blur matches.
 result_large_err = "allow"

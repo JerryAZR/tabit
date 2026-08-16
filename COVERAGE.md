@@ -14,11 +14,11 @@ Defensive ("unreachable") arms follow a stricter rule:
 
 - **Trivially provable dead** → deleted, not documented. A proof quote
   belongs in the deleting commit, not in a permanent comment.
-- **Reachable via internal error** (our own invariant broke) → loud, hard
-  failure: the request aborts with an `internal invariant violated:`
-  prefixed error — nothing is substituted, nothing is swallowed. (Literal
-  panics are lint-denied in shipped code; the hard error is the loudest
-  permitted form.)
+- **Reachable via internal error** (our own invariant broke) → **panic,
+  fail hard and loud** (AGENTS.md's error doctrine): the process dies
+  rather than running in a broken state. The engine refactor converts
+  the existing `internal invariant violated:`-prefixed error arms to
+  deliberate panics.
 - **Reachable via external error** (malformed wire input, corrupted
   persisted state) → graceful, clear error naming the malformed input and
   its cause. Never a silent skip or a placeholder that looks like real data.
