@@ -279,7 +279,10 @@ impl AgentRunner {
     /// Build a runner from an agent whose input is a full conversation —
     /// see [`RunInput::Conversation`].
     pub fn from_agent_conversation(agent: &Agent, conversation: Vec<Message>) -> Self {
-        Self::from_input(agent, RunInput::Conversation(conversation.into_boxed_slice()))
+        Self::from_input(
+            agent,
+            RunInput::Conversation(conversation.into_boxed_slice()),
+        )
     }
 
     fn from_input(agent: &Agent, input: RunInput) -> Self {
