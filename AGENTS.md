@@ -109,7 +109,9 @@ Current workspace layout:
 ## Terminology
 
 - **Outer loop** — what the user feels: prompt → agent thinks → calls tools →
-  repeat until done. One outer loop = one `AgentRun`.
+  repeat until done. One outer loop = one `AgentRun`. The engine's state
+  machine (states, responsibilities, machine/driver split) is designed in
+  `ENGINE.md`.
 - **Turn** — one model call within a run.
 - **Tool-use roundtrip** — the boundary between a model turn's tool calls and
   the next model call (execute tools → feed results back). This is where
