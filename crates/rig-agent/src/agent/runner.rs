@@ -202,6 +202,10 @@ pub trait SteeringSource: WasmCompatSend + WasmCompatSync {
 }
 
 /// What a runner sends: one new message, or a whole conversation.
+// `Message` itself is large (~288 bytes), so the single-message variant
+// dominates; the runner is constructed once per request and moved once —
+// the size is irrelevant, and boxing a lone prompt would be noise.
+#[allow(clippy::large_enum_variant)]
 #[derive(Debug, Clone)]
 pub(crate) enum RunInput {
     /// A single new user message, with no caller-provided context.
@@ -210,7 +214,7 @@ pub(crate) enum RunInput {
     /// (the same rule the engine applies to every turn — its latest
     /// message is that turn's prompt) and the rest precede it as
     /// context. Retry-ready: the same list can be resent verbatim.
-    /// Boxed: conversations are unbounded, the prompt is not.
+    /// Boxed: conversations are unbounded.
     Conversation(Box<[Message]>),
 }
 
