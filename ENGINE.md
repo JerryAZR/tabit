@@ -1,39 +1,96 @@
 # ENGINE.md
 
-The design record for the agent engine's turn state machine
-(`rig-agent`'s `AgentRun`) — the backend counterpart to PROTOCOL.md's
-frontend contract. Structure, not steps: this documents the machine's
-states, each state's single responsibility, the machine/driver split,
-and the behavior deltas of the redesign. The implementation refactor
-follows this document; changes to the machine change this document.
+The design record for the agent engine — the backend counterpart to
+PROTOCOL.md's frontend contract. Two layers, kept strictly separate:
 
-## Why redesign
+1. the **outer loop** — run lifecycle: when a run starts, what it is
+   entered with, what it emits, how it is preempted — with the inner
+   loop as a black box;
+2. the **inner loop** — the turn state machine inside one run.
 
-The current machine grew control flow inside data handlers instead of
-as states, and the driver grew control decisions that belong to the
-machine:
+Structure, not steps: states, each state's single responsibility, the
+machine/driver split, and the behavior deltas of the redesign. The
+implementation follows this document; changes to the machine change
+this document. (PROTOCOL.md keeps the frontend/event view of the same
+loop; the session actor implements the outer layer.)
 
-- **Three scattered steer drains** in `drive_agent` (defect path,
-  post-turn, post-tool), each silently gated at runtime by
-  `ready_for_steering()`. Steering is control flow — *when* it happens
-  — but it lives as inline checks in data-handling arms. The silent
-  no-op gate makes misuse invisible: draining at an illegal point
-  returns nothing and only tests catch it (this happened in practice).
-- **`AwaitingAdvance`'s `next_step` arm carries five conditional
-  responsibilities**: output-tool detection, output-schema re-prompt,
-  output finalization-as-text, skip-pairing, and the
-  Done-vs-CallTools decision.
-- **The exit decisions are scattered**: `Done` is decided inside
-  `next_step`, `MaxTurnsError` fires from `PreparingRequest`, the
-  defect streak and hook-stop terminations are driver locals.
+## Layer 1 — the outer loop (the inner loop is a black box)
 
-## The design
+```mermaid
+stateDiagram-v2
+    Idle --> Running : queue non-empty — drain-all batch<br/>becomes the run's opening input
+    Running --> Idle : Done — emit run_finished
+    Running --> Idle : Failed — emit run_failed
+    Running --> Idle : abort preempts (token race at any await)<br/>— emit run_aborted, discard the queue
+    Idle --> Idle : abort while idle — discard the queue<br/>(no-op when empty)
+```
 
-One rule, no special cases: **the run loop is drain → decide → model →
-path → drain.** Every model call is preceded by exactly one drain and
-one decision; every turn outcome (of the three kinds) feeds exactly one
-drain. Steering drains are independent of tools, so all paths converge
-at the same drain state.
+**Entry contract** (what the outer layer hands the black box):
+
+- the conversation history as it stands, plus the opening batch — the
+  whole queue drained at entry, whose final message is the first
+  turn's prompt;
+- at least one turn of budget (`max_turns ≥ 1` — entering a run that
+  cannot run is unrepresentable).
+
+**Exit contract** (what the black box guarantees):
+
+- **at least one turn runs** — control never enters and leaves without
+  issuing a model call;
+- exactly one terminal: `Done(response)` or `Failed(reason)`;
+- the run never observes abort as a state — abort preempts it from
+  outside (the token races the in-flight awaits); the outer layer
+  records `Aborted` and discards the queue.
+
+**Outer-layer responsibilities:** queue custody (the always-queue
+invariant — every message yields exactly one user event or steers the
+run in flight; the only discard is abort), opening-input construction
+(drain-all at entry), terminal-event emission, preemption. Implemented
+today by the tabit-session actor (`pump`/`run_one` + the mailbox and
+cancel token); documented here because the entry/exit contracts above
+are what the inner machine is designed against.
+
+**One queue, two layers:** a message arriving while idle becomes the
+next run's opening input (drained by the outer layer at entry); a
+message arriving during a run lands at the inner loop's drain points.
+No-loss and ordering hold across both.
+
+## Layer 2 — the inner loop (one run's turn machine)
+
+Entry is **Preparing**: it takes the existing history and constructs
+the request. Every later iteration is preceded by exactly one drain
+and one decision. The three turn outcomes — final, broken, tools —
+converge at the same drain, because steering is independent of tools.
+
+```mermaid
+stateDiagram-v2
+    [*] --> Preparing : enter — history + opening batch,<br/>the final message is the turn's prompt
+    Preparing --> ModelTurn : request issued
+    ModelTurn --> FinalTurn : committed, no tool calls
+    ModelTurn --> BrokenTurn : typed defect — never committed
+    ModelTurn --> ValidatingTools : committed, tool calls
+    ModelTurn --> Failed : fatal error (bypass — see rule)
+    FinalTurn --> DrainingSteers
+    BrokenTurn --> DrainingSteers
+    ValidatingTools --> ExecutingTools : batch admitted
+    ValidatingTools --> DrainingSteers : recovery retry (feedback queued)
+    ValidatingTools --> Failed : recovery fail / stop (bypass)
+    ExecutingTools --> DrainingSteers : results appended
+    DrainingSteers --> Deciding
+    Deciding --> Preparing : loop — another turn
+    Deciding --> Done : final turn, queue silent
+    Deciding --> Failed : streak exhausted / budget gone / terminating
+    Done --> [*]
+    Failed --> [*]
+```
+
+**The bypass rule:** exactly two edges skip the drain — fatal errors
+and recovery fail/stop — and both leave *nothing settled* (no turn
+committed, nothing to converge). This is deliberate: a steer arriving
+while a run is dying must survive queued for the next run, not be
+recorded into a dead one (the owner's ruling against dead-lettering).
+Everything else — all three outcomes, recovery retries, output
+re-prompt feedback — passes through the drain before the decision.
 
 ### The machine contract
 
@@ -44,7 +101,7 @@ at the same drain state.
 | `Final { turn }` | committed turn, no tool calls | FinalTurn |
 | `Tools { turn }` | committed turn with tool calls | ValidatingTools |
 | `Broken { defect }` | typed malformed-tool-call defect; nothing committed | BrokenTurn |
-| `fatal { error }` | transport/provider failure; nothing to settle | Failed (direct) |
+| `fatal { error }` | transport/provider failure | Failed (bypass) |
 | `terminate { reason }` | a hook stopped the run | flag, read at Deciding |
 
 **Flags owned by the machine** (the "data collected earlier" that
@@ -58,45 +115,24 @@ Deciding reads):
   from "queue drained into history".
 - budget — turns consumed by committed model calls only (a discarded
   turn returns its slot; a recovery retry consumes another).
-- `last_outcome` — what kind of turn (if any) just ended.
+- `last_outcome` — what kind of turn (if any) just ended; Deciding's
+  exits are unreachable before the first outcome exists (the
+  at-least-one-turn invariant, structurally).
 
 serde/suspension remains a property of the machine (it stays
 serializable), but nothing serializes a run today — there are no
 compatibility constraints, only the discipline.
-
-### The state machine
-
-```mermaid
-stateDiagram-v2
-    [*] --> DrainingSteers : run opens
-    DrainingSteers --> Deciding
-    Deciding --> Preparing : loop
-    Deciding --> Done : final turn, queue silent
-    Deciding --> Failed : budget gone / streak exhausted / terminating
-    Preparing --> ModelTurn : issue model call
-    ModelTurn --> FinalTurn : committed, no calls
-    ModelTurn --> BrokenTurn : typed defect, never committed
-    ModelTurn --> ValidatingTools : committed, calls
-    ModelTurn --> Failed : fatal error (nothing to settle)
-    FinalTurn --> DrainingSteers
-    BrokenTurn --> DrainingSteers
-    ValidatingTools --> ExecutingTools : batch admitted
-    ValidatingTools --> DrainingSteers : recovery retry (feedback queued)
-    ValidatingTools --> Failed : recovery fail / stop
-    ExecutingTools --> DrainingSteers : results appended
-    Done --> [*]
-    Failed --> [*]
-```
 
 ### State responsibilities
 
 Each state has exactly one. Where a state was considered for splitting
 during design review, the verdict is recorded.
 
-- **Preparing** — split the settled input into prompt + preceding
-  context for the model call. *Self-review: the max-turns budget gate
-  currently hiding here moves to Deciding — Preparing keeps nothing
-  conditional.*
+- **Preparing** — take the existing history and construct the request:
+  the latest message is the turn's prompt, the rest precede it as
+  context; emit the model-call step. *Self-review: the max-turns
+  budget gate currently hiding in `PreparingRequest`'s `next_step`
+  moves to Deciding — Preparing keeps nothing conditional.*
 - **ModelTurn** — the provider turn is in flight; the driver drives it
   (request, stream, spans). The machine waits for one input of the
   five above.
@@ -152,9 +188,9 @@ during design review, the verdict is recorded.
 
 ### Behavior deltas (documented, intended)
 
-1. **One drain point** (was three): the opening window now drains
-   before the first model call. No-loss and ordering guarantees
-   unchanged.
+1. **One drain point** (was three), at the convergence. The run's
+   opening input is settled by the outer layer before entry — matching
+   today's session semantics exactly; no opening-window delta.
 2. **Exhaustion only fires on a silent queue** — a drained steer resets
    the streak (owner ruling).
 3. **The final turn commits at classification**, not lazily on the
@@ -177,6 +213,7 @@ ones.
 
 | current | new home |
 |---|---|
+| tabit-session `pump`/`run_one` + mailbox + token | Layer 1 (already implemented; documented here for the contracts) |
 | `PreparingRequest` | Preparing (split only; budget gate → Deciding) |
 | `AwaitingModel` | ModelTurn |
 | `ResolvingToolCalls` + `resolve_invalid_tool_call` | ValidatingTools |
