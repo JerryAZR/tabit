@@ -38,34 +38,8 @@ resolved flag records its decision and stays as history.
   sender) ends the actor after the in-flight run; the event stream then
   closes. Close is not a barrier — commands already queued are honored.
 
-## Open flags (discussion order)
-
-### 1. Actor session ping-pong vs a resident loop — RULING WANTED
-
-The actor holds `Option<Session>`, moves it into each spawned pump
-task, and takes it back over a channel; three coordinated branches keep
-the invariant (command arm spawns pumps, return arm restarts on
-leftovers, the leftover check covers the handoff window).
-
-Options:
-- **Keep ping-pong** — the session is actor-reachable between runs
-  (future idle commands: `set_model`, `rewind`, stats), at the cost of
-  the handoff window, the `Option` dance, and the untested leftover
-  branch (flag 7).
-- **Resident loop** — one task owns the session forever: `loop { wait
-  for work / command; pump }`. Message and abort never needed the
-  actor at all (they are shared-state mutations: mailbox + cancel
-  token — exactly how print mode's Esc watcher works), so the handle
-  can submit them directly and the "actor" shrinks to the resident
-  worker plus a work-notification in the mailbox. Deletes the return
-  channel, the `Option`, the leftover branch (flag 7 dies
-  structurally), and one of the two termination mechanisms (flag 4
-  dies). Cost: idle-time session commands (none exist yet) must route
-  through the worker's wait loop, and the mailbox grows a
-  `tokio::sync::Notify`.
-
-Recommendation: resident loop — the only commands that must land
-mid-run are exactly the two that shared state already serves.
+## Open flags (numbering is fixed at creation; resolved numbers are
+skipped)
 
 ### 2. `run_one` failure epilogue — mechanical
 
@@ -78,29 +52,11 @@ A `fail(..)` helper flattens it. No semantic change.
 ~150 lines: recording + batch, engine fold, epilogue. The fold body can
 extract beside `stream_item_event`.
 
-### 4. Dual termination mechanisms — dies with flag 1
-
-Shutdown token + channel-close arm; the token exists because
-`tokio::UnboundedSender` has no `close()`. The resident loop (flag 1)
-needs only the token.
-
-### 5. "Close is not a barrier" — document
-
-Commands sent before `close_commands()` run; the actor's dequeue is the
-boundary. Correct, tested; deserves the contract written on
-`close_commands` itself.
-
 ### 6. Twin abort clears — document the proof
 
 The actor's Abort handler and `run_one`'s aborted branch both clear the
 mailbox; each covers a different interleaving (abort between runs vs
 mid-run). Without a comment pair this reads like removable duplication.
-
-### 7. Untested leftover branch — dies with flag 1
-
-Load-bearing (a message in the pump-handoff window only runs because of
-it), coverage-justified, no deterministic test. The resident loop
-removes the window entirely; otherwise stage a slow-tool test.
 
 ### 8. Terminal events are not terminal — RULING WANTED
 
@@ -129,14 +85,6 @@ Windows reads a blocked store path as empty (`NotFound`), Linux errors
 
 Direct `pump()` calls on an empty mailbox return a vacuous `Completed`.
 `prompt_with` cannot hit it. Document, or make it unrepresentable.
-
-### 12. Rapid-message batching is scheduler-nondeterministic — FIX, cheap
-
-Two quick messages may batch into one run or form two, depending on
-pump-vs-actor scheduling. No-loss holds, but tests assert weakly and
-scripts get no guarantee. Fix: when work arrives while idle, drain
-already-queued commands before starting the pump — pipelined messages
-then always batch. Recommendation: do it.
 
 ### 13. The protocol borrows engine types — RULING WANTED
 
@@ -190,5 +138,34 @@ in AGENTS.md), or pin both.
 
 ## Resolved
 
-(none yet — flags move here with their decision and the commit that
-implemented it)
+- **1 — Resident loop** (supersedes 4, 5, 7, 12): one worker task owns
+  the `Session` exclusively and forever — `loop { wait for work-signal /
+  shutdown / receiver-dropped; pump to quiescence inline }`. Message and
+  abort act directly on the shared leaves (mailbox + cancel token); the
+  only intent that must preempt mid-run is abort, and it bypasses the
+  queue by nature. Ownership never moves, so the handoff window, the
+  `Option` dance, and the leftover branch do not exist. Evidence:
+  codex's core is the same shape (one long-lived submission loop;
+  steering = per-turn queue drained at model roundtrips; interrupt =
+  CancellationToken raced at every await), while claurst — the
+  ownership-handoff alternative — carries handoff-shaped scars (a
+  documented cancel-token re-arm race, partial assistant text lost on
+  mid-stream cancel, dead in-loop steering plumbing that rotted because
+  no single owner executed it). Deliberately NOT adopted from codex:
+  `Arc<Mutex<Session>>` + per-turn tasks (their interrupt routes
+  through the loop; ours does not need to). Standing rule: mid-run
+  capabilities enter as shared leaves (mailbox, token, future
+  permission oneshots), never as session interior mutability.
+- **4 — Termination**: explicit `close_commands()` token + dropping the
+  frontend's whole handle (the worker watches the event receiver). The
+  redundant channel-close arm is gone. In-flight runs finish either way.
+- **5 — Close is not a barrier**: pushes are synchronous, so everything
+  sent before `close_commands()` is already queued when the worker sees
+  the token; the worker drains it before winding down. The contract is
+  documented on `close_commands`.
+- **7 — Untested leftover branch**: deleted structurally (see 1).
+- **12 — Rapid-message batching**: deterministic under single-threaded
+  schedulers (pushes are synchronous and the worker wakes only when the
+  caller yields — tests and scripts get exact batching); on multi-thread
+  runtimes a push racing the drain may steer instead. The guarantee is
+  no-loss + order; exact batching where it is observable.

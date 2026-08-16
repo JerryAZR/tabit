@@ -149,16 +149,12 @@ named, the classification applies to its current lcov-uncovered ranges.
      (parent validation at parse time resolves every link) and
      `Session::rewind`'s boundary-parent-off-chain arm (the boundary comes
      from the chain, so its parent is an ancestor on it).
-   - Actor defensive arms in `endpoint.rs`: the poison-recovery `lock`
-     (same policy as `recorder.rs`); the commands-channel `None` arm
-     (every current caller closes via the shutdown token while the
-     handle itself holds a sender, so the all-senders-dropped path
-     cannot be observed through the public API); the
-     leftover-message re-pump branch after a pump returns (the pump's
-     own loop already drains the mailbox, so the branch is belt-and-
-     braces for a message landing in the exact return window); and
-     `start_pump`'s `Option::take` guard (both call sites check
-     `session.is_some()` first).
+   - The resident worker's `event_tx.closed()` arm in `endpoint.rs`
+     (frontend dropped its entire handle): observable only by dropping
+     the receiver the test itself reads events from — nothing remains
+     to assert through. Its sibling termination paths (explicit
+     `close_commands`, including the queued-work-honoring re-check)
+     are exercised by every `drain()`-based test.
    - `json.rs`'s serialize-failure `continue` in `write_loop`:
      `ServerFrame` contains only strings/numbers/serde-derived types,
      so `serde_json::to_string` cannot fail (no non-string map keys, no

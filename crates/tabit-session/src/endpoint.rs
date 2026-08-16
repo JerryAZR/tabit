@@ -1,18 +1,18 @@
-//! The session actor: the backend half of the frontend protocol. One
-//! task owns the [`Session`] (single owner, no session locks); commands
-//! arrive on an unbounded channel, stamped events leave on one. When a
-//! message arrives idle, the actor moves the session into a spawned pump
-//! task — so commands keep being processed while the run is in flight: a
-//! message submitted mid-run steers it through the mailbox, and abort
-//! cancels it and discards the queue.
+//! The session worker: the backend half of the frontend protocol. One
+//! resident task owns the [`Session`] exclusively and forever —
+//! ownership never moves, so there is no handoff window to patch. The
+//! worker waits for mailbox work (or shutdown) and pumps to quiescence
+//! inline. The two capabilities that must act while a run is in flight
+//! are shared leaves, so they never need the worker's attention:
+//! a message submitted mid-run steers it through the mailbox (the
+//! engine drains at turn boundaries), and abort preempts through the
+//! cancel token.
 //!
-//! Termination contract: once every command sender is closed
-//! ([`SessionHandle::close_commands`] or the last
-//! [`SessionHandle::command_link`] dropped), the actor finishes any
-//! in-flight pump, captures [`SessionHandle::closing_stats`], and the
-//! event stream ends.
+//! Termination: [`SessionHandle::close_commands`] (explicit) or dropping
+//! the frontend's entire handle (the event receiver goes with it).
+//! Either way the in-flight run finishes — accepted messages run —
+//! closing stats are captured, and the event stream ends.
 
-use crate::events::SessionEvent;
 use crate::lock::lock;
 use crate::model::ModelSelection;
 use crate::protocol::{EventFrame, SessionCommand, StreamId};
@@ -38,34 +38,42 @@ pub struct SessionInfo {
 /// [`SessionHandle::command_link`].
 pub struct SessionHandle {
     info: SessionInfo,
-    commands: mpsc::UnboundedSender<SessionCommand>,
+    mailbox: MailboxHandle,
+    abort: AbortHandle,
     events: mpsc::UnboundedReceiver<EventFrame>,
     shutdown: CancellationToken,
     closing_stats: Arc<Mutex<Option<SessionStats>>>,
 }
 
-/// A cheap clone of the handle's command sender, for a thread that only
-/// submits (a transport edge's reader). Dropping the last link (or
-/// [`SessionHandle::close_commands`]) starts the termination contract.
+/// A cheap clone for threads that only submit commands (a transport
+/// edge's reader). Commands act directly on the shared leaves: a
+/// message queues in the mailbox, abort cancels the run in flight and
+/// discards the queue.
 #[derive(Clone)]
 pub struct SessionCommandLink {
-    commands: mpsc::UnboundedSender<SessionCommand>,
+    mailbox: MailboxHandle,
+    abort: AbortHandle,
 }
 
 impl SessionCommandLink {
     /// Submit a command. Fire-and-forget: outcomes arrive as events.
-    /// Sending after the session ended is a no-op.
+    /// Sends after the session has wound down are no-ops.
     pub fn send(&self, command: SessionCommand) {
-        // The actor is gone only when the whole session is; there is no
-        // per-command failure to report.
-        let _ = self.commands.send(command);
+        match command {
+            SessionCommand::Message { text } => self.mailbox.submit(text),
+            SessionCommand::Abort => {
+                self.abort.abort();
+                self.mailbox.clear();
+            }
+        }
     }
 }
 
 impl SessionHandle {
-    /// Hand `session` to its actor and get the frontend handle back. Must
-    /// be called inside a tokio runtime (the actor is spawned here).
-    pub fn spawn(session: Session) -> Self {
+    /// Hand `session` to its resident worker and get the frontend handle
+    /// back. Must be called inside a tokio runtime (the worker is
+    /// spawned here).
+    pub fn spawn(mut session: Session) -> Self {
         let info = SessionInfo {
             session_id: session.id().to_string(),
             session_path: session.path().display().to_string(),
@@ -73,167 +81,109 @@ impl SessionHandle {
         };
         let mailbox = session.mailbox_handle();
         let abort = session.abort_handle();
-        let (command_tx, command_rx) = mpsc::unbounded_channel();
-        let (event_tx, event_rx) = mpsc::unbounded_channel();
-        let (session_tx, session_rx) = mpsc::channel(1);
+        let (event_tx, event_rx) = mpsc::unbounded_channel::<EventFrame>();
         let shutdown = CancellationToken::new();
         let closing_stats = Arc::new(Mutex::new(None));
-        tokio::spawn(
-            Actor {
-                session: Some(session),
-                mailbox,
-                abort,
-                events: event_tx,
-                commands: command_rx,
-                session_return: session_rx,
-                session_tx,
-                shutdown: shutdown.clone(),
-                closing_stats: closing_stats.clone(),
+        let worker_shutdown = shutdown.clone();
+        let worker_stats = closing_stats.clone();
+        let worker_mailbox = mailbox.clone();
+        tokio::spawn(async move {
+            // The resident worker. Ownership never moves: idle is the
+            // wait below, running is the pump call — two positions of
+            // one loop, not two tasks.
+            loop {
+                if !worker_mailbox.is_empty() {
+                    session
+                        .pump(&mut |event| {
+                            // The receiver is gone only when the frontend
+                            // is; there is no one left to tell.
+                            let _ = event_tx.send(EventFrame {
+                                stream: StreamId::main(),
+                                event,
+                            });
+                        })
+                        .await;
+                    continue;
+                }
+                tokio::select! {
+                    biased;
+                    _ = worker_shutdown.cancelled() => {
+                        // Close is not a barrier: pushes are synchronous,
+                        // so anything sent before closing is already
+                        // queued — run it before winding down. (Pushes
+                        // that race the wind-down simply run too; nothing
+                        // is lost.)
+                        if !worker_mailbox.is_empty() {
+                            continue;
+                        }
+                        break;
+                    }
+                    // The frontend dropped its whole handle: the run in
+                    // flight finishes (the log stays durable), then stop.
+                    _ = event_tx.closed() => break,
+                    _ = worker_mailbox.work_signal().notified() => {}
+                }
             }
-            .run(),
-        );
+            if let Ok(stats) = session.stats() {
+                *lock(&worker_stats) = Some(stats);
+            }
+            // `event_tx` drops here: the stream ends.
+        });
         Self {
             info,
-            commands: command_tx,
+            mailbox,
+            abort,
             events: event_rx,
             shutdown,
             closing_stats,
         }
     }
 
-    /// The session facts captured when the actor took over.
+    /// The session facts captured when the worker took over.
     pub fn info(&self) -> &SessionInfo {
         &self.info
     }
 
     /// Submit a user message: steers the run in flight or starts one.
     pub fn message(&self, text: impl Into<String>) {
-        self.command_link()
-            .send(SessionCommand::Message { text: text.into() });
+        self.mailbox.submit(text);
     }
 
     /// Stop: abort the run in flight and discard queued messages.
+    /// Aborting while idle is a no-op (including on anything queued —
+    /// the queue is discarded with it).
     pub fn abort(&self) {
-        self.command_link().send(SessionCommand::Abort);
+        self.abort.abort();
+        self.mailbox.clear();
     }
 
-    /// A cloneable sender for threads that only submit commands.
+    /// A cloneable submitter for threads that only send commands.
     pub fn command_link(&self) -> SessionCommandLink {
         SessionCommandLink {
-            commands: self.commands.clone(),
+            mailbox: self.mailbox.clone(),
+            abort: self.abort.clone(),
         }
     }
 
-    /// Close the command side — the actor finishes any in-flight pump,
-    /// captures closing stats, and the event stream ends. Later sends
-    /// from surviving links are no-ops.
+    /// Close the session's command side. The worker finishes any
+    /// in-flight run, then — close is not a barrier — runs everything
+    /// already queued, captures [`SessionHandle::closing_stats`], and
+    /// the event stream ends. Sends from surviving links that race the
+    /// wind-down still run; once the stream has ended they are no-ops.
     pub fn close_commands(&mut self) {
         self.shutdown.cancel();
     }
 
-    /// The next stamped event, or `None` once the actor has wound down.
+    /// The next stamped event, or `None` once the worker has wound down.
     pub async fn next_event(&mut self) -> Option<EventFrame> {
         self.events.recv().await
     }
 
-    /// Session totals captured at actor wind-down, for callers that want
-    /// a closing summary (print mode's footer). `None` until the event
-    /// stream has ended.
+    /// Session totals captured at worker wind-down, for callers that
+    /// want a closing summary (print mode's footer). `None` until the
+    /// event stream has ended.
     pub fn closing_stats(&self) -> Option<SessionStats> {
         lock(&self.closing_stats).clone()
-    }
-}
-
-/// The backend actor: owns the session between pumps, and the pump task
-/// owns it during one drain-to-quiescence.
-struct Actor {
-    session: Option<Session>,
-    mailbox: MailboxHandle,
-    abort: AbortHandle,
-    events: mpsc::UnboundedSender<EventFrame>,
-    commands: mpsc::UnboundedReceiver<SessionCommand>,
-    session_return: mpsc::Receiver<Session>,
-    session_tx: mpsc::Sender<Session>,
-    shutdown: CancellationToken,
-    closing_stats: Arc<Mutex<Option<SessionStats>>>,
-}
-
-impl Actor {
-    async fn run(mut self) {
-        let mut open = true;
-        // Exit when commands are closed AND the session is back (the
-        // in-flight pump is allowed to finish — accepted messages run).
-        while open || self.session.is_none() {
-            tokio::select! {
-                biased;
-                _ = self.shutdown.cancelled(), if open => {
-                    open = false;
-                    // Commands already queued were accepted from the
-                    // caller's perspective; honor them before winding
-                    // down.
-                    while let Ok(command) = self.commands.try_recv() {
-                        self.handle_command(command);
-                    }
-                }
-                command = self.commands.recv(), if open => match command {
-                    None => open = false,
-                    Some(command) => self.handle_command(command),
-                },
-                returned = self.session_return.recv() => {
-                    self.session = returned;
-                    // Leftovers (a message that missed the last drain of a
-                    // failed run) get their pump; usually the mailbox is
-                    // empty here.
-                    if open && self.session.is_some() && !self.mailbox.is_empty() {
-                        self.start_pump();
-                    }
-                }
-            }
-        }
-        if let Some(session) = &self.session
-            && let Ok(stats) = session.stats()
-        {
-            *lock(&self.closing_stats) = Some(stats);
-        }
-        // `self.events` drops here: the stream ends.
-    }
-
-    fn handle_command(&mut self, command: SessionCommand) {
-        match command {
-            SessionCommand::Message { text } => {
-                self.mailbox.submit(text);
-                if self.session.is_some() {
-                    self.start_pump();
-                }
-            }
-            SessionCommand::Abort => {
-                self.abort.abort();
-                self.mailbox.clear();
-            }
-        }
-    }
-
-    /// Move the session into a pump task; it comes back on
-    /// `session_return` when the mailbox is drained.
-    fn start_pump(&mut self) {
-        let Some(mut session) = self.session.take() else {
-            return;
-        };
-        let events = self.events.clone();
-        let session_tx = self.session_tx.clone();
-        tokio::spawn(async move {
-            session
-                .pump(&mut |event: SessionEvent| {
-                    // The receiver is gone only when the frontend is;
-                    // there is no one left to tell.
-                    let _ = events.send(EventFrame {
-                        stream: StreamId::main(),
-                        event,
-                    });
-                })
-                .await;
-            let _ = session_tx.send(session).await;
-        });
     }
 }
 

@@ -265,11 +265,16 @@ impl SessionBuilder {
 #[derive(Clone, Default)]
 pub(crate) struct Mailbox {
     queue: std::sync::Arc<std::sync::Mutex<std::collections::VecDeque<Message>>>,
+    /// Wakes the resident worker when work arrives. One permit covers any
+    /// number of pushes; the queue itself is the source of truth — the
+    /// signal exists only so an empty queue can be waited on.
+    work: std::sync::Arc<tokio::sync::Notify>,
 }
 
 impl Mailbox {
     pub(crate) fn push(&self, message: Message) {
         lock(&self.queue).push_back(message);
+        self.work.notify_one();
     }
 
     pub(crate) fn is_empty(&self) -> bool {
@@ -282,6 +287,12 @@ impl Mailbox {
 
     fn drain_all(&self) -> Vec<Message> {
         lock(&self.queue).drain(..).collect()
+    }
+
+    /// The work signal the resident worker waits on. A push before the
+    /// wait stores a permit, so no wakeup can be lost.
+    pub(crate) fn work_signal(&self) -> &tokio::sync::Notify {
+        &self.work
     }
 }
 
@@ -309,6 +320,11 @@ impl MailboxHandle {
     /// Discard everything queued (abort semantics).
     pub(crate) fn clear(&self) {
         self.mailbox.clear();
+    }
+
+    /// The work signal the resident worker waits on.
+    pub(crate) fn work_signal(&self) -> &tokio::sync::Notify {
+        self.mailbox.work_signal()
     }
 }
 

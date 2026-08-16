@@ -151,13 +151,36 @@ async fn two_rapid_messages_both_land_in_order() {
     handle.message("second");
     let frames = drain(&mut handle).await;
 
-    // Both accepted, in submit order (the mailbox is FIFO). Whether they
-    // were drained as one batch (one run) or the second followed the
-    // first run depends on when the pump task picked them up — either
-    // way nothing is lost, so the assertion is the invariant: both
-    // messages acknowledged, at least one completion.
+    // Rapid messages deterministically batch: pushes are synchronous
+    // and the worker only wakes once the caller yields, so both land in
+    // one drain — one run, both messages as its opening input, one
+    // completion. (On a multi-thread runtime a push racing the worker's
+    // drain may steer instead; the guarantee is no-loss and order, and
+    // single-threaded schedulers — tests, scripts — get exact batching.)
     assert_eq!(user_texts(&frames), vec!["first", "second"]);
-    assert!(!finished_outputs(&frames).is_empty());
+    assert_eq!(finished_outputs(&frames), vec!["a"]);
+    std::fs::remove_dir_all(store.dir()).ok();
+}
+
+#[tokio::test]
+async fn abort_while_idle_discards_queued_messages() {
+    let store = temp_store("endpoint-abort-idle");
+    let session = Factory::new(vec![text_turn("never")])
+        .into_builder(store.clone())
+        .create("C:/w")
+        .expect("session");
+    let mut handle = SessionHandle::spawn(session);
+
+    // Queued while idle (the worker cannot have started: no await yet),
+    // then stopped before any run: the queue goes with it.
+    handle.message("queued one");
+    handle.message("queued two");
+    handle.abort();
+    let frames = drain(&mut handle).await;
+    assert!(
+        frames.is_empty(),
+        "no run ever happened and nothing was emitted: {frames:?}"
+    );
     std::fs::remove_dir_all(store.dir()).ok();
 }
 
@@ -180,9 +203,14 @@ async fn abort_mid_run_discards_the_queue_and_ends_the_run() {
             SessionEvent::ToolCall { .. } if !sent => {
                 // Queued behind the run, then stopped — while the tool is
                 // still executing, so the abort provably lands mid-run.
+                // Both through a link, covering the link's command
+                // dispatch.
                 sent = true;
-                handle.message("queued behind");
-                handle.abort();
+                let link = handle.command_link();
+                link.send(SessionCommand::Message {
+                    text: "queued behind".to_string(),
+                });
+                link.send(SessionCommand::Abort);
             }
             SessionEvent::RunAborted { .. } => saw_aborted = true,
             SessionEvent::UserMessage { text } if text != "run the tool" => queued += 1,
