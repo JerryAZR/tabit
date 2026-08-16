@@ -2,10 +2,11 @@
 //!
 //! One session is one JSONL file. The first line is a
 //! [`SessionHeader`]; every following line is a [`SessionEntry`] whose
-//! `parent_id` links it into a tree rooted at the header (in practice the
-//! log is appended linearly, so the tree is a path; the link exists so
-//! rewinding to an earlier entry — moving the leaf — stays possible without
-//! a format change).
+//! `parent_id` links it into a tree rooted at the header. Appends always
+//! extend the current leaf, so a never-rewound session is one path;
+//! rewinding moves the leaf to an earlier entry and the next append starts
+//! a branch. Abandoned branches stay in the file, reachable through their
+//! parent links.
 //!
 //! Unknown `kind` tags fail deserialization loudly: the file was written by
 //! a newer tabit, and silently dropping records would corrupt the
@@ -106,6 +107,17 @@ pub enum EntryKind {
     /// the abort interrupted are repaired on the next open, exactly like a
     /// crash. Not part of model context.
     Aborted,
+    /// The leaf moved to the entry `to` — a rewind (branch point). The
+    /// marker's own parent records where the previous chain ended, and
+    /// entries appended after it extend from `to` instead. Bookkeeping
+    /// only: not part of model context. A marker as the final line makes
+    /// the rewind durable even when nothing is appended after it.
+    Rewound {
+        /// The entry the active chain now ends at; `None` branches from
+        /// the root (an empty chain).
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        to: Option<String>,
+    },
     /// A human-facing bookmark. Reserved; not part of model context.
     Label {
         /// Bookmark name.

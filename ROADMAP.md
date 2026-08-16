@@ -79,6 +79,17 @@ The application-level conversation layer pi builds over its agent loop:
 - Persistence: session log format (JSONL event log first — replayable,
   diff-friendly; sqlite backend later if needed).
 - Session listing/resume across runs.
+- **Rewind/branch shipped**: the JSONL log is a parent-linked tree; a
+  rewind appends a `rewound` marker (durable even with no follow-up
+  append) and moves the leaf, so the next prompt branches. Library level
+  branches from any entry (`Session::rewind_to_entry`) with the dangling
+  repair covering mid-batch points; the user surface
+  (`Session::rewind(n)`, CLI `--rewind <n>`) targets user-message
+  boundaries (prompts and steers alike). Projection, model hints, and
+  stats all follow the active chain; rewinding past a model switch
+  re-adopts the chain's model. Interactive branch browsing is a TUI
+  feature. The CLI is now TUI-shaped: `-p <PROMPT>` selects print mode,
+  `--rewind` too, bare `tabit` errors loudly until the TUI exists.
 - **Model registry shipped** (`tabit-session::ModelRegistry`): the single
   construction site for models — cached provider HTTP clients (switching
   models reuses the connection pool) and the default-selection chain:

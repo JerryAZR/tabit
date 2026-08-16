@@ -792,3 +792,412 @@ async fn abort_while_idle_does_nothing() -> Result<(), SessionError> {
     std::fs::remove_dir_all(store.dir()).ok();
     Ok(())
 }
+
+#[tokio::test]
+async fn rewind_drops_the_last_turn_and_branches_the_next_prompt() -> Result<(), SessionError> {
+    let store = temp_store("rewind");
+    let factory = Factory::new(vec![
+        text_turn("first answer"),
+        text_turn("second answer"),
+        text_turn("revised answer"),
+    ]);
+    let mut session = factory.clone().into_builder(store.clone()).create("C:/w")?;
+    session.prompt("question one").await.expect("run one");
+    session.prompt("question two").await.expect("run two");
+
+    let rewind = session.rewind(1).expect("rewind");
+    assert_eq!(rewind.dropped, 1);
+    assert_eq!(
+        user_messages(session.context()),
+        vec!["question one"],
+        "the second turn left the chain"
+    );
+
+    // The marker is the last line; the dropped entries stay in the file,
+    // off-chain but present.
+    let loaded = store.open_path(session.path()).expect("reload");
+    assert!(matches!(
+        loaded.entries.last().map(|e| &e.kind),
+        Some(EntryKind::Rewound { .. })
+    ));
+    assert_eq!(loaded.entries.len(), 6, "nothing was deleted");
+    assert_eq!(loaded.chain.len(), 3, "model change + first turn only");
+    let first_answer_id = loaded.entries[2].id.clone();
+
+    // The next prompt branches from the branch point.
+    session
+        .prompt("question two, revised")
+        .await
+        .expect("run three");
+    let loaded = store
+        .open_path(session.path())
+        .expect("reload after branch");
+    let branched = loaded
+        .entries
+        .iter()
+        .rev()
+        .find(|entry| matches!(entry.kind, EntryKind::UserMessage { .. }))
+        .expect("the new user message");
+    assert_eq!(
+        branched.parent_id.as_deref(),
+        Some(first_answer_id.as_str()),
+        "the branch attaches before the dropped turn"
+    );
+    assert_eq!(
+        user_messages(session.context()),
+        vec!["question one", "question two, revised"]
+    );
+    assert_eq!(
+        assistant_texts(session.context()),
+        vec!["first answer", "revised answer"]
+    );
+    std::fs::remove_dir_all(store.dir()).ok();
+    Ok(())
+}
+
+#[tokio::test]
+async fn rewind_rejects_zero_and_more_than_the_chain_holds() -> Result<(), SessionError> {
+    let store = temp_store("rewind-errors");
+    let factory = Factory::new(vec![text_turn("answer")]);
+    let mut session = factory.into_builder(store.clone()).create("C:/w")?;
+    session.prompt("only question").await.expect("run");
+
+    let zero = session.rewind(0).expect_err("zero is not a rewind");
+    assert!(zero.to_string().contains("at least 1"), "{zero}");
+    let too_far = session.rewind(2).expect_err("only one message to drop");
+    assert!(too_far.to_string().contains("holds 1"), "{too_far}");
+
+    // Nothing was written by the failed attempts.
+    let loaded = store.open_path(session.path()).expect("reload");
+    assert!(matches!(
+        loaded.entries.last().map(|e| &e.kind),
+        Some(EntryKind::AssistantMessage { .. })
+    ));
+    std::fs::remove_dir_all(store.dir()).ok();
+    Ok(())
+}
+
+#[tokio::test]
+async fn rewind_past_a_model_switch_adopts_the_chains_model() -> Result<(), SessionError> {
+    let store = temp_store("rewind-model");
+    let factory = Factory::new(vec![text_turn("answer one"), text_turn("answer two")]);
+    let mut session = factory.clone().into_builder(store.clone()).create("C:/w")?;
+    session.prompt("question one").await.expect("run one");
+    session.prompt("question two").await.expect("run two");
+    // The switch lands after the last prompt, so rewinding one message
+    // drops it with the turn.
+    session
+        .set_model(ModelSelection::new("q", "m2"))
+        .expect("switch");
+    assert_eq!(session.selection().model, "m2");
+
+    // The chain's model is p/m again; the session adopts it without
+    // recording a duplicate change — the chain already says it.
+    session.rewind(1).expect("rewind");
+    assert_eq!(session.selection().model, "m");
+    let requested = factory.requested.lock().expect("requested").clone();
+    assert_eq!(
+        requested,
+        vec![
+            ("p".to_string(), "m".to_string()),
+            ("q".to_string(), "m2".to_string()),
+            ("p".to_string(), "m".to_string()), // the rewind rebuild
+        ]
+    );
+    let loaded = store.open_path(session.path()).expect("reload");
+    let model_changes = loaded
+        .chain
+        .iter()
+        .filter(|entry| matches!(entry.kind, EntryKind::ModelChange { .. }))
+        .count();
+    assert_eq!(model_changes, 1, "the switch left the chain with the turn");
+    std::fs::remove_dir_all(store.dir()).ok();
+    Ok(())
+}
+
+#[tokio::test]
+async fn promptless_rewind_survives_reopen() -> Result<(), SessionError> {
+    let store = temp_store("rewind-reopen");
+    let factory = Factory::new(vec![text_turn("a"), text_turn("b")]);
+    let path = {
+        let mut session = factory.into_builder(store.clone()).create("C:/w")?;
+        session.prompt("question one").await.expect("run one");
+        session.prompt("question two").await.expect("run two");
+        session.rewind(1).expect("rewind");
+        session.path().to_path_buf()
+    };
+
+    let (session, _report) = Factory::new(vec![text_turn("continued")])
+        .into_builder(store.clone())
+        .resume(&path)
+        .expect("resume");
+    assert_eq!(
+        user_messages(session.context()),
+        vec!["question one"],
+        "the marker alone carried the rewind"
+    );
+
+    let mut session = session;
+    session.prompt("question two, again").await.expect("run");
+    let loaded = store.open_path(&path).expect("reload");
+    let chain_texts = user_messages_from_entries(&loaded.chain);
+    assert_eq!(chain_texts, vec!["question one", "question two, again"]);
+    std::fs::remove_dir_all(store.dir()).ok();
+    Ok(())
+}
+
+fn user_messages_from_entries(entries: &[crate::entry::SessionEntry]) -> Vec<String> {
+    entries
+        .iter()
+        .filter_map(|entry| match &entry.kind {
+            EntryKind::UserMessage {
+                message: Message::User { content },
+            } => Some(
+                content
+                    .iter()
+                    .filter_map(|part| match part {
+                        UserContent::Text(text) => Some(text.text.clone()),
+                        _ => None,
+                    })
+                    .collect(),
+            ),
+            _ => None,
+        })
+        .collect()
+}
+
+#[tokio::test]
+async fn rewind_targets_steers_like_prompts() -> Result<(), SessionError> {
+    let store = temp_store("rewind-steer");
+    // Hand-written log whose last user message is a mid-run steer: a
+    // rewind of one message drops the steer — "un-send it".
+    let mut writer = store.create("C:/w").expect("create");
+    writer
+        .append(EntryKind::UserMessage {
+            message: Message::user("question"),
+        })
+        .expect("user");
+    writer
+        .append(EntryKind::AssistantMessage {
+            message: Message::Assistant {
+                id: None,
+                content: OneOrMany::one(AssistantContent::text("answer")),
+            },
+            usage: Usage::default(),
+        })
+        .expect("assistant");
+    writer
+        .append(EntryKind::UserMessage {
+            message: Message::user("actually, do it differently"),
+        })
+        .expect("steer");
+    let path = writer.path().to_path_buf();
+
+    let (mut session, _report) = Factory::new(vec![text_turn("ok")])
+        .into_builder(store.clone())
+        .resume(&path)
+        .expect("resume");
+    let rewind = session.rewind(1).expect("rewind");
+    assert_eq!(rewind.dropped, 1);
+    assert_eq!(
+        user_messages(session.context()),
+        vec!["question"],
+        "the steer was dropped like any user message"
+    );
+    std::fs::remove_dir_all(store.dir()).ok();
+    Ok(())
+}
+
+#[tokio::test]
+async fn rewinding_mid_batch_repairs_only_the_unanswered_call() -> Result<(), SessionError> {
+    let store = temp_store("rewind-midbatch");
+    // Hand-written log with a complete two-call roundtrip; rewinding to
+    // the FIRST result entry branches mid-batch — the second call dangles
+    // and must be repaired on the new chain.
+    let mut writer = store.create("C:/w").expect("create");
+    writer
+        .append(EntryKind::UserMessage {
+            message: Message::user("go"),
+        })
+        .expect("user");
+    writer
+        .append(EntryKind::AssistantMessage {
+            message: Message::Assistant {
+                id: None,
+                content: OneOrMany::many(vec![
+                    AssistantContent::ToolCall(rig_core::message::ToolCall::new(
+                        "c1".to_string(),
+                        rig_core::message::ToolFunction::new("echo".to_string(), json!({})),
+                    )),
+                    AssistantContent::ToolCall(rig_core::message::ToolCall::new(
+                        "c2".to_string(),
+                        rig_core::message::ToolFunction::new("echo".to_string(), json!({})),
+                    )),
+                ])
+                .expect("two calls"),
+            },
+            usage: Usage::default(),
+        })
+        .expect("assistant");
+    let first_result = writer
+        .append(EntryKind::ToolResult {
+            result: rig_core::message::ToolResult {
+                id: "c1".to_string(),
+                call_id: None,
+                content: OneOrMany::one(rig_core::message::ToolResultContent::text("one")),
+            },
+        })
+        .expect("first result");
+    writer
+        .append(EntryKind::ToolResult {
+            result: rig_core::message::ToolResult {
+                id: "c2".to_string(),
+                call_id: None,
+                content: OneOrMany::one(rig_core::message::ToolResultContent::text("two")),
+            },
+        })
+        .expect("second result");
+    let path = writer.path().to_path_buf();
+
+    let (mut session, _report) = Factory::new(vec![text_turn("ok")])
+        .into_builder(store.clone())
+        .resume(&path)
+        .expect("resume");
+
+    let rewind = session
+        .rewind_to_entry(&first_result.id)
+        .expect("rewind to the first result");
+    assert_eq!(rewind.to_entry, first_result.id);
+
+    // The new chain: user, assistant, one user message carrying the real
+    // c1 result plus the synthesized c2 result — balanced again.
+    let context = session.context();
+    assert_eq!(context.len(), 3);
+    let Message::User { content } = &context[2] else {
+        panic!("the trailing batch is one user message");
+    };
+    assert_eq!(content.len(), 2, "the real result and the repair");
+
+    let loaded = store.open_path(&path).expect("reload");
+    let repair = loaded
+        .entries
+        .iter()
+        .rev()
+        .find(|entry| matches!(&entry.kind, EntryKind::ToolResult { result } if result.id == "c2"))
+        .expect("the synthesized repair");
+    assert_eq!(
+        repair.parent_id.as_deref(),
+        Some(first_result.id.as_str()),
+        "the repair lands on the new chain"
+    );
+    std::fs::remove_dir_all(store.dir()).ok();
+    Ok(())
+}
+
+#[tokio::test]
+async fn rewinding_to_an_unknown_entry_changes_nothing() -> Result<(), SessionError> {
+    let store = temp_store("rewind-unknown");
+    let factory = Factory::new(vec![text_turn("answer")]);
+    let mut session = factory.into_builder(store.clone()).create("C:/w")?;
+    session.prompt("question").await.expect("run");
+
+    let error = session
+        .rewind_to_entry("no-such-entry")
+        .expect_err("unknown");
+    assert!(error.to_string().contains("no entry"), "{error}");
+    let loaded = store.open_path(session.path()).expect("reload");
+    assert_eq!(loaded.entries.len(), 3, "nothing was written");
+    std::fs::remove_dir_all(store.dir()).ok();
+    Ok(())
+}
+
+#[tokio::test]
+async fn rewind_to_the_root_records_the_current_model() -> Result<(), SessionError> {
+    let store = temp_store("rewind-root");
+    // Hand-written log whose first entry is a user message with no
+    // parent (create always records a model change first, so only a
+    // hand-written log reaches a root branch).
+    let mut writer = store.create("C:/w").expect("create");
+    writer
+        .append(EntryKind::UserMessage {
+            message: Message::user("question"),
+        })
+        .expect("user");
+    writer
+        .append(EntryKind::AssistantMessage {
+            message: Message::Assistant {
+                id: None,
+                content: OneOrMany::one(AssistantContent::text("answer")),
+            },
+            usage: Usage::default(),
+        })
+        .expect("assistant");
+    let path = writer.path().to_path_buf();
+    let mut session = Factory::new(vec![text_turn("fresh answer"), text_turn("next")])
+        .into_builder(store.clone())
+        .resume(&path)
+        .expect("resume")
+        .0;
+
+    // Branch from the root: the chain empties, so the current selection
+    // becomes durable at the new tip, exactly like resume on a bare log.
+    let rewind = session.rewind(1).expect("rewind");
+    assert_eq!(rewind.to_entry, "");
+    assert!(session.context().is_empty());
+    let loaded = store.open_path(&path).expect("reload");
+    assert!(matches!(
+        loaded.entries.last().map(|e| &e.kind),
+        Some(EntryKind::ModelChange { model, .. }) if model == "m"
+    ));
+    assert_eq!(loaded.chain.len(), 1);
+
+    // The session is usable from the emptied chain.
+    session.prompt("fresh start").await.expect("run");
+    assert_eq!(user_messages(session.context()), vec!["fresh start"]);
+    std::fs::remove_dir_all(store.dir()).ok();
+    Ok(())
+}
+
+#[tokio::test]
+async fn rewind_fails_loudly_when_the_chains_model_left_the_config() -> Result<(), SessionError> {
+    let store = temp_store("rewind-ghost-model");
+    // The chain's only model change names a provider the config no longer
+    // carries; adopting it must fail before anything is written.
+    let mut writer = store.create("C:/w").expect("create");
+    writer
+        .append(EntryKind::ModelChange {
+            provider: "ghost".to_string(),
+            model: "gone".to_string(),
+            thinking_level: None,
+        })
+        .expect("model change");
+    writer
+        .append(EntryKind::UserMessage {
+            message: Message::user("question"),
+        })
+        .expect("user");
+    writer
+        .append(EntryKind::AssistantMessage {
+            message: Message::Assistant {
+                id: None,
+                content: OneOrMany::one(AssistantContent::text("answer")),
+            },
+            usage: Usage::default(),
+        })
+        .expect("assistant");
+    let path = writer.path().to_path_buf();
+    let entries_before = store.open_path(&path).expect("reload").entries.len();
+
+    let (mut session, _report) = Factory::new(vec![text_turn("ok")])
+        .into_builder(store.clone())
+        .resume(&path)
+        .expect("resume");
+    let error = session.rewind(1).expect_err("ghost model");
+    assert!(error.to_string().contains("ghost"), "{error}");
+    let loaded = store.open_path(&path).expect("reload");
+    // Resume itself appended its model change; the failed rewind added
+    // nothing on top.
+    assert_eq!(loaded.entries.len(), entries_before + 1);
+    std::fs::remove_dir_all(store.dir()).ok();
+    Ok(())
+}

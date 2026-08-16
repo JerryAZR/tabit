@@ -10,17 +10,20 @@
         clippy::unwrap_used
     )
 )]
-//! `tabit` — a minimal coding agent, print mode.
+//! `tabit` — a minimal coding agent.
 //!
-//! One prompt in, one outer loop out: events print as they happen, the
-//! session is persisted project-locally, and the printed session path
-//! resumes the conversation later.
+//! Print mode is the only mode today: one prompt in, one outer loop out,
+//! events print as they happen, the session persists project-locally, and
+//! the printed session path resumes the conversation later. Interactive
+//! TUI mode — the eventual default, like every other agent — is not
+//! implemented yet.
 //!
 //! ```text
-//! tabit "list the rust files in this project"     # new session
-//! tabit --continue "now count lines in each"      # resume the newest
-//! tabit --session <path> "what did we conclude?"  # resume a specific one
-//! tabit --list                                    # show this project's sessions
+//! tabit -p "list the rust files in this project"     # new session
+//! tabit --continue -p "now count lines in each"      # resume the newest
+//! tabit --session <path> -p "what did we conclude?"  # resume a specific one
+//! tabit --continue --rewind 1                        # rewind, then exit
+//! tabit --list                                       # show this project's sessions
 //! ```
 
 use std::io::Write as _;
@@ -35,19 +38,25 @@ use tabit_tools::{dynamic, dynamic_contextual};
 
 #[derive(Debug)]
 struct Args {
-    prompt: Option<String>,
+    print_prompt: Option<String>,
     session: Option<PathBuf>,
     continue_newest: bool,
     list: bool,
     model: Option<String>,
     max_turns: Option<usize>,
+    rewind: Option<usize>,
 }
 
 const USAGE: &str = "\
-usage: tabit [PROMPT]
-       tabit --continue PROMPT          resume this project's newest session
-       tabit --session <path> PROMPT    resume a specific session file
-       tabit --list                     list this project's sessions
+usage: tabit -p <PROMPT>                  print mode: one prompt, one run
+       tabit --continue -p <PROMPT>       resume this project's newest session
+       tabit --session <path> -p <PROMPT> resume a specific session file
+       tabit --continue --rewind <n>      rewind n user messages, then exit;
+                                         add -p <PROMPT> to branch with it
+       tabit --list                      list this project's sessions
+
+bare `tabit` starts interactive mode — not implemented yet; pass
+-p <PROMPT> until the TUI lands.
 
 Esc aborts the running turn (line-buffered stdin: Esc then Enter).
        tabit --model <model-id|provider/model> select the model for this run
@@ -58,23 +67,43 @@ Esc aborts the running turn (line-buffered stdin: Esc then Enter).
 config: providers.toml / auth.toml under ~/.tabit (override with
         TABIT_CONFIG / TABIT_AUTH); sessions live in <project>/.tabit/sessions";
 
+/// What a parsed command line asks for. `-p` and `--rewind` both select
+/// print mode; interactive mode is the default once the TUI exists.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Mode {
+    List,
+    Print,
+    Interactive,
+}
+
+fn mode_of(args: &Args) -> Mode {
+    if args.list {
+        Mode::List
+    } else if args.print_prompt.is_some() || args.rewind.is_some() {
+        Mode::Print
+    } else {
+        Mode::Interactive
+    }
+}
+
 fn parse_args() -> Result<Args, String> {
     parse_args_from(std::env::args().skip(1))
 }
 
-/// Manual parsing over an injectable iterator (no clap: four flags do not
+/// Manual parsing over an injectable iterator (no clap: five flags do not
 /// justify the dependency); `parse_args_from` is the testable core.
 fn parse_args_from<I>(args: I) -> Result<Args, String>
 where
     I: Iterator<Item = String>,
 {
     let mut parsed = Args {
-        prompt: None,
+        print_prompt: None,
         session: None,
         continue_newest: false,
         list: false,
         model: None,
         max_turns: None,
+        rewind: None,
     };
     let mut it = args;
     while let Some(arg) = it.next() {
@@ -88,6 +117,18 @@ where
             "--session" => {
                 let value = it.next().ok_or("--session needs a path (see --help)")?;
                 parsed.session = Some(PathBuf::from(value));
+            }
+            "-p" | "--print" => {
+                let value = it.next().ok_or("-p needs a prompt (see --help)")?;
+                parsed.print_prompt = Some(value);
+            }
+            "--rewind" => {
+                let value = it.next().ok_or("--rewind needs a number (see --help)")?;
+                parsed.rewind = Some(
+                    value
+                        .parse()
+                        .map_err(|_| format!("--rewind: `{value}` is not a number"))?,
+                );
             }
             "--model" | "-m" => {
                 let value = it
@@ -106,11 +147,10 @@ where
             other if other.starts_with('-') => {
                 return Err(format!("unknown flag `{other}`\n{USAGE}"));
             }
-            prompt => {
-                if parsed.prompt.is_some() {
-                    return Err(format!("two prompts given; expected one\n{USAGE}"));
-                }
-                parsed.prompt = Some(prompt.to_string());
+            positional => {
+                return Err(format!(
+                    "unexpected argument `{positional}` — pass the prompt with -p\n{USAGE}"
+                ));
             }
         }
     }
@@ -244,15 +284,21 @@ fn run() -> Result<(), String> {
     let config = Arc::new(TabitConfig::load_default().map_err(|e| e.to_string())?);
     let auth = Arc::new(AuthConfig::load_default().map_err(|e| e.to_string())?);
 
-    if args.list {
+    if mode_of(&args) == Mode::List {
         let store = SessionStore::project_default();
         return list_sessions(&store);
     }
-
-    let prompt = args
-        .prompt
-        .clone()
-        .ok_or_else(|| format!("no prompt given\n{USAGE}"))?;
+    if mode_of(&args) == Mode::Interactive {
+        return Err(format!(
+            "interactive mode is not implemented yet; pass -p <PROMPT> for print mode\n{USAGE}"
+        ));
+    }
+    if args.rewind.is_some() && args.session.is_none() && !args.continue_newest {
+        return Err(
+            "--rewind rewinds a session: pass --continue or --session <path> (see --help)"
+                .to_string(),
+        );
+    }
 
     // Default-model resolution (registry): an explicit --model wins,
     // then the resumed session's last model, then default_model in
@@ -285,6 +331,18 @@ fn run() -> Result<(), String> {
         .default_selection(explicit, resumed)
         .map_err(|e| e.to_string())?;
     let mut session = assemble_session(&args, registry, selection, resume_target)?;
+
+    if let Some(turns) = args.rewind {
+        let rewind = session.rewind(turns).map_err(|e| e.to_string())?;
+        println!(
+            "[rewound: dropped {} user message(s) — the next prompt branches from before them]",
+            rewind.dropped
+        );
+    }
+    // A promptless rewind is complete: the marker alone carries it.
+    let Some(prompt) = args.print_prompt.clone() else {
+        return Ok(());
+    };
 
     let stats = session.stats().ok();
     if stats
@@ -357,31 +415,54 @@ mod tests {
 
     #[test]
     fn parses_prompt_and_flags() {
-        let parsed = args(&["--continue", "--model", "p/m", "hello world"]).expect("valid");
-        assert_eq!(parsed.prompt.as_deref(), Some("hello world"));
+        let parsed = args(&["--continue", "--model", "p/m", "-p", "hello world"]).expect("valid");
+        assert_eq!(parsed.print_prompt.as_deref(), Some("hello world"));
         assert!(parsed.continue_newest);
         assert_eq!(parsed.model.as_deref(), Some("p/m"));
 
-        let parsed = args(&["--session", "s.jsonl", "--max-turns", "5", "go"]).expect("valid");
+        let parsed =
+            args(&["--session", "s.jsonl", "--max-turns", "5", "-p", "go"]).expect("valid");
         assert_eq!(
             parsed.session.as_deref(),
             Some(std::path::Path::new("s.jsonl"))
         );
         assert_eq!(parsed.max_turns, Some(5));
 
+        let parsed = args(&["--continue", "--rewind", "2"]).expect("valid");
+        assert_eq!(parsed.rewind, Some(2));
+
         let parsed = args(&["--list"]).expect("valid");
         assert!(parsed.list);
     }
 
     #[test]
-    fn rejects_missing_values_unknown_flags_and_double_prompts() {
+    fn rejects_missing_values_unknown_flags_and_positionals() {
         assert!(args(&["--session"]).is_err());
         assert!(args(&["--model"]).is_err());
+        assert!(args(&["-p"]).is_err());
+        assert!(args(&["--rewind"]).is_err());
         assert!(args(&["--max-turns", "x"]).is_err());
+        assert!(args(&["--rewind", "x"]).is_err());
         let unknown = args(&["--bogus"]).expect_err("unknown flag");
         assert!(unknown.contains("--bogus"), "{unknown}");
-        let two = args(&["one", "two"]).expect_err("two prompts");
-        assert!(two.contains("two prompts"), "{two}");
+        let positional = args(&["hello"]).expect_err("positional prompt");
+        assert!(positional.contains("-p"), "{positional}");
+    }
+
+    #[test]
+    fn print_mode_is_selected_by_prompt_or_rewind() {
+        assert_eq!(mode_of(&args(&[]).expect("bare")), Mode::Interactive);
+        assert_eq!(mode_of(&args(&["-p", "hi"]).expect("print")), Mode::Print);
+        assert_eq!(
+            mode_of(&args(&["--rewind", "1"]).expect("rewind")),
+            Mode::Print
+        );
+        assert_eq!(mode_of(&args(&["--list"]).expect("list")), Mode::List);
+        // --list short-circuits everything else.
+        assert_eq!(
+            mode_of(&args(&["--list", "-p", "hi"]).expect("list wins")),
+            Mode::List
+        );
     }
 
     #[test]

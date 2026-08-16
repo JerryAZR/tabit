@@ -18,7 +18,7 @@ use crate::model::ModelSelection;
 use crate::projection;
 use crate::recorder::{RecorderHook, SessionRecorder};
 use crate::registry::ModelRegistry;
-use crate::store::{Repair, SessionStore, SessionWriter};
+use crate::store::{Repair, SessionStore, SessionWriter, chain_from};
 use futures::StreamExt;
 use rig_agent::agent::{Agent, AgentBuilder, ModelHandle};
 use rig_agent::agent::{MultiTurnStreamItem, StreamingError};
@@ -54,6 +54,17 @@ pub struct RunSummary {
     pub usage: Usage,
     /// Everything the run emitted, in order.
     pub events: Vec<SessionEvent>,
+}
+
+/// What a rewind did: how many user messages left the active chain, and
+/// the entry the chain now ends at (the branch point; empty for a branch
+/// from the root).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct RewindSummary {
+    /// How many trailing user messages the rewind dropped from the chain.
+    pub dropped: usize,
+    /// The entry the active chain now ends at.
+    pub to_entry: String,
 }
 
 /// What happened while resuming a session.
@@ -198,10 +209,10 @@ impl SessionBuilder {
             ..ResumeReport::default()
         };
 
-        let (context, _dangling) = projection::project(&loaded.entries);
+        let (context, _dangling) = projection::project(&loaded.chain);
         let writer = SessionWriter::open_existing(&loaded.path)?;
 
-        let last = projection::last_model_change(&loaded.entries);
+        let last = projection::last_model_change(&loaded.chain);
         if let Some((provider, model, thinking_level)) = last {
             report.resumed_model = Some(ModelSelection {
                 provider: provider.to_string(),
@@ -504,6 +515,133 @@ impl Session {
         }
     }
 
+    /// Rewind the active chain by `turns` user messages: the leaf moves to
+    /// the parent of the `turns`-th-most-recent `user_message` entry (a
+    /// prompt or a steer — both are valid "I should have said something
+    /// else here" points), and the next prompt branches from there. The
+    /// dropped entries stay in the file as a sibling branch.
+    ///
+    /// Idle only — `&mut self` cannot alias a run in flight. The rewind is
+    /// durable on its own: a `rewound` marker lands in the log even if no
+    /// prompt follows.
+    pub fn rewind(&mut self, turns: usize) -> Result<RewindSummary, SessionError> {
+        let loaded = self.store.open_path(&self.path)?;
+        let boundaries = projection::user_message_boundaries(&loaded.chain);
+        if turns == 0 {
+            return Err(SessionError::Config {
+                message: "rewind needs at least 1 user message to drop".to_string(),
+            });
+        }
+        let Some(target) = turns
+            .checked_sub(1)
+            .and_then(|offset| boundaries.len().checked_sub(1 + offset))
+            .and_then(|index| boundaries.get(index))
+        else {
+            return Err(SessionError::Config {
+                message: format!(
+                    "cannot rewind {turns} user message(s): the active chain holds {}",
+                    boundaries.len()
+                ),
+            });
+        };
+        // The branch point is the boundary's parent; the new chain is the
+        // current chain truncated right after it.
+        let new_chain = match &target.parent_id {
+            Some(branch_point) => {
+                let Some(end) = loaded.chain.iter().position(|e| &e.id == branch_point) else {
+                    // Unreachable: the boundary sits on the chain, so its
+                    // parent does too — but a hand-crafted log is not
+                    // trusted to keep that promise.
+                    return Err(SessionError::Corrupt {
+                        path: self.path.clone(),
+                        message: format!(
+                            "boundary `{}` has parent `{branch_point}` outside the active chain",
+                            target.id
+                        ),
+                    });
+                };
+                loaded.chain.iter().take(end + 1).cloned().collect()
+            }
+            None => Vec::new(),
+        };
+        let dropped = boundaries.len() - projection::user_message_boundaries(&new_chain).len();
+        self.apply_rewind(target.parent_id.as_deref(), new_chain, dropped)
+    }
+
+    /// Rewind to an exact entry: the active chain will end at that entry.
+    /// Any entry in the file is a valid target, on or off the active chain
+    /// (this is also how a branch switch happens); a target that leaves a
+    /// partially answered tool batch gets the same interrupted-result
+    /// repair a crash gets. The library primitive for tree-picking
+    /// frontends — [`Session::rewind`] is the user-facing form.
+    pub fn rewind_to_entry(&mut self, entry_id: &str) -> Result<RewindSummary, SessionError> {
+        let loaded = self.store.open_path(&self.path)?;
+        if !loaded.entries.iter().any(|entry| entry.id == entry_id) {
+            return Err(SessionError::Config {
+                message: format!("no entry `{entry_id}` in this session"),
+            });
+        }
+        let new_chain = chain_from(&loaded.entries, Some(entry_id), &loaded.path)?;
+        let dropped = projection::user_message_boundaries(&loaded.chain)
+            .len()
+            .saturating_sub(projection::user_message_boundaries(&new_chain).len());
+        self.apply_rewind(Some(entry_id), new_chain, dropped)
+    }
+
+    /// Shared rewind mechanics: validate the new chain's model against the
+    /// config first (nothing is written when it does not resolve), then
+    /// record the marker, reload the context onto the new chain, and
+    /// re-align selection and agent with the chain's model history.
+    fn apply_rewind(
+        &mut self,
+        branch_point: Option<&str>,
+        new_chain: Vec<SessionEntry>,
+        dropped: usize,
+    ) -> Result<RewindSummary, SessionError> {
+        let chain_model =
+            projection::last_model_change(&new_chain).map(|(provider, model, thinking_level)| {
+                ModelSelection {
+                    provider: provider.to_string(),
+                    model: model.to_string(),
+                    thinking_level: thinking_level.map(str::to_string),
+                }
+            });
+        if let Some(selection) = &chain_model {
+            selection.validate(&self.config)?;
+        }
+
+        self.recorder.rewind_to(branch_point);
+        if let Some(error) = self.recorder.first_error() {
+            return Err(SessionError::Persist(error));
+        }
+        // Repairs for a dangling tail land on the new chain, at the new
+        // leaf.
+        self.reload_context()?;
+        match chain_model {
+            // The chain carries its own model history: adopt it. No new
+            // entry — the chain's last model_change already says it.
+            Some(selection) => {
+                if selection != self.selection {
+                    self.rebuild_agent(&selection)?;
+                    self.selection = selection;
+                }
+            }
+            // A chain older than any model_change: make the current
+            // selection durable at the new tip, exactly like resume.
+            None => {
+                self.recorder.record(EntryKind::ModelChange {
+                    provider: self.selection.provider.clone(),
+                    model: self.selection.model.clone(),
+                    thinking_level: self.selection.thinking_level.clone(),
+                });
+            }
+        }
+        Ok(RewindSummary {
+            dropped,
+            to_entry: branch_point.unwrap_or_default().to_string(),
+        })
+    }
+
     /// Switch the provider/model/thinking level from the next outer loop
     /// on. Recorded as a `model_change` entry.
     pub fn set_model(&mut self, selection: ModelSelection) -> Result<(), SessionError> {
@@ -549,20 +687,21 @@ impl Session {
         &self.context
     }
 
-    /// Usage and cost totals, folded from the log. Re-reads the session
-    /// file so the answer is always consistent with what is on disk.
+    /// Usage and cost totals, folded from the active chain. Re-reads the
+    /// session file so the answer is always consistent with what is on
+    /// disk.
     pub fn stats(&self) -> Result<SessionStats, SessionError> {
         let loaded = self.store.open_path(&self.path)?;
-        Ok(self.fold_stats(&loaded.entries))
+        Ok(self.fold_stats(&loaded.chain))
     }
 
-    /// Re-derive the in-memory context from the log. If the log ends on a
-    /// dangling tool-use roundtrip (an interrupted run), repair it with
-    /// synthesized results — the same fix resume applies — so the context
-    /// stays replayable.
+    /// Re-derive the in-memory context from the log's active chain. If the
+    /// chain ends on a dangling tool-use roundtrip (an interrupted run or
+    /// a mid-batch branch point), repair it with synthesized results — the
+    /// same fix resume applies — so the context stays replayable.
     fn reload_context(&mut self) -> Result<usize, SessionError> {
         let loaded = self.store.open_path(&self.path)?;
-        let (_, dangling) = projection::project(&loaded.entries);
+        let (_, dangling) = projection::project(&loaded.chain);
         let mut repaired = 0;
         if let Some(dangling) = &dangling {
             for result in projection::interrupted_results(dangling) {
@@ -576,7 +715,7 @@ impl Session {
             }
         }
         let reloaded = self.store.open_path(&self.path)?;
-        let (context, _) = projection::project(&reloaded.entries);
+        let (context, _) = projection::project(&reloaded.chain);
         self.context = context;
         Ok(repaired)
     }

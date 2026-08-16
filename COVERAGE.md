@@ -31,14 +31,15 @@ Defensive ("unreachable") arms follow a stricter rule:
 - The whole suite runs offline (cassette replay + test doubles). Doctests
   are NOT included in these numbers (`llvm-cov` was run without
   `--doctests`); they are gated by the same CI run.
-- Current state: **96.08% lines / 96.60% regions** (2,201 of 56,219 lines;
-  re-measured after the system prompt builder — item 3 v1, `prompt.rs` at
-  100% branch coverage — and the clippy-1.96 lint fixes). The rig crates'
-  residue is unchanged, the tabit crates carry their own itemization below.
-  `crates/tabit-config` sits at 100% branch coverage with no fully
-  unexecuted line. The tabit crates: tabit-session 91.3% (session.rs) /
-  83.3% (store.rs), tabit-tools 90.5%; their residue is almost entirely
-  error arms (see "Justified residue" item 9).
+- Current state: **95.86% lines / 96.42% regions** (2,365 of 57,159 lines;
+  re-measured after session rewind/branch: entry-level `Rewound` markers,
+  chain-aware load/projection/stats, partial-batch dangling repair, and the
+  `-p`/`--rewind` CLI). The rig crates' residue is unchanged, the tabit
+  crates carry their own itemization below. `crates/tabit-config` sits at
+  100% branch coverage with no fully unexecuted line. The tabit crates:
+  tabit-session 93.2% (session.rs) / 84.9% (store.rs), tabit-tools 90.5%;
+  their residue is almost entirely error arms (see "Justified residue"
+  item 9).
 
 ## Filled
 
@@ -114,7 +115,10 @@ named, the classification applies to its current lcov-uncovered ranges.
      disk-full / uuid-collision / `create_new` races cannot be staged.
    - Poisoned-`Mutex` arms in `recorder.rs` — reachable only after a panic
      inside the lock, which the workspace lint policy forbids in shipped
-     code.
+     code. `rewind_to`'s persist-failure arm shares `record()`'s
+     capture-and-surface path (`note_error`, covered for `record` by the
+     persist-failure test); staging a write fault that spares the load
+     read but breaks the marker append is not portable.
    - Placeholder arms documented as unreachable by construction:
      `UnreachableModel` (every assembled session rebuilds its real agent
      immediately; its bodies error loudly as internal-invariant guards) and
@@ -134,6 +138,12 @@ named, the classification applies to its current lcov-uncovered ranges.
      first-error check `prompt()` performs post-run (covered there); the
      repair variant needs a dangling log whose writer fails exactly at
      repair time.
+   - Rewind defensive arms, provably dead by load invariants, kept as loud
+     `Corrupt` errors rather than deleted because the lint policy denies
+     `expect` in shipped code: `chain_from`'s missing-entry walk arm
+     (parent validation at parse time resolves every link) and
+     `Session::rewind`'s boundary-parent-off-chain arm (the boundary comes
+     from the chain, so its parent is an ancestor on it).
 
 ## Deferred (explicit)
 

@@ -186,3 +186,100 @@ fn assistant_entry_holding_a_non_assistant_message_is_not_dangling() {
     assert_eq!(messages.len(), 1);
     assert!(dangling.is_none());
 }
+
+#[test]
+fn partially_answered_batch_dangles_only_the_unanswered_call() {
+    // A branch point can land mid-batch: some results arrived, one call
+    // was never answered. Only the unanswered call dangles.
+    let entries = vec![
+        entry(user("q")),
+        entry(assistant_tool_calls(&["c1".to_string(), "c2".to_string()])),
+        entry(tool_result("c1")),
+    ];
+    let (messages, dangling) = project(&entries);
+    let dangling = dangling.expect("c2 was never answered");
+    assert_eq!(dangling.calls.len(), 1);
+    assert_eq!(dangling.calls[0].id, "c2");
+    assert_eq!(messages.len(), 3, "user, assistant, the one result");
+}
+
+#[test]
+fn results_answer_calls_by_provider_call_id_too() {
+    // Providers that correlate by call_id (OpenAI-style) answer calls
+    // whose canonical id never appears in any result.
+    let mut call = ToolCall::new(
+        "internal-1".to_string(),
+        ToolFunction::new("echo".to_string(), json!({})),
+    );
+    call.call_id = Some("call-abc".to_string());
+    let entries = vec![
+        entry(user("q")),
+        entry(EntryKind::AssistantMessage {
+            message: Message::Assistant {
+                id: None,
+                content: OneOrMany::one(AssistantContent::ToolCall(call)),
+            },
+            usage: rig_core::completion::Usage::default(),
+        }),
+        entry(EntryKind::ToolResult {
+            result: ToolResult {
+                id: "unrelated".to_string(),
+                call_id: Some("call-abc".to_string()),
+                content: OneOrMany::one(ToolResultContent::text("ok")),
+            },
+        }),
+    ];
+    let (_, dangling) = project(&entries);
+    assert!(dangling.is_none(), "the call_id answered the call");
+}
+
+#[test]
+fn rewound_markers_are_state_not_context() {
+    let entries = vec![
+        entry(user("q")),
+        entry(assistant_text("a")),
+        entry(EntryKind::Rewound { to: None }),
+        entry(user("again")),
+        entry(assistant_text("b")),
+    ];
+    let (messages, dangling) = project(&entries);
+    assert!(dangling.is_none());
+    assert_eq!(messages.len(), 4, "the marker projects to nothing");
+}
+
+#[test]
+fn user_message_boundaries_list_every_user_message_in_order() {
+    // Prompts and steers are both UserMessage entries — both are valid
+    // rewind targets.
+    let entries = vec![
+        entry(EntryKind::ModelChange {
+            provider: "p".to_string(),
+            model: "m".to_string(),
+            thinking_level: None,
+        }),
+        entry(user("first")),
+        entry(assistant_text("a")),
+        entry(user("second")),
+        entry(assistant_tool_calls(&["c1".to_string()])),
+        entry(tool_result("c1")),
+        entry(user("a steer mid-run")),
+        entry(assistant_text("b")),
+    ];
+    let boundaries = user_message_boundaries(&entries);
+    let texts: Vec<String> = boundaries
+        .iter()
+        .map(|entry| match &entry.kind {
+            EntryKind::UserMessage {
+                message: Message::User { content },
+            } => content
+                .iter()
+                .filter_map(|part| match part {
+                    UserContent::Text(text) => Some(text.text.clone()),
+                    _ => None,
+                })
+                .collect(),
+            _ => String::new(),
+        })
+        .collect();
+    assert_eq!(texts, vec!["first", "second", "a steer mid-run"]);
+}

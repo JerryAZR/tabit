@@ -320,3 +320,199 @@ fn project_default_resolves_under_the_current_directory() {
         "default store sits at <root>/.tabit/sessions: {dir}"
     );
 }
+
+#[test]
+fn rewind_moves_the_leaf_and_branches_the_next_append() {
+    let store = temp_store("rewind-writer");
+    let mut writer = store.create("C:/work").expect("create");
+    let first = writer
+        .append(EntryKind::UserMessage {
+            message: user_message("one"),
+        })
+        .expect("append");
+    let second = writer
+        .append(EntryKind::UserMessage {
+            message: user_message("two"),
+        })
+        .expect("append");
+    writer.rewind_to(Some(&first.id)).expect("rewind");
+    assert_eq!(writer.leaf(), Some(first.id.as_str()));
+
+    let third = writer
+        .append(EntryKind::UserMessage {
+            message: user_message("branched"),
+        })
+        .expect("append");
+    assert_eq!(
+        third.parent_id,
+        Some(first.id.clone()),
+        "branches from the target"
+    );
+
+    // The marker recorded the abandoned tip honestly, and load follows
+    // the branch: the chain skips `second`, the file keeps everything.
+    let loaded = store.open_path(writer.path()).expect("open");
+    assert_eq!(
+        loaded.entries.len(),
+        4,
+        "nothing was deleted, one marker added"
+    );
+    assert!(matches!(
+        &loaded.entries[2].kind,
+        EntryKind::Rewound { to: Some(target) } if target == &first.id
+    ));
+    assert_eq!(
+        loaded.entries[2].parent_id,
+        Some(second.id.clone()),
+        "the marker parents to the abandoned tip"
+    );
+    let chain_texts: Vec<&str> = loaded
+        .chain
+        .iter()
+        .filter_map(|entry| match &entry.kind {
+            EntryKind::UserMessage {
+                message: Message::User { content },
+            } => content.iter().find_map(|part| match part {
+                UserContent::Text(text) => Some(text.text.as_str()),
+                _ => None,
+            }),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(chain_texts, vec!["one", "branched"]);
+    fs::remove_dir_all(store.dir()).ok();
+}
+
+#[test]
+fn trailing_marker_directs_the_reopened_writer() {
+    // A rewind as the final write must survive reopen: nothing was
+    // appended to carry the new parent implicitly.
+    let store = temp_store("rewind-durable");
+    let mut writer = store.create("C:/work").expect("create");
+    let first = writer
+        .append(EntryKind::UserMessage {
+            message: user_message("one"),
+        })
+        .expect("append");
+    writer
+        .append(EntryKind::UserMessage {
+            message: user_message("dropped"),
+        })
+        .expect("append");
+    writer.rewind_to(Some(&first.id)).expect("rewind");
+    let path = writer.path().to_path_buf();
+    drop(writer);
+
+    let loaded = store.open_path(&path).expect("open");
+    assert_eq!(loaded.chain.len(), 1, "the abandoned tail is off-chain");
+
+    let mut reopened = SessionWriter::open_existing(&path).expect("reopen");
+    let next = reopened
+        .append(EntryKind::UserMessage {
+            message: user_message("after reopen"),
+        })
+        .expect("append");
+    assert_eq!(next.parent_id, Some(first.id));
+    fs::remove_dir_all(store.dir()).ok();
+}
+
+#[test]
+fn rewind_to_none_branches_from_the_root() {
+    let store = temp_store("rewind-root");
+    let mut writer = store.create("C:/work").expect("create");
+    writer
+        .append(EntryKind::UserMessage {
+            message: user_message("only"),
+        })
+        .expect("append");
+    writer.rewind_to(None).expect("rewind to root");
+    assert_eq!(writer.leaf(), None);
+
+    let loaded = store.open_path(writer.path()).expect("open");
+    assert!(loaded.chain.is_empty(), "the root chain is empty");
+    fs::remove_dir_all(store.dir()).ok();
+}
+
+#[test]
+fn marker_targeting_an_unknown_entry_is_corrupt() {
+    let store = temp_store("rewind-corrupt");
+    let writer = store.create("C:/work").expect("create");
+    let path = writer.path().to_path_buf();
+    let header = fs::read_to_string(&path).expect("read header");
+    let marker = serde_json::to_string(&SessionEntry {
+        id: "rw".to_string(),
+        parent_id: None,
+        timestamp: "t".to_string(),
+        kind: EntryKind::Rewound {
+            to: Some("ghost".to_string()),
+        },
+    })
+    .expect("marker");
+    fs::write(&path, format!("{header}{marker}\n")).expect("write");
+    match store.open_path(&path) {
+        Err(SessionError::Corrupt { message, .. }) => {
+            assert!(message.contains("unknown or later"), "{message}")
+        }
+        other => panic!("expected corruption error, got {other:?}"),
+    }
+    fs::remove_dir_all(store.dir()).ok();
+}
+
+#[test]
+fn last_model_follows_the_active_chain_not_the_file() {
+    let store = temp_store("rewind-model-hint");
+    let mut writer = store.create("C:/work").expect("create");
+    writer
+        .append(EntryKind::ModelChange {
+            provider: "p".to_string(),
+            model: "m".to_string(),
+            thinking_level: None,
+        })
+        .expect("append");
+    let turn_one = writer
+        .append(EntryKind::UserMessage {
+            message: user_message("one"),
+        })
+        .expect("append");
+    let turn_two = writer
+        .append(EntryKind::UserMessage {
+            message: user_message("two"),
+        })
+        .expect("append");
+    // A switch recorded between the two turns.
+    writer
+        .append(EntryKind::ModelChange {
+            provider: "q".to_string(),
+            model: "m2".to_string(),
+            thinking_level: None,
+        })
+        .expect("append");
+    writer
+        .append(EntryKind::UserMessage {
+            message: user_message("after switch"),
+        })
+        .expect("append");
+
+    // Before rewinding: the file's last model_change is q/m2.
+    assert_eq!(
+        store
+            .last_model(writer.path())
+            .expect("hint")
+            .map(|s| s.model),
+        Some("m2".to_string())
+    );
+
+    // Branch from before the switch: the hint rolls back with the chain.
+    writer.rewind_to(Some(&turn_two.id)).expect("rewind");
+    assert_eq!(
+        store
+            .last_model(writer.path())
+            .expect("hint")
+            .map(|s| s.model),
+        Some("m".to_string())
+    );
+    // Turn one's entry is still reachable as an earlier chain node.
+    let loaded = store.open_path(writer.path()).expect("open");
+    assert!(loaded.chain.iter().any(|entry| entry.id == turn_one.id));
+    fs::remove_dir_all(store.dir()).ok();
+}

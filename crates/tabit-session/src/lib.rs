@@ -80,8 +80,8 @@ pub use projection::DanglingToolCalls;
 pub use prompt::build_system_prompt;
 pub use registry::ModelRegistry;
 pub use session::{
-    AbortHandle, DEFAULT_MAX_TURNS, ModelStats, RunOutcome, RunSummary, Session, SessionBuilder,
-    SessionStats, SteerHandle,
+    AbortHandle, DEFAULT_MAX_TURNS, ModelStats, RewindSummary, RunOutcome, RunSummary, Session,
+    SessionBuilder, SessionStats, SteerHandle,
 };
 pub use store::{LoadedSession, Repair, SessionStore, SessionSummary, SessionWriter};
 

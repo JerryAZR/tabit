@@ -51,14 +51,32 @@ impl SessionRecorder {
             Err(poisoned) => poisoned.into_inner().append(kind),
         };
         if let Err(error) = result {
-            let message = error.to_string();
-            let mut slot = match self.first_error.lock() {
-                Ok(guard) => guard,
-                Err(poisoned) => poisoned.into_inner(),
-            };
-            if slot.is_none() {
-                *slot = Some(message);
-            }
+            self.note_error(error);
+        }
+    }
+
+    /// Record a rewind: a `rewound` marker plus the leaf move, under the
+    /// same single writer. Persistence failures are captured like
+    /// [`SessionRecorder::record`].
+    pub fn rewind_to(&self, to: Option<&str>) {
+        let result = match self.writer.lock() {
+            Ok(mut writer) => writer.rewind_to(to),
+            Err(poisoned) => poisoned.into_inner().rewind_to(to),
+        };
+        if let Err(error) = result {
+            self.note_error(error);
+        }
+    }
+
+    /// Remember the first persistence failure for the session to surface.
+    fn note_error(&self, error: crate::error::SessionError) {
+        let message = error.to_string();
+        let mut slot = match self.first_error.lock() {
+            Ok(guard) => guard,
+            Err(poisoned) => poisoned.into_inner(),
+        };
+        if slot.is_none() {
+            *slot = Some(message);
         }
     }
 }

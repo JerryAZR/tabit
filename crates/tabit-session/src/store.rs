@@ -37,8 +37,13 @@ pub struct SessionWriter {
 pub struct LoadedSession {
     /// The header line.
     pub header: SessionHeader,
-    /// Every parseable entry, in file order.
+    /// Every parseable entry, in file order (all branches, plus
+    /// bookkeeping markers).
     pub entries: Vec<SessionEntry>,
+    /// The active chain: root → effective leaf, the entries the next
+    /// outer loop sees. Diverges from file order once the log holds
+    /// branches.
+    pub chain: Vec<SessionEntry>,
     /// The file the session was loaded from.
     pub path: PathBuf,
     /// Repairs applied while loading (e.g. a torn tail line dropped).
@@ -165,12 +170,13 @@ impl SessionStore {
     }
 
     /// The model a session file last used, for default-selection hints
-    /// (see [`crate::ModelRegistry::default_selection`]). `None` when the
-    /// log records no model change.
+    /// (see [`crate::ModelRegistry::default_selection`]). Follows the
+    /// active chain, so a rewind past a model switch rolls the hint back
+    /// with it. `None` when the chain records no model change.
     pub fn last_model(&self, path: &Path) -> Result<Option<ModelSelection>, SessionError> {
         let loaded = self.open_path(path)?;
         Ok(
-            projection::last_model_change(&loaded.entries).map(|(provider, model, level)| {
+            projection::last_model_change(&loaded.chain).map(|(provider, model, level)| {
                 ModelSelection {
                     provider: provider.to_string(),
                     model: model.to_string(),
@@ -292,9 +298,13 @@ impl SessionStore {
             }
         }
 
+        let leaf = effective_leaf(&entries, path)?;
+        let chain = chain_from(&entries, leaf.as_deref(), path)?;
+
         Ok(LoadedSession {
             header,
             entries,
+            chain,
             path: path.to_path_buf(),
             repairs,
         })
@@ -303,11 +313,11 @@ impl SessionStore {
 
 impl SessionWriter {
     /// Re-open an existing session file for appending, resuming the parent
-    /// chain from its last complete record.
+    /// chain from the entry the log's rewind state points at.
     pub fn open_existing(path: &Path) -> Result<SessionWriter, SessionError> {
         let loaded = SessionStore::new(path.parent().unwrap_or(Path::new("."))).open_path(path)?;
         let header = loaded.header;
-        let leaf = loaded.entries.last().map(|entry| entry.id.clone());
+        let leaf = effective_leaf(&loaded.entries, path)?;
         let file = OpenOptions::new()
             .append(true)
             .open(path)
@@ -347,6 +357,20 @@ impl SessionWriter {
         self.leaf.as_deref()
     }
 
+    /// Record a rewind: append a `rewound` marker — parented to the
+    /// current leaf, the honest record of where the abandoned chain
+    /// ended — then move the leaf to `to`, so the next append branches
+    /// from there (`None` branches from the root). The caller proves `to`
+    /// names an entry in this log; the marker alone makes the move durable
+    /// even if nothing follows.
+    pub fn rewind_to(&mut self, to: Option<&str>) -> Result<(), SessionError> {
+        self.append(EntryKind::Rewound {
+            to: to.map(str::to_string),
+        })?;
+        self.leaf = to.map(str::to_string);
+        Ok(())
+    }
+
     /// The session file path.
     pub fn path(&self) -> &Path {
         &self.path
@@ -355,6 +379,66 @@ impl SessionWriter {
     /// The session id from the header.
     pub fn session_id(&self) -> &str {
         &self.id
+    }
+}
+
+/// The entry the log's active chain ends at: normally the last entry in
+/// file order, but a `rewound` marker moves it to the entry the marker
+/// names. A marker pointing at an entry that does not precede it is
+/// corruption (rewind targets can only be entries that already existed).
+fn effective_leaf(entries: &[SessionEntry], path: &Path) -> Result<Option<String>, SessionError> {
+    let mut leaf = None;
+    let mut seen = std::collections::BTreeSet::new();
+    for entry in entries {
+        if let EntryKind::Rewound { to } = &entry.kind {
+            if let Some(target) = to
+                && !seen.contains(target)
+            {
+                return Err(SessionError::Corrupt {
+                    path: path.to_path_buf(),
+                    message: format!(
+                        "rewound marker `{}` targets unknown or later entry `{target}`",
+                        entry.id
+                    ),
+                });
+            }
+            leaf = to.clone();
+        } else {
+            leaf = Some(entry.id.clone());
+        }
+        seen.insert(entry.id.clone());
+    }
+    Ok(leaf)
+}
+
+/// The active chain of `entries`: `leaf` walked to the root via parent
+/// links, reversed into root→leaf order. Parent validation during parsing
+/// guarantees every link resolves; a miss is unreachable corruption and
+/// still fails loudly rather than producing a partial chain.
+pub(crate) fn chain_from(
+    entries: &[SessionEntry],
+    leaf: Option<&str>,
+    path: &Path,
+) -> Result<Vec<SessionEntry>, SessionError> {
+    let Some(leaf) = leaf else {
+        return Ok(Vec::new());
+    };
+    let by_id: std::collections::HashMap<&str, &SessionEntry> = entries
+        .iter()
+        .map(|entry| (entry.id.as_str(), entry))
+        .collect();
+    let mut chain = Vec::new();
+    let mut current = leaf;
+    loop {
+        let entry = by_id.get(current).ok_or_else(|| SessionError::Corrupt {
+            path: path.to_path_buf(),
+            message: format!("chain walks through missing entry `{current}`"),
+        })?;
+        chain.push((*entry).clone());
+        match &entry.parent_id {
+            Some(parent) => current = parent.as_str(),
+            None => return Ok(chain.into_iter().rev().collect()),
+        }
     }
 }
 

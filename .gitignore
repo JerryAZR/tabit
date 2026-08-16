@@ -6,3 +6,4 @@
 
 # local dogfooding sessions (tabit CLI run inside this repo)
 /.tabit/
+.zcode/
