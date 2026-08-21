@@ -98,6 +98,26 @@ histories).
   we adopt the approach, not the code. Our replay is a projection of
   our own chain walk (simpler than yaca's: no compaction to fold in
   yet), tested for ordering, branch exclusion, tool batches, and usage.
+- **`message_queued { text }` — the submit-time ack.** Emitted the
+  moment the actor accepts a `message` command, before any drain. This
+  is not the rejected temp-id round trip: it is an event, not a
+  response — no correlation id (the channel is ordered), no rejection
+  cases, commands stay fire-and-forget. It closes the lost-message
+  window: a steer submitted mid-run is visible in the GUI immediately
+  (as pending), and moves into the transcript when its
+  `user_message { text, entry_id }` fires at drain. The accounting is
+  a closed ledger: `message_queued` − `messages_discarded` =
+  `user_message`, one for one, in order.
+- **`messages_discarded { texts }` — abort salvages the queue.** Every
+  mailbox clear emits the discarded texts — both abort interleavings
+  (the actor's handler and the aborted-run branch; flag 6's twin
+  clears), and any future clear site joins them. Nothing user-authored
+  leaves the system silently. The frontend salvages the texts as
+  drafts or pending input; the backend does not persist them — they
+  were never part of the conversation, and undrained drafts die with
+  the process pair, like unsaved editor text. `checkout` does not
+  clear the mailbox: queued messages are future input, not history —
+  they append onto whichever branch is active when they drain.
 - **`checkout { entry_id }`** (renamed from `rewind`: the tree means the
   target can be any entry in the file, not just an ancestor —
   `git checkout <hash>` is the right metaphor; the next append branches
