@@ -87,11 +87,12 @@ histories).
 - **Replay on startup.** `initialize { protocol_version, replay: true }`
   → `initialize_ack` → `replay_started { total }` → the active chain's
   entries as finalized live events (`user_message` with its entry id;
+  `turn_started`/`turn_committed` brackets with the turn's id around
   one full-text `text_delta` per assistant message; reasoning as one
   full-text `reasoning_delta` per block id; `tool_call`/`tool_result`
-  pairs; `turn_committed` with each assistant entry's id;
-  `completion_call` per assistant turn; `model_changed` for
-  `ModelChange` entries) → `replay_done`. Branch siblings are excluded
+  pairs stamped with the turn id; `completion_call` per assistant turn;
+  `model_changed` for `ModelChange` entries) → `replay_done`. Branch
+  siblings are excluded
   by the chain walk; deltas are never persisted, so replay emits whole
   texts. Risk noted: yaca's implementation has never run in production —
   we adopt the approach, not the code. Our replay is a projection of
@@ -112,14 +113,22 @@ histories).
   events → `replay_done`), reusing the startup replay machinery. The
   GUI drops its own groups after `base_id` and applies the pass. When
   the target is an ancestor (the common rewind) the suffix is empty and
-  nothing follows. Cut points need entry-anchored groups, so v2 puts
-  ids on the anchors: `user_message` (id minted and emitted at drain),
-  `tool_result` gains `entry_id`, and a new `turn_committed
-  { entry_id }` fires when a model turn commits to the log — a live
-  turn's id cannot precede its commit (the entry does not exist yet;
-  yaca documents the same impossibility), and replay emits the same
-  anchor alongside its finalized events, so live and replay share
-  shapes.
+  nothing follows. **Entry ids are born early enough to be useful.**
+  Uniform rule: every context entry's id appears on the wire on the
+  event that announces it, and turn-scoped events carry `turn_id` so
+  the frontend maps deltas to growing widgets. `user_message { text,
+  entry_id }` (minted at drain); `tool_result` gains `entry_id` plus
+  `turn_id`; turns are announced by `turn_started { id }` when the
+  model call begins — the engine mints the id there, every event of the
+  turn is stamped with it (text/reasoning deltas, tool calls, usage),
+  and the session records the committed entry **with that same id**,
+  so live and replay ids are literally identical. (yaca's live-vs-log
+  id split is an artifact of minting ids inside the append; we own the
+  append — v1's `TextDelta` carried no correlation at all and worked
+  only because one turn streams at a time.) A turn that never commits —
+  aborted, provider-failed, discarded as a malformed-tool-call defect —
+  leaves its announced id uncommitted; the frontend already discards
+  provisional groups (`turn_retried`, abort), and ids are never reused.
 - **Id generation is centralized in the backend.** The log owns
   identity: every entry id is a backend-minted UUIDv7 at append;
   frontends never generate or supply ids, they learn them from events.
