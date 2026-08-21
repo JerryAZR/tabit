@@ -31,8 +31,11 @@ Defensive ("unreachable") arms follow a stricter rule:
 - The whole suite runs offline (cassette replay + test doubles). Doctests
   are NOT included in these numbers (`llvm-cov` was run without
   `--doctests`); they are gated by the same CI run.
-- Current state: **95.56% lines / 96.15% regions** (2,530 of 57,017
-  lines; re-measured after the `tabit-protocol` extraction — the
+- Current state: **94.27% lines / 94.99% regions** (3,320 of 57,978
+  lines; re-measured after the GUI walking skeleton — the drop from
+  95.56/96.15 is the `tabit-gui` crate's justified gaps, below; the
+  rest of the workspace is unchanged. Before that: re-measured after
+  the `tabit-protocol` extraction — the
   frontend vocabulary moved out of tabit-session into its own
   engine-free crate, gaining a protocol-owned five-field `Usage` (the
   engine's richer fields convert at the wire) and 100% coverage of its
@@ -213,3 +216,18 @@ rather than skipping, reachable or not.)
   candidate for removal, not documentation.
 - Re-run the collection after material changes and re-classify anything
   that moved from justified to reachable.
+
+## tabit-gui (walking skeleton)
+
+- `reducer.rs` — **covered** (91.4% lines; the residue is partial
+  field combinations in `add` and `Facts` paths).
+- `app.rs`, `theme.rs`, `main.rs` — **justified**: egui rendering,
+  the eframe event loop, and window construction have no offline
+  unit-test surface; verification is the owner's end-to-end pass (the
+  GUI exists precisely because tests cannot verify UX — ROADMAP item
+  7's rationale for building it before the v2 backend).
+- `backend.rs` — **justified**: spawns a real `tabit --json` child
+  and owns OS pipes/threads; exercisable only in a live session.
+  The protocol parse it performs is covered by tabit-protocol's
+  round-trip tests; the launch path (`tabit` launcher detach-spawn)
+  likewise needs a desktop session.

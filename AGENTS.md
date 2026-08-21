@@ -26,6 +26,9 @@ Current workspace layout:
   only: filesystem-backed; the rig crates keep wasm support)
 - `crates/tabit-tools` — coding tools (`read`, `ls`, `bash`) as
   `#[rig_tool]` PortableTools, erasable to DynamicTools (native only)
+- `crates/tabit-gui` — the egui frontend (`tabit-gui` binary; the
+  `tabit` launcher detach-spawns it; reducer/view contract in ROADMAP
+  item 7)
 - `crates/tabit` — the `tabit` binary: print mode (`-p <PROMPT>`,
   `--rewind <n>`) and JSON mode (`--json` — the stdio protocol edge)
   over the session actor (create / `--continue` / `--session <path>` /

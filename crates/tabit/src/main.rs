@@ -52,6 +52,8 @@ struct Args {
     max_turns: Option<usize>,
     rewind: Option<usize>,
     json: bool,
+    /// Positional project path — selects GUI mode (`tabit <path>`).
+    path: Option<PathBuf>,
 }
 
 const USAGE: &str = "\
@@ -63,9 +65,9 @@ usage: tabit -p <PROMPT>                  print mode: one prompt, one run
        tabit --json [session flags]       JSON protocol on stdio (scriptable)
        tabit --list                      list this project's sessions
 
-bare `tabit` starts interactive mode — not implemented yet; pass
--p <PROMPT> for print mode or --json for the stdio protocol until the
-TUI lands.
+bare `tabit` or `tabit <path>` launches the GUI detached (vscode-style:
+the terminal is free immediately and the GUI survives its close). The
+GUI spawns its own `tabit --json` backend per session.
 
 print mode: Esc aborts the running turn (line-buffered stdin: Esc then
 Enter). JSON mode: LF-JSONL frames — initialize, then message/abort
@@ -87,7 +89,7 @@ enum Mode {
     List,
     Print,
     Json,
-    Interactive,
+    Gui,
 }
 
 fn mode_of(args: &Args) -> Mode {
@@ -98,7 +100,7 @@ fn mode_of(args: &Args) -> Mode {
     } else if args.print_prompt.is_some() || args.rewind.is_some() {
         Mode::Print
     } else {
-        Mode::Interactive
+        Mode::Gui
     }
 }
 
@@ -121,6 +123,7 @@ where
         max_turns: None,
         rewind: None,
         json: false,
+        path: None,
     };
     let mut it = args;
     while let Some(arg) = it.next() {
@@ -166,11 +169,23 @@ where
                 return Err(format!("unknown flag `{other}`\n{USAGE}"));
             }
             positional => {
-                return Err(format!(
-                    "unexpected argument `{positional}` — pass the prompt with -p\n{USAGE}"
-                ));
+                if parsed.path.is_some() {
+                    return Err(format!(
+                        "unexpected second argument `{positional}` — GUI mode takes one path\n{USAGE}"
+                    ));
+                }
+                parsed.path = Some(PathBuf::from(positional));
             }
         }
+    }
+    // A path only means GUI mode; it cannot combine with the modes
+    // that write to stdout.
+    if parsed.path.is_some()
+        && (parsed.list || parsed.json || parsed.print_prompt.is_some() || parsed.rewind.is_some())
+    {
+        return Err(format!(
+            "<path> selects GUI mode; --list/--json/-p/--rewind select others — pick one\n{USAGE}"
+        ));
     }
     Ok(parsed)
 }
@@ -322,21 +337,94 @@ fn assemble_session(
     }
 }
 
+/// The `tabit-gui` executable: explicit override, else the sibling of
+/// this binary (cargo installs workspace binaries side by side).
+fn gui_bin() -> Option<PathBuf> {
+    if let Ok(path) = std::env::var("TABIT_GUI_BIN") {
+        return Some(PathBuf::from(path));
+    }
+    std::env::current_exe()
+        .ok()
+        .and_then(|exe| {
+            exe.parent()
+                .map(|dir| dir.join(format!("tabit-gui{}", std::env::consts::EXE_SUFFIX)))
+        })
+        .filter(|path| path.is_file())
+}
+
+/// Launch the GUI detached (vscode-style: it survives this terminal)
+/// and return immediately. Stderr goes to `<project>/.tabit/gui.log`
+/// so GUI crashes are diagnosable after the fact.
+fn launch_gui(path: Option<&std::path::Path>) -> Result<i32, String> {
+    use std::process::{Command, Stdio};
+    let bin = gui_bin().ok_or_else(|| {
+        "the tabit-gui executable was not found next to tabit;          set TABIT_GUI_BIN or install both binaries together"
+            .to_string()
+    })?;
+    let cwd = match path {
+        Some(path) => path.to_path_buf(),
+        None => std::env::current_dir().map_err(|e| e.to_string())?,
+    };
+    let log_dir = cwd.join(".tabit");
+    std::fs::create_dir_all(&log_dir).map_err(|e| e.to_string())?;
+    let log = std::fs::OpenOptions::new()
+        .create(true)
+        .append(true)
+        .open(log_dir.join("gui.log"))
+        .map_err(|e| e.to_string())?;
+
+    let mut command = Command::new(bin);
+    command
+        .current_dir(&cwd)
+        .stdin(Stdio::null())
+        .stdout(Stdio::null())
+        .stderr(Stdio::from(log));
+    detach(&mut command);
+    command
+        .spawn()
+        .map_err(|e| format!("could not start the GUI: {e}"))?;
+    println!("opening tabit in {} …", cwd.display());
+    Ok(0)
+}
+
+/// Put the child in its own process group so closing this terminal
+/// (SIGHUP to the foreground group on Unix, the console job on
+/// Windows) cannot reach it — the survive-the-terminal trick.
+#[cfg(windows)]
+fn detach(command: &mut std::process::Command) {
+    use std::os::windows::process::CommandExt;
+    const CREATE_NEW_PROCESS_GROUP: u32 = 0x0000_0200;
+    const DETACHED_PROCESS: u32 = 0x0000_0008;
+    command.creation_flags(CREATE_NEW_PROCESS_GROUP | DETACHED_PROCESS);
+}
+
+#[cfg(unix)]
+fn detach(command: &mut std::process::Command) {
+    use std::os::unix::process::CommandExt;
+    // 0 = a fresh process group.
+    command.process_group(0);
+}
+
 fn run() -> Result<i32, String> {
     let args = parse_args()?;
+    if mode_of(&args) == Mode::Gui {
+        // The GUI loads its own config in its own process; the
+        // launcher needs nothing but the binary.
+        return launch_gui(args.path.as_deref());
+    }
     let config = Arc::new(TabitConfig::load_default().map_err(|e| e.to_string())?);
     let auth = Arc::new(AuthConfig::load_default().map_err(|e| e.to_string())?);
 
     match mode_of(&args) {
+        // Unreachable: GUI returns before the config load above. Loud
+        // rather than silent.
+        #[allow(clippy::unreachable)]
+        Mode::Gui => unreachable!("GUI mode handled before config load"),
         Mode::List => {
             let store = SessionStore::project_default();
             list_sessions(&store)?;
             Ok(0)
         }
-        Mode::Interactive => Err(format!(
-            "interactive mode is not implemented yet; pass -p <PROMPT> for print mode \
-             or --json for the stdio protocol\n{USAGE}"
-        )),
         Mode::Json if args.print_prompt.is_some() || args.rewind.is_some() => {
             Err("--json selects JSON mode; -p/--rewind select print mode — pick one".to_string())
         }
@@ -557,13 +645,34 @@ mod tests {
         assert!(args(&["--rewind", "x"]).is_err());
         let unknown = args(&["--bogus"]).expect_err("unknown flag");
         assert!(unknown.contains("--bogus"), "{unknown}");
-        let positional = args(&["hello"]).expect_err("positional prompt");
-        assert!(positional.contains("-p"), "{positional}");
+        let gui = args(&["hello"]).expect("a positional path parses");
+        assert_eq!(gui.path.as_deref(), Some(std::path::Path::new("hello")));
+        let second = args(&["hello", "world"]).expect_err("two positionals");
+        assert!(second.contains("second argument"), "{second}");
     }
 
     #[test]
     fn print_mode_is_selected_by_prompt_or_rewind() {
-        assert_eq!(mode_of(&args(&[]).expect("bare")), Mode::Interactive);
+        assert_eq!(mode_of(&args(&[]).expect("bare")), Mode::Gui);
+        assert_eq!(
+            mode_of(&args(&["."]).expect("path")),
+            Mode::Gui,
+            "a positional path selects GUI mode"
+        );
+        assert!(args(&["a", "b"]).is_err(), "two paths are rejected");
+        assert!(
+            args(&[".", "-p", "hi"]).is_err(),
+            "a path cannot combine with print mode"
+        );
+        assert!(
+            args(&[".", "--json"]).is_err(),
+            "a path cannot combine with JSON mode"
+        );
+        assert_eq!(
+            args(&["--list"]).expect("list has no path").path,
+            None,
+            "flags alone never set a path"
+        );
         assert_eq!(mode_of(&args(&["-p", "hi"]).expect("print")), Mode::Print);
         assert_eq!(
             mode_of(&args(&["--rewind", "1"]).expect("rewind")),

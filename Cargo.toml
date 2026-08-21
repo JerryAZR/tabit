@@ -12,6 +12,7 @@ default-members = [
     "crates/tabit-config",
     "crates/tabit-protocol",
     "crates/tabit-session",
+    "crates/tabit-gui",
     "crates/tabit-tools",
     "crates/tabit",
 ]

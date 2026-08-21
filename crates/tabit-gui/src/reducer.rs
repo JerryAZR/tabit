@@ -1,0 +1,289 @@
+//! The GUI's state machine: a pure fold over backend messages.
+//!
+//! This module is deliberately framework-free (no egui types) and
+//! unit-tested — the ROADMAP "GUI design contract": the view is a
+//! projection of [`GuiState`], business logic never lives in it, and a
+//! future framework switch rewrites only the view layer. v1-wire
+//! caveats are marked `v2:` where the protocol's next version removes
+//! the heuristic.
+
+use std::collections::VecDeque;
+
+use tabit_protocol::{EventFrame, ModelSelection, SessionEvent, Usage};
+
+/// One message from the backend process: a protocol frame or a
+/// lifecycle fact (the child exited).
+#[derive(Debug, Clone, PartialEq)]
+pub enum InMsg {
+    /// `initialize_ack` — the session facts.
+    Ack {
+        session_id: String,
+        session_path: String,
+        model: ModelSelection,
+    },
+    /// `initialize_rejected` — the connection is over.
+    Rejected(String),
+    /// `protocol_error` — display-only; the connection stays.
+    ProtocolError(String),
+    /// A stamped event.
+    Event(Box<EventFrame>),
+    /// The backend's stdout reached EOF and the child exited with
+    /// `code` (None = killed by a signal).
+    BackendExited { code: Option<i32> },
+}
+
+/// Where the window stands with its backend.
+#[derive(Debug, Clone, PartialEq)]
+pub enum Phase {
+    /// Spawned, handshake in flight.
+    Connecting,
+    /// Acked and talking.
+    Live,
+    /// The backend is gone. `clean` = it was idle when it ended (a
+    /// drain-to-EOF after stdin close); anything else is a crash
+    /// surface to the user.
+    Exited { clean: bool, reason: String },
+}
+
+/// Session facts from the handshake.
+#[derive(Debug, Clone, PartialEq)]
+pub struct Facts {
+    pub session_id: String,
+    pub session_path: String,
+    pub model: ModelSelection,
+}
+
+/// One reasoning block inside a turn, correlated by the protocol's
+/// block id.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ReasoningBlock {
+    pub id: String,
+    pub text: String,
+}
+
+/// One tool call the model issued, and whether its result arrived.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ToolCallRow {
+    pub name: String,
+    pub call_id: String,
+    pub internal_call_id: String,
+    pub arguments: Option<String>,
+    pub done: bool,
+}
+
+/// An assistant turn: streaming text, reasoning blocks, tool calls.
+#[derive(Debug, Clone, PartialEq, Default)]
+pub struct TurnGroup {
+    pub text: String,
+    pub reasoning: Vec<ReasoningBlock>,
+    pub tools: Vec<ToolCallRow>,
+}
+
+/// One renderable transcript row.
+#[derive(Debug, Clone, PartialEq)]
+pub enum Group {
+    /// A user message that entered history.
+    User { text: String },
+    /// Assistant output (provisional while a run is live — v1 has no
+    /// commit signal; v2's `turn_committed` will make it explicit).
+    Turn(TurnGroup),
+    /// A session-level note the user must see (failures, protocol
+    /// errors). `error` marks it for error styling.
+    Notice { text: String, error: bool },
+    /// A provider-native item, kept opaque.
+    Native { item: String },
+}
+
+/// The whole window state. Reduce with [`GuiState::reduce`]; query
+/// from the view. No egui types in here, ever.
+#[derive(Debug, Clone, PartialEq)]
+pub struct GuiState {
+    pub phase: Phase,
+    pub facts: Option<Facts>,
+    pub transcript: Vec<Group>,
+    /// Messages sent but not yet `user_message`-acknowledged (v1 has
+    /// no queued-ack event; v2's id-carrying `message_queued` makes
+    /// this exact). FIFO pairing is the documented v1 heuristic.
+    pub pending: VecDeque<String>,
+    /// True from the first `user_message` of a run to its terminal.
+    pub running: bool,
+    /// Sum of `run_finished` usage across runs.
+    pub usage: Usage,
+}
+
+impl Default for GuiState {
+    fn default() -> Self {
+        Self {
+            phase: Phase::Connecting,
+            facts: None,
+            transcript: Vec::new(),
+            pending: VecDeque::new(),
+            running: false,
+            usage: Usage::default(),
+        }
+    }
+}
+
+impl GuiState {
+    /// Fold one backend message into the state.
+    pub fn reduce(&mut self, msg: InMsg) {
+        match msg {
+            InMsg::Ack {
+                session_id,
+                session_path,
+                model,
+            } => {
+                self.facts = Some(Facts {
+                    session_id,
+                    session_path,
+                    model,
+                });
+                self.phase = Phase::Live;
+            }
+            InMsg::Rejected(reason) => {
+                self.phase = Phase::Exited {
+                    clean: false,
+                    reason: format!("handshake rejected: {reason}"),
+                };
+            }
+            InMsg::ProtocolError(text) => {
+                self.push_notice(text, true);
+            }
+            InMsg::Event(frame) => self.reduce_event(*frame),
+            InMsg::BackendExited { code } => {
+                let clean = matches!(self.phase, Phase::Live) && !self.running;
+                let reason = match code {
+                    Some(code) => format!("backend exited with code {code}"),
+                    None => "backend was killed".to_string(),
+                };
+                self.running = false;
+                self.phase = Phase::Exited {
+                    clean,
+                    reason: if clean {
+                        format!("{reason} (idle — nothing was lost)")
+                    } else {
+                        format!("{reason} mid-run; the transcript tail was not committed")
+                    },
+                };
+            }
+        }
+    }
+
+    /// Record that a message left the input box (the send-side half of
+    /// `pending`; the ack half is the `user_message` event).
+    pub fn message_sent(&mut self, text: String) {
+        self.pending.push_back(text);
+    }
+
+    fn reduce_event(&mut self, frame: EventFrame) {
+        match frame.event {
+            SessionEvent::UserMessage { text } => {
+                // v1: pair with the oldest pending message by FIFO.
+                // v2: ids make this exact.
+                self.pending.pop_front();
+                self.transcript.push(Group::User { text });
+                self.running = true;
+            }
+            SessionEvent::TextDelta { text } => {
+                self.turn().text.push_str(&text);
+            }
+            SessionEvent::ReasoningDelta { id, reasoning } => {
+                let turn = self.turn();
+                match turn.reasoning.iter_mut().find(|b| b.id == id) {
+                    Some(block) => block.text.push_str(&reasoning),
+                    None => turn.reasoning.push(ReasoningBlock {
+                        id,
+                        text: reasoning,
+                    }),
+                }
+            }
+            SessionEvent::ToolCall {
+                name,
+                call_id,
+                internal_call_id,
+                arguments,
+            } => {
+                self.turn().tools.push(ToolCallRow {
+                    name,
+                    call_id,
+                    internal_call_id,
+                    arguments,
+                    done: false,
+                });
+            }
+            SessionEvent::ToolResult {
+                internal_call_id, ..
+            } => {
+                let turn = self.turn();
+                if let Some(tool) = turn
+                    .tools
+                    .iter_mut()
+                    .find(|t| t.internal_call_id == internal_call_id)
+                {
+                    tool.done = true;
+                }
+            }
+            SessionEvent::TurnRetried { .. } => {
+                // The provisional turn is discarded wholesale; a fresh
+                // one starts with the next delta.
+                if matches!(self.transcript.last(), Some(Group::Turn(_))) {
+                    self.transcript.pop();
+                }
+            }
+            SessionEvent::CompletionCall { .. } => {
+                // Per-request usage; the run terminal carries the
+                // aggregate. v1 keeps the aggregate only.
+            }
+            SessionEvent::RunFinished { usage, .. } => {
+                self.running = false;
+                self.usage = add(self.usage, usage);
+            }
+            SessionEvent::RunAborted { .. } => {
+                // Streamed partial text stays visible — the deltas the
+                // user watched are the record.
+                self.running = false;
+            }
+            SessionEvent::RunFailed { message } => {
+                self.running = false;
+                self.push_notice(message, true);
+            }
+            SessionEvent::NativeItem { item } => {
+                self.transcript.push(Group::Native {
+                    item: item.to_string(),
+                });
+            }
+        }
+    }
+
+    /// The current (trailing) turn, creating it if the last group
+    /// isn't a turn.
+    fn turn(&mut self) -> &mut TurnGroup {
+        if !matches!(self.transcript.last(), Some(Group::Turn(_))) {
+            self.transcript.push(Group::Turn(TurnGroup::default()));
+        }
+        // Sanctioned crash: the branch above just pushed a turn.
+        #[allow(clippy::unreachable)]
+        let Some(Group::Turn(turn)) = self.transcript.last_mut() else {
+            unreachable!("just pushed a turn")
+        };
+        turn
+    }
+
+    fn push_notice(&mut self, text: String, error: bool) {
+        self.transcript.push(Group::Notice { text, error });
+    }
+}
+
+fn add(a: Usage, b: Usage) -> Usage {
+    Usage {
+        input_tokens: a.input_tokens + b.input_tokens,
+        output_tokens: a.output_tokens + b.output_tokens,
+        total_tokens: a.total_tokens + b.total_tokens,
+        cached_input_tokens: a.cached_input_tokens + b.cached_input_tokens,
+        cache_creation_input_tokens: a.cache_creation_input_tokens + b.cache_creation_input_tokens,
+    }
+}
+
+#[cfg(test)]
+#[path = "reducer_tests.rs"]
+mod tests;

@@ -1,0 +1,22 @@
+[package]
+name = "tabit-gui"
+version.workspace = true
+edition.workspace = true
+license = "MIT"
+description = "The tabit egui frontend: one window per session, speaking the frontend protocol to a tabit --json child."
+
+[lints]
+workspace = true
+
+[[bin]]
+name = "tabit-gui"
+path = "src/main.rs"
+
+[dependencies]
+eframe = "0.36"
+egui = "0.36"
+serde_json = { workspace = true }
+tabit-protocol = { path = "../tabit-protocol", version = "0.41.0" }
+
+[dev-dependencies]
+tabit-protocol = { path = "../tabit-protocol", version = "0.41.0" }
