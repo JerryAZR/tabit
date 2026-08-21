@@ -98,32 +98,42 @@ histories).
   we adopt the approach, not the code. Our replay is a projection of
   our own chain walk (simpler than yaca's: no compaction to fold in
   yet), tested for ordering, branch exclusion, tool batches, and usage.
-- **`message_queued { text }` — the submit-time ack.** Emitted the
-  moment the actor accepts a `message` command, before any drain. This
-  is not the rejected temp-id round trip: it is an event, not a
-  response — no correlation id (the channel is ordered), no rejection
-  cases, commands stay fire-and-forget. It closes the lost-message
-  window: a steer submitted mid-run is visible in the GUI immediately
-  (as pending), and moves into the transcript when its
-  `user_message { text, entry_id }` fires at drain. The accounting is
-  a closed ledger: `message_queued` − `messages_discarded` =
-  `user_message`, one for one, in order.
-- **`messages_discarded { texts }` — abort salvages the queue.** Every
-  mailbox clear emits the discarded texts — both abort interleavings
-  (the actor's handler and the aborted-run branch; flag 6's twin
-  clears), and any future clear site joins them. Nothing user-authored
-  leaves the system silently. The frontend salvages the texts as
-  drafts or pending input; the backend does not persist them — they
-  were never part of the conversation, and undrained drafts die with
-  the process pair, like unsaved editor text. `checkout` does not
-  clear the mailbox: queued messages are future input, not history —
-  they append onto whichever branch is active when they drain.
+- **`message_queued { text, id }` — the submit-time ack, linked by
+  id.** Emitted the moment the actor accepts a `message` command,
+  before any drain. This is not the rejected temp-id round trip: it is
+  an event, not a response — no client-supplied id, no rejection
+  cases, commands stay fire-and-forget. The `id` is the message's
+  entry id, minted at accept time and carried into the log when the
+  message drains — the same born-early principle as turn ids
+  (`turn_started` at call start, entry at commit; `message_queued` at
+  submit, entry at drain): identity is minted when the backend first
+  acknowledges the thing. The GUI drops a pending display exactly when
+  it sees a `user_message` or `messages_discarded` carrying that id —
+  text or position matching cannot disambiguate duplicate texts, and
+  replayed history emits `user_message` events with no queued
+  counterparts. Accounting is a closed ledger by id: every
+  `message_queued` id ends up in exactly one `user_message` or
+  `messages_discarded`, never both.
+- **`messages_discarded { messages: [{ id, text }] }` — clears
+  salvage the queue.** Every mailbox clear emits the discarded pairs,
+  ids included — both abort interleavings (the actor's handler and the
+  aborted-run branch; flag 6's twin clears), checkout's clear, and any
+  future clear site joins them by rule. Nothing user-authored leaves
+  the system silently. The frontend salvages them as drafts or
+  pending input; the backend does not persist them — they were never
+  part of the conversation, and undrained drafts die with the process
+  pair, like unsaved editor text.
 - **`checkout { entry_id }`** (renamed from `rewind`: the tree means the
   target can be any entry in the file, not just an ancestor —
   `git checkout <hash>` is the right metaphor; the next append branches
   from the target). Idle-only (the GUI composes abort-then-checkout;
   run state is derivable from events). Outcome events
   `checked_out { entry_id, base_id }` / `checkout_failed { message }`.
+  **Checkout clears the mailbox** (ruling: steers are information
+  bound to the context they were sent into; checkout changes context,
+  so they do not carry over). `messages_discarded` hands them back as
+  drafts — the user decides what, if anything, to resend onto the new
+  branch.
   **Cross-branch checkouts resend the diff, not the chain.** The
   frontend holds only the active branch, so a target on another branch
   is content it has never seen: the backend — with the whole tree
