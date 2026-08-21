@@ -366,10 +366,23 @@ metadata error → loud error on both platforms. One nuance: use the
 helpers — those swallow the error kind (a permission failure would
 masquerade as "no sessions"). Implementation rides the v2 store touch.
 
-### 11. Empty `pump()` reports `Completed` — document or forbid
+### 11. Empty `pump()` — RESOLVED (explained no-op, unexplained panic)
 
-Direct `pump()` calls on an empty mailbox return a vacuous `Completed`.
-`prompt_with` cannot hit it. Document, or make it unrepresentable.
+Analysis: there IS exactly one legitimate way to reach an empty first
+drain — a mailbox clear landing between the worker's `is_empty()`
+check and `pump`'s `drain_all`. The abort command-time clear (flag 6)
+is unsynchronized with the worker by design, and checkout's clear (v2)
+joins it; in both cases the discarded-notice journal records what
+happened. Ruled:
+
+- **Explained empty drain** (the journal is non-empty — a clear raced
+  the wake): a visible no-op. `pump` returns `Option<RunSummary>`;
+  `None` = legitimately nothing ran.
+- **Unexplained empty drain** (nothing cleared — messages vanished
+  without cause): panic, per the internal-error doctrine. A future
+  code path that drains the mailbox without signaling through the
+  journal is a bug we want loud, not a vacuous `Completed` slipping
+  by.
 
 ### 13. The protocol borrows engine types — RESOLVED (owner approved the v2 item)
 
@@ -422,11 +435,15 @@ controls pacing through the protocol itself — send a steer after the
 pause-for-user-input point is the deterministic mid-run staging
 position; no Notify mocks, no sleeps.
 
-### 18. Callback type ergonomics — small
+### 18. Callback type ergonomics — RESOLVED (by-value)
 
-`&mut (dyn FnMut(SessionEvent) + Send)` is awkward at call sites; the
-`Send` is forced by spawning. By-value `impl FnMut(SessionEvent) +
-Send` or an owned box reads better.
+`impl FnMut(SessionEvent) + Send` by value — every call site builds a
+fresh closure anyway, and the `Send` stays (the pump future runs in
+the spawned worker). Owner fallback, recorded: if borrowing ever turns
+into a fight (rule 9), shift responsibility instead — the callee
+returns data or instructions and the caller operates on entities it
+already owns (the sans-IO direction the engine's AgentRun already
+takes).
 
 ### 19. Exit conventions differ by mode — RESOLVED (FRONTEND.md is the law)
 
