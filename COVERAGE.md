@@ -31,25 +31,23 @@ Defensive ("unreachable") arms follow a stricter rule:
 - The whole suite runs offline (cassette replay + test doubles). Doctests
   are NOT included in these numbers (`llvm-cov` was run without
   `--doctests`); they are gated by the same CI run.
-- Current state: **95.76% lines / 96.27% regions** (2,463 of 58,056
-  lines; re-measured after the flag-21 pass: the typed
-  `MalformedToolCall` defect signal unified across all three providers,
-  `AgentRun::discard_turn` with the engine's turn-discard retry (steers
-  ride along; discarded turns don't consume `max_turns`), and
-  exhaustion failing the run with history clean. `drive.rs`'s retry
-  branches are fully covered by the four new engine tests; the pass's
-  one new defensive arm joins the residue below). Prior passes: the
-  protocol rulings pass (drain-all mailbox batches,
-  `prompt`/`prompt_with` unified onto `pump` with failures as events,
-  deferred session-file creation, the shared poison-lock helper,
-  `list()` reading a missing directory as empty, and
-  `StreamingChat::stream_chat` taking a full conversation whose final
-  message is the turn being sent). The rig crates' residue is
-  unchanged, the tabit crates carry their own itemization below.
-  `crates/tabit-config` sits at 100% branch coverage with no fully
-  unexecuted line. The tabit crates: tabit-session 93.6% (session.rs) /
-  84.9% (store.rs), tabit-tools 90.5%; their residue is almost
-  entirely error arms (see "Justified residue" item 9).
+- Current state: **95.56% lines / 96.15% regions** (2,530 of 57,010
+  lines; re-measured after the engine refactor — `AgentRun` rebuilt as
+  the ENGINE.md machine: 8.5K lines removed with the invalid-tool-call
+  hook machinery, the prompt/context split, and the three scattered
+  drains; `run/tests.rs` rewritten as the machine's contract suite;
+  the invalid-recovery test suites deleted with their contract. The
+  new machine's residue is protocol-violation arms, the same class as
+  the old ones). Prior passes: flag-21 (typed `MalformedToolCall`
+  defect signal across all three providers, turn-discard retry) and
+  the protocol rulings pass (drain-all mailbox, failures as events,
+  deferred session-file creation, `stream_chat` taking a full
+  conversation). The rig crates' residue is unchanged, the tabit
+  crates carry their own itemization below. `crates/tabit-config` sits
+  at 100% branch coverage with no fully unexecuted line. The tabit
+  crates: tabit-session 93.6% (session.rs) / 84.9% (store.rs),
+  tabit-tools 90.5%; their residue is almost entirely error arms (see
+  "Justified residue" item 9).
 
 ## Filled
 
