@@ -218,6 +218,13 @@ The known deviation from pi's subprocess model:
   `egui_tty` (Ghostty's VT engine) are candidates; defer until an
   interactive PTY is a real requirement. Transcript list, input editor,
   and overlays are ours on egui layout primitives.
+  **Build order** (the GUI is the owner's feedback instrument, so it
+  starts before the v2 backend completes): `tabit-protocol` extraction
+  → walking-skeleton GUI on the shipped v1 wire (spawn `tabit --json`,
+  transcript, input, steer, abort, crash handling) → v2 backend slices
+  land behind it, the GUI growing each slice (ids → turn anchors,
+  replay → restart-safe transcript, checkout → rewind buttons, model
+  command → picker, write-behind → degraded banner).
 - **License (decided): all-MIT.** The GPL split existed only to admit the
   claurst harvest; with the TUI dead there is no GPL dependency and no
   reason to go GPL (enforcement isn't free either). AGENTS.md rule 10
