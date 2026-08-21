@@ -225,6 +225,42 @@ The known deviation from pi's subprocess model:
   land behind it, the GUI growing each slice (ids → turn anchors,
   replay → restart-safe transcript, checkout → rewind buttons, model
   command → picker, write-behind → degraded banner).
+- **Framework: egui (ruled 2026-08, after evaluation).** Runner-up
+  iced (its Elm architecture matches our reducer split natively) loses
+  on ecosystem for our exact surfaces — no markdown widget, no list
+  virtualization, no terminal story, thinner agent-training corpus.
+  Webview stacks (Tauri) rejected on the opencode lesson: system
+  WebKit rendering skew drove them to bundling Chromium; a browser
+  bundle or a JS boundary both cost more than egui's ceiling costs us.
+  Slint (license complexity), Xilem (not ready), gtk4-rs (Windows
+  story), Flutter (language boundary) dismissed. Revisit triggers: an
+  interactive terminal becomes core (xterm.js is unmatched), or egui's
+  text ceiling proves too low for the transcript quality wanted. The
+  reducer stays framework-free and pure, so a future switch rewrites
+  only the view layer.
+- **Entry-point architecture (ruled): `tabit` is a launcher, the GUI
+  spawns the core.** `tabit [path]` spawns `tabit-gui <path>`
+  detached — own process group on Unix, detach flags on Windows, the
+  vscode survive-the-terminal trick — and exits immediately; `-p` /
+  `--json` keep their foreground modes; bare `tabit` stops erroring
+  and opens the GUI. Per window the GUI owns one `tabit --json` child
+  per session: crash isolation follows the panic doctrine, and local
+  and ssh spawning are the same shape. Singleton handoff (vscode's
+  running-instance IPC) deliberately deferred — each launch is an
+  independent window.
+- **GUI design contract (ruled for the polish pass).** Reducer/view
+  separation is strict: the reducer is pure, framework-free, and
+  unit-tested; the egui pass is a projection containing no business
+  logic. Theming via crates over egui's data-driven style
+  (egui-elegance-class tools), never hand-rolled color tweaks at call
+  sites. Rich rendering behind single-function seams (plain text now;
+  egui_commonmark / syntect swap in later). View-only state lives in
+  its own churnable display struct, never in the reducer. The
+  transcript renders through ScrollArea's viewport pattern from day
+  one. **Ecosystem-first rule: before hand-rolling anything
+  non-trivial in tabit-gui — theming, markdown, terminal emulation,
+  docks, toasts — pause and research existing crates, or ask the
+  owner to search.**
 - **License (decided): all-MIT.** The GPL split existed only to admit the
   claurst harvest; with the TUI dead there is no GPL dependency and no
   reason to go GPL (enforcement isn't free either). AGENTS.md rule 10
