@@ -140,7 +140,7 @@ retryable-vs-fatal without string matching. Add a small kind enum
 
 ### 15. Unbounded event channel — ledger with a trigger
 
-A stalled frontend grows memory mid-run. Accepted at v1; the TUI
+A stalled frontend grows memory mid-run. Accepted at v1; the GUI
 milestone needs the real backpressure answer.
 
 ### 16. Ack-before-events ordering is causal, not structural — cheap fix
@@ -236,7 +236,7 @@ Options: (a) a `discarded` entry kind carrying usage — projection
 skips it, stats count it, the log stays the cost source of truth;
 (b) accept — session stats price committed turns only, engine
 telemetry carries the full picture. Recommendation: (a), deferrable
-until the stats view becomes a product surface (the TUI cost display).
+until the stats view becomes a product surface (the GUI cost display).
 
 ## Resolved
 

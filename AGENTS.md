@@ -75,11 +75,11 @@ Current workspace layout:
    two designs — assume the design is wrong, not the code. Do not "make it
    work" with a dirty hack. Stop, then summarize for the user: the goal,
    the problem, and why it is hard — and ask for a design discussion first.
-10. **License split.** Backend crates are MIT; `tabit-tui` (the claurst
-    harvest — see ROADMAP item 7) and the released binary are
-    GPL-3.0-only. GPL code never enters an MIT crate: dependencies run
-    frontend → backend only, and the protocol vocabulary lives on the MIT
-    side (tabit-session).
+10. **All-MIT.** The GPL split existed only to admit the claurst TUI
+    harvest; that frontend is dead (see ROADMAP item 7), so nothing in the
+    workspace is GPL and nothing will be. Frontends stay leaf consumers of
+    the protocol (dependencies run frontend → backend only) — architecture
+    hygiene, not license law.
 11. **Flow changes go through ENGINE.md.** Flow-level changes (turn
     loop, run lifecycle, steering, failure handling) consult
     `ENGINE.md` first and amend it before touching code. New flow

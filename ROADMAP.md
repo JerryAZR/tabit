@@ -87,9 +87,9 @@ The application-level conversation layer pi builds over its agent loop:
   (`Session::rewind(n)`, CLI `--rewind <n>`) targets user-message
   boundaries (prompts and steers alike). Projection, model hints, and
   stats all follow the active chain; rewinding past a model switch
-  re-adopts the chain's model. Interactive branch browsing is a TUI
-  feature. The CLI is now TUI-shaped: `-p <PROMPT>` selects print mode,
-  `--rewind` too, bare `tabit` errors loudly until the TUI exists.
+  re-adopts the chain's model. Interactive branch browsing is a GUI
+  feature. The CLI is print-shaped: `-p <PROMPT>` selects print mode,
+  `--rewind` too, bare `tabit` errors loudly until the GUI exists.
 - **Model registry shipped** (`tabit-session::ModelRegistry`): the single
   construction site for models — cached provider HTTP clients (switching
   models reuses the connection pool) and the default-selection chain:
@@ -155,12 +155,13 @@ The known deviation from pi's subprocess model:
 - **Print mode shipped** (`crates/tabit`): one prompt in, live events out,
   project-local sessions, `-p <PROMPT>` / `--continue` /
   `--session <path>` / `--list` / `--rewind <n>`, `--model provider/model`
-  or `default_model` in providers.toml. TUI is the eventual default mode;
+  or `default_model` in providers.toml. The GUI is the eventual default
+  mode;
   `-p` and `--rewind` opt out into print mode.
 - The protocol's design record — locked decisions plus every open
   flag with options — lives in ; flags are resolved in
   discussion order there.
-- **Frontend architecture (decided, v1 shipped): TUI-through-protocol.**
+- **Frontend architecture (decided, v1 shipped): frontend-through-protocol.**
   One typed vocabulary. Commands are fire-and-forget with total
   semantics — `message { text }` (steers the run in flight, or starts
   one) and `abort` (aborts + discards the queue) — nothing can be
@@ -198,21 +199,30 @@ The known deviation from pi's subprocess model:
   discarded (never entering history on any provider) and the request
   retried once, exhaustion fails the run with history clean (PROTOCOL.md
   flag 21, recorded with the outer-loop diagram).
-- **TUI: build, harvesting claurst** (reuse question closed: codex's TUI
-  is a porting project — ~40 path-dep crates, ratatui-0.30/crossterm-fork
-  skew; claurst's decomposes into ~19K LOC of near-verbatim leaves — the
-  `prompt_input` editor, `overlays` + dialog framework, virtual list,
-  markdown, diff viewer, tests in-file — plus ~5K ported with a
-  data-model swap). App state machine, protocol-driven loop, and layout
-  are ours. Codex (Apache-2.0) is the secondary borrow source for widgets
-  the harvest doesn't cover — research at that point, mind the skew.
-- **License split (decided)**: backend crates stay MIT; `tabit-tui` (the
-  claurst harvest) and the released binary are GPL-3.0-only. Valid
-  because dependencies run GPL→MIT only — frontends are leaves consuming
-  the protocol, and the vocabulary lives on the MIT side
-  (tabit-session). A no-TUI feature build remains all-MIT. At TUI time:
-  dep-direction CI check (`tabit-tui` reachable only from the binary),
-  cargo-deny license audit, `HARVEST.md` provenance alongside VENDOR.md.
+- **GUI: egui, the primary frontend (decided; supersedes the TUI plan).**
+  The TUI milestone (the claurst harvest, ~19K LOC) is dead/low priority —
+  only reconsidered if everything else lands and a terminal frontend is
+  still wanted. The GUI is an egui app (eframe shell, egui style theming)
+  speaking the item-7 protocol over the existing stdio edge: it spawns
+  `tabit --json` as a child process, one backend per session. Process
+  separation is the point, twice over: internal errors panic by doctrine,
+  and the GUI must survive a backend crash (restart the session, keep UI
+  state); and it is exactly the vscode-remote shape — SSH remote is the
+  same child spawned on the far side of `ssh`, stdio forwarded, no new
+  transport (this likely retires item 8's named-pipe/local-socket plan).
+  Widget ecosystem (surveyed 2026-08): markdown via `egui_commonmark`
+  (actively maintained, GitHub-flavored extensions); syntax highlighting
+  via `syntect` (egui's own code-editor demo is the pattern); diffs over
+  the `similar` crate with a hand-rolled viewer. An embedded terminal
+  (interactive bash) has no battle-tested egui widget — `egui_term` /
+  `egui_tty` (Ghostty's VT engine) are candidates; defer until an
+  interactive PTY is a real requirement. Transcript list, input editor,
+  and overlays are ours on egui layout primitives.
+- **License (decided): all-MIT.** The GPL split existed only to admit the
+  claurst harvest; with the TUI dead there is no GPL dependency and no
+  reason to go GPL (enforcement isn't free either). AGENTS.md rule 10
+  updated to match. Frontends stay leaf consumers of the protocol —
+  dependency direction remains one-way by architecture, not license.
 
 ### 8. Client/server + protocol
 
