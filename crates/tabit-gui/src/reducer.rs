@@ -109,6 +109,10 @@ pub struct GuiState {
     pub running: bool,
     /// Sum of `run_finished` usage across runs.
     pub usage: Usage,
+    /// The backend refused the handshake (e.g. first-run setup
+    /// needed) — never retried automatically; the reason is the
+    /// message to show.
+    pub handshake_rejected: bool,
 }
 
 impl Default for GuiState {
@@ -120,6 +124,7 @@ impl Default for GuiState {
             pending: VecDeque::new(),
             running: false,
             usage: Usage::default(),
+            handshake_rejected: false,
         }
     }
 }
@@ -141,29 +146,43 @@ impl GuiState {
                 self.phase = Phase::Live;
             }
             InMsg::Rejected(reason) => {
+                // The full reason (a setup guide on a fresh install)
+                // is transcript material; the status strip stays short.
+                self.handshake_rejected = true;
                 self.phase = Phase::Exited {
                     clean: false,
-                    reason: format!("handshake rejected: {reason}"),
+                    reason: "handshake rejected — see the note in the transcript".to_string(),
                 };
+                self.push_notice(reason, true);
             }
             InMsg::ProtocolError(text) => {
                 self.push_notice(text, true);
             }
             InMsg::Event(frame) => self.reduce_event(*frame),
             InMsg::BackendExited { code } => {
-                let clean = matches!(self.phase, Phase::Live) && !self.running;
-                let reason = match code {
+                // Never overwrite the real story: a rejection or an
+                // earlier exit already said why.
+                if matches!(self.phase, Phase::Exited { .. }) {
+                    return;
+                }
+                let was_running = self.running;
+                self.running = false;
+                let exit = match code {
                     Some(code) => format!("backend exited with code {code}"),
                     None => "backend was killed".to_string(),
                 };
-                self.running = false;
+                let (clean, tail) = if self.facts.is_none() {
+                    // Never handshook: a startup failure, not a crash
+                    // mid-conversation (stderr tail explains).
+                    (false, " — see stderr details")
+                } else if was_running {
+                    (false, " mid-run; the transcript tail was not committed")
+                } else {
+                    (true, " (idle — nothing was lost)")
+                };
                 self.phase = Phase::Exited {
                     clean,
-                    reason: if clean {
-                        format!("{reason} (idle — nothing was lost)")
-                    } else {
-                        format!("{reason} mid-run; the transcript tail was not committed")
-                    },
+                    reason: format!("{exit}{tail}"),
                 };
             }
         }

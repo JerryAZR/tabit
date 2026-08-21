@@ -111,6 +111,7 @@ impl eframe::App for TabitApp {
             if was_connecting
                 && self.state.facts.is_none()
                 && matches!(self.state.phase, Phase::Exited { .. })
+                && !self.state.handshake_rejected
                 && !self.retried_fresh
             {
                 self.retried_fresh = true;

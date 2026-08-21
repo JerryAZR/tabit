@@ -226,8 +226,42 @@ fn protocol_error_is_a_notice_and_the_connection_survives() {
 }
 
 #[test]
-fn rejection_ends_the_connection() {
+fn rejection_carries_its_reason_into_the_transcript() {
     let mut state = GuiState::default();
-    state.reduce(InMsg::Rejected("version mismatch".to_string()));
+    state.reduce(InMsg::Rejected(
+        "first-run setup needed: no config
+create ~/.tabit/providers.toml"
+            .to_string(),
+    ));
+    assert!(state.handshake_rejected);
     assert!(matches!(state.phase, Phase::Exited { clean: false, .. }));
+    // The full guide is transcript material, the status reason is short.
+    match state.transcript.last() {
+        Some(Group::Notice { text, error: true }) => {
+            assert!(text.contains("providers.toml"), "{text}");
+        }
+        other => panic!("expected an error notice, got {other:?}"),
+    }
+    // The exit event that follows never clobbers the story.
+    state.reduce(InMsg::BackendExited { code: Some(1) });
+    match &state.phase {
+        Phase::Exited { reason, .. } => assert!(reason.contains("handshake rejected"), "{reason}"),
+        other => panic!("expected exit, got {other:?}"),
+    }
+}
+
+#[test]
+fn startup_exit_is_not_mid_run() {
+    // A backend that dies before the handshake is a startup failure,
+    // never "mid-run" — the most common first-run shape.
+    let mut state = GuiState::default();
+    state.reduce(InMsg::BackendExited { code: Some(1) });
+    match &state.phase {
+        Phase::Exited { clean, reason } => {
+            assert!(!*clean);
+            assert!(reason.contains("code 1"), "{reason}");
+            assert!(!reason.contains("mid-run"), "{reason}");
+        }
+        other => panic!("expected exit, got {other:?}"),
+    }
 }

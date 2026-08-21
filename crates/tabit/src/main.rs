@@ -405,6 +405,43 @@ fn detach(command: &mut std::process::Command) {
     command.process_group(0);
 }
 
+/// The first-run setup guide: a fresh install has no config, which is
+/// normal — the failure message must teach, not scare.
+fn setup_guide(detail: &str) -> String {
+    let example = r#"create ~/.tabit/providers.toml (or point $TABIT_CONFIG at a file):
+
+    default_model = "lmstudio/your-model-id"   # optional; the first model is the fallback
+
+    [providers.lmstudio]
+    base_url = "http://127.0.0.1:1234/v1"
+    api = "openai-completions"
+
+    [[providers.lmstudio.models]]
+    id = "your-model-id"
+
+API keys (only if the endpoint needs one) go in ~/.tabit/auth.toml:
+
+    [lmstudio]
+    api_key = "..." "#;
+    format!("first-run setup needed: {detail}\n\n{example}\n")
+}
+
+/// JSON-mode setup failure: one `initialize_rejected` frame carrying
+/// the guide to stdout (a setup screen, not a crash), the same on
+/// stderr, exit 1.
+fn json_setup_failure(detail: &str) -> Result<i32, String> {
+    let reason = setup_guide(detail);
+    let frame = tabit_protocol::ServerControlFrame::InitializeRejected {
+        reason: reason.clone(),
+    };
+    let Some(line) = serde_json::to_string(&frame).ok() else {
+        return Err(reason);
+    };
+    println!("{line}");
+    eprintln!("{reason}");
+    Ok(1)
+}
+
 fn run() -> Result<i32, String> {
     let args = parse_args()?;
     if mode_of(&args) == Mode::Gui {
@@ -412,8 +449,8 @@ fn run() -> Result<i32, String> {
         // launcher needs nothing but the binary.
         return launch_gui(args.path.as_deref());
     }
-    let config = Arc::new(TabitConfig::load_default().map_err(|e| e.to_string())?);
-    let auth = Arc::new(AuthConfig::load_default().map_err(|e| e.to_string())?);
+    let config = TabitConfig::load_default().map_err(|e| e.to_string());
+    let auth = AuthConfig::load_default().map_err(|e| e.to_string());
 
     match mode_of(&args) {
         // Unreachable: GUI returns before the config load above. Loud
@@ -429,6 +466,14 @@ fn run() -> Result<i32, String> {
             Err("--json selects JSON mode; -p/--rewind select print mode — pick one".to_string())
         }
         Mode::Json => {
+            // A fresh install has no providers.toml — perfectly
+            // normal, and the most common first run. Fail gracefully:
+            // reject the handshake with a setup guide instead of
+            // dying stderr-only (the owner's first-run ruling).
+            let (config, auth) = match (config, auth) {
+                (Ok(config), Ok(auth)) => (Arc::new(config), Arc::new(auth)),
+                (Err(detail), _) | (_, Err(detail)) => return json_setup_failure(&detail),
+            };
             let session = assemble(&args, &config, &auth)?;
             print_banner(&session);
             let runtime = tokio::runtime::Builder::new_current_thread()
@@ -445,7 +490,11 @@ fn run() -> Result<i32, String> {
                 .await
             }))
         }
-        Mode::Print => print_mode(&args, &config, &auth),
+        Mode::Print => {
+            let config = Arc::new(config.map_err(|e| setup_guide(&e))?);
+            let auth = Arc::new(auth.map_err(|e| e.to_string())?);
+            print_mode(&args, &config, &auth)
+        }
     }
 }
 

@@ -98,9 +98,12 @@ new events arrive later without a version bump).
    pending steers waits for them to execute; abort first if you want
    out now.
 5. **Exit codes are not a reliable crash signal.** `1` means handshake
-   rejection, a transport-thread panic, or a pre-handshake spawn
-   failure (bad flags, missing session file, unresolvable `--model` —
-   stderr message, no stdout frames). But `0` also covers non-clean
+   rejection (including **first-run setup failures** — no config file:
+   the backend sends `initialize_rejected` whose reason carries a
+   setup guide, then exits; display the reason, it is written for the
+   user), a transport-thread panic, or a pre-handshake spawn failure
+   (bad flags, missing session file, unresolvable `--model` — stderr
+   message, no stdout frames). But `0` also covers non-clean
    ends: a broken pipe, and a backend worker panic (the stream simply
    reaches EOF). **Detect crashes as EOF without a terminal event for
    the in-flight run**, not by exit code; capture stderr as the
