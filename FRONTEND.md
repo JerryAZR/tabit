@@ -188,6 +188,19 @@ retry, before the fresh `turn_started` that follows `turn_retried`).
 | `model_changed` | `entry_id`, `provider`, `model`, `thinking_level` | a `model` command (or startup) set the selection for the next run; it is a chain entry and a valid anchor. |
 | `model_error` | `message` | the selection did not resolve in config. |
 
+**Durability (write-behind log)**
+
+| event | payload | when |
+|---|---|---|
+| `persist_degraded` | `pending`, `message` | a log flush failed (e.g. disk full); `pending` entries are buffered in memory and retried on every commit. Nag the user about disk space. |
+| `persist_recovered` | — | the buffer drained; everything is on disk again. |
+
+`run_finished { durable: false }` means the buffer was non-empty at
+the terminal. The conversation continues from memory regardless; a
+restart replays disk truth — buffered entries that never flushed are
+lost on a force stop (the accepted limit). A degraded session heals
+itself the moment the disk accepts writes again.
+
 **Replay** (brackets; content is finalized events from the catalog
 above — full-text deltas, same ids as live)
 
@@ -317,12 +330,11 @@ response id) are unsettled; see §11.
 
 ## 11. Open questions (known and unsettled)
 
-1. **Durability policy after `durable: false`** (PROTOCOL.md flag 8 —
-   properly open, ruling wanted). The terminal shape (`run_finished
-   { durable }`, one terminal per run) is the surface; the open
-   question is the aftermath: does the session keep recording
-   best-effort after a persist failure, stop recording for the rest of
-   the run, or degrade harder? See flag 8 for the grounded options.
+1. **The prompt barrier** (PROTOCOL.md flag 8's one open sub-question):
+   should a turn refuse to start until its opening user message is
+   durable on disk (codex's rule — a full disk holds messages instead
+   of running turns whose input could vanish on force stop), or should
+   turns run on in-memory-only input while degraded?
 2. **Event timestamps.** Transcript UIs plausibly want per-entry
    wall-clock times on `user_message`/`turn_committed` at least.
 3. **Backpressure.** What a stalled reader should experience — needed

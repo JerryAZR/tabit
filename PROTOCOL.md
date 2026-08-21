@@ -244,49 +244,54 @@ The actor's Abort handler and `run_one`'s aborted branch both clear the
 mailbox; each covers a different interleaving (abort between runs vs
 mid-run). Without a comment pair this reads like removable duplication.
 
-### 8. Terminal events are not terminal — RULING WANTED
+### 8. Terminal events are not terminal — RESOLVED (write-behind log)
 
-`RunFailed` can follow `RunFinished` (post-run persistence failure). A
-frontend whose read loop stops at the first terminal silently misses
-durability failures.
+`RunFailed` used to follow `RunFinished` on post-run persistence
+failure. v2 folds the report into the terminal —
+`run_finished { durable: false }`, one terminal per run — and moves
+the real handling to a session-level write-behind policy (owner
+design, 2026-08, validated against the references):
 
-The v2 contract (FRONTEND.md) folds the report into the terminal:
-`run_finished { durable: false }`, one terminal per run — the terminal
-shape is settled unless overruled. The **real open question is the
-aftermath policy** — what the session does once a persist has failed.
-Code facts that frame it (all verified):
+- **Memory first, disk second.** Commit = append the entry to an
+  in-memory buffer (never fails short of OOM), then try to flush the
+  buffer to disk. Failed-to-flush entries stay in the buffer and are
+  retried on every subsequent commit, plus one final attempt at clean
+  exit (force stop can't be helped — that loss is accepted and
+  documented).
+- **Events, typed.** `persist_degraded { pending, message }` on
+  entering the failed state, `persist_recovered` when the buffer
+  drains; `run_finished.durable` = buffer empty at the terminal.
+  Typed per flag 14's philosophy: frontends branch to nag about disk
+  space, not string-match.
+- **Implementation shape:** the buffer flushes FIFO (the file is
+  always a clean prefix of commit order — kills the orphan corner by
+  construction); the writer holds two cursors (parent-chain leaf,
+  which advances at buffer time so entries chain in commit order, and
+  the durable leaf, which lags); a failed write rolls back to the last
+  good offset (`set_len` + seek) so a retried entry can never splice a
+  torn line; the existing torn-tail repair stays as the reopen net.
+  Buffer growth under sustained disk-full is unbounded and accepted
+  (a session's entries are MBs at worst) — documented limit.
 
-- Each append writes + flushes independently; `leaf` advances only on
-  success, so post-failure appends parent to the last durable entry —
-  the file stays structurally valid, no dangling parents.
-- The recorder captures the **first** error only; the session surfaces
-  it at run end. Appends keep being attempted afterwards.
-- Memory continues regardless: the conversation keeps running with
-  turns the disk may never see; a restart replays disk truth and
-  silently truncates to the last durable entry.
-- Narrow corner (transient single-entry failure): the file can end up
-  with tool results whose assistant entry is missing; projection folds
-  them into a plain user message — degraded, not bricked, but a
-  provider would reject orphan results on the wire.
+Precedent: **codex ships this exact shape** — rollout items buffer in
+`pending_items`, leave only after a successful write, are retried with
+file-reopen on the next barrier, and turn-item persistence failure is
+logged-and-continued (`rollout/src/recorder.rs:1603-1676`,
+`core/src/session/mod.rs:3671`). **pi** has zero handling (the sync
+throw kills the run, raw `ENOSPC` in the TUI; the newer harness JSONL
+store has hygiene but isn't the production path). **opencode** dies
+the turn via SQLite defects, no retry. Databases fail hard (they
+promise durability); editors buffer-and-retry (memory is
+authoritative) — a session log is the editor class.
 
-Options:
-
-1. **Continue best-effort** (current): keep recording, report
-   `durable: false` per affected run. A transient hiccup heals itself
-   at the cost of the orphan corner; a dead disk keeps failing loudly
-   once per run.
-2. **Stop recording for the rest of the run** after the first failure:
-   the file keeps a clean prefix cut (no orphan corner), the terminal
-   reports `durable: false`, and the next run attempts recording again
-   from the disk leaf. Restart still truncates.
-3. **Degrade hard**: after a persist failure the session refuses new
-   runs (`run_failed { durability }` immediately) until restart. No
-   divergence growth, but a transient blip kills the working session.
-
-Recommendation: **2** — it keeps the session alive through transient
-disk problems (a coding session shouldn't die because of one failed
-flush) while eliminating the orphan corner entirely, and the
-restart-truncation rule stays the honest recovery story.
+**One open sub-question (proposed, from codex): the prompt barrier.**
+codex refuses to start a turn until the user's prompt entry is durable
+(`PersistenceFailed` rejection, `core/src/hook_runtime.rs:606-634`).
+Adopting it here would mean: a full disk holds queued messages (they
+stay buffered, the user is told) rather than running turns whose input
+might vanish on force-stop — "act only on durable input"; buffer loss
+then costs model output only, never user input. Ruling wanted on this
+one behavioral addition.
 
 ### 9. Empty conversation rides `PromptCancelled` — rename (broadened)
 
