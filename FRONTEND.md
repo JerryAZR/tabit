@@ -295,7 +295,7 @@ response id) are unsettled; see §11.
 - **The message ledger.** Every `message_queued { id }` ends in
   exactly one of `user_message { entry_id: id }` or an entry in
   `messages_discarded` — never both, never neither, across abort,
-  checkout, and run failure.
+  checkout, the prompt barrier, and run failure.
 - **The turn ledger.** Every `turn_started { id }` ends in
   `turn_committed { id }`, or is discarded (`turn_retried { turn_id }`
   or a run terminal without commit). Discarded ids are never reused.
@@ -327,14 +327,16 @@ response id) are unsettled; see §11.
 
 ## 10. Limits and non-features (honest list)
 
-- **No backpressure yet.** The backend buffers unboundedly for a slow
-  reader; keep reading (drain into your UI queue) or memory grows.
-  No line-size limits either way.
+- **No consumer backpressure yet.** A slow reader grows backend memory
+  up to an arbitrarily high tripwire cap (breach = a runaway producer
+  bug; the backend dies loudly). Keep reading. No line-size limits
+  either way.
 - **No replay pagination.** The whole active chain arrives at startup,
   however large. Cursors are a future addition.
 - **No session management on the channel.** Listing is the one-shot
   `tabit --list --json`; switching sessions is spawning another
-  backend. No model discovery either (§11).
+  backend. Model discovery is the one-shot `tabit models --json`
+  (§11 note).
 - **No event timestamps.** Entries carry wall-clock times in the
   session file; events carry none on the wire (§11).
 - **One consumer.** Events go to the single connected frontend; no

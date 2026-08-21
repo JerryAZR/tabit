@@ -7,6 +7,8 @@ resolved flag records its decision and stays as history.
 
 ## Locked design
 
+v1 as shipped; the v2 section below amends where noted.
+
 - **Commands are fire-and-forget with total semantics** — `message`
   (steers the run in flight, or starts one), `abort` (aborts the run
   in flight and discards what was queued at abort time — flag 6;
@@ -17,7 +19,8 @@ resolved flag records its decision and stays as history.
 - **Every drain point takes the whole queue**: idle entry batches all
   pending messages into one run's opening input; the engine drains the
   rest as steers at turn boundaries. Invariant: every `message` yields
-  exactly one `user_message` event; the only discard is abort.
+  exactly one `user_message` event; discards (abort at command time,
+  checkout, the prompt barrier) each emit `messages_discarded` (v2).
 - **Failures are events**: `RunFailed` + `RunOutcome::Failed`; the run
   path has no `Err` return (`prompt`/`prompt_with` are thin wrappers
   over `submit` + `pump`).
@@ -68,7 +71,7 @@ flowchart TD
     ABORT["abort (preemptive, any await)"] -.-> RUN
 ```
 
-## v2 — proposed (ruling wanted; research recorded 2026-08)
+## v2 — ruled (2026-08; research recorded herein)
 
 The egui GUI (ROADMAP item 7) is the second protocol consumer. What it
 needs beyond `{message, abort}`, grounded in the references: **yaca**
@@ -146,7 +149,8 @@ histories).
   `git checkout <hash>` is the right metaphor; the next append branches
   from the target). Idle-only (the GUI composes abort-then-checkout;
   run state is derivable from events). Outcome events
-  `checked_out { entry_id, base_id }` / `checkout_failed { message }`.
+  `checked_out { entry_id, base_id }`, or `error { kind: checkout }` on
+  failure.
   **Checkout clears the mailbox** (ruling: steers are information
   bound to the context they were sent into; checkout changes context,
   so they do not carry over). `messages_discarded` hands them back as
@@ -178,19 +182,20 @@ histories).
   leaves its announced id uncommitted; the frontend already discards
   provisional groups (`turn_retried`, abort), and ids are never reused.
 - **Id generation is centralized in the backend.** The log owns
-  identity: every entry id is a backend-minted UUIDv7 at append;
-  frontends never generate or supply ids, they learn them from events.
-  Shape: the `message { text }` command is text-only; the
-  `user_message { text, entry_id }` event is the id's delivery vehicle.
-  **Steers get ids like any other message** — one steer, one
-  `UserMessage` entry (the log keeps 1:1 fidelity with what the model
-  saw), one `user_message` event carrying its id. The id exists from
-  the moment the message is *drained into a run* (batch open or turn
-  boundary), not from submission: a message sitting in the mailbox has
-  no id and never needs one — abort is its only exit. Neither
-  frontend-supplied ids nor temp-id round trips are needed: the stdio
-  channel's failure mode is process death (no dedup window to defend).
-  Replay reuses log ids verbatim — stable across replays.
+  identity: every entry id is a backend-minted UUIDv7; frontends never
+  generate or supply ids, they learn them from events. Shape: the
+  `message { text }` command is text-only; the id's first delivery
+  vehicle is `message_queued` (minted at accept — see above), restated
+  by `user_message { text, entry_id }` at drain. **Steers get ids like
+  any other message** — one steer, one `UserMessage` entry (the log
+  keeps 1:1 fidelity with what the model saw), one `user_message` event
+  carrying its id. The exits from pending are draining and a discard
+  (abort at command time, checkout, the prompt barrier) — every
+  discard emits `messages_discarded`, so a pending id never vanishes
+  silently. Neither frontend-supplied ids nor temp-id round trips are
+  needed: the stdio channel's failure mode is process death (no dedup
+  window to defend). Replay reuses log ids verbatim — stable across
+  replays.
 - **The frontend keeps the active branch only.** The GUI's transcript
   is the checked-out chain's events; the tree (abandoned branches,
   markers) is backend/log truth. Branch browsing, if ever wanted, is a
@@ -198,7 +203,7 @@ histories).
 - **`model { provider, model, thinking_level? }`** — exactly
   `ModelSelection`, validated against config, applied from the next
   outer loop (mirrors the existing `ModelChange` entry kind). Outcome
-  events `model_changed` / `model_error { message }`. Commands stay
+  events `model_changed` / `error { kind: model }`. Commands stay
   total: nothing is rejected without an event.
 - **Session listing stays one-shot.** Scan on startup and explicit
   reload (`tabit --list --json` — local or over ssh); no watch, no
@@ -237,10 +242,11 @@ histories).
   transcript exactly once per open (the replay pass); there are no
   per-turn re-sends.
 
-Folded v2 work items: flags 8 (one terminal per run — fold durability
-into `run_finished { durable: bool }`), 9 (`PromptCancelled` →
-`RunStopped { reason }`), 14 (`RunFailed` kind enum), 16 (structural
-ack-before-events), 19 (unified exit conventions).
+Folded v2 work items — flags 8 (write-behind durability), 9 (the
+stopped-kind taxonomy replacing the `PromptCancelled` umbrella), 14
+(`run_failed` kinds), 16 (structural ack-before-events), 19 (the
+FRONTEND.md exit table as the one law); each flag's entry carries the
+settled shape.
 
 ## Open flags (numbering is fixed at creation; resolved numbers are
 skipped)
@@ -297,11 +303,12 @@ design, 2026-08, validated against the references):
   retried on every subsequent commit, plus one final attempt at clean
   exit (force stop can't be helped — that loss is accepted and
   documented).
-- **Events, typed.** `persist_degraded { pending, message }` on
-  entering the failed state, `persist_recovered` when the buffer
+- **Events ride the generic error carrier** (v2's `error { kind }`):
+  `error { kind: persist_degraded, pending, message }` on entering the
+  failed state, `error { kind: persist_recovered }` when the buffer
   drains; `run_finished.durable` = buffer empty at the terminal.
-  Typed per flag 14's philosophy: frontends branch to nag about disk
-  space, not string-match.
+  Frontends branch on the kind to nag about disk space, not
+  string-match.
 - **Implementation shape:** the buffer flushes FIFO (the file is
   always a clean prefix of commit order — kills the orphan corner by
   construction); the writer holds two cursors (parent-chain leaf,
