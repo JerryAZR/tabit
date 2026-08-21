@@ -119,8 +119,10 @@ new events arrive later without a version bump).
    pending are draining and discard. **A run failure does not clear
    pending**: after `run_failed` the mailbox keeps draining; a queued
    message starts the next run.
-- **abort** preempts the run at the next await and clears every pending
-   message. Order: `run_aborted` first, then `messages_discarded`.
+- **abort** preempts the run at the next await and discards what was
+   queued **at abort time** (order: `run_aborted`, then
+   `messages_discarded`). Messages arriving *after* the abort are not
+   killed by it — they queue normally and start the next run.
 - The session is an **append-only tree** of entries. You render the
    **active chain**; `checkout` moves the leaf to any entry in the
    tree — including one on an abandoned branch — and the next append
@@ -135,7 +137,7 @@ All commands are total — there is no rejection. Outcomes are events.
 | command | when | effect |
 |---|---|---|
 | `message { text }` | any time | idle: starts a run; running: steers at the next turn boundary. Immediate ack: `message_queued { id, text }`. |
-| `abort` | any time | running: preempts (`run_aborted`); always clears pending (`messages_discarded`, omitted when nothing is pending). |
+| `abort` | any time | running: preempts (`run_aborted`); discards messages queued at abort time (`messages_discarded`, omitted when none). Post-abort messages queue normally and start the next run. |
 | `checkout { entry_id }` | idle only | moves the active chain; see §7. Compose abort-then-checkout if a run is live. |
 | `model { provider, model, thinking_level? }` | idle only | the next run uses this selection; validates against the backend's config. |
 | `interaction_response { id, option, text? }` | after an `interaction_request` | answers a pending request; see §8. |
@@ -155,7 +157,7 @@ unstamped control frames; everything else is a stamped event.
 |---|---|---|
 | `message_queued` | `id`, `text` | the moment `message` is accepted. `id` is the message's entry id, minted here. |
 | `user_message` | `entry_id`, `text` | the message drains into a run (opening batch or steer boundary) and becomes history. Consecutive `user_message`s = an opening batch. |
-| `messages_discarded` | `messages: [{ id, text }]` | every mailbox clear: abort (after `run_aborted`) and checkout (before `checked_out`). Omitted when the mailbox was empty. Salvage as drafts; the backend keeps no copy. |
+| `messages_discarded` | `messages: [{ id, text }]` | abort (what was queued at abort time; the event arrives with the run's wind-down) and checkout (before `checked_out`). Omitted when nothing was pending. Salvage as drafts; the backend keeps no copy. |
 | `turn_started` | `id` | a model turn begins; `id` is the turn's entry id, minted here and reused at commit. |
 | `text_delta` | `turn_id`, `text` | assistant text; appends within the turn. Full-text exactly once in replay. |
 | `reasoning_delta` | `turn_id`, `id`, `reasoning` | model reasoning; `id` correlates blocks within the turn (several may interleave; same-id deltas append). Full-text once per block id in replay. |

@@ -8,8 +8,10 @@ resolved flag records its decision and stays as history.
 ## Locked design
 
 - **Commands are fire-and-forget with total semantics** — `message`
-  (steers the run in flight, or starts one), `abort` (aborts + discards
-  the queue; no-op idle). No ids, no request/response, no rejection
+  (steers the run in flight, or starts one), `abort` (aborts the run
+  in flight and discards what was queued at abort time — flag 6;
+  post-abort messages queue normally). No ids, no request/response,
+  no rejection
   cases: every rejection case we could construct was a buggy client or
   better served by total semantics.
 - **Every drain point takes the whole queue**: idle entry batches all
@@ -132,9 +134,9 @@ histories).
   `messages_discarded`, never both.
 - **`messages_discarded { messages: [{ id, text }] }` — clears
   salvage the queue.** Every mailbox clear emits the discarded pairs,
-  ids included — both abort interleavings (the actor's handler and the
-  aborted-run branch; flag 6's twin clears), checkout's clear, and any
-  future clear site joins them by rule. Nothing user-authored leaves
+  ids included — abort's single clear at command time (the discard
+  notice rides the actor's wind-down; flag 6), checkout's clear, and
+  any future clear site joins them by rule. Nothing user-authored leaves
   the system silently. The frontend salvages them as drafts or
   pending input; the backend does not persist them — they were never
   part of the conversation, and undrained drafts die with the process
@@ -263,11 +265,23 @@ rewrite of run_one.
 ~150 lines: recording + batch, engine fold, epilogue. The fold body can
 extract beside `stream_item_event`.
 
-### 6. Twin abort clears — document the proof
+### 6. Twin abort clears — RESOLVED (the second clear was wrong)
 
-The actor's Abort handler and `run_one`'s aborted branch both clear the
-mailbox; each covers a different interleaving (abort between runs vs
-mid-run). Without a comment pair this reads like removable duplication.
+Ruled: abort discards only what was queued **at abort time**. Messages
+arriving *after* the abort are post-abort input — they queue normally,
+and the idle-entry drain starts the next run with them. "If a message
+is sent after an abort, it shouldn't be killed by the abort."
+
+So the twin collapses to **one clear, at the command link** (the
+abort-command site); `run_one`'s run-end clear is deleted in v2 — it
+existed to kill strays in the token-fire-to-wind-down window, which is
+exactly the post-abort traffic that must now survive. Before/after is
+defined by lock order (the only linearization available), and the
+frontend sees precisely which messages died via `messages_discarded`.
+Emission timing detail: the link clears on the caller's thread without
+the event channel, so the discard notice rides the actor's wind-down
+(next loop iteration) — still ordered before any subsequent
+`user_message` events.
 
 ### 8. Terminal events are not terminal — RESOLVED (write-behind log)
 
