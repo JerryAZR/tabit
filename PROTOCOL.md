@@ -243,13 +243,22 @@ ack-before-events), 19 (unified exit conventions).
 ## Open flags (numbering is fixed at creation; resolved numbers are
 skipped)
 
-### 2. `run_one` failure epilogue — mechanical
+### 2. `run_one` failure epilogue — subsumed by the v2 session rewrite
+
+(Live code — verified 2026-08: the four-block epilogue still exists.)
+The write-behind rewrite touches every block (persist failure becomes
+run_finished.durable, abort gains messages_discarded, the batch head
+gains the prompt barrier), so the fail() flattening folds into that
+work, not a standalone cleanup.
 
 Four sequential outcome blocks (aborted / stream-failure /
 reload-failure / persist-failure) with a `!Failed` guard on the reload.
 A `fail(..)` helper flattens it. No semantic change.
 
-### 3. `run_one` length — cosmetic
+### 3. `run_one` length — subsumed by the v2 session rewrite
+
+Same as flag 2: the fold-body extraction happens inside the v2
+rewrite of run_one.
 
 ~150 lines: recording + batch, engine fold, epilogue. The fold body can
 extract beside `stream_item_event`.
@@ -315,7 +324,13 @@ state.** The session keeps its resident tree and projected context
 entries (the outbox). Separate structs, one-way flow (session commits
 → writer buffers → disk), events flow back (degraded/recovered).
 
-### 9. Empty conversation rides `PromptCancelled` — rename (broadened)
+### 9. Empty conversation rides `PromptCancelled` — resolved by the v2 pass
+
+The wire side is decided: the `run_failed { kind: stopped }` taxonomy
+covers hook-terminate, empty-conversation, and malformed-tool-call
+exhaustion (FRONTEND.md §6). The engine-side rename (`PromptCancelled`
+becomes an honest typed stop in rig-agent) is implementation riding
+the v2 engine touch.
 
 An empty history is not a cancellation; the variant name misleads. The
 flag-21 pass widened the problem: `PromptCancelled` is now the de-facto
@@ -328,7 +343,7 @@ Open discussion, not settled: per-cause variants, or one honest
 `RunStopped { reason, history }`-shaped arm with cancellation as just
 one reason, or keep the umbrella and rename only.
 
-### 10. `list()` platform divergence — documented, tested
+### 10. `list()` platform divergence — accepted (documented, tested)
 
 Windows reads a blocked store path as empty (`NotFound`), Linux errors
 (`ENOTDIR`). Inherent; the write side fails loudly everywhere.
@@ -338,7 +353,11 @@ Windows reads a blocked store path as empty (`NotFound`), Linux errors
 Direct `pump()` calls on an empty mailbox return a vacuous `Completed`.
 `prompt_with` cannot hit it. Document, or make it unrepresentable.
 
-### 13. The protocol borrows engine types — RULING WANTED
+### 13. The protocol borrows engine types — RESOLVED (owner approved the v2 item)
+
+The `tabit-protocol` extraction with protocol-owned `Usage` and
+native-item shapes was item 6 of the v2 menu ("Looks fine"); the
+open flag text simply was never updated.
 
 `RunFinished { usage: rig_core::Usage }` and `NativeItem { Value }`
 put engine shapes on the wire: engine refactors churn the protocol
@@ -348,7 +367,12 @@ or explicitly-opaque native items), or accept rig-core as the shared
 vocabulary crate (it is ours). Recommendation: own the types — the
 protocol is the foundation; the engine is an implementation detail.
 
-### 14. `RunFailed` is stringly — small
+### 14. `RunFailed` is stringly — RESOLVED (v2 kind taxonomy)
+
+Kinds: provider / budget / stopped (FRONTEND.md §6). `durability`
+moved out of run_failed entirely (flag 8 folded it into
+`run_finished.durable`); `internal` never reaches the wire — internal
+errors panic by doctrine.
 
 A display string, not a kind; frontends cannot branch
 retryable-vs-fatal without string matching. Add a small kind enum
@@ -359,7 +383,10 @@ retryable-vs-fatal without string matching. Add a small kind enum
 A stalled frontend grows memory mid-run. Accepted at v1; the GUI
 milestone needs the real backpressure answer.
 
-### 16. Ack-before-events ordering is causal, not structural — cheap fix
+### 16. Ack-before-events ordering — decided (structural), implementation pending
+
+The forwarder starts only after the handshake completes; rides the
+v2 JSON-mode touch.
 
 The bridge holds because the reader sends the ack before any command; a
 reordered line breaks it silently. Structural fix: the forwarder starts
@@ -377,7 +404,12 @@ and the flake surface.
 `Send` is forced by spawning. By-value `impl FnMut(SessionEvent) +
 Send` or an owned box reads better.
 
-### 19. Exit conventions differ by mode — unify
+### 19. Exit conventions differ by mode — RESOLVED (FRONTEND.md is the law)
+
+FRONTEND.md §3 specifies the exit-code table (0 clean incl. EOF-edge
+cases; 1 handshake rejection, transport-thread panic, pre-handshake
+spawn failure); print mode already exits 1 on run failure. Aligning
+the code paths to that one table rides the v2 touch.
 
 JSON mode returns `i32`; print mode signals via `Err` that `main`
 converts. Two paths for one concept.
