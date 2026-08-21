@@ -89,7 +89,8 @@ histories).
   entries as finalized live events (`user_message` with its entry id;
   one full-text `text_delta` per assistant message; reasoning as one
   full-text `reasoning_delta` per block id; `tool_call`/`tool_result`
-  pairs; `completion_call` per assistant turn; `model_changed` for
+  pairs; `turn_committed` with each assistant entry's id;
+  `completion_call` per assistant turn; `model_changed` for
   `ModelChange` entries) → `replay_done`. Branch siblings are excluded
   by the chain walk; deltas are never persisted, so replay emits whole
   texts. Risk noted: yaca's implementation has never run in production —
@@ -101,17 +102,38 @@ histories).
   `git checkout <hash>` is the right metaphor; the next append branches
   from the target). Idle-only (the GUI composes abort-then-checkout;
   run state is derivable from events). Outcome events
-  `checked_out { entry_id }` / `checkout_failed { message }`; the GUI
-  drops its own state after `entry_id` — no re-replay.
+  `checked_out { entry_id, base_id }` / `checkout_failed { message }`.
+  **Cross-branch checkouts resend the diff, not the chain.** The
+  frontend holds only the active branch, so a target on another branch
+  is content it has never seen: the backend — with the whole tree
+  resident — computes where the old chain and the new chain diverge
+  (`base_id`) and, after `checked_out`, streams the suffix the frontend
+  never had as a replay pass (`replay_started { total }` → finalized
+  events → `replay_done`), reusing the startup replay machinery. The
+  GUI drops its own groups after `base_id` and applies the pass. When
+  the target is an ancestor (the common rewind) the suffix is empty and
+  nothing follows. Cut points need entry-anchored groups, so v2 puts
+  ids on the anchors: `user_message` (id minted and emitted at drain),
+  `tool_result` gains `entry_id`, and a new `turn_committed
+  { entry_id }` fires when a model turn commits to the log — a live
+  turn's id cannot precede its commit (the entry does not exist yet;
+  yaca documents the same impossibility), and replay emits the same
+  anchor alongside its finalized events, so live and replay share
+  shapes.
 - **Id generation is centralized in the backend.** The log owns
   identity: every entry id is a backend-minted UUIDv7 at append;
-  frontends never generate or supply ids, they learn them from events —
-  `user_message` carries `entry_id`, and the one-message-one-event
-  invariant is the delivery contract (ordered, no correlation needed).
-  Neither frontend-supplied user-message ids nor temp-id round trips
-  are needed: the stdio channel's failure mode is process death (no
-  dedup window to defend), and the event ack is immediate. Replay
-  reuses log ids verbatim — stable across replays.
+  frontends never generate or supply ids, they learn them from events.
+  Shape: the `message { text }` command is text-only; the
+  `user_message { text, entry_id }` event is the id's delivery vehicle.
+  **Steers get ids like any other message** — one steer, one
+  `UserMessage` entry (the log keeps 1:1 fidelity with what the model
+  saw), one `user_message` event carrying its id. The id exists from
+  the moment the message is *drained into a run* (batch open or turn
+  boundary), not from submission: a message sitting in the mailbox has
+  no id and never needs one — abort is its only exit. Neither
+  frontend-supplied ids nor temp-id round trips are needed: the stdio
+  channel's failure mode is process death (no dedup window to defend).
+  Replay reuses log ids verbatim — stable across replays.
 - **The frontend keeps the active branch only.** The GUI's transcript
   is the checked-out chain's events; the tree (abandoned branches,
   markers) is backend/log truth. Branch browsing, if ever wanted, is a
