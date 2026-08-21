@@ -15,10 +15,10 @@ use futures::{Stream, StreamExt, stream};
 use rig_agent::{
     Agent, AgentBuilder, ModelHandle,
     agent::{
-        AgentHook, CompletionCallAction, HookContext, InvalidToolCallAction, ModelSelection,
-        ModelSelectionAction, ModelTurnAction, ModelTurnFinished, NoToolConfig, PromptRequest,
-        RequestPatch, Standard, StreamingError, StreamingResult, ToolCall as ToolCallEvent,
-        ToolCallAction, ToolResultAction, ToolResultEvent,
+        AgentHook, CompletionCallAction, HookContext, ModelSelection, ModelSelectionAction,
+        ModelTurnAction, ModelTurnFinished, NoToolConfig, PromptRequest, RequestPatch, Standard,
+        StreamingError, StreamingResult, ToolCall as ToolCallEvent, ToolCallAction,
+        ToolResultAction, ToolResultEvent,
     },
     completion::{
         CompletionError, CompletionModel, CompletionRequest, CompletionResponse, Message, Prompt,
@@ -93,6 +93,10 @@ fn usage(total_tokens: u64) -> Usage {
 
 #[derive(Clone)]
 enum Turn {
+    // Matched by the mock's arms; no current test constructs it (its
+    // constructor left with the invalid-retry tests).
+    #[allow(dead_code)]
+    Error(String),
     Text {
         text: String,
         usage: Usage,
@@ -110,7 +114,6 @@ enum Turn {
         usage: Usage,
         message_id: String,
     },
-    Error(String),
 }
 
 impl Turn {
@@ -138,10 +141,6 @@ impl Turn {
             usage: usage(total_tokens),
             message_id: message_id.to_owned(),
         }
-    }
-
-    fn error(message: &str) -> Self {
-        Self::Error(message.to_owned())
     }
 
     fn usage(&self) -> Usage {
@@ -1148,63 +1147,6 @@ async fn retries_reenter_selection_without_leaking_rejected_turn_state() {
     }));
 }
 
-#[derive(Clone)]
-struct RetryInvalidTool;
-
-impl AgentHook for RetryInvalidTool {
-    async fn on_invalid_tool_call(
-        &self,
-        _context: &HookContext,
-        _event: &rig_agent::agent::InvalidToolCallContext,
-    ) -> Option<InvalidToolCallAction> {
-        Some(InvalidToolCallAction::retry(
-            "answer directly instead of calling that tool",
-        ))
-    }
-}
-
-#[tokio::test]
-async fn invalid_tool_retry_reenters_selection_exactly_once() {
-    let invalid = Turn::tool("missing_tool", 2, "invalid-tool-message");
-    let alpha = AlphaModel(Script::new("alpha", [invalid.clone()], invalid));
-    let beta = beta_static("recovered after invalid tool");
-    let alpha_handle = ModelHandle::named("alpha", alpha);
-    let beta_handle = ModelHandle::named("beta", beta);
-    let selections = Arc::new(Mutex::new(Vec::new()));
-    let selections_for_router = selections.clone();
-
-    let output = AgentBuilder::from_model_handle(alpha_handle.clone())
-        .add_hook(RetryInvalidTool)
-        .build()
-        .prompt("recover from an invalid tool")
-        .max_turns(2)
-        .max_invalid_tool_call_retries(1)
-        .add_hook(SelectWith(
-            move |context: &HookContext, event: ModelSelection<'_>| {
-                selections_for_router.lock().expect("selection lock").push((
-                    context.turn(),
-                    event
-                        .previous_model
-                        .and_then(ModelHandle::label)
-                        .map(str::to_owned),
-                ));
-                ModelSelectionAction::select(if context.turn() == 1 {
-                    alpha_handle.clone()
-                } else {
-                    beta_handle.clone()
-                })
-            },
-        ))
-        .await
-        .expect("invalid-tool retry run");
-
-    assert_eq!(output, "recovered after invalid tool");
-    assert_eq!(
-        selections.lock().expect("selection lock").as_slice(),
-        &[(1, None), (2, Some("alpha".to_owned()))]
-    );
-}
-
 #[tokio::test]
 async fn normalized_stream_preserves_events_message_id_and_usage() {
     let rich = Turn::rich("final text", 13, "rich-message-id");
@@ -1811,98 +1753,4 @@ impl AgentHook for BadSecondTurnPatch {
             CompletionCallAction::continue_run()
         }
     }
-}
-
-#[tokio::test]
-async fn an_errored_provider_attempt_still_counts_as_the_previous_model() {
-    for streaming in [false, true] {
-        // Turn 1's provider attempt errors after being issued; the invalid
-        // reply is not needed — instead, the recovery path that keeps the run
-        // alive is a fresh extraction retry driven by the caller. Within a
-        // single run the driver terminates on a provider error, so the
-        // issued-attempt semantics are observed through the invalid-tool-call
-        // retry: alpha's turn-1 attempt is issued and defective, and turn 2's
-        // selection still sees previous_model == alpha. The direct
-        // provider-error path is asserted below to issue exactly one request
-        // and fail with the provider error (not a cancellation), proving the
-        // attempt was issued after selection resolved.
-        let flaky = AlphaModel(Script::new(
-            "flaky",
-            [Turn::error("provider exploded")],
-            Turn::text("unreachable", 1, "unreachable-message"),
-        ));
-        let script = flaky.0.clone();
-        let observations: SelectionObservations = Arc::new(Mutex::new(Vec::new()));
-        let flaky_handle = ModelHandle::named("flaky", flaky);
-        let agent = AgentBuilder::from_model_handle(flaky_handle)
-            .add_hook(observing_selector(observations.clone()))
-            .build();
-
-        let failed_with_provider_error = if streaming {
-            matches!(
-                drain_stream(agent.stream_prompt("boom").await).await,
-                Err(StreamingError::Completion(CompletionError::ProviderError(message)))
-                    if message == "provider exploded"
-            )
-        } else {
-            matches!(
-                agent.prompt("boom").await,
-                Err(PromptError::CompletionError(CompletionError::ProviderError(message)))
-                    if message == "provider exploded"
-            )
-        };
-        assert!(
-            failed_with_provider_error,
-            "streaming={streaming}: the issued attempt's provider error must surface"
-        );
-        // The attempt WAS issued: selection resolved, preparation succeeded,
-        // and the provider received exactly one request before erroring.
-        assert_eq!(observations.lock().expect("observation lock").len(), 1);
-        assert_eq!(script.requests().len(), 1);
-    }
-
-    // The advancement itself (an issued-but-failed attempt counts) is
-    // observable when the run continues: alpha's turn-1 attempt returns an
-    // invalid tool call (issued and defective), and turn 2's selection sees
-    // previous_model == "alpha" even though nothing from that attempt was
-    // committed.
-    let invalid = Turn::tool("missing_tool", 2, "invalid-message");
-    let alpha = AlphaModel(Script::new("alpha", [invalid.clone()], invalid));
-    let beta_handle = ModelHandle::named("beta", beta_static("recovered"));
-    let alpha_handle = ModelHandle::named("alpha", alpha);
-    let observations: SelectionObservations = Arc::new(Mutex::new(Vec::new()));
-    let observations_for_router = observations.clone();
-    let output = AgentBuilder::from_model_handle(alpha_handle.clone())
-        .add_hook(RetryInvalidTool)
-        .build()
-        .prompt("recover")
-        .max_turns(2)
-        .max_invalid_tool_call_retries(1)
-        .add_hook(SelectWith(
-            move |context: &HookContext, event: ModelSelection<'_>| {
-                observations_for_router
-                    .lock()
-                    .expect("observation lock")
-                    .push((
-                        context.turn(),
-                        event
-                            .previous_model
-                            .and_then(ModelHandle::label)
-                            .map(str::to_owned),
-                        None,
-                        None,
-                    ));
-                ModelSelectionAction::select(if context.turn() == 1 {
-                    alpha_handle.clone()
-                } else {
-                    beta_handle.clone()
-                })
-            },
-        ))
-        .await
-        .expect("recovered run");
-    assert_eq!(output, "recovered");
-    let observed = observations.lock().expect("observation lock").clone();
-    assert_eq!(observed[0], (1, None, None, None));
-    assert_eq!(observed[1], (2, Some("alpha".to_owned()), None, None));
 }

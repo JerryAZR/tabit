@@ -27,7 +27,7 @@ use crate::{
             PromptResponse,
             streaming::{MultiTurnStreamItem, StreamingError},
         },
-        run::{AgentRun, AgentRunStep, PendingToolCall},
+        run::{AgentRun, AgentRunStep, PendingToolCall, ProviderErrorClass},
         runner::{
             AgentRunner, CompletionCallOutcome, ToolExecution, append_run_messages,
             new_execute_tool_span, resolve_completion_call, run_single_tool,
@@ -162,51 +162,69 @@ pub(crate) fn store_error_usage(runner: &AgentRunner, run: &AgentRun) {
     }
 }
 
-/// Deliver queued steering to the run's history at a turn end. No budget
-/// check: appending to history is unconditional — the max-turn budget
-/// gates only the next model call, discovered (and reported as
-/// `MaxTurnsError`) when the loop tries to send. Returns the steered
-/// texts for the driver to surface.
-fn drain_steers(runner: &AgentRunner, run: &mut AgentRun) -> Result<Vec<String>, PromptError> {
-    let Some(steering) = &runner.steering else {
-        return Ok(Vec::new());
-    };
-    if !run.ready_for_steering() || !steering.has_pending() {
-        return Ok(Vec::new());
-    }
-    let messages = steering.drain();
-    run.steer(messages.clone())?;
-    Ok(messages
-        .iter()
-        .filter_map(|message| message.user_text())
-        .collect())
+/// How a failed turn classifies for the machine's feeds — the driver owns
+/// error observation and classification (ENGINE.md's taxonomy); the machine
+/// owns the resulting control flow.
+enum TurnFailure {
+    /// A model-side defect: the model emitted a tool call whose arguments
+    /// cannot be parsed. The turn is discarded and retried, bounded.
+    Defect(String),
+    /// A provider/transport failure, retryable or terminal.
+    Provider(ProviderErrorClass),
+    /// A hook stopped the run.
+    Stop(String),
 }
 
-/// How many consecutive defective model turns the driver discards and
-/// retries before failing the run — one retry, two attempts per turn. A
-/// named engine constant, not model config: the retry policy is ours, and
-/// a deterministic defect (a token limit cutting calls mid-argument) should
-/// burn it fast and fail with the actionable message.
-const MAX_DISCARDED_DEFECTIVE_TURNS: usize = 1;
+fn classify_turn_failure(err: &StreamingError) -> TurnFailure {
+    match err {
+        StreamingError::Completion(CompletionError::MalformedToolCall { tool, reason }) => {
+            TurnFailure::Defect(format!("`{tool}`: {reason}"))
+        }
+        StreamingError::Completion(other) => TurnFailure::Provider(classify_provider_error(other)),
+        StreamingError::Prompt(boxed) => match &**boxed {
+            PromptError::PromptCancelled { reason, .. } => TurnFailure::Stop(reason.clone()),
+            PromptError::CompletionError(inner) => {
+                TurnFailure::Provider(classify_provider_error(inner))
+            }
+            _ => TurnFailure::Provider(ProviderErrorClass::Terminal),
+        },
+    }
+}
 
-/// Whether a turn error is the model emitting a tool call it broke itself —
-/// arguments that cannot be parsed, so the turn can neither execute nor be
-/// replayed — as opposed to a transport failure. The defect path discards
-/// the turn and retries; transport failures fail the run.
-fn is_malformed_tool_call_defect(err: &StreamingError) -> bool {
-    matches!(
-        err,
-        StreamingError::Completion(CompletionError::MalformedToolCall { .. })
-    )
+/// Classify a provider failure per ENGINE.md's taxonomy. Deliberately
+/// coarse — a simple, documented judgment, not provider forensics:
+/// rate limits (HTTP 429, or a rate-limit-shaped message) retry; everything
+/// else is terminal. Widening this is a one-function change.
+fn classify_provider_error(err: &CompletionError) -> ProviderErrorClass {
+    if err
+        .provider_response_status()
+        .is_some_and(|status| status.as_u16() == 429)
+        || err.to_string().to_lowercase().contains("rate limit")
+    {
+        ProviderErrorClass::Retryable
+    } else {
+        ProviderErrorClass::Terminal
+    }
 }
 
 /// The single agent drive loop, shared by the blocking and streaming surfaces.
 ///
-/// Owns the medium-independent loop — `next_step` dispatch, the `CompletionCall`
-/// hook + request preparation, the `Done` memory append — and delegates the
-/// medium-specific model call, tool execution, span shaping and finalization to
-/// a [`TurnSource`]. The streaming surface forwards the yielded [`DriveItem`]s;
-/// the blocking surface folds them to `Done`.
+/// Owns the medium-independent loop — `next_step` dispatch, the
+/// `CompletionCall` hook + request preparation, the drain, the `Done`
+/// memory append — and delegates the medium-specific model call, tool
+/// execution, span shaping and finalization to a [`TurnSource`]. The
+/// streaming surface forwards the yielded [`DriveItem`]s; the blocking
+/// surface folds them to `Done`.
+///
+/// The loop mirrors ENGINE.md's inner machine: model turn → outcome feed
+/// → `DrainSteers` (the one drain) → decision. Turn sources feed
+/// *committed* turns to the machine themselves; failures are classified
+/// here and fed (`broken` / `provider_error` / `terminate`), so every
+/// outcome converges at the drain before anything else happens.
+// `clippy::panic`: one deliberate internal-invariant crash (the empty
+// history is unrepresentable — the machine panics at construction and only
+// appends). AGENTS.md's error doctrine sanctions it.
+#[allow(clippy::panic)]
 pub(crate) fn drive_agent<S>(
     runner: AgentRunner,
     mut source: S,
@@ -234,10 +252,9 @@ where
         // is invoked, so a completion-call stop, selection stop, or preparation
         // failure leaves it unchanged while a provider error still counts.
         let mut previous_model: Option<ModelHandle> = None;
-        // Consecutive model turns discarded because the model emitted a tool
-        // call with unparseable arguments. Reset on any committed turn — the
-        // cap bounds the resample streak, not the run.
-        let mut discarded_defective_turns: usize = 0;
+        // A provider failure awaits the machine's decision (through the
+        // drain); its original `Completion` shape is restored at the exit.
+        let mut provider_failure = false;
 
         'outer: loop {
             let step = match run.next_step() {
@@ -250,12 +267,22 @@ where
             };
 
             match step {
-                AgentRunStep::CallModel { prompt, history, turn } => {
+                AgentRunStep::CallModel { history, turn } => {
                     drop(pending_tool_snapshot.take());
                     if runner.max_turns > 1 {
                         tracing::info!("Current conversation Turns: {}/{}", turn, runner.max_turns);
                     }
                     hook_ctx.set_turn(turn);
+                    // The message being answered — a derived view; the machine
+                    // guarantees the history is never empty (ENGINE.md: no
+                    // prompt/context split).
+                    let prompt = match history.last() {
+                        Some(message) => message.clone(),
+                        None => panic!(
+                            "drive: model-call history is empty — the machine guarantees \
+                             at least the message being answered"
+                        ),
+                    };
 
                     // Completion-call hooks resolve FIRST: a stop here suppresses
                     // model selection entirely, and their merged `RequestPatch`
@@ -263,9 +290,14 @@ where
                     let request_patch =
                         match resolve_completion_call(&runner.hooks, &hook_ctx, &prompt, &history, turn).await {
                             CompletionCallOutcome::Terminate(reason) => {
-                                store_error_usage(&runner, &run);
-                                yield Err(StreamingError::Prompt(Box::new(run.cancel_error(reason))));
-                                break 'outer;
+                                // Route the stop through the drain (the machine's
+                                // law); the error surfaces from the decision.
+                                if let Err(err) = run.terminate(reason) {
+                                    store_error_usage(&runner, &run);
+                                    yield Err(Box::new(err).into());
+                                    break 'outer;
+                                }
+                                continue 'outer;
                             }
                             CompletionCallOutcome::Proceed(request_patch) => request_patch,
                         };
@@ -289,9 +321,12 @@ where
                         ModelSelectionAction::Continue => runner.model.clone(),
                         ModelSelectionAction::Select(model) => model,
                         ModelSelectionAction::Stop(reason) => {
-                            store_error_usage(&runner, &run);
-                            yield Err(StreamingError::Prompt(Box::new(run.cancel_error(reason))));
-                            break 'outer;
+                            if let Err(err) = run.terminate(reason) {
+                                store_error_usage(&runner, &run);
+                                yield Err(Box::new(err).into());
+                                break 'outer;
+                            }
+                            continue 'outer;
                         }
                     };
 
@@ -311,7 +346,6 @@ where
                     let committed_output_tool = run.output_tool_name().map(str::to_owned);
                     let mut prepared = match build_prepared_completion_request(
                         &selected_model,
-                        prompt.clone(),
                         &history,
                         runner.preamble.as_deref(),
                         &runner.static_context,
@@ -332,9 +366,20 @@ where
                     {
                         Ok(prepared) => prepared,
                         Err(err) => {
-                            store_error_usage(&runner, &run);
-                            yield Err(err.into());
-                            break 'outer;
+                            // Request construction can fail on user content
+                            // (an attachment a provider cannot carry) — external
+                            // input, so it fails gracefully as a terminal error
+                            // rather than panicking.
+                            if let Err(state_err) = run.provider_error(
+                                ProviderErrorClass::Terminal,
+                                err.into(),
+                            ) {
+                                store_error_usage(&runner, &run);
+                                yield Err(Box::new(state_err).into());
+                                break 'outer;
+                            }
+                            provider_failure = true;
+                            continue 'outer;
                         }
                     };
                     run.set_output_tool_name(prepared.output_tool_name.clone());
@@ -374,86 +419,41 @@ where
                     }
                     drop(turn_stream);
                     if let Some(err) = turn_error {
-                        if is_malformed_tool_call_defect(&err) {
-                            // The defective turn is discarded unconditionally
-                            // — it never entered history, so exhausting after
-                            // this point still leaves the conversation
-                            // unchanged. Discarding also returns the run to
-                            // a steerable state for the drain below.
-                            if let Err(state_err) = run.discard_turn() {
-                                store_error_usage(&runner, &run);
-                                yield Err(Box::new(state_err).into());
-                                break 'outer;
-                            }
-                            // Steers that arrived during the defective turn
-                            // drain here — a turn boundary like any other —
-                            // and a drained steer RESETS the streak: it is
-                            // new user input, and the retry budget exists to
-                            // bound unattended loops. A present, steering
-                            // user is their own circuit breaker.
-                            match drain_steers(&runner, &mut run) {
-                                Ok(texts) => {
-                                    if !texts.is_empty() {
-                                        discarded_defective_turns = 0;
-                                    }
-                                    for text in texts {
-                                        yield Ok(DriveItem::Item(
-                                            MultiTurnStreamItem::Steer { text },
-                                        ));
-                                    }
-                                }
-                                Err(steer_err) => {
-                                    store_error_usage(&runner, &run);
-                                    yield Err(Box::new(steer_err).into());
-                                    break 'outer;
-                                }
-                            }
-                            if discarded_defective_turns < MAX_DISCARDED_DEFECTIVE_TURNS {
-                                discarded_defective_turns += 1;
+                        // Classify and feed; the loop then routes through the
+                        // drain, where steers ride along and the decision
+                        // (retry, bounded, or fail) is made by the machine.
+                        let class = classify_turn_failure(&err);
+                        let fed = match &class {
+                            TurnFailure::Defect(reason) => {
                                 tracing::warn!(
                                     turn,
-                                    discarded = discarded_defective_turns,
                                     "model turn carried a malformed tool call; \
                                      discarding the turn and retrying the request"
                                 );
-                                continue 'outer;
+                                run.broken(reason.clone())
                             }
-                            // Only reachable when no steer drained: new user
-                            // input resets the streak above.
+                            TurnFailure::Provider(class) => {
+                                if matches!(class, ProviderErrorClass::Retryable) {
+                                    tracing::warn!(
+                                        turn,
+                                        "retryable provider error; draining and retrying the request"
+                                    );
+                                }
+                                run.provider_error(*class, streaming_error_into_prompt(err))
+                            }
+                            TurnFailure::Stop(reason) => run.terminate(reason.clone()),
+                        };
+                        if let Err(state_err) = fed {
                             store_error_usage(&runner, &run);
-                            yield Err(StreamingError::Prompt(Box::new(run.cancel_error(
-                                format!(
-                                    "the model repeatedly emitted tool calls with \
-                                     malformed arguments ({discarded_defective_turns} \
-                                     consecutive turns discarded and retried); the \
-                                     conversation history is unchanged — resend the \
-                                     prompt to try again, or raise the model's output \
-                                     token limit if the calls keep getting cut. Last \
-                                     failure: {err}"
-                                ),
-                            ))));
+                            yield Err(Box::new(state_err).into());
                             break 'outer;
                         }
-                        store_error_usage(&runner, &run);
-                        yield Err(err);
-                        break 'outer;
+                        provider_failure |= matches!(class, TurnFailure::Provider(_));
+                        continue 'outer;
                     }
-                    // A committed turn resets the defect streak.
-                    discarded_defective_turns = 0;
+                    // Clean end: the source fed the committed turn; the
+                    // machine decides what surfaces next.
                     pending_tool_snapshot = Some(turn_tool_snapshot);
-                    // Turn end: deliver steering to history (a turn with
-                    // tool calls is not steerable yet — its tools run
-                    // first; the drain below the tool arm catches those).
-                    for text in match drain_steers(&runner, &mut run) {
-                        Ok(texts) => texts,
-                        Err(err) => {
-                            store_error_usage(&runner, &run);
-                            yield Err(Box::new(err).into());
-                            break 'outer;
-                        }
-                    } {
-                        yield Ok(DriveItem::Item(MultiTurnStreamItem::Steer { text }));
-                    }
                 }
                 AgentRunStep::CallTools { calls } => {
                     let Some(tool_snapshot) = pending_tool_snapshot.take() else {
@@ -483,25 +483,59 @@ where
                     }
                     drop(tool_stream);
                     if let Some(err) = tool_error {
-                        store_error_usage(&runner, &run);
-                        yield Err(err);
-                        break 'outer;
-                    }
-                    // Turn end: results are in history; steers append
-                    // after them, before the loop decides whether another
-                    // model call fits the budget.
-                    for text in match drain_steers(&runner, &mut run) {
-                        Ok(texts) => texts,
-                        Err(err) => {
+                        let class = classify_turn_failure(&err);
+                        let fed = match &class {
+                            TurnFailure::Defect(reason) => run.broken(reason.clone()),
+                            TurnFailure::Provider(class) => {
+                                run.provider_error(*class, streaming_error_into_prompt(err))
+                            }
+                            TurnFailure::Stop(reason) => run.terminate(reason.clone()),
+                        };
+                        if let Err(state_err) = fed {
                             store_error_usage(&runner, &run);
-                            yield Err(Box::new(err).into());
+                            yield Err(Box::new(state_err).into());
                             break 'outer;
                         }
-                    } {
+                        provider_failure |= matches!(class, TurnFailure::Provider(_));
+                        continue 'outer;
+                    }
+                    // Tool results were fed by the tool source; the loop
+                    // routes through the drain next.
+                }
+                AgentRunStep::DrainSteers => {
+                    // THE drain point (the machine's only one): take
+                    // everything queued, surface each message, feed the
+                    // machine — whose decision then returns the next step,
+                    // the failure, or nothing (Done next round).
+                    let messages = runner
+                        .steering
+                        .as_ref()
+                        .map(|steering| steering.drain())
+                        .unwrap_or_default();
+                    for text in messages.iter().filter_map(Message::user_text) {
                         yield Ok(DriveItem::Item(MultiTurnStreamItem::Steer { text }));
                     }
+                    if let Err(err) = run.steered(messages) {
+                        // The decision failed the run (terminal error,
+                        // exhausted retries, budget, or a stop) or the
+                        // driver drove out of protocol; either way the run
+                        // is over. A provider failure exits with its
+                        // original error shape.
+                        store_error_usage(&runner, &run);
+                        yield Err(if provider_failure {
+                            match err {
+                                crate::completion::PromptError::CompletionError(completion) => {
+                                    StreamingError::Completion(completion)
+                                }
+                                other => Box::new(other).into(),
+                            }
+                        } else {
+                            Box::new(err).into()
+                        });
+                        break 'outer;
+                    }
                 }
-                AgentRunStep::Done(response) => {
+                AgentRunStep::Done(boxed_response) => {
                     // Run-completion marker, unifying the blocking and streaming
                     // drivers' run-finished logs into one shared event.
                     tracing::info!(
@@ -509,6 +543,7 @@ where
                         max_turns = runner.max_turns,
                         "Agent run finished"
                     );
+                    let response = *boxed_response;
                     source.record_run_level_telemetry(&agent_span, &response, created_agent_span);
                     append_run_messages(
                         memory_handle.as_ref(),

@@ -362,30 +362,6 @@ impl HookContext {
     }
 }
 
-/// Diagnostics for an invalid model-emitted tool call.
-#[derive(Debug, Clone)]
-#[non_exhaustive]
-pub struct InvalidToolCallContext {
-    /// Name emitted by the model.
-    pub tool_name: String,
-    /// Provider tool-call id, when present.
-    pub tool_call_id: Option<String>,
-    /// Rig correlation id, when present.
-    pub internal_call_id: Option<String>,
-    /// Emitted JSON arguments, when present.
-    pub args: Option<String>,
-    /// Executable tools advertised for the turn.
-    pub available_tools: Vec<String>,
-    /// Tools permitted by the active tool choice.
-    pub allowed_tools: Vec<String>,
-    /// Active tool choice.
-    pub tool_choice: Option<ToolChoice>,
-    /// Diagnostic history including the rejected output.
-    pub chat_history: Vec<Message>,
-    /// Whether the call came from the streaming path.
-    pub is_streaming: bool,
-}
-
 /// Completion-call event.
 ///
 /// Per `CallModel` step, hook resolution is ordered: completion-call hooks run
@@ -945,68 +921,6 @@ impl ToolResultAction {
     }
 }
 
-/// Action for invalid-tool-call hooks and manual invalid-call resolution.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub enum InvalidToolCallAction {
-    /// Preserve fail-fast behavior.
-    Fail,
-    /// Retry the model with corrective feedback.
-    Retry {
-        /// Feedback appended for the retry.
-        feedback: String,
-    },
-    /// Repair the emitted tool name.
-    Repair {
-        /// Replacement registered tool name.
-        tool_name: String,
-    },
-    /// Treat the invalid call as skipped.
-    Skip {
-        /// Synthetic model feedback.
-        reason: String,
-    },
-    /// Stop the run.
-    Stop {
-        /// Stop reason.
-        reason: String,
-    },
-}
-
-impl InvalidToolCallAction {
-    /// Creates an action that preserves fail-fast invalid-call handling.
-    pub fn fail() -> Self {
-        Self::Fail
-    }
-
-    /// Creates an action that retries the model with corrective feedback.
-    pub fn retry(feedback: impl Into<String>) -> Self {
-        Self::Retry {
-            feedback: feedback.into(),
-        }
-    }
-
-    /// Creates an action that replaces the invalid tool name.
-    pub fn repair(tool_name: impl Into<String>) -> Self {
-        Self::Repair {
-            tool_name: tool_name.into(),
-        }
-    }
-
-    /// Creates an action that treats the invalid call as skipped.
-    pub fn skip(reason: impl Into<String>) -> Self {
-        Self::Skip {
-            reason: reason.into(),
-        }
-    }
-
-    /// Creates an action that stops the run with the supplied reason.
-    pub fn stop(reason: impl Into<String>) -> Self {
-        Self::Stop {
-            reason: reason.into(),
-        }
-    }
-}
-
 /// Action for observe-only lifecycle events.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum ObservationAction {
@@ -1087,17 +1001,6 @@ pub trait AgentHook: WasmCompatSend + WasmCompatSync {
     /// Resolves a model-emitted tool call that cannot be dispatched as written.
     ///
     /// The call may be failed, retried, repaired, skipped, or used to stop the
-    /// run. Return `None` to leave the decision to a later hook. If every hook
-    /// in a [`HookStack`] returns `None`, the agent preserves fail-fast
-    /// behavior.
-    fn on_invalid_tool_call(
-        &self,
-        _ctx: &HookContext,
-        _event: &InvalidToolCallContext,
-    ) -> impl Future<Output = Option<InvalidToolCallAction>> + WasmCompatSend {
-        async { None }
-    }
-
     /// Runs before a valid tool call is executed.
     ///
     /// The hook may rewrite the current arguments, skip execution, or stop the
@@ -1188,11 +1091,6 @@ trait DynAgentHook: WasmCompatSend + WasmCompatSync {
         ctx: &'a HookContext,
         event: ModelTurnFinished<'a>,
     ) -> WasmBoxedFuture<'a, ModelTurnAction>;
-    fn invalid_tool_call<'a>(
-        &'a self,
-        ctx: &'a HookContext,
-        event: &'a InvalidToolCallContext,
-    ) -> WasmBoxedFuture<'a, Option<InvalidToolCallAction>>;
     fn tool_call<'a>(
         &'a self,
         ctx: &'a HookContext,
@@ -1249,13 +1147,6 @@ where
         event: ModelTurnFinished<'a>,
     ) -> WasmBoxedFuture<'a, ModelTurnAction> {
         Box::pin(self.on_model_turn_finished(ctx, event))
-    }
-    fn invalid_tool_call<'a>(
-        &'a self,
-        ctx: &'a HookContext,
-        event: &'a InvalidToolCallContext,
-    ) -> WasmBoxedFuture<'a, Option<InvalidToolCallAction>> {
-        Box::pin(self.on_invalid_tool_call(ctx, event))
     }
     fn tool_call<'a>(
         &'a self,
@@ -1468,18 +1359,6 @@ impl AgentHook for HookStack {
             }
         }
         ModelTurnAction::Continue
-    }
-    async fn on_invalid_tool_call(
-        &self,
-        ctx: &HookContext,
-        event: &InvalidToolCallContext,
-    ) -> Option<InvalidToolCallAction> {
-        for hook in &self.hooks {
-            if let Some(action) = hook.invalid_tool_call(ctx, event).await {
-                return Some(action);
-            }
-        }
-        None
     }
     async fn on_tool_call(&self, ctx: &HookContext, event: ToolCall<'_>) -> ToolCallAction {
         let internal_call_id = event.internal_call_id;

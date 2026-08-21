@@ -4,13 +4,13 @@ use crate::{
     agent::completion::PreparedCompletionRequest,
     agent::drive::{DriveStream, TurnSource, drive_tool_calls, record_usage_on_span},
     agent::hook::{
-        AgentHook, HookContext, HookStack, InvalidToolCallAction, ModelTurnFinished, StepEventKind,
-        StreamResponseFinish, TextDelta, ToolCallDelta,
+        AgentHook, HookContext, HookStack, ModelTurnFinished, StepEventKind, StreamResponseFinish,
+        TextDelta, ToolCallDelta,
     },
     agent::prompt_request::{assistant_text_from_choice, is_empty_assistant_turn},
     agent::run::{
         AgentRun, PendingToolCall,
-        streamed::{StreamedResolution, StreamedTurnAssembler, StreamedTurnEvent},
+        streamed::{StreamedTurnAssembler, StreamedTurnEvent},
     },
     agent::runner::{
         AgentRunner, ModelTurnDecision, build_chat_span, observe_action, resolve_model_turn_action,
@@ -189,25 +189,6 @@ impl MultiTurnStreamItem {
         ))
     }
 }
-
-/// Drain a provider stream abandoned by invalid tool-call recovery so the
-/// reported usage for the recovered completion call is not lost.
-async fn drain_stream_usage(
-    stream: &mut crate::streaming::StreamingCompletionResponse,
-) -> Result<crate::completion::Usage, StreamingError> {
-    while let Some(content) = stream.next().await {
-        match content {
-            Ok(StreamedAssistantContent::Final(final_resp)) => {
-                return Ok(final_resp.usage);
-            }
-            Ok(_) => {}
-            Err(err) => return Err(err.into()),
-        }
-    }
-
-    Ok(crate::completion::Usage::new())
-}
-
 /// Build the final streamed content for a finished run (#1928).
 ///
 /// When the finishing turn carries a tool call it is a Tool-mode output-tool
@@ -372,9 +353,6 @@ pub(crate) struct StreamingTurnSource {
     /// high-frequency delta events when no hook observes them.
     observes_text_delta: bool,
     observes_tool_call_delta: bool,
-    /// Whether any hook is present — gates building the (history-cloning)
-    /// invalid-tool diagnostic context.
-    has_hooks: bool,
 }
 
 impl StreamingTurnSource {
@@ -392,7 +370,6 @@ impl StreamingTurnSource {
             record_telemetry_content,
             observes_text_delta: hooks.observes(StepEventKind::TextDelta),
             observes_tool_call_delta: hooks.observes(StepEventKind::ToolCallDelta),
-            has_hooks: !hooks.is_empty(),
         }
     }
 }
@@ -438,13 +415,13 @@ impl TurnSource for StreamingTurnSource {
                 prepared.allowed_tool_names.clone(),
             );
             let mut completion_call_emitted = false;
-            let mut turn_abandoned = false;
+            let turn_abandoned = false;
             let mut provider_final_seen = false;
             let mut pending_final = None;
             // Mirrors the blocking driver's `response_hook_suppressed`: a turn
             // whose invalid tool call was repaired is a recovered turn, so its
             // response-finish hook is suppressed.
-            let mut turn_recovered = false;
+            let turn_recovered = false;
 
             // Emit the turn's single `CompletionCall` exactly once, recording its
             // usage onto the chat span and into the run. Defined here (not a free
@@ -474,7 +451,7 @@ impl TurnSource for StreamingTurnSource {
                 }};
             }
 
-            'turn: while let Some(item) = stream.next().await {
+            while let Some(item) = stream.next().await {
                 let item = match item {
                     Ok(item) => item,
                     Err(err) => {
@@ -587,78 +564,6 @@ impl TurnSource for StreamingTurnSource {
                                 pending_final = item_slot.take();
                             }
                         }
-                        StreamedTurnEvent::InvalidToolCall(invalid) => {
-                            let partial = assembler.partial_turn(stream.message_id.clone());
-                            // Gated on `has_hooks`: building the diagnostic context
-                            // clones the chat history, so an empty stack skips it and
-                            // fails fast — identical to the blocking path.
-                            let action = if self.has_hooks {
-                                let context =
-                                    run.streamed_invalid_tool_call_context(&partial, &invalid);
-                                runner
-                                    .hooks
-                                    .on_invalid_tool_call(hook_ctx, &context)
-                                    .await
-                                    .unwrap_or_else(InvalidToolCallAction::fail)
-                            } else {
-                                InvalidToolCallAction::fail()
-                            };
-
-                            let resolution =
-                                match run.resolve_streamed_invalid_tool_call(&partial, &invalid, action) {
-                                    Ok(resolution) => resolution,
-                                    Err(err) => {
-                                        yield Err(Box::new(err).into());
-                                        return;
-                                    }
-                                };
-
-                            match resolution {
-                                StreamedResolution::Repaired { .. } => {
-                                    // Replayed deltas flow through the same event
-                                    // handling above; the turn is now recovered, so
-                                    // its response-finish hook is suppressed.
-                                    turn_recovered = true;
-                                    events.extend(assembler.resolve_pending_invalid(&resolution));
-                                }
-                                StreamedResolution::TurnAbandoned {
-                                    ref skipped_tool_result,
-                                } => {
-                                    let skipped_tool_result = skipped_tool_result.clone();
-                                    assembler.resolve_pending_invalid(&resolution);
-
-                                    if let Some(err) = assembler.pending_delta_error() {
-                                        yield Err(err.into());
-                                        return;
-                                    }
-                                    let drained_usage = match drain_stream_usage(&mut stream).await {
-                                        Ok(usage) => usage,
-                                        Err(err) => {
-                                            yield Err(err);
-                                            return;
-                                        }
-                                    };
-                                    match emit_completion_call!(drained_usage) {
-                                        Ok(Some(item)) => yield Ok(item),
-                                        Ok(None) => {}
-                                        Err(err) => {
-                                            yield Err(err);
-                                            return;
-                                        }
-                                    }
-                                    if let Some(tool_result) = skipped_tool_result {
-                                        yield Ok(MultiTurnStreamItem::StreamUserItem(
-                                            StreamedUserContent::ToolResult {
-                                                tool_result,
-                                                internal_call_id: invalid.internal_call_id.clone(),
-                                            },
-                                        ));
-                                    }
-                                    turn_abandoned = true;
-                                    break 'turn;
-                                }
-                            }
-                        }
                     }
                 }
             }
@@ -730,7 +635,7 @@ impl TurnSource for StreamingTurnSource {
             // history; the raw `stream.choice` is kept in `last_final_choice` for
             // the raw/final streaming behavior.
             let canonical_choice = streamed_turn.choice.clone();
-            if let Err(err) = run.streamed_turn(streamed_turn) {
+            if let Err(err) = run.turn_committed_streamed(streamed_turn) {
                 yield Err(Box::new(err).into());
                 return;
             }

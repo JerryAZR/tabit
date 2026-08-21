@@ -221,8 +221,7 @@ pub(crate) fn allowed_tool_names_for_choice(
 #[allow(clippy::too_many_arguments)]
 pub(crate) async fn build_prepared_completion_request(
     model: &ModelHandle,
-    prompt: Message,
-    chat_history: &[Message],
+    history: &[Message],
     preamble: Option<&str>,
     static_context: &[Document],
     temperature: Option<f64>,
@@ -270,12 +269,9 @@ pub(crate) async fn build_prepared_completion_request(
 
     // Retrieved tools keep their existing query-selection behavior: prefer the
     // current prompt's RAG text, then the latest matching history message.
-    let retrieval_query = prompt.rag_text().or_else(|| {
-        chat_history
-            .iter()
-            .rev()
-            .find_map(|message| message.rag_text())
-    });
+    // The message being answered is the history's last entry — a view,
+    // not a field (ENGINE.md: no prompt/context split).
+    let retrieval_query = history.iter().rev().find_map(|message| message.rag_text());
 
     let mut tool_snapshot = tool_server_handle
         .snapshot_tool_defs(retrieval_query)
@@ -437,19 +433,34 @@ pub(crate) async fn build_prepared_completion_request(
         }
     };
 
-    // A per-turn `history` patch replaces the prior messages sent to the provider
-    // *this turn only* (context-window compaction / summarization). The RAG query
-    // text above deliberately still derives from the original `chat_history`, so
-    // this changes only what is sent, never what is retrieved or persisted.
-    let messages_history: &[Message] = request_patch
-        .and_then(|o| o.history.as_deref())
-        .unwrap_or(chat_history);
+    // The message being answered is the ORIGINAL history's last entry — a
+    // derived view, not a field (ENGINE.md: no prompt/context split). A
+    // per-turn `history` patch replaces the prior messages sent to the
+    // provider *this turn only* (context-window compaction / summarization);
+    // the RAG query text above deliberately still derives from the original
+    // history, so this changes only what is sent, never what is retrieved
+    // or persisted.
+    let prompt = history
+        .last()
+        .cloned()
+        .unwrap_or_else(|| Message::user(String::new()));
+    // The patch replaces the *preceding* messages only (context-window
+    // compaction); the prompt below always comes from the original
+    // history's last entry.
+    let preceding: Vec<Message> = match request_patch.and_then(|o| o.history.clone()) {
+        Some(patched) => patched,
+        None => {
+            let mut original = history.to_vec();
+            original.pop();
+            original
+        }
+    };
     let chat_history: Vec<Message> = if let Some(preamble) = &effective_preamble {
         std::iter::once(Message::system(preamble.clone()))
-            .chain(messages_history.iter().cloned())
+            .chain(preceding.iter().cloned())
             .collect()
     } else {
-        messages_history.to_vec()
+        preceding
     };
 
     // In Tool mode, advertise the synthetic output tool to the provider (its name
@@ -1182,8 +1193,7 @@ mod tests {
 
         let prepared = build_prepared_completion_request(
             &model,
-            Message::user("answer"),
-            &[],
+            &[Message::user("answer")],
             None,
             &[],
             None,

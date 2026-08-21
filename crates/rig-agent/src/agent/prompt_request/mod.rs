@@ -162,14 +162,6 @@ macro_rules! forward_prompt_setters {
             self
         }
 
-        /// Set the retry budget for invalid tool-call recovery.
-        ///
-        /// Invalid tool-call retries also consume the total model-call budget.
-        pub fn max_invalid_tool_call_retries(mut self, retries: usize) -> Self {
-            self.$recv = self.$recv.max_invalid_tool_call_retries(retries);
-            self
-        }
-
         /// Set the default model candidate for this run.
         ///
         /// This does not suppress registered model-selection hooks, which may
@@ -572,28 +564,6 @@ impl<T> TypedPromptResponse<T> {
         self.completion_calls.len()
     }
 }
-
-pub(crate) const TOOL_NOT_EXECUTED_DUE_TO_INVALID_PEER: &str =
-    "Tool not executed because another tool call in the same assistant turn was invalid.";
-
-/// Combine input history with new messages for building completion requests.
-pub(crate) fn build_history_for_request(
-    chat_history: Option<&[Message]>,
-    new_messages: &[Message],
-) -> Vec<Message> {
-    let input = chat_history.unwrap_or(&[]);
-    input.iter().chain(new_messages.iter()).cloned().collect()
-}
-
-/// Build the full history for error reporting (input + new messages).
-pub(crate) fn build_full_history(
-    chat_history: Option<&[Message]>,
-    new_messages: Vec<Message>,
-) -> Vec<Message> {
-    let input = chat_history.unwrap_or(&[]);
-    input.iter().cloned().chain(new_messages).collect()
-}
-
 /// Wrap already-shaped tool-result content for the model (see
 /// [`tool_result_output`] / [`tool_result_message`]).
 fn tool_result_with(
@@ -632,6 +602,12 @@ pub(crate) fn tool_result_message(
         OneOrMany::one(ToolResultContent::text(message)),
     )
 }
+
+/// Synthetic result reported for validated sibling calls when a turn is
+/// re-prompted after an invalid call: they did not run, through no fault of
+/// their own.
+pub(crate) const TOOL_NOT_EXECUTED_DUE_TO_INVALID_PEER: &str =
+    "This tool call was not executed because a sibling tool call in the same turn was invalid";
 
 pub(crate) fn invalid_tool_retry_user_message(
     assistant_content: &OneOrMany<AssistantContent>,

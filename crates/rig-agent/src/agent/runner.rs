@@ -40,9 +40,9 @@ use super::{
     },
     hook::{
         AgentHook, CompletionCall, CompletionCallAction,
-        CompletionResponse as CompletionResponseEvent, HookContext, HookStack,
-        InvalidToolCallAction, ModelTurnAction, ModelTurnFinished, ObservationAction, RequestPatch,
-        ToolCall as ToolCallEvent, ToolCallAction, ToolResultAction, ToolResultEvent,
+        CompletionResponse as CompletionResponseEvent, HookContext, HookStack, ModelTurnAction,
+        ModelTurnFinished, ObservationAction, RequestPatch, ToolCall as ToolCallEvent,
+        ToolCallAction, ToolResultAction, ToolResultEvent,
     },
     model::ModelHandle,
     prompt_request::{
@@ -50,9 +50,7 @@ use super::{
         streaming::{MultiTurnStreamItem, StreamingError, StreamingResult, StreamingTurnSource},
         tool_result_output,
     },
-    run::{
-        AgentRun, DEFAULT_OUTPUT_RETRIES, ModelTurn, ModelTurnOutcome, OutputMode, PendingToolCall,
-    },
+    run::{AgentRun, DEFAULT_OUTPUT_RETRIES, ModelTurn, OutputMode, PendingToolCall},
 };
 use rig_core::{
     memory::ConversationMemory,
@@ -70,13 +68,6 @@ use crate::{
 };
 
 use super::UNKNOWN_AGENT_NAME;
-
-#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
-pub(crate) enum UnhandledInvalidToolCallPolicy {
-    #[default]
-    Fail,
-    IgnoreForExtractor,
-}
 
 /// Build the per-turn `chat` span shared by both turn sources.
 ///
@@ -135,7 +126,7 @@ pub(crate) fn resolve_model_turn_action(
     match action {
         ModelTurnAction::Continue => Ok(ModelTurnDecision::Advance),
         ModelTurnAction::Retry(request) => {
-            run.retry_model_turn(request)?;
+            run.reject_final_turn(request)?;
             Ok(ModelTurnDecision::Retried)
         }
         ModelTurnAction::Stop(reason) => Ok(ModelTurnDecision::Terminate(reason)),
@@ -244,7 +235,6 @@ pub struct AgentRunner {
     pub(crate) input: RunInput,
     pub(crate) chat_history: Option<Vec<Message>>,
     pub(crate) max_turns: usize,
-    pub(crate) max_invalid_tool_call_retries: usize,
     pub(crate) model: ModelHandle,
     pub(crate) agent_name: Option<String>,
     pub(crate) preamble: Option<String>,
@@ -262,7 +252,6 @@ pub struct AgentRunner {
     pub(crate) output_tool_name: Option<String>,
     pub(crate) output_tool_description: Option<String>,
     pub(crate) augment_output_preamble: bool,
-    pub(crate) unhandled_invalid_tool_call_policy: UnhandledInvalidToolCallPolicy,
     pub(crate) concurrency: usize,
     pub(crate) memory: Option<Arc<dyn ConversationMemory>>,
     pub(crate) conversation_id: Option<String>,
@@ -294,7 +283,6 @@ impl AgentRunner {
             input,
             chat_history: None,
             max_turns: agent.default_max_turns.unwrap_or(1),
-            max_invalid_tool_call_retries: 0,
             model: agent.model.clone(),
             agent_name: agent.name.clone(),
             preamble: agent.preamble.clone(),
@@ -311,7 +299,6 @@ impl AgentRunner {
             output_tool_name: None,
             output_tool_description: None,
             augment_output_preamble: true,
-            unhandled_invalid_tool_call_policy: UnhandledInvalidToolCallPolicy::Fail,
             concurrency: 1,
             memory: agent.memory.clone(),
             conversation_id: agent.default_conversation_id.clone(),
@@ -500,14 +487,6 @@ impl AgentRunner {
     ///
     /// This is an internal compatibility policy for extractors, whose legacy
     /// transport treated every non-`submit` call as irrelevant response
-    /// content. Hooks still receive the invalid-call event first and retain
-    /// full control over recovery or termination.
-    pub(crate) fn ignore_unhandled_invalid_tool_calls(mut self) -> Self {
-        self.unhandled_invalid_tool_call_policy =
-            UnhandledInvalidToolCallPolicy::IgnoreForExtractor;
-        self
-    }
-
     /// Opt in or out of recording sensitive request, response, and tool content
     /// on GenAI telemetry spans for this run.
     ///
@@ -560,13 +539,6 @@ impl AgentRunner {
         self
     }
 
-    /// Set the retry budget for invalid tool-call recovery. Invalid tool-call
-    /// retries also consume the total model-call budget.
-    pub fn max_invalid_tool_call_retries(mut self, retries: usize) -> Self {
-        self.max_invalid_tool_call_retries = retries;
-        self
-    }
-
     pub(crate) fn agent_name_or_default(&self) -> &str {
         self.agent_name.as_deref().unwrap_or(UNKNOWN_AGENT_NAME)
     }
@@ -580,31 +552,35 @@ impl AgentRunner {
         &self,
         history_override: Option<Vec<Message>>,
     ) -> Result<AgentRun, PromptError> {
-        let (prompt, history) = match &self.input {
+        // The run is entered with one already-joined history (ENGINE.md:
+        // the request IS the history, no prompt/context split).
+        let history = match &self.input {
             RunInput::Prompt(message) => {
-                (message.clone(), self.configured_history(history_override))
+                let mut history = self
+                    .configured_history(history_override)
+                    .unwrap_or_default();
+                history.push(message.clone());
+                history
             }
-            RunInput::Conversation(messages) => {
-                let Some((prompt, earlier)) = messages.split_last() else {
-                    // Reached only at send time (the builder is
-                    // infallible); loud, with the contract in the message.
-                    return Err(PromptError::prompt_cancelled(
-                        Vec::new(),
-                        "empty conversation: stream_chat history must end with the \
-                         message being sent",
-                    ));
-                };
-                (prompt.clone(), Some(earlier.to_vec()))
-            }
+            RunInput::Conversation(messages) => messages.to_vec(),
         };
-        let run = build_agent_run(
-            prompt,
-            self.max_turns,
-            self.max_invalid_tool_call_retries,
-            self.output_schema.as_ref(),
-            history,
-            self.tool_choice.clone(),
-        );
+        if history.is_empty() {
+            // Reached only at send time (the builder is infallible); loud,
+            // with the contract in the message.
+            return Err(PromptError::prompt_cancelled(
+                Vec::new(),
+                "empty conversation: stream_chat history must end with the                  message being sent",
+            ));
+        }
+        if self.max_turns == 0 {
+            // The entry contract (ENGINE.md): a run executes at least one
+            // turn. A zero budget is configuration error, not a run shape.
+            return Err(PromptError::prompt_cancelled(
+                history,
+                "max_turns must be at least 1 — a run always executes one turn",
+            ));
+        }
+        let run = build_agent_run(history, self.max_turns, self.output_schema.as_ref());
         let run = match &self.output_tool_name {
             Some(name) => run.with_output_tool_name(name.clone()),
             None => run,
@@ -629,27 +605,16 @@ impl AgentRunner {
 /// run is built, so the blocking and streaming drivers configure runs
 /// identically.
 pub(crate) fn build_agent_run(
-    prompt: Message,
+    history: Vec<Message>,
     max_turns: usize,
-    max_invalid_tool_call_retries: usize,
     output_schema: Option<&schemars::Schema>,
-    history: Option<Vec<Message>>,
-    tool_choice: Option<ToolChoice>,
 ) -> AgentRun {
-    let mut run = AgentRun::new(prompt)
+    AgentRun::new(history)
         .max_turns(max_turns)
-        .max_invalid_tool_call_retries(max_invalid_tool_call_retries)
         .with_output_validation(
             output_schema.map(|schema| schema.as_value().clone()),
             DEFAULT_OUTPUT_RETRIES,
-        );
-    if let Some(history) = history {
-        run = run.with_history(history);
-    }
-    if let Some(tool_choice) = tool_choice {
-        run = run.with_tool_choice(tool_choice);
-    }
-    run
+        )
 }
 
 /// Build (or adopt) the top-level `invoke_agent` span for a run, shared by the
@@ -1037,120 +1002,75 @@ impl TurnSource for UnaryTurnSource {
                 }
             };
 
-            let mut outcome = match run.model_response(ModelTurn::new(
+            if let Err(err) = run.turn_committed(ModelTurn::new(
                 resp.message_id.clone(),
                 resp.choice.clone(),
                 resp.usage,
                 prepared.executable_tool_names,
                 prepared.allowed_tool_names,
             )) {
-                Ok(outcome) => outcome,
-                Err(err) => {
-                    yield Err(Box::new(err).into());
+                yield Err(Box::new(err).into());
+                return;
+            }
+
+            // The response-finish event fires first, then the normalized
+            // per-turn event. The first observes; the second can accept,
+            // retry, or stop the canonical turn.
+            if let Some(reason) = observe_action(
+                runner
+                    .hooks
+                    .on_completion_response(
+                        hook_ctx,
+                        CompletionResponseEvent {
+                            prompt: &current_prompt,
+                            content: &resp.choice,
+                            usage: resp.usage,
+                            message_id: resp.message_id.as_deref(),
+                        },
+                    )
+                    .await,
+            ) {
+                yield Err(StreamingError::Prompt(Box::new(run.cancel_error(reason))));
+                return;
+            }
+            let action = runner
+                .hooks
+                .on_model_turn_finished(
+                    hook_ctx,
+                    ModelTurnFinished {
+                        turn: hook_ctx.turn(),
+                        content: &resp.choice,
+                        usage: resp.usage,
+                    },
+                )
+                .await;
+            match resolve_model_turn_action(run, action) {
+                Ok(ModelTurnDecision::Advance) => {}
+                Ok(ModelTurnDecision::Retried) => return,
+                Ok(ModelTurnDecision::Terminate(reason)) => {
+                    // The stop observed this already completed provider turn:
+                    // record its content telemetry before the cancellation
+                    // surfaces (matching the streaming surface).
+                    if runner.record_telemetry_content {
+                        rig_core::telemetry::record_model_output(
+                            &chat_span,
+                            &resp.choice,
+                            true,
+                        );
+                    }
+                    yield Err(StreamingError::Prompt(Box::new(
+                        run.cancel_error(reason),
+                    )));
                     return;
                 }
-            };
-
-            loop {
-                match outcome {
-                    ModelTurnOutcome::NeedsResolution(context) => {
-                        let action = runner
-                            .hooks
-                            .on_invalid_tool_call(hook_ctx, &context)
-                            .await;
-                        let resolution = match action {
-                            Some(action) => run.resolve_invalid_tool_call(action),
-                            None
-                                if runner.unhandled_invalid_tool_call_policy
-                                    == UnhandledInvalidToolCallPolicy::IgnoreForExtractor =>
-                            {
-                                run.ignore_invalid_tool_call()
-                            }
-                            None => run.resolve_invalid_tool_call(InvalidToolCallAction::fail()),
-                        };
-                        outcome = match resolution {
-                            Ok(outcome) => outcome,
-                            Err(err) => {
-                                yield Err(Box::new(err).into());
-                                return;
-                            }
-                        };
-                    }
-                    ModelTurnOutcome::TurnRetried => break,
-                    ModelTurnOutcome::Continue {
-                        response_hook_suppressed,
-                    } => {
-                        if !response_hook_suppressed {
-                            // The response-finish event fires first, then the
-                            // normalized per-turn event. The first observes;
-                            // the second can accept, retry, or stop the canonical
-                            // turn. Both are suppressed for recovered turns.
-                            if let Some(reason) = observe_action(
-                                runner
-                                    .hooks
-                                    .on_completion_response(
-                                        hook_ctx,
-                                        CompletionResponseEvent {
-                                            prompt: &current_prompt,
-                                            content: &resp.choice,
-                                            usage: resp.usage,
-                                            message_id: resp.message_id.as_deref(),
-                                        },
-                                    )
-                                    .await,
-                            ) {
-                                if runner.record_telemetry_content
-                                    && let Some(choice) = run.accepted_turn_choice()
-                                {
-                                    rig_core::telemetry::record_model_output(
-                                        &chat_span, &choice, true,
-                                    );
-                                }
-                                yield Err(StreamingError::Prompt(Box::new(run.cancel_error(reason))));
-                                return;
-                            }
-                            let action = runner
-                                .hooks
-                                .on_model_turn_finished(
-                                    hook_ctx,
-                                    ModelTurnFinished {
-                                        turn: hook_ctx.turn(),
-                                        content: &resp.choice,
-                                        usage: resp.usage,
-                                    },
-                                )
-                                .await;
-                            match resolve_model_turn_action(run, action) {
-                                Ok(ModelTurnDecision::Advance) => {}
-                                Ok(ModelTurnDecision::Retried) => break,
-                                Ok(ModelTurnDecision::Terminate(reason)) => {
-                                    if runner.record_telemetry_content
-                                        && let Some(choice) = run.accepted_turn_choice()
-                                    {
-                                        rig_core::telemetry::record_model_output(
-                                            &chat_span, &choice, true,
-                                        );
-                                    }
-                                    yield Err(StreamingError::Prompt(Box::new(
-                                        run.cancel_error(reason),
-                                    )));
-                                    return;
-                                }
-                                Err(err) => {
-                                    yield Err(StreamingError::Prompt(Box::new(err)));
-                                    return;
-                                }
-                            }
-                        }
-
-                        if runner.record_telemetry_content
-                            && let Some(choice) = run.accepted_turn_choice()
-                        {
-                            rig_core::telemetry::record_model_output(&chat_span, &choice, true);
-                        }
-                        break;
-                    }
+                Err(err) => {
+                    yield Err(StreamingError::Prompt(Box::new(err)));
+                    return;
                 }
+            }
+
+            if runner.record_telemetry_content {
+                rig_core::telemetry::record_model_output(&chat_span, &resp.choice, true);
             }
         })
     }

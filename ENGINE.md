@@ -115,7 +115,8 @@ seen by the next attempt. There are **no bypass edges**.
 | model-side mistake | a tool name not in the registry | admission scan at ExecutingTools entry: an in-band synthetic result tells the model; never stops the run |
 | retryable provider/transport | rate-limit, transient connection failures, timeouts | drained, then bounded retry through the normal loop |
 | terminal provider | auth failure, permanent quota, context overflow | drained, then exit-Failed — history (with steers) carries forward |
-| internal (ours) | request construction, our own invariants | **panic and hard stop** — a development bug; the process dies loud. Not a state machine path and not a terminal: there is nothing graceful to do with ourselves |
+| internal (ours) | our own invariants | **panic and hard stop** — a development bug; the process dies loud. Not a state machine path and not a terminal: there is nothing graceful to do with ourselves |
+| request construction | a provider cannot carry the content (e.g. a video attachment on Anthropic) | surfaced as a **terminal** error through the drain — implementation judgment: it can stem from *user content* (external input), so it fails gracefully rather than panicking |
 
 A drained steer resets every retry streak, for the same reason as the
 defect streak: new user input changes the situation, and the budgets
@@ -253,6 +254,25 @@ during design review, the verdict is recorded.
    (and at classification for pre-turn stops).
 8. **Internal errors panic** — the process dies loud instead of
    degrading gracefully through the machine.
+
+## Implementation judgments (refactor landing)
+
+Recorded where the code had to pick; revisit on review:
+
+- **Request-construction failures** are terminal errors, not panics (see
+  the taxonomy row) — they can stem from user content.
+- **Zero budget is rejected at run construction** with a clear
+  configuration error; the at-least-one-turn invariant makes "a run that
+  cannot run" unrepresentable, so `max_turns(0)` is not a run shape.
+- **Provider-error identity survives the decision**: the machine stores
+  the classified error as a `PromptError`, but the driver restores the
+  original `Completion`-shaped error at the exit, so consumers keep
+  matching the provider's own error type.
+- **The final turn commits at classification** and the Done candidate
+  response is built then; a drained steer discards the candidate and
+  re-opens the run.
+- `AgentRunStep::Done` carries `Box<PromptResponse>` (the step enum's
+  size is dominated by it).
 
 ## Future branch points
 

@@ -11,7 +11,7 @@ pub use model_conformance::{
     structured_extraction, tool_choice_modes, tool_output_serialization,
     validate_cancelled_failure, validate_extraction_fields, validate_max_turns_failure,
     validate_protocol_hygiene, validate_result_redaction, validate_rewritten_arguments,
-    validate_unknown_tool_failure, zero_argument_tool,
+    zero_argument_tool,
 };
 pub use rig_core::test_utils::*;
 pub use tools::{

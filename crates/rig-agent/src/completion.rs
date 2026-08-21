@@ -41,21 +41,6 @@ pub enum PromptError {
         /// Human-readable cancellation reason.
         reason: String,
     },
-
-    /// The model attempted to call a tool unavailable for the current turn.
-    #[error(
-        "UnknownToolCall: model attempted to call unknown or disallowed tool `{tool_name}`. Available tools: {available_tools:?}. Allowed tools for this turn: {allowed_tools:?}"
-    )]
-    UnknownToolCall {
-        /// Tool name emitted by the model.
-        tool_name: String,
-        /// Tools registered on the runtime.
-        available_tools: Vec<String>,
-        /// Exact immutable set allowed for this turn.
-        allowed_tools: Vec<String>,
-        /// Canonical history available at failure.
-        chat_history: Box<Vec<Message>>,
-    },
 }
 
 // Error payloads are not on hot paths, so plain (unboxed) variants keep

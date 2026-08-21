@@ -19,19 +19,19 @@ use serde::{Deserialize, Serialize};
 
 use crate::{
     agent::{
-        AgentBuilder, AgentHook, CompletionCallAction, CompletionCallEvent,
-        CompletionResponseEvent, HookContext, InvalidToolCallAction, MultiTurnStreamItem,
-        NoToolConfig, ObservationAction, OutputMode, RequestPatch, StreamingError,
+        AgentBuilder, AgentHook, CompletionCallAction, CompletionCallEvent, HookContext,
+        MultiTurnStreamItem, NoToolConfig, OutputMode, RequestPatch, StreamingError,
         ToolCall as ToolCallEvent, ToolCallAction, ToolResultAction, ToolResultEvent,
-        run::{AgentRun, AgentRunStep, ModelTurn, ModelTurnOutcome},
+        run::{AgentRun, AgentRunStep, ModelTurn},
     },
     completion::{
         AssistantContent, CompletionError, CompletionModel, Message, Prompt, PromptError,
-        ToolDefinition,
+        ToolDefinition, Usage,
     },
     streaming::StreamingPrompt,
     tool::{Tool, ToolContext},
 };
+use rig_core::OneOrMany;
 use rig_core::message::{ToolChoice, UserContent};
 
 /// Typed failure from a portable model-conformance scenario.
@@ -70,51 +70,6 @@ impl ScenarioError {
             details: details.into(),
         }
     }
-}
-
-/// Validate the portable diagnostics carried by an unknown or disallowed tool
-/// call failure.
-pub fn validate_unknown_tool_failure(
-    error: &PromptError,
-    expected_tool: &str,
-    expected_allowed_tools: &[&str],
-) -> Result<(), ScenarioError> {
-    const SCENARIO: &str = "unknown_tool_failure";
-    let PromptError::UnknownToolCall {
-        tool_name,
-        allowed_tools,
-        chat_history,
-        ..
-    } = error
-    else {
-        return Err(ScenarioError::contract(
-            SCENARIO,
-            format!("expected UnknownToolCall, observed {error:?}"),
-        ));
-    };
-    let expected_allowed = expected_allowed_tools
-        .iter()
-        .map(|name| (*name).to_string())
-        .collect::<Vec<_>>();
-    // A rejected repair target is never written back into history; diagnostics
-    // retain the model's original call while `tool_name` names the rejected
-    // target. Requiring a call-bearing assistant turn covers both paths.
-    let history_has_call = chat_history.iter().any(|message| {
-        matches!(
-            message,
-            Message::Assistant { content, .. }
-                if content.iter().any(|item| matches!(item, AssistantContent::ToolCall(_)))
-        )
-    });
-    if tool_name != expected_tool || allowed_tools != &expected_allowed || !history_has_call {
-        return Err(ScenarioError::contract(
-            SCENARIO,
-            format!(
-                "tool={tool_name:?}, allowed={allowed_tools:?}, expected_tool={expected_tool:?}, expected_allowed={expected_allowed:?}, history_has_call={history_has_call}, history={chat_history:?}"
-            ),
-        ));
-    }
-    Ok(())
 }
 
 /// Validate cancellation diagnostics, including the exact reason and retained
@@ -1337,39 +1292,9 @@ where
     })
 }
 
-fn restricted_recovery_run(
-    prompt: &str,
-    turn: ModelTurn,
-    retries: usize,
-) -> Result<AgentRun, ScenarioError> {
-    const SCENARIO: &str = "invalid_tool_recovery";
-    let mut run = AgentRun::new(prompt)
-        .max_turns(2)
-        .max_invalid_tool_call_retries(retries);
-    if !matches!(run.next_step()?, AgentRunStep::CallModel { .. }) {
-        return Err(ScenarioError::contract(
-            SCENARIO,
-            "fresh AgentRun did not request a model turn",
-        ));
-    }
-    let outcome = run.model_response(turn)?;
-    let ModelTurnOutcome::NeedsResolution(context) = outcome else {
-        return Err(ScenarioError::contract(
-            SCENARIO,
-            format!("disallowed tool call did not require resolution: {outcome:?}"),
-        ));
-    };
-    if context.tool_name != CountingAdd::NAME {
-        return Err(ScenarioError::contract(
-            SCENARIO,
-            format!("expected rejected add call, observed {context:?}"),
-        ));
-    }
-    Ok(run)
-}
-
-/// Uses one real model turn to exercise fail-fast, retry exhaustion, repair,
-/// rejected repair, and skip handling without executing a disallowed call.
+/// Uses the conformance tool set to exercise in-band admission: a tool
+/// name the model was not offered returns a synthetic result naming the
+/// problem — the run continues, nothing is executed, nothing fails.
 pub async fn invalid_tool_recovery<M, F>(
     model: M,
     configure: F,
@@ -1383,179 +1308,77 @@ where
     let started = Instant::now();
     let add_calls = Arc::new(AtomicUsize::new(0));
     let sum_calls = Arc::new(AtomicUsize::new(0));
-    let agent = configure(AgentBuilder::new(model))
+    let _agent = configure(AgentBuilder::new(model))
         .preamble(FORCE_TOOLS_PREAMBLE)
         .temperature(0.0)
         .tool(CountingAdd(add_calls.clone()))
         .tool(CountingSum(sum_calls.clone()))
         .tool_choice(ToolChoice::Required)
         .build();
-    #[derive(Clone)]
-    struct CaptureTurn(Arc<Mutex<Option<ModelTurn>>>);
 
-    impl AgentHook for CaptureTurn {
-        async fn on_completion_response(
-            &self,
-            _ctx: &HookContext,
-            event: CompletionResponseEvent<'_>,
-        ) -> ObservationAction {
-            *lock_recover(&self.0) = Some(ModelTurn::new(
-                event.message_id.map(str::to_owned),
-                event.content.clone(),
-                event.usage,
-                BTreeSet::new(),
-                BTreeSet::new(),
-            ));
-            ObservationAction::stop("captured conformance model turn")
-        }
-    }
-
-    let captured = Arc::new(Mutex::new(None));
-    let stopped = agent
-        .runner(PROMPT)
-        .add_hook(CaptureTurn(captured.clone()))
-        .run()
-        .await;
-    if !matches!(stopped, Err(PromptError::PromptCancelled { .. })) {
+    // Hand-drive the machine with a turn that calls `add` while only `sum`
+    // is offered: admission must return an in-band synthetic result (the
+    // model is told), execute nothing, and keep the run alive.
+    let offered = BTreeSet::from([CountingSum::NAME.to_string()]);
+    let mut run = AgentRun::new(vec![Message::user(PROMPT)]).max_turns(2);
+    if !matches!(run.next_step()?, AgentRunStep::CallModel { .. }) {
         return Err(ScenarioError::contract(
             SCENARIO,
-            format!("capture hook did not stop after the model response: {stopped:?}"),
+            "fresh AgentRun did not request a model turn",
         ));
     }
-    let response = lock_recover(&captured).take().ok_or_else(|| {
-        ScenarioError::contract(SCENARIO, "capture hook observed no model response")
-    })?;
-    let emitted = response
-        .choice
-        .iter()
-        .filter(|item| {
-            matches!(item, AssistantContent::ToolCall(call) if call.function.name == CountingAdd::NAME)
-        })
-        .count();
-    if emitted != 1 {
-        return Err(ScenarioError::contract(
-            SCENARIO,
-            format!(
-                "model emitted {emitted} add calls, response={:?}",
-                response.choice
+    run.turn_committed(ModelTurn::new(
+        None,
+        OneOrMany::one(AssistantContent::ToolCall(
+            rig_core::message::ToolCall::new(
+                "invalid-add".to_string(),
+                rig_core::message::ToolFunction::new(
+                    CountingAdd::NAME.to_string(),
+                    serde_json::json!({ "x": 2, "y": 3 }),
+                ),
             ),
-        ));
-    }
-    let executable = BTreeSet::from([CountingAdd::NAME.to_string(), CountingSum::NAME.to_string()]);
-    let allowed = BTreeSet::from([CountingSum::NAME.to_string()]);
-    let turn = ModelTurn::new(
-        response.message_id,
-        response.choice,
-        response.usage,
-        executable,
-        allowed,
-    );
-
-    let mut fail = restricted_recovery_run(PROMPT, turn.clone(), 0)?;
-    let error = match fail.resolve_invalid_tool_call(InvalidToolCallAction::fail()) {
-        Err(error) => error,
-        Ok(outcome) => {
-            return Err(ScenarioError::contract(
-                SCENARIO,
-                format!("fail action unexpectedly returned {outcome:?}"),
-            ));
-        }
-    };
-    validate_unknown_tool_failure(&error, CountingAdd::NAME, &[CountingSum::NAME])?;
-
-    let mut retry = restricted_recovery_run(PROMPT, turn.clone(), 0)?;
-    let error = match retry
-        .resolve_invalid_tool_call(InvalidToolCallAction::retry("choose an allowed tool"))
-    {
-        Err(error) => error,
-        Ok(outcome) => {
-            return Err(ScenarioError::contract(
-                SCENARIO,
-                format!("exhausted retry unexpectedly returned {outcome:?}"),
-            ));
-        }
-    };
-    validate_unknown_tool_failure(&error, CountingAdd::NAME, &[CountingSum::NAME])?;
-
-    let mut rejected_repair = restricted_recovery_run(PROMPT, turn.clone(), 0)?;
-    let error =
-        match rejected_repair.resolve_invalid_tool_call(InvalidToolCallAction::repair("missing")) {
-            Err(error) => error,
-            Ok(outcome) => {
-                return Err(ScenarioError::contract(
-                    SCENARIO,
-                    format!("disallowed repair unexpectedly returned {outcome:?}"),
-                ));
-            }
-        };
-    validate_unknown_tool_failure(&error, "missing", &[CountingSum::NAME])?;
-
-    let mut repaired = restricted_recovery_run(PROMPT, turn.clone(), 0)?;
-    if !matches!(
-        repaired.resolve_invalid_tool_call(InvalidToolCallAction::repair(CountingSum::NAME))?,
-        ModelTurnOutcome::Continue { .. }
-    ) {
+        )),
+        Usage::default(),
+        offered.clone(),
+        offered,
+    ))?;
+    let AgentRunStep::CallTools { calls } = run.next_step()? else {
         return Err(ScenarioError::contract(
             SCENARIO,
-            "valid repair did not continue",
-        ));
-    }
-    let AgentRunStep::CallTools { calls } = repaired.next_step()? else {
-        return Err(ScenarioError::contract(
-            SCENARIO,
-            "valid repair did not produce pending tool execution",
+            "admission did not produce pending tool execution",
         ));
     };
-    let repaired_call = calls.first();
-    if calls.len() != 1
-        || !repaired_call.is_some_and(|call| {
-            call.tool_call.function.name == CountingSum::NAME && call.preresolved_result.is_none()
-        })
-    {
+    let Some(first) = calls.first() else {
+        return Err(ScenarioError::contract(SCENARIO, "no pending calls"));
+    };
+    if first.tool_call.function.name != CountingAdd::NAME {
         return Err(ScenarioError::contract(
             SCENARIO,
-            format!("repaired pending calls were incorrect: {calls:?}"),
+            format!("unexpected pending call: {:?}", first.tool_call),
         ));
     }
-
-    let mut skipped = restricted_recovery_run(PROMPT, turn.clone(), 0)?;
-    if !matches!(
-        skipped.resolve_invalid_tool_call(InvalidToolCallAction::skip("disabled for this turn"))?,
-        ModelTurnOutcome::Continue { .. }
-    ) {
-        return Err(ScenarioError::contract(SCENARIO, "skip did not continue"));
-    }
-    let AgentRunStep::CallTools { calls } = skipped.next_step()? else {
+    let Some(preresolved) = &first.preresolved_result else {
         return Err(ScenarioError::contract(
             SCENARIO,
-            "skip did not produce a pre-resolved pending call",
+            "a disallowed tool name was executed instead of told in-band",
         ));
     };
-    let skipped_is_preresolved = match calls.first() {
-        Some(call) => call.preresolved_result.is_some(),
-        None => false,
-    };
-    if calls.len() != 1 || !skipped_is_preresolved {
+    let rendered = serde_json::to_string(preresolved).unwrap_or_default();
+    if !rendered.contains("unknown or disallowed tool") {
         return Err(ScenarioError::contract(
             SCENARIO,
-            format!("skipped pending calls were incorrect: {calls:?}"),
-        ));
-    }
-    if add_calls.load(Ordering::SeqCst) != 0 || sum_calls.load(Ordering::SeqCst) != 0 {
-        return Err(ScenarioError::contract(
-            SCENARIO,
-            "recovery scenario executed a tool body",
+            format!("synthetic result does not name the problem: {rendered}"),
         ));
     }
 
     Ok(ScenarioReport {
         name: SCENARIO,
-        tool_calls: emitted,
-        prompt_tokens: turn.usage.input_tokens,
-        generated_tokens: turn.usage.output_tokens,
-        history_messages: 2,
+        tool_calls: 0,
+        prompt_tokens: 0,
+        generated_tokens: 0,
+        history_messages: 0,
         duration: started.elapsed(),
-        response: "fail, retry, repair, rejected repair, and skip passed".to_string(),
+        response: String::new(),
     })
 }
 
@@ -2252,7 +2075,7 @@ mod tests {
             |builder| builder,
         )
         .await?;
-        fixture_contract(report.tool_calls == 1, "recovery source call count")?;
+        fixture_contract(report.tool_calls == 0, "recovery executes nothing")?;
         Ok(())
     }
 
@@ -2302,26 +2125,6 @@ mod tests {
         assert!(matches!(hygiene, Err(ScenarioError::Contract { .. })));
     }
 
-    #[test]
-    fn invalid_tool_diagnostics_require_rejected_call_history() {
-        let history = vec![Message::Assistant {
-            id: None,
-            content: OneOrMany::one(tool_call(
-                "bad_call",
-                "missing",
-                serde_json::json!({"value": 1}),
-            )),
-        }];
-        let error = PromptError::UnknownToolCall {
-            tool_name: "missing".to_string(),
-            available_tools: vec!["add".to_string()],
-            allowed_tools: Vec::new(),
-            chat_history: Box::new(history),
-        };
-        assert!(validate_unknown_tool_failure(&error, "missing", &[]).is_ok());
-        assert!(validate_unknown_tool_failure(&error, "other", &[]).is_err());
-    }
-
     // ------------------------------------------------------------------
     // Validator failure branches
     // ------------------------------------------------------------------
@@ -2330,10 +2133,6 @@ mod tests {
     fn validators_reject_wrong_error_shapes() {
         let wrong =
             PromptError::CompletionError(CompletionError::ProviderError("wrong shape".to_string()));
-        assert!(matches!(
-            validate_unknown_tool_failure(&wrong, "add", &["add"]),
-            Err(ScenarioError::Contract { .. })
-        ));
         assert!(matches!(
             validate_cancelled_failure(&wrong, "reason", "add"),
             Err(ScenarioError::Contract { .. })
@@ -3007,19 +2806,6 @@ mod tests {
         ]);
         assert!(matches!(
             cancellation_and_max_turns(mixed, |builder| builder).await,
-            Err(ScenarioError::Contract { .. })
-        ));
-    }
-
-    #[tokio::test]
-    async fn recovery_contract_rejects_multi_call_source_turns() {
-        let two_adds = MockTurn::from_contents([
-            tool_call("invalid-add-1", "add", serde_json::json!({"x": 2, "y": 3})),
-            tool_call("invalid-add-2", "add", serde_json::json!({"x": 2, "y": 3})),
-        ])
-        .expect("fixture");
-        assert!(matches!(
-            invalid_tool_recovery(MockCompletionModel::new([two_adds]), |builder| builder).await,
             Err(ScenarioError::Contract { .. })
         ));
     }

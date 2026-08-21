@@ -483,21 +483,6 @@ impl AgentHook for ObservesOnly {
     }
 }
 
-struct InvalidResponder {
-    action: InvalidToolCallAction,
-    calls: Arc<AtomicUsize>,
-}
-impl AgentHook for InvalidResponder {
-    async fn on_invalid_tool_call(
-        &self,
-        _ctx: &HookContext,
-        _event: &InvalidToolCallContext,
-    ) -> Option<InvalidToolCallAction> {
-        self.calls.fetch_add(1, Ordering::Relaxed);
-        Some(self.action.clone())
-    }
-}
-
 struct LabeledPatcher {
     label: u32,
     log: Arc<Mutex<Vec<u32>>>,
@@ -533,20 +518,6 @@ fn completion_call_event() -> CompletionCall<'static> {
         prompt: PROMPT.get_or_init(|| rig_core::message::Message::user("hi")),
         history: &[],
         turn: 1,
-    }
-}
-
-fn invalid_tool_call_context() -> InvalidToolCallContext {
-    InvalidToolCallContext {
-        tool_name: "unknown".into(),
-        tool_call_id: Some("tc1".into()),
-        internal_call_id: Some("ic1".into()),
-        args: Some("{}".into()),
-        available_tools: vec!["add".into()],
-        allowed_tools: vec!["add".into()],
-        tool_choice: None,
-        chat_history: vec![],
-        is_streaming: false,
     }
 }
 
@@ -616,48 +587,6 @@ async fn first_stop_short_circuits_observation() {
         ObservationAction::Stop(_)
     ));
     assert_eq!(*log.lock().unwrap(), vec![1]);
-}
-
-#[tokio::test]
-async fn explicit_fail_short_circuits_later_invalid_tool_hooks() {
-    let fail_calls = Arc::new(AtomicUsize::new(0));
-    let retry_calls = Arc::new(AtomicUsize::new(0));
-    let mut stack = HookStack::with(InvalidResponder {
-        action: InvalidToolCallAction::fail(),
-        calls: fail_calls.clone(),
-    });
-    stack.push(InvalidResponder {
-        action: InvalidToolCallAction::retry("try another tool"),
-        calls: retry_calls.clone(),
-    });
-
-    let action = stack
-        .on_invalid_tool_call(&ctx(), &invalid_tool_call_context())
-        .await;
-
-    assert_eq!(action, Some(InvalidToolCallAction::fail()));
-    assert_eq!(fail_calls.load(Ordering::Relaxed), 1);
-    assert_eq!(retry_calls.load(Ordering::Relaxed), 0);
-}
-
-#[tokio::test]
-async fn no_invalid_tool_decision_defers_to_later_hooks() {
-    let retry_calls = Arc::new(AtomicUsize::new(0));
-    let mut stack = HookStack::with(());
-    stack.push(InvalidResponder {
-        action: InvalidToolCallAction::retry("try another tool"),
-        calls: retry_calls.clone(),
-    });
-
-    let action = stack
-        .on_invalid_tool_call(&ctx(), &invalid_tool_call_context())
-        .await;
-
-    assert_eq!(
-        action,
-        Some(InvalidToolCallAction::retry("try another tool"))
-    );
-    assert_eq!(retry_calls.load(Ordering::Relaxed), 1);
 }
 
 #[tokio::test]
@@ -1190,7 +1119,6 @@ fn action_types_are_event_specific() {
     fn retry_request(_: RetryRequest) {}
     fn call(_: ToolCallAction) {}
     fn result(_: ToolResultAction) {}
-    fn invalid(_: InvalidToolCallAction) {}
     fn observation(_: ObservationAction) {}
     model_selection(ModelSelectionAction::continue_run());
     completion(CompletionCallAction::continue_run());
@@ -1198,7 +1126,6 @@ fn action_types_are_event_specific() {
     retry_request(RetryRequest::Repeat);
     call(ToolCallAction::run());
     result(ToolResultAction::keep());
-    invalid(InvalidToolCallAction::fail());
     observation(ObservationAction::continue_run());
     let calls = AtomicUsize::new(0);
     calls.fetch_add(1, Ordering::Relaxed);

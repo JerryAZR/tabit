@@ -263,7 +263,6 @@ where
                 "Submit the structured data you extracted from the provided text.",
                 false,
             )
-            .ignore_unhandled_invalid_tool_calls()
             .run_with_error_usage()
             .await;
         let response = match result {
@@ -509,7 +508,6 @@ mod tests {
         completion_calls: Arc<AtomicUsize>,
         completion_responses: Arc<AtomicUsize>,
         model_turns: Arc<AtomicUsize>,
-        invalid_tool_calls: Arc<AtomicUsize>,
     }
 
     impl AgentHook for LifecycleCounts {
@@ -538,15 +536,6 @@ mod tests {
         ) -> ModelTurnAction {
             self.model_turns.fetch_add(1, Ordering::SeqCst);
             ModelTurnAction::Continue
-        }
-
-        async fn on_invalid_tool_call(
-            &self,
-            _ctx: &HookContext,
-            _event: &crate::agent::InvalidToolCallContext,
-        ) -> Option<crate::agent::InvalidToolCallAction> {
-            self.invalid_tool_calls.fetch_add(1, Ordering::SeqCst);
-            None
         }
     }
 
@@ -651,48 +640,6 @@ mod tests {
             } else {
                 ModelTurnAction::continue_run()
             }
-        }
-    }
-
-    struct StopOnInvalidToolCall;
-
-    impl AgentHook for StopOnInvalidToolCall {
-        async fn on_invalid_tool_call(
-            &self,
-            _ctx: &HookContext,
-            _event: &crate::agent::InvalidToolCallContext,
-        ) -> Option<crate::agent::InvalidToolCallAction> {
-            Some(crate::agent::InvalidToolCallAction::stop(
-                "unexpected extractor tool call",
-            ))
-        }
-    }
-
-    struct RepairUnexpectedAsSubmit;
-
-    impl AgentHook for RepairUnexpectedAsSubmit {
-        async fn on_invalid_tool_call(
-            &self,
-            _ctx: &HookContext,
-            _event: &crate::agent::InvalidToolCallContext,
-        ) -> Option<crate::agent::InvalidToolCallAction> {
-            Some(crate::agent::InvalidToolCallAction::repair(
-                SUBMIT_TOOL_NAME,
-            ))
-        }
-    }
-
-    struct SkipUnexpected;
-
-    impl AgentHook for SkipUnexpected {
-        async fn on_invalid_tool_call(
-            &self,
-            _ctx: &HookContext,
-            _event: &crate::agent::InvalidToolCallContext,
-        ) -> Option<crate::agent::InvalidToolCallAction> {
-            Some(crate::agent::InvalidToolCallAction::skip(
-                "ignored by extractor hook",
-            ))
         }
     }
 
@@ -882,50 +829,29 @@ mod tests {
 
         assert_eq!(response.data.name, "John");
         assert_eq!(response.usage.total_tokens, 15);
-        assert_eq!(counts.invalid_tool_calls.load(Ordering::SeqCst), 1);
         assert_eq!(counts.completion_responses.load(Ordering::SeqCst), 2);
         assert_eq!(counts.model_turns.load(Ordering::SeqCst), 2);
     }
 
     #[tokio::test]
-    async fn unexpected_tool_call_hook_can_stop_extraction() {
-        let model =
-            MockCompletionModel::new([MockTurn::tool_call("unknown", "unexpected", json!({}))]);
-
-        let error = ExtractorBuilder::<Person>::new(model)
-            .add_hook(StopOnInvalidToolCall)
-            .build()
-            .extract("John")
-            .await
-            .expect_err("invalid-tool hook should retain control");
-
-        assert!(matches!(
-            error,
-            ExtractionError::PromptError(PromptError::PromptCancelled { reason, .. })
-                if reason == "unexpected extractor tool call"
-        ));
-    }
-
-    #[tokio::test]
-    async fn unexpected_tool_call_hook_can_repair_to_submit() {
-        let model = MockCompletionModel::new([MockTurn::tool_call(
-            "unknown",
-            "unexpected",
-            json!({ "name": "John" }),
-        )]);
+    async fn unexpected_tool_call_is_told_to_the_model_which_fixes_itself() {
+        let model = MockCompletionModel::new([
+            MockTurn::tool_call("unknown", "unexpected", json!({})),
+            submit_turn("John"),
+        ]);
 
         let response = ExtractorBuilder::<Person>::new(model)
-            .add_hook(RepairUnexpectedAsSubmit)
+            .retries(1)
             .build()
             .extract("John")
             .await
-            .expect("repaired output-tool call should finalize extraction");
+            .expect("the model is told in-band and gets to fix it");
 
         assert_eq!(response.name, "John");
     }
 
     #[tokio::test]
-    async fn skip_hook_preserves_valid_submit_sibling() {
+    async fn unknown_sibling_preserves_valid_submit_sibling() {
         let turn = MockTurn::from_contents([
             tool_call("unknown", "unexpected", json!({})),
             tool_call("submit", SUBMIT_TOOL_NAME, json!({ "name": "John" })),
@@ -934,11 +860,10 @@ mod tests {
         let model = MockCompletionModel::new([turn]);
 
         let response = ExtractorBuilder::<Person>::new(model)
-            .add_hook(SkipUnexpected)
             .build()
             .extract("John")
             .await
-            .expect("skipping an invalid sibling should preserve submit");
+            .expect("an in-band sibling result should preserve submit");
 
         assert_eq!(response.name, "John");
     }
