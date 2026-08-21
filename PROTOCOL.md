@@ -66,6 +66,70 @@ flowchart TD
     ABORT["abort (preemptive, any await)"] -.-> RUN
 ```
 
+## v2 — proposed (ruling wanted; research recorded 2026-08)
+
+The egui GUI (ROADMAP item 7) is the second protocol consumer. What it
+needs beyond `{message, abort}`, grounded in the references: **yaca**
+replays resumed history as finalized live events — the same shapes live
+would produce, one full-text delta per message, bracketed by
+`session_resumed { total }` and per-entry `replay_progress`, replay
+ids derived from log entry ids so a future rewind references something
+stable; **codex** delivers a snapshot first plus pagination cursors
+(`thread/resume` → populated turns), every item keyed by a UUIDv7 id,
+rewind at turn granularity, and a generic multi-question ask-user
+request with options + free text (`Denied { rejection }` carries the
+user's reason back to the model). Tabit follows yaca's event replay —
+yaca's log is the same parent-linked JSONL tree ours is, and
+`Session::rewind_to_entry` already exists — and defers pagination
+(coding-session transcripts are short; codex's cursors serve IDE-scale
+histories).
+
+- **Replay on startup.** `initialize { protocol_version, replay: true }`
+  → `initialize_ack` → `replay_started { total }` → the active chain's
+  entries as finalized live events (`user_message` with its entry id;
+  one full-text `text_delta` per assistant message; reasoning as one
+  full-text `reasoning_delta` per block id; `tool_call`/`tool_result`
+  pairs; `completion_call` per assistant turn; `model_changed` for
+  `ModelChange` entries) → `replay_done`. Branch siblings are excluded
+  by the chain walk; deltas are never persisted, so replay emits whole
+  texts.
+- **`rewind { entry_id }`** — idle-only (the GUI composes
+  abort-then-rewind; run state is derivable from events). Every entry
+  already has a UUIDv7 id; v2 surfaces it: `user_message` gains
+  `entry_id` — the anchor a per-message rewind button binds to.
+  Outcome events `rewound { entry_id }` / `rewind_failed { message }`;
+  the GUI drops its own state after `entry_id` — no re-replay.
+- **`model { provider, model, thinking_level? }`** — exactly
+  `ModelSelection`, validated against config, applied from the next
+  outer loop (mirrors the existing `ModelChange` entry kind). Outcome
+  events `model_changed` / `model_error { message }`. Commands stay
+  total: nothing is rejected without an event.
+- **Session listing stays one-shot.** Scan on startup and explicit
+  reload (`tabit --list --json` — local or over ssh); no watch, no
+  long-lived listing command.
+- **`interaction_request` (generic, reserved).** One pop-up shape for
+  permission and future ask-the-user tools:
+  `interaction_request { id, title, body, options: [{ label,
+  description? }], free_text: bool }` answered by
+  `interaction_response { id, option, text? }`. Permission is options
+  [Allow, Always allow, Deny] with `free_text` on (the rejection
+  reason goes back to the model, per codex's `Denied { rejection }`);
+  an AskUserQuestion tool is the same shape. v2 reserves the wire
+  shape; implementation lands with the permission milestone
+  (ENGINE.md's planned pausable tool-path stage).
+- **`tabit-protocol` crate (flag 13 resolved by this)**: extract the
+  vocabulary from tabit-session before GUI work — the GUI is Rust and
+  shares the serde types (no codegen) without depending on persistence
+  internals. The protocol owns `Usage` and native-item shapes.
+- **Version bump to 2** covers the additive event changes
+  (`user_message.entry_id`, new events); v1 consumers are in-repo and
+  move with it.
+
+Folded v2 work items: flags 8 (one terminal per run — fold durability
+into `run_finished { durable: bool }`), 9 (`PromptCancelled` →
+`RunStopped { reason }`), 14 (`RunFailed` kind enum), 16 (structural
+ack-before-events), 19 (unified exit conventions).
+
 ## Open flags (numbering is fixed at creation; resolved numbers are
 skipped)
 
