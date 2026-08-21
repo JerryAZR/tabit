@@ -250,12 +250,43 @@ mid-run). Without a comment pair this reads like removable duplication.
 frontend whose read loop stops at the first terminal silently misses
 durability failures.
 
-Options: accept and make "read to stream end" the law; or fold
-durability into the terminal (`run_finished { durable: false }` +
-a single follow-up), keeping "one terminal per run" true.
+The v2 contract (FRONTEND.md) folds the report into the terminal:
+`run_finished { durable: false }`, one terminal per run — the terminal
+shape is settled unless overruled. The **real open question is the
+aftermath policy** — what the session does once a persist has failed.
+Code facts that frame it (all verified):
 
-Recommendation: one terminal per run — the invariant is worth more
-than the event's simplicity.
+- Each append writes + flushes independently; `leaf` advances only on
+  success, so post-failure appends parent to the last durable entry —
+  the file stays structurally valid, no dangling parents.
+- The recorder captures the **first** error only; the session surfaces
+  it at run end. Appends keep being attempted afterwards.
+- Memory continues regardless: the conversation keeps running with
+  turns the disk may never see; a restart replays disk truth and
+  silently truncates to the last durable entry.
+- Narrow corner (transient single-entry failure): the file can end up
+  with tool results whose assistant entry is missing; projection folds
+  them into a plain user message — degraded, not bricked, but a
+  provider would reject orphan results on the wire.
+
+Options:
+
+1. **Continue best-effort** (current): keep recording, report
+   `durable: false` per affected run. A transient hiccup heals itself
+   at the cost of the orphan corner; a dead disk keeps failing loudly
+   once per run.
+2. **Stop recording for the rest of the run** after the first failure:
+   the file keeps a clean prefix cut (no orphan corner), the terminal
+   reports `durable: false`, and the next run attempts recording again
+   from the disk leaf. Restart still truncates.
+3. **Degrade hard**: after a persist failure the session refuses new
+   runs (`run_failed { durability }` immediately) until restart. No
+   divergence growth, but a transient blip kills the working session.
+
+Recommendation: **2** — it keeps the session alive through transient
+disk problems (a coding session shouldn't die because of one failed
+flush) while eliminating the orphan corner entirely, and the
+restart-truncation rule stays the honest recovery story.
 
 ### 9. Empty conversation rides `PromptCancelled` — rename (broadened)
 

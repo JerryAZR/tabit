@@ -40,7 +40,9 @@ tabit --json [--continue | --session <path>] [--model <ref>]
   design — the process dies loudly rather than running broken. Your UI
   must survive that (see §3 and §10).
 - A session picker uses the one-shot listing `tabit --list --json`
-  (spawn, read, exit; works over ssh unchanged) — row schema in §11.
+  (spawn, read, exit; works over ssh unchanged; re-scan on reload).
+  Rows, newest first: `{ id, created_at, cwd, entry_count, path,
+  model }`.
 
 ## 2. Wire format
 
@@ -229,12 +231,19 @@ context they were sent into; salvage as drafts), then `checked_out
 3. An ancestor target (the common "rewind") has an empty suffix: the
    brackets arrive empty, nothing else changes.
 
-**Valid cut points.** Checkout targets (and `base_id` values you will
-ever see) are **boundary entries**: `user_message` entries and
-committed assistant turns (plus `model_changed` entries). A
-`tool_result` inside a turn's batch is never a target — cutting
-mid-batch would dangle a tool roundtrip — and the backend rejects it
-with `checkout_failed`.
+**Valid cut points** (ruled). Checkout targets (and `base_id` values
+you will ever see) are **boundary entries**: `user_message` entries,
+committed assistant turns, and `model_changed` entries. A
+`tool_result` inside a turn's batch is never a target — mid-batch cuts
+are deferred to the turn boundary or replaced by abort-then-checkout,
+whichever is easier for the UI.
+
+**Synthesized results tell the truth in their body.** A repaired tool
+result's content is the sentence "tool execution was interrupted
+before completing — the call may have had partial effects; verify them
+before relying on anything it did". It is never a fabricated success;
+render it like any tool result and the text says what happened. No
+wire marker.
 
 ## 8. Interaction requests (reserved)
 
@@ -308,24 +317,25 @@ response id) are unsettled; see §11.
 
 ## 11. Open questions (known and unsettled)
 
-1. **Durability terminal — ruling pending.** The contract above folds
-   persistence failure into `run_finished { durable: false }` (one
-   terminal per run). The alternative — a trailing
-   `run_failed { kind: durability }` after the terminal — exists in
-   the v1 code today. The fold is the recommended resolution; confirm
-   before relying on the single-terminal invariant.
-2. **Model discovery.** Nothing tells a UI the valid
-   `provider`/`model`/`thinking_level` choices. Candidate: a one-shot
-   `tabit models --json` from the backend's config (static per
-   process). Until then, a picker is free-text against `model_error`.
-3. **`--list --json` row schema.** Proposed: `{ id, created_at, cwd,
-   entry_count, path, model }` per row, newest first.
-4. **Event timestamps.** Transcript UIs plausibly want per-entry
+1. **Durability policy after `durable: false`** (PROTOCOL.md flag 8 —
+   properly open, ruling wanted). The terminal shape (`run_finished
+   { durable }`, one terminal per run) is the surface; the open
+   question is the aftermath: does the session keep recording
+   best-effort after a persist failure, stop recording for the rest of
+   the run, or degrade harder? See flag 8 for the grounded options.
+2. **Event timestamps.** Transcript UIs plausibly want per-entry
    wall-clock times on `user_message`/`turn_committed` at least.
-5. **Backpressure.** What a stalled reader should experience — needed
+3. **Backpressure.** What a stalled reader should experience — needed
    before long-running GUI use.
-6. **Interaction edge semantics.** Request pending when the run
+4. **Interaction edge semantics.** Request pending when the run
    fails/aborts; `interaction_response` with a stale id. Deferred to
    the permission milestone.
-7. **Subagent streams.** Sibling `stream` ids and their event subset —
+5. **Subagent streams.** Sibling `stream` ids and their event subset —
    reserved, unspecified.
+
+Settled since the review: model discovery is a one-shot
+`tabit models --json` at startup plus explicit reload (the session
+listing pattern — no notifications); pre-handshake spawn failures stay
+exit-1-with-stderr (the GUI's own discovery passes valid paths; stderr
+is the diagnostic channel); checkout cut points are boundary entries
+(§7); synthesized tool results carry no marker (§7).
