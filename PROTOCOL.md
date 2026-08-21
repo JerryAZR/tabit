@@ -378,10 +378,13 @@ A display string, not a kind; frontends cannot branch
 retryable-vs-fatal without string matching. Add a small kind enum
 (`provider`, `budget`, `durability`, `internal`).
 
-### 15. Unbounded event channel — ledger with a trigger
+### 15. Unbounded event channel — tripwire cap (ruled); consumer backpressure deferred
 
-A stalled frontend grows memory mid-run. Accepted at v1; the GUI
-milestone needs the real backpressure answer.
+Ruled: an arbitrarily high cap on the event channel — not backpressure,
+a sanity tripwire. A producer that keeps dumping events every tick is a
+bug, and breaching the cap fails loud (internal error, panic per
+doctrine) instead of growing memory forever. What a legitimately slow
+consumer should experience remains deferred to the GUI milestone.
 
 ### 16. Ack-before-events ordering — decided (structural), implementation pending
 
@@ -472,7 +475,7 @@ a resample, and the two must not be conflated.
   costs one retry. Fine either way — a persistent network error
   resurfaces on the retry; a transient one didn't matter.
 
-### 22. Discarded-attempt usage never reaches the session log
+### 22. Discarded-attempt usage never reaches the session log — RESOLVED (discarded entry kind)
 
 The engine keeps a discarded turn's completion-call usage (the tokens
 were spent; telemetry sees them), but the log records nothing —
@@ -483,8 +486,10 @@ whenever a retry happened. Live providers bill the defective turn.
 Options: (a) a `discarded` entry kind carrying usage — projection
 skips it, stats count it, the log stays the cost source of truth;
 (b) accept — session stats price committed turns only, engine
-telemetry carries the full picture. Recommendation: (a), deferrable
-until the stats view becomes a product surface (the GUI cost display).
+telemetry carries the full picture. Ruled: (a). A `discarded` entry kind
+carrying the attempt's usage — projection skips it (not model context),
+stats count it, the log stays the cost source of truth. Implementation
+rides the v2 session work.
 
 ## Resolved
 
