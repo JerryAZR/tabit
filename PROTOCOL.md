@@ -357,10 +357,14 @@ Open discussion, not settled: per-cause variants, or one honest
 `RunStopped { reason, history }`-shaped arm with cancellation as just
 one reason, or keep the umbrella and rename only.
 
-### 10. `list()` platform divergence — accepted (documented, tested)
+### 10. `list()` platform divergence — RESOLVED (disambiguate with metadata)
 
-Windows reads a blocked store path as empty (`NotFound`), Linux errors
-(`ENOTDIR`). Inherent; the write side fails loudly everywhere.
+Ruled: unify with a metadata check — path missing → empty list (a fresh
+install is normal); path exists but is not a directory, or any other
+metadata error → loud error on both platforms. One nuance: use the
+`fs::metadata` result match, not the boolean `Path::exists()`/`is_file()`
+helpers — those swallow the error kind (a permission failure would
+masquerade as "no sessions"). Implementation rides the v2 store touch.
 
 ### 11. Empty `pump()` reports `Completed` — document or forbid
 
@@ -409,11 +413,14 @@ The bridge holds because the reader sends the ack before any command; a
 reordered line breaks it silently. Structural fix: the forwarder starts
 only after the handshake completes.
 
-### 17. Mid-run test staging needs real sleeps — test infra
+### 17. Mid-run test staging needs real sleeps — deferred (ruled)
 
-The `slow_tool` pattern (300ms per mid-run test). Engine-level
-awaitable mock turns (a `Notify`-armed stream event) remove the latency
-and the flake surface.
+Keep `slow_tool` for now. The real answer arrives with the interaction
+milestone: a fake model calls an interactive tool, and the tester
+controls pacing through the protocol itself — send a steer after the
+`interaction_request` event arrives but before answering it. The
+pause-for-user-input point is the deterministic mid-run staging
+position; no Notify mocks, no sleeps.
 
 ### 18. Callback type ergonomics — small
 
