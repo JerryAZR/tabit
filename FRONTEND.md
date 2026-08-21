@@ -184,16 +184,25 @@ retry, before the fresh `turn_started` that follows `turn_retried`).
 | event | payload | when |
 |---|---|---|
 | `checked_out` | `entry_id`, `base_id` | checkout succeeded. `base_id` is where your old chain and the new chain diverge; `null` means from the root (drop everything). |
-| `checkout_failed` | `message` | the target does not exist or is not a valid cut point (§7). |
 | `model_changed` | `entry_id`, `provider`, `model`, `thinking_level` | a `model` command (or startup) set the selection for the next run; it is a chain entry and a valid anchor. |
-| `model_error` | `message` | the selection did not resolve in config. |
 
-**Durability (write-behind log)**
+**Errors: one generic carrier with a `kind`.** Anything that goes
+wrong outside a run terminal rides `error { kind, message, … }`. A
+minimal frontend implements one handler — show the message; a rich one
+switches on `kind`. Unknown kinds display generically.
 
-| event | payload | when |
+| kind | extra fields | meaning |
 |---|---|---|
-| `persist_degraded` | `pending`, `message` | a log flush failed (e.g. disk full); `pending` entries are buffered in memory and retried on every commit. Nag the user about disk space. |
+| `model` | — | a `model` command failed config validation. |
+| `checkout` | — | the checkout target does not exist or is not a valid cut point (§7). |
+| `persist_degraded` | `pending` | a log flush failed (disk full?); `pending` entries are buffered in memory and retried on every commit. Nag the user about disk space. |
 | `persist_recovered` | — | the buffer drained; everything is on disk again. |
+
+**The prompt barrier.** A turn does not start until its opening user
+message is durable. If the flush fails at drain time, the batch is not
+held — it is discarded, `messages_discarded` returns the texts as
+drafts, and an `error { kind: persist_degraded }` explains why. No
+turn ever runs on input that exists only in memory.
 
 `run_finished { durable: false }` means the buffer was non-empty at
 the terminal. The conversation continues from memory regardless; a
@@ -244,12 +253,13 @@ context they were sent into; salvage as drafts), then `checked_out
 3. An ancestor target (the common "rewind") has an empty suffix: the
    brackets arrive empty, nothing else changes.
 
-**Valid cut points** (ruled). Checkout targets (and `base_id` values
-you will ever see) are **boundary entries**: `user_message` entries,
-committed assistant turns, and `model_changed` entries. A
-`tool_result` inside a turn's batch is never a target — mid-batch cuts
-are deferred to the turn boundary or replaced by abort-then-checkout,
-whichever is easier for the UI.
+**Valid cut points** (ruled). The atomic unit is the tool roundtrip:
+an assistant turn and its complete result batch commit and rewind
+together — you cannot cut in-between (partial writes from crashes or
+aborts are repaired with synthesized results, never left half-open).
+Checkout targets — and `base_id` values — are therefore
+`user_message` entries, committed assistant turns, and `model_changed`
+entries.
 
 **Synthesized results tell the truth in their body.** A repaired tool
 result's content is the sentence "tool execution was interrupted
@@ -330,24 +340,21 @@ response id) are unsettled; see §11.
 
 ## 11. Open questions (known and unsettled)
 
-1. **The prompt barrier** (PROTOCOL.md flag 8's one open sub-question):
-   should a turn refuse to start until its opening user message is
-   durable on disk (codex's rule — a full disk holds messages instead
-   of running turns whose input could vanish on force stop), or should
-   turns run on in-memory-only input while degraded?
-2. **Event timestamps.** Transcript UIs plausibly want per-entry
+1. **Event timestamps.** Transcript UIs plausibly want per-entry
    wall-clock times on `user_message`/`turn_committed` at least.
-3. **Backpressure.** What a stalled reader should experience — needed
+2. **Backpressure.** What a stalled reader should experience — needed
    before long-running GUI use.
-4. **Interaction edge semantics.** Request pending when the run
+3. **Interaction edge semantics.** Request pending when the run
    fails/aborts; `interaction_response` with a stale id. Deferred to
    the permission milestone.
-5. **Subagent streams.** Sibling `stream` ids and their event subset —
+4. **Subagent streams.** Sibling `stream` ids and their event subset —
    reserved, unspecified.
 
 Settled since the review: model discovery is a one-shot
 `tabit models --json` at startup plus explicit reload (the session
 listing pattern — no notifications); pre-handshake spawn failures stay
 exit-1-with-stderr (the GUI's own discovery passes valid paths; stderr
-is the diagnostic channel); checkout cut points are boundary entries
-(§7); synthesized tool results carry no marker (§7).
+is the diagnostic channel); cut points follow the roundtrip-unit rule
+(§7); synthesized tool results carry no marker (§7); durability is a
+write-behind log with the prompt barrier — flag 8 fully resolved; all
+non-terminal errors ride the generic `error { kind }` carrier (§6).

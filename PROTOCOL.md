@@ -84,6 +84,22 @@ yaca's log is the same parent-linked JSONL tree ours is, and
 (coding-session transcripts are short; codex's cursors serve IDE-scale
 histories).
 
+- **One generic `error` event with a `kind`** (ruled). Error
+  conditions that are not run terminals ride one carrier —
+  `error { kind, message, … }` with optional kind-specific fields — so
+  a minimal frontend implements a single handler (show the message)
+  while a rich one switches on `kind`: `model` (a `model` command
+  failed config validation), `checkout` (target missing or not a cut
+  point), `persist_degraded { pending }`, `persist_recovered`. Unknown
+  kinds fall back to generic display — the same forward-compat rule as
+  unknown event types. `run_failed` stays its own event (it is a run
+  terminal, not an error condition) and shares the kind vocabulary.
+- **The atomic unit is the tool roundtrip** (ruled framing for cut
+  points): an assistant turn and its complete tool-result batch commit
+  and rewind as one unit — partial writes from crashes/aborts are
+  repaired (synthesized results), never left half-open, and
+  `checkout`/`base_id` can never land in-between. User messages and
+  model changes are single-entry units.
 - **Replay on startup.** `initialize { protocol_version, replay: true }`
   → `initialize_ack` → `replay_started { total }` → the active chain's
   entries as finalized live events (`user_message` with its entry id;
@@ -284,14 +300,20 @@ the turn via SQLite defects, no retry. Databases fail hard (they
 promise durability); editors buffer-and-retry (memory is
 authoritative) — a session log is the editor class.
 
-**One open sub-question (proposed, from codex): the prompt barrier.**
-codex refuses to start a turn until the user's prompt entry is durable
-(`PersistenceFailed` rejection, `core/src/hook_runtime.rs:606-634`).
-Adopting it here would mean: a full disk holds queued messages (they
-stay buffered, the user is told) rather than running turns whose input
-might vanish on force-stop — "act only on durable input"; buffer loss
-then costs model output only, never user input. Ruling wanted on this
-one behavioral addition.
+**Prompt barrier (ruled, with the owner's discard twist):** a turn
+does not start until its opening user message is durable. At drain the
+buffer flushes through the prompt entry first; if the flush fails, the
+batch is not held — it is discarded (`messages_discarded` hands the
+texts back as drafts, the existing salvage path) and an
+`error { kind: persist_degraded }` explains why. No turn ever runs on
+input that exists only in memory; force-stop buffer loss costs model
+output, never user input.
+
+Implementation shape addition: **the buffer is not the runtime
+state.** The session keeps its resident tree and projected context
+(the conversation truth); the writer owns a linear FIFO of unflushed
+entries (the outbox). Separate structs, one-way flow (session commits
+→ writer buffers → disk), events flow back (degraded/recovered).
 
 ### 9. Empty conversation rides `PromptCancelled` — rename (broadened)
 
