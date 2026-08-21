@@ -92,13 +92,30 @@ histories).
   pairs; `completion_call` per assistant turn; `model_changed` for
   `ModelChange` entries) → `replay_done`. Branch siblings are excluded
   by the chain walk; deltas are never persisted, so replay emits whole
-  texts.
-- **`rewind { entry_id }`** — idle-only (the GUI composes
-  abort-then-rewind; run state is derivable from events). Every entry
-  already has a UUIDv7 id; v2 surfaces it: `user_message` gains
-  `entry_id` — the anchor a per-message rewind button binds to.
-  Outcome events `rewound { entry_id }` / `rewind_failed { message }`;
-  the GUI drops its own state after `entry_id` — no re-replay.
+  texts. Risk noted: yaca's implementation has never run in production —
+  we adopt the approach, not the code. Our replay is a projection of
+  our own chain walk (simpler than yaca's: no compaction to fold in
+  yet), tested for ordering, branch exclusion, tool batches, and usage.
+- **`checkout { entry_id }`** (renamed from `rewind`: the tree means the
+  target can be any entry in the file, not just an ancestor —
+  `git checkout <hash>` is the right metaphor; the next append branches
+  from the target). Idle-only (the GUI composes abort-then-checkout;
+  run state is derivable from events). Outcome events
+  `checked_out { entry_id }` / `checkout_failed { message }`; the GUI
+  drops its own state after `entry_id` — no re-replay.
+- **Id generation is centralized in the backend.** The log owns
+  identity: every entry id is a backend-minted UUIDv7 at append;
+  frontends never generate or supply ids, they learn them from events —
+  `user_message` carries `entry_id`, and the one-message-one-event
+  invariant is the delivery contract (ordered, no correlation needed).
+  Neither frontend-supplied user-message ids nor temp-id round trips
+  are needed: the stdio channel's failure mode is process death (no
+  dedup window to defend), and the event ack is immediate. Replay
+  reuses log ids verbatim — stable across replays.
+- **The frontend keeps the active branch only.** The GUI's transcript
+  is the checked-out chain's events; the tree (abandoned branches,
+  markers) is backend/log truth. Branch browsing, if ever wanted, is a
+  future query over the backend's resident tree — not frontend state.
 - **`model { provider, model, thinking_level? }`** — exactly
   `ModelSelection`, validated against config, applied from the next
   outer loop (mirrors the existing `ModelChange` entry kind). Outcome
@@ -114,16 +131,32 @@ histories).
   `interaction_response { id, option, text? }`. Permission is options
   [Allow, Always allow, Deny] with `free_text` on (the rejection
   reason goes back to the model, per codex's `Denied { rejection }`);
-  an AskUserQuestion tool is the same shape. v2 reserves the wire
-  shape; implementation lands with the permission milestone
-  (ENGINE.md's planned pausable tool-path stage).
+  the shape is deliberately generic — any future ask-the-user tool
+  would reuse it; none is planned. v2 reserves the wire shape;
+  implementation lands with the permission milestone (ENGINE.md's
+  planned pausable tool-path stage).
 - **`tabit-protocol` crate (flag 13 resolved by this)**: extract the
   vocabulary from tabit-session before GUI work — the GUI is Rust and
   shares the serde types (no codegen) without depending on persistence
   internals. The protocol owns `Usage` and native-item shapes.
-- **Version bump to 2** covers the additive event changes
-  (`user_message.entry_id`, new events); v1 consumers are in-repo and
-  move with it.
+- **Version numbering, no compat code.** The bump to 2 numbers the
+  additive event changes (`user_message.entry_id`, new events) for the
+  first release; before that release there is **no backward-compat
+  code** — in-repo consumers move with every change.
+- **Storage stays JSONL (re-checked for the GUI era).** A database buys
+  indexed cross-session queries we don't have; JSONL keeps
+  crash-safety-by-append, human/diff friendliness, and zero migrations.
+  If cross-session features (search, all-sessions stats) ever become
+  real, the answer is a derived, rebuildable index over the logs
+  (sqlite as index, not source of truth).
+- **The in-memory contract.** The backend parses the log once at open
+  and keeps both the entry tree and the projected context resident:
+  appends are O(1) in memory plus one JSONL line; checkout and stats
+  read memory — nothing re-parses mid-session. (Today `rewind`, `stats`,
+  and dangling-repair re-open the file per call — a wart the v2 session
+  work removes.) The frontend accumulates events and receives the
+  transcript exactly once per open (the replay pass); there are no
+  per-turn re-sends.
 
 Folded v2 work items: flags 8 (one terminal per run — fold durability
 into `run_finished { durable: bool }`), 9 (`PromptCancelled` →
