@@ -29,17 +29,15 @@ name = "high"
 #[test]
 fn selection_validation_covers_thinking_levels() {
     let config = config();
-    ModelSelection::new("local", "m")
-        .validate(&config)
-        .expect("valid");
+    validate_selection(&ModelSelection::new("local", "m"), &config).expect("valid");
     let leveled = ModelSelection {
         provider: "local".to_string(),
         model: "m".to_string(),
         thinking_level: Some("high".to_string()),
     };
-    leveled.validate(&config).expect("valid with level");
+    validate_selection(&leveled, &config).expect("valid with level");
     let missing_model = ModelSelection::new("local", "nope");
-    match missing_model.validate(&config) {
+    match validate_selection(&missing_model, &config) {
         Err(SessionError::Config { message }) => {
             assert!(message.contains("model `nope`"), "{message}")
         }
@@ -51,7 +49,7 @@ fn selection_validation_covers_thinking_levels() {
         model: "m".to_string(),
         thinking_level: Some("maximum".to_string()),
     };
-    match bogus.validate(&config) {
+    match validate_selection(&bogus, &config) {
         Err(SessionError::Config { message }) => {
             assert!(message.contains("`maximum`"), "{message}");
             assert!(message.contains("off, high"), "{message}");

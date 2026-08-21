@@ -19,6 +19,8 @@ Current workspace layout:
 - `crates/rig-agent` — agent loop / runtime
 - `crates/rig-derive` — `#[rig_tool]` proc macros
 - `crates/rig` — facade crate re-exporting the three above
+- `crates/tabit-protocol` — the frontend protocol vocabulary (commands,
+  stamped events, handshake frames; `FRONTEND.md` is the contract)
 - `crates/tabit-config` — provider/model configuration (see `ROADMAP.md`)
 - `crates/tabit-session` — persistent sessions over the outer loop (native
   only: filesystem-backed; the rig crates keep wasm support)

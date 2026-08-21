@@ -11,11 +11,11 @@
 use crate::entry::{EntryKind, SESSION_FORMAT_VERSION, SessionEntry, SessionHeader};
 use crate::error::SessionError;
 use crate::ids;
-use crate::model::ModelSelection;
 use crate::projection;
 use std::fs::{self, OpenOptions};
 use std::io::Write as _;
 use std::path::{Path, PathBuf};
+use tabit_protocol::ModelSelection;
 
 /// Creates and loads session files under one directory.
 #[derive(Debug, Clone)]

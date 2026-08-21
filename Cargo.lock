@@ -2621,6 +2621,7 @@ dependencies = [
  "rig-core",
  "serde_json",
  "tabit-config",
+ "tabit-protocol",
  "tabit-session",
  "tabit-tools",
  "tokio",
@@ -2640,6 +2641,14 @@ dependencies = [
 ]
 
 [[package]]
+name = "tabit-protocol"
+version = "0.41.0"
+dependencies = [
+ "serde",
+ "serde_json",
+]
+
+[[package]]
 name = "tabit-session"
 version = "0.41.0"
 dependencies = [
@@ -2650,6 +2659,7 @@ dependencies = [
  "serde",
  "serde_json",
  "tabit-config",
+ "tabit-protocol",
  "thiserror",
  "tokio",
  "tokio-util",

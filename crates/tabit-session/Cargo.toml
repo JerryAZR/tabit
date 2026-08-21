@@ -21,6 +21,7 @@ rig-core = { path = "../rig-core", version = "0.41.0", default-features = false 
 serde = { workspace = true, features = ["derive"] }
 serde_json = { workspace = true }
 tabit-config = { path = "../tabit-config", version = "0.41.0" }
+tabit-protocol = { path = "../tabit-protocol", version = "0.41.0" }
 thiserror = { workspace = true }
 uuid = { workspace = true, features = ["v7"] }
 

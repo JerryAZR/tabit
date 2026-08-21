@@ -18,9 +18,8 @@
 
 use crate::entry::{EntryKind, SessionEntry};
 use crate::error::SessionError;
-use crate::events::SessionEvent;
 use crate::lock::lock;
-use crate::model::ModelSelection;
+use crate::model::validate_selection;
 use crate::projection;
 use crate::recorder::{RecorderHook, SessionRecorder};
 use crate::registry::ModelRegistry;
@@ -34,6 +33,8 @@ use rig_agent::tool::DynamicTool;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use tabit_config::{AuthConfig, TabitConfig};
+use tabit_protocol::ModelSelection;
+use tabit_protocol::SessionEvent;
 use tokio_util::sync::CancellationToken;
 
 /// Default model-call budget for one outer loop.
@@ -147,7 +148,7 @@ impl SessionBuilder {
         auth: Arc<AuthConfig>,
         selection: ModelSelection,
     ) -> Result<Self, SessionError> {
-        selection.validate(&config)?;
+        validate_selection(&selection, &config)?;
         let default_factory: ModelFactory =
             ModelRegistry::new(config.clone(), auth.clone()).factory();
         drop(auth);
@@ -229,7 +230,7 @@ impl SessionBuilder {
                 thinking_level: thinking_level.map(str::to_string),
             });
         }
-        self.selection.validate(&self.config)?;
+        validate_selection(&self.selection, &self.config)?;
         let mut session = Session::assemble(self, writer, context)?;
         let same_model = matches!(
             last,
@@ -533,7 +534,7 @@ impl Session {
                     usage = response.usage;
                     let event = SessionEvent::RunFinished {
                         output: output.clone(),
-                        usage,
+                        usage: Self::wire_usage(&usage),
                     };
                     on_event(event.clone());
                     events.push(event);
@@ -733,7 +734,7 @@ impl Session {
                 }
             });
         if let Some(selection) = &chain_model {
-            selection.validate(&self.config)?;
+            validate_selection(selection, &self.config)?;
         }
 
         self.recorder.rewind_to(branch_point);
@@ -771,7 +772,7 @@ impl Session {
     /// Switch the provider/model/thinking level from the next outer loop
     /// on. Recorded as a `model_change` entry.
     pub fn set_model(&mut self, selection: ModelSelection) -> Result<(), SessionError> {
-        selection.validate(&self.config)?;
+        validate_selection(&selection, &self.config)?;
         self.rebuild_agent(&selection)?;
         self.recorder.record(EntryKind::ModelChange {
             provider: selection.provider.clone(),
@@ -844,6 +845,19 @@ impl Session {
         let (context, _) = projection::project(&reloaded.chain);
         self.context = context;
         Ok(repaired)
+    }
+
+    /// Convert the engine's usage record to the protocol's wire shape
+    /// (the engine's richer fields — reasoning, tool-use, per-TTL splits —
+    /// stay engine-internal).
+    fn wire_usage(usage: &rig_core::completion::Usage) -> tabit_protocol::Usage {
+        tabit_protocol::Usage {
+            input_tokens: usage.input_tokens,
+            output_tokens: usage.output_tokens,
+            total_tokens: usage.total_tokens,
+            cached_input_tokens: usage.cached_input_tokens,
+            cache_creation_input_tokens: usage.cache_creation_input_tokens,
+        }
     }
 
     fn fold_stats(&self, entries: &[SessionEntry]) -> SessionStats {

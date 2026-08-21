@@ -30,7 +30,7 @@ fn events_round_trip_through_json() {
         },
         SessionEvent::RunFinished {
             output: "done".to_string(),
-            usage: rig_core::completion::Usage::default(),
+            usage: Usage::default(),
         },
         SessionEvent::RunFailed {
             message: "provider stream ended early".to_string(),

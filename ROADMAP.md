@@ -235,9 +235,11 @@ The known deviation from pi's subprocess model:
 
 - The protocol is the item-7 vocabulary, defined once and shared by every
   transport: in-process channels first, stdio JSONL with the JSON mode,
-  named pipe / local socket only when a remote client exists. Extracting
-  the vocabulary from tabit-session into a `tabit-protocol` crate happens
-  at that same trigger.
+  named pipe / local socket only when a remote client exists. The
+  vocabulary lives in **`crates/tabit-protocol`** (extracted from
+  tabit-session; flag 13) — engine-free, protocol-owned shapes, so
+  frontends (the egui GUI included) share the serde types without
+  touching persistence internals.
 
 ### 9. Extensions
 

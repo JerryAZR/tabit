@@ -15,14 +15,15 @@ use std::collections::HashMap;
 use std::sync::{Arc, Mutex};
 
 use crate::lock::lock;
+use crate::model::validate_selection;
 use rig_agent::agent::ModelHandle;
 use rig_core::client::CompletionClient;
 use rig_core::providers::{anthropic, openai};
 use tabit_config::{AuthConfig, Provider, TabitConfig, WireApi};
 
 use crate::SessionError;
-use crate::model::ModelSelection;
 use crate::session::ModelFactory;
+use tabit_protocol::ModelSelection;
 
 /// One constructed provider client. Clients clone cheaply and share
 /// their HTTP connection pool; models built from them are thin wrappers,
@@ -89,21 +90,19 @@ impl ModelRegistry {
         resumed: Option<ModelSelection>,
     ) -> Result<ModelSelection, SessionError> {
         if let Some(explicit) = explicit {
-            explicit.validate(&self.inner.config)?;
+            validate_selection(&explicit, &self.inner.config)?;
             return Ok(explicit);
         }
         if let Some(resumed) = resumed {
-            resumed
-                .validate(&self.inner.config)
-                .map_err(|error| match error {
-                    SessionError::Config { message } => SessionError::Config {
-                        message: format!(
-                            "{message} — the resumed session last used it; pass \
+            validate_selection(&resumed, &self.inner.config).map_err(|error| match error {
+                SessionError::Config { message } => SessionError::Config {
+                    message: format!(
+                        "{message} — the resumed session last used it; pass \
                              --model or restore the provider"
-                        ),
-                    },
-                    other => other,
-                })?;
+                    ),
+                },
+                other => other,
+            })?;
             return Ok(resumed);
         }
         if let Some(default) = &self.inner.config.default_model {
@@ -120,7 +119,7 @@ impl ModelRegistry {
                 model,
                 thinking_level: default.thinking_level.clone(),
             };
-            selection.validate(&self.inner.config)?;
+            validate_selection(&selection, &self.inner.config)?;
             return Ok(selection);
         }
         self.inner

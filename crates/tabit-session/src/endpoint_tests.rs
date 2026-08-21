@@ -3,11 +3,11 @@
 
 use super::*;
 use crate::SessionEvent;
-use crate::protocol::SessionCommand;
 use crate::tests::{Factory, echo_tool, temp_store, text_turn, tool_turn};
 use rig_agent::tool::{DynamicTool, ToolOutput};
 use serde_json::json;
 use std::time::Duration;
+use tabit_protocol::SessionCommand;
 
 /// A tool that takes real time, so a run is provably in flight while the
 /// actor processes commands sent alongside it (the instant mock would
@@ -95,7 +95,7 @@ async fn an_idle_message_runs_to_completion_over_the_stream() {
     // The info block carries the startup facts, and closing stats landed.
     assert_eq!(
         handle.info().model,
-        crate::model::ModelSelection::new("p", "m")
+        tabit_protocol::ModelSelection::new("p", "m")
     );
     assert!(
         handle.closing_stats().is_some(),

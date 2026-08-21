@@ -14,10 +14,9 @@
 //! closing stats are captured, and the event stream ends.
 
 use crate::lock::lock;
-use crate::model::ModelSelection;
-use crate::protocol::{EventFrame, SessionCommand, StreamId};
 use crate::session::{AbortHandle, MailboxHandle, Session, SessionStats};
 use std::sync::{Arc, Mutex};
+use tabit_protocol::{EventFrame, ModelSelection, SessionCommand, StreamId};
 use tokio::sync::mpsc;
 use tokio_util::sync::CancellationToken;
 

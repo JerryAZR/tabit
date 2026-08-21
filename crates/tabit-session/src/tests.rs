@@ -3,8 +3,6 @@
 
 use crate::SessionError;
 use crate::entry::EntryKind;
-use crate::events::SessionEvent;
-use crate::model::ModelSelection;
 use crate::session::{RunSummary, SessionBuilder};
 use crate::store::SessionStore;
 use rig_agent::agent::ModelHandle;
@@ -16,6 +14,7 @@ use rig_core::message::{AssistantContent, Text, UserContent};
 use serde_json::json;
 use std::path::Path;
 use std::sync::{Arc, Mutex};
+use tabit_protocol::{ModelSelection, SessionEvent};
 
 pub(crate) fn temp_store(tag: &str) -> SessionStore {
     let dir = std::env::temp_dir()

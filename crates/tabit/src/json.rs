@@ -8,10 +8,8 @@
 //! with in-memory buffers instead of process pipes.
 
 use std::io::{BufRead, Write};
-use tabit_session::{
-    ClientFrame, PROTOCOL_VERSION, ServerControlFrame, ServerFrame, SessionCommandLink,
-    SessionHandle, SessionInfo,
-};
+use tabit_protocol::{ClientFrame, PROTOCOL_VERSION, ServerControlFrame, ServerFrame};
+use tabit_session::{SessionCommandLink, SessionHandle, SessionInfo};
 use tokio::sync::mpsc;
 
 /// Serve the session over `reader`/`writer` until the client closes its

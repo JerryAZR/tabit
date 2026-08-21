@@ -5,7 +5,7 @@
 //! ships in this workspace, so an added variant is a coordinated change,
 //! not a compatibility hazard.
 
-use rig_core::completion::Usage;
+use crate::usage::Usage;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 

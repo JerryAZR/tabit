@@ -31,8 +31,14 @@ Defensive ("unreachable") arms follow a stricter rule:
 - The whole suite runs offline (cassette replay + test doubles). Doctests
   are NOT included in these numbers (`llvm-cov` was run without
   `--doctests`); they are gated by the same CI run.
-- Current state: **95.56% lines / 96.15% regions** (2,530 of 57,010
-  lines; re-measured after the engine refactor — `AgentRun` rebuilt as
+- Current state: **95.56% lines / 96.15% regions** (2,530 of 57,017
+  lines; re-measured after the `tabit-protocol` extraction — the
+  frontend vocabulary moved out of tabit-session into its own
+  engine-free crate, gaining a protocol-owned five-field `Usage` (the
+  engine's richer fields convert at the wire) and 100% coverage of its
+  executable lines (`events.rs`/`usage.rs` are pure declarations with
+  no instrumented lines; their serde shapes are pinned by round-trip
+  tests). Before that: re-measured after the engine refactor — `AgentRun` rebuilt as
   the ENGINE.md machine: 8.5K lines removed with the invalid-tool-call
   hook machinery, the prompt/context split, and the three scattered
   drains; `run/tests.rs` rewritten as the machine's contract suite;

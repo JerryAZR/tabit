@@ -16,6 +16,7 @@ path = "src/main.rs"
 rig-agent = { path = "../rig-agent", version = "0.41.0", default-features = false }
 rig-core = { path = "../rig-core", version = "0.41.0", default-features = false }
 tabit-config = { path = "../tabit-config", version = "0.41.0" }
+tabit-protocol = { path = "../tabit-protocol", version = "0.41.0" }
 tabit-session = { path = "../tabit-session", version = "0.41.0" }
 tabit-tools = { path = "../tabit-tools", version = "0.41.0" }
 serde_json = { workspace = true }

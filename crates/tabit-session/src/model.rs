@@ -1,63 +1,48 @@
-//! The session's model selection type: the `(provider, model,
-//! thinking level)` triple the session layer switches between.
-//! Construction lives in the [`crate::ModelRegistry`].
+//! Selection validation — the `(provider, model, thinking level)`
+//! shape itself is protocol vocabulary ([`ModelSelection`] in
+//! tabit-protocol); construction lives in the [`crate::ModelRegistry`],
+//! resolution against tabit config here.
 
 use crate::error::SessionError;
-use serde::{Deserialize, Serialize};
 use tabit_config::TabitConfig;
+use tabit_protocol::ModelSelection;
 
-/// A `(provider, model)` pair the session can switch between.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub struct ModelSelection {
-    /// Provider id from tabit config.
-    pub provider: String,
-    /// Model id within the provider.
-    pub model: String,
-    /// Active thinking level name, when the model defines levels.
-    pub thinking_level: Option<String>,
-}
-
-impl ModelSelection {
-    /// A selection without a thinking level.
-    pub fn new(provider: impl Into<String>, model: impl Into<String>) -> Self {
-        Self {
-            provider: provider.into(),
-            model: model.into(),
-            thinking_level: None,
-        }
+/// Validate that the selection resolves in the config (provider,
+/// model, and — when set — the thinking level name).
+pub fn validate_selection(
+    selection: &ModelSelection,
+    config: &TabitConfig,
+) -> Result<(), SessionError> {
+    let provider = config
+        .provider(&selection.provider)
+        .ok_or_else(|| SessionError::Config {
+            message: format!("provider `{}` (check providers.toml)", selection.provider),
+        })?;
+    let model = provider
+        .model(&selection.model)
+        .ok_or_else(|| SessionError::Config {
+            message: format!(
+                "model `{}` for provider `{}`",
+                selection.model, selection.provider
+            ),
+        })?;
+    if let Some(level) = &selection.thinking_level
+        && model.thinking_level(level).is_none()
+    {
+        return Err(SessionError::Config {
+            message: format!(
+                "thinking level `{level}` for model `{}` (defined levels: {})",
+                selection.model,
+                model
+                    .thinking_levels
+                    .iter()
+                    .map(|l| l.name.as_str())
+                    .collect::<Vec<_>>()
+                    .join(", ")
+            ),
+        });
     }
-
-    /// Validate the selection resolves in the config (provider, model, and
-    /// — when set — the thinking level name).
-    pub fn validate(&self, config: &TabitConfig) -> Result<(), SessionError> {
-        let provider = config
-            .provider(&self.provider)
-            .ok_or_else(|| SessionError::Config {
-                message: format!("provider `{}` (check providers.toml)", self.provider),
-            })?;
-        let model = provider
-            .model(&self.model)
-            .ok_or_else(|| SessionError::Config {
-                message: format!("model `{}` for provider `{}`", self.model, self.provider),
-            })?;
-        if let Some(level) = &self.thinking_level
-            && model.thinking_level(level).is_none()
-        {
-            return Err(SessionError::Config {
-                message: format!(
-                    "thinking level `{level}` for model `{}` (defined levels: {})",
-                    self.model,
-                    model
-                        .thinking_levels
-                        .iter()
-                        .map(|l| l.name.as_str())
-                        .collect::<Vec<_>>()
-                        .join(", ")
-                ),
-            });
-        }
-        Ok(())
-    }
+    Ok(())
 }
 
 #[cfg(test)]

@@ -1,0 +1,18 @@
+[package]
+name = "tabit-protocol"
+version.workspace = true
+edition.workspace = true
+license = "MIT"
+description = "The tabit frontend protocol vocabulary: commands, stamped events, and the handshake — shared by every transport and frontend."
+
+[lints]
+workspace = true
+
+[lib]
+name = "tabit_protocol"
+path = "src/lib.rs"
+doctest = true
+
+[dependencies]
+serde = { workspace = true, features = ["derive"] }
+serde_json = { workspace = true }

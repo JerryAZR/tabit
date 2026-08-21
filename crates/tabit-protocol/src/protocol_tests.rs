@@ -1,4 +1,5 @@
 use super::*;
+use crate::Usage;
 
 fn round_trip<T>(value: &T) -> T
 where
@@ -67,7 +68,7 @@ fn every_event_variant_survives_the_frame_envelope() {
             stream: StreamId::main(),
             event: SessionEvent::RunFinished {
                 output: "done".to_string(),
-                usage: rig_core::completion::Usage::default(),
+                usage: Usage::default(),
             },
         },
         EventFrame {

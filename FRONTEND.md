@@ -224,8 +224,8 @@ above — full-text deltas, same ids as live)
 `{ input_tokens, output_tokens, total_tokens, cached_input_tokens,
 cache_creation_input_tokens }` (u64; `total = input + output`; the
 cache fields are accounting breakdowns aligned with the backend's
-cost model). The v1 wire carries a superset of these fields; v2 is
-the five above.
+cost model). The engine tracks richer fields (reasoning, tool-use,
+per-TTL splits); they stay engine-internal and never reach the wire.
 
 ## 7. Replay and checkout: how transcript state moves
 
