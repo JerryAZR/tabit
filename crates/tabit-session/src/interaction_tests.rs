@@ -219,6 +219,47 @@ async fn an_ask_user_tool_body_round_trips_the_question_and_answer() {
 }
 
 #[tokio::test]
+async fn frontend_death_with_a_card_open_winds_the_worker_down() {
+    // The orphaned-backend regression (ruled 2026-08: the core dies with
+    // the frontend, regardless of state): a card parked on an answer
+    // that can never arrive must not pin the worker — the death watcher
+    // aborts the run and the worker winds down.
+    let store = temp_store("permit-death");
+    let session = Factory::new(vec![tool_turn("t1", "bash"), text_turn("unreachable")])
+        .into_builder(store.clone())
+        .dynamic_tool(gated_tool())
+        .create("C:/w")
+        .expect("session");
+    let mut handle = SessionHandle::spawn(session);
+    let mut events = handle.take_events().expect("the event stream");
+
+    handle.message("run it");
+    let mut saw_card = false;
+    while let Some(frame) = events.recv().await {
+        if matches!(frame.event, SessionEvent::InteractionRequested { .. }) {
+            saw_card = true;
+            break;
+        }
+    }
+    assert!(saw_card, "the card opened before the death");
+
+    // The frontend dies with the card open; the worker must wind down
+    // (closing stats appear) rather than await the answer forever.
+    drop(events);
+    tokio::time::timeout(std::time::Duration::from_secs(5), async {
+        loop {
+            if handle.closing_stats().is_some() {
+                return;
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(25)).await;
+        }
+    })
+    .await
+    .expect("the worker must wind down when the frontend dies");
+    std::fs::remove_dir_all(store.dir()).ok();
+}
+
+#[tokio::test]
 async fn abort_with_a_card_open_closes_the_question_totally() {
     let store = temp_store("permit-abort");
     let session = Factory::new(vec![tool_turn("t1", "bash"), text_turn("unreachable")])

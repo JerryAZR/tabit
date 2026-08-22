@@ -39,9 +39,17 @@ v1 as shipped; the v2 section below amends where noted.
   `initialize_ack` (session facts) or `initialize_rejected` + exit 1;
   unparseable lines / premature commands → `protocol_error`, connection
   stays. Tagged JSON lines, not JSON-RPC 2.0.
-- **Termination contract**: `close_commands()` (or dropping every
-  sender) ends the actor after the in-flight run; the event stream then
-  closes. Close is not a barrier — commands already queued are honored.
+- **Termination contract (ruled 2026-08: the core dies with the
+  frontend)**: two doors. `close_commands()` is the polite close for
+  in-process consumers that stay to read the stream (print mode) —
+  close is not a barrier, commands already queued are honored, the
+  event stream ends after the in-flight run finishes. **Frontend
+  death** — the event receiver dropped, or stdin EOF at a serialized
+  edge — aborts the in-flight run and winds the actor down
+  immediately, regardless of state: a parked interaction card or a
+  half-finished turn never outlives the user. Interrupted results
+  synthesize on the next open exactly like a crash; the log stays
+  durable.
 - **Interaction rides the ask pattern (ruled 2026-08, shipped with
   the permission milestone)**: `interaction_request { id, title,
   body, options, free_text }` (an event) answered by

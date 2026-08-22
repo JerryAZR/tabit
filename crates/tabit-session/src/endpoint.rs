@@ -8,10 +8,19 @@
 //! engine drains at turn boundaries), and abort preempts through the
 //! cancel token.
 //!
-//! Termination: [`SessionHandle::close_commands`] (explicit) or dropping
-//! the frontend's entire handle (the event receiver goes with it).
-//! Either way the in-flight run finishes — accepted messages run —
-//! closing stats are captured, and the event stream ends.
+//! Termination (ruled 2026-08 — the core dies with the frontend):
+//!
+//! - [`SessionHandle::close_commands`] is the **polite** close: the
+//!   in-flight run finishes, commands already queued are honored
+//!   (close is not a barrier), closing stats are captured, and the
+//!   event stream ends. In-process consumers that stay alive to read
+//!   the stream (print mode) use this.
+//! - **Frontend death** — the event receiver is gone, whatever the
+//!   reason (the GUI process exited, the transport dropped it) —
+//!   aborts the in-flight run and winds the worker down immediately,
+//!   regardless of state: a parked permission card or a half-finished
+//!   turn must never outlive the user. Interrupted results synthesize
+//!   on the next open exactly like a crash; the log stays durable.
 
 use crate::interaction::InteractionHub;
 use crate::lock::lock;
@@ -99,6 +108,24 @@ impl SessionHandle {
         let worker_stats = closing_stats.clone();
         let worker_mailbox = mailbox.clone();
         let worker_interaction = interaction.clone();
+        let worker_events = event_tx.clone();
+        let worker_abort = abort.clone();
+        let watcher_shutdown = shutdown.clone();
+        // The death watcher: frontend death (the event receiver is gone)
+        // aborts the in-flight run so the worker can wind down
+        // immediately, regardless of state (the ruling). The worker
+        // itself cannot see death while pumping — the watcher is its
+        // eyes. It exits on either signal and drops its sender clone,
+        // so the polite path's stream still ends when the worker does.
+        tokio::spawn(async move {
+            tokio::select! {
+                biased;
+                _ = watcher_shutdown.cancelled() => {}
+                _ = worker_events.closed() => {
+                    worker_abort.abort();
+                }
+            }
+        });
         tokio::spawn(async move {
             // The hub reaches the worker's event channel, so it exists only
             // here — attach it before the first pump can run.
@@ -133,8 +160,8 @@ impl SessionHandle {
                         }
                         break;
                     }
-                    // The frontend dropped its whole handle: the run in
-                    // flight finishes (the log stays durable), then stop.
+                    // The frontend is gone; the death watcher has already
+                    // aborted any in-flight run, so the pump has returned.
                     _ = event_tx.closed() => break,
                     _ = worker_mailbox.work_signal().notified() => {}
                 }

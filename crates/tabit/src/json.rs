@@ -43,10 +43,15 @@ where
 
     // A panicked reader thread is a broken edge: exit nonzero.
     let exit = reader_task.await.unwrap_or(1);
+    // The client is gone (EOF, broken pipe, or a dead reader thread):
+    // at a stdio edge that IS frontend death — abort the in-flight run
+    // rather than draining it (ruled 2026-08: the core dies with the
+    // frontend, regardless of state), then wind down. Interrupted
+    // results synthesize on the next open, exactly like a crash.
+    handle.abort();
     handle.close_commands();
     // The forwarder ends when the worker drops the event sender at
-    // wind-down (accepted messages still run); the writer ends when
-    // every writer_tx clone is gone.
+    // wind-down; the writer ends when every writer_tx clone is gone.
     drop(writer_tx);
     let _ = forwarder_task.await;
     let _ = writer_task.await;
@@ -185,6 +190,14 @@ mod tests {
     }
 
     fn test_session(tag: &str, turns: Vec<Vec<MockStreamEvent>>) -> Session {
+        test_session_with(tag, turns, Vec::new())
+    }
+
+    fn test_session_with(
+        tag: &str,
+        turns: Vec<Vec<MockStreamEvent>>,
+        tools: Vec<rig_agent::tool::DynamicTool>,
+    ) -> Session {
         let dir = std::env::temp_dir()
             .join("tabit-json-tests")
             .join(format!("{tag}-{}", std::process::id()));
@@ -204,7 +217,7 @@ id = "m"
             .expect("config"),
         );
         let auth = Arc::new(AuthConfig::default());
-        SessionBuilder::new(
+        let mut builder = SessionBuilder::new(
             SessionStore::new(&dir),
             config,
             auth,
@@ -215,9 +228,27 @@ id = "m"
             Ok(ModelHandle::new(MockCompletionModel::from_stream_turns(
                 turns.clone(),
             )))
-        }))
-        .create("C:/w")
-        .expect("session")
+        }));
+        for tool in tools {
+            builder = builder.dynamic_tool(tool);
+        }
+        builder.create("C:/w").expect("session")
+    }
+
+    /// A tool that takes real time, so a run is provably in flight when
+    /// the client's input closes.
+    fn slow_tool() -> rig_agent::tool::DynamicTool {
+        rig_agent::tool::DynamicTool::new(
+            "slow",
+            "sleeps then echoes",
+            serde_json::json!({"type":"object","properties":{"value":{"type":"string"}}}),
+            |_ctx, _args| {
+                Box::pin(async move {
+                    tokio::time::sleep(std::time::Duration::from_millis(300)).await;
+                    Ok(rig_agent::tool::ToolOutput::text("slept"))
+                })
+            },
+        )
     }
 
     /// A writer into shared memory, so the test can read what the bridge
@@ -364,15 +395,68 @@ id = "m"
             .collect()
     }
 
+    /// Drive the bridge over a live input (a channel the test holds
+    /// open) until `until(output)` holds, then close it — the client
+    /// shape under the death ruling: input closing while a run is in
+    /// flight aborts it, so tests that want a completed run keep the
+    /// input open until it finishes.
+    async fn bridge_live(
+        tag: &str,
+        lines: Vec<String>,
+        turns: Vec<Vec<MockStreamEvent>>,
+        until: impl Fn(&[String]) -> bool,
+    ) -> (i32, Vec<String>) {
+        let session = test_session(tag, turns);
+        let handle = SessionHandle::spawn(session);
+        let out = SharedOut::default();
+        let (tx_in, rx_in) = std::sync::mpsc::channel::<String>();
+        let serve_task = tokio::spawn(serve(
+            handle,
+            ChannelIn {
+                lines: rx_in,
+                buf: Vec::new(),
+            },
+            out.clone(),
+        ));
+        for line in lines {
+            tx_in.send(line).unwrap();
+        }
+        tokio::time::timeout(std::time::Duration::from_secs(5), async {
+            loop {
+                if until(&read_lines(&out)) {
+                    return;
+                }
+                tokio::time::sleep(std::time::Duration::from_millis(25)).await;
+            }
+        })
+        .await
+        .expect("bridge condition met before timeout");
+        drop(tx_in);
+        let code = serve_task.await.unwrap();
+        (code, read_lines(&out))
+    }
+
+    fn parse_frames(lines: &[String]) -> Vec<ServerFrame> {
+        lines
+            .iter()
+            .map(|line| serde_json::from_str(line).expect("every line is a frame"))
+            .collect()
+    }
+
     #[tokio::test]
     async fn handshake_then_round_trip_over_memory_buffers() {
-        let (code, frames) = bridge(
+        let (code, lines) = bridge_live(
             "roundtrip",
-            "{\"protocol_version\":1}\n{\"type\":\"message\",\"text\":\"hi\"}\n",
+            vec![
+                r#"{"protocol_version":1}"#.to_string(),
+                r#"{"type":"message","text":"hi"}"#.to_string(),
+            ],
             vec![script("hello")],
+            |lines| lines.iter().any(|l| l.contains("run_finished")),
         )
         .await;
         assert_eq!(code, 0);
+        let frames = parse_frames(&lines);
         // The ack comes first and carries the session facts.
         match &frames[0] {
             ServerFrame::Control(ServerControlFrame::InitializeAck {
@@ -414,13 +498,19 @@ id = "m"
 
     #[tokio::test]
     async fn a_command_before_initialize_is_a_protocol_error_and_the_connection_survives() {
-        let (code, frames) = bridge(
+        let (code, lines) = bridge_live(
             "preinit",
-            "{\"type\":\"abort\"}\n{\"protocol_version\":1}\n{\"type\":\"message\",\"text\":\"real\"}\n",
+            vec![
+                r#"{"type":"abort"}"#.to_string(),
+                r#"{"protocol_version":1}"#.to_string(),
+                r#"{"type":"message","text":"real"}"#.to_string(),
+            ],
             vec![script("ok")],
+            |lines| lines.iter().any(|l| l.contains("run_finished")),
         )
         .await;
         assert_eq!(code, 0);
+        let frames = parse_frames(&lines);
         match &frames[0] {
             ServerFrame::Control(ServerControlFrame::ProtocolError { message }) => {
                 assert!(message.contains("before initialize"), "{message}");
@@ -434,6 +524,72 @@ id = "m"
             ServerFrame::Control(ServerControlFrame::InitializeAck { .. })
         ));
         assert_eq!(texts(&frames, "user"), vec!["real"]);
+    }
+
+    #[tokio::test]
+    async fn input_closing_mid_run_aborts_it_instead_of_draining() {
+        // The death ruling at the stdio edge: EOF while a run is in
+        // flight aborts it (the core dies with the frontend) — a slow
+        // run must not keep the process alive for a client that is
+        // gone. The abort terminal still flushes before the exit.
+        let slow = vec![
+            MockStreamEvent::text("partial"),
+            MockStreamEvent::tool_call("t1", "slow", serde_json::json!({})),
+            MockStreamEvent::final_response(Usage::default()),
+        ];
+        let finish = vec![
+            MockStreamEvent::text("done"),
+            MockStreamEvent::final_response(Usage::default()),
+        ];
+        let session = test_session_with("eof-abort", vec![slow, finish], vec![slow_tool()]);
+        let handle = SessionHandle::spawn(session);
+        let out = SharedOut::default();
+        let (tx_in, rx_in) = std::sync::mpsc::channel::<String>();
+        let serve_task = tokio::spawn(serve(
+            handle,
+            ChannelIn {
+                lines: rx_in,
+                buf: Vec::new(),
+            },
+            out.clone(),
+        ));
+
+        tx_in.send(r#"{"protocol_version":1}"#.to_string()).unwrap();
+        tx_in
+            .send(r#"{"type":"message","text":"slow one"}"#.to_string())
+            .unwrap();
+
+        // Close the input the moment the tool call is provably in
+        // flight (the tool sleeps, so the window is wide).
+        tokio::time::timeout(std::time::Duration::from_secs(5), async {
+            loop {
+                if read_lines(&out)
+                    .iter()
+                    .any(|l| l.contains(r#""type":"tool_call""#))
+                {
+                    return;
+                }
+                tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+            }
+        })
+        .await
+        .expect("the tool call must arrive");
+        drop(tx_in);
+
+        let code = tokio::time::timeout(std::time::Duration::from_secs(5), serve_task)
+            .await
+            .expect("the bridge must exit after the abort")
+            .unwrap();
+        assert_eq!(code, 0);
+        let lines = read_lines(&out);
+        assert!(
+            lines.iter().any(|l| l.contains("run_aborted")),
+            "EOF mid-run must abort the run, got: {lines:?}"
+        );
+        assert!(
+            !lines.iter().any(|l| l.contains("run_finished")),
+            "the unattended run must not complete"
+        );
     }
 
     #[tokio::test]

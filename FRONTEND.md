@@ -105,11 +105,12 @@ new events arrive later without a version bump).
    JSON, and JSON escapes embedded newlines).
 3. `protocol_error` / `initialize_rejected` reasons are free text for
    humans — display them, never branch on them.
-4. To shut down: **close stdin**. The backend is not killed: it drains
-   to quiescence — every queued message runs to its terminal event, all
-   events are written — then the stream reaches EOF. A quit with
-   pending steers waits for them to execute; abort first if you want
-   out now.
+4. To shut down: **close stdin**. Closing stdin is frontend death
+   (ruled 2026-08 — the core dies with the frontend, regardless of
+   state): an in-flight run is **aborted** (its `run_aborted` terminal
+   still flushes before the stream ends), queued messages are
+   discarded, and the backend exits. Interrupted results synthesize
+   on the next open, exactly like a crash; the log stays durable.
 5. **Exit codes: 101 is the one reliable crash signal.** `1` means
    handshake rejection (including **first-run setup failures** — no
    config file: the backend sends `initialize_rejected` whose reason

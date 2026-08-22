@@ -100,9 +100,12 @@ impl InteractionHub {
         lock(&self.inner.always_allowed).insert(tool.to_string());
     }
 
-    /// Register the question, surface it, and await the answer. A dead
-    /// event channel (frontend gone) or a retraction (run terminal
-    /// cleared the sender) resolves as unanswered.
+    /// Register the question, surface it, and await the answer. Drop is
+    /// the cancellation: aborting the run (the user, or the frontend
+    /// dying — the endpoint's death watcher aborts) drops the asking
+    /// future and the question goes with it; run terminals clear the
+    /// map. A dead event channel at registration (frontend already
+    /// gone, no pump in flight) resolves as unanswered.
     async fn ask_once(&self, prompt: InteractionPrompt) -> InteractionReply {
         let (sender, receiver) = oneshot::channel();
         let id = new_entry_id();
@@ -128,18 +131,18 @@ impl InteractionHub {
             .inner
             .events
             .upgrade()
-            .is_some_and(|sender| sender.send(event).is_ok());
+            .is_some_and(|channel| channel.send(event).is_ok());
         if !sent {
-            // No strong sender (no pump in flight — a stray ask outside a
-            // run) or the frontend is gone: no one will ever answer.
-            // Retract and report the dismissal.
+            // No pump in flight, or the frontend is already gone: no one
+            // will ever answer.
             lock(&self.inner.pending).remove(&id);
             return InteractionReply::unanswered();
         }
         match receiver.await {
             Ok(reply) => reply,
-            // The sender was dropped without sending — the run terminal
-            // retracted the question.
+            // The sender was dropped without sending — the run ended
+            // under the question (terminal retraction or the death
+            // watcher's abort dropping the asker).
             Err(_) => InteractionReply::unanswered(),
         }
     }
