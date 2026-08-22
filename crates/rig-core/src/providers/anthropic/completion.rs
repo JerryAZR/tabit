@@ -135,6 +135,23 @@ pub struct Usage {
     #[serde(default)]
     pub cache_creation: Option<CacheCreationDetail>,
     pub output_tokens: u64,
+    /// Breakdown of `output_tokens`. Absent when the provider does not report
+    /// it (a turn with extended thinking disabled).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub output_tokens_details: Option<OutputTokensDetails>,
+}
+
+/// Breakdown of `usage.output_tokens`.
+///
+/// The tokens Claude spent on extended thinking are reported here, *inside*
+/// `output_tokens` rather than beside it — the name says `details`, and every
+/// recorded turn has `thinking_tokens <= output_tokens`. Adding them to a
+/// total would double-count.
+#[derive(Clone, Copy, Debug, Default, Deserialize, Serialize, PartialEq, Eq)]
+pub struct OutputTokensDetails {
+    /// Output tokens spent on extended thinking this turn.
+    #[serde(default)]
+    pub thinking_tokens: u64,
 }
 
 impl std::fmt::Display for Usage {
@@ -160,27 +177,55 @@ impl std::fmt::Display for Usage {
     }
 }
 
+/// Aggregate an Anthropic token report into rig's usage shape.
+///
+/// Anthropic reports cache reads and cache writes *alongside* `input_tokens`
+/// rather than inside it, so the total is the sum of all four counters.
+/// `thinking_tokens` is the exception: it is a *breakdown* of `output_tokens`,
+/// already counted there, so it populates `reasoning_tokens` without entering
+/// the total. Shared with the streaming path, whose `PartialUsage` carries the
+/// same counters — the parameter is required rather than defaulted so a new
+/// caller cannot silently drop it.
+pub(super) fn anthropic_usage_totals(
+    input_tokens: u64,
+    output_tokens: u64,
+    cache_read: Option<u64>,
+    cache_creation: Option<u64>,
+    cache_creation_detail: Option<&CacheCreationDetail>,
+    output_tokens_details: Option<OutputTokensDetails>,
+) -> crate::completion::Usage {
+    let mut usage = crate::completion::Usage::new();
+
+    usage.input_tokens = input_tokens;
+    usage.output_tokens = output_tokens;
+    usage.cached_input_tokens = cache_read.unwrap_or_default();
+    usage.cache_creation_input_tokens = cache_creation.unwrap_or_default();
+    // The 1h figure is a breakdown of `cache_creation_input_tokens`, not
+    // an addition to it: carried for accounting, excluded from the total.
+    usage.cache_creation_1h_input_tokens = cache_creation_detail
+        .and_then(|detail| detail.ephemeral_1h_input_tokens)
+        .unwrap_or_default();
+    usage.reasoning_tokens = output_tokens_details
+        .map(|details| details.thinking_tokens)
+        .unwrap_or_default();
+    usage.total_tokens = usage.input_tokens
+        + usage.cached_input_tokens
+        + usage.cache_creation_input_tokens
+        + usage.output_tokens;
+
+    usage
+}
+
 impl From<&Usage> for crate::completion::Usage {
     fn from(value: &Usage) -> crate::completion::Usage {
-        let mut usage = crate::completion::Usage::new();
-
-        usage.input_tokens = value.input_tokens;
-        usage.output_tokens = value.output_tokens;
-        usage.cached_input_tokens = value.cache_read_input_tokens.unwrap_or_default();
-        usage.cache_creation_input_tokens = value.cache_creation_input_tokens.unwrap_or_default();
-        // The 1h figure is a breakdown of `cache_creation_input_tokens`, not
-        // an addition to it: carried for accounting, excluded from the total.
-        usage.cache_creation_1h_input_tokens = value
-            .cache_creation
-            .as_ref()
-            .and_then(|detail| detail.ephemeral_1h_input_tokens)
-            .unwrap_or_default();
-        usage.total_tokens = value.input_tokens
-            + value.cache_read_input_tokens.unwrap_or_default()
-            + value.cache_creation_input_tokens.unwrap_or_default()
-            + value.output_tokens;
-
-        usage
+        anthropic_usage_totals(
+            value.input_tokens,
+            value.output_tokens,
+            value.cache_read_input_tokens,
+            value.cache_creation_input_tokens,
+            value.cache_creation.as_ref(),
+            value.output_tokens_details,
+        )
     }
 }
 
@@ -274,10 +319,30 @@ impl crate::completion::NormalizeCompletionResponse for CompletionResponse {
             .collect::<Result<Vec<_>, _>>()?;
 
         let choice = if content.is_empty() {
-            // Anthropic documents empty `end_turn` responses after tool-result round trips.
-            // The generic completion response still requires at least one assistant item, so
-            // normalize that terminal no-op into the same empty-text sentinel used by streaming.
-            if response.stop_reason.as_deref() == Some("end_turn") {
+            // Anthropic has two ways to end a turn that genuinely carried no
+            // content, and the empty-text sentinel (the same one streaming
+            // uses) says exactly that:
+            //
+            // - `end_turn` after a tool-result round trip — documented.
+            // - `stop_sequence` when the matched sequence is the first thing
+            //   the model emits — Anthropic strips the sequence it stopped
+            //   on, so such a turn arrives with `content: []` and a 200.
+            //   Rejecting it turned a completed provider turn into
+            //   `EMPTY_RESPONSE_ERROR`, and diverged from the streamed twin,
+            //   which finishes the same turn with an empty choice and no
+            //   error.
+            //
+            // The `stop_sequence` arm additionally requires the sequence
+            // itself: every legal stop-sequence turn names the sequence that
+            // fired, and the Anthropic-compatible gateways sharing this
+            // mapping are the likeliest to report a stop reason without its
+            // companion field — that malformed shape stays guarded.
+            let legal_empty_turn = match response.stop_reason.as_deref() {
+                Some("end_turn") => true,
+                Some("stop_sequence") => response.stop_sequence.is_some(),
+                _ => false,
+            };
+            if legal_empty_turn {
                 OneOrMany::one(completion::AssistantContent::text(""))
             } else {
                 return Err(CompletionError::ResponseError(

@@ -79,7 +79,21 @@ where
                 break;
             }
 
-            after_id = page.last_id;
+            // `has_more` without `last_id` has no next page to ask for, and
+            // resetting the cursor to the uncursored first page would loop
+            // forever re-fetching it. The Anthropic-compatible gateways
+            // sharing this client are exactly the sources that report a flag
+            // without its companion field — break (with a warning) rather
+            // than spin.
+            let Some(next) = page.last_id else {
+                tracing::warn!(
+                    "Anthropic model listing reported has_more without last_id; \
+                     stopping after {} models",
+                    all_models.len()
+                );
+                break;
+            };
+            after_id = Some(next);
         }
 
         Ok(ModelList::new(all_models))
@@ -175,6 +189,24 @@ mod tests {
                 Some("test-key")
             );
         }
+    }
+
+    #[tokio::test]
+    async fn has_more_without_last_id_stops_instead_of_refetching_page_one() {
+        // A page claiming more data but naming no cursor: the old loop reset
+        // to the uncursored first page and re-fetched it forever, appending
+        // its models on every pass. The sequence ends after the first page,
+        // so a second request would fail the test with an exhausted mock.
+        let http = SequencedHttpClient::new([MockHttpResponse::success(page_json(
+            &[("claude-a", "Claude A")],
+            true,
+            None,
+        ))]);
+
+        let lister = AnthropicModelLister::new(client(http));
+        let models = lister.list_all().await.expect("list_all should succeed");
+
+        assert_eq!(models.len(), 1, "the page's models are kept, then stop");
     }
 
     #[tokio::test]

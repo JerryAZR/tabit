@@ -2233,6 +2233,7 @@ fn empty_end_turn_response_normalizes_to_empty_text_choice() {
             cache_creation_input_tokens: None,
             cache_creation: None,
             output_tokens: 2,
+            output_tokens_details: None,
         },
     };
 
@@ -2266,12 +2267,79 @@ fn empty_non_end_turn_response_still_errors() {
             cache_creation_input_tokens: None,
             cache_creation: None,
             output_tokens: 2,
+            output_tokens_details: None,
         },
     };
 
     let err = response
         .normalize("anthropic")
         .expect_err("empty non-end_turn should remain an error");
+
+    assert!(matches!(
+        err,
+        CompletionError::ResponseError(message) if message == EMPTY_RESPONSE_ERROR
+    ));
+}
+
+/// Anthropic strips the sequence it stopped on, so a turn whose first output
+/// is the match arrives with `content: []`, a named sequence, and a 200 — a
+/// completed turn, not a provider defect.
+#[test]
+fn empty_stop_sequence_response_with_a_named_sequence_normalizes() {
+    let response = CompletionResponse {
+        content: vec![],
+        id: "msg_123".to_string(),
+        model: "claude-sonnet-4-6".to_string(),
+        role: "assistant".to_string(),
+        stop_reason: Some("stop_sequence".to_string()),
+        stop_sequence: Some("alpha".to_string()),
+        usage: Usage {
+            input_tokens: 7,
+            cache_read_input_tokens: None,
+            cache_creation_input_tokens: None,
+            cache_creation: None,
+            output_tokens: 2,
+            output_tokens_details: None,
+        },
+    };
+
+    let parsed: completion::CompletionResponse = response
+        .normalize("anthropic")
+        .expect("an empty turn that names its matched sequence is legal");
+
+    assert_eq!(parsed.choice.len(), 1);
+    assert!(matches!(
+        parsed.choice.first(),
+        completion::AssistantContent::Text(text) if text.text.is_empty()
+    ));
+    assert_eq!(parsed.finish_reason(), Some(completion::FinishReason::Stop));
+}
+
+/// A turn claiming to have stopped on a sequence while naming none is the
+/// malformed shape the guard exists for — likeliest from the
+/// Anthropic-compatible gateways sharing this mapping.
+#[test]
+fn empty_stop_sequence_response_without_a_named_sequence_still_errors() {
+    let response = CompletionResponse {
+        content: vec![],
+        id: "msg_123".to_string(),
+        model: "claude-sonnet-4-6".to_string(),
+        role: "assistant".to_string(),
+        stop_reason: Some("stop_sequence".to_string()),
+        stop_sequence: None,
+        usage: Usage {
+            input_tokens: 7,
+            cache_read_input_tokens: None,
+            cache_creation_input_tokens: None,
+            cache_creation: None,
+            output_tokens: 2,
+            output_tokens_details: None,
+        },
+    };
+
+    let err = response
+        .normalize("anthropic")
+        .expect_err("a stop reason without its companion sequence stays guarded");
 
     assert!(matches!(
         err,
@@ -2339,6 +2407,7 @@ fn end_turn_with_a_tool_call_is_reconciled_to_tool_calls() {
             cache_creation_input_tokens: None,
             cache_creation: None,
             output_tokens: 2,
+            output_tokens_details: None,
         },
     };
 
@@ -2957,6 +3026,7 @@ fn provider_text_response_concatenates_text_blocks_without_inserted_newlines() {
             cache_creation_input_tokens: None,
             cache_creation: None,
             output_tokens: 1,
+            output_tokens_details: None,
         },
     };
 
@@ -3385,6 +3455,10 @@ fn sample_usage() -> Usage {
             ephemeral_1h_input_tokens: Some(4),
         }),
         output_tokens: 11,
+        // A thinking breakdown inside `output_tokens`: 4 of the 11 output
+        // tokens were spent thinking, so `reasoning_tokens` reads 4 while
+        // the total stays 3 + 5 + 7 + 11 (adding it would double-count).
+        output_tokens_details: Some(OutputTokensDetails { thinking_tokens: 4 }),
     }
 }
 
@@ -3459,8 +3533,13 @@ fn usage_display_and_conversion_to_generic_usage() {
     assert_eq!(generic.cached_input_tokens, 5);
     assert_eq!(generic.cache_creation_input_tokens, 7);
     assert_eq!(generic.cache_creation_1h_input_tokens, 4);
+    assert_eq!(
+        generic.reasoning_tokens, 4,
+        "thinking tokens are the reasoning share"
+    );
     // The 1h figure is a breakdown of the aggregate, not an addition:
-    // the total stays computed from the aggregate alone.
+    // the total stays computed from the aggregate alone. The thinking
+    // figure is likewise a breakdown of `output_tokens` — excluded here.
     assert_eq!(generic.total_tokens, 3 + 5 + 7 + 11);
 }
 
@@ -3495,6 +3574,42 @@ fn usage_decodes_the_wire_cache_creation_breakdown() {
     }))
     .expect("a usage payload without the breakdown should still decode");
     assert_eq!(without_breakdown.cache_creation, None);
+}
+
+/// Anthropic reports the tokens Claude spent thinking as a breakdown of
+/// `output_tokens`; without the field, serde dropped it and a thinking turn
+/// read as free reasoning on every surface.
+#[test]
+fn usage_decodes_the_wire_thinking_breakdown_into_reasoning_tokens() {
+    let usage: Usage = serde_json::from_value(json!({
+        "input_tokens": 12,
+        "output_tokens": 30,
+        "output_tokens_details": { "thinking_tokens": 17 }
+    }))
+    .expect("the thinking breakdown shape should decode");
+    assert_eq!(
+        usage.output_tokens_details,
+        Some(OutputTokensDetails {
+            thinking_tokens: 17
+        })
+    );
+
+    let generic = crate::completion::Usage::from(&usage);
+    assert_eq!(generic.reasoning_tokens, 17);
+    assert_eq!(
+        generic.total_tokens,
+        12 + 30,
+        "thinking tokens are inside `output_tokens`; adding them would double-count"
+    );
+
+    // A turn with thinking disabled sends no breakdown at all.
+    let plain: Usage = serde_json::from_value(json!({
+        "input_tokens": 12,
+        "output_tokens": 30
+    }))
+    .expect("a usage payload without the breakdown should still decode");
+    assert_eq!(plain.output_tokens_details, None);
+    assert_eq!(crate::completion::Usage::from(&plain).reasoning_tokens, 0);
 }
 
 #[test]

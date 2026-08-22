@@ -63,7 +63,11 @@ fn provider_response_from_compatible_sse_data(data: &str) -> Option<CompletionEr
 pub(crate) fn map_openai_finish_reason(reason: &str) -> FinishReason {
     match reason {
         "stop" => FinishReason::Stop,
-        "length" | "max_tokens" => FinishReason::Length,
+        // `model_length` is Mistral's spelling for generation stopped because
+        // the *context window* was exhausted rather than `max_tokens`. Both
+        // are truncation, so both are `Length` — the distinction is which
+        // limit was hit, not whether the turn finished.
+        "length" | "max_tokens" | "model_length" => FinishReason::Length,
         "tool_calls" | "function_call" => FinishReason::ToolCalls,
         "content_filter" => FinishReason::ContentFilter,
         other => FinishReason::Other(other.to_owned()),
@@ -736,8 +740,11 @@ pub(crate) mod test_support {
 #[cfg(test)]
 mod tests {
     use super::test_support::sse_bytes_from_data_lines;
-    use super::{CompatibleStreamProfile, send_compatible_raw_streaming_request};
+    use super::{
+        CompatibleStreamProfile, map_openai_finish_reason, send_compatible_raw_streaming_request,
+    };
     use crate::completion::CompletionError;
+    use crate::completion::FinishReason;
     use crate::http_client;
     use crate::streaming::StreamedAssistantContent;
     use crate::test_utils::MockStreamingClient;
@@ -746,6 +753,29 @@ mod tests {
         FinishReasonCleanupProfile,
     };
     use futures::StreamExt;
+
+    /// Mistral truncates at its context ceiling with `model_length`, which is
+    /// the same truncation class as `length` — only the limit differs. The
+    /// shape is the one recorded live against `voxtral-small-latest`
+    /// (`max_context_length` 32768): generation stopped dead on the ceiling
+    /// with output tokens still budgeted.
+    #[test]
+    fn model_length_is_truncation_not_a_natural_stop() {
+        assert_eq!(
+            map_openai_finish_reason("model_length"),
+            FinishReason::Length,
+            "a turn cut off by the context window must be distinguishable from \
+             one that simply had nothing more to say"
+        );
+        assert_eq!(map_openai_finish_reason("length"), FinishReason::Length);
+        assert_eq!(map_openai_finish_reason("max_tokens"), FinishReason::Length);
+        assert_eq!(map_openai_finish_reason("stop"), FinishReason::Stop);
+        assert_eq!(
+            map_openai_finish_reason("made_up_reason"),
+            FinishReason::Other("made_up_reason".to_owned()),
+            "an unrecognized spelling still surfaces verbatim"
+        );
+    }
 
     /// Wrap a profile-driven raw stream into the normalized carrier, so these
     /// tests exercise the same path providers use.

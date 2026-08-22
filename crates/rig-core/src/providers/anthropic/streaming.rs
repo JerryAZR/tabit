@@ -282,28 +282,24 @@ pub struct PartialUsage {
     /// aggregate). Absent on the wire decodes to `None`.
     #[serde(default)]
     pub cache_creation: Option<super::completion::CacheCreationDetail>,
+    /// Breakdown of `output_tokens`. Anthropic reports it on the terminal
+    /// `message_delta` — the frame that also carries the final `output_tokens`
+    /// — not on `message_start`, so unlike `cache_creation` it needs no
+    /// carry-forward.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub output_tokens_details: Option<super::completion::OutputTokensDetails>,
 }
 
 impl From<&PartialUsage> for crate::completion::Usage {
     fn from(value: &PartialUsage) -> crate::completion::Usage {
-        let mut usage = crate::completion::Usage::new();
-
-        usage.input_tokens = value.input_tokens.unwrap_or_default() as u64;
-        usage.output_tokens = value.output_tokens as u64;
-        usage.cached_input_tokens = value.cache_read_input_tokens.unwrap_or(0);
-        usage.cache_creation_input_tokens = value.cache_creation_input_tokens.unwrap_or(0);
-        // The 1h figure is a breakdown of `cache_creation_input_tokens`, not
-        // an addition to it: carried for accounting, excluded from the total.
-        usage.cache_creation_1h_input_tokens = value
-            .cache_creation
-            .as_ref()
-            .and_then(|detail| detail.ephemeral_1h_input_tokens)
-            .unwrap_or(0);
-        usage.total_tokens = usage.input_tokens
-            + usage.cached_input_tokens
-            + usage.cache_creation_input_tokens
-            + usage.output_tokens;
-        usage
+        super::completion::anthropic_usage_totals(
+            value.input_tokens.unwrap_or_default() as u64,
+            value.output_tokens as u64,
+            value.cache_read_input_tokens,
+            value.cache_creation_input_tokens,
+            value.cache_creation.as_ref(),
+            value.output_tokens_details,
+        )
     }
 }
 
@@ -479,6 +475,12 @@ impl WireAdapter for AnthropicAdapter {
                         .cache_creation
                         .clone()
                         .or_else(|| self.start_cache_creation.clone()),
+                    // Taken from this frame alone, with no `message_start`
+                    // fallback: unlike `cache_creation`, Anthropic reports the
+                    // output-token breakdown on the terminal `message_delta`,
+                    // the same frame that carries the final `output_tokens` it
+                    // breaks down. `message_start` has none to carry forward.
+                    output_tokens_details: usage.output_tokens_details,
                 };
 
                 let span = tracing::Span::current();
@@ -487,6 +489,10 @@ impl WireAdapter for AnthropicAdapter {
                     StreamingCompletionResponse {
                         usage,
                         stop_reason: Some(reason.clone()),
+                        // Rides the same `message_delta` as the stop reason,
+                        // and only that frame carries it: `message_start`
+                        // always opens with `null`.
+                        stop_sequence: delta.stop_sequence.clone(),
                         message_id: self.message_id.clone(),
                         model: self.response_model.clone(),
                     },
@@ -541,6 +547,18 @@ pub struct StreamingCompletionResponse {
     /// Anthropic's `stop_reason`, verbatim, when the stream reported one.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub stop_reason: Option<String>,
+    /// Which of the caller's `stop_sequences` actually fired, verbatim, when
+    /// the terminal `message_delta` reported one.
+    ///
+    /// `stop_reason: "stop_sequence"` says only *that* a sequence matched;
+    /// the sequence itself is the part a caller branches on, and Anthropic
+    /// strips it from the text, so the wire is its only source. The blocking
+    /// twin has carried it on
+    /// [`CompletionResponse::stop_sequence`](super::completion::CompletionResponse::stop_sequence)
+    /// all along — the streamed record dropped it after parsing, so the same
+    /// request answered strictly less when streamed.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub stop_sequence: Option<String>,
     /// The `message_start` message ID, when the stream reported one.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub message_id: Option<String>,
@@ -2511,6 +2529,7 @@ mod tests {
             yield Ok(RawStreamingChoice::FinalResponse(StreamingCompletionResponse {
                 usage: PartialUsage {
                     output_tokens: 5,
+                output_tokens_details: None,
                     input_tokens: Some(3),
                     cache_creation_input_tokens: Some(7),
                     cache_read_input_tokens: Some(2),
@@ -2520,6 +2539,7 @@ mod tests {
                     }),
                 },
                 stop_reason: Some("max_tokens".to_string()),
+                stop_sequence: None,
                 message_id: Some("msg_1".to_string()),
                 model: Some("claude-opus-4-8".to_string()),
             }));
@@ -2646,6 +2666,7 @@ mod tests {
     fn partial_usage_converts_to_generic_usage_by_value() {
         let usage: crate::completion::Usage = PartialUsage {
             output_tokens: 5,
+            output_tokens_details: None,
             input_tokens: Some(3),
             cache_creation_input_tokens: Some(7),
             cache_read_input_tokens: Some(2),
@@ -2767,6 +2788,85 @@ mod tests {
             out.is_empty(),
             "a message_delta without a stop reason must not terminate the turn"
         );
+    }
+
+    /// The terminal `message_delta` is the only frame that reports which of
+    /// the caller's `stop_sequences` matched — `message_start` always opens
+    /// with `null` and Anthropic strips the matched text from the content.
+    #[test]
+    fn terminal_message_delta_carries_the_matched_stop_sequence() {
+        let adapter = AnthropicAdapter::default();
+        let frame = WireFrame::Text(
+            r#"{"type":"message_delta","delta":{"stop_reason":"stop_sequence","stop_sequence":"charlie"},"usage":{"output_tokens":3}}"#
+                .into(),
+        );
+        let crate::providers::internal::wire::WireEvent::Known(event) = adapter.classify(frame)
+        else {
+            panic!("a modeled event must classify as Known");
+        };
+
+        let mut adapter = AnthropicAdapter::default();
+        let mut out = Vec::new();
+        adapter.interpret(event, &mut out);
+        let [Ok(RawStreamingChoice::FinalResponse(terminal))] = out.as_slice() else {
+            panic!(
+                "a stop-reason-carrying message_delta must emit exactly the \
+                 terminal record, got {out:?}"
+            );
+        };
+        assert_eq!(terminal.stop_reason.as_deref(), Some("stop_sequence"));
+        assert_eq!(
+            terminal.stop_sequence.as_deref(),
+            Some("charlie"),
+            "the matched sequence is the part a caller branches on; the wire \
+             frame is its only source"
+        );
+    }
+
+    /// The thinking breakdown rides the terminal `message_delta`'s usage and
+    /// must reach `reasoning_tokens` without entering the total.
+    #[test]
+    fn terminal_message_delta_carries_the_thinking_breakdown() {
+        let open = AnthropicAdapter::default();
+        let open_frame = WireFrame::Text(
+            r#"{"type":"message_start","message":{"id":"msg_1","role":"assistant","content":[],"model":"claude-sonnet-4-6","stop_reason":null,"stop_sequence":null,"usage":{"input_tokens":12,"output_tokens":0}}}"#
+                .into(),
+        );
+        let crate::providers::internal::wire::WireEvent::Known(open_event) =
+            open.classify(open_frame)
+        else {
+            panic!("a modeled event must classify as Known");
+        };
+
+        let terminal_adapter = AnthropicAdapter::default();
+        let terminal_frame = WireFrame::Text(
+            r#"{"type":"message_delta","delta":{"stop_reason":"end_turn"},"usage":{"output_tokens":30,"output_tokens_details":{"thinking_tokens":17}}}"#
+                .into(),
+        );
+        let crate::providers::internal::wire::WireEvent::Known(terminal_event) =
+            terminal_adapter.classify(terminal_frame)
+        else {
+            panic!("a modeled event must classify as Known");
+        };
+
+        let mut adapter = AnthropicAdapter::default();
+        let mut out = Vec::new();
+        adapter.interpret(open_event, &mut out);
+        out.clear();
+        adapter.interpret(terminal_event, &mut out);
+        let [Ok(RawStreamingChoice::FinalResponse(terminal))] = out.as_slice() else {
+            panic!("a stop-reason-carrying message_delta must emit the terminal, got {out:?}");
+        };
+
+        assert_eq!(
+            terminal.usage.output_tokens_details,
+            Some(super::super::completion::OutputTokensDetails {
+                thinking_tokens: 17
+            })
+        );
+        let usage = crate::completion::Usage::from(&terminal.usage);
+        assert_eq!(usage.reasoning_tokens, 17);
+        assert_eq!(usage.total_tokens, 12 + 30);
     }
 
     /// The per-index fix: a text delta for its own open block streams even
