@@ -124,6 +124,19 @@ pub enum ServerFrame {
     Event(EventFrame),
 }
 
+/// Serialize a frame (either direction) to its wire line. Every protocol
+/// type serializes — the shapes are strings, numbers, and options, and
+/// the round-trip tests hold that invariant — so a failure here is an
+/// internal error and crashes loudly (AGENTS.md doctrine) instead of
+/// silently dropping a frame the protocol promised. One policy for every
+/// edge: no call site invents its own fallback.
+pub fn to_wire_line<T: Serialize + ?Sized>(value: &T) -> String {
+    // Sanctioned crash (AGENTS.md doctrine): unserializable protocol
+    // data is a bug; a silent skip would drop a promised frame.
+    #[allow(clippy::expect_used)]
+    serde_json::to_string(value).expect("protocol frames always serialize (round-trip tested)")
+}
+
 #[cfg(test)]
 #[path = "protocol_tests.rs"]
 mod tests;

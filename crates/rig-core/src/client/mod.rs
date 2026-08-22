@@ -413,7 +413,7 @@ where
                             Ok(result) => return result,
                             Err(_elapsed) => {
                                 eprintln!(
-                                    "warning: no response data for {stall_warning:?}; still                                      waiting (the request is not killed)"
+                                    "warning: no response data for {stall_warning:?}; still waiting (the request is not killed)"
                                 );
                             }
                         }

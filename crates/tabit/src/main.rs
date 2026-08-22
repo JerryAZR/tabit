@@ -104,6 +104,67 @@ fn mode_of(args: &Args) -> Mode {
     }
 }
 
+impl Mode {
+    fn name(self) -> &'static str {
+        match self {
+            Mode::List => "list",
+            Mode::Print => "print",
+            Mode::Json => "JSON",
+            Mode::Gui => "GUI",
+        }
+    }
+}
+
+/// The flags each mode accepts. A flag that cannot act in the selected
+/// mode is a user mistake, rejected loudly at parse time — never a
+/// silent no-op. One allow-list per mode replaces the per-pair conflict
+/// checks (which kept missing combinations: `--model` with a path,
+/// `--session` alone, `--list --continue`, …).
+fn validate_mode(args: &Args) -> Result<Mode, String> {
+    let mode = mode_of(args);
+    let present = [
+        args.print_prompt.is_some().then_some("-p/--print"),
+        args.rewind.is_some().then_some("--rewind"),
+        args.session.is_some().then_some("--session"),
+        args.continue_newest.then_some("--continue"),
+        args.model.is_some().then_some("--model"),
+        args.max_turns.is_some().then_some("--max-turns"),
+        args.json.then_some("--json"),
+        args.list.then_some("--list"),
+        args.path.is_some().then_some("<path>"),
+    ]
+    .into_iter()
+    .flatten()
+    .collect::<Vec<_>>();
+    let allowed: &[&str] = match mode {
+        Mode::List => &["--list"],
+        Mode::Json => &[
+            "--json",
+            "--session",
+            "--continue",
+            "--model",
+            "--max-turns",
+        ],
+        Mode::Print => &[
+            "-p/--print",
+            "--rewind",
+            "--session",
+            "--continue",
+            "--model",
+            "--max-turns",
+        ],
+        Mode::Gui => &["<path>"],
+    };
+    if present.iter().any(|flag| !allowed.contains(flag)) {
+        return Err(format!(
+            "those flags do not combine: {} mode accepts only [{}]; pick one mode\n{USAGE}",
+            mode.name(),
+            allowed.join(", ")
+        ));
+    }
+    Ok(mode)
+}
+
 fn parse_args() -> Result<Args, String> {
     parse_args_from(std::env::args().skip(1))
 }
@@ -178,15 +239,8 @@ where
             }
         }
     }
-    // A path only means GUI mode; it cannot combine with the modes
-    // that write to stdout.
-    if parsed.path.is_some()
-        && (parsed.list || parsed.json || parsed.print_prompt.is_some() || parsed.rewind.is_some())
-    {
-        return Err(format!(
-            "<path> selects GUI mode; --list/--json/-p/--rewind select others — pick one\n{USAGE}"
-        ));
-    }
+    // The selected mode's flag set must cover everything present.
+    validate_mode(&parsed)?;
     Ok(parsed)
 }
 
@@ -307,10 +361,7 @@ fn assemble_session(
     .dynamic_tool(dynamic(tabit_tools::Read))
     .dynamic_tool(dynamic(tabit_tools::Ls))
     .dynamic_tool(dynamic_contextual(tabit_tools::Bash))
-    .model_factory({
-        let factory = registry.factory();
-        move |provider, model| factory(provider, model)
-    });
+    .model_factory(registry.factory());
     if let Some(max_turns) = args.max_turns {
         builder = builder.max_turns(max_turns);
     }
@@ -358,7 +409,7 @@ fn gui_bin() -> Option<PathBuf> {
 fn launch_gui(path: Option<&std::path::Path>) -> Result<i32, String> {
     use std::process::{Command, Stdio};
     let bin = gui_bin().ok_or_else(|| {
-        "the tabit-gui executable was not found next to tabit;          set TABIT_GUI_BIN or install both binaries together"
+        "the tabit-gui executable was not found next to tabit; set TABIT_GUI_BIN or install both binaries together"
             .to_string()
     })?;
     let cwd = match path {
@@ -441,10 +492,7 @@ fn json_setup_failure(detail: &str) -> Result<i32, String> {
     let frame = tabit_protocol::ServerControlFrame::InitializeRejected {
         reason: reason.clone(),
     };
-    let Some(line) = serde_json::to_string(&frame).ok() else {
-        return Err(reason);
-    };
-    println!("{line}");
+    println!("{}", tabit_protocol::to_wire_line(&frame));
     eprintln!("{reason}");
     Ok(1)
 }
@@ -468,9 +516,6 @@ fn run() -> Result<i32, String> {
             let store = SessionStore::project_default();
             list_sessions(&store)?;
             Ok(0)
-        }
-        Mode::Json if args.print_prompt.is_some() || args.rewind.is_some() => {
-            Err("--json selects JSON mode; -p/--rewind select print mode — pick one".to_string())
         }
         Mode::Json => {
             // A fresh install has no providers.toml — perfectly
@@ -658,7 +703,38 @@ fn assemble(
     assemble_session(args, registry, selection, resume_target)
 }
 
+/// Internal errors crash the process (owner ruling): a panic anywhere —
+/// the session actor's tokio task, a transport thread, anywhere — must
+/// end the process, never linger as a zombie holding a live stdin. The
+/// hook chains the default report (message, location, backtrace per
+/// RUST_BACKTRACE) and exits 101: nonzero so the frontend's crash path
+/// fires, and distinct from 1 (handshake rejection) so the two are
+/// never confused. The stderr report is what the user sends back.
+fn install_crash_hook() {
+    let default_hook = std::panic::take_hook();
+    std::panic::set_hook(Box::new(move |info| {
+        default_hook(info);
+        eprintln!(
+            "tabit: internal error — exiting with code 101; \
+             please report this together with the output above"
+        );
+        std::process::exit(101);
+    }));
+}
+
+/// Test-only crash injection (tests/crash.rs): exercises the hook
+/// end-to-end through the real binary. Sanctioned crash — that is the
+/// branch's whole point.
+#[allow(clippy::panic)]
+fn crash_injection() {
+    panic!("injected internal error");
+}
+
 fn main() {
+    install_crash_hook();
+    if std::env::var_os("TABIT_CRASH_TEST").is_some() {
+        crash_injection();
+    }
     match run() {
         Ok(code) => std::process::exit(code),
         Err(error) => {
@@ -723,19 +799,6 @@ mod tests {
             "a positional path selects GUI mode"
         );
         assert!(args(&["a", "b"]).is_err(), "two paths are rejected");
-        assert!(
-            args(&[".", "-p", "hi"]).is_err(),
-            "a path cannot combine with print mode"
-        );
-        assert!(
-            args(&[".", "--json"]).is_err(),
-            "a path cannot combine with JSON mode"
-        );
-        assert_eq!(
-            args(&["--list"]).expect("list has no path").path,
-            None,
-            "flags alone never set a path"
-        );
         assert_eq!(mode_of(&args(&["-p", "hi"]).expect("print")), Mode::Print);
         assert_eq!(
             mode_of(&args(&["--rewind", "1"]).expect("rewind")),
@@ -743,28 +806,49 @@ mod tests {
         );
         assert_eq!(mode_of(&args(&["--json"]).expect("json")), Mode::Json);
         assert_eq!(mode_of(&args(&["--list"]).expect("list")), Mode::List);
-        // --list short-circuits everything else.
-        assert_eq!(
-            mode_of(&args(&["--list", "-p", "hi"]).expect("list wins")),
-            Mode::List
-        );
     }
 
     #[test]
-    fn json_mode_parses_and_conflicts_loudly_with_print_flags() {
+    fn flags_outside_the_selected_mode_are_loud_parse_errors() {
+        // One allow-list per mode, so every combination class is covered,
+        // including ones the old per-pair checks missed.
+        let cases: &[&[&str]] = &[
+            &[".", "-p", "hi"],       // path × print
+            &[".", "--json"],         // path × json
+            &[".", "--list"],         // path × list
+            &[".", "--model", "p/m"], // path × model (missed before)
+            &[".", "--continue"],     // path × continue (missed before)
+            &[".", "--session", "s"], // path × session (missed before)
+            &["--json", "-p", "hi"],  // json × print
+            &["--json", "--rewind", "1"],
+            &["--list", "-p", "hi"], // list is exclusive (was a silent win)
+            &["--list", "--continue"],
+            &["--session", "s"], // session alone selects GUI mode
+        ];
+        for case in cases {
+            let error = args(case).expect_err("foreign flags must not parse");
+            assert!(error.contains("do not combine"), "case {case:?}: {error}");
+        }
+
+        // The shared flags still combine within print and json modes.
+        args(&["--continue", "--session", "s", "--model", "p/m", "-p", "hi"])
+            .expect("print accepts the shared flags");
+        args(&["--continue", "--json", "--max-turns", "5"]).expect("json accepts the shared flags");
+        // GUI mode takes only the optional path.
+        args(&[]).expect("bare tabit is GUI mode");
+        args(&["."]).expect("a path alone is GUI mode");
+    }
+
+    #[test]
+    fn json_mode_parses_and_print_conflicts_at_parse_time() {
         let parsed = args(&["--continue", "--json"]).expect("valid");
         assert!(parsed.json && parsed.continue_newest);
         assert_eq!(mode_of(&parsed), Mode::Json);
 
-        let conflict = args(&["--json", "-p", "hi"]).expect("parses; mode resolution errors");
-        assert!(conflict.json && conflict.print_prompt.is_some());
-        // The conflict is a run-time error, not a parse error; the check
-        // lives next to mode dispatch in `run`.
-        assert_eq!(
-            conflict.print_prompt.as_deref(),
-            Some("hi"),
-            "parsing stays permissive; dispatch rejects the combination"
-        );
+        // json × print is a parse error now (validate_mode), not a
+        // run-time dispatch check.
+        let conflict = args(&["--json", "-p", "hi"]).expect_err("parse rejects the combination");
+        assert!(conflict.contains("do not combine"), "{conflict}");
     }
 
     #[test]

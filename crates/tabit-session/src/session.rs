@@ -183,12 +183,12 @@ impl SessionBuilder {
 
     /// Supply models yourself instead of through tabit config. The factory
     /// receives `(provider, model)` ids; it is consulted on session
-    /// creation, on resume, and on every model switch.
-    pub fn model_factory(
-        mut self,
-        factory: impl Fn(&str, &str) -> Result<ModelHandle, SessionError> + Send + Sync + 'static,
-    ) -> Self {
-        self.model_factory = Arc::new(factory);
+    /// creation, on resume, and on every model switch. Takes the named
+    /// [`ModelFactory`] handle (cheaply clonable, shareable across
+    /// builders) so callers like `ModelRegistry::factory` pass through
+    /// unwrapped.
+    pub fn model_factory(mut self, factory: ModelFactory) -> Self {
+        self.model_factory = factory;
         self
     }
 

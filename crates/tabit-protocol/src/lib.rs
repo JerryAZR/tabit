@@ -36,6 +36,6 @@ pub use events::SessionEvent;
 pub use model::ModelSelection;
 pub use protocol::{
     ClientFrame, EventFrame, PROTOCOL_VERSION, ServerControlFrame, ServerFrame, SessionCommand,
-    StreamId,
+    StreamId, to_wire_line,
 };
 pub use usage::Usage;

@@ -58,14 +58,14 @@ pub enum SessionError {
         message: String,
     },
 
-    /// A model could not be constructed from the provider config (bad
-    /// endpoint, missing credential, ...).
-    #[error("cannot build model `{provider}/{model}`: {message}")]
-    ModelBuild {
+    /// A provider client could not be constructed from the provider
+    /// config (bad endpoint, missing credential, ...). Client
+    /// construction is provider-scoped — no model is involved yet —
+    /// so the error names the provider alone.
+    #[error("cannot build the provider client for `{provider}`: {message}")]
+    ClientBuild {
         /// The provider id from config.
         provider: String,
-        /// The model id from config.
-        model: String,
         /// What failed.
         message: String,
     },

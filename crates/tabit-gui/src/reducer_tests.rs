@@ -284,6 +284,19 @@ fn backend_exit_classifies_clean_vs_crash() {
     idle.reduce(ack());
     idle.reduce(InMsg::BackendExited { code: Some(0) });
     assert!(matches!(idle.phase, Phase::Exited { clean: true, .. }));
+
+    // An internal-error crash is never clean, even idle: the stderr
+    // report is the payload the user must send back.
+    let mut idle_crash = GuiState::default();
+    idle_crash.reduce(ack());
+    idle_crash.reduce(InMsg::BackendExited { code: Some(101) });
+    match &idle_crash.phase {
+        Phase::Exited { clean, reason } => {
+            assert!(!*clean);
+            assert!(reason.contains("internal error"), "{reason}");
+        }
+        other => panic!("expected exit, got {other:?}"),
+    }
 }
 
 #[test]

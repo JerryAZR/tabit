@@ -8,7 +8,7 @@ use std::time::Duration;
 use eframe::egui;
 
 use crate::backend::{self, Backend};
-use crate::reducer::{Group, GuiState, Phase, Segment};
+use crate::reducer::{Group, GuiState, InMsg, Phase, Segment};
 use crate::theme;
 
 /// View-only state, expected to churn on the polish pass — kept out
@@ -86,7 +86,14 @@ impl TabitApp {
         self.start_backend(true, ctx);
     }
 
+    /// Send the input box — the one choke point. Text leaves the box only
+    /// over a Live channel: every affordance (button, Enter) routes here,
+    /// so none can bypass the guard and silently lose input while the
+    /// backend is gone (v1 has no send acknowledgment to catch it with).
     fn send(&mut self) {
+        if self.state.phase != Phase::Live {
+            return;
+        }
         let text = self.display.input.trim().to_string();
         if text.is_empty() {
             return;
@@ -116,6 +123,11 @@ impl eframe::App for TabitApp {
         let msgs = self.backend.as_ref().map(|b| b.drain()).unwrap_or_default();
         for msg in msgs {
             let was_connecting = self.state.phase == Phase::Connecting;
+            // An internal-error crash auto-opens the stderr disclosure:
+            // the report is the payload, not a hidden diagnostic.
+            if matches!(&msg, InMsg::BackendExited { code: Some(101) }) {
+                self.display.show_stderr = true;
+            }
             self.state.reduce(msg);
             // `--continue` with no sessions gets exactly one fresh
             // respawn; rejections and repeated failures are never

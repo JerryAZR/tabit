@@ -151,9 +151,7 @@ fn read_loop<R: BufRead>(
 /// gone: stop writing, the shutdown path ends everything else.
 async fn write_loop<W: Write>(mut rx: mpsc::UnboundedReceiver<ServerFrame>, mut writer: W) {
     while let Some(frame) = rx.recv().await {
-        let Ok(line) = serde_json::to_string(&frame) else {
-            continue; // events are always serializable; skip defensively
-        };
+        let line = tabit_protocol::to_wire_line(&frame);
         if writeln!(writer, "{line}").is_err() {
             break;
         }
@@ -212,11 +210,11 @@ id = "m"
             ModelSelection::new("p", "m"),
         )
         .expect("builder")
-        .model_factory(move |_, _| {
+        .model_factory(std::sync::Arc::new(move |_, _| {
             Ok(ModelHandle::new(MockCompletionModel::from_stream_turns(
                 turns.clone(),
             )))
-        })
+        }))
         .create("C:/w")
         .expect("session")
     }

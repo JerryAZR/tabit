@@ -174,7 +174,12 @@ impl GuiState {
                     Some(code) => format!("backend exited with code {code}"),
                     None => "backend was killed".to_string(),
                 };
-                let (clean, tail) = if self.facts.is_none() {
+                // Exit 101 is the internal-error crash (FRONTEND.md
+                // §3.5): never clean, whatever the timing — the stderr
+                // report is what the user sends back.
+                let (clean, tail) = if code == Some(101) {
+                    (false, " — internal error; send back the report below")
+                } else if self.facts.is_none() {
                     // Never handshook: a startup failure, not a crash
                     // mid-conversation (stderr tail explains).
                     (false, " — see stderr details")

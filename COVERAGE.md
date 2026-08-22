@@ -120,7 +120,10 @@ named, the classification applies to its current lcov-uncovered ranges.
 6. **Subprocess-executed tests are not attributed**: trybuild compile-fail
    cases and the `dependency_rename` fixture crates run `cargo`/`rustc` as
    subprocesses llvm-cov does not instrument (e.g. the
-   contextual-tool-without-runtime-dep arm in `rig-derive`).
+   contextual-tool-without-runtime-dep arm in `rig-derive`). The crash
+   contract (`tests/crash.rs`) joins this class: the panic hook and
+   injection branch run in the spawned `tabit` child, asserted there by
+   exit code 101, the stderr report, and empty stdout.
 7. **Live-network scenarios** are `#[ignore]`d by policy (two
    prompt_request tests requiring API keys; `model_listing` live calls).
    Their request-construction and conversion code is covered offline;
@@ -170,11 +173,13 @@ named, the classification applies to its current lcov-uncovered ranges.
      to assert through. Its sibling termination paths (explicit
      `close_commands`, including the queued-work-honoring re-check)
      are exercised by every `drain()`-based test.
-   - `json.rs`'s serialize-failure `continue` in `write_loop`:
-     `ServerFrame` contains only strings/numbers/serde-derived types,
-     so `serde_json::to_string` cannot fail (no non-string map keys, no
-     unserializable floats); the arm is the minimal handling of an
-     infallible `Result`. The broken-transport edges around it
+   - `tabit-protocol`'s `to_wire_line` expect: `ServerFrame` and
+     `SessionCommand` contain only strings/numbers/serde-derived
+     types, so `serde_json::to_string` cannot fail (no non-string map
+     keys, no unserializable floats); the round-trip tests hold the
+     invariant. This one policy replaced the per-site fallbacks (the
+     old `write_loop` skip, `send_message`'s empty line). The
+     broken-transport edges around the caller
      (panicking reader, erroring reader, failing writer) are exercised
      by `broken_transport_edges_fail_or_end_cleanly`.
    - Deferred-creation fault arms in `store.rs`: `ensure_open`'s

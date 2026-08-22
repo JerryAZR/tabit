@@ -11,13 +11,15 @@ use std::sync::{Arc, Mutex};
 use std::thread;
 
 use tabit_protocol::{
-    ClientFrame, ModelSelection, PROTOCOL_VERSION, ServerControlFrame, ServerFrame, SessionCommand,
+    ClientFrame, PROTOCOL_VERSION, ServerControlFrame, ServerFrame, SessionCommand, to_wire_line,
 };
 
 use crate::reducer::InMsg;
 
-/// How many stderr lines to keep for crash reporting.
-const STDERR_RING: usize = 40;
+/// How many stderr lines to keep for crash reporting — enough for a
+/// full internal-error report (message plus backtrace), bounded against
+/// runaway output.
+const STDERR_RING: usize = 200;
 
 /// A live `tabit --json` child with its pipe threads.
 pub struct Backend {
@@ -85,10 +87,9 @@ pub fn spawn(
         .stdin
         .take()
         .expect("internal invariant violated: stdin pipe captured at spawn");
-    let init = serde_json::to_string(&ClientFrame::Initialize {
+    let init = to_wire_line(&ClientFrame::Initialize {
         protocol_version: PROTOCOL_VERSION,
-    })
-    .unwrap_or_else(|_| "{\"protocol_version\":1}".to_string());
+    });
     let _ = writeln!(stdin, "{init}");
     let _ = stdin.flush();
 
@@ -148,24 +149,15 @@ pub fn spawn(
                 }
                 match serde_json::from_str::<ServerFrame>(&line) {
                     Ok(ServerFrame::Control(ServerControlFrame::InitializeAck {
-                        protocol_version: _,
                         session_id,
                         session_path,
-                        model:
-                            ModelSelection {
-                                provider,
-                                model,
-                                thinking_level,
-                            },
+                        model,
+                        ..
                     })) => {
                         let _ = tx.send(InMsg::Ack {
                             session_id,
                             session_path,
-                            model: ModelSelection {
-                                provider,
-                                model,
-                                thinking_level,
-                            },
+                            model,
                         });
                     }
                     Ok(ServerFrame::Control(ServerControlFrame::InitializeRejected { reason })) => {
@@ -214,19 +206,14 @@ impl Backend {
 
     /// Send a message (steers a live run, starts one when idle).
     pub fn send_message(&self, text: &str) {
-        let _ = self.writer.send(
-            serde_json::to_string(&SessionCommand::Message {
-                text: text.to_string(),
-            })
-            .unwrap_or_default(),
-        );
+        let _ = self.writer.send(to_wire_line(&SessionCommand::Message {
+            text: text.to_string(),
+        }));
     }
 
     /// Abort the live run (and clear the queue backend-side).
     pub fn abort(&self) {
-        let _ = self
-            .writer
-            .send(serde_json::to_string(&SessionCommand::Abort).unwrap_or_default());
+        let _ = self.writer.send(to_wire_line(&SessionCommand::Abort));
     }
 
     /// The tail of the backend's stderr, for crash reporting.

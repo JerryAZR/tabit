@@ -137,7 +137,7 @@ impl ModelRegistry {
             match preferred_selection(default, &self.inner.config) {
                 Ok(selection) => return Ok(selection),
                 Err(message) => eprintln!(
-                    "warning: default_model `{}` is not usable ({message});                      falling back to the first configured model",
+                    "warning: default_model `{}` is not usable ({message}); falling back to the first configured model",
                     default.model
                 ),
             }
@@ -209,21 +209,21 @@ impl ModelRegistry {
                     .base_url(provider.base_url.clone())
                     .api_key(api_key)
                     .build()
-                    .map_err(|source| build_error(provider_id, "", source))?,
+                    .map_err(|source| build_error(provider_id, source))?,
             ),
             WireApi::OpenaiResponses => ProviderClient::Responses(
                 openai::Client::builder()
                     .base_url(provider.base_url.clone())
                     .api_key(api_key)
                     .build()
-                    .map_err(|source| build_error(provider_id, "", source))?,
+                    .map_err(|source| build_error(provider_id, source))?,
             ),
             WireApi::OpenaiCompletions => ProviderClient::Completions(
                 openai::CompletionsClient::builder()
                     .base_url(provider.base_url.clone())
                     .api_key(api_key)
                     .build()
-                    .map_err(|source| build_error(provider_id, "", source))?,
+                    .map_err(|source| build_error(provider_id, source))?,
             ),
         };
         Ok(lock(&self.inner.clients)
@@ -238,11 +238,10 @@ impl ModelRegistry {
     }
 }
 
-/// Lock, recovering from poisoning (see [`ModelRegistry::client_for`]).
-fn build_error(provider_id: &str, model_id: &str, source: impl std::error::Error) -> SessionError {
-    SessionError::ModelBuild {
+/// Wrap a client-construction failure with the provider id.
+fn build_error(provider_id: &str, source: impl std::error::Error) -> SessionError {
+    SessionError::ClientBuild {
         provider: provider_id.to_string(),
-        model: model_id.to_string(),
         message: source.to_string(),
     }
 }

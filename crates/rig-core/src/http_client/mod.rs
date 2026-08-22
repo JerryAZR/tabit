@@ -220,7 +220,7 @@ pub(crate) fn stall_warning_stream(stream: BoxedStream, interval: Duration) -> B
                 Ok(None) => break,
                 Err(_elapsed) => {
                     eprintln!(
-                        "warning: no stream data for {interval:?}; still waiting                          (the stream is not killed)"
+                        "warning: no stream data for {interval:?}; still waiting (the stream is not killed)"
                     );
                 }
             }

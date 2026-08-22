@@ -136,14 +136,14 @@ impl Factory {
             ModelSelection::new("p", "m"),
         )
         .expect("builder")
-        .model_factory(move |provider, model| {
+        .model_factory(std::sync::Arc::new(move |provider, model| {
             if let Ok(mut guard) = self.requested.lock() {
                 guard.push((provider.to_string(), model.to_string()));
             }
             Ok(ModelHandle::new(MockCompletionModel::from_stream_turns(
                 self.turns.clone(),
             )))
-        })
+        }))
     }
 }
 
@@ -537,14 +537,14 @@ async fn resume_uses_the_builder_selection_and_records_the_switch() -> Result<()
         ModelSelection::new("p", "m"),
     )
     .expect("builder")
-    .model_factory(move |provider, model| {
+    .model_factory(std::sync::Arc::new(move |provider, model| {
         if let Ok(mut guard) = sink.lock() {
             guard.push((provider.to_string(), model.to_string()));
         }
         Ok(ModelHandle::new(MockCompletionModel::from_stream_turns(
             vec![text_turn("b")],
         )))
-    });
+    }));
     let (session, report) = builder.resume(&path).expect("resume");
     // The report still says what the log last used...
     let resumed = report.resumed_model.expect("log carried the switch");

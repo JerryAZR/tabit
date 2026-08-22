@@ -100,21 +100,23 @@ new events arrive later without a version bump).
    events are written — then the stream reaches EOF. A quit with
    pending steers waits for them to execute; abort first if you want
    out now.
-5. **Exit codes are not a reliable crash signal.** `1` means handshake
-   rejection (including **first-run setup failures** — no config file:
-   the backend sends `initialize_rejected` whose reason carries a
-   setup guide, then exits; display the reason, it is written for the
-   user — and recovery is manual: the user fixes the file and the
-   frontend respawns the backend; config is not re-read per request by
-   design), a transport-thread panic, or a pre-handshake spawn failure
-   (bad flags, missing session file, unresolvable `--model` — stderr
-   message, no stdout frames). But `0` also covers non-clean
-   ends: a broken pipe, and a backend worker panic (the stream simply
-   reaches EOF). **Detect crashes as EOF without a terminal event for
-   the in-flight run**, not by exit code; capture stderr as the
-   explanation — stderr is the **internal**-failure path (panics,
-   the report the user sends back); external errors arrive as
-   events (§6) and never require mining stderr.
+5. **Exit codes: 101 is the one reliable crash signal.** `1` means
+   handshake rejection (including **first-run setup failures** — no
+   config file: the backend sends `initialize_rejected` whose reason
+   carries a setup guide, then exits; display the reason, it is written
+   for the user — and recovery is manual: the user fixes the file and
+   the frontend respawns the backend; config is not re-read per request
+   by design) or a pre-handshake spawn failure (bad flags, missing
+   session file, unresolvable `--model` — stderr message, no stdout
+   frames). `101` is an **internal error**: the process crashed itself
+   — a panic in any task or thread ends the process, so a crashed
+   backend never lingers as a zombie. Display the stderr report and
+   ask the user to send it back. `0` covers one non-clean end: a broken
+   pipe. Otherwise **detect crashes as EOF without a terminal event
+   for the in-flight run**; capture stderr as the explanation — stderr
+   is the **internal**-failure path (panics, the report the user sends
+   back); external errors arrive as events (§6) and never require
+   mining stderr.
 
 ## 4. The model: runs, turns, steers, and the tree
 
