@@ -23,6 +23,7 @@ serde_json = { workspace = true }
 tabit-config = { path = "../tabit-config", version = "0.41.0" }
 tabit-protocol = { path = "../tabit-protocol", version = "0.41.0" }
 thiserror = { workspace = true }
+tracing = { workspace = true }
 uuid = { workspace = true, features = ["v7"] }
 
 tokio = { workspace = true, features = ["macros", "rt", "sync"] }

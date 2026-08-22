@@ -269,3 +269,6 @@ async fn a_link_outlives_the_handle_and_still_submits() {
     assert_eq!(user_texts(&frames), vec!["via link"]);
     std::fs::remove_dir_all(store.dir()).ok();
 }
+
+#[path = "interaction_tests.rs"]
+mod interaction_tests;

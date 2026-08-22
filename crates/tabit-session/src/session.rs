@@ -18,8 +18,10 @@
 
 use crate::entry::{EntryKind, SessionEntry};
 use crate::error::SessionError;
+use crate::interaction::InteractionHub;
 use crate::lock::lock;
 use crate::model::validate_selection;
+use crate::permission::PermissionHook;
 use crate::projection;
 use crate::recorder::{RecorderHook, SessionRecorder};
 use crate::registry::ModelRegistry;
@@ -39,6 +41,11 @@ use tokio_util::sync::CancellationToken;
 
 /// Default model-call budget for one outer loop.
 pub const DEFAULT_MAX_TURNS: usize = 32;
+
+/// How many of a turn's tool chains run at once (ENGINE.md's tool
+/// phase: chains are independent and bounded). Named and visible —
+/// a config surface arrives with the settings story.
+pub const TOOL_CONCURRENCY: usize = 4;
 
 /// How an outer loop ended.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -384,6 +391,12 @@ pub struct Session {
     /// started fresh (`create`) — reported in the handshake so a
     /// frontend that asked to resume can note a silent fresh start.
     resumed: bool,
+    /// The interaction hub, attached by the session worker when it takes
+    /// ownership (the hub needs the worker's event channel, which does
+    /// exist until spawn). `None` for direct [`Session`] consumers:
+    /// the permission gate fails closed and ask-the-user tools report
+    /// no frontend, in-band.
+    interaction: Option<InteractionHub>,
 }
 
 impl Session {
@@ -482,11 +495,17 @@ impl Session {
         }
         let mut tool_context = rig_agent::tool::ToolContext::new();
         tool_context.insert(run_token.clone());
+        let permission = PermissionHook::new(self.interaction.clone());
+        if let Some(hub) = &self.interaction {
+            tool_context.insert(hub.capability());
+        }
         let request = self
             .agent
             .stream_chat(history)
             .max_turns(self.max_turns)
+            .tool_concurrency(TOOL_CONCURRENCY)
             .add_hook(RecorderHook(self.recorder.clone()))
+            .add_hook(permission)
             .steering(std::sync::Arc::new(SessionSteers {
                 mailbox: self.mailbox.clone(),
             }))
@@ -623,6 +642,12 @@ impl Session {
             events.push(event);
             outcome = RunOutcome::Failed;
         }
+        // Every terminal that will be emitted has been; no asker
+        // survives the run. Retract any question still standing so its
+        // sender cannot linger (a racing response is then a total no-op).
+        if let Some(hub) = &self.interaction {
+            hub.clear_pending();
+        }
         RunSummary {
             outcome,
             output,
@@ -644,6 +669,14 @@ impl Session {
         AbortHandle {
             token: self.abort.clone(),
         }
+    }
+
+    /// Attach the interaction hub. Called once by the session worker
+    /// ([`crate::endpoint::SessionHandle::spawn`]) when it takes
+    /// ownership — the hub is built over the worker's event channel,
+    /// which exists only there.
+    pub fn attach_interaction(&mut self, hub: InteractionHub) {
+        self.interaction = Some(hub);
     }
 
     /// Rewind the active chain by `turns` user messages: the leaf moves to
@@ -961,6 +994,7 @@ impl Session {
             path,
             id,
             resumed,
+            interaction: None,
         };
         let selection = session.selection.clone();
         session.rebuild_agent(&selection)?;

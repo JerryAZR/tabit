@@ -65,8 +65,10 @@ mod endpoint;
 mod entry;
 mod error;
 mod ids;
+mod interaction;
 mod lock;
 mod model;
+mod permission;
 mod projection;
 mod prompt;
 mod recorder;
@@ -77,13 +79,15 @@ mod store;
 pub use endpoint::{SessionCommandLink, SessionHandle, SessionInfo};
 pub use entry::{EntryKind, SESSION_FORMAT_VERSION, SessionEntry, SessionHeader};
 pub use error::SessionError;
+pub use interaction::InteractionHub;
 pub use model::validate_selection;
+pub use permission::{PERMISSION_ASK_TOOLS, PermissionHook};
 pub use projection::DanglingToolCalls;
 pub use prompt::build_system_prompt;
 pub use registry::ModelRegistry;
 pub use session::{
     AbortHandle, DEFAULT_MAX_TURNS, MailboxHandle, ModelStats, RewindSummary, RunOutcome,
-    RunSummary, Session, SessionBuilder, SessionStats,
+    RunSummary, Session, SessionBuilder, SessionStats, TOOL_CONCURRENCY,
 };
 pub use store::{LoadedSession, Repair, SessionStore, SessionSummary, SessionWriter};
 pub use tabit_protocol::{

@@ -13,6 +13,7 @@
 //! Either way the in-flight run finishes — accepted messages run —
 //! closing stats are captured, and the event stream ends.
 
+use crate::interaction::InteractionHub;
 use crate::lock::lock;
 use crate::session::{AbortHandle, MailboxHandle, Session, SessionStats};
 use std::sync::{Arc, Mutex};
@@ -42,6 +43,7 @@ pub struct SessionHandle {
     info: SessionInfo,
     mailbox: MailboxHandle,
     abort: AbortHandle,
+    interaction: InteractionHub,
     events: Option<mpsc::UnboundedReceiver<EventFrame>>,
     shutdown: CancellationToken,
     closing_stats: Arc<Mutex<Option<SessionStats>>>,
@@ -55,6 +57,7 @@ pub struct SessionHandle {
 pub struct SessionCommandLink {
     mailbox: MailboxHandle,
     abort: AbortHandle,
+    interaction: InteractionHub,
 }
 
 impl SessionCommandLink {
@@ -66,6 +69,10 @@ impl SessionCommandLink {
             SessionCommand::Abort => {
                 self.abort.abort();
                 self.mailbox.clear();
+            }
+            // Total: an unknown or dead id logs and drops inside the hub.
+            SessionCommand::InteractionResponse { id, option, text } => {
+                self.interaction.respond(&id, option, text);
             }
         }
     }
@@ -85,12 +92,17 @@ impl SessionHandle {
         let mailbox = session.mailbox_handle();
         let abort = session.abort_handle();
         let (event_tx, event_rx) = mpsc::unbounded_channel::<EventFrame>();
+        let interaction = InteractionHub::new(event_tx.clone());
         let shutdown = CancellationToken::new();
         let closing_stats = Arc::new(Mutex::new(None));
         let worker_shutdown = shutdown.clone();
         let worker_stats = closing_stats.clone();
         let worker_mailbox = mailbox.clone();
+        let worker_interaction = interaction.clone();
         tokio::spawn(async move {
+            // The hub reaches the worker's event channel, so it exists only
+            // here — attach it before the first pump can run.
+            session.attach_interaction(worker_interaction);
             // The resident worker. Ownership never moves: idle is the
             // wait below, running is the pump call — two positions of
             // one loop, not two tasks.
@@ -136,6 +148,7 @@ impl SessionHandle {
             info,
             mailbox,
             abort,
+            interaction,
             events: Some(event_rx),
             shutdown,
             closing_stats,
@@ -165,6 +178,7 @@ impl SessionHandle {
         SessionCommandLink {
             mailbox: self.mailbox.clone(),
             abort: self.abort.clone(),
+            interaction: self.interaction.clone(),
         }
     }
 

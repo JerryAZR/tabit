@@ -132,6 +132,37 @@ pub async fn ls(path: Option<String>) -> Result<String, ToolExecutionError> {
     Ok(out)
 }
 
+/// Ask the user a question and return their answer — the whole body is
+/// one interaction roundtrip over the session's
+/// [`UserInteraction`](rig_agent::tool::interaction::UserInteraction)
+/// capability (ENGINE.md's tool phase: a tool body may ask; this one
+/// asks once). Fails in-band when the session has no interactive
+/// frontend.
+#[rig_tool(
+    description = "Ask the user a question and return their answer. Use it when \
+                   you need information, a decision, or a confirmation only the \
+                   user can provide; do not guess on their behalf. The answer \
+                   text is returned verbatim; a dismissed question says so."
+)]
+pub async fn ask_user(
+    #[rig(context)] context: &mut ToolContext,
+    question: String,
+) -> Result<String, ToolExecutionError> {
+    use rig_agent::tool::interaction::{InteractionPrompt, UserInteraction};
+    let Some(interaction) = context.get::<std::sync::Arc<dyn UserInteraction>>() else {
+        return Err(ToolExecutionError::other(
+            "this session has no interactive frontend — there is no user to ask; state that \
+             and continue with what you have",
+        ));
+    };
+    let reply = interaction.ask(InteractionPrompt::ask(question)).await;
+    Ok(match (reply.text, reply.option) {
+        (Some(text), _) => text,
+        (None, Some(option)) => format!("the user chose: {option}"),
+        (None, None) => "the user dismissed the question without answering".to_string(),
+    })
+}
+
 /// Run a shell command. On Windows the tool prefers `bash` on PATH (Git
 /// Bash) so commands keep POSIX syntax; it falls back to PowerShell only
 /// when no bash exists. Combined output (stdout, then stderr) is capped at
