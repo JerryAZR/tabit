@@ -50,7 +50,7 @@ fn a_run_lifecycle_from_message_to_terminal() {
     let mut state = GuiState::default();
     state.reduce(ack());
     state.message_sent("who are you?".to_string());
-    assert_eq!(state.pending.len(), 1);
+    assert_eq!(state.pending.len(), 0, "idle send never queues");
     state.reduce(user("who are you?"));
     assert_eq!(state.pending.len(), 0);
     assert!(state.running);
@@ -180,12 +180,31 @@ fn run_failure_and_abort_end_the_run() {
 }
 
 #[test]
-fn duplicate_texts_pair_by_fifo() {
-    // v1 heuristic: two identical messages pair in order.
+fn idle_sends_never_queue() {
+    // Owner ruling: on idle the queue is known to drain immediately —
+    // no waiting state; user_message (milliseconds later) is the
+    // acknowledgment.
     let mut state = GuiState::default();
     state.reduce(ack());
+    state.message_sent("hello".to_string());
+    assert!(state.pending.is_empty(), "idle send does not wait");
+    state.reduce(user("hello"));
+    assert!(state.pending.is_empty());
+    assert!(matches!(
+        state.transcript.last(),
+        Some(Group::User { text }) if text == "hello"
+    ));
+}
+
+#[test]
+fn steers_wait_and_pair_by_fifo() {
+    // v1 heuristic: identical steers pair in order.
+    let mut state = GuiState::default();
+    state.reduce(ack());
+    state.reduce(user("start"));
     state.message_sent("same".to_string());
     state.message_sent("same".to_string());
+    assert_eq!(state.pending.len(), 2, "mid-run sends wait");
     state.reduce(user("same"));
     assert_eq!(state.pending.len(), 1);
     state.reduce(user("same"));

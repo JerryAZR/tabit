@@ -144,7 +144,7 @@ All commands are total — there is no rejection. Outcomes are events.
 
 | command | when | effect |
 |---|---|---|
-| `message { text }` | any time | idle: starts a run; running: steers at the next turn boundary. Immediate ack: `message_queued { id, text }`. |
+| `message { text }` | any time | idle: starts a run — acknowledged directly by `user_message` (milliseconds; no queued event — nothing waits); running: steers at the next turn boundary, acknowledged by `message_queued { id, text }`. |
 | `abort` | any time | running: preempts (`run_aborted`); discards messages queued at abort time (`messages_discarded`, omitted when none). Post-abort messages queue normally and start the next run. |
 | `checkout { entry_id }` | idle only | moves the active chain; see §7. Compose abort-then-checkout if a run is live. |
 | `model { provider, model, thinking_level? }` | idle only | the next run uses this selection; validates against the backend's config. |
@@ -163,7 +163,7 @@ unstamped control frames; everything else is a stamped event.
 
 | event | payload | when |
 |---|---|---|
-| `message_queued` | `id`, `text` | the moment `message` is accepted. `id` is the message's entry id, minted here. |
+| `message_queued` | `id`, `text` | a `message` accepted while a run is live (a steer that waits). `id` is the message's entry id, minted here. Idle sends never produce this event. |
 | `user_message` | `entry_id`, `text` | the message drains into a run (opening batch or steer boundary) and becomes history. Consecutive `user_message`s = an opening batch. |
 | `messages_discarded` | `messages: [{ id, text }]` | abort (what was queued at abort time; the event arrives with the run's wind-down) and checkout (before `checked_out`). Omitted when nothing was pending. Salvage as drafts; the backend keeps no copy. |
 | `turn_started` | `id` | a model turn begins; `id` is the turn's entry id, minted here and reused at commit. |

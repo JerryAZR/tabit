@@ -101,9 +101,11 @@ pub struct GuiState {
     pub phase: Phase,
     pub facts: Option<Facts>,
     pub transcript: Vec<Group>,
-    /// Messages sent but not yet `user_message`-acknowledged (v1 has
-    /// no queued-ack event; v2's id-carrying `message_queued` makes
-    /// this exact). FIFO pairing is the documented v1 heuristic.
+    /// Steers sent mid-run, waiting for the turn boundary (v1 has no
+    /// queued-ack event; v2's id-carrying `message_queued` makes this
+    /// exact). Idle sends never queue — the queue drains immediately,
+    /// so `user_message` (milliseconds later) is the acknowledgment
+    /// (owner ruling: the queued state is for messages that wait).
     pub pending: VecDeque<String>,
     /// True from the first `user_message` of a run to its terminal.
     pub running: bool,
@@ -188,16 +190,20 @@ impl GuiState {
         }
     }
 
-    /// Record that a message left the input box (the send-side half of
-    /// `pending`; the ack half is the `user_message` event).
+    /// Record that a message left the input box. Only mid-run sends
+    /// (steers) enter the waiting display; idle sends drain
+    /// immediately and are acknowledged by `user_message` directly.
     pub fn message_sent(&mut self, text: String) {
-        self.pending.push_back(text);
+        if self.running {
+            self.pending.push_back(text);
+        }
     }
 
     fn reduce_event(&mut self, frame: EventFrame) {
         match frame.event {
             SessionEvent::UserMessage { text } => {
-                // v1: pair with the oldest pending message by FIFO.
+                // v1: pair with the oldest waiting steer by FIFO
+                // (idle sends never entered `pending`).
                 // v2: ids make this exact.
                 self.pending.pop_front();
                 self.transcript.push(Group::User { text });

@@ -119,9 +119,12 @@ histories).
   we adopt the approach, not the code. Our replay is a projection of
   our own chain walk (simpler than yaca's: no compaction to fold in
   yet), tested for ordering, branch exclusion, tool batches, and usage.
-- **`message_queued { text, id }` — the submit-time ack, linked by
-  id.** Emitted the moment the actor accepts a `message` command,
-  before any drain. This is not the rejected temp-id round trip: it is
+- **`message_queued { text, id }` — the submit-time ack for messages
+  that wait, linked by id.** Emitted when a `message` command is
+  accepted while a run is live (a steer sitting until the turn
+  boundary). **Idle sends never queue** (ruled): the queue is known
+  to drain immediately, so `user_message` — milliseconds later — is
+  the acknowledgment and no queued event exists for it. This is not the rejected temp-id round trip: it is
   an event, not a response — no client-supplied id, no rejection
   cases, commands stay fire-and-forget. The `id` is the message's
   entry id, minted at accept time and carried into the log when the
