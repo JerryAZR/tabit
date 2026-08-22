@@ -55,6 +55,16 @@ model catalog). Decisions:
   `context_window`, `max_tokens`, `sampling_params`, `cost` (4 required
   $/M-token rates), ordered `thinking_levels` (each a named `extra_body`
   merge — array shape so a UI can cycle), per-model `headers`/`extra_body`.
+- **Request-parameter application shipped (2026-08, pure-forwarding
+  ruling):** `max_tokens` and `temperature` ride the agent builder's
+  dedicated knobs; `top_p`/`top_k` and the `extra_body` chain
+  (provider → model → active thinking level, later wins) merge into one
+  flattened `additional_params` map where `extra_body` keeps the last word
+  (it is the escape hatch); provider-level `headers` ride the constructed
+  client. Re-resolved on every model/thinking-level switch (the agent
+  rebuild). Deliberately unwired: per-model `headers` (needs a
+  client-caching decision), `context_window` (compaction — item 6),
+  `reasoning`/`input`/display names (model-picker UI, item 7 v2).
 - `default_model` is the preferred-model slot: a bare model id (must be
   unambiguous), optional `provider` qualifier for conflicts, optional
   `thinking_level` — both wire shapes accepted (bare string or
@@ -159,6 +169,13 @@ The known deviation from pi's subprocess model:
   provider, repair and retry rather than fail the session.
 - Port pi's overflow heuristics when a consumer exists (deferred helper —
   see COVERAGE.md phase 4 note).
+- **Ruled 2026-08: compaction gets a real design discussion before any
+  code.** No coding agent (pi included) ships a genuinely robust compaction
+  pass — treat pi's as a reference, not a target. The design must also cover
+  the history/session-tree interaction: what a compaction entry *is* in the
+  append-only tree, how checkout interacts with a compacted chain, and what
+  replay reconstructs. `context_window` config stays unwired until that
+  design exists.
 
 ### 7. CLI / interface layer
 

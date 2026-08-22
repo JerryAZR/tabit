@@ -975,12 +975,38 @@ impl Session {
 
     fn rebuild_agent(&mut self, selection: &ModelSelection) -> Result<(), SessionError> {
         let handle = (self.model_factory)(&selection.provider, &selection.model)?;
+        let params = crate::registry::request_params(&self.config, selection);
         // `dynamic_tools` (even with an empty vec) moves the builder to
         // its tool-configured state, keeping one concrete type through
         // the preamble/build chain.
         let mut builder = AgentBuilder::new(handle).dynamic_tools(self.tools.clone());
         if let Some(preamble) = &self.preamble {
             builder = builder.preamble(preamble.as_str());
+        }
+        // Configured request parameters are pure forwarding (reviewed
+        // 2026-08): the model's knobs, nothing interpreted.
+        if let Some(max_tokens) = params.max_tokens {
+            builder = builder.max_tokens(max_tokens);
+        }
+        if let Some(temperature) = params.temperature {
+            builder = builder.temperature(temperature);
+        }
+        // `top_p`/`top_k` have no dedicated field on the completion
+        // request — they ride the same flattened `additional_params` map
+        // as `extra_body`, which is the compat escape hatch and therefore
+        // gets the last word over the named knobs.
+        let mut additional = serde_json::Map::new();
+        if let Some(top_p) = params.top_p {
+            additional.insert("top_p".to_string(), serde_json::json!(top_p));
+        }
+        if let Some(top_k) = params.top_k {
+            additional.insert("top_k".to_string(), serde_json::json!(top_k));
+        }
+        if let Some(extra) = params.extra_body {
+            additional.extend(extra);
+        }
+        if !additional.is_empty() {
+            builder = builder.additional_params(serde_json::Value::Object(additional));
         }
         self.agent = Arc::new(builder.build());
         Ok(())

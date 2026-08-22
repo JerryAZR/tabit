@@ -14,6 +14,7 @@ use rig_core::message::{AssistantContent, Text, UserContent};
 use serde_json::json;
 use std::path::Path;
 use std::sync::{Arc, Mutex};
+use tabit_config::TabitConfig;
 use tabit_protocol::{ModelSelection, SessionEvent};
 
 pub(crate) fn temp_store(tag: &str) -> SessionStore {
@@ -118,6 +119,7 @@ pub(crate) fn echo_tool() -> DynamicTool {
 pub(crate) struct Factory {
     turns: Vec<Vec<MockStreamEvent>>,
     requested: Mutex<Vec<(String, String)>>,
+    models: Mutex<Vec<MockCompletionModel>>,
 }
 
 impl Factory {
@@ -125,25 +127,46 @@ impl Factory {
         Arc::new(Self {
             turns,
             requested: Mutex::new(Vec::new()),
+            models: Mutex::new(Vec::new()),
         })
     }
 
     pub(crate) fn into_builder(self: Arc<Self>, store: SessionStore) -> SessionBuilder {
-        SessionBuilder::new(
-            store,
-            test_config(),
-            test_auth(),
-            ModelSelection::new("p", "m"),
-        )
-        .expect("builder")
-        .model_factory(std::sync::Arc::new(move |provider, model| {
-            if let Ok(mut guard) = self.requested.lock() {
-                guard.push((provider.to_string(), model.to_string()));
-            }
-            Ok(ModelHandle::new(MockCompletionModel::from_stream_turns(
-                self.turns.clone(),
-            )))
-        }))
+        self.into_builder_with_config(store, test_config(), ModelSelection::new("p", "m"))
+    }
+
+    /// The same scripted factory over an explicit config and selection, for
+    /// tests that assert how config properties reach the request.
+    pub(crate) fn into_builder_with_config(
+        self: Arc<Self>,
+        store: SessionStore,
+        config: Arc<TabitConfig>,
+        selection: ModelSelection,
+    ) -> SessionBuilder {
+        SessionBuilder::new(store, config, test_auth(), selection)
+            .expect("builder")
+            .model_factory(std::sync::Arc::new(move |provider, model| {
+                if let Ok(mut guard) = self.requested.lock() {
+                    guard.push((provider.to_string(), model.to_string()));
+                }
+                // The mock records every request it serves; clones share the
+                // recording, so the test can read what the session sent.
+                let mock = MockCompletionModel::from_stream_turns(self.turns.clone());
+                if let Ok(mut guard) = self.models.lock() {
+                    guard.push(mock.clone());
+                }
+                Ok(ModelHandle::new(mock))
+            }))
+    }
+
+    /// The requests served by the latest model this factory handed out.
+    pub(crate) fn requests(&self) -> Vec<rig_core::completion::CompletionRequest> {
+        self.models
+            .lock()
+            .ok()
+            .and_then(|guard| guard.last().cloned())
+            .map(|model| model.requests())
+            .unwrap_or_default()
     }
 }
 
@@ -1478,6 +1501,74 @@ async fn rewind_fails_loudly_when_the_chains_model_left_the_config() -> Result<(
     // Resume itself appended its model change; the failed rewind added
     // nothing on top.
     assert_eq!(loaded.entries.len(), entries_before + 1);
+    std::fs::remove_dir_all(store.dir()).ok();
+    Ok(())
+}
+
+/// Configured request parameters are pure forwarding: the model's
+/// `max_tokens` and sampling knobs, and the `extra_body` chain (provider →
+/// model → active thinking level, later sources win), reach the request the
+/// model serves.
+#[tokio::test]
+async fn configured_request_parameters_reach_the_model() -> Result<(), SessionError> {
+    let store = temp_store("params-forwarding");
+    let config = Arc::new(
+        TabitConfig::from_toml_str(
+            r#"
+[providers.p]
+base_url = "http://127.0.0.1:9999/v1"
+api = "openai-completions"
+extra_body = { shared = "provider", only_provider = true }
+
+[[providers.p.models]]
+id = "m"
+max_tokens = 512
+sampling_params = { temperature = 0.7, top_p = 0.9 }
+extra_body = { shared = "model", model_only = true }
+
+[[providers.p.models.thinking_levels]]
+name = "high"
+extra_body = { shared = "level" }
+"#,
+            Path::new("providers.toml"),
+        )
+        .expect("config"),
+    );
+
+    let factory = Factory::new(vec![text_turn("done")]);
+    let selection = ModelSelection {
+        provider: "p".to_string(),
+        model: "m".to_string(),
+        thinking_level: Some("high".to_string()),
+    };
+    let mut session = factory
+        .clone()
+        .into_builder_with_config(store.clone(), config, selection)
+        .create("C:/w")?;
+
+    let run = session.prompt("hi").await;
+    assert_eq!(run.output, "done");
+
+    let requests = factory.requests();
+    let request = requests.first().expect("the mock served a request");
+    assert_eq!(request.temperature, Some(0.7));
+    assert_eq!(request.max_tokens, Some(512));
+    let additional = request
+        .additional_params
+        .as_ref()
+        .and_then(|value| value.as_object())
+        .expect("additional params on the request");
+    // `top_p` has no dedicated field — it rides the flattened map.
+    assert_eq!(additional.get("top_p"), Some(&json!(0.9)));
+    assert!(
+        !additional.contains_key("top_k"),
+        "unset knobs contribute nothing"
+    );
+    // The overlay: level over model over provider, earlier sources' unique
+    // keys retained.
+    assert_eq!(additional.get("shared"), Some(&json!("level")));
+    assert_eq!(additional.get("model_only"), Some(&json!(true)));
+    assert_eq!(additional.get("only_provider"), Some(&json!(true)));
     std::fs::remove_dir_all(store.dir()).ok();
     Ok(())
 }

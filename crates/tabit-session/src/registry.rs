@@ -208,6 +208,7 @@ impl ModelRegistry {
                 anthropic::Client::builder()
                     .base_url(provider.base_url.clone())
                     .api_key(api_key)
+                    .http_headers(configured_headers(provider_id, provider)?)
                     .build()
                     .map_err(|source| build_error(provider_id, source))?,
             ),
@@ -215,6 +216,7 @@ impl ModelRegistry {
                 openai::Client::builder()
                     .base_url(provider.base_url.clone())
                     .api_key(api_key)
+                    .http_headers(configured_headers(provider_id, provider)?)
                     .build()
                     .map_err(|source| build_error(provider_id, source))?,
             ),
@@ -222,6 +224,7 @@ impl ModelRegistry {
                 openai::CompletionsClient::builder()
                     .base_url(provider.base_url.clone())
                     .api_key(api_key)
+                    .http_headers(configured_headers(provider_id, provider)?)
                     .build()
                     .map_err(|source| build_error(provider_id, source))?,
             ),
@@ -236,6 +239,77 @@ impl ModelRegistry {
     pub fn cached_provider_count(&self) -> usize {
         lock(&self.inner.clients).len()
     }
+}
+
+/// The request parameters a session forwards for a selection: the model's
+/// pass-through knobs, with the active thinking level's `extra_body`
+/// overlaid last (level over model over provider).
+///
+/// Pure forwarding — nothing here interprets the values. Unknown ids
+/// contribute nothing (the model factory is the loud check for those).
+pub(crate) fn request_params(
+    config: &TabitConfig,
+    selection: &ModelSelection,
+) -> ModelRequestParams {
+    let Some(provider) = config.provider(&selection.provider) else {
+        return ModelRequestParams::default();
+    };
+    let Some(model) = provider.model(&selection.model) else {
+        return ModelRequestParams::default();
+    };
+    let level = selection
+        .thinking_level
+        .as_deref()
+        .and_then(|name| model.thinking_level(name));
+    ModelRequestParams {
+        max_tokens: model.max_tokens,
+        temperature: model.sampling_params.and_then(|params| params.temperature),
+        top_p: model.sampling_params.and_then(|params| params.top_p),
+        top_k: model.sampling_params.and_then(|params| params.top_k),
+        extra_body: model.merged_extra_body(provider.extra_body.as_ref(), level),
+    }
+}
+
+/// The request parameters resolved for one selection. Carried separately
+/// from the model handle so the factory (tests, custom constructors) stays
+/// untouched.
+#[derive(Debug, Clone, Default, PartialEq)]
+pub(crate) struct ModelRequestParams {
+    pub max_tokens: Option<u64>,
+    pub temperature: Option<f64>,
+    pub top_p: Option<f64>,
+    pub top_k: Option<u64>,
+    pub extra_body: Option<serde_json::Map<String, serde_json::Value>>,
+}
+
+/// The provider's configured headers as an HTTP header map. Provider
+/// protocol headers (e.g. `anthropic-version`) are inserted at client build
+/// time and coexist with these.
+fn configured_headers(
+    provider_id: &str,
+    provider: &Provider,
+) -> Result<http::HeaderMap, SessionError> {
+    let mut headers = http::HeaderMap::new();
+    let Some(configured) = &provider.headers else {
+        return Ok(headers);
+    };
+    for (name, value) in configured {
+        let name = http::HeaderName::from_bytes(name.as_bytes()).map_err(|source| {
+            SessionError::Config {
+                message: format!(
+                    "provider `{provider_id}` header name `{name}` is not valid HTTP: {source}"
+                ),
+            }
+        })?;
+        let value = http::HeaderValue::from_str(value).map_err(|source| SessionError::Config {
+            message: format!(
+                "provider `{provider_id}` header `{name}` has a value that is not valid \
+                     HTTP: {source}"
+            ),
+        })?;
+        headers.insert(name, value);
+    }
+    Ok(headers)
 }
 
 /// Wrap a client-construction failure with the provider id.

@@ -230,3 +230,120 @@ api_key = \"dummy\"
         assert_eq!(selection.model, "m", "the first configured model");
     }
 }
+
+const PARAMS_CONFIG: &str = r#"
+[providers.local]
+base_url = "http://127.0.0.1:1234/v1"
+api = "openai-completions"
+extra_body = { shared = "provider", only_provider = true }
+
+[[providers.local.models]]
+id = "m"
+max_tokens = 512
+sampling_params = { temperature = 0.7, top_p = 0.9, top_k = 40 }
+extra_body = { shared = "model", model_only = true }
+
+[[providers.local.models.thinking_levels]]
+name = "high"
+extra_body = { shared = "level", only_level = 1 }
+"#;
+
+#[test]
+fn request_params_forward_the_model_knobs() {
+    let registry = registry_with(
+        PARAMS_CONFIG,
+        r#"
+[providers.local]
+api_key = "dummy"
+"#,
+    );
+    let selection = ModelSelection::new("local", "m");
+    let params = request_params(registry.config(), &selection);
+    assert_eq!(params.max_tokens, Some(512));
+    assert_eq!(params.temperature, Some(0.7));
+    assert_eq!(params.top_p, Some(0.9));
+    assert_eq!(params.top_k, Some(40));
+    // No active level: the model's extra_body overlays the provider's.
+    let extra = params.extra_body.expect("merged extra_body");
+    assert_eq!(extra.get("shared"), Some(&serde_json::json!("model")));
+    assert_eq!(extra.get("model_only"), Some(&serde_json::json!(true)));
+    assert_eq!(extra.get("only_provider"), Some(&serde_json::json!(true)));
+
+    // The active level overlays both, keeping their unique keys.
+    let selection = ModelSelection {
+        thinking_level: Some("high".to_string()),
+        ..selection
+    };
+    let params = request_params(registry.config(), &selection);
+    let extra = params.extra_body.expect("merged extra_body");
+    assert_eq!(extra.get("shared"), Some(&serde_json::json!("level")));
+    assert_eq!(extra.get("only_level"), Some(&serde_json::json!(1)));
+
+    // Unknown ids contribute nothing; the model factory is the loud check.
+    let params = request_params(registry.config(), &ModelSelection::new("nope", "m"));
+    assert_eq!(params, ModelRequestParams::default());
+}
+
+#[test]
+fn provider_headers_ride_the_constructed_client() {
+    let registry = registry_with(
+        r#"
+[providers.local]
+base_url = "http://127.0.0.1:1234/v1"
+api = "openai-completions"
+
+[providers.local.headers]
+x-custom = "value"
+"#,
+        r#"
+[providers.local]
+api_key = "dummy"
+"#,
+    );
+    let provider = registry.config().provider("local").expect("provider");
+    let client = registry
+        .client_for("local", provider, &api_key())
+        .expect("client builds with configured headers");
+    let ProviderClient::Completions(client) = client else {
+        panic!("openai-completions wire api expected");
+    };
+    assert_eq!(
+        client
+            .headers()
+            .get("x-custom")
+            .and_then(|v| v.to_str().ok()),
+        Some("value")
+    );
+}
+
+#[test]
+fn an_invalid_configured_header_fails_loudly() {
+    let registry = registry_with(
+        r#"
+[providers.local]
+base_url = "http://127.0.0.1:1234/v1"
+api = "openai-completions"
+
+[providers.local.headers]
+"not a header!" = "value"
+"#,
+        r#"
+[providers.local]
+api_key = "dummy"
+"#,
+    );
+    let provider = registry.config().provider("local").expect("provider");
+    let error = match registry.client_for("local", provider, &api_key()) {
+        Err(error) => error,
+        Ok(_) => panic!("an invalid header name must fail the build"),
+    };
+    let message = error.to_string();
+    assert!(
+        message.contains("not a header!") && message.contains("local"),
+        "the error names the header and the provider: {message}"
+    );
+}
+
+fn api_key() -> String {
+    "dummy".to_string()
+}
