@@ -117,27 +117,28 @@ where
     ) -> Result<(Vec<(T, OneOrMany<Embedding>)>, Usage), EmbeddingError> {
         use stream::TryStreamExt;
 
-        // Store the documents and their texts in a HashMap for easy access.
-        let mut docs = HashMap::new();
+        // Assign every text a global slot before chunking, and record how many
+        // slots each document owns. Batches complete in whatever order the
+        // provider finishes them (`buffer_unordered`), so when a batch
+        // completes must not affect where its embeddings land: a finished
+        // batch writes each embedding into its own slot, and reassembly walks
+        // the slots in order, handing each document its run.
+        let mut docs = Vec::with_capacity(self.documents.len());
         let mut texts = Vec::new();
-
-        // Iterate over all documents in the builder and insert their docs and texts into the lookup stores.
-        for (i, (doc, doc_texts)) in self.documents.into_iter().enumerate() {
-            docs.insert(i, doc);
-            texts.push((i, doc_texts));
+        for (doc, doc_texts) in self.documents {
+            docs.push((doc, doc_texts.len()));
+            texts.extend(doc_texts);
         }
 
         // Compute the embeddings.
-        let (mut embeddings, usage) = stream::iter(texts)
-            // Merge the texts of each document into a single list of texts.
-            .flat_map(|(i, texts)| stream::iter(texts.into_iter().map(move |text| (i, text))))
+        let (landed, usage) = stream::iter(texts.into_iter().enumerate())
             // Chunk them into batches. Each batch size is at most the embedding API limit per request.
             .chunks(M::MAX_DOCUMENTS)
             // Generate the embeddings for each batch with usage tracking.
-            .map(|text| async {
-                let (ids, docs): (Vec<_>, Vec<_>) = text.into_iter().unzip();
+            .map(|chunk| async {
+                let (ids, batch): (Vec<_>, Vec<_>) = chunk.into_iter().unzip();
 
-                let response: EmbeddingResponse = self.model.embed_texts_with_usage(docs).await?;
+                let response: EmbeddingResponse = self.model.embed_texts_with_usage(batch).await?;
                 Ok::<_, EmbeddingError>((
                     ids.into_iter().zip(response.embeddings).collect::<Vec<_>>(),
                     response.usage,
@@ -145,36 +146,44 @@ where
             })
             // Parallelize the embeddings generation over 10 concurrent requests
             .buffer_unordered(max(1, 1024 / M::MAX_DOCUMENTS))
-            // Collect the embeddings into a HashMap and accumulate usage.
+            // Land each batch's embeddings in their slots and accumulate usage.
             .try_fold(
-                (
-                    HashMap::<usize, OneOrMany<Embedding>>::new(),
-                    Usage::default(),
-                ),
-                |(mut acc, mut usage_acc), (chunk_embeddings, chunk_usage)| async move {
-                    chunk_embeddings.into_iter().for_each(|(i, embedding)| {
-                        acc.entry(i)
-                            .and_modify(|embeddings| embeddings.push(embedding.clone()))
-                            .or_insert(OneOrMany::one(embedding.clone()));
-                    });
+                (HashMap::<usize, Embedding>::new(), Usage::default()),
+                |(mut landed, mut usage_acc), (chunk_embeddings, chunk_usage)| async move {
+                    for (slot, embedding) in chunk_embeddings {
+                        landed.insert(slot, embedding);
+                    }
                     usage_acc += chunk_usage;
-                    Ok((acc, usage_acc))
+                    Ok((landed, usage_acc))
                 },
             )
             .await?;
 
-        // Merge the embeddings with their respective documents
-        let result = docs
-            .into_iter()
-            .map(|(i, doc)| {
-                let embedding = embeddings.remove(&i).ok_or_else(|| {
+        // Merge the embeddings with their respective documents, in input
+        // order: take each document's slots by walking the counter, so a
+        // landing position can never depend on batch completion order. A
+        // missing slot means the provider returned fewer embeddings than the
+        // texts it was sent — an external defect, surfaced as a typed error.
+        let mut next_slot = 0usize;
+        let mut result = Vec::with_capacity(docs.len());
+        for (doc, count) in docs {
+            let mut embeddings = Vec::with_capacity(count);
+            for slot in next_slot..next_slot + count {
+                let embedding = landed.get(&slot).cloned().ok_or_else(|| {
                     crate::embeddings::EmbeddingError::ResponseError(
                         "missing embedding for document after batch merge".to_string(),
                     )
                 })?;
-                Ok::<_, crate::embeddings::EmbeddingError>((doc, embedding))
-            })
-            .collect::<Result<Vec<_>, crate::embeddings::EmbeddingError>>()?;
+                embeddings.push(embedding);
+            }
+            let embeddings = OneOrMany::many(embeddings).map_err(|_| {
+                crate::embeddings::EmbeddingError::ResponseError(
+                    "document produced no texts to embed".to_string(),
+                )
+            })?;
+            result.push((doc, embeddings));
+            next_slot += count;
+        }
 
         Ok((result, usage))
     }
@@ -227,16 +236,12 @@ mod tests {
         let fake_definitions = definitions_multiple_text();
 
         let fake_model = MockEmbeddingModel;
-        let mut result = EmbeddingsBuilder::new(fake_model)
+        let result = EmbeddingsBuilder::new(fake_model)
             .documents(fake_definitions)
             .unwrap()
             .build()
             .await
             .unwrap();
-
-        result.sort_by(|(fake_definition_1, _), (fake_definition_2, _)| {
-            fake_definition_1.id.cmp(&fake_definition_2.id)
-        });
 
         assert_eq!(result.len(), 2);
 
@@ -261,16 +266,12 @@ mod tests {
         let fake_definitions = definitions_single_text();
 
         let fake_model = MockEmbeddingModel;
-        let mut result = EmbeddingsBuilder::new(fake_model)
+        let result = EmbeddingsBuilder::new(fake_model)
             .documents(fake_definitions)
             .unwrap()
             .build()
             .await
             .unwrap();
-
-        result.sort_by(|(fake_definition_1, _), (fake_definition_2, _)| {
-            fake_definition_1.id.cmp(&fake_definition_2.id)
-        });
 
         assert_eq!(result.len(), 2);
 
@@ -296,7 +297,7 @@ mod tests {
         let fake_definitions_single = definitions_multiple_text_2();
 
         let fake_model = MockEmbeddingModel;
-        let mut result = EmbeddingsBuilder::new(fake_model)
+        let result = EmbeddingsBuilder::new(fake_model)
             .documents(fake_definitions)
             .unwrap()
             .documents(fake_definitions_single)
@@ -304,10 +305,6 @@ mod tests {
             .build()
             .await
             .unwrap();
-
-        result.sort_by(|(fake_definition_1, _), (fake_definition_2, _)| {
-            fake_definition_1.id.cmp(&fake_definition_2.id)
-        });
 
         assert_eq!(result.len(), 4);
 
@@ -333,16 +330,12 @@ mod tests {
         let fake_definitions = bindings.iter().map(|def| def.texts.clone());
 
         let fake_model = MockEmbeddingModel;
-        let mut result = EmbeddingsBuilder::new(fake_model)
+        let result = EmbeddingsBuilder::new(fake_model)
             .documents(fake_definitions)
             .unwrap()
             .build()
             .await
             .unwrap();
-
-        result.sort_by(|(fake_definition_1, _), (fake_definition_2, _)| {
-            fake_definition_1.cmp(fake_definition_2)
-        });
 
         assert_eq!(result.len(), 2);
 
@@ -358,5 +351,67 @@ mod tests {
         assert_eq!(
             second_definition.1.rest()[0].document, "A fictional creature found in the distant, swampy marshlands of the planet Glibbo in the Andromeda galaxy.".to_string()
         )
+    }
+
+    /// A model whose first request is slow, so the second batch completes
+    /// first under `buffer_unordered` — the completion order that used to
+    /// decide where embeddings landed.
+    #[derive(Clone, Default)]
+    struct SlowFirstBatchModel {
+        calls: std::sync::Arc<std::sync::atomic::AtomicUsize>,
+    }
+
+    impl crate::embeddings::EmbeddingModel for SlowFirstBatchModel {
+        const MAX_DOCUMENTS: usize = 5;
+
+        type Client = crate::client::Nothing;
+
+        fn make(_: &Self::Client, _: impl Into<String>, _: Option<usize>) -> Self {
+            Self::default()
+        }
+
+        fn ndims(&self) -> usize {
+            1
+        }
+
+        async fn embed_texts(
+            &self,
+            documents: impl IntoIterator<Item = String> + crate::wasm_compat::WasmCompatSend,
+        ) -> Result<Vec<crate::embeddings::Embedding>, crate::embeddings::EmbeddingError> {
+            use std::sync::atomic::Ordering;
+            let call = self.calls.fetch_add(1, Ordering::SeqCst);
+            if call == 0 {
+                tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+            }
+            Ok(documents
+                .into_iter()
+                .map(|document| crate::embeddings::Embedding {
+                    document,
+                    vec: vec![0.0],
+                })
+                .collect())
+        }
+    }
+
+    /// One document with six texts under `MAX_DOCUMENTS = 5` straddles a batch
+    /// boundary; with the first batch slow, the old accumulator recorded the
+    /// second batch's embedding first and the document read its own texts back
+    /// shuffled (`["t5", "t0", …, "t4"]`). Slots make landing position
+    /// independent of completion order.
+    #[tokio::test]
+    async fn a_documents_embeddings_stay_in_text_order_across_batch_boundaries() {
+        let doc = MockMultiTextDocument::new("doc0", ["t0", "t1", "t2", "t3", "t4", "t5"]);
+
+        let result = EmbeddingsBuilder::new(SlowFirstBatchModel::default())
+            .document(doc)
+            .expect("embed the document")
+            .build()
+            .await
+            .expect("build should succeed");
+
+        assert_eq!(result.len(), 1);
+        let (_, embeddings) = &result[0];
+        let order: Vec<&str> = embeddings.iter().map(|e| e.document.as_str()).collect();
+        assert_eq!(order, ["t0", "t1", "t2", "t3", "t4", "t5"]);
     }
 }
