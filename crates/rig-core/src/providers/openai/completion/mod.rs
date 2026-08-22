@@ -1659,7 +1659,7 @@ impl TryFrom<OpenAIRequestParams> for CompletionRequest {
 
         let history_has_tool_result = history_contains_tool_result(&full_history);
 
-        let (tools, tool_choice) = if supports_tools {
+        let (mut tools, tool_choice) = if supports_tools {
             let tool_choice = tool_choice.map(ToolChoice::try_from).transpose()?;
             let tools: Vec<ToolDefinition> = tools
                 .into_iter()
@@ -1678,6 +1678,55 @@ impl TryFrom<OpenAIRequestParams> for CompletionRequest {
             }
             (Vec::new(), None)
         };
+
+        // `additional_params` is flattened into the serialized request, so a raw
+        // `tools` array left in it would silently replace the typed `tools`
+        // field (the body is built via `serde_json::to_value`, where the
+        // flattened key wins). Merge its function tools into the typed list
+        // instead, mirroring the Responses API path (upstream #1890). Entries
+        // that are not function tools stay behind for the provider's
+        // `prepare_request` hook — a gateway may fold its native tools
+        // (`{"type": "browser_search"}`, ...) from there.
+        let mut additional_params = additional_params;
+        if supports_tools
+            && let Some(map) = additional_params
+                .as_mut()
+                .and_then(serde_json::Value::as_object_mut)
+            && let Some(raw_tools) = map.remove("tools")
+        {
+            let raw_tools =
+                serde_json::from_value::<Vec<serde_json::Value>>(raw_tools).map_err(|err| {
+                    CompletionError::RequestError(
+                        format!(
+                            "Invalid OpenAI Chat Completions `additional_params.tools` payload: {err}"
+                        )
+                        .into(),
+                    )
+                })?;
+            let mut remaining = Vec::new();
+            for raw_tool in raw_tools {
+                let is_function_tool =
+                    raw_tool.get("type").and_then(serde_json::Value::as_str) == Some("function");
+                if is_function_tool {
+                    let tool =
+                        serde_json::from_value::<ToolDefinition>(raw_tool).map_err(|err| {
+                            CompletionError::RequestError(
+                                format!(
+                                    "Invalid function tool in OpenAI Chat Completions \
+                                 `additional_params.tools`: {err}"
+                                )
+                                .into(),
+                            )
+                        })?;
+                    tools.push(tool);
+                } else {
+                    remaining.push(raw_tool);
+                }
+            }
+            if !remaining.is_empty() {
+                map.insert("tools".to_string(), serde_json::Value::Array(remaining));
+            }
+        }
 
         if output_schema.is_some() && !supports_response_format {
             tracing::warn!(

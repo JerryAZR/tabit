@@ -382,6 +382,124 @@ fn test_openai_request_uses_default_model_when_override_unset() {
     assert_eq!(serialized["model"], "gpt-4o-mini");
 }
 
+/// A mixed `additional_params.tools` array splits by shape: function tools
+/// merge into the typed `tools` field (left in the flattened params they
+/// would replace the typed field at serialization — the flattened key wins),
+/// while non-function entries stay behind for a provider's `prepare_request`
+/// hook to fold its native tools from.
+#[test]
+fn additional_params_function_tools_merge_and_native_tools_stay() {
+    let request = crate::completion::CompletionRequest {
+        model: None,
+        preamble: None,
+        chat_history: crate::OneOrMany::one("Hello".into()),
+        documents: vec![],
+        tools: vec![crate::completion::ToolDefinition {
+            name: "builder_tool".to_string(),
+            description: "from the builder".to_string(),
+            parameters: serde_json::json!({"type": "object", "properties": {}}),
+        }],
+        temperature: None,
+        max_tokens: None,
+        tool_choice: None,
+        additional_params: Some(serde_json::json!({
+            "tools": [
+                {
+                    "type": "function",
+                    "function": {
+                        "name": "params_tool",
+                        "description": "from additional_params",
+                        "parameters": {"type": "object", "properties": {}}
+                    }
+                },
+                {"type": "browser_search"}
+            ]
+        })),
+        output_schema: None,
+        record_telemetry_content: false,
+    };
+
+    let openai_request = CompletionRequest::try_from(OpenAIRequestParams {
+        model: "gpt-4o-mini".to_string(),
+        request,
+        strict_tools: false,
+        tool_result_array_content: false,
+        supports_response_format: true,
+        supports_tools: true,
+    })
+    .expect("request conversion should succeed");
+
+    // The conversion is the contract: function tools merge into the typed
+    // list, non-function entries stay behind for `prepare_request` hooks
+    // (which read `additional_params` before serialization — a leftover
+    // `tools` key would shadow the typed field on the flattened wire body,
+    // which is exactly why merging, not passing through, is the fix).
+    let names: Vec<&str> = openai_request
+        .tools
+        .iter()
+        .map(|tool| tool.function.name.as_str())
+        .collect();
+    assert_eq!(
+        names,
+        vec!["builder_tool", "params_tool"],
+        "the builder's typed tools and the merged function tools coexist"
+    );
+    assert_eq!(
+        openai_request.additional_params,
+        Some(serde_json::json!({"tools": [{"type": "browser_search"}]})),
+        "non-function entries stay behind for the provider's prepare_request hook"
+    );
+
+    // When every additional tool is a function tool, nothing stays behind:
+    // the serialized body carries the merged list under `tools` with no
+    // flattened collision.
+    let request = crate::completion::CompletionRequest {
+        additional_params: Some(serde_json::json!({
+            "tools": [
+                {
+                    "type": "function",
+                    "function": {
+                        "name": "params_tool",
+                        "description": "from additional_params",
+                        "parameters": {"type": "object", "properties": {}}
+                    }
+                }
+            ]
+        })),
+        model: None,
+        preamble: None,
+        chat_history: crate::OneOrMany::one("Hello".into()),
+        documents: vec![],
+        tools: vec![crate::completion::ToolDefinition {
+            name: "builder_tool".to_string(),
+            description: "from the builder".to_string(),
+            parameters: serde_json::json!({"type": "object", "properties": {}}),
+        }],
+        temperature: None,
+        max_tokens: None,
+        tool_choice: None,
+        output_schema: None,
+        record_telemetry_content: false,
+    };
+    let openai_request = CompletionRequest::try_from(OpenAIRequestParams {
+        model: "gpt-4o-mini".to_string(),
+        request,
+        strict_tools: false,
+        tool_result_array_content: false,
+        supports_response_format: true,
+        supports_tools: true,
+    })
+    .expect("request conversion should succeed");
+    let serialized = serde_json::to_value(openai_request).expect("serialization should succeed");
+    let names: Vec<&str> = serialized["tools"]
+        .as_array()
+        .expect("tools array")
+        .iter()
+        .filter_map(|tool| tool["function"]["name"].as_str())
+        .collect();
+    assert_eq!(names, vec!["builder_tool", "params_tool"]);
+}
+
 #[test]
 fn openai_chat_request_keeps_documents_after_system_messages() {
     let request = CompletionRequestBuilder::new(MockCompletionModel::default(), "Prompt")

@@ -143,6 +143,11 @@ struct StreamingChoice {
     #[serde(default)]
     delta: StreamingDelta,
     finish_reason: Option<FinishReason>,
+    /// Which candidate this delta belongs to when the caller asked for
+    /// `n > 1`. Optional because providers streaming a single candidate may
+    /// omit it; absent is read as candidate 0.
+    #[serde(default)]
+    index: Option<usize>,
 }
 
 #[derive(Deserialize, Debug)]
@@ -381,11 +386,24 @@ where
         // Classification only — the unknown/corrupt policy (warn-skip vs.
         // in-band `Err` item) lives in the shared driver, not here.
         wire::classify_chat_completions_frame::<StreamingCompletionChunk<U>>(data).map(|data| {
+            // `n > 1` streams as interleaved chunks distinguished only by
+            // `choices[].index`. Taking each *chunk's* first choice would
+            // concatenate every candidate into one garbled answer, while the
+            // blocking path answers the same request from candidate 0 alone;
+            // selecting by index keeps the two transports agreeing.
+            let primary = data
+                .choices
+                .iter()
+                .position(|choice| choice.index.is_none_or(|index| index == 0))
+                .and_then(|position| data.choices.get(position))
+                .map(std::slice::from_ref)
+                .unwrap_or_default();
+
             openai_chat_completions_compatible::normalize_first_choice_chunk(
                 data.id,
                 data.model,
                 data.usage,
-                &data.choices,
+                primary,
                 |choice| CompatibleChoiceData {
                     // The shared mapping also folds `function_call` — the
                     // deprecated pre-tools finish reason some compatible
@@ -695,6 +713,43 @@ mod tests {
         let delta: StreamingDelta = serde_json::from_str(json).unwrap();
         assert_eq!(delta.refusal.as_deref(), Some("I can't help with that."));
         assert!(delta.content.is_none());
+    }
+
+    /// An `n > 1` stream interleaves candidates distinguished only by
+    /// `choices[].index`; the adapter answers from candidate 0, exactly like
+    /// the blocking path. Taking each chunk's first-listed choice would
+    /// concatenate every candidate into one answer the model never produced
+    /// (the interleaving upstream recorded live: 0='Z', 1='H', 1='arm',
+    /// 0='ebra' — blocking yields "Zebra", the old stream "ZHarmebra").
+    #[tokio::test]
+    async fn multi_candidate_streams_answer_from_candidate_zero() {
+        use crate::providers::openai::send_compatible_streaming_request;
+        use crate::streaming::StreamedAssistantContent;
+        use crate::test_utils::MockStreamingClient;
+        use futures::StreamExt;
+
+        let client = MockStreamingClient {
+            sse_bytes: sse_bytes_from_data_lines([
+                r#"{"choices":[{"index":1,"delta":{"content":"H"}},{"index":0,"delta":{"content":"Z"}}]}"#,
+                r#"{"choices":[{"index":1,"delta":{"content":"arm"}}]}"#,
+                r#"{"choices":[{"index":0,"delta":{"content":"ebra"}}]}"#,
+                r#"{"choices":[{"index":0,"delta":{},"finish_reason":"stop"}]}"#,
+                "[DONE]",
+            ]),
+        };
+
+        let mut stream = send_compatible_streaming_request(client, streaming_request(), "openai")
+            .await
+            .expect("stream should start");
+
+        let mut text = String::new();
+        while let Some(item) = stream.next().await {
+            if let StreamedAssistantContent::Text(delta) = item.expect("stream item ok") {
+                text.push_str(&delta.text);
+            }
+        }
+
+        assert_eq!(text, "Zebra");
     }
 
     /// A streamed refusal delta must produce visible refusal text — mapped
