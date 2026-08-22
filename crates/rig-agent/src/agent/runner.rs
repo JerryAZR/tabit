@@ -1019,10 +1019,12 @@ impl TurnSource for UnaryTurnSource {
                 }
             };
 
+            let finish_reason = resp.finish_reason();
             if let Err(err) = run.turn_committed(ModelTurn::new(
                 resp.message_id.clone(),
                 resp.choice.clone(),
                 resp.usage,
+                finish_reason,
                 prepared.executable_tool_names,
                 prepared.allowed_tool_names,
             )) {

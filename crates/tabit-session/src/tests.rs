@@ -307,6 +307,46 @@ async fn tool_roundtrip_is_recorded_and_events_name_the_tool() -> Result<(), Ses
     Ok(())
 }
 
+/// A turn that ends truncated (`finish_reason: length`) warns the frontend
+/// and the run completes normally — informational, not a failure (ENGINE.md
+/// behavior delta 9).
+#[tokio::test]
+async fn truncated_turn_warns_and_the_run_still_completes() -> Result<(), SessionError> {
+    let store = temp_store("truncation-warning");
+    let factory = Factory::new(vec![vec![
+        MockStreamEvent::text("partial answer"),
+        MockStreamEvent::FinalResponse(
+            rig_agent::test_utils::mock_final(Usage {
+                input_tokens: 100,
+                output_tokens: 10,
+                total_tokens: 110,
+                ..Usage::default()
+            })
+            .with_finish_reason(rig_core::completion::FinishReason::Length),
+        ),
+    ]]);
+    let mut session = factory.into_builder(store.clone()).create("C:/w")?;
+
+    let run = session.prompt("go deep").await;
+
+    assert_eq!(run.output, "partial answer");
+    assert_eq!(run.outcome, crate::session::RunOutcome::Completed);
+    assert_eq!(
+        run.events
+            .iter()
+            .filter(|e| matches!(e, SessionEvent::TurnTruncated))
+            .count(),
+        1,
+        "exactly one truncation warning for one truncated turn"
+    );
+    assert!(matches!(
+        run.events.last(),
+        Some(SessionEvent::RunFinished { output, .. }) if output == "partial answer"
+    ));
+    std::fs::remove_dir_all(store.dir()).ok();
+    Ok(())
+}
+
 #[tokio::test]
 async fn resumed_reflects_create_vs_resume() -> Result<(), SessionError> {
     // The handshake reports this so a frontend that asked to resume

@@ -310,6 +310,15 @@ impl GuiState {
                 // Per-request usage; the run terminal carries the
                 // aggregate. v1 keeps the aggregate only.
             }
+            SessionEvent::TurnTruncated => {
+                // Informational (ENGINE.md behavior delta 9): the run
+                // continues; the note is the user's cue that the model hit
+                // its output cap — a steer asks it to go on.
+                self.transcript.push(Group::Notice {
+                    text: "model output was truncated (output token limit)".to_string(),
+                    error: false,
+                });
+            }
             SessionEvent::RunFinished { usage, .. } => {
                 self.running = false;
                 self.interactions.clear();

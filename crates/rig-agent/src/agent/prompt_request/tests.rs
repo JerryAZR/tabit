@@ -115,8 +115,8 @@ fn typed_prompt_response_deserializes_with_deserialize_only_output() {
 fn prompt_response_serializes_completion_calls_with_missing_usage() {
     let reported_usage = usage(3, 4);
     let response = PromptResponse::new("ok", reported_usage).with_completion_calls(vec![
-        CompletionCall::new(0, Usage::new()),
-        CompletionCall::new(1, reported_usage),
+        CompletionCall::new(0, Usage::new(), None),
+        CompletionCall::new(1, reported_usage, None),
     ]);
 
     let value = serde_json::to_value(&response).expect("serialize prompt response");
@@ -159,8 +159,8 @@ fn prompt_response_serializes_completion_calls_with_missing_usage() {
     assert_eq!(
         response.completion_calls(),
         &[
-            CompletionCall::new(0, Usage::new()),
-            CompletionCall::new(1, reported_usage)
+            CompletionCall::new(0, Usage::new(), None),
+            CompletionCall::new(1, reported_usage, None)
         ]
     );
     assert_eq!(response.requests(), 2);
@@ -189,8 +189,8 @@ fn prompt_response_deserializes_pre_monoid_null_usage_format() {
     assert_eq!(
         response.completion_calls(),
         &[
-            CompletionCall::new(0, Usage::new()),
-            CompletionCall::new(1, usage(3, 4))
+            CompletionCall::new(0, Usage::new(), None),
+            CompletionCall::new(1, usage(3, 4), None)
         ]
     );
 }
@@ -273,7 +273,7 @@ fn prompt_response_serialize_and_deserialize_agree_on_wire_shape() {
     // length-prefixed binary format can encode, and self-describing formats
     // (JSON) collapse `Some(x)` and `x` to identical bytes, hiding the mismatch.
     let response = PromptResponse::new("hi", usage(1, 2))
-        .with_completion_calls(vec![CompletionCall::new(0, usage(1, 2))]);
+        .with_completion_calls(vec![CompletionCall::new(0, usage(1, 2), None)]);
 
     let from_response = serde_json::to_value(&response).expect("serialize response");
     let from_shadow =
@@ -290,7 +290,7 @@ fn prompt_response_serialize_and_deserialize_agree_on_wire_shape() {
     assert_eq!(round.usage(), usage(1, 2));
     assert_eq!(
         round.completion_calls(),
-        &[CompletionCall::new(0, usage(1, 2))]
+        &[CompletionCall::new(0, usage(1, 2), None)]
     );
 }
 
@@ -309,7 +309,7 @@ async fn prompt_response_records_completion_call_without_reported_usage() {
     assert_eq!(response.usage, Usage::new());
     assert_eq!(
         response.completion_calls(),
-        &[CompletionCall::new(0, Usage::new())]
+        &[CompletionCall::new(0, Usage::new(), None)]
     );
 }
 
@@ -344,7 +344,7 @@ async fn typed_prompt_response_preserves_completion_calls() {
     assert_eq!(response.usage, call_usage);
     assert_eq!(
         response.completion_calls(),
-        &[CompletionCall::new(0, call_usage)]
+        &[CompletionCall::new(0, call_usage, None)]
     );
 }
 
@@ -605,8 +605,8 @@ async fn prompt_request_stops_cleanly_on_empty_terminal_turn() {
     assert_eq!(
         response.completion_calls(),
         &[
-            CompletionCall::new(0, first_call_usage),
-            CompletionCall::new(1, second_call_usage)
+            CompletionCall::new(0, first_call_usage, None),
+            CompletionCall::new(1, second_call_usage, None)
         ]
     );
 

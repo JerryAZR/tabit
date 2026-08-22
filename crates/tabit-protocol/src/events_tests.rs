@@ -28,6 +28,7 @@ fn events_round_trip_through_json() {
             input_tokens: 10,
             output_tokens: 4,
         },
+        SessionEvent::TurnTruncated,
         SessionEvent::RunFinished {
             output: "done".to_string(),
             usage: Usage::default(),
@@ -44,4 +45,10 @@ fn events_round_trip_through_json() {
         let back: SessionEvent = serde_json::from_str(&json).expect("parse");
         assert_eq!(back, *event);
     }
+
+    // The wire spelling is the snake_case tag with no payload.
+    assert_eq!(
+        serde_json::to_string(&SessionEvent::TurnTruncated).expect("serialize"),
+        r#"{"type":"turn_truncated"}"#
+    );
 }

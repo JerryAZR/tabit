@@ -572,6 +572,23 @@ impl Session {
                     on_event(event.clone());
                     events.push(event);
                 }
+                Ok(MultiTurnStreamItem::CompletionCall(call)) => {
+                    let event = SessionEvent::CompletionCall {
+                        input_tokens: call.usage.input_tokens,
+                        output_tokens: call.usage.output_tokens,
+                    };
+                    on_event(event.clone());
+                    events.push(event);
+                    // A truncation-class finish reason is a warning, not a
+                    // failure (ENGINE.md behavior delta 9): the flow
+                    // continues untouched — steers drain into the next turn,
+                    // the run may end normally.
+                    if call.finish_reason == Some(rig_core::completion::FinishReason::Length) {
+                        let event = SessionEvent::TurnTruncated;
+                        on_event(event.clone());
+                        events.push(event);
+                    }
+                }
                 Ok(item) => {
                     if let Some(event) = stream_item_event(item, &mut tool_names) {
                         on_event(event.clone());
@@ -1034,10 +1051,9 @@ fn stream_item_event(
         MultiTurnStreamItem::StreamAssistantItem(_) => None,
         MultiTurnStreamItem::ToolExecutionCommitted { .. } => None,
         MultiTurnStreamItem::StreamUserItem(_) => None,
-        MultiTurnStreamItem::CompletionCall(call) => Some(SessionEvent::CompletionCall {
-            input_tokens: call.usage.input_tokens,
-            output_tokens: call.usage.output_tokens,
-        }),
+        // `CompletionCall` is handled by an explicit arm in `run_one` — it
+        // can carry a second, truncation-warning event beside the usage one.
+        MultiTurnStreamItem::CompletionCall(_) => None,
         MultiTurnStreamItem::ModelTurnRetried { turn } => Some(SessionEvent::TurnRetried { turn }),
         MultiTurnStreamItem::FinalResponse(_) => None, // handled by the caller
         _ => None,

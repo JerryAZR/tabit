@@ -15,6 +15,7 @@ fn text_turn(text: &str) -> ModelTurn {
         Some("msg_1".to_string()),
         OneOrMany::one(AssistantContent::text(text)),
         Usage::new(),
+        None,
         tools(&[]),
         tools(&[]),
     )
@@ -29,6 +30,7 @@ fn tool_turn(name: &str, executable: &[&str]) -> ModelTurn {
         Some("msg_1".to_string()),
         OneOrMany::one(call),
         Usage::new(),
+        None,
         tools(executable),
         tools(executable),
     )
@@ -396,10 +398,37 @@ fn usage_records_on_commit() {
         None,
         OneOrMany::one(AssistantContent::text("done")),
         usage,
+        None,
         tools(&[]),
         tools(&[]),
     ))
     .expect("commit");
     assert_eq!(run.usage().total_tokens, 7);
     assert_eq!(run.completion_calls().len(), 1);
+}
+
+/// The streamed recorder carries the terminal's finish reason onto the
+/// per-call record — the turn-level fact a consumer warns on.
+#[test]
+fn streamed_completion_call_carries_the_finish_reason() {
+    let mut run = AgentRun::new(vec![user("go")]);
+    assert!(matches!(
+        run.next_step(),
+        Ok(AgentRunStep::CallModel { .. })
+    ));
+    let call = run
+        .record_streamed_completion_call(
+            Usage::new(),
+            Some(crate::completion::FinishReason::Length),
+        )
+        .expect("record");
+    assert_eq!(
+        call.finish_reason,
+        Some(crate::completion::FinishReason::Length)
+    );
+    let recorded = &run.completion_calls()[0];
+    assert_eq!(
+        recorded.finish_reason,
+        Some(crate::completion::FinishReason::Length)
+    );
 }

@@ -431,14 +431,14 @@ impl TurnSource for StreamingTurnSource {
             // Returns the item to yield (`Some` the first time, `None` after), or
             // the terminal error to surface.
             macro_rules! emit_completion_call {
-                ($usage:expr) => {{
+                ($usage:expr, $finish_reason:expr) => {{
                     let usage = $usage;
                     last_usage = usage;
                     if !completion_call_emitted {
                         if usage.has_values() {
                             record_usage_on_span(&chat_span, usage);
                         }
-                        match run.record_streamed_completion_call(usage) {
+                        match run.record_streamed_completion_call(usage, $finish_reason) {
                             Ok(call) => {
                                 completion_call_emitted = true;
                                 Ok(Some(MultiTurnStreamItem::CompletionCall(call)))
@@ -544,8 +544,12 @@ impl TurnSource for StreamingTurnSource {
                                 },
                             ));
                         }
-                        StreamedTurnEvent::Completed { usage, emit_final } => {
-                            match emit_completion_call!(usage) {
+                        StreamedTurnEvent::Completed {
+                            usage,
+                            finish_reason,
+                            emit_final,
+                        } => {
+                            match emit_completion_call!(usage, finish_reason) {
                                 Ok(Some(item)) => yield Ok(item),
                                 Ok(None) => {}
                                 Err(err) => {
@@ -596,7 +600,7 @@ impl TurnSource for StreamingTurnSource {
             // inline (not `emit_completion_call!`) so it doesn't emit a dead
             // `completion_call_emitted = true` write.
             if !completion_call_emitted {
-                match run.record_streamed_completion_call(crate::completion::Usage::new()) {
+                match run.record_streamed_completion_call(crate::completion::Usage::new(), None) {
                     Ok(call) => yield Ok(MultiTurnStreamItem::CompletionCall(call)),
                     Err(err) => {
                         yield Err(Box::new(err).into());

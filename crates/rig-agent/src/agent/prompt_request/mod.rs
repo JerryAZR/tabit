@@ -310,7 +310,7 @@ impl PromptRequest<Standard> {
 }
 
 /// Details for one successfully completed completion request made by an agent run.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[non_exhaustive]
 pub struct CompletionCall {
     /// Zero-based index of the completion request within this agent run.
@@ -322,12 +322,28 @@ pub struct CompletionCall {
     /// from "unreported".
     #[serde(default, deserialize_with = "usage_null_as_default")]
     pub usage: Usage,
+    /// Why the provider stopped generating, when it reported a reason.
+    ///
+    /// Per call rather than per run: a multi-turn run has N reasons and a
+    /// truncation-class one is the diagnostic. `None` means the provider
+    /// reported no reason — deliberately not smoothed into `Stop`: "finished
+    /// normally" and "did not say" are different facts.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub finish_reason: Option<crate::completion::FinishReason>,
 }
 
 impl CompletionCall {
     /// Create details for one completion request in an agent run.
-    pub fn new(call_index: usize, usage: Usage) -> Self {
-        Self { call_index, usage }
+    pub fn new(
+        call_index: usize,
+        usage: Usage,
+        finish_reason: Option<crate::completion::FinishReason>,
+    ) -> Self {
+        Self {
+            call_index,
+            usage,
+            finish_reason,
+        }
     }
 }
 

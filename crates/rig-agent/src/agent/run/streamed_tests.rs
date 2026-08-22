@@ -183,3 +183,26 @@ fn final_event_carries_usage() {
         }]
     ));
 }
+
+/// The terminal's finish reason rides the Completed event verbatim — the
+/// turn-level fact a consumer warns on (a truncation-class reason is
+/// informational, not a failure).
+#[test]
+fn final_event_carries_the_finish_reason() {
+    let mut assembler = assembler();
+    let mut usage = Usage::new();
+    usage.total_tokens = 9;
+    let events = assembler
+        .ingest(&StreamedAssistantContent::Final(
+            rig_core::streaming::StreamFinal::new("mock", usage)
+                .with_finish_reason(rig_core::completion::FinishReason::Length),
+        ))
+        .expect("ingest");
+    assert!(matches!(
+        events.as_slice(),
+        [StreamedTurnEvent::Completed {
+            finish_reason: Some(rig_core::completion::FinishReason::Length),
+            ..
+        }]
+    ));
+}

@@ -973,6 +973,7 @@ async fn execution_commit_items_are_not_emitted_when_run_commit_fails() {
             ),
         )),
         Usage::new(),
+        None,
         advertised.clone(),
         advertised,
     );
@@ -1632,7 +1633,7 @@ async fn tool_arguments_and_results_follow_content_telemetry_toggle() {
 #[test]
 fn completion_calls_stream_item_serializes_and_deserializes_expected_shape() {
     let item: MultiTurnStreamItem =
-        MultiTurnStreamItem::CompletionCall(CompletionCall::new(2, usage(3, 4)));
+        MultiTurnStreamItem::CompletionCall(CompletionCall::new(2, usage(3, 4), None));
 
     let value = serde_json::to_value(&item).expect("serialize completion call event");
 
@@ -1657,13 +1658,13 @@ fn completion_calls_stream_item_serializes_and_deserializes_expected_shape() {
         serde_json::from_value(value).expect("deserialize completion call event");
     match item {
         MultiTurnStreamItem::CompletionCall(call_usage) => {
-            assert_eq!(call_usage, CompletionCall::new(2, usage(3, 4)));
+            assert_eq!(call_usage, CompletionCall::new(2, usage(3, 4), None));
         }
         other => panic!("expected completion call event, got {other:?}"),
     }
 
     let item: MultiTurnStreamItem =
-        MultiTurnStreamItem::CompletionCall(CompletionCall::new(3, Usage::new()));
+        MultiTurnStreamItem::CompletionCall(CompletionCall::new(3, Usage::new(), None));
     let value = serde_json::to_value(&item).expect("serialize missing usage event");
 
     // Unreported usage serializes as a plain zero-valued object (Usage's
@@ -1695,7 +1696,7 @@ fn completion_calls_stream_item_serializes_and_deserializes_expected_shape() {
     .expect("legacy null-usage event should deserialize");
     match legacy {
         MultiTurnStreamItem::CompletionCall(call) => {
-            assert_eq!(call, CompletionCall::new(3, Usage::new()));
+            assert_eq!(call, CompletionCall::new(3, Usage::new(), None));
         }
         other => panic!("expected completion call event, got {other:?}"),
     }
@@ -1707,8 +1708,8 @@ fn final_response_serializes_completion_calls_with_missing_usage() {
         OneOrMany::one(AssistantContent::text("done")),
         usage(3, 4),
         vec![
-            CompletionCall::new(0, Usage::new()),
-            CompletionCall::new(1, usage(3, 4)),
+            CompletionCall::new(0, Usage::new(), None),
+            CompletionCall::new(1, usage(3, 4), None),
         ],
         None,
     );
@@ -2644,8 +2645,8 @@ async fn stream_prompt_exposes_completion_calls() {
     assert_eq!(
         completion_calls_events,
         vec![
-            CompletionCall::new(0, first_call_usage),
-            CompletionCall::new(1, second_call_usage)
+            CompletionCall::new(0, first_call_usage, None),
+            CompletionCall::new(1, second_call_usage, None)
         ]
     );
 
@@ -2666,8 +2667,8 @@ async fn stream_prompt_exposes_completion_calls() {
     assert_eq!(
         final_response.completion_calls(),
         &[
-            CompletionCall::new(0, first_call_usage),
-            CompletionCall::new(1, second_call_usage)
+            CompletionCall::new(0, first_call_usage, None),
+            CompletionCall::new(1, second_call_usage, None)
         ]
     );
 }
@@ -2742,7 +2743,10 @@ async fn stream_prompt_emits_completion_call_before_finish_hook_termination() {
         }
     }
 
-    assert_eq!(completion_calls, vec![CompletionCall::new(0, call_usage)]);
+    assert_eq!(
+        completion_calls,
+        vec![CompletionCall::new(0, call_usage, None)]
+    );
     assert!(saw_error);
 }
 
@@ -2789,8 +2793,8 @@ async fn stream_prompt_completion_calls_records_unreported_usage() {
     }
 
     let expected_usage = vec![
-        CompletionCall::new(0, Usage::new()),
-        CompletionCall::new(1, second_call_usage),
+        CompletionCall::new(0, Usage::new(), None),
+        CompletionCall::new(1, second_call_usage, None),
     ];
     assert_eq!(completion_calls_events, expected_usage);
 
@@ -3449,6 +3453,7 @@ async fn stream_to_stdout_handles_reasoning_retries_and_errors() {
         Ok(MultiTurnStreamItem::CompletionCall(CompletionCall::new(
             0,
             Usage::new(),
+            None,
         ))),
         Err(StreamingError::Completion(CompletionError::ResponseError(
             "boom".to_string(),

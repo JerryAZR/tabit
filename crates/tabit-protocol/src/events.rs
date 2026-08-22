@@ -64,6 +64,11 @@ pub enum SessionEvent {
         /// Output tokens reported by the provider.
         output_tokens: u64,
     },
+    /// A committed turn ended truncated: the provider cut generation short at
+    /// its output limit (`finish_reason: length`). Informational, not a
+    /// failure — the run continues exactly as usual, and a steer is the
+    /// user's way to ask the model to go on.
+    TurnTruncated,
     /// The outer loop finished successfully.
     RunFinished {
         /// The final assistant text.

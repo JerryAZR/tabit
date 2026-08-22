@@ -12,7 +12,8 @@ period. Design against v2. (One v1 trap: a v1 backend *silently
 ignores* unknown `initialize` fields, so a v2 client against v1 gets
 neither replay nor an error — always check the ack's `protocol_version`.
 The one-shot JSON listing edges — `--list --json`, `models --json` —
-are likewise v2; today `--list` prints a human table.)
+are likewise v2; today `--list` prints a human table. `turn_truncated`
+ships in v1 already, without the `turn_id` payload.)
 
 ## 1. Architecture: two processes, one pipe
 
@@ -189,6 +190,7 @@ unstamped control frames; everything else is a stamped event.
 | `interaction_request` | `id`, `title`, `body`, `options`, `free_text` | a tool gate (permission) or a tool body asks the user; several may be open at once. Answer with `interaction_response`; a run terminal closes the unanswered (§8). |
 | `tool_result` | `turn_id`, `entry_id`, `name`, `internal_call_id`, `content`, `status` | one tool body finished; its result committed. `content` is exactly the text the model saw — already capped at the source, failure text included; render it verbatim. `status` is structure only: `success` or `failed { exit_code? }`; the detail is in `content`, not `status`. |
 | `completion_call` | `turn_id`, `input_tokens`, `output_tokens` | one model request finished; usage is final for it. |
+| `turn_truncated` | `turn_id` | the committed turn ended truncated: the provider cut generation at its output limit (`finish_reason: length`). Informational, never a failure — the run continues exactly as usual (steers drain into the next turn; the run may end normally). Show it as a note; a steer is how the user asks the model to go on. |
 | `turn_committed` | `id` | the turn is durable history. Same id as `turn_started`. |
 | `turn_retried` | `turn_id` | the turn was discarded before commit (e.g. malformed tool-call arguments); drop its provisional groups — a fresh `turn_started` follows. |
 | `native_item` | `item` (opaque JSON) | a provider-native output the backend does not model. **Live-only**: never replayed, never an anchor. Render or skip. |

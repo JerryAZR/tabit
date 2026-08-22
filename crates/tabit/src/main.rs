@@ -310,6 +310,11 @@ fn print_event(event: &SessionEvent) {
             let _ = writeln!(out, "[turn {turn} rejected by a hook; retrying]");
         }
         SessionEvent::CompletionCall { .. } => {}
+        // Informational (ENGINE.md behavior delta 9): the run continues;
+        // the note is the user's cue that a steer can ask for more.
+        SessionEvent::TurnTruncated => {
+            let _ = writeln!(out, "[model output was truncated (output token limit)]");
+        }
         SessionEvent::RunFinished { .. } => {
             let _ = writeln!(out);
         }

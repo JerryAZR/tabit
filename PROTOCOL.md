@@ -65,6 +65,16 @@ v1 as shipped; the v2 section below amends where noted.
   event exists. Requests never persist or replay; the durable record
   is the tool result. ENGINE.md's tool-phase section owns the
   design; EXTENSIONS.md records the standard-model ruling.
+- **Output-budget truncation is a warning, not a failure** (ruled
+  2026-08, upstream-triage discussion; ENGINE.md behavior delta 9):
+  when a committed turn's terminal reports a truncation-class finish
+  reason (`Length`), the backend emits `turn_truncated` and the flow
+  continues exactly as usual — steers drain into the next turn, the
+  another-turn check is unchanged, the run may end normally. Partial
+  tool calls stay on their own uniform path (in-band errors, never
+  conditioned on the finish reason). The carrier: `CompletionCall`
+  carries the turn's `finish_reason`, so the session warns per
+  truncated turn.
 
 ## The outer loop
 

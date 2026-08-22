@@ -146,6 +146,10 @@ pub enum StreamedTurnEvent {
         /// Provider-reported usage for this call. Zero-valued usage means the
         /// provider reported no usage metrics.
         usage: Usage,
+        /// Why the provider stopped generating, when it reported a reason —
+        /// the turn-level fact a consumer warns on (a truncation-class reason
+        /// is informational, not a failure).
+        finish_reason: Option<crate::completion::FinishReason>,
         /// Whether the ingested final item should be forwarded to the
         /// consumer (set when the turn streamed text).
         emit_final: bool,
@@ -300,9 +304,14 @@ impl StreamedTurnAssembler {
                 }
 
                 let usage = final_response.usage;
+                let finish_reason = final_response.finish_reason.clone();
                 let emit_final = self.saw_text;
                 self.saw_text = false;
-                Ok(vec![StreamedTurnEvent::Completed { usage, emit_final }])
+                Ok(vec![StreamedTurnEvent::Completed {
+                    usage,
+                    finish_reason,
+                    emit_final,
+                }])
             }
             StreamedAssistantContent::Unknown(_) => {
                 // Unmodeled provider item (e.g. a hosted-tool result): forward it

@@ -174,6 +174,9 @@ pub struct ModelTurn {
     pub choice: OneOrMany<AssistantContent>,
     /// Token usage reported by the provider for this completion request.
     pub usage: Usage,
+    /// Why the provider stopped generating, when it reported a reason.
+    #[serde(default)]
+    pub finish_reason: Option<crate::completion::FinishReason>,
     /// Executable Rig tools advertised to the provider for this turn.
     pub executable_tool_names: BTreeSet<String>,
     /// Tools allowed by the active tool choice for this turn.
@@ -187,6 +190,7 @@ impl ModelTurn {
         message_id: Option<String>,
         choice: OneOrMany<AssistantContent>,
         usage: Usage,
+        finish_reason: Option<crate::completion::FinishReason>,
         executable_tool_names: BTreeSet<String>,
         allowed_tool_names: BTreeSet<String>,
     ) -> Self {
@@ -194,6 +198,7 @@ impl ModelTurn {
             message_id,
             choice,
             usage,
+            finish_reason,
             executable_tool_names,
             allowed_tool_names,
         }
@@ -497,7 +502,7 @@ impl AgentRun {
                 self.protocol_violation("turn_committed called without a pending CallModel step")
             );
         }
-        self.record_completion_call(turn.usage);
+        self.record_completion_call(turn.usage, turn.finish_reason);
         self.commit_turn(
             turn.message_id,
             turn.choice,
@@ -518,7 +523,7 @@ impl AgentRun {
             );
         }
         if !self.streamed_completion_call_recorded {
-            self.record_completion_call(Usage::new());
+            self.record_completion_call(Usage::new(), None);
             self.streamed_completion_call_recorded = true;
         }
         self.commit_turn(
@@ -975,10 +980,14 @@ impl AgentRun {
     /// push it, and aggregate its usage into the run total. The single home
     /// for this accounting arithmetic, shared by the non-streamed and
     /// streamed ingestion paths.
-    fn record_completion_call(&mut self, usage: Usage) -> CompletionCall {
-        let call = CompletionCall::new(self.completion_call_index, usage);
+    fn record_completion_call(
+        &mut self,
+        usage: Usage,
+        finish_reason: Option<crate::completion::FinishReason>,
+    ) -> CompletionCall {
+        let call = CompletionCall::new(self.completion_call_index, usage, finish_reason);
         self.completion_call_index += 1;
-        self.completion_calls.push(call);
+        self.completion_calls.push(call.clone());
         self.usage += usage;
         call
     }
@@ -989,6 +998,7 @@ impl AgentRun {
     pub fn record_streamed_completion_call(
         &mut self,
         usage: Usage,
+        finish_reason: Option<crate::completion::FinishReason>,
     ) -> Result<CompletionCall, PromptError> {
         let recordable = matches!(self.state, RunState::ModelTurn);
         if !recordable {
@@ -1002,7 +1012,7 @@ impl AgentRun {
             ));
         }
         self.streamed_completion_call_recorded = true;
-        Ok(self.record_completion_call(usage))
+        Ok(self.record_completion_call(usage, finish_reason))
     }
 
     // === Views ============================================================
