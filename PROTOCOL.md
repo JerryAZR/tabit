@@ -364,25 +364,23 @@ settled shape.
 ## Open flags (numbering is fixed at creation; resolved numbers are
 skipped)
 
-### 2. `run_one` failure epilogue — subsumed by the v2 session rewrite
+### 2. `run_one` failure epilogue — RESOLVED (extracted as `Session::conclude`)
 
-(Live code — verified 2026-08: the four-block epilogue still exists.)
-The write-behind rewrite touches every block (persist failure becomes
-run_finished.durable, abort gains messages_discarded, the batch head
-gains the prompt barrier), so the fail() flattening folds into that
-work, not a standalone cleanup.
+The four-block epilogue (aborted / stream-failure / reload-failure /
+persist-failure) now lives in its own named method, `conclude`, over an
+`EventSink` (one emission path: live consumer + summary in one step, no
+send-without-record). The write-behind restructure lands there alone;
+`messages_discarded` joins the abort block. A `fail(..)` helper stopped
+being worth it once `sink.emit` collapsed each block to two lines.
 
-Four sequential outcome blocks (aborted / stream-failure /
-reload-failure / persist-failure) with a `!Failed` guard on the reload.
-A `fail(..)` helper flattens it. No semantic change.
+### 3. `run_one` length — RESOLVED (phase decomposition)
 
-### 3. `run_one` length — subsumed by the v2 session rewrite
-
-Same as flag 2: the fold-body extraction happens inside the v2
-rewrite of run_one.
-
-~150 lines: recording + batch, engine fold, epilogue. The fold body can
-extract beside `stream_item_event`.
+`run_one` is now orchestration over named phases: `stage_input` (the
+v2 prompt-barrier seam), `open_run` (request assembly), `drive` (the
+item fold — the translation seam v2 replay shares and where event ids
+mint) with `note_tool_result`/`note_steer` for the recording arms, and
+`conclude` (flag 2). The item→event translation lives in `drive` +
+`stream_item_event`, extractable for replay without touching the loop.
 
 ### 6. Twin abort clears — RESOLVED (the second clear was wrong)
 

@@ -459,11 +459,17 @@ impl Session {
         total
     }
 
-    /// One outer loop for a drained batch: record every message, run the
-    /// engine to completion, re-derive the context from the log, and
-    /// report. Exactly one terminal event comes out
-    /// (`run_finished`/`run_aborted`/`run_failed`), plus a trailing
-    /// `run_failed` when durability checks fail after a terminal.
+    /// One outer loop for a drained batch: stage the input, drive the
+    /// engine to completion, conclude the run. Exactly one terminal event
+    /// comes out (`run_finished`/`run_aborted`/`run_failed`), plus a
+    /// trailing `run_failed` when durability checks fail after a terminal.
+    ///
+    /// The phases are named methods so each concern changes in one place:
+    /// input staging (the v2 prompt barrier lands in [`Self::stage_input`]),
+    /// request assembly ([`Self::open_run`]), the item fold
+    /// ([`Self::drive`] — where v2 event ids mint, shared with replay), and
+    /// the terminal/durability epilogue ([`Self::conclude`] — where the
+    /// write-behind log and `messages_discarded` land).
     async fn run_one(
         &mut self,
         batch: &[Message],
@@ -476,57 +482,91 @@ impl Session {
             *slot = CancellationToken::new();
             slot.clone()
         };
-        let mut events = Vec::new();
-        // Drain-all at idle entry: the whole batch becomes this run's
-        // opening user input — one entry each, 1:1 with what the model
-        // saw — recorded first, then handed to the engine as one
-        // conversation whose final message is the turn being sent.
+        let mut sink = EventSink::new(on_event);
+        let history = self.stage_input(batch, &mut sink);
+        let stream = self.open_run(history, &run_token).await;
+        let driven = self.drive(stream, &run_token, &mut sink).await;
+        let (outcome, output, usage) = self.conclude(driven, &mut sink);
+        RunSummary {
+            outcome,
+            output,
+            usage,
+            events: sink.events,
+        }
+    }
+
+    /// Drain-all at idle entry: the whole batch becomes this run's opening
+    /// user input — one entry each, 1:1 with what the model saw — recorded
+    /// first, then handed to the engine as one conversation whose final
+    /// message is the turn being sent.
+    fn stage_input(&mut self, batch: &[Message], sink: &mut EventSink<'_>) -> Vec<Message> {
         let mut history = self.context.clone();
         for message in batch {
             self.recorder.record(EntryKind::UserMessage {
                 message: message.clone(),
             });
-            let event = SessionEvent::UserMessage {
+            sink.emit(SessionEvent::UserMessage {
                 text: user_text(message),
-            };
-            on_event(event.clone());
-            events.push(event);
+            });
             history.push(message.clone());
         }
+        history
+    }
+
+    /// Assemble the engine request for one run: the abort token and
+    /// interaction capability in the tool context, the permission gate, the
+    /// recorder hook, and steering over the run-agnostic mailbox.
+    async fn open_run(
+        &self,
+        history: Vec<Message>,
+        run_token: &CancellationToken,
+    ) -> rig_agent::agent::StreamingResult {
         let mut tool_context = rig_agent::tool::ToolContext::new();
         tool_context.insert(run_token.clone());
         let permission = PermissionHook::new(self.interaction.clone());
         if let Some(hub) = &self.interaction {
             tool_context.insert(hub.capability());
         }
-        let request = self
-            .agent
+        self.agent
             .stream_chat(history)
             .max_turns(self.max_turns)
             .tool_concurrency(TOOL_CONCURRENCY)
             .add_hook(RecorderHook(self.recorder.clone()))
             .add_hook(permission)
-            .steering(std::sync::Arc::new(SessionSteers {
+            .steering(Arc::new(SessionSteers {
                 mailbox: self.mailbox.clone(),
             }))
-            .tool_context(tool_context);
-        let mut stream = request.await;
+            .tool_context(tool_context)
+            .await
+    }
 
-        let mut output = String::new();
-        let mut usage = Usage::default();
+    /// Drive the engine stream to its end, folding every item into events
+    /// and the durable log. Aborting the run token preempts the stream;
+    /// returning drops it, which cancels in-flight tool futures (their drop
+    /// guards kill process trees) — completed turns and results are already
+    /// recorded, anything dangling repairs on next open, exactly like a
+    /// crash.
+    async fn drive(
+        &mut self,
+        mut stream: rig_agent::agent::StreamingResult,
+        run_token: &CancellationToken,
+        sink: &mut EventSink<'_>,
+    ) -> DriveOutcome {
+        let mut driven = DriveOutcome {
+            output: String::new(),
+            usage: Usage::default(),
+            aborted: false,
+            failure: None,
+        };
         // Tool names by correlation id: the result items carry the call's
         // internal id but not its name.
         let mut tool_names: std::collections::BTreeMap<String, String> =
             std::collections::BTreeMap::new();
-        let mut aborted = false;
-        // The provider failure that ended the stream, if one did; the
-        // `run_failed` event is emitted after the loop.
-        let mut stream_failure: Option<SessionError> = None;
         loop {
             let item = tokio::select! {
                 biased;
                 _ = run_token.cancelled() => {
-                    aborted = true;
+                    driven.aborted = true;
                     break;
                 }
                 item = stream.next() => match item {
@@ -539,92 +579,109 @@ impl Session {
                     tool_result,
                     internal_call_id,
                 })) => {
-                    self.recorder.record(EntryKind::ToolResult {
-                        result: tool_result,
-                    });
-                    let event = SessionEvent::ToolResult {
-                        name: tool_names
-                            .get(&internal_call_id)
-                            .cloned()
-                            .unwrap_or_default(),
-                        internal_call_id,
-                    };
-                    on_event(event.clone());
-                    events.push(event);
+                    self.note_tool_result(tool_result, internal_call_id, &mut tool_names, sink);
                 }
                 Ok(MultiTurnStreamItem::FinalResponse(response)) => {
-                    output = response.output;
-                    usage = response.usage;
-                    let event = SessionEvent::RunFinished {
-                        output: output.clone(),
-                        usage: Self::wire_usage(&usage),
-                    };
-                    on_event(event.clone());
-                    events.push(event);
+                    driven.output = response.output;
+                    driven.usage = response.usage;
+                    sink.emit(SessionEvent::RunFinished {
+                        output: driven.output.clone(),
+                        usage: Self::wire_usage(&driven.usage),
+                    });
                 }
                 Ok(MultiTurnStreamItem::Steer { text }) => {
-                    // One steer, one user_message entry: the log keeps 1:1
-                    // fidelity with what the model saw.
-                    self.recorder.record(EntryKind::UserMessage {
-                        message: Message::user(text.clone()),
-                    });
-                    let event = SessionEvent::UserMessage { text };
-                    on_event(event.clone());
-                    events.push(event);
+                    self.note_steer(text, sink);
                 }
                 Ok(MultiTurnStreamItem::CompletionCall(call)) => {
-                    let event = SessionEvent::CompletionCall {
+                    sink.emit(SessionEvent::CompletionCall {
                         input_tokens: call.usage.input_tokens,
                         output_tokens: call.usage.output_tokens,
-                    };
-                    on_event(event.clone());
-                    events.push(event);
+                    });
                     // A truncation-class finish reason is a warning, not a
                     // failure (ENGINE.md behavior delta 9): the flow
-                    // continues untouched — steers drain into the next turn,
-                    // the run may end normally.
+                    // continues untouched — steers drain into the next
+                    // turn, the run may end normally.
                     if call.finish_reason == Some(rig_core::completion::FinishReason::Length) {
-                        let event = SessionEvent::TurnTruncated;
-                        on_event(event.clone());
-                        events.push(event);
+                        sink.emit(SessionEvent::TurnTruncated);
                     }
                 }
                 Ok(item) => {
                     if let Some(event) = stream_item_event(item, &mut tool_names) {
-                        on_event(event.clone());
-                        events.push(event);
+                        sink.emit(event);
                     }
                 }
                 Err(StreamingError::Completion(error)) => {
-                    stream_failure = Some(SessionError::Prompt(error.into()));
+                    driven.failure = Some(SessionError::Prompt(error.into()));
                     break;
                 }
                 Err(StreamingError::Prompt(error)) => {
-                    stream_failure = Some(SessionError::Prompt(*error));
+                    driven.failure = Some(SessionError::Prompt(*error));
                     break;
                 }
             }
         }
+        driven
+    }
 
+    /// One executed tool call's result: the durable record, and the event
+    /// naming the tool through the correlation map its call populated.
+    fn note_tool_result(
+        &self,
+        tool_result: rig_core::message::ToolResult,
+        internal_call_id: String,
+        tool_names: &mut std::collections::BTreeMap<String, String>,
+        sink: &mut EventSink<'_>,
+    ) {
+        self.recorder.record(EntryKind::ToolResult {
+            result: tool_result,
+        });
+        sink.emit(SessionEvent::ToolResult {
+            name: tool_names
+                .get(&internal_call_id)
+                .cloned()
+                .unwrap_or_default(),
+            internal_call_id,
+        });
+    }
+
+    /// A steer drained into history mid-run: one user_message entry, 1:1
+    /// with what the model saw.
+    fn note_steer(&self, text: String, sink: &mut EventSink<'_>) {
+        self.recorder.record(EntryKind::UserMessage {
+            message: Message::user(text.clone()),
+        });
+        sink.emit(SessionEvent::UserMessage { text });
+    }
+
+    /// The run's epilogue: exactly one terminal (the fold already emitted
+    /// `run_finished`; here `run_aborted` or `run_failed`), then the
+    /// context re-derivation and durability checks that can follow a
+    /// terminal with a trailing `run_failed`, then the retraction of any
+    /// unanswered interaction — no asker survives the run (a racing
+    /// response is then a total no-op).
+    fn conclude(
+        &mut self,
+        driven: DriveOutcome,
+        sink: &mut EventSink<'_>,
+    ) -> (RunOutcome, String, Usage) {
+        let DriveOutcome {
+            output,
+            usage,
+            aborted,
+            failure,
+        } = driven;
         let mut outcome = RunOutcome::Completed;
         if aborted {
-            // Dropping the stream cancels in-flight tool futures; their
-            // drop guards kill process trees. Completed turns and results
-            // are already recorded; anything dangling repairs on next
-            // open, exactly like a crash.
-            drop(stream);
             self.recorder.record(EntryKind::Aborted);
-            let event = SessionEvent::RunAborted {
+            sink.emit(SessionEvent::RunAborted {
                 output: output.clone(),
-            };
-            on_event(event.clone());
-            events.push(event);
+            });
             // Abort means stop: discard anything queued behind the run.
-            // Nothing queued was ever acknowledged by an event, so
-            // nothing observable vanishes.
+            // Nothing queued was ever acknowledged by an event, so nothing
+            // observable vanishes.
             self.mailbox.clear();
             outcome = RunOutcome::Aborted;
-        } else if let Some(failure) = stream_failure {
+        } else if let Some(failure) = failure {
             // The log stays the source of truth: re-derive the context,
             // and a failing reload outranks the provider error (the same
             // precedence the pre-event failure path had).
@@ -633,44 +690,30 @@ impl Session {
                 .err()
                 .map(|error| error.to_string())
                 .unwrap_or_else(|| failure.to_string());
-            let event = SessionEvent::RunFailed { message };
-            on_event(event.clone());
-            events.push(event);
+            sink.emit(SessionEvent::RunFailed { message });
             outcome = RunOutcome::Failed;
         }
         if !matches!(outcome, RunOutcome::Failed)
             && let Err(error) = self.reload_context()
         {
-            let event = SessionEvent::RunFailed {
+            sink.emit(SessionEvent::RunFailed {
                 message: error.to_string(),
-            };
-            on_event(event.clone());
-            events.push(event);
+            });
             outcome = RunOutcome::Failed;
         }
         // Durability: a record that never reached the disk fails the run
         // even when the model answered (this `run_failed` follows the
         // terminal event — documented on the event).
         if let Some(persist_error) = self.recorder.first_error() {
-            let event = SessionEvent::RunFailed {
+            sink.emit(SessionEvent::RunFailed {
                 message: persist_error,
-            };
-            on_event(event.clone());
-            events.push(event);
+            });
             outcome = RunOutcome::Failed;
         }
-        // Every terminal that will be emitted has been; no asker
-        // survives the run. Retract any question still standing so its
-        // sender cannot linger (a racing response is then a total no-op).
         if let Some(hub) = &self.interaction {
             hub.clear_pending();
         }
-        RunSummary {
-            outcome,
-            output,
-            usage,
-            events,
-        }
+        (outcome, output, usage)
     }
 
     /// The session's mailbox as a clonable handle: submits work while a
@@ -1043,6 +1086,38 @@ impl Session {
         session.rebuild_agent(&selection)?;
         Ok(session)
     }
+}
+
+/// The run-loop's event fan-out: every event reaches the live consumer and
+/// the run's summary in one step, so no emission site can send without
+/// recording (or the reverse).
+struct EventSink<'a> {
+    on_event: &'a mut (dyn FnMut(SessionEvent) + Send),
+    events: Vec<SessionEvent>,
+}
+
+impl<'a> EventSink<'a> {
+    fn new(on_event: &'a mut (dyn FnMut(SessionEvent) + Send)) -> Self {
+        Self {
+            on_event,
+            events: Vec::new(),
+        }
+    }
+
+    fn emit(&mut self, event: SessionEvent) {
+        (self.on_event)(event.clone());
+        self.events.push(event);
+    }
+}
+
+/// What the drive loop learned before the stream ended: the run's final
+/// output and usage, and how the stream stopped (abort preemption, or the
+/// provider failure that ended it).
+struct DriveOutcome {
+    output: String,
+    usage: Usage,
+    aborted: bool,
+    failure: Option<SessionError>,
 }
 
 /// Map an engine item to a session event; `None` means "not surfaced in
