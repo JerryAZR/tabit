@@ -52,23 +52,20 @@ fn tabit_bin(launcher_provided: Option<&Path>) -> PathBuf {
     PathBuf::from("tabit")
 }
 
-/// Spawn a backend in `cwd` (the project directory). `resume_newest`
-/// passes `--continue`; the caller handles the no-sessions failure by
-/// respawning fresh (a pre-handshake spawn failure exits 1 with a
-/// stderr note — FRONTEND.md §3.5). `repaint` is called after every
-/// message so the UI wakes immediately.
+/// Spawn a backend in `cwd` (the project directory), always with
+/// `--continue`: an empty store is absorbed backend-side into a fresh
+/// start (the ack's `resumed: false` carries the note — the pinned
+/// startup contract). `repaint` is called after every message so the
+/// UI wakes immediately.
 pub fn spawn(
     cwd: Option<&Path>,
     tabit: Option<&Path>,
-    resume_newest: bool,
     repaint: impl Fn() + Send + 'static,
 ) -> std::io::Result<Backend> {
     let mut command = Command::new(tabit_bin(tabit));
-    command.arg("--json");
-    if resume_newest {
-        command.arg("--continue");
-    }
     command
+        .arg("--json")
+        .arg("--continue")
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
         .stderr(Stdio::piped());
@@ -152,12 +149,14 @@ pub fn spawn(
                         session_id,
                         session_path,
                         model,
+                        resumed,
                         ..
                     })) => {
                         let _ = tx.send(InMsg::Ack {
                             session_id,
                             session_path,
                             model,
+                            resumed,
                         });
                     }
                     Ok(ServerFrame::Control(ServerControlFrame::InitializeRejected { reason })) => {

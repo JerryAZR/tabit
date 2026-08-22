@@ -20,6 +20,9 @@ pub enum InMsg {
         session_id: String,
         session_path: String,
         model: ModelSelection,
+        /// False after a `--continue` that found nothing: the backend
+        /// started fresh (absorbed, not an error).
+        resumed: bool,
     },
     /// `initialize_rejected` — the connection is over.
     Rejected(String),
@@ -51,6 +54,10 @@ pub struct Facts {
     pub session_id: String,
     pub session_path: String,
     pub model: ModelSelection,
+    /// False when the backend absorbed a `--continue` miss and started
+    /// fresh — the GUI always asks to resume, so false always means the
+    /// note is warranted.
+    pub resumed: bool,
 }
 
 /// One tool call the model issued, and whether its result arrived.
@@ -140,13 +147,22 @@ impl GuiState {
                 session_id,
                 session_path,
                 model,
+                resumed,
             } => {
                 self.facts = Some(Facts {
                     session_id,
                     session_path,
                     model,
+                    resumed,
                 });
                 self.phase = Phase::Live;
+                // The GUI always spawns with `--continue`; a fresh
+                // start behind that ask gets one muted note (the pinned
+                // startup contract: an empty store is not an error, but
+                // it is not silent either).
+                if !resumed {
+                    self.push_notice("no sessions to resume — started fresh".to_string(), false);
+                }
             }
             InMsg::Rejected(reason) => {
                 // The full reason (a setup guide on a fresh install)

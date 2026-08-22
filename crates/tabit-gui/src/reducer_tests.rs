@@ -13,6 +13,7 @@ fn ack() -> InMsg {
         session_id: "s1".to_string(),
         session_path: "sessions/s1.jsonl".to_string(),
         model: tabit_protocol::ModelSelection::new("local", "m"),
+        resumed: true,
     }
 }
 
@@ -309,6 +310,26 @@ fn protocol_error_is_a_notice_and_the_connection_survives() {
         state.transcript.last(),
         Some(Group::Notice { error: true, .. })
     ));
+}
+
+#[test]
+fn an_absorbed_continue_miss_announces_the_fresh_start() {
+    // The GUI always asks to resume; resumed: false means the backend
+    // started fresh — one muted note, and the connection is Live.
+    let mut state = GuiState::default();
+    state.reduce(InMsg::Ack {
+        session_id: "s".to_string(),
+        session_path: "s.jsonl".to_string(),
+        model: tabit_protocol::ModelSelection::new("local", "m"),
+        resumed: false,
+    });
+    assert_eq!(state.phase, Phase::Live);
+    match state.transcript.first() {
+        Some(Group::Notice { text, error: false }) => {
+            assert!(text.contains("started fresh"), "{text}");
+        }
+        other => panic!("expected a muted fresh-start note, got {other:?}"),
+    }
 }
 
 #[test]

@@ -308,6 +308,25 @@ async fn tool_roundtrip_is_recorded_and_events_name_the_tool() -> Result<(), Ses
 }
 
 #[tokio::test]
+async fn resumed_reflects_create_vs_resume() -> Result<(), SessionError> {
+    // The handshake reports this so a frontend that asked to resume
+    // can note a silent fresh start (the pinned startup contract).
+    let store = temp_store("resumed-flag");
+    let factory = Factory::new(vec![text_turn("a")]);
+    let mut first = factory.into_builder(store.clone()).create("C:/w")?;
+    assert!(!first.resumed(), "a created session is fresh");
+    first.prompt("hi").await;
+    let path = first.path().to_path_buf();
+    drop(first);
+
+    let (second, _report) = Factory::new(vec![text_turn("b")])
+        .into_builder(store)
+        .resume(&path)?;
+    assert!(second.resumed(), "a resumed session continues a chain");
+    Ok(())
+}
+
+#[tokio::test]
 async fn resume_continues_the_log_and_reports_the_model() -> Result<(), SessionError> {
     let store = temp_store("resume");
     let factory = Factory::new(vec![text_turn("one"), text_turn("two")]);

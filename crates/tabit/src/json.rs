@@ -102,6 +102,7 @@ fn read_loop<R: BufRead>(
                             session_id: info.session_id.clone(),
                             session_path: info.session_path.clone(),
                             model: info.model.clone(),
+                            resumed: info.resumed,
                         },
                     );
                     initialized = true;

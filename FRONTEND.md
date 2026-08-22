@@ -59,7 +59,7 @@ size limit** — tool output can be large; buffer accordingly.
 ```
 → {"type":"initialize","protocol_version":2,"replay":true}
 ← {"type":"initialize_ack","protocol_version":2,"session_id":"…","session_path":"…",
-   "model":{"provider":"…","model":"…","thinking_level":null}}
+   "model":{"provider":"…","model":"…","thinking_level":null},"resumed":true}
 ← {"type":"replay_started","stream":"main","total":14}
 ← … the transcript as finalized events …
 ← {"type":"replay_done","stream":"main"}
@@ -84,10 +84,17 @@ new events arrive later without a version bump).
 1. Your **first line** must be
    `initialize { protocol_version, replay? }` (`replay` defaults to
    `false`). Match → `initialize_ack` with the session facts (id,
-   path, active model), then — if you asked — the replay pass, then
-   live traffic. Mismatch → `initialize_rejected { reason }` and the
+   path, active model, `resumed`), then — if you asked — the replay
+   pass, then live traffic. `resumed: false` after you asked the
+   backend to resume means the store was empty and the backend
+   **started fresh — an absorbed miss, not an error**; show a small
+   note. Mismatch → `initialize_rejected { reason }` and the
    process exits 1. A second `initialize` after a successful handshake
-   gets `protocol_error`; the connection stays open.
+   gets `protocol_error`; the connection stays open. Rejection
+   reasons come in two flavors: config/auth problems carry the
+   first-run setup guide (written for the user — display it);
+   everything else (session unreadable, model unbuildable) carries a
+   plain reason — do not treat it as a config problem.
 2. A command before `initialize`, an unparseable line, or an
    empty/whitespace-only `message` text gets `protocol_error
    { message }`; **the connection stays open**. `message` texts are

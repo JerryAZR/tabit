@@ -30,6 +30,9 @@ pub struct SessionInfo {
     pub session_path: String,
     /// The active model selection.
     pub model: ModelSelection,
+    /// Whether the session continues an existing chain (or started
+    /// fresh — see [`Session::resumed`]).
+    pub resumed: bool,
 }
 
 /// The frontend half of a session: submit commands, receive stamped
@@ -77,6 +80,7 @@ impl SessionHandle {
             session_id: session.id().to_string(),
             session_path: session.path().display().to_string(),
             model: session.selection().clone(),
+            resumed: session.resumed(),
         };
         let mailbox = session.mailbox_handle();
         let abort = session.abort_handle();

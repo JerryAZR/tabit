@@ -297,6 +297,33 @@ histories).
   warn and fall back (pi's behavior; explicit `--model` stays loud);
   and the launcher hands the GUI its exact executable (`--tabit
   <path>`), so backend-binary resolution is never a failure mode.
+- **Death classification is pinned** (ruled 2026-08, after the first
+  GUI review): every way the backend can end is classified by cause,
+  and each cause has exactly one response. The GUI never infers
+  cause from process shape, and **retry is capped at zero
+  automatic** — nothing respawns on its own; the user's click is the
+  only retry and the only rate limiter, and a persistent failure
+  reproduces the same explained screen. The table:
+
+  | cause | behavior | user sees |
+  |---|---|---|
+  | no config (first run) | `initialize_rejected` + setup guide | the guide; fix + reload |
+  | `--continue`, empty store | **absorbed**: fresh session, ack `resumed: false` | the chat; "no sessions to resume — started fresh" |
+  | malformed config / unbuildable model | rejected, plain reason (the guide is config-problems-only) | the specific reason; fix + reload |
+  | session file unreadable | rejected, plain reason | the reason; start fresh (old file untouched) |
+  | panic anywhere (incl. startup) | process exit 101 + stderr report | crash banner, report auto-shown, "send this back" |
+  | killed / abnormal exit | no frame | "terminated unexpectedly" + restart |
+  | spawn failure | GUI-side | OS reason verbatim + "if it persists, reinstall tabit" + retry |
+
+  Rationale for the retry row: a spawn failure is the environment
+  refusing, not the app misbehaving — the transient refusals
+  (antivirus lock, memory pressure) resolve on a plain re-ask, and a
+  deterministic one (broken install) keeps the reason on screen, so
+  retrying buries nothing. The absorbed miss is not a retry — it is
+  the same process answering the handshake. This pinned table
+  deletes the GUI's auto-fresh-fallback (the five-clause respawn
+  conditional): the class it papered over became backend policy.
+
 
 Folded v2 work items — flags 8 (write-behind durability), 9 (the
 stopped-kind taxonomy replacing the `PromptCancelled` umbrella), 14

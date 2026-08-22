@@ -98,6 +98,11 @@ pub enum ServerControlFrame {
         session_path: String,
         /// The active model selection.
         model: ModelSelection,
+        /// Whether the session continues an existing chain. `false`
+        /// after a `--continue` that found nothing means the backend
+        /// started fresh instead — an absorbed miss, not an error (the
+        /// pinned startup contract).
+        resumed: bool,
     },
     /// The handshake failed (version mismatch); the connection closes.
     InitializeRejected {

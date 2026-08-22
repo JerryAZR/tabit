@@ -33,11 +33,6 @@ pub struct TabitApp {
     cwd: Option<PathBuf>,
     /// The exact backend executable, handed over by the launcher.
     tabit: Option<PathBuf>,
-    /// The automatic no-sessions fallback fires at most once per
-    /// backend lifetime — a startup that keeps failing must stop and
-    /// show the banner, never spin (owner report: respawn loop).
-    /// Manual restarts reset it.
-    auto_fresh_used: bool,
 }
 
 impl TabitApp {
@@ -52,38 +47,43 @@ impl TabitApp {
             backend: None,
             cwd,
             tabit,
-            auto_fresh_used: false,
         };
-        app.start_backend(true, ctx);
+        app.start_backend(ctx);
         app
     }
 
-    fn start_backend(&mut self, resume_newest: bool, ctx: egui::Context) {
+    /// Spawn the backend with `--continue`: returning users get their
+    /// newest session; an empty store is absorbed backend-side into a
+    /// fresh start (the ack's `resumed: false` carries the note). A
+    /// spawn failure is the environment refusing — shown with the OS
+    /// reason and the reinstall hint.
+    fn start_backend(&mut self, ctx: egui::Context) {
         let cwd = self.cwd.clone();
         let tabit = self.tabit.clone();
-        match backend::spawn(cwd.as_deref(), tabit.as_deref(), resume_newest, move || {
+        match backend::spawn(cwd.as_deref(), tabit.as_deref(), move || {
             ctx.request_repaint()
         }) {
             Ok(backend) => self.backend = Some(backend),
             Err(error) => {
                 self.state.phase = Phase::Exited {
                     clean: false,
-                    reason: format!("could not spawn the tabit backend: {error}"),
+                    reason: format!(
+                        "could not start the backend: {error}. If it persists, reinstall tabit"
+                    ),
                 };
             }
         }
     }
 
-    /// Restart the backend — the manual reload: a respawn re-reads
-    /// config, auth, and sessions from disk (fix the file, click, the
-    /// fresh handshake reflects it). Always attempt `--continue`; the
-    /// no-sessions fallback covers a fresh install, and the
-    /// resume-vs-fresh guesswork stays out of the GUI.
+    /// Restart the backend — the manual reload and the only retry: a
+    /// respawn re-reads config, auth, and sessions from disk (fix the
+    /// file, click, the fresh handshake reflects it). The GUI never
+    /// respawns on its own — every death is explained on screen, and
+    /// the user's click is the rate limiter.
     fn restart(&mut self, ctx: egui::Context) {
         self.backend = None;
         self.state = GuiState::default();
-        self.auto_fresh_used = false;
-        self.start_backend(true, ctx);
+        self.start_backend(ctx);
     }
 
     /// Send the input box — the one choke point. Text leaves the box only
@@ -118,33 +118,18 @@ impl TabitApp {
 impl eframe::App for TabitApp {
     /// The no-UI half of the contract: fold backend messages into
     /// state (also runs while the window is hidden — eframe calls
-    /// logic without a paint pass).
-    fn logic(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
+    /// logic without a paint pass). Pure folding — no lifecycle
+    /// decisions live here; deaths are classified by the reducer and
+    /// every retry is the user's click.
+    fn logic(&mut self, _ctx: &egui::Context, _frame: &mut eframe::Frame) {
         let msgs = self.backend.as_ref().map(|b| b.drain()).unwrap_or_default();
         for msg in msgs {
-            let was_connecting = self.state.phase == Phase::Connecting;
             // An internal-error crash auto-opens the stderr disclosure:
             // the report is the payload, not a hidden diagnostic.
             if matches!(&msg, InMsg::BackendExited { code: Some(101) }) {
                 self.display.show_stderr = true;
             }
             self.state.reduce(msg);
-            // `--continue` with no sessions gets exactly one fresh
-            // respawn; rejections and repeated failures are never
-            // retried automatically — they land in the banner with
-            // the manual reload/restart buttons.
-            if was_connecting
-                && self.state.facts.is_none()
-                && matches!(self.state.phase, Phase::Exited { .. })
-                && !self.state.handshake_rejected
-                && !self.auto_fresh_used
-            {
-                self.auto_fresh_used = true;
-                self.backend = None;
-                self.state = GuiState::default();
-                self.start_backend(false, ctx.clone());
-                return;
-            }
         }
     }
 
@@ -204,6 +189,10 @@ impl eframe::App for TabitApp {
                     ui.label(egui::RichText::new(reason.clone()).color(color));
                     let action = if self.state.handshake_rejected {
                         "reload config / retry"
+                    } else if self.state.facts.is_none() {
+                        // No session was ever established (spawn
+                        // failure): the action is a plain retry.
+                        "retry"
                     } else {
                         "restart session"
                     };

@@ -203,7 +203,7 @@ impl SessionBuilder {
             model: self.selection.model.clone(),
             thinking_level: self.selection.thinking_level.clone(),
         });
-        Session::assemble(self, writer, Vec::new())
+        Session::assemble(self, writer, Vec::new(), false)
     }
 
     /// Resume the session stored at `path`: replay entries into context,
@@ -231,7 +231,7 @@ impl SessionBuilder {
             });
         }
         validate_selection(&self.selection, &self.config)?;
-        let mut session = Session::assemble(self, writer, context)?;
+        let mut session = Session::assemble(self, writer, context, true)?;
         let same_model = matches!(
             last,
             Some((provider, model, level))
@@ -380,6 +380,10 @@ pub struct Session {
     context: Vec<Message>,
     path: PathBuf,
     id: String,
+    /// Whether this session continues an existing chain (`resume`) or
+    /// started fresh (`create`) — reported in the handshake so a
+    /// frontend that asked to resume can note a silent fresh start.
+    resumed: bool,
 }
 
 impl Session {
@@ -809,6 +813,14 @@ impl Session {
         &self.path
     }
 
+    /// Whether this session continues an existing chain or started
+    /// fresh. A frontend that asked to resume (`--continue`) reports a
+    /// silent fresh start from this (the pinned startup contract: an
+    /// empty store is not an error).
+    pub fn resumed(&self) -> bool {
+        self.resumed
+    }
+
     /// The projected model-visible context (what the next outer loop sees).
     pub fn context(&self) -> &[Message] {
         &self.context
@@ -928,6 +940,7 @@ impl Session {
         builder: SessionBuilder,
         writer: SessionWriter,
         context: Vec<Message>,
+        resumed: bool,
     ) -> Result<Self, SessionError> {
         let path = writer.path().to_path_buf();
         let id = writer.session_id().to_string();
@@ -947,6 +960,7 @@ impl Session {
             context,
             path,
             id,
+            resumed,
         };
         let selection = session.selection.clone();
         session.rebuild_agent(&selection)?;

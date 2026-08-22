@@ -110,6 +110,7 @@ fn server_control_frames_round_trip_and_stay_distinct_from_events() {
         session_id: "s1".to_string(),
         session_path: "C:/w/.tabit/s.jsonl".to_string(),
         model: crate::model::ModelSelection::new("p", "m"),
+        resumed: false,
     };
     assert_eq!(round_trip(&ack), ack);
 

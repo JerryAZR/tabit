@@ -343,15 +343,15 @@ fn assemble_session(
     registry: ModelRegistry,
     selection: ModelSelection,
     resume_target: Option<PathBuf>,
+    store: SessionStore,
 ) -> Result<Session, String> {
-    let store = SessionStore::project_default();
     let cwd = std::env::current_dir()
         .map_err(|e| format!("cannot determine the working directory: {e}"))?;
     // Built once per process: the prompt must stay byte-stable for the
     // provider's prompt cache (see the prompt module docs).
     let preamble = build_system_prompt(&cwd).map_err(|e| e.to_string())?;
     let mut builder = SessionBuilder::new(
-        store.clone(),
+        store,
         registry.config().clone(),
         registry.auth().clone(),
         selection,
@@ -484,11 +484,25 @@ API keys (only if the endpoint needs one) go in ~/.tabit/auth.toml:
     format!("first-run setup needed: {detail}\n\n{example}\n")
 }
 
-/// JSON-mode setup failure: one `initialize_rejected` frame carrying
-/// the guide to stdout (a setup screen, not a crash), the same on
-/// stderr, exit 1.
+/// JSON-mode setup failure — the config/auth file is the problem — so
+/// the rejection carries the first-run guide (a fresh install has no
+/// providers.toml — the most common first run; the message must teach,
+/// not scare).
 fn json_setup_failure(detail: &str) -> Result<i32, String> {
-    let reason = setup_guide(detail);
+    json_reject(setup_guide(detail))
+}
+
+/// JSON-mode startup failure that is *not* a config problem (session
+/// unreadable, model unbuildable, cwd gone): reject with the plain
+/// reason — the setup guide would be advice for a problem the user
+/// does not have.
+fn json_startup_failure(detail: &str) -> Result<i32, String> {
+    json_reject(format!("could not start the session: {detail}"))
+}
+
+/// One `initialize_rejected` frame to stdout (a startup screen, not a
+/// crash), the same text on stderr, exit 1.
+fn json_reject(reason: String) -> Result<i32, String> {
     let frame = tabit_protocol::ServerControlFrame::InitializeRejected {
         reason: reason.clone(),
     };
@@ -526,13 +540,21 @@ fn run() -> Result<i32, String> {
                 (Ok(config), Ok(auth)) => (Arc::new(config), Arc::new(auth)),
                 (Err(detail), _) | (_, Err(detail)) => return json_setup_failure(&detail),
             };
-            // Assemble failures (model unbuildable, session unreadable)
-            // reject the handshake with the reason instead of dying
-            // stderr-only — the GUI shows it, and its reload/restart
-            // buttons are the recovery.
-            let session = match assemble(&args, &config, &auth) {
+            // Assemble failures (session unreadable, model unbuildable)
+            // reject the handshake with the plain reason — not the
+            // config setup guide, which would be advice for a problem
+            // the user does not have. A `--continue` that finds no
+            // sessions is absorbed into a fresh start (the pinned
+            // startup contract; the ack's `resumed: false` says so).
+            let session = match assemble(
+                &args,
+                &config,
+                &auth,
+                &SessionStore::project_default(),
+                ContinueMiss::StartFresh,
+            ) {
                 Ok(session) => session,
-                Err(detail) => return json_setup_failure(&detail),
+                Err(detail) => return json_startup_failure(&detail),
             };
             print_banner(&session);
             let runtime = tokio::runtime::Builder::new_current_thread()
@@ -580,7 +602,13 @@ fn print_mode(
                 .to_string(),
         );
     }
-    let mut session = assemble(args, config, auth)?;
+    let mut session = assemble(
+        args,
+        config,
+        auth,
+        &SessionStore::project_default(),
+        ContinueMiss::Fail,
+    )?;
     if let Some(turns) = args.rewind {
         let rewind = session.rewind(turns).map_err(|e| e.to_string())?;
         println!(
@@ -663,28 +691,42 @@ fn print_mode(
     }
 }
 
+/// What happens when `--continue` finds nothing to resume. Print mode
+/// fails loudly (a terminal user asked explicitly); JSON mode starts
+/// fresh — the pinned startup contract: the chat UI is unconditional,
+/// and an empty store (a brand-new project) is not an error. The
+/// handshake's `resumed: false` tells the frontend what happened.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum ContinueMiss {
+    Fail,
+    StartFresh,
+}
+
 /// Resolve config/auth into a session per the args (model selection,
-/// resume target, tools, preamble).
+/// resume target, tools, preamble). `store` is injected so tests drive
+/// a temp store instead of the repo's.
 fn assemble(
     args: &Args,
     config: &Arc<TabitConfig>,
     auth: &Arc<AuthConfig>,
+    store: &SessionStore,
+    miss: ContinueMiss,
 ) -> Result<Session, String> {
     // Default-model resolution (registry): an explicit --model wins,
     // then the resumed session's last model, then default_model in
     // providers.toml, then the first configured model.
     let registry = ModelRegistry::new(config.clone(), auth.clone());
-    let store = SessionStore::project_default();
     let resume_target = match (&args.session, args.continue_newest) {
         (Some(path), _) => Some(path.clone()),
         (None, true) => {
-            let newest = store
-                .list()
-                .map_err(|e| e.to_string())?
-                .into_iter()
-                .next()
-                .ok_or_else(|| format!("no sessions yet in {}", store.dir().display()))?;
-            Some(newest.path)
+            let newest = store.list().map_err(|e| e.to_string())?.into_iter().next();
+            match (newest, miss) {
+                (Some(newest), _) => Some(newest.path),
+                (None, ContinueMiss::Fail) => {
+                    return Err(format!("no sessions yet in {}", store.dir().display()));
+                }
+                (None, ContinueMiss::StartFresh) => None,
+            }
         }
         (None, false) => None,
     };
@@ -700,7 +742,7 @@ fn assemble(
     let selection = registry
         .default_selection(explicit, resumed)
         .map_err(|e| e.to_string())?;
-    assemble_session(args, registry, selection, resume_target)
+    assemble_session(args, registry, selection, resume_target, store.clone())
 }
 
 /// Internal errors crash the process (owner ruling): a panic anywhere —
@@ -916,6 +958,28 @@ id = "m"
             .default_selection(None, None)
             .expect_err("nothing configured");
         assert!(error.to_string().contains("no models"), "{error}");
+    }
+
+    #[test]
+    fn continue_miss_is_loud_in_print_and_absorbed_in_json() {
+        let dir = std::env::temp_dir().join(format!("tabit-assemble-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        let store = SessionStore::new(&dir);
+        let config = Arc::new(test_config());
+        let auth = Arc::new(AuthConfig::default());
+        let cont_print = args(&["--continue", "-p", "hi"]).expect("valid print combo");
+
+        let error = match assemble(&cont_print, &config, &auth, &store, ContinueMiss::Fail) {
+            Err(error) => error,
+            Ok(_) => panic!("print mode fails loudly on an empty store"),
+        };
+        assert!(error.contains("no sessions yet"), "{error}");
+
+        let cont_json = args(&["--continue", "--json"]).expect("valid json combo");
+        let session = assemble(&cont_json, &config, &auth, &store, ContinueMiss::StartFresh)
+            .expect("json mode starts fresh");
+        assert!(!session.resumed(), "the fresh start is reported");
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     fn test_config() -> TabitConfig {
