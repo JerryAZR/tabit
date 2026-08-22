@@ -31,14 +31,12 @@ pub struct TabitApp {
     display: Display,
     backend: Option<Backend>,
     cwd: Option<PathBuf>,
-    /// A resume attempt that died before the handshake gets one
-    /// fresh respawn (`--continue` with no sessions is a
-    /// pre-handshake exit-1; FRONTEND.md §3.5).
-    retried_fresh: bool,
+    /// The exact backend executable, handed over by the launcher.
+    tabit: Option<PathBuf>,
 }
 
 impl TabitApp {
-    pub fn new(cwd: Option<PathBuf>, ctx: egui::Context) -> Self {
+    pub fn new(cwd: Option<PathBuf>, tabit: Option<PathBuf>, ctx: egui::Context) -> Self {
         theme::apply(&ctx);
         let mut app = Self {
             state: GuiState::default(),
@@ -48,7 +46,7 @@ impl TabitApp {
             },
             backend: None,
             cwd,
-            retried_fresh: false,
+            tabit,
         };
         app.start_backend(true, ctx);
         app
@@ -56,7 +54,10 @@ impl TabitApp {
 
     fn start_backend(&mut self, resume_newest: bool, ctx: egui::Context) {
         let cwd = self.cwd.clone();
-        match backend::spawn(cwd.as_deref(), resume_newest, move || ctx.request_repaint()) {
+        let tabit = self.tabit.clone();
+        match backend::spawn(cwd.as_deref(), tabit.as_deref(), resume_newest, move || {
+            ctx.request_repaint()
+        }) {
             Ok(backend) => self.backend = Some(backend),
             Err(error) => {
                 self.state.phase = Phase::Exited {
@@ -67,14 +68,15 @@ impl TabitApp {
         }
     }
 
-    /// Restart after an exit: resume if a session now exists (a first
-    /// message may have created one), else fresh.
+    /// Restart the backend — the manual reload: a respawn re-reads
+    /// config, auth, and sessions from disk (fix the file, click, the
+    /// fresh handshake reflects it). Always attempt `--continue`; the
+    /// no-sessions fallback covers a fresh install, and the
+    /// resume-vs-fresh guesswork stays out of the GUI.
     fn restart(&mut self, ctx: egui::Context) {
-        let resume = self.state.facts.is_some() || !self.retried_fresh;
-        self.retried_fresh = true;
         self.backend = None;
         self.state = GuiState::default();
-        self.start_backend(resume, ctx);
+        self.start_backend(true, ctx);
     }
 
     fn send(&mut self) {
@@ -108,13 +110,14 @@ impl eframe::App for TabitApp {
         for msg in msgs {
             let was_connecting = self.state.phase == Phase::Connecting;
             self.state.reduce(msg);
+            // `--continue` with no sessions gets exactly one fresh
+            // respawn; a rejection (setup problems) is never retried
+            // automatically.
             if was_connecting
                 && self.state.facts.is_none()
                 && matches!(self.state.phase, Phase::Exited { .. })
                 && !self.state.handshake_rejected
-                && !self.retried_fresh
             {
-                self.retried_fresh = true;
                 self.backend = None;
                 self.state = GuiState::default();
                 self.start_backend(false, ctx.clone());
@@ -177,7 +180,12 @@ impl eframe::App for TabitApp {
                 Phase::Exited { clean, reason } => {
                     let color = if *clean { theme::MUTED } else { theme::ERROR };
                     ui.label(egui::RichText::new(reason.clone()).color(color));
-                    if ui.button("restart session").clicked() {
+                    let action = if self.state.handshake_rejected {
+                        "reload config / retry"
+                    } else {
+                        "restart session"
+                    };
+                    if ui.button(action).clicked() {
                         self.restart(ctx.clone());
                     }
                     if !*clean && !stderr_tail.is_empty() {

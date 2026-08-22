@@ -31,7 +31,10 @@ tabit --json [--continue | --session <path>] [--model <ref>]
   sessions`, where project root is the nearest ancestor directory
   containing `.git`, else the cwd. Spawn the backend in the project
   directory. `--model <ref>` is `provider/model` or a bare model id
-  when unambiguous; `--max-turns <n>` also exists.
+  when unambiguous; `--max-turns <n>` also exists. The `tabit` launcher
+  hands the GUI its exact executable via `--tabit <path>` — "can't
+  find the backend" is not a failure mode in the supported flow
+  (`TABIT_BIN` remains a development override).
 - **Local or remote, same edge.** Locally the backend is a child
   process; remotely it is the same child spawned on the far side of
   `ssh` with stdio forwarded. Nothing in the protocol distinguishes
@@ -101,7 +104,9 @@ new events arrive later without a version bump).
    rejection (including **first-run setup failures** — no config file:
    the backend sends `initialize_rejected` whose reason carries a
    setup guide, then exits; display the reason, it is written for the
-   user), a transport-thread panic, or a pre-handshake spawn failure
+   user — and recovery is manual: the user fixes the file and the
+   frontend respawns the backend; config is not re-read per request by
+   design), a transport-thread panic, or a pre-handshake spawn failure
    (bad flags, missing session file, unresolvable `--model` — stderr
    message, no stdout frames). But `0` also covers non-clean
    ends: a broken pipe, and a backend worker panic (the stream simply

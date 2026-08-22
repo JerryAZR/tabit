@@ -102,8 +102,9 @@ impl ModelRegistry {
     /// Precedence: `explicit` (a caller-provided choice, e.g. `--model`),
     /// then `resumed` (the session log's last model), then the configured
     /// `default_model`, then the first configured model. A `resumed`
-    /// reference that no longer resolves is a loud error — the session
-    /// was last used with a provider that is no longer configured.
+    /// reference that no longer resolves warns and falls back (it is
+    /// a preference, like default_model); only an explicit selection
+    /// fails loudly.
     pub fn default_selection(
         &self,
         explicit: Option<ModelSelection>,
@@ -113,17 +114,19 @@ impl ModelRegistry {
             validate_selection(&explicit, &self.inner.config)?;
             return Ok(explicit);
         }
+        // A resumed selection is a preference too (owner ruling, pi
+        // precedent): the session's last model may be gone from
+        // config — warn and fall through to the default_model/first
+        // chain instead of blocking. Explicit selections (the arm
+        // above) stay loud; the user asked for exactly that model.
         if let Some(resumed) = resumed {
-            validate_selection(&resumed, &self.inner.config).map_err(|error| match error {
-                SessionError::Config { message } => SessionError::Config {
-                    message: format!(
-                        "{message} — the resumed session last used it; pass \
-                             --model or restore the provider"
-                    ),
-                },
-                other => other,
-            })?;
-            return Ok(resumed);
+            match validate_selection(&resumed, &self.inner.config) {
+                Ok(()) => return Ok(resumed),
+                Err(error) => eprintln!(
+                    "warning: the resumed session's model `{}/{}` is not usable ({}); falling back to default_model or the first configured model",
+                    resumed.provider, resumed.model, error
+                ),
+            }
         }
         // `default_model` is a preference, not a hard reference: a
         // stale or ambiguous entry degrades to the first configured

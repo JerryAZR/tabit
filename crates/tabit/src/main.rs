@@ -373,8 +373,15 @@ fn launch_gui(path: Option<&std::path::Path>) -> Result<i32, String> {
         .open(log_dir.join("gui.log"))
         .map_err(|e| e.to_string())?;
 
+    // The GUI never guesses where the backend is: hand it the exact
+    // executable that launched it ("can't find tabit" is not a valid
+    // failure mode in the supported flow).
+    let tabit_exe =
+        std::env::current_exe().map_err(|e| format!("cannot resolve the tabit executable: {e}"))?;
     let mut command = Command::new(bin);
     command
+        .arg("--tabit")
+        .arg(&tabit_exe)
         .current_dir(&cwd)
         .stdin(Stdio::null())
         .stdout(Stdio::null())

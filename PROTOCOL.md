@@ -242,6 +242,21 @@ histories).
   transcript exactly once per open (the replay pass); there are no
   per-turn re-sends.
 
+- **Startup & recovery (ruled 2026-08, after the pi/codex/opencode
+  survey): the chat UI is unconditional; config is not re-read per
+  request.** Setup failures (config missing/malformed, zero models)
+  reject the handshake with the setup guide as the reason; the GUI
+  window stays alive showing the guide, and recovery is a manual
+  reload — the GUI respawns the backend, which re-reads config, auth,
+  and sessions (an in-process reload command is deferred until
+  respawns actually annoy, which v2 replay should prevent). Lazy
+  per-request resolution was ruled out: it complicates the
+  architecture for no UX gain over a button. Two adjacent rulings:
+  a resumed session's model that no longer resolves is a preference —
+  warn and fall back (pi's behavior; explicit `--model` stays loud);
+  and the launcher hands the GUI its exact executable (`--tabit
+  <path>`), so backend-binary resolution is never a failure mode.
+
 Folded v2 work items — flags 8 (write-behind durability), 9 (the
 stopped-kind taxonomy replacing the `PromptCancelled` umbrella), 14
 (`run_failed` kinds), 16 (structural ack-before-events), 19 (the

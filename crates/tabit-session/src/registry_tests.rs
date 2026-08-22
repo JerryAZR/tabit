@@ -79,18 +79,15 @@ api_key = "dummy"
 }
 
 #[test]
-fn default_selection_stale_resumed_is_a_loud_hint() {
+fn default_selection_stale_resumed_falls_back_with_a_warning() {
+    // Owner ruling (pi precedent): a resumed session's last model is a
+    // preference — gone from config means warn + fall back, never a
+    // blocked startup. Explicit selections keep their loud failure.
     let registry = default_registry();
-    let err = registry
+    let selection = registry
         .default_selection(None, Some(ModelSelection::new("gone", "m")))
-        .expect_err("stale resumed");
-    match err {
-        SessionError::Config { message } => {
-            assert!(message.contains("provider `gone`"), "{message}");
-            assert!(message.contains("--model"), "{message}");
-        }
-        other => panic!("expected config error, got {other:?}"),
-    }
+        .expect("falls back instead of failing");
+    assert_eq!(selection.model, "m", "the first configured model");
 }
 
 #[test]

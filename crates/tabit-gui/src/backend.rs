@@ -28,10 +28,14 @@ pub struct Backend {
 
 type Sender = std::sync::mpsc::Sender<String>;
 
-/// Where to find the `tabit` binary: explicit override, the sibling of
-/// this executable (cargo puts workspace binaries side by side), then
-/// PATH.
-fn tabit_bin() -> PathBuf {
+/// Where to find the `tabit` binary. The supported flow needs no
+/// guessing: the launcher hands its exact path over with `--tabit`.
+/// The fallbacks (env override, sibling, PATH) serve direct
+/// `cargo run -p tabit-gui` development.
+fn tabit_bin(launcher_provided: Option<&Path>) -> PathBuf {
+    if let Some(path) = launcher_provided {
+        return path.to_path_buf();
+    }
     if let Ok(path) = std::env::var("TABIT_BIN") {
         return PathBuf::from(path);
     }
@@ -53,10 +57,11 @@ fn tabit_bin() -> PathBuf {
 /// message so the UI wakes immediately.
 pub fn spawn(
     cwd: Option<&Path>,
+    tabit: Option<&Path>,
     resume_newest: bool,
     repaint: impl Fn() + Send + 'static,
 ) -> std::io::Result<Backend> {
-    let mut command = Command::new(tabit_bin());
+    let mut command = Command::new(tabit_bin(tabit));
     command.arg("--json");
     if resume_newest {
         command.arg("--continue");
