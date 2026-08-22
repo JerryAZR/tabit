@@ -46,9 +46,6 @@ pub enum Error {
         /// Configured maximum server-requested delay.
         cap: Duration,
     },
-    /// No response data arrived within the configured idle timeout.
-    #[error("no data arrived within the configured idle timeout of {0:?}; the connection stalled")]
-    IdleTimeout(Duration),
     #[error("Header value outside of legal range: {0}")]
     InvalidHeaderValue(#[from] http::header::InvalidHeaderValue),
     #[error("Request in error state, cannot access headers")]
@@ -208,23 +205,23 @@ async fn non_success_status_error(response: reqwest::Response) -> Error {
     }
 }
 
-/// Wrap a streaming body so each chunk must arrive within `idle_timeout`.
-///
-/// If no chunk arrives within the window, the stream yields
-/// [`Error::IdleTimeout`] once and ends. The wrapper only observes the stream;
-/// chunk contents pass through unchanged.
-pub(crate) fn idle_timeout_stream(stream: BoxedStream, idle_timeout: Duration) -> BoxedStream {
+/// Warn on a stalled stream, never kill it (owner ruling: a slow
+/// local server must be able to think in silence — the app does not
+/// decide the wait is over). One stderr warning per interval of
+/// continued silence; the stream ends only when it ends.
+pub(crate) fn stall_warning_stream(stream: BoxedStream, interval: Duration) -> BoxedStream {
     use futures::StreamExt;
 
     Box::pin(async_stream::stream! {
         let mut stream = stream;
         loop {
-            match crate::wasm_compat::timeout(idle_timeout, stream.next()).await {
+            match crate::wasm_compat::timeout(interval, stream.next()).await {
                 Ok(Some(chunk)) => yield chunk,
                 Ok(None) => break,
                 Err(_elapsed) => {
-                    yield Err(Error::IdleTimeout(idle_timeout));
-                    break;
+                    eprintln!(
+                        "warning: no stream data for {interval:?}; still waiting                          (the stream is not killed)"
+                    );
                 }
             }
         }
@@ -533,36 +530,29 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn idle_timeout_stream_errors_on_a_stalled_stream() {
+    async fn stall_warning_stream_never_kills_a_stalled_stream() {
         use futures::StreamExt;
 
+        // Owner ruling: a stalled stream waits forever, warning
+        // periodically — it must not error. Several intervals pass
+        // (warnings fire to stderr); the poll stays pending.
         let stalled: BoxedStream = Box::pin(futures::stream::pending());
-        let mut guarded = idle_timeout_stream(stalled, Duration::from_millis(25));
+        let mut guarded = stall_warning_stream(stalled, Duration::from_millis(25));
 
-        let error = guarded
-            .next()
-            .await
-            .expect("timeout must surface an error item")
-            .expect_err("the error names the idle timeout");
-        assert!(
-            matches!(error, Error::IdleTimeout(timeout) if timeout == Duration::from_millis(25)),
-            "got: {error}"
-        );
-        assert!(
-            guarded.next().await.is_none(),
-            "the stream ends after the timeout"
-        );
+        let still_pending = tokio::time::timeout(Duration::from_millis(150), guarded.next()).await;
+        assert!(still_pending.is_err(), "a stalled stream stays pending");
+        drop(guarded);
     }
 
     #[tokio::test]
-    async fn idle_timeout_stream_passes_chunks_through() {
+    async fn stall_warning_stream_passes_chunks_through() {
         use futures::StreamExt;
 
         let chunks: BoxedStream = Box::pin(futures::stream::iter([
             Ok(Bytes::from_static(b"one")),
             Ok(Bytes::from_static(b"two")),
         ]));
-        let mut guarded = idle_timeout_stream(chunks, Duration::from_secs(60));
+        let mut guarded = stall_warning_stream(chunks, Duration::from_secs(60));
 
         match guarded.next().await {
             Some(Ok(chunk)) => assert_eq!(chunk, Bytes::from_static(b"one")),

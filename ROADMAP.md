@@ -11,7 +11,10 @@ that pi's `pi-ai` provides, at or above its robustness:
 - **rig-core**: anthropic + openai (Responses API) providers over a shared
   openai-compatible engine; pi-policy retry (408/409/429/5xx + x-should-retry,
   retry-after honored, 60s server-delay cap, jittered 0.5s·2ⁿ→8s backoff,
-  default 2 retries), connect/idle timeouts, typed transport errors,
+  default 2 retries), connect timeouts, stall warnings (a stalled stream or
+  body warns every 120s and keeps waiting — never killed; owner ruling: a
+  slow local server must be able to think in silence, only the user aborts),
+  typed transport errors,
   per-index content-block routing with loud interleave guards, orphan
   tool-result validation, cache-usage reporting, refusal surfacing.
 - **rig-agent**: agent loop with lifecycle hooks, sans-IO serializable

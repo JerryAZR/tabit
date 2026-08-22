@@ -27,7 +27,7 @@ struct TransportOptions {
     connect_timeout: Duration,
     /// Maximum time without inbound data before a request fails: per-chunk for
     /// streaming bodies, overall for unary bodies.
-    idle_timeout: Duration,
+    stall_warning: Duration,
 }
 
 impl Default for TransportOptions {
@@ -35,7 +35,7 @@ impl Default for TransportOptions {
         Self {
             retry: http_client::retry::RetryConfig::default(),
             connect_timeout: Duration::from_secs(10),
-            idle_timeout: Duration::from_secs(120),
+            stall_warning: Duration::from_secs(120),
         }
     }
 }
@@ -395,7 +395,7 @@ where
         let body: Bytes = body.into();
         let http = Arc::clone(&self.http_client);
         let retry = self.transport.retry.clone();
-        let idle_timeout = self.transport.idle_timeout;
+        let stall_warning = self.transport.stall_warning;
 
         async move {
             let response = retry
@@ -403,15 +403,21 @@ where
                 .await?;
 
             // The response (2xx) is about to be handed to the caller, so no
-            // more retries from here on; instead bound how long the deferred
-            // body read may stall.
+            // more retries from here on. A stalled body read warns
+            // periodically and keeps waiting (owner ruling: never kill).
             Ok(response.map(|body| -> LazyBody<U> {
                 Box::pin(async move {
-                    crate::wasm_compat::timeout(idle_timeout, body)
-                        .await
-                        .unwrap_or_else(|_elapsed| {
-                            Err(http_client::Error::IdleTimeout(idle_timeout))
-                        })
+                    let mut body = std::pin::pin!(body);
+                    loop {
+                        match crate::wasm_compat::timeout(stall_warning, body.as_mut()).await {
+                            Ok(result) => return result,
+                            Err(_elapsed) => {
+                                eprintln!(
+                                    "warning: no response data for {stall_warning:?}; still                                      waiting (the request is not killed)"
+                                );
+                            }
+                        }
+                    }
                 })
             }))
         }
@@ -446,7 +452,7 @@ where
         let body: Bytes = body.into();
         let http = Arc::clone(&self.http_client);
         let retry = self.transport.retry.clone();
-        let idle_timeout = self.transport.idle_timeout;
+        let stall_warning = self.transport.stall_warning;
 
         async move {
             // Retry boundary: once a 2xx response is returned below, the
@@ -458,9 +464,8 @@ where
                 })
                 .await?;
 
-            // Guard each chunk with the idle timeout so a stalled stream fails
-            // loudly instead of hanging forever.
-            Ok(response.map(|stream| http_client::idle_timeout_stream(stream, idle_timeout)))
+            // Warn on stalls, never kill (owner ruling).
+            Ok(response.map(|stream| http_client::stall_warning_stream(stream, stall_warning)))
         }
     }
 }
@@ -757,8 +762,8 @@ where
     /// arrives within the window the stream fails with an error naming the
     /// timeout. For regular (non-streaming) requests it bounds the overall
     /// body read.
-    pub fn idle_timeout(mut self, idle_timeout: Duration) -> Self {
-        self.transport.idle_timeout = idle_timeout;
+    pub fn stall_warning_every(mut self, interval: Duration) -> Self {
+        self.transport.stall_warning = interval;
         self
     }
 
@@ -1508,7 +1513,7 @@ mod tests {
             assert_eq!(defaults.retry.max_retries, 2);
             assert_eq!(defaults.retry.max_server_delay, Duration::from_secs(60));
             assert_eq!(defaults.connect_timeout, Duration::from_secs(10));
-            assert_eq!(defaults.idle_timeout, Duration::from_secs(120));
+            assert_eq!(defaults.stall_warning, Duration::from_secs(120));
         }
 
         #[tokio::test]
@@ -1806,14 +1811,17 @@ mod tests {
         }
 
         #[tokio::test]
-        async fn stalled_stream_fails_with_the_idle_timeout() {
+        async fn stalled_streams_wait_forever_with_periodic_warnings() {
+            // Owner ruling: a stalled stream is never killed — a slow
+            // local server must be able to think in silence. Several
+            // warning intervals pass; the poll stays pending.
             let backend = ScriptedTransport::new(vec![], vec![StreamOutcome::Pending]);
             let client = Client::<TestExt, reqwest::Client>::builder()
                 .api_key("test-key")
-                .idle_timeout(Duration::from_millis(25))
-                .http_client(backend.clone())
+                .stall_warning_every(Duration::from_millis(25))
+                .http_client(backend)
                 .build()
-                .expect("client builds with a short idle timeout");
+                .expect("client builds with a short warning interval");
 
             let response = client
                 .send_streaming(streaming_request(&client))
@@ -1821,45 +1829,29 @@ mod tests {
                 .expect("the stalled stream still connects");
 
             let mut stream = response.into_body();
-            let error = stream
-                .next()
-                .await
-                .expect("timeout surfaces an error item")
-                .expect_err("no chunk arrived in time");
-            assert!(
-                matches!(
-                    error,
-                    http_client::Error::IdleTimeout(timeout)
-                        if timeout == Duration::from_millis(25)
-                ),
-                "error must name the timeout, got: {error}"
-            );
-            assert!(stream.next().await.is_none(), "the stream ends");
+            let still_pending =
+                tokio::time::timeout(Duration::from_millis(150), stream.next()).await;
+            assert!(still_pending.is_err(), "a stalled stream stays pending");
         }
 
         #[tokio::test]
-        async fn stalled_unary_body_fails_with_the_idle_timeout() {
+        async fn stalled_unary_body_waits_forever_with_periodic_warnings() {
             let backend = ScriptedTransport::new(vec![UnaryOutcome::BodyPending], vec![]);
             let client = Client::<TestExt, reqwest::Client>::builder()
                 .api_key("test-key")
-                .idle_timeout(Duration::from_millis(25))
+                .stall_warning_every(Duration::from_millis(25))
                 .http_client(backend)
                 .build()
-                .expect("client builds with a short idle timeout");
+                .expect("client builds with a short warning interval");
 
             let response = client
                 .send::<_, Bytes>(unary_request(&client))
                 .await
                 .expect("the response headers arrive");
 
-            let error = response
-                .into_body()
-                .await
-                .expect_err("the body never resolves");
-            assert!(
-                matches!(error, http_client::Error::IdleTimeout(_)),
-                "overall body read is bounded by the idle timeout, got: {error}"
-            );
+            let still_pending =
+                tokio::time::timeout(Duration::from_millis(150), response.into_body()).await;
+            assert!(still_pending.is_err(), "a stalled body stays pending");
         }
 
         #[tokio::test]
