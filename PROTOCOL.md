@@ -42,6 +42,21 @@ v1 as shipped; the v2 section below amends where noted.
 - **Termination contract**: `close_commands()` (or dropping every
   sender) ends the actor after the in-flight run; the event stream then
   closes. Close is not a barrier — commands already queued are honored.
+- **Interaction rides the ask pattern (ruled 2026-08, shipped with
+  the permission milestone)**: `interaction_request { id, title,
+  body, options, free_text }` (an event) answered by
+  `interaction_response { id, option?, text? }` (a command — total
+  semantics: at least one of option/text; an unknown id or a dead
+  asker logs and drops, like abort-while-idle). One hub routes
+  answers by id to the awaiting asker; askers are tool gates
+  (permission — options [Allow, Always allow, Deny], the free-text
+  denial reason is delivered to the model) and tool bodies (ask-the-
+  user tools — the answer becomes the result; a tool may ask
+  repeatedly). Every unanswered request's death coincides with a run
+  terminal, so the frontend closes cards on terminals — no close
+  event exists. Requests never persist or replay; the durable record
+  is the tool result. ENGINE.md's tool-phase section owns the
+  design; EXTENSIONS.md records the standard-model ruling.
 
 ## The outer loop
 
@@ -249,17 +264,14 @@ histories).
 - **Session listing stays one-shot.** Scan on startup and explicit
   reload (`tabit --list --json` — local or over ssh); no watch, no
   long-lived listing command.
-- **`interaction_request` (generic, reserved).** One pop-up shape for
-  permission and future ask-the-user tools:
-  `interaction_request { id, title, body, options: [{ label,
-  description? }], free_text: bool }` answered by
-  `interaction_response { id, option, text? }`. Permission is options
-  [Allow, Always allow, Deny] with `free_text` on (the rejection
-  reason goes back to the model, per codex's `Denied { rejection }`);
-  the shape is deliberately generic — any future ask-the-user tool
-  would reuse it; none is planned. v2 reserves the wire shape;
-  implementation lands with the permission milestone (ENGINE.md's
-  planned pausable tool-path stage).
+- **`interaction_request` — shipped** (2026-08, with the permission
+  milestone; the full ruling lives in Locked design above). The
+  reserved-shape question that stayed open through v2 design — edge
+  semantics — settled with it: run terminals close every pending
+  request (the frontend rule), orphaned responses are logged no-ops,
+  and nothing replays. The generic shape stands: any future
+  ask-the-user surface reuses it rather than minting a new pop-up
+  frame (EXTENSIONS.md).
 - **`tabit-protocol` crate (flag 13 resolved by this)**: extract the
   vocabulary from tabit-session before GUI work — the GUI is Rust and
   shares the serde types (no codegen) without depending on persistence

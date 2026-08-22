@@ -187,10 +187,11 @@ during design review, the verdict is recorded.
   and can fix it; the run never stops on the model's own error (there
   is nothing a user could do about it). *Single concern: custody.
   Execution itself (concurrency, drop guards) is the driver's.
-  Validating is deliberately not a separate state — with no
-  interactive recovery it never pauses, and states exist where the
-  machine can await input. The permission stage below will be one, and
-  will be added when it exists.*
+  Validating is deliberately not a separate state — interaction
+  landed driver-side (see the tool phase below), and the machine
+  deliberately gains no state for it: the machine awaits input only
+  where the machine itself decides (classification, steering,
+  budget), and no interaction decision is the machine's.*
 - **DrainingSteers** — **the one and only drain point**: take the whole
   queue, append to history, set `steers_drained` (which resets every
   retry streak). Legality is structural — the machine offers the
@@ -274,14 +275,70 @@ Recorded where the code had to pick; revisit on review:
 - `AgentRunStep::Done` carries `Box<PromptResponse>` (the step enum's
   size is dominated by it).
 
-## Future branch points
+## The tool phase (driver-side, ruled 2026-08)
 
-Permission prompts insert an `AwaitingPermission` stage in the tool
-path before execution: allow → execute; deny → synthetic result →
-converge at the drain; "always" → allow and remember. It will be the
-tool path's first genuinely pausable stage — the insertion point is
-explicit, and branching is added by inserting states when they exist,
-not by growing conditionals inside existing ones.
+The batch's execution is a designed driver subsystem — the machine's
+`ExecutingTools` stays custody-only, but what happens under it is
+specified here, not accreted.
+
+**The chain is the unit.** Each admitted call runs one independent
+chain: **gate → body → post** —
+
+- *gate* — the `ToolCall` hook chain (argument rewrites, skips, the
+  permission ask);
+- *body* — dispatch of the tool itself (concurrency-bounded), which may
+  park on user asks (the `ToolContext` interaction capability; a tool
+  may ask any number of times);
+- *post* — the `ToolResult` hook chain.
+
+Chains run independently — in call order at `tool_concurrency` 1,
+bounded-concurrent above it — with **no phase barriers**: one chain
+parked on a permission card must not head-of-line-block its harmless
+siblings (ruled: 1-in-10 denied says nothing about the other 9). A
+parked gate occupies a concurrency slot; a two-pool split (gates
+exempt from the body budget) is the named refinement if card-heavy
+batches ever starve execution.
+
+**The batch is a sealed unit once launched.** Launch (admission +
+the upfront model tool-call events) → run (chains) → settle (collect
+everything, surface and commit results in call order,
+unconditionally). Settlement cannot be stranded: every chain is
+bounded by its own timeout or the user.
+
+**Stop taxonomy (ruled)** — three stop-shaped needs, one mechanism
+each; **nothing may kill a batch**:
+
+| need | mechanism | semantics |
+|---|---|---|
+| stop now | **abort** (the token leaf) | preempts at any await; `run_aborted`; queue discarded; unanswered calls get synthesized interrupted results. Callable by the user, frontends, and any hook constructed with the leaf. |
+| don't continue after this batch | **post-tool `Stop` → the `terminating` flag** | no effect on the current batch — unstarted chains still run; the flag is fed only after `tool_results` commits, so the tool phase is flag-blind by construction. Steers still drain; `Deciding`'s another-turn check is overridden → `run_failed(reason)`; history carries forward. |
+| don't run this call | **`Skip`** | in-band synthetic result; the model is told; siblings unaffected. |
+
+The pre-tool `Stop` action is deleted (its niches compose from
+`Skip` + abort), and the fail-fast machinery with it (`first_error`,
+the start-gate flag, lowest-index-error selection,
+drain-vs-drop): `run_single_tool` has no error path, and settlement
+is unconditional — nothing exists that could strand a parked ask.
+
+**Interaction — the ask pattern.** One hub (the actor's third shared
+leaf beside the mailbox and abort): an ask registers a oneshot in
+the pending map, emits `interaction_request` on the event channel,
+and awaits; `interaction_response` routes by id (unknown id or dead
+receiver: log and drop — total semantics, like abort-while-idle).
+Two sites share the one primitive: the gate (a permission hook
+constructed with the hub handle — deny maps to `Skip`) and the body
+(`ToolContext` capability). Questions die with their chains — drop
+is the cancellation — and run terminals clear the pending map; the
+frontend closes cards on run terminals (no close event exists or is
+needed: every unanswered question's death coincides with a run
+terminal, structurally). Interaction requests never persist or
+replay; the durable record is the tool result (the answer or denial
+the model saw).
+
+Pause points are enumerable — only context-carrying sites can ask
+(today: the tool-call gate by construction, the tool body via
+`ToolContext`); other hook points gain the capability when a
+consumer exists.
 
 ## Migration map (old → new)
 

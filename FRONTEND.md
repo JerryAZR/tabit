@@ -163,7 +163,7 @@ All commands are total — there is no rejection. Outcomes are events.
 | `abort` | any time | running: preempts (`run_aborted`); discards messages queued at abort time (`messages_discarded`, omitted when none). Post-abort messages queue normally and start the next run. |
 | `checkout { entry_id }` | idle only | moves the active chain; see §7. Compose abort-then-checkout if a run is live. |
 | `model { provider, model, thinking_level? }` | idle only | the next run uses this selection; validates against the backend's config. |
-| `interaction_response { id, option, text? }` | after an `interaction_request` | answers a pending request; see §8. |
+| `interaction_response { id, option?, text? }` | after an `interaction_request` | answers a pending request; at least one of option/text; see §8. |
 
 `checkout` and `model` are idle-only by convention, not by error: a
 frontend derives idle/run state from events (§9) and holds the command
@@ -185,6 +185,7 @@ unstamped control frames; everything else is a stamped event.
 | `text_delta` | `turn_id`, `text` | assistant text; appends within the turn. Full-text exactly once in replay. |
 | `reasoning_delta` | `turn_id`, `id`, `reasoning` | model reasoning; `id` correlates blocks within the turn (several may interleave; same-id deltas append). Full-text once per block id in replay. |
 | `tool_call` | `turn_id`, `name`, `call_id`, `internal_call_id`, `arguments` | the model issued a complete tool call, before execution. `arguments` is the raw JSON string, or `null` when unparseable. |
+| `interaction_request` | `id`, `title`, `body`, `options`, `free_text` | a tool gate (permission) or a tool body asks the user; several may be open at once. Answer with `interaction_response`; a run terminal closes the unanswered (§8). |
 | `tool_result` | `turn_id`, `entry_id`, `name`, `internal_call_id`, `content`, `status` | one tool body finished; its result committed. `content` is exactly the text the model saw — already capped at the source, failure text included; render it verbatim. `status` is structure only: `success` or `failed { exit_code? }`; the detail is in `content`, not `status`. |
 | `completion_call` | `turn_id`, `input_tokens`, `output_tokens` | one model request finished; usage is final for it. |
 | `turn_committed` | `id` | the turn is durable history. Same id as `turn_started`. |
@@ -304,10 +305,13 @@ before relying on anything it did". It is never a fabricated success;
 render it like any tool result and the text says what happened. No
 wire marker.
 
-## 8. Interaction requests (reserved)
+## 8. Interaction requests
 
-The blocking pop-up shape, generic over permission prompts and future
-ask-the-user tools. One at a time; the run is paused until answered.
+The blocking pop-up shape, generic over permission prompts and
+ask-the-user tools (one primitive, two askers — permission fires at
+the tool's gate, ask-the-user tools ask from their bodies, and a tool
+may ask repeatedly). Concurrent chains may hold several open requests
+at once; answer them in any order.
 
 ```
 ← {"type":"interaction_request","stream":"main","id":"019…","title":"Run command?",
@@ -319,10 +323,19 @@ ask-the-user tools. One at a time; the run is paused until answered.
 `free_text: true` invites an optional explanation; when present it is
 delivered to the model (a denial reason shapes the retry), not just
 logged. Option objects are `{ label }` (a `description` field may
-appear — display it when present). This surface is reserved — no
-current tool triggers it — but build the widget against this shape.
-Edge semantics (a run failing while a request is pending, a stale
-response id) are unsettled; see §11.
+appear — display it when present). `interaction_response` carries at
+least one of `option` (a label from the request) and `text` (the
+free-text answer; an options-empty ask is answered by `text` alone).
+
+**Closing rule:** a run terminal (`run_finished` / `run_aborted` /
+`run_failed`) closes every pending request — drop the cards, no
+response needed. There is no close event and none is needed: an
+unanswered request's death always coincides with a run terminal (a
+question lives inside its tool's execution, and the run always ends
+in exactly one terminal). A response racing a terminal (stale id,
+dead asker) is a logged no-op on the backend — send it, never block
+on the race. Requests never replay; the durable record of an
+interaction is the tool result — the answer or denial the model saw.
 
 ## 9. Invariants you may rely on
 
@@ -382,9 +395,9 @@ response id) are unsettled; see §11.
    wall-clock times on `user_message`/`turn_committed` at least.
 2. **Backpressure.** What a stalled reader should experience — needed
    before long-running GUI use.
-3. **Interaction edge semantics.** Request pending when the run
-   fails/aborts; `interaction_response` with a stale id. Deferred to
-   the permission milestone.
+3. **Interaction edge semantics — settled with the permission
+   milestone (§8):** run terminals close every pending request; stale
+   responses are logged no-ops; requests never replay.
 4. **Subagent streams.** Sibling `stream` ids and their event subset —
    reserved, unspecified.
 
