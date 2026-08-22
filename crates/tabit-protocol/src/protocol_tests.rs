@@ -16,6 +16,16 @@ fn commands_round_trip_with_snake_case_tags() {
             text: "hello".to_string(),
         },
         SessionCommand::Abort,
+        SessionCommand::InteractionResponse {
+            id: "0197".to_string(),
+            option: Some("Deny".to_string()),
+            text: Some("never delete build dirs".to_string()),
+        },
+        SessionCommand::InteractionResponse {
+            id: "0198".to_string(),
+            option: None,
+            text: Some("use python".to_string()),
+        },
     ];
     for command in &commands {
         assert_eq!(&round_trip(command), command);
@@ -30,6 +40,15 @@ fn commands_round_trip_with_snake_case_tags() {
         })
         .expect("serialize"),
         r#"{"type":"message","text":"hi"}"#
+    );
+    assert_eq!(
+        serde_json::to_string(&SessionCommand::InteractionResponse {
+            id: "0197".to_string(),
+            option: Some("Deny".to_string()),
+            text: None,
+        })
+        .expect("serialize"),
+        r#"{"type":"interaction_response","id":"0197","option":"Deny"}"#
     );
 }
 
@@ -75,6 +94,29 @@ fn every_event_variant_survives_the_frame_envelope() {
             stream: StreamId::main(),
             event: SessionEvent::RunFailed {
                 message: "boom".to_string(),
+            },
+        },
+        EventFrame {
+            stream: StreamId::main(),
+            event: SessionEvent::InteractionRequested {
+                id: "0199".to_string(),
+                title: "Run command?".to_string(),
+                body: "rm -rf target".to_string(),
+                options: vec![
+                    crate::InteractionOption {
+                        label: "Allow".to_string(),
+                        description: None,
+                    },
+                    crate::InteractionOption {
+                        label: "Always allow".to_string(),
+                        description: Some("for this session".to_string()),
+                    },
+                    crate::InteractionOption {
+                        label: "Deny".to_string(),
+                        description: None,
+                    },
+                ],
+                free_text: true,
             },
         },
     ];

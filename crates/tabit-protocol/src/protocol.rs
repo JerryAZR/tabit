@@ -53,10 +53,11 @@ pub struct EventFrame {
 /// A frontend command, fire-and-forget. The behavior is total over the
 /// two session states:
 ///
-/// | command  | idle                  | running                              |
-/// |----------|-----------------------|--------------------------------------|
-/// | `Message`| starts a run          | steers (next turn boundary)          |
-/// | `Abort`  | no-op                 | aborts; discards queued messages     |
+/// | command               | idle                  | running                              |
+/// |-----------------------|-----------------------|--------------------------------------|
+/// | `Message`             | starts a run          | steers (next turn boundary)          |
+/// | `Abort`               | no-op                 | aborts; discards queued messages     |
+/// | `InteractionResponse` | no-op (logged)        | routes the answer by id to the asker |
 ///
 /// There is nothing to acknowledge and nothing to reject: outcomes are
 /// events (`user_message` for acceptance, the run terminals for results).
@@ -70,6 +71,20 @@ pub enum SessionCommand {
     },
     /// Stop: abort the run in flight and discard any queued messages.
     Abort,
+    /// Answer a pending `interaction_request`. Total, like every command:
+    /// at least one of `option`/`text`; a response for an unknown or dead
+    /// request is a logged no-op (the asker went away with its run —
+    /// terminals close everything).
+    InteractionResponse {
+        /// The request id being answered.
+        id: String,
+        /// The chosen option label, when answering by button.
+        #[serde(skip_serializing_if = "Option::is_none")]
+        option: Option<String>,
+        /// The free-text answer or explanation, when invited.
+        #[serde(skip_serializing_if = "Option::is_none")]
+        text: Option<String>,
+    },
 }
 
 /// One line from the client. The first line must be
