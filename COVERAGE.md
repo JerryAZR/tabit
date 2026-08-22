@@ -236,3 +236,26 @@ rather than skipping, reachable or not.)
   The protocol parse it performs is covered by tabit-protocol's
   round-trip tests; the launch path (`tabit` launcher detach-spawn)
   likewise needs a desktop session.
+
+## Interaction (permission + ask_user, 2026-08)
+
+- `tabit-session/src/interaction.rs` — **covered**: routing, total
+  no-op, retraction, weak-sender dismissal, session memory, prompt
+  shape (unit) plus five actor-level end-to-end tests (allow, deny,
+  always-allow, ask_user round-trip, abort-with-card-open).
+- `tabit-session/src/permission.rs` — **covered via the actor tests**
+  (the allow/deny/always paths run through `PermissionHook`); the
+  no-frontend fail-closed arm is reachable only by a direct `Session`
+  consumer — **JUSTIFIED**: every actor session attaches a hub, and
+  the arm is the recorded EXTENSIONS.md default.
+- `tabit/bin print-mode stdin reader` (`main.rs` watcher thread,
+  card rendering) — **JUSTIFIED**: owns real stdin; `parse_answer`
+  is unit-covered (numbered buttons + reason, free text, fail-closed
+  empties).
+- json bridge `InteractionResponse` passthrough — rides the generic
+  `ClientFrame::Command => link.send(command)` arm, unchanged by this
+  feature; the command itself is round-trip covered in tabit-protocol
+  and link-routed covered in tabit-session.
+- `app.rs` cards panel / `answer()` — **justified** under the existing
+  GUI skeleton policy above (view code; owner e2e pass); the reducer
+  state behind it is unit-covered.

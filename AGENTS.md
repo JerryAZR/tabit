@@ -24,7 +24,8 @@ Current workspace layout:
 - `crates/tabit-config` — provider/model configuration (see `ROADMAP.md`)
 - `crates/tabit-session` — persistent sessions over the outer loop (native
   only: filesystem-backed; the rig crates keep wasm support)
-- `crates/tabit-tools` — coding tools (`read`, `ls`, `bash`) as
+- `crates/tabit-tools` — coding tools (`read`, `ls`, `bash`,
+  `ask_user` — the body is one interaction roundtrip) as
   `#[rig_tool]` PortableTools, erasable to DynamicTools (native only)
 - `crates/tabit-gui` — the egui frontend (`tabit-gui` binary; the
   `tabit` launcher detach-spawns it; reducer/view contract in ROADMAP
