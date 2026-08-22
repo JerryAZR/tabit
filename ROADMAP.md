@@ -60,9 +60,11 @@ model catalog). Decisions:
   `thinking_level` — both wire shapes accepted (bare string or
   table). Ruled a **preference, not a hard reference**: a stale,
   ambiguous, or malformed entry never blocks startup — the registry
-  warns on stderr and falls back to the first configured model
+  warns and falls back to the first configured model
   (explicit `--model` requests and resumed-session models still fail
-  loudly). Reference resolution
+  loudly). The warning is stderr today; v2 moves it onto the event
+  channel (`error { kind: model }` — the external-errors ruling in
+  PROTOCOL.md). Reference resolution
   (`TabitConfig::resolve_model_ref`) is an exact-match lookup over an
   index registering every model under two keys — its bare id and its
   qualified `provider/model` id (model ids may contain `/`); a key with
@@ -163,11 +165,11 @@ The known deviation from pi's subprocess model:
 - **Print mode shipped** (`crates/tabit`): one prompt in, live events out,
   project-local sessions, `-p <PROMPT>` / `--continue` /
   `--session <path>` / `--list` / `--rewind <n>`, `--model provider/model`
-  or `default_model` in providers.toml. The GUI is the eventual default
-  mode;
+  or `default_model` in providers.toml. The GUI is the default mode
+  (shipped — bare `tabit [path]` launches it);
   `-p` and `--rewind` opt out into print mode.
 - The protocol's design record — locked decisions plus every open
-  flag with options — lives in ; flags are resolved in
+  flag with options — lives in PROTOCOL.md; flags are resolved in
   discussion order there.
 - **Frontend architecture (decided, v1 shipped): frontend-through-protocol.**
   One typed vocabulary. Commands are fire-and-forget with total

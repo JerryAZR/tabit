@@ -10,7 +10,9 @@ speaks v1 — no ids on events, and no replay/checkout/model/queue events
 yet; v2 lands as one protocol-version bump with no compatibility
 period. Design against v2. (One v1 trap: a v1 backend *silently
 ignores* unknown `initialize` fields, so a v2 client against v1 gets
-neither replay nor an error — always check the ack's `protocol_version`.)
+neither replay nor an error — always check the ack's `protocol_version`.
+The one-shot JSON listing edges — `--list --json`, `models --json` —
+are likewise v2; today `--list` prints a human table.)
 
 ## 1. Architecture: two processes, one pipe
 
@@ -24,8 +26,9 @@ tabit --json [--continue | --session <path>] [--model <ref>]
   lines from you; **stderr** carries human-oriented diagnostics you may
   ignore (never protocol data) — but capture it for crash reports.
 - **One backend process per session.** The session is chosen at spawn:
-  `--continue` resumes the project's newest session, `--session <path>`
-  a specific file, neither starts a fresh one. There is no
+  `--continue` resumes the project's newest session (nothing to
+  resume → fresh session, ack `resumed: false` — §3.1), `--session
+  <path>` a specific file, neither starts a fresh one. There is no
   create/list/switch-session command on the long-lived channel.
 - **Spawn environment.** Sessions live at `<project-root>/.tabit/
   sessions`, where project root is the nearest ancestor directory
@@ -113,9 +116,10 @@ new events arrive later without a version bump).
    carries a setup guide, then exits; display the reason, it is written
    for the user — and recovery is manual: the user fixes the file and
    the frontend respawns the backend; config is not re-read per request
-   by design) or a pre-handshake spawn failure (bad flags, missing
-   session file, unresolvable `--model` — stderr message, no stdout
-   frames). `101` is an **internal error**: the process crashed itself
+   by design) or a pre-handshake exit with **no frames** — bad flags
+   only (stderr message; every session/model startup failure arrives
+   as a rejection frame instead, §3.1). `101` is an **internal
+   error**: the process crashed itself
    — a panic in any task or thread ends the process, so a crashed
    backend never lingers as a zombie. Display the stderr report and
    ask the user to send it back. `0` covers one non-clean end: a broken
@@ -386,9 +390,10 @@ response id) are unsettled; see §11.
 
 Settled since the review: model discovery is a one-shot
 `tabit models --json` at startup plus explicit reload (the session
-listing pattern — no notifications); pre-handshake spawn failures stay
-exit-1-with-stderr (the GUI's own discovery passes valid paths; stderr
-is the diagnostic channel); cut points follow the roundtrip-unit rule
+listing pattern — no notifications); bad-flag exits stay
+exit-1-with-stderr-no-frames while session/model startup failures
+reject with plain-reason frames (§3.1 — the death-classification
+pin); cut points follow the roundtrip-unit rule
 (§7); synthesized tool results carry no marker (§7); durability is a
 write-behind log with the prompt barrier — flag 8 fully resolved; all
 non-terminal errors ride the generic `error { kind }` carrier (§6).

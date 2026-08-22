@@ -538,8 +538,9 @@ takes).
 ### 19. Exit conventions differ by mode — RESOLVED (FRONTEND.md is the law)
 
 FRONTEND.md §3 specifies the exit-code table (0 clean incl. EOF-edge
-cases; 1 handshake rejection, transport-thread panic, pre-handshake
-spawn failure); print mode already exits 1 on run failure. Aligning
+cases; 1 handshake rejection and bad-flag exits; 101 internal error —
+process death with the stderr report); print mode already exits 1 on
+run failure. Aligning
 the code paths to that one table rides the v2 touch.
 
 JSON mode returns `i32`; print mode signals via `Err` that `main`
