@@ -107,20 +107,58 @@ use std::collections::{BTreeMap, HashMap};
 use std::path::{Path, PathBuf};
 
 /// The model a session uses when the caller does not pick one.
+///
+/// A **preference, not a hard reference**: it accepts a bare model id
+/// string or the full table, and an entry that no longer resolves is
+/// not a config error — the registry warns and falls back to the
+/// first configured model (owner ruling: stale `default_model` must
+/// never block startup).
 #[derive(Debug, Clone, PartialEq, Deserialize)]
-#[serde(deny_unknown_fields)]
+#[serde(from = "DefaultModelRaw")]
 pub struct DefaultModel {
     /// Provider id. Optional: when absent, `model` must resolve to exactly
     /// one provider's model — qualify with the provider only when the same
     /// model id is configured under more than one.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub provider: Option<String>,
     /// Model id within the provider (may itself contain `/`, as in
     /// `openai/gpt-oss-20b`).
     pub model: String,
     /// Thinking level name, when the model defines levels.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub thinking_level: Option<String>,
+}
+
+/// The wire forms of [`DefaultModel`]: a bare model id (must be
+/// unambiguous across providers) or the full table.
+#[derive(Deserialize)]
+#[serde(untagged)]
+enum DefaultModelRaw {
+    Bare(String),
+    Full {
+        provider: Option<String>,
+        model: String,
+        thinking_level: Option<String>,
+    },
+}
+
+impl From<DefaultModelRaw> for DefaultModel {
+    fn from(raw: DefaultModelRaw) -> Self {
+        match raw {
+            DefaultModelRaw::Bare(model) => Self {
+                provider: None,
+                model,
+                thinking_level: None,
+            },
+            DefaultModelRaw::Full {
+                provider,
+                model,
+                thinking_level,
+            } => Self {
+                provider,
+                model,
+                thinking_level,
+            },
+        }
+    }
 }
 
 /// A parsed and validated tabit configuration.
@@ -203,31 +241,10 @@ impl TabitConfig {
     /// path. Empty means valid.
     pub fn validation_issues(&self) -> Vec<String> {
         let mut issues = Vec::new();
-        if let Some(default) = &self.default_model {
-            match &default.provider {
-                Some(provider) => validate_model_reference(
-                    "default_model",
-                    provider,
-                    &default.model,
-                    default.thinking_level.as_deref(),
-                    self,
-                    &mut issues,
-                ),
-                None => match self.resolve_model_ref(&default.model) {
-                    Ok((provider, _)) => validate_model_reference(
-                        "default_model",
-                        &provider,
-                        &default.model,
-                        default.thinking_level.as_deref(),
-                        self,
-                        &mut issues,
-                    ),
-                    Err(message) => {
-                        issues.push(format!("default_model.model: {message}"));
-                    }
-                },
-            }
-        }
+        // `default_model` is deliberately absent: it is a preference,
+        // and a stale one degrades at resolution (the registry warns
+        // and falls back to the first configured model) rather than
+        // failing the whole config.
         for (provider_id, provider) in &self.providers {
             validate_provider(provider_id, provider, &mut issues);
         }
@@ -296,37 +313,6 @@ impl TabitConfig {
         let (provider_id, provider) = self.providers.iter().next()?;
         let model = provider.models.first()?;
         Some((provider_id.clone(), model.id.clone()))
-    }
-}
-
-/// Validate a `provider`/`model`(/`thinking_level`) reference against the
-/// configured providers; shared by `default_model` validation.
-fn validate_model_reference(
-    key: &str,
-    provider_id: &str,
-    model_id: &str,
-    thinking_level: Option<&str>,
-    config: &TabitConfig,
-    issues: &mut Vec<String>,
-) {
-    let Some(provider) = config.providers.get(provider_id) else {
-        issues.push(format!(
-            "{key}.provider: `{provider_id}` is not defined under [providers]"
-        ));
-        return;
-    };
-    let Some(model) = provider.models.iter().find(|m| m.id == model_id) else {
-        issues.push(format!(
-            "{key}.model: `{model_id}` is not defined for provider `{provider_id}`"
-        ));
-        return;
-    };
-    if let Some(level) = thinking_level
-        && model.thinking_level(level).is_none()
-    {
-        issues.push(format!(
-            "{key}.thinking_level: `{level}` is not one of the levels defined for              provider `{provider_id}` model `{model_id}`"
-        ));
     }
 }
 

@@ -48,6 +48,26 @@ pub struct ModelRegistry {
     inner: Arc<RegistryInner>,
 }
 
+/// Resolve the `default_model` preference into a selection. Every
+/// failure is a message (the caller warns and falls back), never a
+/// hard error.
+fn preferred_selection(
+    default: &tabit_config::DefaultModel,
+    config: &TabitConfig,
+) -> Result<ModelSelection, String> {
+    let (provider, model) = match &default.provider {
+        Some(provider) => (provider.clone(), default.model.clone()),
+        None => config.resolve_model_ref(&default.model)?,
+    };
+    let selection = ModelSelection {
+        provider,
+        model,
+        thinking_level: default.thinking_level.clone(),
+    };
+    validate_selection(&selection, config).map_err(|error| error.to_string())?;
+    Ok(selection)
+}
+
 impl ModelRegistry {
     /// A registry over the loaded config and auth.
     pub fn new(config: Arc<TabitConfig>, auth: Arc<AuthConfig>) -> Self {
@@ -105,22 +125,19 @@ impl ModelRegistry {
             })?;
             return Ok(resumed);
         }
+        // `default_model` is a preference, not a hard reference: a
+        // stale or ambiguous entry degrades to the first configured
+        // model with a visible warning (owner ruling — it must never
+        // block startup). The stderr line is deliberate: config advice
+        // for the human, not a library error path.
         if let Some(default) = &self.inner.config.default_model {
-            let (provider, model) = match &default.provider {
-                Some(provider) => (provider.clone(), default.model.clone()),
-                None => self
-                    .inner
-                    .config
-                    .resolve_model_ref(&default.model)
-                    .map_err(|message| SessionError::Config { message })?,
-            };
-            let selection = ModelSelection {
-                provider,
-                model,
-                thinking_level: default.thinking_level.clone(),
-            };
-            validate_selection(&selection, &self.inner.config)?;
-            return Ok(selection);
+            match preferred_selection(default, &self.inner.config) {
+                Ok(selection) => return Ok(selection),
+                Err(message) => eprintln!(
+                    "warning: default_model `{}` is not usable ({message});                      falling back to the first configured model",
+                    default.model
+                ),
+            }
         }
         self.inner
             .config

@@ -609,9 +609,11 @@ fn auth_load_reports_missing_file() {
 }
 
 #[test]
-fn default_model_validates_against_providers() {
-    let ok = r#"
-default_model = { provider = "x", model = "m" }
+fn default_model_is_a_preference_not_a_reference() {
+    // Both wire shapes parse (owner ruling: a bare model id is the
+    // ergonomic form; the table qualifies).
+    let bare = r#"
+default_model = "m"
 
 [providers.x]
 base_url = "https://example.com"
@@ -619,39 +621,44 @@ api = "openai-responses"
 
 [[providers.x.models]]
 id = "m"
-
-[[providers.x.models.thinking_levels]]
-name = "high"
 "#;
-    assert!(TabitConfig::from_toml_str(ok, Path::new("providers.toml")).is_ok());
+    let config = TabitConfig::from_toml_str(bare, Path::new("providers.toml"))
+        .expect("bare default_model parses");
+    let default = config.default_model.as_ref().expect("present");
+    assert_eq!(default.model, "m");
+    assert_eq!(default.provider, None);
 
-    let unknown_provider = r#"
+    let full = r#"
+default_model = { provider = "x", model = "m", thinking_level = "high" }
+"#;
+    let _ = TabitConfig::from_toml_str(full, Path::new("providers.toml"))
+        .expect("table default_model parses");
+
+    // A stale or malformed reference is NOT a load error — the
+    // registry degrades to the first configured model (with a
+    // warning) instead of blocking startup.
+    for stale in [
+        r#"
 default_model = { provider = "nope", model = "m" }
 
 [providers.x]
 base_url = "https://example.com"
 api = "openai-responses"
-"#;
-    let err = validation_error(unknown_provider);
-    assert!(
-        err.to_string().contains("default_model.provider: `nope`"),
-        "{err}"
-    );
 
-    let unknown_model = r#"
+[[providers.x.models]]
+id = "m"
+"#,
+        r#"
 default_model = { provider = "x", model = "missing" }
 
 [providers.x]
 base_url = "https://example.com"
 api = "openai-responses"
-"#;
-    let err = validation_error(unknown_model);
-    assert!(
-        err.to_string().contains("default_model.model: `missing`"),
-        "{err}"
-    );
 
-    let bad_level = r#"
+[[providers.x.models]]
+id = "m"
+"#,
+        r#"
 default_model = { provider = "x", model = "m", thinking_level = "max" }
 
 [providers.x]
@@ -663,13 +670,12 @@ id = "m"
 
 [[providers.x.models.thinking_levels]]
 name = "high"
-"#;
-    let err = validation_error(bad_level);
-    assert!(
-        err.to_string()
-            .contains("default_model.thinking_level: `max`"),
-        "{err}"
-    );
+"#,
+    ] {
+        let config = TabitConfig::from_toml_str(stale, Path::new("providers.toml"))
+            .expect("a stale default_model still loads");
+        assert!(config.validation_issues().is_empty());
+    }
 }
 
 #[test]
@@ -793,10 +799,10 @@ fn default_model_without_provider_resolves_or_fails_loudly() {
          name = \"Second\"\nbase_url = \"http://second\"\napi = \"openai-responses\"\n\n\
          [[providers.second.models]]\nid = \"claude-some-model\"\n"
     );
-    let err = validation_error(&ambiguous);
-    assert!(
-        err.to_string()
-            .contains("default_model.model: model reference `claude-some-model`"),
-        "{err}"
-    );
+    // An ambiguous bare id is no longer a load error either — the
+    // preference degrades at resolution (registry warns and falls
+    // back); ambiguity still fails loudly for explicit `--model`
+    // requests through resolve_model_ref.
+    let config = parse(&ambiguous);
+    assert!(config.validation_issues().is_empty());
 }

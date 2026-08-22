@@ -54,7 +54,12 @@ model catalog). Decisions:
   merge — array shape so a UI can cycle), per-model `headers`/`extra_body`.
 - `default_model` is the preferred-model slot: a bare model id (must be
   unambiguous), optional `provider` qualifier for conflicts, optional
-  `thinking_level`. Reference resolution
+  `thinking_level` — both wire shapes accepted (bare string or
+  table). Ruled a **preference, not a hard reference**: a stale,
+  ambiguous, or malformed entry never blocks startup — the registry
+  warns on stderr and falls back to the first configured model
+  (explicit `--model` requests and resumed-session models still fail
+  loudly). Reference resolution
   (`TabitConfig::resolve_model_ref`) is an exact-match lookup over an
   index registering every model under two keys — its bare id and its
   qualified `provider/model` id (model ids may contain `/`); a key with

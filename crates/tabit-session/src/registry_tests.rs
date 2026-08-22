@@ -208,3 +208,30 @@ fn build_errors_name_the_missing_pieces() {
         other => panic!("expected model-build error, got {other:?}"),
     }
 }
+
+#[test]
+fn a_stale_default_model_falls_back_to_the_first_model() {
+    // Owner ruling: default_model is a preference — unknown refs,
+    // ambiguity, or bad levels must never block startup; the registry
+    // warns and uses the first configured model.
+    for stale in [
+        "default_model = { provider = \"nope\", model = \"m1\" }",
+        "default_model = { model = \"missing\"
+}",
+    ] {
+        let raw = format!(
+            "{stale}
+{TWO_MODELS}"
+        );
+        let registry = registry_with(
+            &raw,
+            "[providers.local]
+api_key = \"dummy\"
+",
+        );
+        let selection = registry
+            .default_selection(None, None)
+            .expect("falls back instead of failing");
+        assert_eq!(selection.model, "m", "the first configured model");
+    }
+}
