@@ -112,7 +112,9 @@ new events arrive later without a version bump).
    ends: a broken pipe, and a backend worker panic (the stream simply
    reaches EOF). **Detect crashes as EOF without a terminal event for
    the in-flight run**, not by exit code; capture stderr as the
-   explanation.
+   explanation — stderr is the **internal**-failure path (panics,
+   the report the user sends back); external errors arrive as
+   events (§6) and never require mining stderr.
 
 ## 4. The model: runs, turns, steers, and the tree
 
@@ -208,11 +210,13 @@ dead structure ahead of the data.
 **Errors: one generic carrier with a `kind`.** Anything that goes
 wrong outside a run terminal rides `error { kind, message, … }`. A
 minimal frontend implements one handler — show the message; a rich one
-switches on `kind`. Unknown kinds display generically.
+switches on `kind`. Unknown kinds display generically. External
+errors never travel as stderr — stderr is the internal-failure
+report (§3.5); you never mine it for user-facing meaning.
 
 | kind | extra fields | meaning |
 |---|---|---|
-| `model` | — | a `model` command failed config validation. |
+| `model` | — | model configuration failed or degraded: a `model` command failed validation, or a startup preference (stale `default_model`, a resumed session's model gone) fell back. The fallback case is a warning — the session continues, with the fallback named in the message. |
 | `checkout` | — | the checkout target does not exist or is not a valid cut point (§7). |
 | `persist_degraded` | `pending` | a log flush failed (disk full?); `pending` entries are buffered in memory and retried on every commit. Nag the user about disk space. |
 | `persist_recovered` | — | the buffer drained; everything is on disk again. |

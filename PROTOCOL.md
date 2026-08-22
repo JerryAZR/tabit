@@ -99,6 +99,23 @@ histories).
   kinds fall back to generic display — the same forward-compat rule as
   unknown event types. `run_failed` stays its own event (it is a run
   terminal, not an error condition) and shares the kind vocabulary.
+- **External errors ride the channel; stderr is not a frontend
+  concern** (ruled). Everything that originates in daily use —
+  config trouble, provider trouble, persistence degrade — reaches
+  the frontend as an event, because telling the user what went
+  wrong (and how to fix it) is the frontend's job and events are
+  the only thing it can see. Direct consequences: the startup
+  preference degradations (a stale `default_model`, a resumed
+  session's model gone) become carrier events (kind `model`) as
+  the first frames after the ack — resolution notes must thread
+  into the session/actor rather than printing at construction —
+  and library layers stop printing user-facing text; for
+  transport-deep conditions (stall warnings) the mechanism is
+  open (tracing + a binary-side bridge, or a transport callback).
+  Internal errors are a separate track: panics should not exist in
+  production, and when one does the user should be able to report
+  it back in detail — that is process death with a stderr report,
+  never the channel.
 - **The atomic unit is the tool roundtrip** (ruled framing for cut
   points): an assistant turn and its complete tool-result batch commit
   and rewind as one unit — partial writes from crashes/aborts are
