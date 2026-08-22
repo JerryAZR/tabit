@@ -632,8 +632,7 @@ fn print_mode(
     // mode: press Esc then Enter to abort; any other line answers the
     // open interaction card — its number for buttons, free text
     // otherwise). Real key handling arrives with the GUI.
-    let armed: std::sync::Arc<std::sync::Mutex<Option<(String, Vec<String>)>>> =
-        std::sync::Arc::default();
+    let armed: ArmedSlot = std::sync::Arc::default();
 
     // The message goes through the session actor — the same path JSON
     // mode drives — and the stream is read to its end: the actor returns
@@ -679,7 +678,11 @@ fn print_mode(
                         outcome.input_tokens += input_tokens;
                         outcome.output_tokens += output_tokens;
                     }
-                    SessionEvent::RunFailed { message } => outcome.failed = Some(message.clone()),
+                    SessionEvent::RunFailed { message } => {
+                        outcome.failed = Some(message.clone());
+                        // A terminal closes every card (FRONTEND.md §8).
+                        lock_armed(&armed).take();
+                    }
                     SessionEvent::InteractionRequested {
                         id,
                         title,
@@ -704,14 +707,7 @@ fn print_mode(
                             options.iter().map(|o| o.label.clone()).collect(),
                         ));
                     }
-                    terminal
-                        if matches!(
-                            terminal,
-                            SessionEvent::RunFinished { .. }
-                                | SessionEvent::RunAborted { .. }
-                                | SessionEvent::RunFailed { .. }
-                        ) =>
-                    {
+                    SessionEvent::RunFinished { .. } | SessionEvent::RunAborted { .. } => {
                         // A terminal closes every card (FRONTEND.md §8).
                         lock_armed(&armed).take();
                     }
@@ -752,9 +748,12 @@ enum ContinueMiss {
 
 /// Lock the armed-card slot (poisoning recovers — the slot is only a
 /// hint for the stdin reader).
-fn lock_armed(
-    armed: &std::sync::Arc<std::sync::Mutex<Option<(String, Vec<String>)>>>,
-) -> std::sync::MutexGuard<'_, Option<(String, Vec<String>)>> {
+/// The armed card: its request id and button labels, waiting for one
+/// stdin line.
+type ArmedCard = Option<(String, Vec<String>)>;
+type ArmedSlot = std::sync::Arc<std::sync::Mutex<ArmedCard>>;
+
+fn lock_armed(armed: &ArmedSlot) -> std::sync::MutexGuard<'_, ArmedCard> {
     armed.lock().unwrap_or_else(|error| error.into_inner())
 }
 
@@ -762,7 +761,6 @@ fn lock_armed(
 /// `2` or `2 reason text`; a free-text card takes the whole line. An
 /// empty or unrecognizable line answers with nothing — the backend's
 /// fail-closed default (deny / dismissed), so a card can never hang.
-
 #[cfg(test)]
 mod interaction_answer_tests {
     use super::*;
