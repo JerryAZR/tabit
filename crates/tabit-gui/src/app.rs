@@ -33,6 +33,11 @@ pub struct TabitApp {
     cwd: Option<PathBuf>,
     /// The exact backend executable, handed over by the launcher.
     tabit: Option<PathBuf>,
+    /// The automatic no-sessions fallback fires at most once per
+    /// backend lifetime — a startup that keeps failing must stop and
+    /// show the banner, never spin (owner report: respawn loop).
+    /// Manual restarts reset it.
+    auto_fresh_used: bool,
 }
 
 impl TabitApp {
@@ -47,6 +52,7 @@ impl TabitApp {
             backend: None,
             cwd,
             tabit,
+            auto_fresh_used: false,
         };
         app.start_backend(true, ctx);
         app
@@ -76,6 +82,7 @@ impl TabitApp {
     fn restart(&mut self, ctx: egui::Context) {
         self.backend = None;
         self.state = GuiState::default();
+        self.auto_fresh_used = false;
         self.start_backend(true, ctx);
     }
 
@@ -111,13 +118,16 @@ impl eframe::App for TabitApp {
             let was_connecting = self.state.phase == Phase::Connecting;
             self.state.reduce(msg);
             // `--continue` with no sessions gets exactly one fresh
-            // respawn; a rejection (setup problems) is never retried
-            // automatically.
+            // respawn; rejections and repeated failures are never
+            // retried automatically — they land in the banner with
+            // the manual reload/restart buttons.
             if was_connecting
                 && self.state.facts.is_none()
                 && matches!(self.state.phase, Phase::Exited { .. })
                 && !self.state.handshake_rejected
+                && !self.auto_fresh_used
             {
+                self.auto_fresh_used = true;
                 self.backend = None;
                 self.state = GuiState::default();
                 self.start_backend(false, ctx.clone());

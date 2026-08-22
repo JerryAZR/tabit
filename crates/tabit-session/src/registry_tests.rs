@@ -197,13 +197,11 @@ fn build_errors_name_the_missing_pieces() {
         }
         other => panic!("expected config error, got {other:?}"),
     }
-    match config_only.build("local", "m") {
-        Err(SessionError::ModelBuild { message, .. }) => {
-            assert!(message.contains("auth.toml"), "{message}");
-            assert!(message.contains("api_key_env"), "{message}");
-        }
-        other => panic!("expected model-build error, got {other:?}"),
-    }
+    // Keyless builds succeed now (local endpoints run keyless;
+    // auth-requiring providers answer 401 at send time).
+    config_only
+        .build("local", "m")
+        .expect("keyless provider builds");
 }
 
 #[test]

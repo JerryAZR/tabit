@@ -481,7 +481,14 @@ fn run() -> Result<i32, String> {
                 (Ok(config), Ok(auth)) => (Arc::new(config), Arc::new(auth)),
                 (Err(detail), _) | (_, Err(detail)) => return json_setup_failure(&detail),
             };
-            let session = assemble(&args, &config, &auth)?;
+            // Assemble failures (model unbuildable, session unreadable)
+            // reject the handshake with the reason instead of dying
+            // stderr-only — the GUI shows it, and its reload/restart
+            // buttons are the recovery.
+            let session = match assemble(&args, &config, &auth) {
+                Ok(session) => session,
+                Err(detail) => return json_setup_failure(&detail),
+            };
             print_banner(&session);
             let runtime = tokio::runtime::Builder::new_current_thread()
                 .enable_all()

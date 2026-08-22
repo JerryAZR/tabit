@@ -166,20 +166,16 @@ impl ModelRegistry {
             .ok_or_else(|| SessionError::Config {
                 message: format!("model `{model_id}` for provider `{provider_id}`"),
             })?;
+        // Keyless is a supported state (ROADMAP item 1: local
+        // endpoints run keyless). A provider that actually requires
+        // auth rejects the first request with its own 401 — an
+        // external error at send time, matching how pi/opencode
+        // surface missing credentials — instead of blocking startup.
         let api_key = self
             .inner
             .config
             .resolve_api_key(provider_id, &self.inner.auth)
-            .ok_or_else(|| SessionError::ModelBuild {
-                provider: provider_id.to_string(),
-                model: model_id.to_string(),
-                message: format!(
-                    "no API key for provider `{provider_id}`: set one in auth.toml \
-                     ([providers.{provider_id}] api_key = ...) or point the provider's \
-                     api_key_env at an environment variable (a placeholder key is fine \
-                     for local servers)"
-                ),
-            })?;
+            .unwrap_or_default();
         let label = format!("{provider_id}/{}", model.id);
         let handle = match self.client_for(provider_id, provider, &api_key)? {
             ProviderClient::Anthropic(client) => {

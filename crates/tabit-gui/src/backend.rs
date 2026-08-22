@@ -73,6 +73,7 @@ pub fn spawn(
     if let Some(cwd) = cwd {
         command.current_dir(cwd);
     }
+    no_console_window(&mut command);
     let mut child = command.spawn()?;
 
     // Handshake first line out.
@@ -236,6 +237,19 @@ impl Backend {
             .clone()
     }
 }
+
+/// A console-subsystem child spawned by a windowless (detached) GUI
+/// would allocate and flash its own console on Windows — suppress it;
+/// the pipes are unaffected.
+#[cfg(windows)]
+fn no_console_window(command: &mut Command) {
+    use std::os::windows::process::CommandExt;
+    const CREATE_NO_WINDOW: u32 = 0x0800_0000;
+    command.creation_flags(CREATE_NO_WINDOW);
+}
+
+#[cfg(not(windows))]
+fn no_console_window(_command: &mut Command) {}
 
 fn reap(mut child: Child) -> Option<i32> {
     child.wait().ok().and_then(|status| status.code())
