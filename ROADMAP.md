@@ -295,6 +295,17 @@ The known deviation from pi's subprocess model:
 - Settings surface: layered config (user > workspace > flags) already partly
   from item 1; extensions register tools, hooks, and prompt contributions.
 
+### 10. Prompt caching (required before release)
+
+- Activate provider prompt caching on the session's static prefix (tool
+  definitions + preamble — re-sent every turn today): Anthropic
+  `cache_control` breakpoints with per-breakpoint TTL (1h prefix / 5m
+  tail). Reference pi's caching approach and rig upstream's per-breakpoint
+  TTL work (`4be867de`, post-0.42) when we get here. Usage-side parsing
+  (cache read/creation tokens, TTL breakdown) already ships in rig-core.
+- Falls out of the v2 backend slices (write-behind log + prompt barrier)
+  where the static prefix becomes an explicit unit.
+
 ## Explicitly not planned
 
 (kept in sync with AGENTS.md)

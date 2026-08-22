@@ -255,6 +255,16 @@ during design review, the verdict is recorded.
    (and at classification for pre-turn stops).
 8. **Internal errors panic** — the process dies loud instead of
    degrading gracefully through the machine.
+9. **Output-budget truncation is a warning, not a failure** (ruled
+   2026-08, upstream-triage discussion): when a committed turn's
+   terminal reports a truncation-class finish reason (`Length`), the
+   engine surfaces a turn warning to the frontend and the flow proceeds
+   exactly as usual — steers drain into the next turn, the
+   another-turn check is unchanged, the run may end normally. Partial
+   tool calls keep their own uniform path: in-band errors, never
+   conditioned on the turn's finish reason (a partial call from a
+   length cap is handled exactly like one from broken model output —
+   no cause-based carve-out).
 
 ## Implementation judgments (refactor landing)
 
