@@ -10,7 +10,7 @@ vendoring state for provenance only and constrains nothing.
 
 - Upstream: rig **0.41.0** (`0xPlaygrounds/rig`)
 - Local upstream checkout used for vendoring: `C:/Users/lrzx_/Projects/Agents/rig`
-  (its `HEAD` when vendored)
+  (its `HEAD` when vendoring; now `C:/Users/Jerry/Projects/agents/rig`)
 
 ## What was vendored
 
@@ -319,3 +319,54 @@ trim list above is the map of what differs from rig 0.41.0:
    `serde_policy_allowlist.txt` encode structural expectations about the
    provider tree.
 3. Re-run `cargo build && cargo test --lib --tests && cargo test --doc`.
+
+## Upstream triage 2026-08 (`9b9c428e..abe338a7`, 75 commits)
+
+Every commit in the range was read against this tree. The range is mostly
+unreachable from tabit: ~15 provider fixes live in deleted providers,
+~11 are "LOC consolidation" refactors over code we have since reshaped
+(no defects on kept surfaces — the one claiming "5 defect fixes" puts
+them all in deleted providers), plus type-erasure sweeps, ownership
+audits, and release/CI/deps chores. `bb6b6cb7` + `57446c10` cancel
+(fix + full revert).
+
+**Adopted** (each ported with offline tests; tabit conventions kept —
+the empty-text sentinel, Value-based SSE errors):
+
+| upstream | ported as | what |
+|---|---|---|
+| `2bfd9724` | a58641b | streamed terminal carries the matched `stop_sequence`; empty turn stopped on a *named* sequence normalizes (unnamed stays guarded) |
+| `a8e5372a` | a58641b | thinking tokens → `reasoning_tokens` via a shared `anthropic_usage_totals` (breakdown, never added to totals); listing loop breaks on `has_more` without `last_id` |
+| `ffd04804` | a58641b | `model_length` maps to `FinishReason::Length` in the compat engine |
+| `923e7fba` | 66eb946 | `additional_params` function tools merge into the typed tool list (chat completions) |
+| `d094fe1e` | 66eb946 | n>1 streams answer from candidate 0 (`choices[].index`) |
+| `2dfb3cc8`+`69aeac78` | 48c6636 | embeddings builder: slot-indexed landing; results follow input order at both levels |
+| `1a6a6adc`/`91098e2a` (carrier only) | f4d785c | `CompletionCall` carries per-turn `finish_reason` — feeding tabit's `turn_truncated` warning (ENGINE.md delta 9), not upstream's fail-the-turn |
+
+**Skipped on doctrine** (would violate AGENTS.md design rules):
+
+- `57b4ad2b` (Length-gated drop of partial tool calls): rule 8 keeps
+  call-level handling uniform — a partial call from a length cap is
+  handled exactly like one from broken output (owner ruling 2026-08;
+  the turn-level story is carried by `turn_truncated` instead).
+- `64cb64f3`'s `max_completion_tokens` rename: keyed on gpt-5/o-series
+  model names — rule 1 (no model catalog). If ever needed, it should be
+  a config-declared parameter mapping.
+- `d525224e` ndims tables: ndims is caller-supplied here by ruling.
+
+**Skipped as inapplicable**: `6963ab08` (error headers end-to-end — our
+retry is a from-scratch SDK-semantics port at the request layer, where
+`Error::NonSuccessResponse.headers` already feeds `retry-after`/`x-should-retry`;
+the fix targets consumers above normalization, which we don't have),
+`841d2759` (`serialize_map_sorted` — our request prefix is built once
+per session from ordered Values; no HashMap in the wire path),
+`23f1cf6a` (image tool results — no image-producing tool yet),
+`3de43b96` (`on_reasoning_delta` hook — events already reach frontends;
+no in-process consumer), `4487ba29`/`638a6c15`/`0e1fdcd7` (raw response
+access, response identity, error request-ids — no product pull),
+`f27d94ab` (drop `#[non_exhaustive]` — cosmetic for internal crates),
+and the consolidation/erasure/audit sweeps wholesale.
+
+**Deferred with a home**: `4be867de` (per-breakpoint cache TTL) and
+`46c436b6` (anthropic strict tools) → ROADMAP item 10 / config knobs;
+embeddings ndims-style items fold into RAG-if-ever.
