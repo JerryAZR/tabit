@@ -16,6 +16,8 @@ use crate::theme;
 #[derive(Default)]
 struct Display {
     input: String,
+    /// Free-text drafts per open interaction card id.
+    answers: std::collections::HashMap<String, String>,
     /// Follow the transcript tail; pauses when the user scrolls up,
     /// re-pins at the bottom.
     pinned: bool,
@@ -112,6 +114,95 @@ impl TabitApp {
         {
             backend.abort();
         }
+    }
+
+    /// Answer one card — the send choke point for interactions (the
+    /// `send` counterpart). The card closes optimistically; a stale id
+    /// is a backend no-op.
+    fn answer(&mut self, id: &str, option: Option<&str>, text: Option<&str>) {
+        if self.state.phase != Phase::Live {
+            return;
+        }
+        if let Some(backend) = &self.backend {
+            backend.send_interaction_response(id, option, text);
+            self.state.interaction_answered(id);
+            self.display.answers.remove(id);
+        }
+    }
+
+    /// The open-card panel: title, body, buttons, and (when invited)
+    /// a free-text line. One block per card; several may be open at
+    /// once, any answer order. Declared before the input panel, so it
+    /// stacks directly above it.
+    fn cards_panel(&mut self, ui: &mut egui::Ui) {
+        let ids: Vec<String> = self
+            .state
+            .interactions
+            .iter()
+            .map(|c| c.id.clone())
+            .collect();
+        // Drafts for closed cards (answered or terminal-closed) go away.
+        self.display.answers.retain(|id, _| ids.contains(id));
+        if self.state.interactions.is_empty() {
+            return;
+        }
+        egui::containers::Panel::bottom("cards").show(ui, |ui| {
+            // Cloned for the widget pass: the send choke point needs
+            // `&mut self` back (cards are small; this is the view).
+            for card in self.state.interactions.clone() {
+                ui.add_space(theme::ROW_GAP / 2.0);
+                ui.horizontal(|ui| {
+                    ui.add_space(theme::ROW_INSET);
+                    ui.label(
+                        egui::RichText::new(&card.title)
+                            .strong()
+                            .color(theme::ACCENT),
+                    );
+                });
+                ui.horizontal(|ui| {
+                    ui.add_space(theme::ROW_INSET);
+                    ui.label(
+                        egui::RichText::new(card.body.clone())
+                            .monospace()
+                            .color(theme::TEXT),
+                    );
+                });
+                ui.horizontal(|ui| {
+                    ui.add_space(theme::ROW_INSET);
+                    let mut sent: Option<Option<String>> = None;
+                    for label in &card.options {
+                        if ui.button(label.clone()).clicked() {
+                            sent = Some(Some(label.clone()));
+                        }
+                    }
+                    if card.free_text {
+                        let draft = self.display.answers.entry(card.id.clone()).or_default();
+                        let field = ui.add(egui::TextEdit::singleline(draft).hint_text(
+                            if card.options.is_empty() {
+                                "your answer"
+                            } else {
+                                "optional note (goes to the model)"
+                            },
+                        ));
+                        if field.lost_focus() && ui.input(|i| i.key_pressed(egui::Key::Enter)) {
+                            sent = Some(None);
+                        }
+                        if ui.button("send").clicked() {
+                            sent = Some(None);
+                        }
+                    }
+                    if let Some(choice) = sent {
+                        let text = self
+                            .display
+                            .answers
+                            .get(&card.id)
+                            .map(|d| d.trim().to_string())
+                            .filter(|t| !t.is_empty());
+                        self.answer(&card.id, choice.as_deref(), text.as_deref());
+                    }
+                });
+            }
+        });
     }
 }
 
@@ -222,7 +313,9 @@ impl eframe::App for TabitApp {
             }
         });
 
-        // 3. Input.
+        // 3. Open interaction cards (above the input panel), then the
+        // input itself.
+        self.cards_panel(ui);
         egui::containers::Panel::bottom("input").show(ui, |ui| {
             ui.horizontal(|ui| {
                 let send = ui.add(

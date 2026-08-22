@@ -372,3 +372,65 @@ fn startup_exit_is_not_mid_run() {
         other => panic!("expected exit, got {other:?}"),
     }
 }
+
+#[test]
+fn interaction_cards_open_in_order_and_close_on_answer() {
+    let mut state = GuiState::default();
+    state.reduce(ack());
+    state.reduce(user("go"));
+    for (id, title) in [
+        ("i1", "Allow `bash` to run?"),
+        ("i2", "Question from the assistant"),
+    ] {
+        state.reduce(event(SessionEvent::InteractionRequested {
+            id: id.to_string(),
+            title: title.to_string(),
+            body: "body".to_string(),
+            options: vec![tabit_protocol::InteractionOption {
+                label: "Allow".to_string(),
+                description: None,
+            }],
+            free_text: true,
+        }));
+    }
+    assert_eq!(state.interactions.len(), 2);
+    assert_eq!(state.interactions[0].id, "i1");
+    assert_eq!(state.interactions[1].options, vec!["Allow".to_string()]);
+
+    state.interaction_answered("i1");
+    assert_eq!(state.interactions.len(), 1);
+    assert_eq!(state.interactions[0].id, "i2");
+}
+
+#[test]
+fn every_run_terminal_closes_all_open_cards() {
+    for terminal in [
+        SessionEvent::RunFinished {
+            output: String::new(),
+            usage: Usage::default(),
+        },
+        SessionEvent::RunAborted {
+            output: String::new(),
+        },
+        SessionEvent::RunFailed {
+            message: "boom".to_string(),
+        },
+    ] {
+        let mut state = GuiState::default();
+        state.reduce(ack());
+        state.reduce(user("go"));
+        state.reduce(event(SessionEvent::InteractionRequested {
+            id: "i1".to_string(),
+            title: "Allow `bash` to run?".to_string(),
+            body: "rm -rf target".to_string(),
+            options: Vec::new(),
+            free_text: true,
+        }));
+        state.reduce(event(terminal));
+        assert!(
+            state.interactions.is_empty(),
+            "the terminal must close every open card"
+        );
+        assert!(!state.running);
+    }
+}

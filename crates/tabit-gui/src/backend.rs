@@ -215,6 +215,18 @@ impl Backend {
         let _ = self.writer.send(to_wire_line(&SessionCommand::Abort));
     }
 
+    /// Answer an interaction request. At least one of `option`/`text`
+    /// (empty string counts as absent); a stale id is a backend no-op.
+    pub fn send_interaction_response(&self, id: &str, option: Option<&str>, text: Option<&str>) {
+        let _ = self
+            .writer
+            .send(to_wire_line(&SessionCommand::InteractionResponse {
+                id: id.to_string(),
+                option: option.filter(|o| !o.is_empty()).map(str::to_string),
+                text: text.filter(|t| !t.trim().is_empty()).map(str::to_string),
+            }));
+    }
+
     /// The tail of the backend's stderr, for crash reporting.
     pub fn stderr_tail(&self) -> Vec<String> {
         self.stderr

@@ -70,6 +70,21 @@ pub struct ToolCallRow {
     pub done: bool,
 }
 
+/// One open interaction card (FRONTEND.md §8): a permission gate or an
+/// ask-the-user body waiting for the user. Several may be open at once;
+/// run terminals close them all (the closing rule — the backend has no
+/// close event and needs none).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct InteractionCard {
+    pub id: String,
+    pub title: String,
+    pub body: String,
+    /// Button labels.
+    pub options: Vec<String>,
+    /// Whether a free-text answer/explanation is invited.
+    pub free_text: bool,
+}
+
 /// One arrival-ordered piece of a turn. The wire interleaves
 /// reasoning, text, and tool calls as they happen; the transcript
 /// must render exactly that order (bucketing by type relocates tool
@@ -117,6 +132,8 @@ pub struct GuiState {
     pub pending: VecDeque<String>,
     /// True from the first `user_message` of a run to its terminal.
     pub running: bool,
+    /// Open interaction cards, oldest first.
+    pub interactions: Vec<InteractionCard>,
     /// Sum of `run_finished` usage across runs.
     pub usage: Usage,
     /// The backend refused the handshake (e.g. first-run setup
@@ -133,6 +150,7 @@ impl Default for GuiState {
             transcript: Vec::new(),
             pending: VecDeque::new(),
             running: false,
+            interactions: Vec::new(),
             usage: Usage::default(),
             handshake_rejected: false,
         }
@@ -221,6 +239,13 @@ impl GuiState {
         }
     }
 
+    /// Record that a card's response was sent (optimistic close — a
+    /// racing terminal already cleared it backend-side; total either
+    /// way).
+    pub fn interaction_answered(&mut self, id: &str) {
+        self.interactions.retain(|card| card.id != id);
+    }
+
     fn reduce_event(&mut self, frame: EventFrame) {
         match frame.event {
             SessionEvent::UserMessage { text } => {
@@ -287,16 +312,34 @@ impl GuiState {
             }
             SessionEvent::RunFinished { usage, .. } => {
                 self.running = false;
+                self.interactions.clear();
                 self.usage = add(self.usage, usage);
             }
             SessionEvent::RunAborted { .. } => {
                 // Streamed partial text stays visible — the deltas the
                 // user watched are the record.
                 self.running = false;
+                self.interactions.clear();
             }
             SessionEvent::RunFailed { message } => {
                 self.running = false;
+                self.interactions.clear();
                 self.push_notice(message, true);
+            }
+            SessionEvent::InteractionRequested {
+                id,
+                title,
+                body,
+                options,
+                free_text,
+            } => {
+                self.interactions.push(InteractionCard {
+                    id,
+                    title,
+                    body,
+                    options: options.into_iter().map(|o| o.label).collect(),
+                    free_text,
+                });
             }
             SessionEvent::NativeItem { item } => {
                 self.transcript.push(Group::Native {
