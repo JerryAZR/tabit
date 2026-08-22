@@ -105,6 +105,27 @@ histories).
   repaired (synthesized results), never left half-open, and
   `checkout`/`base_id` can never land in-between. User messages and
   model changes are single-entry units.
+- **`tool_result` carries the result** (ruled after the first GUI
+  pass): the event gains `content` — exactly the text the model saw —
+  plus `status`. `content` is the faithful copy: the tools cap output
+  at the source (read's byte cap, bash's 128 KiB), failure text
+  included, so the frontend never needs a second channel and never
+  sees more than the model did. `status` is structure only, never
+  prose: `success | failed { exit_code? }` — bash's exit code rides
+  structure; the human-readable failure detail lives in `content`
+  (a detail free-text field would fork the truth and drift).
+  Riding along: the tool side promotes structure out of prose (bash
+  currently formats its exit code into the text) through the
+  internal `ToolResult`.
+- **The tool-event taxonomy — the rest is named and deferred.** v1's
+  `tool_call` fires args-complete, pre-execution; declare/delta
+  (`tool_declare`/`tool_delta`) exist only when argument
+  construction streams — niche, deferred until a consumer asks.
+  `tool_start` — args accepted, execution beginning — becomes
+  load-bearing at the permission milestone: it separates
+  approval-pause from executing, so it lands with
+  `interaction_request`, not before. `tool_progress` implies
+  streaming tool output; deferred until a tool streams.
 - **Replay on startup.** `initialize { protocol_version, replay: true }`
   → `initialize_ack` → `replay_started { total }` → the active chain's
   entries as finalized live events (`user_message` with its entry id;

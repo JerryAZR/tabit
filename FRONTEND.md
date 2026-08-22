@@ -170,7 +170,7 @@ unstamped control frames; everything else is a stamped event.
 | `text_delta` | `turn_id`, `text` | assistant text; appends within the turn. Full-text exactly once in replay. |
 | `reasoning_delta` | `turn_id`, `id`, `reasoning` | model reasoning; `id` correlates blocks within the turn (several may interleave; same-id deltas append). Full-text once per block id in replay. |
 | `tool_call` | `turn_id`, `name`, `call_id`, `internal_call_id`, `arguments` | the model issued a complete tool call, before execution. `arguments` is the raw JSON string, or `null` when unparseable. |
-| `tool_result` | `turn_id`, `entry_id`, `name`, `internal_call_id` | one tool body finished; its result committed. |
+| `tool_result` | `turn_id`, `entry_id`, `name`, `internal_call_id`, `content`, `status` | one tool body finished; its result committed. `content` is exactly the text the model saw — already capped at the source, failure text included; render it verbatim. `status` is structure only: `success` or `failed { exit_code? }`; the detail is in `content`, not `status`. |
 | `completion_call` | `turn_id`, `input_tokens`, `output_tokens` | one model request finished; usage is final for it. |
 | `turn_committed` | `id` | the turn is durable history. Same id as `turn_started`. |
 | `turn_retried` | `turn_id` | the turn was discarded before commit (e.g. malformed tool-call arguments); drop its provisional groups — a fresh `turn_started` follows. |
@@ -180,6 +180,15 @@ unstamped control frames; everything else is a stamped event.
 between turns: after the previous turn's `turn_committed` and
 `completion_call`, before the next `turn_started` (or, if it resets a
 retry, before the fresh `turn_started` that follows `turn_retried`).
+
+**Tool rendering.** `tool_result.content` is a faithful copy of what
+the model saw — render it verbatim, collapsed by default (a 500-line
+read is real content). Specialized views (a diff view for `edit`, a
+command block for `bash`) are a view-side dispatch on the tool name,
+matched in one module with a generic name+args+result card as the
+fallback; the reducer never learns tool names. The dispatch extracts
+when `tool_result.content` first lands on the wire, not before — no
+dead structure ahead of the data.
 
 **Run terminals** (exactly one per run)
 
