@@ -35,6 +35,7 @@ use std::io::Write as _;
 use std::path::PathBuf;
 use std::sync::Arc;
 use tabit_config::{AuthConfig, TabitConfig};
+use tabit_protocol::SessionCommand;
 use tabit_session::SessionEvent;
 use tabit_session::{
     ModelRegistry, ModelSelection, Session, SessionBuilder, SessionHandle, SessionStore,
@@ -278,6 +279,9 @@ fn print_event(event: &SessionEvent) {
     let mut out = stdout.lock();
     match event {
         SessionEvent::UserMessage { .. } => {}
+        // Cards render on stderr in the event loop; stdout stays the
+        // answer channel.
+        SessionEvent::InteractionRequested { .. } => {}
         SessionEvent::RunAborted { .. } => {
             let _ = writeln!(
                 out,
@@ -361,6 +365,7 @@ fn assemble_session(
     .dynamic_tool(dynamic(tabit_tools::Read))
     .dynamic_tool(dynamic(tabit_tools::Ls))
     .dynamic_tool(dynamic_contextual(tabit_tools::Bash))
+    .dynamic_tool(dynamic_contextual(tabit_tools::AskUser))
     .model_factory(registry.factory());
     if let Some(max_turns) = args.max_turns {
         builder = builder.max_turns(max_turns);
@@ -623,21 +628,12 @@ fn print_mode(
 
     print_banner(&session);
 
-    // Esc aborts the running turn (stdin is line-buffered in print mode:
-    // press Esc, then Enter; real key handling arrives with the TUI). The
-    // watcher thread is the single Esc consumer.
-    {
-        let abort = session.abort_handle();
-        std::thread::spawn(move || {
-            use std::io::Read as _;
-            for byte in std::io::stdin().lock().bytes() {
-                if matches!(byte, Ok(0x1b)) {
-                    abort.abort();
-                    return;
-                }
-            }
-        });
-    }
+    // One stdin reader owns both duties (line-buffered stdin in print
+    // mode: press Esc then Enter to abort; any other line answers the
+    // open interaction card — its number for buttons, free text
+    // otherwise). Real key handling arrives with the GUI.
+    let armed: std::sync::Arc<std::sync::Mutex<Option<(String, Vec<String>)>>> =
+        std::sync::Arc::default();
 
     // The message goes through the session actor — the same path JSON
     // mode drives — and the stream is read to its end: the actor returns
@@ -648,6 +644,23 @@ fn print_mode(
         .map_err(|e| e.to_string())?
         .block_on(async {
             let mut handle = SessionHandle::spawn(session);
+            {
+                let link = handle.command_link();
+                let armed = armed.clone();
+                std::thread::spawn(move || {
+                    use std::io::BufRead as _;
+                    for line in std::io::stdin().lock().lines().by_ref().flatten() {
+                        if line.starts_with('\x1b') {
+                            link.send(SessionCommand::Abort);
+                            return;
+                        }
+                        let card = { lock_armed(&armed).take() };
+                        if let Some((id, options)) = card {
+                            link.send(parse_answer(&id, &options, &line));
+                        }
+                    }
+                });
+            }
             let mut outcome = PrintOutcome {
                 failed: None,
                 input_tokens: 0,
@@ -667,6 +680,41 @@ fn print_mode(
                         outcome.output_tokens += output_tokens;
                     }
                     SessionEvent::RunFailed { message } => outcome.failed = Some(message.clone()),
+                    SessionEvent::InteractionRequested {
+                        id,
+                        title,
+                        body,
+                        options,
+                        ..
+                    } => {
+                        eprintln!("\n--- {title}\n{body}");
+                        if options.is_empty() {
+                            eprintln!("(type your answer, then Enter)");
+                        } else {
+                            let legend = options
+                                .iter()
+                                .enumerate()
+                                .map(|(n, o)| format!("{}) {}", n + 1, o.label))
+                                .collect::<Vec<_>>()
+                                .join("  ");
+                            eprintln!("{legend}   — number, then Enter");
+                        }
+                        *lock_armed(&armed) = Some((
+                            id.clone(),
+                            options.iter().map(|o| o.label.clone()).collect(),
+                        ));
+                    }
+                    terminal
+                        if matches!(
+                            terminal,
+                            SessionEvent::RunFinished { .. }
+                                | SessionEvent::RunAborted { .. }
+                                | SessionEvent::RunFailed { .. }
+                        ) =>
+                    {
+                        // A terminal closes every card (FRONTEND.md §8).
+                        lock_armed(&armed).take();
+                    }
                     _ => {}
                 }
                 print_event(&frame.event);
@@ -700,6 +748,103 @@ fn print_mode(
 enum ContinueMiss {
     Fail,
     StartFresh,
+}
+
+/// Lock the armed-card slot (poisoning recovers — the slot is only a
+/// hint for the stdin reader).
+fn lock_armed(
+    armed: &std::sync::Arc<std::sync::Mutex<Option<(String, Vec<String>)>>>,
+) -> std::sync::MutexGuard<'_, Option<(String, Vec<String>)>> {
+    armed.lock().unwrap_or_else(|error| error.into_inner())
+}
+
+/// Turn one stdin line into the card's answer. Numbered buttons parse as
+/// `2` or `2 reason text`; a free-text card takes the whole line. An
+/// empty or unrecognizable line answers with nothing — the backend's
+/// fail-closed default (deny / dismissed), so a card can never hang.
+
+#[cfg(test)]
+mod interaction_answer_tests {
+    use super::*;
+
+    fn options() -> Vec<String> {
+        vec![
+            "Allow".to_string(),
+            "Always allow".to_string(),
+            "Deny".to_string(),
+        ]
+    }
+
+    fn answer(id: &str, options: &[String], line: &str) -> (Option<String>, Option<String>) {
+        match parse_answer(id, options, line) {
+            SessionCommand::InteractionResponse { option, text, .. } => (option, text),
+            other => panic!("unexpected command: {other:?}"),
+        }
+    }
+
+    #[test]
+    fn numbered_buttons_select_by_index_with_optional_reason() {
+        assert_eq!(
+            answer("i1", &options(), "1"),
+            (Some("Allow".to_string()), None)
+        );
+        assert_eq!(
+            answer("i2", &options(), "3 never delete build dirs"),
+            (
+                Some("Deny".to_string()),
+                Some("never delete build dirs".to_string())
+            )
+        );
+    }
+
+    #[test]
+    fn free_text_cards_take_the_whole_line() {
+        assert_eq!(
+            answer("i3", &[], "use python"),
+            (None, Some("use python".to_string()))
+        );
+    }
+
+    #[test]
+    fn empty_or_unknown_answers_fail_closed_with_nothing() {
+        assert_eq!(answer("i4", &options(), ""), (None, None));
+        assert_eq!(answer("i5", &options(), "   "), (None, None));
+        // Out-of-range numbers carry no option: the backend's default
+        // (deny for permission) applies rather than a wrong button.
+        assert_eq!(answer("i6", &options(), "9"), (None, None));
+    }
+}
+
+fn parse_answer(id: &str, options: &[String], line: &str) -> SessionCommand {
+    let line = line.trim();
+    if line.is_empty() {
+        return SessionCommand::InteractionResponse {
+            id: id.to_string(),
+            option: None,
+            text: None,
+        };
+    }
+    if options.is_empty() {
+        return SessionCommand::InteractionResponse {
+            id: id.to_string(),
+            option: None,
+            text: Some(line.to_string()),
+        };
+    }
+    let (number, reason) = match line.split_once(char::is_whitespace) {
+        Some((number, reason)) => (number, reason.trim()),
+        None => (line, ""),
+    };
+    let option = number
+        .parse::<usize>()
+        .ok()
+        .and_then(|n| options.get(n.checked_sub(1)?))
+        .map(String::as_str);
+    SessionCommand::InteractionResponse {
+        id: id.to_string(),
+        option: option.map(str::to_string),
+        text: (!reason.is_empty()).then(|| reason.to_string()),
+    }
 }
 
 /// Resolve config/auth into a session per the args (model selection,
