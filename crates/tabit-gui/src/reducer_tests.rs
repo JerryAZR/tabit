@@ -28,11 +28,18 @@ fn delta(text: &str) -> InMsg {
     })
 }
 
-fn last_turn(state: &GuiState) -> &TurnGroup {
+fn segments(state: &GuiState) -> Vec<String> {
     let Some(Group::Turn(turn)) = state.transcript.last() else {
         panic!("expected a trailing turn");
     };
-    turn
+    turn.segments
+        .iter()
+        .map(|s| match s {
+            Segment::Reasoning { text, .. } => format!("think:{text}"),
+            Segment::Text(text) => format!("text:{text}"),
+            Segment::ToolCall(tool) => format!("tool:{}:{}", tool.name, tool.done),
+        })
+        .collect()
 }
 
 #[test]
@@ -58,7 +65,7 @@ fn a_run_lifecycle_from_message_to_terminal() {
 
     state.reduce(delta("I'm "));
     state.reduce(delta("tabit."));
-    assert_eq!(last_turn(&state).text, "I'm tabit.");
+    assert_eq!(segments(&state), vec!["text:I'm tabit."]);
 
     state.reduce(event(SessionEvent::RunFinished {
         output: "I'm tabit.".to_string(),
@@ -98,17 +105,47 @@ fn tools_and_reasoning_fold_into_the_turn() {
     }));
     state.reduce(delta("done"));
 
-    let turn = last_turn(&state);
     assert_eq!(
-        turn.reasoning,
-        vec![ReasoningBlock {
-            id: "r0".to_string(),
-            text: "checking the ls tool".to_string(),
-        }]
+        segments(&state),
+        vec!["think:checking the ls tool", "tool:ls:true", "text:done",]
     );
-    assert_eq!(turn.tools.len(), 1);
-    assert!(turn.tools[0].done);
-    assert_eq!(turn.text, "done");
+}
+
+#[test]
+fn segments_render_in_arrival_order() {
+    // Owner report: tool calls appeared above text that arrived
+    // first. The turn must preserve the wire's interleaving.
+    let mut state = GuiState::default();
+    state.reduce(ack());
+    state.reduce(user("check"));
+    state.reduce(delta("Let me look. "));
+    state.reduce(event(SessionEvent::ToolCall {
+        name: "ls".to_string(),
+        call_id: "c".to_string(),
+        internal_call_id: "i".to_string(),
+        arguments: None,
+    }));
+    state.reduce(event(SessionEvent::ToolResult {
+        name: "ls".to_string(),
+        internal_call_id: "i".to_string(),
+    }));
+    state.reduce(delta("Found three files."));
+    state.reduce(event(SessionEvent::ToolCall {
+        name: "read".to_string(),
+        call_id: "c2".to_string(),
+        internal_call_id: "i2".to_string(),
+        arguments: None,
+    }));
+
+    assert_eq!(
+        segments(&state),
+        vec![
+            "text:Let me look. ",
+            "tool:ls:true",
+            "text:Found three files.",
+            "tool:read:false",
+        ]
+    );
 }
 
 #[test]
@@ -139,8 +176,25 @@ fn a_second_turn_opens_a_new_group() {
         })
         .collect();
     assert_eq!(turns.len(), 2);
-    assert_eq!(turns[1].text, "second");
-    assert_eq!(turns[0].tools.len(), 1);
+    assert_eq!(
+        turns[1]
+            .segments
+            .iter()
+            .filter_map(|s| match s {
+                Segment::Text(text) => Some(text.clone()),
+                _ => None,
+            })
+            .collect::<String>(),
+        "second"
+    );
+    assert_eq!(
+        turns[0]
+            .segments
+            .iter()
+            .filter(|s| matches!(s, Segment::ToolCall(_)))
+            .count(),
+        1
+    );
 }
 
 #[test]
@@ -152,7 +206,7 @@ fn turn_retried_drops_the_provisional_turn() {
     state.reduce(event(SessionEvent::TurnRetried { turn: 1 }));
     assert!(matches!(state.transcript.last(), Some(Group::User { .. })));
     state.reduce(delta("fixed"));
-    assert_eq!(last_turn(&state).text, "fixed");
+    assert_eq!(segments(&state), vec!["text:fixed"]);
 }
 
 #[test]
@@ -176,7 +230,7 @@ fn run_failure_and_abort_end_the_run() {
     }));
     assert!(!state.running);
     // Aborted partial text stays visible.
-    assert_eq!(last_turn(&state).text, "partial");
+    assert_eq!(segments(&state), vec!["text:partial"]);
 }
 
 #[test]

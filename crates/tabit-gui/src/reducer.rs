@@ -53,14 +53,6 @@ pub struct Facts {
     pub model: ModelSelection,
 }
 
-/// One reasoning block inside a turn, correlated by the protocol's
-/// block id.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct ReasoningBlock {
-    pub id: String,
-    pub text: String,
-}
-
 /// One tool call the model issued, and whether its result arrived.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ToolCallRow {
@@ -71,12 +63,21 @@ pub struct ToolCallRow {
     pub done: bool,
 }
 
-/// An assistant turn: streaming text, reasoning blocks, tool calls.
+/// One arrival-ordered piece of a turn. The wire interleaves
+/// reasoning, text, and tool calls as they happen; the transcript
+/// must render exactly that order (bucketing by type relocates tool
+/// calls above text that arrived first — owner report).
+#[derive(Debug, Clone, PartialEq)]
+pub enum Segment {
+    Reasoning { id: String, text: String },
+    Text(String),
+    ToolCall(ToolCallRow),
+}
+
+/// An assistant turn: arrival-ordered segments.
 #[derive(Debug, Clone, PartialEq, Default)]
 pub struct TurnGroup {
-    pub text: String,
-    pub reasoning: Vec<ReasoningBlock>,
-    pub tools: Vec<ToolCallRow>,
+    pub segments: Vec<Segment>,
 }
 
 /// One renderable transcript row.
@@ -210,13 +211,19 @@ impl GuiState {
                 self.running = true;
             }
             SessionEvent::TextDelta { text } => {
-                self.turn().text.push_str(&text);
+                let turn = self.turn();
+                match turn.segments.last_mut() {
+                    Some(Segment::Text(buffer)) => buffer.push_str(&text),
+                    _ => turn.segments.push(Segment::Text(text)),
+                }
             }
             SessionEvent::ReasoningDelta { id, reasoning } => {
                 let turn = self.turn();
-                match turn.reasoning.iter_mut().find(|b| b.id == id) {
-                    Some(block) => block.text.push_str(&reasoning),
-                    None => turn.reasoning.push(ReasoningBlock {
+                match turn.segments.last_mut() {
+                    Some(Segment::Reasoning { id: open, text }) if *open == id => {
+                        text.push_str(&reasoning)
+                    }
+                    _ => turn.segments.push(Segment::Reasoning {
                         id,
                         text: reasoning,
                     }),
@@ -228,23 +235,21 @@ impl GuiState {
                 internal_call_id,
                 arguments,
             } => {
-                self.turn().tools.push(ToolCallRow {
+                self.turn().segments.push(Segment::ToolCall(ToolCallRow {
                     name,
                     call_id,
                     internal_call_id,
                     arguments,
                     done: false,
-                });
+                }));
             }
             SessionEvent::ToolResult {
                 internal_call_id, ..
             } => {
                 let turn = self.turn();
-                if let Some(tool) = turn
-                    .tools
-                    .iter_mut()
-                    .find(|t| t.internal_call_id == internal_call_id)
-                {
+                if let Some(Segment::ToolCall(tool)) = turn.segments.iter_mut().find(
+                    |s| matches!(s, Segment::ToolCall(t) if t.internal_call_id == internal_call_id),
+                ) {
                     tool.done = true;
                 }
             }

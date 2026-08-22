@@ -8,7 +8,7 @@ use std::time::Duration;
 use eframe::egui;
 
 use crate::backend::{self, Backend};
-use crate::reducer::{Group, GuiState, Phase};
+use crate::reducer::{Group, GuiState, Phase, Segment};
 use crate::theme;
 
 /// View-only state, expected to churn on the polish pass — kept out
@@ -303,12 +303,12 @@ fn estimate_height(group: &Group, width: f32, line_h: f32) -> f32 {
         Group::User { text } => text_lines(text) * line_h,
         Group::Turn(turn) => {
             let mut lines = 0.0;
-            for block in &turn.reasoning {
-                lines += text_lines(&block.text);
-            }
-            lines += turn.tools.len() as f32;
-            if !turn.text.is_empty() {
-                lines += text_lines(&turn.text);
+            for segment in &turn.segments {
+                match segment {
+                    Segment::Reasoning { text, .. } => lines += text_lines(text),
+                    Segment::Text(text) => lines += text_lines(text),
+                    Segment::ToolCall(_) => lines += 1.0,
+                }
             }
             lines * line_h
         }
@@ -330,30 +330,36 @@ fn render_group(ui: &mut egui::Ui, group: &Group) {
             });
         }
         Group::Turn(turn) => {
-            for block in &turn.reasoning {
-                ui.horizontal(|ui| {
-                    ui.add_space(theme::ROW_INSET);
-                    ui.label(
-                        egui::RichText::new(format!("thinking: {}", block.text))
-                            .color(theme::MUTED)
-                            .italics(),
-                    );
-                });
-            }
-            for tool in &turn.tools {
-                ui.horizontal(|ui| {
-                    ui.add_space(theme::ROW_INSET);
-                    let mark = if tool.done { "✓" } else { "…" };
-                    ui.label(
-                        egui::RichText::new(format!("{mark} {}", tool.name)).color(theme::MUTED),
-                    );
-                });
-            }
-            if !turn.text.is_empty() {
-                ui.horizontal(|ui| {
-                    ui.add_space(theme::ROW_INSET);
-                    ui.label(egui::RichText::new(turn.text.clone()).color(theme::TEXT));
-                });
+            // Arrival order, exactly as the wire interleaved it.
+            for segment in &turn.segments {
+                match segment {
+                    Segment::Reasoning { text, .. } => {
+                        ui.horizontal(|ui| {
+                            ui.add_space(theme::ROW_INSET);
+                            ui.label(
+                                egui::RichText::new(format!("thinking: {text}"))
+                                    .color(theme::MUTED)
+                                    .italics(),
+                            );
+                        });
+                    }
+                    Segment::Text(text) => {
+                        ui.horizontal(|ui| {
+                            ui.add_space(theme::ROW_INSET);
+                            ui.label(egui::RichText::new(text.clone()).color(theme::TEXT));
+                        });
+                    }
+                    Segment::ToolCall(tool) => {
+                        ui.horizontal(|ui| {
+                            ui.add_space(theme::ROW_INSET);
+                            let mark = if tool.done { "✓" } else { "…" };
+                            ui.label(
+                                egui::RichText::new(format!("{mark} {}", tool.name))
+                                    .color(theme::MUTED),
+                            );
+                        });
+                    }
+                }
             }
         }
         Group::Notice { text, error } => {
