@@ -39,7 +39,7 @@ pub struct SessionHandle {
     info: SessionInfo,
     mailbox: MailboxHandle,
     abort: AbortHandle,
-    events: mpsc::UnboundedReceiver<EventFrame>,
+    events: Option<mpsc::UnboundedReceiver<EventFrame>>,
     shutdown: CancellationToken,
     closing_stats: Arc<Mutex<Option<SessionStats>>>,
 }
@@ -132,7 +132,7 @@ impl SessionHandle {
             info,
             mailbox,
             abort,
-            events: event_rx,
+            events: Some(event_rx),
             shutdown,
             closing_stats,
         }
@@ -173,9 +173,17 @@ impl SessionHandle {
         self.shutdown.cancel();
     }
 
-    /// The next stamped event, or `None` once the worker has wound down.
+    /// Take the whole event stream for a long-lived consumer (a
+    /// transport forwarder). Once taken, [`SessionHandle::next_event`]
+    /// yields `None` — one stream, one consumer.
+    pub fn take_events(&mut self) -> Option<mpsc::UnboundedReceiver<EventFrame>> {
+        self.events.take()
+    }
+
+    /// The next stamped event, or `None` once the worker has wound
+    /// down (or the stream was taken).
     pub async fn next_event(&mut self) -> Option<EventFrame> {
-        self.events.recv().await
+        self.events.as_mut()?.recv().await
     }
 
     /// Session totals captured at worker wind-down, for callers that

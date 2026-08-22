@@ -8,6 +8,7 @@
 //! with in-memory buffers instead of process pipes.
 
 use std::io::{BufRead, Write};
+use tabit_protocol::EventFrame;
 use tabit_protocol::{ClientFrame, PROTOCOL_VERSION, ServerControlFrame, ServerFrame};
 use tabit_session::{SessionCommandLink, SessionHandle, SessionInfo};
 use tokio::sync::mpsc;
@@ -33,17 +34,37 @@ where
         tokio::task::spawn_blocking(move || read_loop(reader, link, reader_tx, &info));
     let writer_task = tokio::spawn(write_loop(writer_rx, writer));
 
+    // The live forwarder: actor events reach stdout as they happen,
+    // for the whole session — not only at wind-down. (v1 bug: events
+    // accumulated unread in the actor's channel until the client
+    // closed stdin; the GUI sat at "queued" forever while the run was
+    // already streaming.)
+    let forwarder_task = tokio::spawn(forward_events(handle.take_events(), writer_tx.clone()));
+
     // A panicked reader thread is a broken edge: exit nonzero.
     let exit = reader_task.await.unwrap_or(1);
     handle.close_commands();
-    // Forward everything the actor emits while it winds down (accepted
-    // messages still run), then let the writer drain and flush.
-    while let Some(frame) = handle.next_event().await {
-        let _ = writer_tx.send(ServerFrame::Event(frame));
-    }
+    // The forwarder ends when the worker drops the event sender at
+    // wind-down (accepted messages still run); the writer ends when
+    // every writer_tx clone is gone.
     drop(writer_tx);
+    let _ = forwarder_task.await;
     let _ = writer_task.await;
     exit
+}
+
+/// Pump the actor's event stream into the writer channel until the
+/// stream ends.
+async fn forward_events(
+    stream: Option<mpsc::UnboundedReceiver<EventFrame>>,
+    out: mpsc::UnboundedSender<ServerFrame>,
+) {
+    let Some(mut stream) = stream else {
+        return;
+    };
+    while let Some(frame) = stream.recv().await {
+        let _ = out.send(ServerFrame::Event(frame));
+    }
 }
 
 /// Parse client lines and act on them until EOF (or a rejected
@@ -232,6 +253,99 @@ id = "m"
             .map(|line| serde_json::from_str(line).expect("every line is a frame"))
             .collect();
         (code, frames)
+    }
+
+    /// Input whose EOF the test controls: lines arrive through a
+    /// channel and the reader stays pending until the sender drops —
+    /// the shape of a live client (the fixed-script harness closes
+    /// input immediately, which masked the live-forwarding bug).
+    struct ChannelIn {
+        lines: std::sync::mpsc::Receiver<String>,
+        buf: Vec<u8>,
+    }
+
+    impl std::io::Read for ChannelIn {
+        fn read(&mut self, buf: &mut [u8]) -> std::io::Result<usize> {
+            use std::io::BufRead as _;
+            let available = self.fill_buf()?;
+            let n = buf.len().min(available.len());
+            buf[..n].copy_from_slice(&available[..n]);
+            self.consume(n);
+            Ok(n)
+        }
+    }
+
+    impl std::io::BufRead for ChannelIn {
+        fn fill_buf(&mut self) -> std::io::Result<&[u8]> {
+            if self.buf.is_empty()
+                && let Ok(line) = self.lines.recv()
+            {
+                self.buf = format!(
+                    "{line}
+"
+                )
+                .into_bytes();
+            }
+            Ok(&self.buf)
+        }
+        fn consume(&mut self, amt: usize) {
+            self.buf.drain(..amt);
+        }
+    }
+
+    fn read_lines(out: &SharedOut) -> Vec<String> {
+        let bytes = out.0.lock().unwrap().clone();
+        String::from_utf8(bytes)
+            .unwrap_or_default()
+            .lines()
+            .map(str::to_string)
+            .collect()
+    }
+
+    #[tokio::test]
+    async fn events_stream_before_the_client_closes_input() {
+        // Regression: the bridge forwarded actor events only at
+        // wind-down, so a live client saw nothing until it closed
+        // stdin (the GUI sat at "queued" while the run streamed).
+        let (tx_in, rx_in) = std::sync::mpsc::channel::<String>();
+        let session = test_session("live", vec![script("pong")]);
+        let handle = SessionHandle::spawn(session);
+        let out = SharedOut::default();
+        let serve_task = tokio::spawn(serve(
+            handle,
+            ChannelIn {
+                lines: rx_in,
+                buf: Vec::new(),
+            },
+            out.clone(),
+        ));
+
+        tx_in.send(r#"{"protocol_version":1}"#.to_string()).unwrap();
+        tx_in
+            .send(r#"{"type":"message","text":"hi"}"#.to_string())
+            .unwrap();
+
+        // Input stays open: the whole round trip must arrive anyway.
+        let finished = tokio::time::timeout(std::time::Duration::from_secs(5), async {
+            loop {
+                if read_lines(&out).iter().any(|l| l.contains("run_finished")) {
+                    return;
+                }
+                tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+            }
+        })
+        .await;
+        assert!(
+            finished.is_ok(),
+            "run_finished must arrive while input is open"
+        );
+
+        drop(tx_in);
+        let code = serve_task.await.unwrap();
+        assert_eq!(code, 0);
+        let lines = read_lines(&out);
+        assert!(lines.iter().any(|l| l.contains(r#""type":"user_message""#)));
+        assert!(lines.iter().any(|l| l.contains("pong")));
     }
 
     fn texts<'a>(frames: &'a [ServerFrame], kind: &str) -> Vec<&'a str> {
