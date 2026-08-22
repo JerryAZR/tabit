@@ -453,7 +453,7 @@ impl AgentHook for ToolRecorder {
     async fn on_tool_call(&self, _ctx: &HookContext, _event: ToolCall<'_>) -> ToolCallAction {
         self.log.lock().expect("log").push(self.label);
         if self.stop {
-            ToolCallAction::stop("stop")
+            ToolCallAction::skip("stop")
         } else {
             ToolCallAction::run()
         }
@@ -542,7 +542,7 @@ async fn runs_hooks_in_registration_order_and_consults_all_on_continue() {
 }
 
 #[tokio::test]
-async fn first_stop_short_circuits_on_chained_tool_call() {
+async fn first_skip_short_circuits_on_chained_tool_call() {
     let log = Arc::new(Mutex::new(Vec::new()));
     let mut stack = HookStack::with(ToolRecorder {
         label: 1,
@@ -556,7 +556,7 @@ async fn first_stop_short_circuits_on_chained_tool_call() {
     });
     assert!(matches!(
         stack.on_tool_call(&ctx(), tool_call_event()).await,
-        ToolCallAction::Stop(_)
+        ToolCallAction::Skip(_)
     ));
     assert_eq!(*log.lock().unwrap(), vec![1]);
 }
@@ -819,12 +819,6 @@ impl AgentHook for SkipHook {
         ToolCallAction::skip("denied")
     }
 }
-struct StopHook;
-impl AgentHook for StopHook {
-    async fn on_tool_call(&self, _: &HookContext, _: ToolCall<'_>) -> ToolCallAction {
-        ToolCallAction::stop("stop")
-    }
-}
 #[derive(Clone, Default)]
 struct ArgsSpy(Arc<Mutex<Vec<String>>>);
 impl AgentHook for ArgsSpy {
@@ -920,18 +914,6 @@ async fn nested_rewrite_then_skip_preserves_rewrite() {
     outer.push(inner);
     let (action, salvaged) = resolve(&outer).await;
     assert!(matches!(action, ToolCallAction::Skip(_)));
-    assert_eq!(salvaged, Some(json!({"x":41})));
-}
-
-#[tokio::test]
-async fn nested_rewrite_then_stop_preserves_rewrite() {
-    let mut inner = HookStack::new();
-    inner.push(RewriteHook(json!({"x":41})));
-    inner.push(StopHook);
-    let mut outer = HookStack::new();
-    outer.push(inner);
-    let (action, salvaged) = resolve(&outer).await;
-    assert!(matches!(action, ToolCallAction::Stop(_)));
     assert_eq!(salvaged, Some(json!({"x":41})));
 }
 

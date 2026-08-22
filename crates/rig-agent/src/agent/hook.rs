@@ -841,7 +841,10 @@ impl CompletionCallAction {
     }
 }
 
-/// Action for pre-tool hooks.
+/// Action for pre-tool hooks. There is deliberately no stop variant:
+/// nothing may kill a batch (ENGINE.md, stop taxonomy) — a hook that
+/// wants this call not to run skips it, and one that wants the run
+/// over now holds the abort leaf.
 #[derive(Debug, Clone, PartialEq)]
 pub enum ToolCallAction {
     /// Execute with the current arguments.
@@ -850,8 +853,6 @@ pub enum ToolCallAction {
     Rewrite(serde_json::Value),
     /// Do not execute; return this feedback to the model.
     Skip(String),
-    /// Stop the run.
-    Stop(String),
 }
 
 impl ToolCallAction {
@@ -876,11 +877,6 @@ impl ToolCallAction {
     pub fn skip(reason: impl Into<String>) -> Self {
         Self::Skip(reason.into())
     }
-
-    /// Creates an action that stops the run before executing the tool.
-    pub fn stop(reason: impl Into<String>) -> Self {
-        Self::Stop(reason.into())
-    }
 }
 
 /// Action for post-tool hooks.
@@ -891,7 +887,10 @@ pub enum ToolResultAction {
     /// Replace the effective presentation sent to the model and result-content
     /// telemetry.
     Rewrite(ToolOutput),
-    /// Stop the run.
+    /// Do not continue the run after this batch. The current batch is
+    /// unaffected — chains not yet started still run and every result
+    /// commits; the reason is fed to the machine at settle and the run
+    /// ends `failed(reason)` at the decision (ENGINE.md, stop taxonomy).
     Stop(String),
 }
 
@@ -915,7 +914,8 @@ impl ToolResultAction {
         Self::Rewrite(output)
     }
 
-    /// Creates an action that stops the run after result handling.
+    /// Creates an action that ends the run after the current batch
+    /// settles (see [`ToolResultAction::Stop`]).
     pub fn stop(reason: impl Into<String>) -> Self {
         Self::Stop(reason.into())
     }

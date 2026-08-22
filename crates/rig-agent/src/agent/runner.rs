@@ -137,7 +137,6 @@ pub(crate) enum ToolCallDecision {
     Proceed,
     ProceedWith(serde_json::Value),
     Skip(String),
-    Terminate(String),
 }
 
 pub(crate) fn tool_call_decision(action: ToolCallAction) -> ToolCallDecision {
@@ -145,21 +144,23 @@ pub(crate) fn tool_call_decision(action: ToolCallAction) -> ToolCallDecision {
         ToolCallAction::Run => ToolCallDecision::Proceed,
         ToolCallAction::Rewrite(args) => ToolCallDecision::ProceedWith(args),
         ToolCallAction::Skip(reason) => ToolCallDecision::Skip(reason),
-        ToolCallAction::Stop(reason) => ToolCallDecision::Terminate(reason),
     }
 }
 
 pub(crate) enum ToolResultDecision {
     Keep,
     Replace(ToolOutput),
-    Terminate(String),
+    /// A hook decided the run must not continue after this batch. The
+    /// result still commits — the flag is fed only at settle (ENGINE.md,
+    /// stop taxonomy).
+    Stop(String),
 }
 
 pub(crate) fn tool_result_decision(action: ToolResultAction) -> ToolResultDecision {
     match action {
         ToolResultAction::Keep => ToolResultDecision::Keep,
         ToolResultAction::Rewrite(result) => ToolResultDecision::Replace(result),
-        ToolResultAction::Stop(reason) => ToolResultDecision::Terminate(reason),
+        ToolResultAction::Stop(reason) => ToolResultDecision::Stop(reason),
     }
 }
 
@@ -729,16 +730,23 @@ pub(crate) struct ToolCallOutcome {
     pub content: UserContent,
     /// How the call resolved: executed (with the effective tool call) or skipped.
     pub execution: ToolExecution,
+    /// A `ToolResult` hook's decision that the run must not continue after
+    /// this batch (ENGINE.md, stop taxonomy). The current batch is
+    /// unaffected — chains not yet started still run — and the reason is
+    /// fed to the machine only after the batch commits.
+    pub stop_reason: Option<String>,
 }
 
 /// Execute a single tool call, firing the `ToolCall` and `ToolResult` hooks and
 /// shaping the result. **Shared by the blocking and streaming drivers** so a
-/// tool call behaves identically in both: same hook events, same fail-closed
-/// skip/terminate handling, and the same result shaping. Hook skips become
+/// tool call behaves identically in both: same hook events, same skip
+/// handling, and the same result shaping. Hook skips become
 /// [`ToolResult::skipped`], and every result is converted directly into typed
 /// message content through [`tool_result_output`] without reparsing text.
-/// Records `gen_ai.tool.*` on the current span;
-/// `error_history` builds a cancellation error if a hook terminates the run.
+/// Records `gen_ai.tool.*` on the current span. Never fails: a
+/// `ToolResult` hook's run-stop decision rides
+/// [`ToolCallOutcome::stop_reason`] (fed to the machine only after the
+/// batch settles — nothing kills a batch; ENGINE.md, stop taxonomy).
 /// Returns whether the tool body executed via [`ToolCallOutcome::execution`].
 pub(crate) async fn run_single_tool(
     runner: &AgentRunner,
@@ -746,8 +754,7 @@ pub(crate) async fn run_single_tool(
     tool_snapshot: &ToolRegistrySnapshot,
     tool_call: &ToolCall,
     internal_call_id: &str,
-    error_history: &[Message],
-) -> Result<ToolCallOutcome, PromptError> {
+) -> ToolCallOutcome {
     let hooks = &runner.hooks;
     let tool_context = &runner.tool_context;
     let record_content = runner.record_telemetry_content;
@@ -801,12 +808,6 @@ pub(crate) async fn run_single_tool(
     // execution-commit event so a redaction rewrite does not leak. Unused for a skip.
     let mut skipped: Option<ToolResult> = None;
     let effective_args: serde_json::Value = match tool_call_decision(action) {
-        ToolCallDecision::Terminate(reason) => {
-            return Err(PromptError::prompt_cancelled(
-                error_history.to_vec(),
-                reason,
-            ));
-        }
         ToolCallDecision::Skip(reason) => {
             tracing::info!(tool_name = tool_name, reason = reason, "Tool call rejected");
             // Synthetic rejection: `Skipped` outcome, message delivered verbatim.
@@ -876,22 +877,34 @@ pub(crate) async fn run_single_tool(
     record_tool_result(&tool_span, &exec);
 
     match result_decision {
-        ToolResultDecision::Terminate(reason) => Err(PromptError::prompt_cancelled(
-            error_history.to_vec(),
-            reason,
-        )),
+        ToolResultDecision::Stop(reason) => {
+            if record_content {
+                tool_span.record("gen_ai.tool.call.result", exec.output().render());
+            }
+            let content = tool_result_output(
+                tool_call.id.clone(),
+                tool_call.call_id.clone(),
+                exec.output().clone(),
+            );
+            ToolCallOutcome {
+                content,
+                execution,
+                stop_reason: Some(reason),
+            }
+        }
         ToolResultDecision::Replace(replacement) => {
             if record_content {
                 tool_span.record("gen_ai.tool.call.result", replacement.render());
             }
-            Ok(ToolCallOutcome {
+            ToolCallOutcome {
                 content: tool_result_output(
                     tool_call.id.clone(),
                     tool_call.call_id.clone(),
                     replacement,
                 ),
                 execution,
-            })
+                stop_reason: None,
+            }
         }
         ToolResultDecision::Keep => {
             if record_content {
@@ -902,7 +915,11 @@ pub(crate) async fn run_single_tool(
                 tool_call.call_id.clone(),
                 exec.output().clone(),
             );
-            Ok(ToolCallOutcome { content, execution })
+            ToolCallOutcome {
+                content,
+                execution,
+                stop_reason: None,
+            }
         }
     }
 }

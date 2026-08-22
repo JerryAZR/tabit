@@ -616,42 +616,37 @@ async fn content_telemetry_records_effective_args_for_a_proceeding_rewrite() {
 }
 
 #[tokio::test]
-async fn content_telemetry_records_effective_args_for_a_terminal_rewrite() {
-    // A nested stack that rewrites and then stops surfaces the rewrite as a
+async fn content_telemetry_records_effective_args_for_a_skip_rewrite() {
+    // A nested stack that rewrites and then skips surfaces the rewrite as a
     // salvaged value; the re-record path must still execute.
-    struct StopToolCalls;
-    impl AgentHook for StopToolCalls {
+    struct SkipToolCalls;
+    impl AgentHook for SkipToolCalls {
         async fn on_tool_call(&self, _: &HookContext, _: ToolCall<'_>) -> ToolCallAction {
-            ToolCallAction::stop("terminal after rewrite")
+            ToolCallAction::skip("terminal after rewrite")
         }
     }
 
     let mut inner = HookStack::new();
     inner.push(RewriteArgsToForty);
-    inner.push(StopToolCalls);
+    inner.push(SkipToolCalls);
 
-    let model = MockCompletionModel::from_turns([MockTurn::tool_call(
-        "tc1",
-        "add",
-        json!({"x": 2, "y": 3}),
-    )]);
+    let model = MockCompletionModel::from_turns([
+        MockTurn::tool_call("tc1", "add", json!({"x": 2, "y": 3})),
+        MockTurn::text("done"),
+    ]);
 
-    let error = AgentBuilder::new(model)
+    let response = AgentBuilder::new(model)
         .tool(MockAddTool)
         .record_content_telemetry(true)
         .add_hook(inner)
         .build()
         .runner("add")
-        .max_turns(2)
+        .max_turns(3)
         .run()
         .await
-        .expect_err("the terminal tool-call action should stop the run");
+        .expect("the skipped tool call feeds back in-band and the run continues");
 
-    assert!(
-        matches!(error, PromptError::PromptCancelled { ref reason, .. }
-                if reason == "terminal after rewrite"),
-        "unexpected error: {error:?}"
-    );
+    assert_eq!(response.output, "done");
 }
 
 use std::collections::HashMap;
@@ -3925,33 +3920,38 @@ async fn stream_concurrent_tool_result_terminate_drains_in_flight_siblings() {
     );
 }
 
-/// A the event-specific stop action from the `ToolCall` event with a reason keyed by the
-/// call's `x` arg, forcing the `x == 2` call (tc2) to terminate *before* the
-/// `x == 1` call (tc1): tc2 opens the gate after terminating, tc1 awaits it
-/// first. So completion order (tc2) differs from call order (tc1).
+/// A post-result stop with a reason keyed by the call's `x` arg, forcing the
+/// `x == 2` call (tc2) to finish *before* the `x == 1` call (tc1): tc2 opens
+/// the gate after its result, tc1 awaits it first. So completion order (tc2)
+/// differs from call order (tc1) — the batch's collected stop reason must
+/// still pick by call order.
 struct OrderedTerminateHook {
     gate: Arc<tokio::sync::Notify>,
 }
 
 impl AgentHook for OrderedTerminateHook {
-    async fn on_tool_call(&self, _ctx: &HookContext, event: ToolCall<'_>) -> ToolCallAction {
-        if let ToolCall { args, .. } = event {
+    async fn on_tool_result(
+        &self,
+        _ctx: &HookContext,
+        event: ToolResultEvent<'_>,
+    ) -> ToolResultAction {
+        if let ToolResultEvent { args, .. } = event {
             let x = serde_json::from_str::<serde_json::Value>(args)
                 .ok()
                 .and_then(|v| v.get("x").and_then(serde_json::Value::as_i64));
             match x {
                 Some(2) => {
                     self.gate.notify_one();
-                    return ToolCallAction::stop("terminated-by-tc2".to_string());
+                    return ToolResultAction::stop("terminated-by-tc2".to_string());
                 }
                 Some(1) => {
                     self.gate.notified().await;
-                    return ToolCallAction::stop("terminated-by-tc1".to_string());
+                    return ToolResultAction::stop("terminated-by-tc1".to_string());
                 }
                 _ => {}
             }
         }
-        ToolCallAction::run()
+        ToolResultAction::keep()
     }
 }
 
@@ -3980,11 +3980,11 @@ fn two_terminating_tools_streaming_model() -> MockCompletionModel {
     ])
 }
 
-/// When two tool calls in one turn both terminate the run under
+/// When two tool calls in one turn both post-result stop under
 /// `tool_concurrency > 1`, run() and stream() surface the **same** reason —
 /// the first-called tool's (call order), not whichever finished first. tc2
-/// terminates before tc1, so a completion-order pick would surface tc2's
-/// reason and the two drivers would disagree.
+/// stops before tc1, so a completion-order pick would surface tc2's reason
+/// and the two drivers would disagree.
 #[tokio::test]
 async fn concurrent_simultaneous_tool_terminations_pick_call_order_on_both_drivers() {
     let run_err = tokio::time::timeout(
@@ -4044,31 +4044,35 @@ async fn concurrent_simultaneous_tool_terminations_pick_call_order_on_both_drive
     );
 }
 
-/// Terminates the run from the `ToolCall` event of the first tool only
-/// (`x == 1`), letting any later tool through.
+/// Stops after the result of the first tool only (`x == 1`), letting any
+/// later tool through.
 struct TerminateOnFirstToolHook;
 impl AgentHook for TerminateOnFirstToolHook {
-    async fn on_tool_call(&self, _ctx: &HookContext, event: ToolCall<'_>) -> ToolCallAction {
-        if let ToolCall { args, .. } = event
+    async fn on_tool_result(
+        &self,
+        _ctx: &HookContext,
+        event: ToolResultEvent<'_>,
+    ) -> ToolResultAction {
+        if let ToolResultEvent { args, .. } = event
             && serde_json::from_str::<serde_json::Value>(args)
                 .ok()
                 .and_then(|v| v.get("x").and_then(serde_json::Value::as_i64))
                 == Some(1)
         {
-            return ToolCallAction::stop("stop".to_string());
+            return ToolResultAction::stop("stop".to_string());
         }
-        ToolCallAction::run()
+        ToolResultAction::keep()
     }
 }
 
-/// Fail-fast, lock-step across surfaces: on a multi-tool turn whose first
-/// tool's hook terminates the run, the SEQUENTIAL default (`tool_concurrency`
-/// == 1) surfaces the terminate immediately and does **not** start the
-/// remaining sibling tools — so tool B's side effect never runs. The
-/// terminating tool's own body never runs either (its `ToolCall` hook fired
-/// first), so `calls == 0` on both drivers, which share the tool driver.
+/// Post-result stops never affect the current batch (ENGINE.md, stop
+/// taxonomy): on a multi-tool turn whose first tool's result hook stops the
+/// run, the SEQUENTIAL default (`tool_concurrency` == 1) still executes every
+/// sibling — the batch is a sealed unit — and then the run ends with the
+/// reason. So `calls == 2` on both drivers, which share the tool driver,
+/// and both surface the stop.
 #[tokio::test]
-async fn default_concurrency_terminate_skips_remaining_tools_on_both_drivers() {
+async fn default_concurrency_post_result_stop_still_runs_remaining_tools_on_both_drivers() {
     let blocking_calls = Arc::new(AtomicU32::new(0));
     AgentBuilder::new(two_terminating_tools_blocking_model())
         .tool(CountingAddTool {
@@ -4080,11 +4084,11 @@ async fn default_concurrency_terminate_skips_remaining_tools_on_both_drivers() {
         .add_hook(TerminateOnFirstToolHook)
         .run()
         .await
-        .expect_err("the run terminates");
+        .expect_err("the run stops after the batch");
     assert_eq!(
         blocking_calls.load(SeqCst),
-        0,
-        "fail-fast: blocking run() must not start the second tool after the first terminates"
+        2,
+        "the batch is sealed: both tool bodies run before the stop takes effect"
     );
 
     let streaming_calls = Arc::new(AtomicU32::new(0));
@@ -4104,16 +4108,16 @@ async fn default_concurrency_terminate_skips_remaining_tools_on_both_drivers() {
             saw_error = true;
             assert!(
                 err.to_string().contains("stop"),
-                "stream() should surface the terminate reason, got: {err}"
+                "stream() should surface the stop reason, got: {err}"
             );
             break;
         }
     }
-    assert!(saw_error, "stream() must surface the terminate error");
+    assert!(saw_error, "stream() must surface the stop error");
     assert_eq!(
         streaming_calls.load(SeqCst),
-        0,
-        "fail-fast: stream() must not start the second tool after the first terminates"
+        2,
+        "the batch is sealed: both tool bodies run before the stop takes effect"
     );
 }
 
@@ -4182,38 +4186,39 @@ fn three_tools_first_terminates_streaming_model() -> MockCompletionModel {
     ])
 }
 
-/// Terminates from the `x == 0` tool's `ToolCall` hook, but only after the
-/// `x == 1` sibling has signalled it started executing — so tc1 is genuinely
-/// in flight (not merely not-yet-started) when the terminate fires.
+/// Stops after the `x == 0` tool's result, but only after the `x == 1`
+/// sibling has signalled it started executing — so tc1 is genuinely in
+/// flight (not merely not-yet-started) when the stop decision lands.
 struct TerminateOnArgZeroAfterSiblingHook {
     sibling_started: Arc<tokio::sync::Notify>,
 }
 impl AgentHook for TerminateOnArgZeroAfterSiblingHook {
-    async fn on_tool_call(&self, _ctx: &HookContext, event: ToolCall<'_>) -> ToolCallAction {
-        if let ToolCall { args, .. } = event
+    async fn on_tool_result(
+        &self,
+        _ctx: &HookContext,
+        event: ToolResultEvent<'_>,
+    ) -> ToolResultAction {
+        if let ToolResultEvent { args, .. } = event
             && serde_json::from_str::<serde_json::Value>(args)
                 .ok()
                 .and_then(|v| v.get("x").and_then(serde_json::Value::as_i64))
                 == Some(0)
         {
             self.sibling_started.notified().await;
-            return ToolCallAction::stop("stop");
+            return ToolResultAction::stop("stop");
         }
-        ToolCallAction::run()
+        ToolResultAction::keep()
     }
 }
 
-/// Concurrent fail-fast: when a tool terminates the turn under
-/// `tool_concurrency > 1`, an **already-in-flight** sibling is drained while a
-/// sibling **beyond the concurrency window** — not yet started — is dropped.
-/// With concurrency 2 and three tools: tc0 (`x == 0`) terminates only after
-/// tc1 (`x == 1`) has started, so tc1 is genuinely in flight and drains
-/// (`called` contains 1); tc2 (`x == 2`) is pulled only after tc0 frees a slot
-/// — by which time the run is terminating — so it is dropped (`called` never
-/// contains 2), and tc0's own body never runs (its `ToolCall` hook terminated).
-/// The pre-fix run-all-then-decide would have executed tc2 too.
+/// Concurrent post-result stop: the batch is sealed (ENGINE.md, stop
+/// taxonomy), so every chain — in flight, beyond the concurrency window, and
+/// the stopper itself — runs to completion and its result is collected.
+/// With concurrency 2 and three tools: tc0 (`x == 0`) stops only after tc1
+/// (`x == 1`) has started; tc2 (`x == 2`) starts when a slot frees and runs
+/// anyway. The run then ends with the stop reason instead of another turn.
 #[tokio::test]
-async fn concurrent_terminate_drops_beyond_window_sibling_but_drains_in_flight() {
+async fn concurrent_post_result_stop_runs_the_whole_batch() {
     let called = Arc::new(Mutex::new(Vec::new()));
     let sibling_started = Arc::new(tokio::sync::Notify::new());
     let mut stream = AgentBuilder::new(three_tools_first_terminates_streaming_model())
@@ -4245,24 +4250,21 @@ async fn concurrent_terminate_drops_beyond_window_sibling_but_drains_in_flight()
         .await
         .expect("the concurrent tool drive must not hang");
 
-    assert!(saw_error, "the terminated run must surface an error");
-    assert!(
-        !saw_final,
-        "a terminated run must not yield a final response"
-    );
+    assert!(saw_error, "the stopped run must surface an error");
+    assert!(!saw_final, "a stopped run must not yield a final response");
     let called = called.lock().expect("called").clone();
     assert!(
         called.contains(&1),
-        "the in-flight sibling (x==1) must be drained to completion; called args: {called:?}"
+        "the in-flight sibling (x==1) completes; called args: {called:?}"
     );
     assert!(
-        !called.contains(&2),
-        "the not-yet-started sibling beyond the concurrency window (x==2) must be \
-             dropped, not executed; called args: {called:?}"
+        called.contains(&2),
+        "the beyond-window sibling (x==2) starts once a slot frees and runs anyway; \
+             called args: {called:?}"
     );
     assert!(
-        !called.contains(&0),
-        "the terminator's own body never runs (its ToolCall hook terminated); \
+        called.contains(&0),
+        "the stopper's own body runs — a post-result stop never un-executes anything; \
              called args: {called:?}"
     );
 }
@@ -4300,35 +4302,38 @@ impl Tool for SignalOnRunTool {
     }
 }
 
-/// The `x == 2` tool's `ToolCall` hook terminates, but only after the `x == 1`
-/// sibling has finished (via the gate), so a *completed* sibling's result is
-/// still suppressed by the atomic batch.
+/// The `x == 2` tool's result hook stops, but only after the `x == 1`
+/// sibling has finished (via the gate), so a *completed* sibling's result
+/// sits collected next to the stop decision.
 struct TerminateAfterSiblingDoneHook {
     a_done: Arc<tokio::sync::Notify>,
 }
 impl AgentHook for TerminateAfterSiblingDoneHook {
-    async fn on_tool_call(&self, _ctx: &HookContext, event: ToolCall<'_>) -> ToolCallAction {
-        if let ToolCall { args, .. } = event
+    async fn on_tool_result(
+        &self,
+        _ctx: &HookContext,
+        event: ToolResultEvent<'_>,
+    ) -> ToolResultAction {
+        if let ToolResultEvent { args, .. } = event
             && serde_json::from_str::<serde_json::Value>(args)
                 .ok()
                 .and_then(|v| v.get("x").and_then(serde_json::Value::as_i64))
                 == Some(2)
         {
             self.a_done.notified().await;
-            return ToolCallAction::stop("stop");
+            return ToolResultAction::stop("stop");
         }
-        ToolCallAction::run()
+        ToolResultAction::keep()
     }
 }
 
-/// Atomic concurrent batch: when the batch terminates, even a sibling that
-/// completed **successfully** before the terminating sibling produces no
-/// `ToolExecutionCommitted` and no `ToolResult` stream item (no orphan
-/// execution-commit), and its result is not committed. The `x == 1` tool runs
-/// to completion (its side effect happens) and signals; the `x == 2` tool's
-/// hook then terminates.
+/// Atomic concurrent batch with a post-result stop: the batch settles fully,
+/// so every chain surfaces its `ToolExecutionCommitted` and `ToolResult`
+/// items — a stop decision suppresses nothing, it only ends the run at the
+/// next decision. The `x == 1` tool runs to completion and signals; the
+/// `x == 2` tool's result hook then stops.
 #[tokio::test]
-async fn concurrent_termination_surfaces_no_execution_items() {
+async fn concurrent_post_result_stop_surfaces_every_execution_item() {
     let a_ran = Arc::new(AtomicU32::new(0));
     let a_done = Arc::new(tokio::sync::Notify::new());
     let model = MockCompletionModel::from_stream_turns([
@@ -4377,24 +4382,14 @@ async fn concurrent_termination_surfaces_no_execution_items() {
         .await
         .expect("the concurrent tool drive must not hang");
 
-    assert!(saw_error, "the terminated run must surface an error");
-    assert!(
-        !saw_final,
-        "a terminated run must not yield a final response"
-    );
+    assert!(saw_error, "the stopped run must surface an error");
+    assert!(!saw_final, "a stopped run must not yield a final response");
     assert_eq!(
-        exec_commits, 0,
-        "a terminated batch surfaces no ToolExecutionCommitted events"
+        exec_commits, 2,
+        "a settled batch surfaces every ToolExecutionCommitted event"
     );
-    assert_eq!(
-        results, 0,
-        "a terminated batch surfaces no successful ToolResult"
-    );
-    assert_eq!(
-        a_ran.load(SeqCst),
-        1,
-        "the fast sibling did run (its side effect happened), but its result was suppressed"
-    );
+    assert_eq!(results, 2, "a settled batch surfaces every ToolResult");
+    assert_eq!(a_ran.load(SeqCst), 1, "the fast sibling ran exactly once");
 }
 
 /// The model tool-call event carries the model's **original** arguments; the
@@ -4820,13 +4815,6 @@ impl AgentHook for TerminateOn {
             CompletionCallAction::continue_run()
         }
     }
-    async fn on_tool_call(&self, _: &HookContext, _: ToolCall<'_>) -> ToolCallAction {
-        if self.0 == StepEventKind::ToolCall {
-            ToolCallAction::stop("stop here")
-        } else {
-            ToolCallAction::run()
-        }
-    }
     async fn on_tool_result(&self, _: &HookContext, _: ToolResultEvent<'_>) -> ToolResultAction {
         if self.0 == StepEventKind::ToolResult {
             ToolResultAction::stop("stop here")
@@ -4836,16 +4824,13 @@ impl AgentHook for TerminateOn {
     }
 }
 
-/// the event-specific stop action cancels the blocking run from *every* shared driver
-/// event (model call, model response, tool call, tool result) — none is a
-/// silent no-op.
+/// the event-specific stop action cancels the blocking run from the shared
+/// driver events that can still stop it (model call, tool result) — none is
+/// a silent no-op. (The `ToolCall` event has no stop action anymore:
+/// nothing may kill a batch — ENGINE.md, stop taxonomy.)
 #[tokio::test]
 async fn run_terminates_from_each_shared_event() {
-    for kind in [
-        StepEventKind::CompletionCall,
-        StepEventKind::ToolCall,
-        StepEventKind::ToolResult,
-    ] {
+    for kind in [StepEventKind::CompletionCall, StepEventKind::ToolResult] {
         let err = AgentBuilder::new(blocking_model())
             .tool(MockAddTool)
             .build()
@@ -4863,15 +4848,11 @@ async fn run_terminates_from_each_shared_event() {
 }
 
 /// The same fail-closed termination holds for the streaming driver across the
-/// shared events it fires (it surfaces `StreamResponseFinish` instead of
-/// `CompletionResponse`): each yields a stream error and no final response.
+/// shared events it fires that can still stop it (model call, tool result):
+/// each yields a stream error and no final response.
 #[tokio::test]
 async fn stream_terminates_from_each_shared_event() {
-    for kind in [
-        StepEventKind::CompletionCall,
-        StepEventKind::ToolCall,
-        StepEventKind::ToolResult,
-    ] {
+    for kind in [StepEventKind::CompletionCall, StepEventKind::ToolResult] {
         let mut stream = AgentBuilder::new(streaming_model())
             .tool(MockAddTool)
             .build()
@@ -7620,6 +7601,11 @@ enum Decision {
 struct HumanApprovalHook {
     decisions: Arc<Mutex<std::collections::VecDeque<Decision>>>,
     reviewed: Arc<Mutex<Vec<String>>>,
+    /// An `Abort` decision stashed by the `ToolCall` hook; the run ends with
+    /// this reason after the current batch settles (the action surface has
+    /// no kill-a-batch escape — ENGINE.md, stop taxonomy; a true stop-now
+    /// would hold the abort leaf instead).
+    stop_after: Arc<Mutex<Option<&'static str>>>,
 }
 
 impl HumanApprovalHook {
@@ -7627,6 +7613,7 @@ impl HumanApprovalHook {
         Self {
             decisions: Arc::new(Mutex::new(decisions.into_iter().collect())),
             reviewed: Arc::new(Mutex::new(Vec::new())),
+            stop_after: Arc::new(Mutex::new(None)),
         }
     }
 
@@ -7653,10 +7640,25 @@ impl AgentHook for HumanApprovalHook {
             Some(Decision::Approve) => ToolCallAction::run(),
             Some(Decision::Deny(reason)) => ToolCallAction::skip(reason),
             Some(Decision::Edit(args)) => ToolCallAction::rewrite(args),
-            Some(Decision::Abort(reason)) => ToolCallAction::stop(reason),
+            // The call runs; the stashed reason ends the run after its batch.
+            Some(Decision::Abort(reason)) => {
+                *self.stop_after.lock().unwrap() = Some(reason);
+                ToolCallAction::run()
+            }
             // Fail closed if the script is exhausted (it shouldn't be) — deny
             // rather than silently approve, matching the example's contract.
             None => ToolCallAction::skip("denied: no scripted decision (fail-closed)"),
+        }
+    }
+
+    async fn on_tool_result(
+        &self,
+        _ctx: &HookContext,
+        _event: ToolResultEvent<'_>,
+    ) -> ToolResultAction {
+        match self.stop_after.lock().unwrap().take() {
+            Some(reason) => ToolResultAction::stop(reason),
+            None => ToolResultAction::keep(),
         }
     }
 }
@@ -7796,9 +7798,10 @@ async fn human_in_the_loop_approve_deny_edit_parity_across_run_and_stream() {
     );
 }
 
-/// A HITL hook that aborts a tool call (`Decision::Abort` -> `ToolCallAction::stop`)
-/// stops the run and surfaces the reason as a `PromptCancelled` error — on both
-/// the blocking and streaming drivers.
+/// A HITL hook that aborts a tool call (`Decision::Abort` — the call runs,
+/// then the run ends with the reason at the batch's settle) surfaces the
+/// reason as a `PromptCancelled` error — on both the blocking and streaming
+/// drivers.
 #[tokio::test]
 async fn human_in_the_loop_abort_terminates_the_run() {
     let turns = [
