@@ -31,7 +31,7 @@ Defensive ("unreachable") arms follow a stricter rule:
 - The whole suite runs offline (cassette replay + test doubles). Doctests
   are NOT included in these numbers (`llvm-cov` was run without
   `--doctests`); they are gated by the same CI run.
-- Current state: **93.59% lines / 94.25% regions** (3,988 of 62,239
+- Current state: **93.59% lines / 94.27% regions** (3,991 of 62,268
   lines; re-measured after the v3 multi-session host — the endpoint
   worker became `SessionHost` routing to per-session workers at 97.4%
   lines, protocol v3 (session-addressed commands,
@@ -230,7 +230,7 @@ rather than skipping, reachable or not.)
 
 ## tabit-gui (walking skeleton)
 
-- `reducer.rs` — **covered** (90.5% lines; the residue is partial
+- `reducer.rs` — **covered** (92.2% lines; the residue is partial
   field combinations in `add` and `Facts` paths).
 - `app.rs`, `theme.rs`, `main.rs` — **justified**: egui rendering,
   the eframe event loop, and window construction have no offline
