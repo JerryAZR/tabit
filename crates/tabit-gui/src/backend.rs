@@ -52,20 +52,25 @@ fn tabit_bin(launcher_provided: Option<&Path>) -> PathBuf {
     PathBuf::from("tabit")
 }
 
-/// Spawn a backend in `cwd` (the project directory), always with
-/// `--continue`: an empty store is absorbed backend-side into a fresh
-/// start (the ack's `resumed: false` carries the note — the pinned
-/// startup contract). `repaint` is called after every message so the
-/// UI wakes immediately.
+/// Spawn a backend in `cwd` (the project directory). `resume` adds
+/// `--continue`: returning users get their newest session; an empty
+/// store is absorbed backend-side into a fresh start (the ack's
+/// `resumed: false` carries the note — the pinned startup contract).
+/// `resume: false` starts a brand-new session (the GUI's "new" action).
+/// `repaint` is called after every message so the UI wakes immediately.
+#[allow(clippy::fn_params_excessive_bools)]
 pub fn spawn(
     cwd: Option<&Path>,
     tabit: Option<&Path>,
+    resume: bool,
     repaint: impl Fn() + Send + 'static,
 ) -> std::io::Result<Backend> {
     let mut command = Command::new(tabit_bin(tabit));
+    command.arg("--json");
+    if resume {
+        command.arg("--continue");
+    }
     command
-        .arg("--json")
-        .arg("--continue")
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
         .stderr(Stdio::piped());

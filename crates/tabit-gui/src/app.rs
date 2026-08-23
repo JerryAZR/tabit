@@ -18,12 +18,17 @@ struct Display {
     input: String,
     /// Free-text drafts per open interaction card id.
     answers: std::collections::HashMap<String, String>,
-    /// Follow the transcript tail; pauses when the user scrolls up,
-    /// re-pins at the bottom.
-    pinned: bool,
-    /// Content height at the last frame — detects growth while
-    /// pinned (tail-follow).
-    content_bottom: f32,
+    /// Measured rendered height per transcript group (the
+    /// virtualization's spacing for off-screen rows; estimates are
+    /// provisional until a group first renders — measured heights keep
+    /// the scroll geometry stable, so the bottom stays where it is).
+    heights: Vec<Option<f32>>,
+    /// The session the height cache belongs to; a new session (or a
+    /// respawn replaying a different chain) invalidates it.
+    session: Option<String>,
+    /// "New session" is armed after the first click (a second click
+    /// confirms; anything else disarms).
+    confirm_new: bool,
     /// Crash-report toggle.
     show_stderr: bool,
 }
@@ -42,27 +47,23 @@ impl TabitApp {
         theme::apply(&ctx);
         let mut app = Self {
             state: GuiState::default(),
-            display: Display {
-                pinned: true,
-                ..Default::default()
-            },
+            display: Display::default(),
             backend: None,
             cwd,
             tabit,
         };
-        app.start_backend(ctx);
+        app.start_backend(ctx, true);
         app
     }
 
-    /// Spawn the backend with `--continue`: returning users get their
-    /// newest session; an empty store is absorbed backend-side into a
-    /// fresh start (the ack's `resumed: false` carries the note). A
-    /// spawn failure is the environment refusing — shown with the OS
+    /// Spawn the backend. `resume` reattaches to the newest session
+    /// (`--continue`); a fresh start is the GUI's "new session" path.
+    /// A spawn failure is the environment refusing — shown with the OS
     /// reason and the reinstall hint.
-    fn start_backend(&mut self, ctx: egui::Context) {
+    fn start_backend(&mut self, ctx: egui::Context, resume: bool) {
         let cwd = self.cwd.clone();
         let tabit = self.tabit.clone();
-        match backend::spawn(cwd.as_deref(), tabit.as_deref(), move || {
+        match backend::spawn(cwd.as_deref(), tabit.as_deref(), resume, move || {
             ctx.request_repaint()
         }) {
             Ok(backend) => self.backend = Some(backend),
@@ -84,8 +85,19 @@ impl TabitApp {
     /// the user's click is the rate limiter.
     fn restart(&mut self, ctx: egui::Context) {
         self.backend = None;
+        self.display.confirm_new = false;
+        self.start_backend(ctx, true);
+    }
+
+    /// Start a brand-new session: drop the backend (its stdin closes —
+    /// the child aborts any in-flight run and winds down under the
+    /// death contract), reset the transcript, and spawn without
+    /// `--continue`. The old session's file stays on disk, untouched.
+    fn new_session(&mut self, ctx: egui::Context) {
+        self.backend = None;
+        self.display.confirm_new = false;
         self.state = GuiState::default();
-        self.start_backend(ctx);
+        self.start_backend(ctx, false);
     }
 
     /// Send the input box — the one choke point. Text leaves the box only
@@ -101,7 +113,7 @@ impl TabitApp {
             return;
         }
         self.display.input.clear();
-        self.display.pinned = true;
+        self.display.confirm_new = false;
         if let Some(backend) = &self.backend {
             backend.send_message(&text);
             self.state.message_sent(text);
@@ -109,6 +121,7 @@ impl TabitApp {
     }
 
     fn abort(&mut self) {
+        self.display.confirm_new = false;
         if let Some(backend) = &self.backend
             && self.state.running
         {
@@ -222,6 +235,18 @@ impl eframe::App for TabitApp {
             }
             self.state.reduce(msg);
         }
+        // A different session means a different transcript at the same
+        // indexes (a respawn's replay, or the new-session action): the
+        // height cache belongs to the old one.
+        let session = self
+            .state
+            .facts
+            .as_ref()
+            .map(|facts| facts.session_id.clone());
+        if session != self.display.session {
+            self.display.session = session;
+            self.display.heights.clear();
+        }
     }
 
     fn ui(&mut self, ui: &mut egui::Ui, _frame: &mut eframe::Frame) {
@@ -273,6 +298,22 @@ impl eframe::App for TabitApp {
                             ))
                             .color(theme::MUTED),
                         );
+                        // Two-click new session: the first click arms,
+                        // the second confirms — one accidental click
+                        // must not drop a live conversation. The old
+                        // session's file stays on disk, untouched.
+                        let (label, enabled) = if self.display.confirm_new {
+                            ("start new session?", true)
+                        } else {
+                            ("new session", !self.state.running)
+                        };
+                        if ui.add_enabled(enabled, egui::Button::new(label)).clicked() {
+                            if self.display.confirm_new {
+                                self.new_session(ctx.clone());
+                            } else {
+                                self.display.confirm_new = true;
+                            }
+                        }
                     });
                 }
                 Phase::Exited { clean, reason } => {
@@ -340,24 +381,43 @@ impl eframe::App for TabitApp {
         });
 
         // 4. Transcript, virtualized through the viewport pattern.
+        // `stick_to_bottom` owns tail-following (follows growth while
+        // at the bottom, pauses when the user scrolls up, re-pins on
+        // return); the height cache keeps scroll geometry stable —
+        // off-screen rows are spaced by their last measured height, so
+        // materializing rows don't shift the content under the user.
         egui::CentralPanel::default().show(ui, |ui| {
             let line_h = ui.text_style_height(&egui::TextStyle::Body);
             let width = ui.available_width();
             egui::ScrollArea::vertical()
                 .auto_shrink([false, false])
+                .stick_to_bottom(true)
                 .show_viewport(ui, |ui, viewport| {
                     let mut y = 0.0;
-                    for group in &self.state.transcript {
-                        let estimated = estimate_height(group, width, line_h);
-                        let visible = y + estimated >= viewport.top() - 500.0
+                    for (index, group) in self.state.transcript.iter().enumerate() {
+                        if self.display.heights.len() <= index {
+                            self.display.heights.resize(index + 1, None);
+                        }
+                        // Sanctioned indexing (AGENTS.md doctrine): the
+                        // resize above guarantees the slot exists.
+                        #[allow(clippy::indexing_slicing)]
+                        let height = self.display.heights[index]
+                            .unwrap_or_else(|| estimate_height(group, width, line_h));
+                        let visible = y + height + theme::ROW_GAP >= viewport.top() - 500.0
                             && y <= viewport.bottom() + 500.0;
                         if visible {
                             ui.add_space(theme::ROW_GAP);
+                            let top = ui.cursor().top();
                             render_group(ui, group);
+                            let rendered = ui.cursor().top() - top;
+                            #[allow(clippy::indexing_slicing)]
+                            {
+                                self.display.heights[index] = Some(rendered);
+                            }
                         } else {
-                            ui.add_space(estimated + theme::ROW_GAP);
+                            ui.add_space(height + theme::ROW_GAP);
                         }
-                        y += estimated + theme::ROW_GAP;
+                        y += height + theme::ROW_GAP;
                     }
                     for pending in &self.state.pending {
                         ui.add_space(theme::ROW_GAP);
@@ -367,15 +427,6 @@ impl eframe::App for TabitApp {
                                 .italics(),
                         );
                     }
-                    // Tail-follow: re-pins near the bottom, follows
-                    // growth while pinned.
-                    let grew = y > self.display.content_bottom;
-                    self.display.pinned =
-                        viewport.bottom() >= y - 4.0 * line_h || self.display.pinned && grew;
-                    if self.display.pinned && grew {
-                        ui.scroll_to_cursor(Some(egui::Align::Max));
-                    }
-                    self.display.content_bottom = y;
                 });
         });
 
