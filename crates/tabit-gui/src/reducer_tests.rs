@@ -768,10 +768,17 @@ fn session_created_switches_to_the_empty_new_session() {
     state.reduce(ack());
     state.reduce(user("work in the boot session"));
 
-    state.reduce(event(SessionEvent::SessionCreated {
-        id: "s9".to_string(),
-        path: "sessions/20260822_s9.jsonl".to_string(),
-    }));
+    // Realistic shape: the creation frame is stamped with the NEW
+    // session's stream — by definition not the one being viewed. (The
+    // v3 bug: the stream check ate exactly this frame, so the button
+    // did nothing.)
+    state.reduce(from(
+        "s9",
+        SessionEvent::SessionCreated {
+            id: "s9".to_string(),
+            path: "sessions/20260822_s9.jsonl".to_string(),
+        },
+    ));
     // The brand-new session is empty — no replay will come; the switch
     // alone is the whole state, and the facts follow.
     assert_eq!(state.active, "s9");
@@ -813,4 +820,96 @@ fn a_replay_bracket_resets_the_view_structurally() {
     state.reduce(user("the branched history's message"));
     state.reduce(event(SessionEvent::ReplayDone));
     assert_eq!(state.transcript.len(), 1);
+}
+
+#[test]
+fn a_new_session_lands_even_while_the_current_one_runs() {
+    // The owner's report: "new session" mid-conversation did nothing.
+    // Creation is connection-level — it must switch the view with the
+    // current session mid-run, and the abandoned run's liveness must
+    // show on its row.
+    let mut state = GuiState::default();
+    state.reduce(ack());
+    state.reduce(event(SessionEvent::SessionsAvailable {
+        sessions: vec![tabit_protocol::AvailableSession {
+            id: BOOT.to_string(),
+            created_at: "2026-08-22T11:00:00Z".to_string(),
+            entry_count: 3,
+        }],
+    }));
+    state.reduce(user("work in progress"));
+    assert!(state.running);
+
+    state.reduce(from(
+        "s9",
+        SessionEvent::SessionCreated {
+            id: "s9".to_string(),
+            path: "sessions/20260822_s9.jsonl".to_string(),
+        },
+    ));
+    assert_eq!(
+        state.active, "s9",
+        "creation switches immediately, mid-run or not"
+    );
+    assert!(state.transcript.is_empty());
+    assert!(!state.running, "the fresh session is idle");
+    assert!(
+        state
+            .sessions
+            .iter()
+            .find(|row| row.id == BOOT)
+            .unwrap()
+            .running,
+        "the abandoned run's dot survives the switch"
+    );
+
+    // The old session's stream keeps arriving in the background; its
+    // terminal settles the dot without touching the new view.
+    state.reduce(delta("still streaming"));
+    assert!(
+        state.transcript.is_empty(),
+        "background content never renders"
+    );
+    state.reduce(from(
+        BOOT,
+        SessionEvent::RunFinished {
+            output: "done later".to_string(),
+            usage: Usage::default(),
+        },
+    ));
+    assert!(
+        !state
+            .sessions
+            .iter()
+            .find(|row| row.id == BOOT)
+            .unwrap()
+            .running
+    );
+    assert!(state.transcript.is_empty());
+}
+
+#[test]
+fn an_active_sessions_run_state_is_mirrored_onto_its_row() {
+    // The switcher dot must be right even when the run started while
+    // the session was being viewed (the liveness mirror runs before
+    // the active/background split).
+    let mut state = GuiState::default();
+    state.reduce(ack());
+    state.reduce(event(SessionEvent::SessionsAvailable {
+        sessions: vec![tabit_protocol::AvailableSession {
+            id: BOOT.to_string(),
+            created_at: "2026-08-22T11:00:00Z".to_string(),
+            entry_count: 0,
+        }],
+    }));
+    state.reduce(user("go"));
+    assert!(
+        state
+            .sessions
+            .iter()
+            .find(|row| row.id == BOOT)
+            .unwrap()
+            .running,
+        "the row reflects the run viewed live"
+    );
 }

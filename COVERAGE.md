@@ -348,6 +348,18 @@ rather than skipping, reachable or not.)
   background liveness (running dot, attention on background errors,
   never rendering into the transcript), optimistic switch + replay
   rebuild, `session_created` switch with facts, the bracket reset.
+  After the owner's live pass: connection-level routing is pinned with
+  the realistic stamp (creation frames arrive on the NEW session's
+  stream — the original test stamped the boot stream, a frame the
+  backend never produces, and masked the routing bug), creation
+  mid-run switches immediately with the abandoned run's dot surviving,
+  and run liveness mirrors onto rows even when the run was viewed
+  live.
+- Backend non-blocking pin — **covered**
+  (`new_session_is_never_blocked_by_a_running_session`): creation,
+  messaging, and completion of a second session while the boot run is
+  provably mid-tool — the ruling that session lifecycle never waits on
+  another session.
 - `main.rs` wiring closures (`host_wiring`, create/open) — the create
   path is exercised through the tabit crate's bridge tests only when
   `new_session` is driven; the production closures' failure surfaces

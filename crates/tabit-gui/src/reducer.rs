@@ -321,6 +321,61 @@ impl GuiState {
         self.running = running;
     }
 
+    /// The startup catalog: replace the rows, keeping the liveness
+    /// this window already knows (background runs and attention flags
+    /// survive a re-announcement).
+    fn replace_catalog(&mut self, sessions: Vec<tabit_protocol::AvailableSession>) {
+        self.sessions = sessions
+            .into_iter()
+            .map(|session| SessionRow {
+                running: self
+                    .sessions
+                    .iter()
+                    .find(|row| row.id == session.id)
+                    .map(|row| row.running)
+                    .unwrap_or(false),
+                attention: self
+                    .sessions
+                    .iter()
+                    .find(|row| row.id == session.id)
+                    .map(|row| row.attention)
+                    .unwrap_or(false),
+                id: session.id,
+                created_at: session.created_at,
+                entry_count: session.entry_count,
+            })
+            .collect();
+    }
+
+    /// A `new_session` succeeded. Today the only creator is the user's
+    /// own command, so the view switches to the fresh session; when
+    /// subagent children mint sessions (stage 4), this is the seam
+    /// that decides view-stealing versus background rows.
+    fn session_created(&mut self, id: String, path: String) {
+        // A brand-new session: empty (no replay comes), so the switch
+        // is complete the moment it happens.
+        self.sessions.push(SessionRow {
+            id: id.clone(),
+            created_at: String::new(),
+            entry_count: 0,
+            running: false,
+            attention: false,
+        });
+        if let Some(facts) = self.facts.as_mut() {
+            facts.session_id = id.clone();
+            facts.session_path = path;
+        }
+        self.switch_view(id, false);
+    }
+
+    /// Record a session's run liveness on its switcher row (every
+    /// stream, viewed or not — the dot must survive a switch).
+    fn mark_running(&mut self, stream: &str, running: bool) {
+        if let Some(row) = self.sessions.iter_mut().find(|row| row.id == stream) {
+            row.running = running;
+        }
+    }
+
     /// Record that a card's response was sent (optimistic close — a
     /// racing terminal already cleared it backend-side; total either
     /// way).
@@ -329,6 +384,34 @@ impl GuiState {
     }
 
     fn reduce_event(&mut self, frame: EventFrame) {
+        // Host-level announcements are connection-scoped, not stream
+        // content: `session_created` arrives stamped with the NEW
+        // session's id — by definition not the stream being viewed —
+        // and must still switch the view (the v3 GUI bug: the stream
+        // check ate it, so "new session" did nothing).
+        match frame.event {
+            SessionEvent::SessionsAvailable { sessions } => {
+                self.replace_catalog(sessions);
+                return;
+            }
+            SessionEvent::SessionCreated { id, path } => {
+                self.session_created(id, path);
+                return;
+            }
+            _ => {}
+        }
+        // Liveness rides every run-scoped event, viewed or not: the
+        // switcher's dot must survive switching away mid-run (the
+        // `user_message` that started the run may have rendered live
+        // while active, never passing through the background path).
+        match &frame.event {
+            SessionEvent::UserMessage { .. } => self.mark_running(frame.stream.as_str(), true),
+            SessionEvent::RunFinished { .. } | SessionEvent::RunAborted { .. } => {
+                self.mark_running(frame.stream.as_str(), false);
+            }
+            SessionEvent::RunFailed { .. } => self.mark_running(frame.stream.as_str(), false),
+            _ => {}
+        }
         if frame.stream.as_str() != self.active {
             self.reduce_background(frame.stream.as_str().to_string(), frame.event);
             return;
@@ -500,47 +583,6 @@ impl GuiState {
                 // The pass ended; the transcript is whole (live traffic
                 // or quiescence follows).
             }
-            SessionEvent::SessionsAvailable { sessions } => {
-                // The startup catalog: replace the rows, keeping the
-                // liveness this window already knows (background runs
-                // and attention flags survive a re-announcement).
-                self.sessions = sessions
-                    .into_iter()
-                    .map(|session| SessionRow {
-                        running: self
-                            .sessions
-                            .iter()
-                            .find(|row| row.id == session.id)
-                            .map(|row| row.running)
-                            .unwrap_or(false),
-                        attention: self
-                            .sessions
-                            .iter()
-                            .find(|row| row.id == session.id)
-                            .map(|row| row.attention)
-                            .unwrap_or(false),
-                        id: session.id,
-                        created_at: session.created_at,
-                        entry_count: session.entry_count,
-                    })
-                    .collect();
-            }
-            SessionEvent::SessionCreated { id, path } => {
-                // A brand-new session: empty (no replay comes), so the
-                // switch is complete the moment it happens.
-                self.sessions.push(SessionRow {
-                    id: id.clone(),
-                    created_at: String::new(),
-                    entry_count: 0,
-                    running: false,
-                    attention: false,
-                });
-                if let Some(facts) = self.facts.as_mut() {
-                    facts.session_id = id.clone();
-                    facts.session_path = path;
-                }
-                self.switch_view(id, false);
-            }
             SessionEvent::ModelChanged {
                 provider,
                 model,
@@ -581,38 +623,22 @@ impl GuiState {
                     item: item.to_string(),
                 });
             }
+            // Consumed by the connection-level handling at the top of
+            // the fold; unreachable on a stream path.
+            SessionEvent::SessionsAvailable { .. } | SessionEvent::SessionCreated { .. } => {}
         }
     }
 
-    /// A stamped event for a session this window is not viewing:
-    /// liveness only, plus the one always-surface rule — `error`
-    /// conditions must never vanish with the view (they land in the
-    /// active transcript and mark the row).
+    /// A stamped event for a session this window is not viewing.
+    /// Liveness is already mirrored (before the split); the one rule
+    /// here: `error` conditions must never vanish with the view —
+    /// they land in the active transcript and mark the row.
     fn reduce_background(&mut self, stream: String, event: SessionEvent) {
-        let row = self.sessions.iter_mut().find(|row| row.id == stream);
-        match event {
-            SessionEvent::UserMessage { .. } => {
-                if let Some(row) = row {
-                    row.running = true;
-                }
+        if let SessionEvent::Error { message, .. } = event {
+            if let Some(row) = self.sessions.iter_mut().find(|row| row.id == stream) {
+                row.attention = true;
             }
-            SessionEvent::RunFinished { .. } | SessionEvent::RunAborted { .. } => {
-                if let Some(row) = row {
-                    row.running = false;
-                }
-            }
-            SessionEvent::RunFailed { .. } => {
-                if let Some(row) = row {
-                    row.running = false;
-                }
-            }
-            SessionEvent::Error { message, .. } => {
-                if let Some(row) = row {
-                    row.attention = true;
-                }
-                self.push_notice(message, true);
-            }
-            _ => {}
+            self.push_notice(message, true);
         }
     }
 

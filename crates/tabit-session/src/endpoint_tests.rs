@@ -905,3 +905,84 @@ async fn a_created_sessions_selection_notes_follow_its_stream() {
     drain(&mut handle).await;
     std::fs::remove_dir_all(store.dir()).ok();
 }
+
+#[tokio::test]
+async fn new_session_is_never_blocked_by_a_running_session() {
+    // The ruling: session lifecycle writes no session's file, so no
+    // pause point is ever needed — creation (and loading) are
+    // host-level, independent of every worker. Pinned at the extreme:
+    // the boot session's run is provably mid-tool when the new session
+    // is created, messaged, and finished.
+    let store = temp_store("endpoint-create-midrun");
+    let session = Factory::new(vec![tool_turn("t1", "slow"), text_turn("never")])
+        .into_builder(store.clone())
+        .dynamic_tool(slow_tool())
+        .create("C:/w")
+        .expect("session");
+    let create_store = store.clone();
+    let wiring = SessionHostWiring {
+        store: store.clone(),
+        create: std::sync::Arc::new(move || {
+            Factory::new(vec![text_turn("new answer")])
+                .into_builder(create_store.clone())
+                .create("C:/w")
+                .map(|session| (session, Vec::new()))
+                .map_err(|error| error.to_string())
+        }),
+        open: std::sync::Arc::new(|_| Err("not driven".to_string())),
+    };
+    let mut handle = SessionHost::spawn(session, Vec::new(), wiring);
+    let boot = boot_id(&handle);
+    let link = handle.command_link();
+
+    // The boot run is in flight (the slow tool is executing)…
+    link.send(SessionCommand::Message {
+        session: boot.clone(),
+        text: "run the slow tool".to_string(),
+    });
+    let _tool_call = until_event(&mut handle, |event| {
+        matches!(event, SessionEvent::ToolCall { .. })
+    })
+    .await;
+
+    // …and the new session is created, messaged, and FINISHES while
+    // the boot run is still inside the tool (it sleeps 300ms; the new
+    // session's turn is an instant scripted text — the arrival order
+    // below is the proof of non-blocking).
+    link.send(SessionCommand::NewSession);
+    let created = match until_event(&mut handle, |event| {
+        matches!(event, SessionEvent::SessionCreated { .. })
+    })
+    .await
+    .event
+    {
+        SessionEvent::SessionCreated { id, .. } => id,
+        other => panic!("expected session_created, got {other:?}"),
+    };
+    link.send(SessionCommand::Message {
+        session: created.clone(),
+        text: "meanwhile".to_string(),
+    });
+    let finished = until_event(&mut handle, |event| {
+        matches!(event, SessionEvent::RunFinished { .. })
+    })
+    .await;
+    assert_eq!(
+        finished.stream.as_str(),
+        created,
+        "the new session's terminal arrives before the boot run's"
+    );
+
+    // The boot run eventually finishes too — both completed on their
+    // own streams.
+    let boot_done = until_event(&mut handle, |event| {
+        matches!(
+            event,
+            SessionEvent::RunFinished { .. } | SessionEvent::RunAborted { .. }
+        )
+    })
+    .await;
+    assert_eq!(boot_done.stream.as_str(), boot);
+    drain(&mut handle).await;
+    std::fs::remove_dir_all(store.dir()).ok();
+}

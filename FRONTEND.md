@@ -185,8 +185,8 @@ yields `error { kind: session }` stamped with the id you named.
 |---|---|---|
 | `message { session, text }` | any time | idle: starts a run — acknowledged directly by `user_message` (milliseconds; no queued event — nothing waits); running: steers at the next turn boundary, acknowledged by `message_queued { id, text }`. |
 | `abort { session }` | any time | running: preempts (`run_aborted`); discards messages queued at abort time (`messages_discarded`, omitted when none). Post-abort messages queue normally and start the next run. Idle: no-op. |
-| `new_session` | any time | creates a fresh session (same config, tools, and `--model`/`--max-turns` as the boot); `session_created { id, path }` follows, stamped with the new id. Nothing replays (it is empty). |
-| `open_session { id }` | any time | loads the session if needed and streams a replay pass stamped with the id — the pass is the acknowledgment. Idempotent: an open session re-replays. Unknown id or unreadable file → `error { kind: session }` stamped with the id. A running session answers at its next idle beat (its in-flight run finishes first). |
+| `new_session` | any time | creates a fresh session (same config, tools, and `--model`/`--max-turns` as the boot); `session_created { id, path }` follows, stamped with the new id. Nothing replays (it is empty). Never waits on any session — lifecycle writes no session's file. |
+| `open_session { id }` | any time | loads the session if needed and streams a replay pass stamped with the id — the pass is the acknowledgment. Idempotent: an open session re-replays. Unknown id or unreadable file → `error { kind: session }` stamped with the id. Creating, loading, and switching never wait on the session you are leaving; the one wait is the opened session's **own** in-flight run — its pass arrives at that run's terminal (its live streaming renders immediately; only committed history waits). |
 | `checkout { entry_id }` | idle only | moves the active chain; see §7. Compose abort-then-checkout if a run is live. |
 | `model { provider, model, thinking_level? }` | idle only | the next run uses this selection; validates against the backend's config. |
 | `interaction_response { session, id, option?, text? }` | after an `interaction_request` | answers a pending request; at least one of option/text; see §8. |
@@ -312,11 +312,13 @@ rule (ruled; pi-proven): clear your view of the target session
 optimistically, then apply the pass that follows (`replay_started` →
 finalized events → `replay_done`, stamped with the id). It is the same
 shape as startup replay — one transcript-rebuild path in your code,
-and the seam a future streamed suffix replaces. A session whose run is
-still in flight answers at its terminal (the pass then reflects
-everything committed). Runs you switch away from keep running
-backend-side; their events keep arriving on their own stamp — keep
-reading, attribute, and re-replay when you switch back.
+and the seam a future streamed suffix replaces. Switching never waits
+on the session you are leaving; if the opened session's own run is in
+flight, its live streaming renders immediately and its pass (the
+committed history) arrives at that run's terminal. Runs you switch
+away from keep running backend-side; their events keep arriving on
+their own stamp — keep reading, attribute, and re-replay when you
+switch back.
 
 **Checkout.** Send `checkout { entry_id }` (idle). The event sequence
 is: `messages_discarded` (if anything pending — steers belong to the
