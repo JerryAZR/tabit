@@ -292,7 +292,7 @@ impl eframe::App for TabitApp {
                     let mut picked = None;
                     egui::ComboBox::from_id_salt("sessions")
                         .selected_text(selected_label)
-                        .width(180.0)
+                        .width(230.0)
                         .show_ui(ui, |ui| {
                             for row in &self.state.sessions {
                                 let label = if row.id == self.state.active {
@@ -458,16 +458,27 @@ impl eframe::App for TabitApp {
     }
 }
 
-/// One switcher row's label: the id prefix, the size, and liveness
-/// marks — a run dot for live background runs, a bang for unseen
-/// errors.
+/// One switcher row's label. Session ids are UUIDv7 — time-ordered —
+/// so the id's HEAD is shared by everything created in the same
+/// weeks-long window and distinguishes nothing; show the creation
+/// time (catalog rows) and the id's random TAIL instead.
 fn session_label(row: &SessionRow) -> String {
-    let prefix = row
+    let tail = row
         .id
-        .get(..8)
+        .get(row.id.len().saturating_sub(6)..)
         .map(str::to_string)
         .unwrap_or_else(|| row.id.clone());
-    let mut label = format!("{prefix} · {} entries", row.entry_count);
+    let created = if row.created_at.is_empty() {
+        "new".to_string()
+    } else {
+        // "2026-08-22T14:32:05Z" → "08-22 14:32" — the date's year and
+        // the seconds earn nothing in a switcher.
+        row.created_at
+            .get(5..16)
+            .map(|slice| slice.replacen('T', " ", 1))
+            .unwrap_or_else(|| row.created_at.clone())
+    };
+    let mut label = format!("{created} …{tail} · {} entries", row.entry_count);
     if row.running {
         label.push_str(" ●");
     }
