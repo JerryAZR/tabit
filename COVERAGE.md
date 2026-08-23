@@ -268,3 +268,31 @@ rather than skipping, reachable or not.)
   GUI skeleton policy above (view code; owner e2e pass); the reducer
   state behind it is unit-covered (cards, terminals, the
   `turn_truncated` notice, abort clearing pending steers).
+
+## v2 slice 1 — ids, brackets, tool status, error carrier (2026-08)
+
+- Turn announcement (rig-agent `drive_agent`, `TurnStarted`/
+  `TurnCommitted` items, hook-context id) — **covered** by the
+  streaming tests: announcement-before-content, ids reach
+  `ModelTurnFinished` hooks, retry announces a fresh id and only the
+  accepted attempt commits.
+- Session fold stamps + id continuity (`announced_turn_ids_are_the_
+  log_entry_ids`) — **covered** end-to-end: announced ids are the
+  reloaded log's `assistant_message` entry ids (UUIDv7-shaped, proving
+  the injected mint is in force), events stamped, `tool_result`
+  entry ids match their entries, truncation names its turn.
+- Mailbox born-early ids — **covered**: batch ids are the log's user
+  entry ids; the steer round trip (queued acknowledgment → resolved by
+  `user_message` with the same id → the log entry keeps it) and the
+  abort flush (discard after the terminal, ids matching the
+  acknowledgment) are endpoint-tested. The drain-parked-id FIFO's
+  empty arm is the sanctioned crash (engine contract).
+- `tool_result` content+status — **covered** (`tool_roundtrip` success
+  shape, `failing_tool_results_carry_status_and_content` for
+  `failed { exit_code }` + faithful content; bash's structured code
+  pinned in tabit-tools; disposition mapping unit-tested in rig-core).
+- Startup degradations — **covered** (`default_selection_*` note
+  assertions; endpoint first-frame; bridge ack-then-note ordering).
+  The `push`/`pump` liveness race arms are documented both-orders-safe
+  (ledger stays closed either way) — **JUSTIFIED** not to test the
+  race itself: the invariant is order-independence, not one ordering.

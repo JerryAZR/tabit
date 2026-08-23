@@ -106,6 +106,18 @@ flowchart TD
 
 ## v2 — ruled (2026-08; research recorded herein)
 
+**Slice 1 shipped** (2026-08; vocabulary + ids, commits 7406a38..f5372ce):
+engine-announced turn ids with an injected mint (delta 10, both edges —
+`turn_started`/`turn_committed`), turn-scoped `turn_id` stamps and
+`tool_result` `entry_id`, born-early message ids
+(`message_queued`/`messages_discarded`/`user_message.entry_id`, the
+mailbox's closed ledger), `tool_result` `content`+`status` with bash's
+exit-code promotion, the generic `error { kind }` carrier with startup
+degradations as first-frames-after-ack, the ack-gated stdio forwarder,
+and protocol version 2 / session format 2. Slice 2 (replay) builds
+directly on the id-continuity invariant pinned by
+`announced_turn_ids_are_the_log_entry_ids`.
+
 The egui GUI (ROADMAP item 7) is the second protocol consumer. What it
 needs beyond `{message, abort}`, grounded in the references: **yaca**
 replays resumed history as finalized live events — the same shapes live
