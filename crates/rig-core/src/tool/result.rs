@@ -492,6 +492,24 @@ impl ToolResult {
             ToolDisposition::Skipped(_) => "skipped",
         }
     }
+
+    /// The structured outcome for the message-level result: success, or
+    /// failure with the tool's structured error code when it set one.
+    /// Refusals and runtime skips are failures too — the body never
+    /// produced a successful result — with their detail living in the
+    /// model-visible output, never here.
+    pub fn execution_status(&self) -> crate::completion::ToolResultStatus {
+        use crate::completion::ToolResultStatus;
+        match &self.disposition {
+            ToolDisposition::Success(_) => ToolResultStatus::Success,
+            ToolDisposition::Error(error) | ToolDisposition::Refused(error) => {
+                ToolResultStatus::Failed {
+                    code: error.code().map(str::to_string),
+                }
+            }
+            ToolDisposition::Skipped(_) => ToolResultStatus::Failed { code: None },
+        }
+    }
 }
 
 #[cfg(not(target_family = "wasm"))]
@@ -803,6 +821,34 @@ mod migrated_tests {
                 Some(feedback)
             );
         }
+    }
+
+    #[test]
+    fn execution_status_maps_dispositions_to_structure() {
+        use crate::completion::ToolResultStatus;
+        let success = ToolResult::success(ToolOutput::text("done"));
+        assert_eq!(success.execution_status(), ToolResultStatus::Success);
+
+        let coded = ToolResult::failed(ToolExecutionError::other("boom").with_code("3"));
+        assert_eq!(
+            coded.execution_status(),
+            ToolResultStatus::Failed {
+                code: Some("3".to_string())
+            }
+        );
+
+        let plain = ToolResult::failed(ToolExecutionError::other("boom"));
+        assert_eq!(
+            plain.execution_status(),
+            ToolResultStatus::Failed { code: None }
+        );
+
+        let skipped = ToolResult::skipped("policy");
+        assert_eq!(
+            skipped.execution_status(),
+            ToolResultStatus::Failed { code: None },
+            "no body ran, so no successful result exists"
+        );
     }
 
     #[test]

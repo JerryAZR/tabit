@@ -108,6 +108,8 @@ fn every_event_variant_survives_the_frame_envelope() {
                 entry_id: "e1".to_string(),
                 name: "echo".to_string(),
                 internal_call_id: "i1".to_string(),
+                content: String::new(),
+                status: crate::ToolResultStatus::Success,
             },
         },
         EventFrame {

@@ -46,6 +46,8 @@ fn events_round_trip_through_json() {
             entry_id: "0192uuidv7entry".to_string(),
             name: "echo".to_string(),
             internal_call_id: "i1".to_string(),
+            content: "0".to_string(),
+            status: ToolResultStatus::Success,
         },
         SessionEvent::TurnRetried {
             turn_id: TURN.to_string(),

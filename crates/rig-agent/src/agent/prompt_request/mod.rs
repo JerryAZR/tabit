@@ -3,6 +3,7 @@ pub mod streaming;
 use super::{Agent, hook::AgentHook, run::OutputMode, runner::AgentRunner};
 use rig_core::{
     OneOrMany,
+    completion::ToolResultStatus,
     message::{AssistantContent, ToolResultContent, UserContent},
     wasm_compat::{WasmBoxedFuture, WasmCompatSend},
 };
@@ -617,16 +618,24 @@ pub(crate) fn tool_result_output(
 /// never re-parsed as structured tool output, so a JSON-shaped message is not
 /// silently reinterpreted as an image/multimodal result. Used identically by the
 /// blocking and streaming drivers so synthetic results match across both.
+/// Synthetic results are failure reports by construction — no body ran to
+/// succeed — so they carry a `Failed` status.
 pub(crate) fn tool_result_message(
     id: String,
     call_id: Option<String>,
     message: String,
 ) -> UserContent {
-    tool_result_with(
+    match tool_result_with(
         id,
         call_id,
         OneOrMany::one(ToolResultContent::text(message)),
-    )
+    ) {
+        UserContent::ToolResult(mut tool_result) => {
+            tool_result.status = Some(ToolResultStatus::Failed { code: None });
+            UserContent::ToolResult(tool_result)
+        }
+        other => other,
+    }
 }
 
 /// Synthetic result reported for validated sibling calls when a turn is

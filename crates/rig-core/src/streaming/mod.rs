@@ -2210,6 +2210,7 @@ mod tests {
             id: "result_1".to_string(),
             call_id: Some("call_1".to_string()),
             content: OneOrMany::one(crate::message::ToolResultContent::text("42")),
+            status: None,
         };
 
         let streamed = StreamedUserContent::tool_result(tool_result, "internal_1".to_string());

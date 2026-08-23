@@ -73,6 +73,7 @@ fn request_with_multi_block_tool_result() -> CoreCompletionRequest {
             message::ToolResultContent::text("second"),
         ])
         .expect("multiple tool-result blocks should be non-empty"),
+        status: None,
     };
 
     CoreCompletionRequest {
@@ -257,6 +258,7 @@ fn orphan_tool_result_history_fails_request_conversion() {
                     id: "result-id".to_string(),
                     call_id: Some("call-orphan".to_string()),
                     content: OneOrMany::one(message::ToolResultContent::text("output")),
+                    status: None,
                 })),
             },
         ])
@@ -305,6 +307,7 @@ fn multiple_tool_result_blocks_convert_to_distinct_content_parts() {
             message::ToolResultContent::text("second"),
         ])
         .expect("tool-result content should be non-empty"),
+        status: None,
     };
 
     let converted = Message::try_from(result).expect("tool result should convert");
@@ -1640,6 +1643,7 @@ fn tool_result_with_image_content_errors() {
             Some(message::ImageMediaType::PNG),
             None,
         )),
+        status: None,
     };
 
     let res: Result<Message, _> = result.try_into();
@@ -1793,6 +1797,7 @@ fn user_tool_result_content_errors() {
         id: "call_1".to_string(),
         call_id: None,
         content: OneOrMany::one(message::ToolResultContent::text("tool output")),
+        status: None,
     });
     let res: Result<UserContent, _> = content.try_into();
     assert!(

@@ -905,7 +905,7 @@ pub(crate) async fn run_single_tool(
                 exec.output().clone(),
             );
             ToolCallOutcome {
-                content,
+                content: with_execution_status(content, &exec),
                 execution,
                 stop_reason: Some(reason),
             }
@@ -915,10 +915,13 @@ pub(crate) async fn run_single_tool(
                 tool_span.record("gen_ai.tool.call.result", replacement.render());
             }
             ToolCallOutcome {
-                content: tool_result_output(
-                    tool_call.id.clone(),
-                    tool_call.call_id.clone(),
-                    replacement,
+                content: with_execution_status(
+                    tool_result_output(
+                        tool_call.id.clone(),
+                        tool_call.call_id.clone(),
+                        replacement,
+                    ),
+                    &exec,
                 ),
                 execution,
                 stop_reason: None,
@@ -934,12 +937,24 @@ pub(crate) async fn run_single_tool(
                 exec.output().clone(),
             );
             ToolCallOutcome {
-                content,
+                content: with_execution_status(content, &exec),
                 execution,
                 stop_reason: None,
             }
         }
     }
+}
+
+/// Stamp a built tool-result message with the execution's structured
+/// outcome (success | failed, with the tool's structured code when it set
+/// one). A presentation rewrite replaces only the content — the execution
+/// still happened, so the status is the execution's either way.
+fn with_execution_status(content: UserContent, result: &ToolResult) -> UserContent {
+    let UserContent::ToolResult(mut tool_result) = content else {
+        return content;
+    };
+    tool_result.status = Some(result.execution_status());
+    UserContent::ToolResult(tool_result)
 }
 
 fn record_tool_result(span: &tracing::Span, result: &ToolResult) {

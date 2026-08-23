@@ -112,6 +112,8 @@ fn tools_and_reasoning_fold_into_the_turn() {
         entry_id: "e1".to_string(),
         name: "ls".to_string(),
         internal_call_id: "i1".to_string(),
+        content: "3 files".to_string(),
+        status: tabit_protocol::ToolResultStatus::Success,
     }));
     state.reduce(delta("done"));
 
@@ -141,6 +143,8 @@ fn segments_render_in_arrival_order() {
         entry_id: "e1".to_string(),
         name: "ls".to_string(),
         internal_call_id: "i".to_string(),
+        content: String::new(),
+        status: tabit_protocol::ToolResultStatus::Success,
     }));
     state.reduce(delta("Found three files."));
     state.reduce(event(SessionEvent::ToolCall {

@@ -102,6 +102,16 @@ pub enum SessionEvent {
         name: String,
         /// Rig correlation id for the execution.
         internal_call_id: String,
+        /// Exactly the text the model saw — the faithful copy (tools cap
+        /// output at the source, failure text included), so the frontend
+        /// never needs a second channel and never sees more than the
+        /// model did. Text parts joined; non-text content (images) has no
+        /// textual form.
+        content: String,
+        /// Structure only, never prose: the human-readable failure detail
+        /// lives in `content` (a detail field would fork the truth and
+        /// drift).
+        status: ToolResultStatus,
     },
     /// A completed model turn was rejected by a hook and will be retried;
     /// any provisional output for that turn should be discarded.
@@ -190,6 +200,23 @@ pub struct DiscardedMessage {
     pub id: String,
     /// The message text, for salvage as a draft.
     pub text: String,
+}
+
+/// The structured outcome of one tool execution.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(tag = "status", rename_all = "snake_case")]
+pub enum ToolResultStatus {
+    /// The tool body ran and returned normally.
+    Success,
+    /// No successful run of the body: an execution error, a refusal, a
+    /// runtime skip, or a synthetic failure report. The detail is the
+    /// event's `content`.
+    Failed {
+        /// The tool's exit status, when it reported one numerically
+        /// (bash: the process exit code).
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        exit_code: Option<i64>,
+    },
 }
 
 #[cfg(test)]

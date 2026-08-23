@@ -794,7 +794,8 @@ impl Session {
 
     /// One executed tool call's result: the durable record (whose entry id
     /// rides the event), and the event naming the tool through the
-    /// correlation map its call populated.
+    /// correlation map its call populated. `content` is exactly the text
+    /// the model saw; `status` is the execution's structured outcome.
     fn note_tool_result(
         &self,
         tool_result: rig_core::message::ToolResult,
@@ -803,6 +804,22 @@ impl Session {
         tool_names: &mut std::collections::BTreeMap<String, String>,
         sink: &mut EventSink<'_>,
     ) {
+        let content = result_text(&tool_result);
+        let status = match &tool_result.status {
+            Some(rig_core::completion::ToolResultStatus::Success) => {
+                tabit_protocol::ToolResultStatus::Success
+            }
+            Some(rig_core::completion::ToolResultStatus::Failed { code }) => {
+                tabit_protocol::ToolResultStatus::Failed {
+                    // `exit_code` means exit code: the structured code is
+                    // passed through exactly when it is numeric (a shell
+                    // tool's exit status); other codes are not exit codes
+                    // and their detail already lives in the content.
+                    exit_code: code.as_deref().and_then(|code| code.parse().ok()),
+                }
+            }
+            None => tabit_protocol::ToolResultStatus::Success,
+        };
         let entry_id = self.recorder.record(EntryKind::ToolResult {
             result: tool_result,
         });
@@ -814,6 +831,8 @@ impl Session {
                 .cloned()
                 .unwrap_or_default(),
             internal_call_id,
+            content,
+            status,
         });
     }
 
@@ -1401,6 +1420,17 @@ pub(crate) fn user_text(message: &Message) -> String {
             _ => None,
         })
         .collect()
+}
+
+/// The text of a tool result — exactly what the model saw of it (text
+/// parts joined; images have no textual form).
+pub(crate) fn result_text(result: &rig_core::message::ToolResult) -> String {
+    result
+        .content
+        .iter()
+        .filter_map(|content| content.as_text())
+        .collect::<Vec<_>>()
+        .join("\n")
 }
 
 fn add_usage(target: &mut Usage, source: &Usage) {

@@ -216,6 +216,29 @@ pub struct ToolResult {
     pub call_id: Option<String>,
     /// One or more content items produced by the tool.
     pub content: OneOrMany<ToolResultContent>,
+    /// Structured execution outcome — structure only, never prose (the
+    /// human-readable detail is the `content`). `None` on results
+    /// synthesized outside an execution context (external histories,
+    /// compat shims).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub status: Option<ToolResultStatus>,
+}
+
+/// The structured outcome behind a [`ToolResult`].
+#[derive(Clone, Debug, Deserialize, Serialize, PartialEq)]
+#[serde(tag = "status", rename_all = "snake_case")]
+pub enum ToolResultStatus {
+    /// The tool body ran and returned normally.
+    Success,
+    /// No successful run of the body: an execution error, a refusal, a
+    /// runtime skip, or a synthetic failure report. `code` carries the
+    /// tool's structured error code when it set one (a shell tool's
+    /// exit status).
+    Failed {
+        /// The tool's structured error code, when it set one.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        code: Option<String>,
+    },
 }
 
 /// Describes one typed item in a tool result.
@@ -697,6 +720,7 @@ impl Message {
                 id: id.into(),
                 call_id: None,
                 content: OneOrMany::one(ToolResultContent::text(content)),
+                status: None,
             })),
         }
     }
@@ -711,6 +735,7 @@ impl Message {
                 id: id.into(),
                 call_id,
                 content: OneOrMany::one(ToolResultContent::text(content)),
+                status: None,
             })),
         }
     }
@@ -853,6 +878,7 @@ impl UserContent {
             id: id.into(),
             call_id: None,
             content,
+            status: None,
         })
     }
 
@@ -866,6 +892,7 @@ impl UserContent {
             id: id.into(),
             call_id: Some(call_id),
             content,
+            status: None,
         })
     }
 }
@@ -1313,6 +1340,7 @@ impl From<ToolResultContent> for Message {
                 id: String::new(),
                 call_id: None,
                 content: OneOrMany::one(tool_result_content),
+                status: None,
             })),
         }
     }
@@ -1349,7 +1377,32 @@ impl From<MessageError> for CompletionError {
 
 #[cfg(test)]
 mod tests {
-    use std::str::FromStr as _;
+    use super::*;
+
+    #[test]
+    fn tool_result_status_serializes_snake_case_and_defaults_absent() {
+        let plain = serde_json::to_value(ToolResult {
+            id: "c".to_string(),
+            call_id: None,
+            content: OneOrMany::one(ToolResultContent::text("ok")),
+            status: None,
+        })
+        .expect("serialize");
+        assert!(
+            plain.get("status").is_none(),
+            "absent status stays off the wire: {plain}"
+        );
+
+        let failed = serde_json::to_value(ToolResultStatus::Failed {
+            code: Some("3".to_string()),
+        })
+        .expect("serialize");
+        assert_eq!(failed, serde_json::json!({"status": "failed", "code": "3"}));
+
+        let success: ToolResultStatus =
+            serde_json::from_str(r#"{"status":"success"}"#).expect("parse");
+        assert_eq!(success, ToolResultStatus::Success);
+    }
 
     use serde::{Deserialize, Serialize};
 
@@ -2049,6 +2102,7 @@ mod tests {
             id: "id-1".to_string(),
             call_id: None,
             content: OneOrMany::one(ToolResultContent::text("ok")),
+            status: None,
         };
         assert_eq!(
             Message::from(tool_result.clone()),
@@ -2065,6 +2119,7 @@ mod tests {
                     id: String::new(),
                     call_id: None,
                     content: OneOrMany::one(tool_result_content),
+                    status: None,
                 }))
             }
         );

@@ -1959,6 +1959,7 @@ mod tests {
                     media_type: Some(crate::message::ImageMediaType::JPEG),
                     ..Default::default()
                 })),
+                status: None,
             })),
         }]);
         assert_eq!(
@@ -1991,6 +1992,7 @@ mod tests {
                     },
                 ])
                 .expect("non-empty"),
+                status: None,
             })),
         }]);
         assert_eq!(

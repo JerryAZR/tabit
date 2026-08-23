@@ -30,5 +30,5 @@
 pub mod message;
 pub mod request;
 
-pub use message::{AssistantContent, Message, MessageError};
+pub use message::{AssistantContent, Message, MessageError, ToolResultStatus};
 pub use request::*;

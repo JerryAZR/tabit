@@ -140,6 +140,8 @@ pub fn interrupted_results(dangling: &DanglingToolCalls) -> Vec<ToolResult> {
                  may have had partial effects; verify them before relying on \"
                  anything it did]",
             )),
+            // Interrupted is a failure shape: no body completed.
+            status: Some(rig_core::completion::ToolResultStatus::Failed { code: None }),
         })
         .collect()
 }
@@ -180,6 +182,7 @@ fn user_placeholder() -> rig_core::message::UserContent {
         id: String::new(),
         call_id: None,
         content: OneOrMany::one(ToolResultContent::text("")),
+        status: None,
     })
 }
 

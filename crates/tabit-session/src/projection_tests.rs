@@ -57,6 +57,7 @@ fn tool_result(id: &str) -> EntryKind {
             id: id.to_string(),
             call_id: None,
             content: OneOrMany::one(ToolResultContent::text("ok")),
+            status: None,
         },
     }
 }
@@ -226,6 +227,7 @@ fn results_answer_calls_by_provider_call_id_too() {
                 id: "unrelated".to_string(),
                 call_id: Some("call-abc".to_string()),
                 content: OneOrMany::one(ToolResultContent::text("ok")),
+                status: None,
             },
         }),
     ];

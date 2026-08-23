@@ -245,10 +245,19 @@ pub async fn bash(
     if output.status.success() {
         Ok(combined)
     } else {
-        Err(ToolExecutionError::other(format!(
+        // The exit status rides structure too (the protocol's
+        // `failed { exit_code }`): numeric codes pass through as
+        // numbers-in-text, so the frontend colors the row without
+        // parsing the prose. Signal kills have no code — the prose
+        // already says "abnormal termination".
+        let mut error = ToolExecutionError::other(format!(
             "command exited with {}:\n{combined}",
             exit_description(&output.status)
-        )))
+        ));
+        if let Some(code) = output.status.code() {
+            error = error.with_code(code.to_string());
+        }
+        Err(error)
     }
 }
 

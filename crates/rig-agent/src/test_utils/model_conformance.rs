@@ -2317,6 +2317,7 @@ mod tests {
                 }),
             ])
             .expect("non-empty content"),
+            status: None,
         };
         let user = Message::User {
             content: OneOrMany::one(UserContent::ToolResult(image_result)),
@@ -2343,6 +2344,7 @@ mod tests {
                 id: id.to_string(),
                 call_id: None,
                 content: OneOrMany::one(ToolResultContent::text("ok")),
+                status: None,
             })
         };
         // Correlated pass, including a skipped system message.

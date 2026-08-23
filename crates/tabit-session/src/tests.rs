@@ -333,8 +333,92 @@ async fn tool_roundtrip_is_recorded_and_events_name_the_tool() -> Result<(), Ses
         .collect();
     assert_eq!(result_events, vec!["echo"]);
 
+    // A successful execution carries its status and its faithful content:
+    // exactly the text the model saw — the log entry and the event say
+    // the same thing.
+    let (status, content) = run
+        .events
+        .iter()
+        .find_map(|e| match e {
+            SessionEvent::ToolResult {
+                status, content, ..
+            } => Some((status.clone(), content.clone())),
+            _ => None,
+        })
+        .expect("a tool result event");
+    assert_eq!(status, tabit_protocol::ToolResultStatus::Success);
+    let logged = loaded.entries.iter().find_map(|e| match &e.kind {
+        EntryKind::ToolResult { result } => Some(crate::session::result_text(result)),
+        _ => None,
+    });
+    assert_eq!(
+        Some(content.as_str()),
+        logged.as_deref(),
+        "the event's content is exactly the recorded result's text"
+    );
+
     // Projection merges the result into one user message.
     assert_eq!(session.context().len(), 4);
+    std::fs::remove_dir_all(store.dir()).ok();
+    Ok(())
+}
+
+/// A failing tool body carries its structured status and faithful content:
+/// `failed { exit_code }` from the tool's numeric error code (the bash
+/// promotion), content exactly the text the model saw of the failure.
+#[tokio::test]
+async fn failing_tool_results_carry_status_and_content() -> Result<(), SessionError> {
+    let store = temp_store("tool-status-failed");
+    let failing = DynamicTool::new(
+        "fail",
+        "Always fails with code 3",
+        json!({"type":"object","properties":{"value":{"type":"string"}}}),
+        |_ctx, _args| {
+            Box::pin(async move {
+                Err(
+                    rig_agent::tool::ToolExecutionError::other("boom: the thing failed")
+                        .with_code("3"),
+                )
+            })
+        },
+    );
+    let mut session = Factory::new(vec![tool_turn("c1", "fail"), text_turn("recovered")])
+        .into_builder(store.clone())
+        .dynamic_tool(failing)
+        .create("C:/w")?;
+
+    let run = session.prompt("fail it").await;
+    assert_eq!(
+        run.output, "recovered",
+        "the failure is in-band; the run continues"
+    );
+
+    let (status, content) = run
+        .events
+        .iter()
+        .find_map(|e| match e {
+            SessionEvent::ToolResult {
+                status, content, ..
+            } => Some((status.clone(), content.clone())),
+            _ => None,
+        })
+        .expect("a tool result event");
+    assert_eq!(
+        status,
+        tabit_protocol::ToolResultStatus::Failed { exit_code: Some(3) },
+        "the numeric error code rides structure as the exit code"
+    );
+    assert!(!content.is_empty(), "the failure detail is the content");
+    let loaded = store.open_path(session.path())?;
+    let logged = loaded.entries.iter().find_map(|e| match &e.kind {
+        EntryKind::ToolResult { result } => Some(crate::session::result_text(result)),
+        _ => None,
+    });
+    assert_eq!(
+        Some(content.as_str()),
+        logged.as_deref(),
+        "the event's content is exactly the recorded failure text the model saw"
+    );
     std::fs::remove_dir_all(store.dir()).ok();
     Ok(())
 }
@@ -1498,6 +1582,7 @@ async fn rewinding_mid_batch_repairs_only_the_unanswered_call() -> Result<(), Se
                 id: "c1".to_string(),
                 call_id: None,
                 content: OneOrMany::one(rig_core::message::ToolResultContent::text("one")),
+                status: None,
             },
         })
         .expect("first result");
@@ -1507,6 +1592,7 @@ async fn rewinding_mid_batch_repairs_only_the_unanswered_call() -> Result<(), Se
                 id: "c2".to_string(),
                 call_id: None,
                 content: OneOrMany::one(rig_core::message::ToolResultContent::text("two")),
+                status: None,
             },
         })
         .expect("second result");

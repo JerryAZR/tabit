@@ -44,6 +44,7 @@ fn entry_round_trips_every_kind() {
                 id: "call-1".to_string(),
                 call_id: None,
                 content: OneOrMany::one(ToolResultContent::text("ok")),
+                status: None,
             },
         },
         EntryKind::ModelChange {
@@ -116,6 +117,7 @@ fn context_entry_classification() {
             id: "c".to_string(),
             call_id: None,
             content: OneOrMany::one(ToolResultContent::text("")),
+            status: None,
         },
     };
     assert!(result_kind.is_context_entry());

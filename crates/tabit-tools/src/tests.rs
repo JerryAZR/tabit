@@ -22,6 +22,14 @@ fn err_text(result: Result<String, ToolExecutionError>) -> String {
     }
 }
 
+/// The error behind a failing result, for structure assertions.
+fn err(result: Result<String, ToolExecutionError>) -> ToolExecutionError {
+    match result {
+        Ok(text) => panic!("expected an error, got output: {text}"),
+        Err(e) => e,
+    }
+}
+
 #[tokio::test]
 async fn read_returns_file_contents() {
     let dir = temp_dir("read-ok");
@@ -115,11 +123,18 @@ async fn bash_runs_a_command_and_captures_output() {
 
 #[tokio::test]
 async fn bash_reports_nonzero_exits_with_output() {
-    let error = err_text(bash(&mut ctx(), "exit 3".to_string(), None).await);
+    let failure = err(bash(&mut ctx(), "exit 3".to_string(), None).await);
+    let error = failure.to_string();
     // PowerShell has no `exit 3` semantics as a command line; the fallback
     // path only exists where bash is missing. This machine has Git Bash.
     if interpreter().argv0.ends_with("bash.exe") || interpreter().argv0 == "bash" {
         assert!(error.contains("status 3"), "{error}");
+        assert_eq!(
+            failure.code(),
+            Some("3"),
+            "the exit status rides structure (the protocol's exit_code), \
+             not just prose"
+        );
     }
 }
 
