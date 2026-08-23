@@ -2823,6 +2823,19 @@ mod tests {
         );
     }
 
+    /// An absent `stop_sequence` is omitted from the serialized record —
+    /// never an explicit `null` (a replayed record must round-trip through
+    /// parsers that distinguish the two).
+    #[test]
+    fn an_absent_stop_sequence_is_omitted_not_nulled() {
+        let record = StreamingCompletionResponse::default();
+        let json = serde_json::to_value(&record).expect("serialize");
+        assert!(
+            json.get("stop_sequence").is_none(),
+            "absent means omitted: {json}"
+        );
+    }
+
     /// The thinking breakdown rides the terminal `message_delta`'s usage and
     /// must reach `reasoning_tokens` without entering the total.
     #[test]

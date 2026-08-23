@@ -1578,3 +1578,40 @@ extra_body = { shared = "level" }
     std::fs::remove_dir_all(store.dir()).ok();
     Ok(())
 }
+
+/// The empty-truncated stream (the reasoning-ate-the-whole-budget shape):
+/// no text at all, terminal reports Length. The run completes with empty
+/// output and warns — it must not error (ENGINE.md behavior delta 9).
+#[tokio::test]
+async fn an_empty_truncated_stream_warns_and_completes() -> Result<(), SessionError> {
+    let store = temp_store("truncation-empty");
+    let factory = Factory::new(vec![vec![MockStreamEvent::FinalResponse(
+        rig_agent::test_utils::mock_final(Usage {
+            input_tokens: 100,
+            output_tokens: 10,
+            total_tokens: 110,
+            ..Usage::default()
+        })
+        .with_finish_reason(rig_core::completion::FinishReason::Length),
+    )]]);
+    let mut session = factory.into_builder(store.clone()).create("C:/w")?;
+
+    let run = session.prompt("go deep").await;
+
+    assert_eq!(run.output, "");
+    assert_eq!(run.outcome, crate::session::RunOutcome::Completed);
+    assert_eq!(
+        run.events
+            .iter()
+            .filter(|e| matches!(e, SessionEvent::TurnTruncated))
+            .count(),
+        1,
+        "the budget-exhausted empty turn still warns"
+    );
+    assert!(matches!(
+        run.events.last(),
+        Some(SessionEvent::RunFinished { output, .. }) if output.is_empty()
+    ));
+    std::fs::remove_dir_all(store.dir()).ok();
+    Ok(())
+}

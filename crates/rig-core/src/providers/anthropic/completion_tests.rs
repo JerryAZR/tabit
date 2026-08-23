@@ -3610,6 +3610,19 @@ fn usage_decodes_the_wire_thinking_breakdown_into_reasoning_tokens() {
     .expect("a usage payload without the breakdown should still decode");
     assert_eq!(plain.output_tokens_details, None);
     assert_eq!(crate::completion::Usage::from(&plain).reasoning_tokens, 0);
+
+    // Forward compatibility: a future sibling bucket the provider adds is
+    // ignored, and the known figure still maps.
+    let future: Usage = serde_json::from_value(json!({
+        "input_tokens": 12,
+        "output_tokens": 30,
+        "output_tokens_details": { "thinking_tokens": 7, "future_bucket": 3 }
+    }))
+    .expect("unknown buckets are ignored on deserialization");
+    assert_eq!(
+        future.output_tokens_details,
+        Some(OutputTokensDetails { thinking_tokens: 7 })
+    );
 }
 
 #[test]

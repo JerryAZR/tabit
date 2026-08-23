@@ -50,7 +50,10 @@ where
 
         loop {
             let path = match &after_id {
-                Some(cursor) => format!("/v1/models?after_id={cursor}"),
+                Some(cursor) => format!(
+                    "/v1/models?after_id={}",
+                    percent_encoding::utf8_percent_encode(cursor, CURSOR_VALUE)
+                ),
                 None => "/v1/models".to_string(),
             };
 
@@ -79,26 +82,49 @@ where
                 break;
             }
 
-            // `has_more` without `last_id` has no next page to ask for, and
-            // resetting the cursor to the uncursored first page would loop
-            // forever re-fetching it. The Anthropic-compatible gateways
-            // sharing this client are exactly the sources that report a flag
-            // without its companion field — break (with a warning) rather
-            // than spin.
-            let Some(next) = page.last_id else {
+            // `has_more` without a usable cursor has no next page to ask
+            // for: absent or empty both mean "the flag came without its
+            // companion field" (the Anthropic-compatible gateways sharing
+            // this client are exactly those sources), and resetting to the
+            // uncursored first page would loop forever re-fetching it.
+            let Some(next) = page.last_id.filter(|id| !id.is_empty()) else {
                 tracing::warn!(
-                    "Anthropic model listing reported has_more without last_id; \
+                    "Anthropic model listing reported has_more without a usable last_id; \
                      stopping after {} models",
                     all_models.len()
                 );
                 break;
             };
+            // A cursor that repeats the one just served means the page did
+            // not advance — re-requesting it would loop forever.
+            if after_id.as_deref() == Some(next.as_str()) {
+                tracing::warn!(
+                    "Anthropic model listing served the same last_id twice \
+                     (`{next}`); stopping after {} models",
+                    all_models.len()
+                );
+                break;
+            }
             after_id = Some(next);
         }
 
         Ok(ModelList::new(all_models))
     }
 }
+
+/// The characters a cursor must not smuggle into the query string:
+/// everything that would terminate or alter a query parameter. Unreserved
+/// characters (alphanumerics, `-`, `.`, `_`, `~`) pass through untouched,
+/// and non-ASCII ids percent-encode as their UTF-8 bytes.
+const CURSOR_VALUE: &percent_encoding::AsciiSet = &percent_encoding::CONTROLS
+    .add(b' ')
+    .add(b'"')
+    .add(b'#')
+    .add(b'%')
+    .add(b'&')
+    .add(b'+')
+    .add(b'=')
+    .add(b'?');
 
 #[cfg(test)]
 mod tests {
@@ -207,6 +233,77 @@ mod tests {
         let models = lister.list_all().await.expect("list_all should succeed");
 
         assert_eq!(models.len(), 1, "the page's models are kept, then stop");
+    }
+
+    /// A gateway serving the same `last_id` twice never advances: the loop
+    /// must stop, not re-request the identical page forever (the sequence
+    /// ends after one response, so a second request fails the mock).
+    #[tokio::test]
+    async fn a_repeated_cursor_stops_instead_of_looping() {
+        let http = SequencedHttpClient::new([
+            MockHttpResponse::success(page_json(
+                &[("claude-a", "Claude A")],
+                true,
+                Some("claude-a"),
+            )),
+            // The follow-up page claims more but hands back the cursor
+            // that requested it — no advance, so no third request.
+            MockHttpResponse::success(page_json(
+                &[("claude-b", "Claude B")],
+                true,
+                Some("claude-a"),
+            )),
+        ]);
+
+        let lister = AnthropicModelLister::new(client(http.clone()));
+        let models = lister.list_all().await.expect("list_all should succeed");
+        assert_eq!(models.len(), 2, "both pages' models are kept, then stop");
+        assert_eq!(http.requests().len(), 2, "no identical re-request");
+    }
+
+    /// An empty-string cursor is the flag-without-companion shape, not a
+    /// cursor: asking `?after_id=` would be a malformed request.
+    #[tokio::test]
+    async fn an_empty_cursor_stops_instead_of_requesting_a_bare_param() {
+        let http = SequencedHttpClient::new([MockHttpResponse::success(page_json(
+            &[("claude-a", "Claude A")],
+            true,
+            Some(""),
+        ))]);
+
+        let lister = AnthropicModelLister::new(client(http.clone()));
+        let models = lister.list_all().await.expect("list_all should succeed");
+        assert_eq!(models.len(), 1);
+        assert_eq!(http.requests().len(), 1);
+    }
+
+    /// A cursor carrying query-syntax characters must not alter the query
+    /// string: it percent-encodes as a single parameter value.
+    #[tokio::test]
+    async fn cursors_percent_encode_as_a_single_query_value() {
+        let http = SequencedHttpClient::new([
+            MockHttpResponse::success(page_json(
+                &[("claude-a", "Claude A")],
+                true,
+                Some("weird&id=1 x"),
+            )),
+            MockHttpResponse::success(page_json(&[("claude-b", "Claude B")], false, None)),
+        ]);
+        let requests = {
+            let probe = http.clone();
+            let lister = AnthropicModelLister::new(client(probe));
+            lister.list_all().await.expect("list_all should succeed");
+            http.requests()
+        };
+
+        assert_eq!(requests.len(), 2);
+        assert!(
+            requests[1]
+                .uri
+                .ends_with("/v1/models?after_id=weird%26id%3D1%20x"),
+            "the cursor encodes as one parameter value: {}",
+            requests[1].uri
+        );
     }
 
     #[tokio::test]

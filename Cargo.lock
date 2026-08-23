@@ -3931,6 +3931,7 @@ dependencies = [
  "mime",
  "mime_guess",
  "ordered-float",
+ "percent-encoding",
  "pin-project-lite",
  "proptest",
  "rayon",

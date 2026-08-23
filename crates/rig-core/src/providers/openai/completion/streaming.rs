@@ -418,7 +418,20 @@ where
                         .delta
                         .content
                         .clone()
-                        .or_else(|| choice.delta.refusal.clone()),
+                        // A refusal is visible output only when it says
+                        // something: the opening chunk of a refusal turn
+                        // carries an empty `refusal: ""` alongside the
+                        // role, and surfacing it would emit an empty text
+                        // event ahead of the real refusal deltas. Content
+                        // wins when both are present; the refusal is the
+                        // fallback when content stayed null.
+                        .or_else(|| {
+                            choice
+                                .delta
+                                .refusal
+                                .clone()
+                                .filter(|refusal| !refusal.is_empty())
+                        }),
                     reasoning: choice
                         .delta
                         .reasoning_content
@@ -1740,5 +1753,79 @@ mod tests {
 
         let mut stream = model.raw_stream(request).await.unwrap();
         while stream.next().await.is_some() {}
+    }
+    /// Content wins over a simultaneous refusal: a delta carrying both is
+    /// text, not a refusal (the refusal is the fallback for contentless
+    /// turns, not an alternative stream).
+    #[tokio::test]
+    async fn a_delta_with_content_and_refusal_uses_the_content() {
+        use crate::providers::openai::send_compatible_streaming_request;
+        use crate::streaming::StreamedAssistantContent;
+        use crate::test_utils::MockStreamingClient;
+        use futures::StreamExt;
+
+        let client = MockStreamingClient {
+            sse_bytes: sse_bytes_from_data_lines([
+                r#"{"choices":[{"delta":{"content":"real answer","refusal":"nope"},"finish_reason":null}]}"#,
+                r#"{"choices":[{"delta":{},"finish_reason":"stop"}]}"#,
+                "[DONE]",
+            ]),
+        };
+        let mut stream = send_compatible_streaming_request(client, streaming_request(), "openai")
+            .await
+            .expect("stream should start");
+        let mut text = String::new();
+        while let Some(item) = stream.next().await {
+            if let StreamedAssistantContent::Text(delta) = item.expect("stream item ok") {
+                text.push_str(&delta.text);
+            }
+        }
+        assert_eq!(text, "real answer");
+    }
+
+    /// A refusal beside tool calls keeps both: the refusal streams as
+    /// text, the calls still flow to execution.
+    #[tokio::test]
+    async fn a_refusal_beside_tool_calls_keeps_both() {
+        use crate::providers::openai::send_compatible_streaming_request;
+        use crate::streaming::StreamedAssistantContent;
+        use crate::test_utils::MockStreamingClient;
+        use futures::StreamExt;
+
+        let client = MockStreamingClient {
+            sse_bytes: sse_bytes_from_data_lines([
+                r#"{"choices":[{"delta":{"refusal":"I can't run that"},"finish_reason":null}]}"#,
+                r#"{"choices":[{"delta":{"tool_calls":[{"index":0,"id":"c1","type":"function","function":{"name":"echo","arguments":"{}"}}]},"finish_reason":null}]}"#,
+                r#"{"choices":[{"delta":{},"finish_reason":"tool_calls"}]}"#,
+                "[DONE]",
+            ]),
+        };
+        let mut stream = send_compatible_streaming_request(client, streaming_request(), "openai")
+            .await
+            .expect("stream should start");
+        let mut text = String::new();
+        let mut saw_tool_call = false;
+        while let Some(item) = stream.next().await {
+            match item.expect("stream item ok") {
+                StreamedAssistantContent::Text(delta) => text.push_str(&delta.text),
+                StreamedAssistantContent::ToolCall { .. } => saw_tool_call = true,
+                _ => {}
+            }
+        }
+        assert_eq!(text, "I can't run that");
+        assert!(saw_tool_call, "the sibling tool call survives the refusal");
+    }
+
+    /// The opening chunk of a refusal turn carries `refusal: ""` beside
+    /// the role; it is a no-op, not an empty text event.
+    #[test]
+    fn an_opening_empty_refusal_is_ignored() {
+        let delta: StreamingDelta =
+            serde_json::from_str(r#"{"role":"assistant","content":null,"refusal":""}"#).unwrap();
+        assert!(delta.content.is_none());
+        let text = delta
+            .content
+            .or_else(|| delta.refusal.filter(|r| !r.is_empty()));
+        assert!(text.is_none(), "an empty refusal contributes no text");
     }
 }

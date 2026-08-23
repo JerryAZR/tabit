@@ -1109,11 +1109,32 @@ impl crate::completion::NormalizeCompletionResponse for CompletionResponse {
             )),
         }?;
 
-        let choice = OneOrMany::many(content).map_err(|_| {
-            CompletionError::ResponseError(
-                "Response contained no message or tool call (empty)".to_owned(),
-            )
-        })?;
+        let choice = if content.is_empty() {
+            // A turn the provider cut short (output budget, content
+            // filter) may legitimately carry no content: the finish reason
+            // and usage are the story — upstream's truncated-turn rule,
+            // adopted so a budget-exhausted turn reaches the caller (and
+            // tabit's truncation warning) instead of masking both behind
+            // an empty-response error. A turn that *completed* with
+            // nothing stays the shared provider defect.
+            match finish_reason {
+                Some(
+                    crate::completion::FinishReason::Length
+                    | crate::completion::FinishReason::ContentFilter,
+                ) => OneOrMany::one(completion::AssistantContent::text("")),
+                _ => {
+                    return Err(CompletionError::ResponseError(
+                        "Response contained no message or tool call (empty)".to_owned(),
+                    ));
+                }
+            }
+        } else {
+            OneOrMany::many(content).map_err(|_| {
+                CompletionError::ResponseError(
+                    "Response contained no message or tool call (empty)".to_owned(),
+                )
+            })?
+        };
 
         let usage = response
             .usage

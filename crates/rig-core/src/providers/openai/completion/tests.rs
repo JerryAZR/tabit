@@ -2426,3 +2426,54 @@ fn malformed_additional_params_tools_fail_loudly() {
         "the error names the invalid entry: {error}"
     );
 }
+
+/// Upstream's truncated-turn rule (adopted 2026-08): a turn the provider
+/// cut short — output budget (`length`) or content filter — may carry no
+/// content; the finish reason and usage are the story. A *completed*
+/// empty turn stays the shared provider defect.
+#[test]
+fn a_cut_short_turn_may_be_contentless_but_a_completed_empty_turn_may_not() {
+    use crate::completion::FinishReason;
+
+    fn empty_choice_response(finish_reason: &str) -> CompletionResponse {
+        serde_json::from_value(serde_json::json!({
+            "id": "chatcmpl-1",
+            "object": "chat.completion",
+            "created": 0,
+            "model": "gpt-4o-mini",
+            "choices": [{
+                "index": 0,
+                "message": {"role": "assistant", "content": null},
+                "finish_reason": finish_reason
+            }],
+            "usage": {"prompt_tokens": 10, "completion_tokens": 30, "total_tokens": 40}
+        }))
+        .expect("wire shape decodes")
+    }
+
+    // Cut short by the output budget: normalizes with the reason and usage.
+    let parsed = empty_choice_response("length")
+        .normalize("openai")
+        .expect("a budget-cut turn is not a provider defect");
+    assert_eq!(parsed.finish_reason(), Some(FinishReason::Length));
+    assert_eq!(parsed.usage.total_tokens, 40);
+    assert!(matches!(
+        parsed.choice.first(),
+        crate::completion::AssistantContent::Text(text) if text.text.is_empty()
+    ));
+
+    // Cut short by the content filter: same rule.
+    let parsed = empty_choice_response("content_filter")
+        .normalize("openai")
+        .expect("a filtered turn is not a provider defect");
+    assert_eq!(parsed.finish_reason(), Some(FinishReason::ContentFilter));
+
+    // A completed empty turn stays the shared defect.
+    let error = empty_choice_response("stop")
+        .normalize("openai")
+        .expect_err("a completed empty turn is a defect");
+    assert!(
+        error.to_string().contains("(empty)"),
+        "the empty-response guard stays: {error}"
+    );
+}
