@@ -69,6 +69,13 @@ fn events_round_trip_through_json() {
             message: "provider stream ended early".to_string(),
         },
         SessionEvent::error_model("default_model `gone` is not usable"),
+        SessionEvent::ReplayStarted { total: 7 },
+        SessionEvent::ReplayDone,
+        SessionEvent::ModelChanged {
+            provider: "p".to_string(),
+            model: "m".to_string(),
+            thinking_level: Some("high".to_string()),
+        },
         SessionEvent::error_persist_degraded(3, "records are pending on disk"),
         SessionEvent::NativeItem {
             turn_id: TURN.to_string(),

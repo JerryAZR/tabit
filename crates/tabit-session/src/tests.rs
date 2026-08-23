@@ -1842,3 +1842,121 @@ async fn an_empty_truncated_stream_warns_and_completes() -> Result<(), SessionEr
     std::fs::remove_dir_all(store.dir()).ok();
     Ok(())
 }
+
+/// Replay re-emits the chain as finalized live events with the ids the
+/// live run announced (PROTOCOL.md v2's payoff: a frontend that kept the
+/// live stream could have rendered the replay blind, and vice versa) —
+/// and with whole texts where live streamed deltas.
+#[tokio::test]
+async fn replay_re_emits_the_chain_with_live_ids_and_whole_texts() -> Result<(), SessionError> {
+    let store = temp_store("replay-continuity");
+    let factory = Factory::new(vec![tool_turn("call-1", "echo"), text_turn("all done")]);
+    let mut session = factory
+        .into_builder(store.clone())
+        .dynamic_tool(echo_tool())
+        .create("C:/w")?;
+    let run = session.prompt("echo x").await;
+    assert_eq!(run.output, "all done");
+    let path = session.path().to_path_buf();
+    drop(session);
+
+    // What the live run put on the wire: announced turn ids, entry ids,
+    // and the text as accumulated deltas.
+    let live_turns: Vec<String> = run
+        .events
+        .iter()
+        .filter_map(|e| match e {
+            SessionEvent::TurnStarted { id } => Some(id.clone()),
+            _ => None,
+        })
+        .collect();
+    let live_users: Vec<String> = run
+        .events
+        .iter()
+        .filter_map(|e| match e {
+            SessionEvent::UserMessage { entry_id, .. } => Some(entry_id.clone()),
+            _ => None,
+        })
+        .collect();
+    let live_results: Vec<String> = run
+        .events
+        .iter()
+        .filter_map(|e| match e {
+            SessionEvent::ToolResult { entry_id, .. } => Some(entry_id.clone()),
+            _ => None,
+        })
+        .collect();
+    let live_text: String = run
+        .events
+        .iter()
+        .filter_map(|e| match e {
+            SessionEvent::TextDelta { text, .. } => Some(text.clone()),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(live_turns.len(), 2);
+    assert_eq!(live_results.len(), 1);
+
+    // Resume and replay: the pass carries the same ids verbatim.
+    let (resumed, _report) = Factory::new(vec![text_turn("never runs")])
+        .into_builder(store.clone())
+        .resume(&path)?;
+    let replayed = resumed.replay_events();
+
+    let replay_turns: Vec<String> = replayed
+        .iter()
+        .filter_map(|e| match e {
+            SessionEvent::TurnStarted { id } => Some(id.clone()),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(
+        replay_turns, live_turns,
+        "replayed turn ids are the ids the live run announced"
+    );
+    let replay_users: Vec<String> = replayed
+        .iter()
+        .filter_map(|e| match e {
+            SessionEvent::UserMessage { entry_id, .. } => Some(entry_id.clone()),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(replay_users, live_users);
+    let replay_results: Vec<String> = replayed
+        .iter()
+        .filter_map(|e| match e {
+            SessionEvent::ToolResult { entry_id, .. } => Some(entry_id.clone()),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(replay_results, live_results);
+
+    // Whole texts: one text delta carrying everything the live stream
+    // delivered in pieces.
+    let replay_texts: Vec<&str> = replayed
+        .iter()
+        .filter_map(|e| match e {
+            SessionEvent::TextDelta { text, .. } => Some(text.as_str()),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(replay_texts, vec![live_text.as_str()]);
+
+    // The bracket structure: every announced turn commits, and the pass
+    // opens with the session's model change.
+    assert!(matches!(
+        replayed.first(),
+        Some(SessionEvent::ModelChanged { .. })
+    ));
+    let commits: Vec<String> = replayed
+        .iter()
+        .filter_map(|e| match e {
+            SessionEvent::TurnCommitted { id } => Some(id.clone()),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(commits, live_turns);
+
+    std::fs::remove_dir_all(store.dir()).ok();
+    Ok(())
+}

@@ -330,6 +330,11 @@ fn print_event(event: &SessionEvent) {
         // Not a printable stream event: run() turns it into the process
         // error (stderr, exit 1) once the stream has ended.
         SessionEvent::RunFailed { .. } => {}
+        // Replay brackets and model changes never reach print mode (it
+        // never requests the pass); the arms exist for exhaustiveness.
+        SessionEvent::ReplayStarted { .. }
+        | SessionEvent::ReplayDone
+        | SessionEvent::ModelChanged { .. } => {}
         // Non-terminal error conditions (startup degradations,
         // persistence): stderr is the human surface in print mode —
         // stdout stays the answer channel.

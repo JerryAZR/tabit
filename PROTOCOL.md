@@ -114,9 +114,20 @@ engine-announced turn ids with an injected mint (delta 10, both edges —
 mailbox's closed ledger), `tool_result` `content`+`status` with bash's
 exit-code promotion, the generic `error { kind }` carrier with startup
 degradations as first-frames-after-ack, the ack-gated stdio forwarder,
-and protocol version 2 / session format 2. Slice 2 (replay) builds
-directly on the id-continuity invariant pinned by
-`announced_turn_ids_are_the_log_entry_ids`.
+and protocol version 2 / session format 2. Slice 2 (replay) **shipped**
+(2026-08): `initialize { replay: true }` streams the pass —
+`replay_started { total }`, the active chain as finalized live events
+(ids verbatim from the log, whole texts, tool names recovered from
+their calls, bookkeeping excluded), `replay_done` — onto the worker's
+own event channel, so it lands after the startup frames and ahead of
+anything the next message starts (the worker answers replay requests
+ahead of new work). The chain is resident on the session (parse once
+per open, refreshed at each context re-derivation — the ruled
+in-memory contract's first step); the projection lives in
+`tabit-session/src/replay.rs`, the sibling of the model-facing
+`projection.rs`. Live-vs-replay id continuity is pinned end-to-end by
+`announced_turn_ids_are_the_log_entry_ids` and
+`replay_re_emits_the_chain_with_live_ids_and_whole_texts`.
 
 The egui GUI (ROADMAP item 7) is the second protocol consumer. What it
 needs beyond `{message, abort}`, grounded in the references: **yaca**

@@ -538,3 +538,21 @@ fn pending_rows_resolve_by_id_not_position() {
     }));
     assert!(state.pending.is_empty(), "the discarded id leaves pending");
 }
+
+#[test]
+fn replay_brackets_are_inert_and_model_changed_updates_the_facts() {
+    let mut state = GuiState::default();
+    state.reduce(ack());
+    let before = state.facts.as_ref().expect("facts").model.clone();
+    state.reduce(event(SessionEvent::ReplayStarted { total: 3 }));
+    state.reduce(event(SessionEvent::ModelChanged {
+        provider: "other".to_string(),
+        model: "m2".to_string(),
+        thinking_level: None,
+    }));
+    state.reduce(event(SessionEvent::ReplayDone));
+    // The brackets changed nothing; the model change moved the facts —
+    // the picker follows history, not just the handshake.
+    assert_eq!(state.facts.as_ref().expect("facts").model.model, "m2");
+    assert_ne!(state.facts.as_ref().expect("facts").model, before);
+}

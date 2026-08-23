@@ -160,7 +160,17 @@ fn client_frames_parse_initialize_and_commands_from_one_line_shape() {
     assert_eq!(
         init,
         ClientFrame::Initialize {
-            protocol_version: 1
+            protocol_version: 1,
+            replay: false,
+        }
+    );
+    let replaying: ClientFrame =
+        serde_json::from_str(r#"{"protocol_version":2,"replay":true}"#).expect("replaying");
+    assert_eq!(
+        replaying,
+        ClientFrame::Initialize {
+            protocol_version: 2,
+            replay: true,
         }
     );
     let command: ClientFrame =

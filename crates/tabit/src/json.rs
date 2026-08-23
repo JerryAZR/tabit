@@ -123,7 +123,10 @@ fn read_loop<R: BufRead>(
             continue;
         }
         match serde_json::from_str::<ClientFrame>(frame) {
-            Ok(ClientFrame::Initialize { protocol_version }) if !initialized => {
+            Ok(ClientFrame::Initialize {
+                protocol_version,
+                replay,
+            }) if !initialized => {
                 if protocol_version == PROTOCOL_VERSION {
                     control(
                         &out,
@@ -139,6 +142,13 @@ fn read_loop<R: BufRead>(
                     // will send: events may flow from here on.
                     let _ = gate.send(true);
                     initialized = true;
+                    // The pass streams onto the worker's event channel,
+                    // so it lands after the ack (the gate just opened)
+                    // and after the startup frames already queued on the
+                    // same sender.
+                    if replay {
+                        link.replay();
+                    }
                 } else {
                     control(
                         &out,
@@ -794,5 +804,168 @@ id = "m"
         )
         .await;
         assert_eq!(code, 0);
+    }
+    #[tokio::test]
+    async fn initialize_with_replay_receives_the_pass_right_after_the_ack() {
+        // A session with history (run once, then resumed through the
+        // same store): the handshake's `replay: true` streams the pass
+        // after the ack, whole-text, bracketed — and a message
+        // afterwards runs normally.
+        let dir = std::env::temp_dir()
+            .join("tabit-json-tests")
+            .join(format!("replay-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        let store = tabit_session::SessionStore::new(&dir);
+        let history_session = |answer: &'static str, store: tabit_session::SessionStore| {
+            let config = Arc::new(
+                TabitConfig::from_toml_str(
+                    r#"
+[providers.p]
+base_url = "http://127.0.0.1:9999/v1"
+api = "openai-completions"
+
+[[providers.p.models]]
+id = "m"
+"#,
+                    Path::new("providers.toml"),
+                )
+                .expect("config"),
+            );
+            SessionBuilder::new(
+                store,
+                config,
+                Arc::new(AuthConfig::default()),
+                ModelSelection::new("p", "m"),
+            )
+            .expect("builder")
+            .model_factory(Arc::new(move |_, _| {
+                Ok(ModelHandle::new(MockCompletionModel::from_stream_turns([
+                    [
+                        MockStreamEvent::text(answer),
+                        MockStreamEvent::final_response_with_default_usage(),
+                    ],
+                ])))
+            }))
+        };
+        let path = {
+            let mut session = history_session("first answer", store.clone())
+                .create("C:/w")
+                .unwrap();
+            session.prompt("hello").await;
+            session.path().to_path_buf()
+        };
+        let session = history_session("second answer", store)
+            .resume(&path)
+            .unwrap()
+            .0;
+        let handle = SessionHandle::spawn(session, Vec::new());
+
+        let out = SharedOut::default();
+        let (tx_in, rx_in) = std::sync::mpsc::channel::<String>();
+        let serve_task = tokio::spawn(serve(
+            handle,
+            ChannelIn {
+                lines: rx_in,
+                buf: Vec::new(),
+            },
+            out.clone(),
+        ));
+        tx_in
+            .send(r#"{"protocol_version":2,"replay":true}"#.to_string())
+            .unwrap();
+        tx_in
+            .send(r#"{"type":"message","text":"again"}"#.to_string())
+            .unwrap();
+        tokio::time::timeout(std::time::Duration::from_secs(5), async {
+            loop {
+                if read_lines(&out).iter().any(|l| l.contains("run_finished")) {
+                    return;
+                }
+                tokio::time::sleep(std::time::Duration::from_millis(25)).await;
+            }
+        })
+        .await
+        .expect("the follow-up run must complete");
+        drop(tx_in);
+        assert_eq!(serve_task.await.unwrap(), 0);
+
+        let frames = parse_frames(&read_lines(&out));
+        assert!(matches!(
+            frames.first(),
+            Some(ServerFrame::Control(
+                ServerControlFrame::InitializeAck { .. }
+            ))
+        ));
+        let types: Vec<&str> = frames
+            .iter()
+            .filter_map(|frame| match frame {
+                ServerFrame::Event(event) => match &event.event {
+                    tabit_session::SessionEvent::ReplayStarted { .. } => Some("replay_started"),
+                    tabit_session::SessionEvent::ReplayDone => Some("replay_done"),
+                    tabit_session::SessionEvent::ModelChanged { .. } => Some("model_changed"),
+                    tabit_session::SessionEvent::UserMessage { .. } => Some("user_message"),
+                    tabit_session::SessionEvent::TurnStarted { .. } => Some("turn_started"),
+                    tabit_session::SessionEvent::TextDelta { .. } => Some("text_delta"),
+                    tabit_session::SessionEvent::CompletionCall { .. } => Some("completion_call"),
+                    tabit_session::SessionEvent::TurnCommitted { .. } => Some("turn_committed"),
+                    tabit_session::SessionEvent::RunFinished { .. } => Some("run_finished"),
+                    _ => Some("other"),
+                },
+                _ => None,
+            })
+            .collect();
+        assert_eq!(
+            types,
+            vec![
+                "replay_started",
+                "model_changed",
+                "user_message",
+                "turn_started",
+                "text_delta",
+                "completion_call",
+                "turn_committed",
+                "replay_done",
+                // The follow-up message runs after the pass, live.
+                "user_message",
+                "turn_started",
+                "text_delta",
+                "completion_call",
+                "turn_committed",
+                "run_finished",
+            ]
+        );
+        // History arrives whole: one delta carrying the full first
+        // answer.
+        assert!(
+            frames.iter().any(|frame| matches!(frame,
+                ServerFrame::Event(EventFrame {
+                    event: tabit_session::SessionEvent::TextDelta { text, .. },
+                    ..
+                }) if text == "first answer"
+            )),
+            "history arrives whole"
+        );
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[tokio::test]
+    async fn initialize_without_replay_gets_no_pass() {
+        let (code, frames) = bridge(
+            "no-replay",
+            r#"{"protocol_version":2}"#,
+            vec![script("hello")],
+        )
+        .await;
+        assert_eq!(code, 0);
+        assert!(
+            !frames.iter().any(|frame| matches!(
+                frame,
+                ServerFrame::Event(EventFrame {
+                    event: tabit_session::SessionEvent::ReplayStarted { .. },
+                    ..
+                })
+            )),
+            "no replay request, no pass"
+        );
     }
 }

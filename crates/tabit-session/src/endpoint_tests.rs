@@ -392,3 +392,76 @@ async fn a_link_outlives_the_handle_and_still_submits() {
 
 #[path = "interaction_tests.rs"]
 mod interaction_tests;
+
+#[tokio::test]
+async fn a_replay_request_streams_the_pass_onto_the_event_channel() {
+    // A session with history (run once, then resumed): the pass carries
+    // it, bracketed and counted, and the stream continues normally
+    // afterwards.
+    let store = temp_store("endpoint-replay");
+    let path = {
+        let mut session = Factory::new(vec![text_turn("first answer")])
+            .into_builder(store.clone())
+            .create("C:/w")
+            .expect("session");
+        session.prompt("hello").await;
+        session.path().to_path_buf()
+    };
+    let session = Factory::new(vec![text_turn("second answer")])
+        .into_builder(store.clone())
+        .resume(&path)
+        .expect("resume")
+        .0;
+    let mut handle = SessionHandle::spawn(session, Vec::new());
+
+    handle.replay();
+    let mut pass = Vec::new();
+    let mut done = false;
+    while !done {
+        let frame = handle
+            .next_event()
+            .await
+            .expect("the worker answers a replay request");
+        match frame.event {
+            SessionEvent::ReplayStarted { .. } => pass.push("started".to_string()),
+            SessionEvent::ReplayDone => {
+                pass.push("done".to_string());
+                done = true;
+            }
+            event => pass.push(kind_of(&event)),
+        }
+    }
+    // model change, user message, a bracketed turn with whole text.
+    assert_eq!(
+        pass,
+        vec![
+            "started",
+            "model_changed",
+            "user_message",
+            "turn_started",
+            "text_delta",
+            "completion_call",
+            "turn_committed",
+            "done",
+        ]
+    );
+
+    // The stream continues: a message after the pass runs normally.
+    handle.message("again");
+    let frames = drain(&mut handle).await;
+    assert_eq!(user_texts(&frames), vec!["again"]);
+    assert_eq!(finished_outputs(&frames), vec!["second answer"]);
+    std::fs::remove_dir_all(store.dir()).ok();
+}
+
+fn kind_of(event: &SessionEvent) -> String {
+    match event {
+        SessionEvent::ModelChanged { .. } => "model_changed".to_string(),
+        SessionEvent::UserMessage { .. } => "user_message".to_string(),
+        SessionEvent::TurnStarted { .. } => "turn_started".to_string(),
+        SessionEvent::TextDelta { .. } => "text_delta".to_string(),
+        SessionEvent::CompletionCall { .. } => "completion_call".to_string(),
+        SessionEvent::TurnCommitted { .. } => "turn_committed".to_string(),
+        other => format!("other:{other:?}"),
+    }
+}

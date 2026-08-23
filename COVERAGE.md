@@ -296,3 +296,18 @@ rather than skipping, reachable or not.)
   The `push`/`pump` liveness race arms are documented both-orders-safe
   (ledger stays closed either way) — **JUSTIFIED** not to test the
   race itself: the invariant is order-independence, not one ordering.
+
+## v2 slice 2 — replay (2026-08)
+
+- `replay.rs` projection — **covered** by unit tests over synthesized
+  chains: exact bracketed sequence (ids, whole texts, usage, commits),
+  per-block reasoning + single accumulated text delta with in-content
+  ordering, bookkeeping exclusion, failed-status structure.
+- Session live-vs-replay continuity — **covered** end-to-end: replayed
+  turn/user/result ids are the live-announced ids, whole texts match
+  the accumulated live deltas.
+- Worker pass + bridge — **covered**: the endpoint pass streams
+  bracketed events and the stream continues; the wire test pins
+  ack → pass → live-run ordering, whole-text history, and the
+  no-replay default. The replay-before-work arm priority is exercised
+  by the bridge test's back-to-back initialize+message.

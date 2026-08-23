@@ -56,6 +56,10 @@ pub struct SessionHandle {
     events: Option<mpsc::UnboundedReceiver<EventFrame>>,
     shutdown: CancellationToken,
     closing_stats: Arc<Mutex<Option<SessionStats>>>,
+    /// Replay pass requests: the worker answers each by streaming the
+    /// pass onto the event channel (same sender as everything else, so
+    /// the pass lands after the startup frames already queued).
+    replay_requests: mpsc::UnboundedSender<()>,
 }
 
 /// A cheap clone for threads that only submit commands (a transport
@@ -67,11 +71,19 @@ pub struct SessionCommandLink {
     mailbox: MailboxHandle,
     abort: AbortHandle,
     interaction: InteractionHub,
+    replay_requests: mpsc::UnboundedSender<()>,
 }
 
 impl SessionCommandLink {
     /// Submit a command. Fire-and-forget: outcomes arrive as events.
     /// Sends after the session has wound down are no-ops.
+    /// Request the replay pass (see [`SessionHandle::replay`]) — the
+    /// transport edge's way in (the bridge asks right after the
+    /// handshake, when the `initialize` frame said `replay: true`).
+    pub fn replay(&self) {
+        let _ = self.replay_requests.send(());
+    }
+
     pub fn send(&self, command: SessionCommand) {
         match command {
             SessionCommand::Message { text } => self.mailbox.submit(text),
@@ -121,6 +133,7 @@ impl SessionHandle {
         let worker_events = event_tx.clone();
         let worker_abort = abort.clone();
         let watcher_shutdown = shutdown.clone();
+        let (replay_tx, mut replay_rx) = mpsc::unbounded_channel::<()>();
         // The death watcher: frontend death (the event receiver is gone)
         // aborts the in-flight run so the worker can wind down
         // immediately, regardless of state (the ruling). The worker
@@ -184,6 +197,35 @@ impl SessionHandle {
                     // The frontend is gone; the death watcher has already
                     // aborted any in-flight run, so the pump has returned.
                     _ = event_tx.closed() => break,
+                    // Answered ahead of new work: a frontend asks for the
+                    // pass at the handshake, before it sends anything,
+                    // so the pass reflects the chain as it was when the
+                    // frontend connected — not whatever arrived since.
+                    replay = replay_rx.recv() => {
+                        // Answered at idle, so nothing can interleave:
+                        // the pass is the resident chain projected, sent
+                        // on this worker's own sender — it lands after
+                        // everything already queued (the startup frames)
+                        // and before anything the next message starts.
+                        if replay.is_some() {
+                            let events = session.replay_events();
+                            let total = events.len() as u64;
+                            let _ = event_tx.send(EventFrame {
+                                stream: StreamId::main(),
+                                event: SessionEvent::ReplayStarted { total },
+                            });
+                            for event in events {
+                                let _ = event_tx.send(EventFrame {
+                                    stream: StreamId::main(),
+                                    event,
+                                });
+                            }
+                            let _ = event_tx.send(EventFrame {
+                                stream: StreamId::main(),
+                                event: SessionEvent::ReplayDone,
+                            });
+                        }
+                    }
                     _ = worker_mailbox.work_signal().notified() => {}
                 }
             }
@@ -200,7 +242,18 @@ impl SessionHandle {
             events: Some(event_rx),
             shutdown,
             closing_stats,
+            replay_requests: replay_tx,
         }
+    }
+
+    /// Request the replay pass: the resident chain re-emitted onto the
+    /// event stream as finalized live events, bracketed by
+    /// `replay_started`/`replay_done`. Fire-and-forget like a command —
+    /// the pass itself is the acknowledgment. Answered at idle; requests
+    /// during a run wait for the next idle beat (frontends ask once,
+    /// right after the handshake).
+    pub fn replay(&self) {
+        let _ = self.replay_requests.send(());
     }
 
     /// The session facts captured when the worker took over.
@@ -226,6 +279,7 @@ impl SessionHandle {
             mailbox: self.mailbox.clone(),
             abort: self.abort.clone(),
             interaction: self.interaction.clone(),
+            replay_requests: self.replay_requests.clone(),
         }
     }
 

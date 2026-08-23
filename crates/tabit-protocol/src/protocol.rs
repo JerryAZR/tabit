@@ -92,10 +92,23 @@ pub enum SessionCommand {
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(untagged)]
 pub enum ClientFrame {
-    /// The connection handshake: the client's protocol version.
-    Initialize { protocol_version: u32 },
+    /// The connection handshake: the client's protocol version, and
+    /// whether it wants the session's active chain re-emitted as
+    /// finalized live events (the replay pass) right after the ack.
+    Initialize {
+        protocol_version: u32,
+        /// Request the replay pass (absent means no: a frontend that
+        /// keeps its own state, or a fresh connect with nothing to
+        /// replay).
+        #[serde(default, skip_serializing_if = "is_false")]
+        replay: bool,
+    },
     /// A session command.
     Command(SessionCommand),
+}
+
+fn is_false(value: &bool) -> bool {
+    !*value
 }
 
 /// The server's non-event lines: handshake outcomes and transport-level

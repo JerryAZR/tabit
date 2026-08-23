@@ -86,6 +86,9 @@ pub fn spawn(
         .expect("internal invariant violated: stdin pipe captured at spawn");
     let init = to_wire_line(&ClientFrame::Initialize {
         protocol_version: PROTOCOL_VERSION,
+        // The GUI holds no state across a backend respawn — the replay
+        // pass rebuilds its transcript (v2 slice 2).
+        replay: true,
     });
     let _ = writeln!(stdin, "{init}");
     let _ = stdin.flush();

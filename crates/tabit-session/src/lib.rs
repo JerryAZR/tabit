@@ -73,6 +73,7 @@ mod projection;
 mod prompt;
 mod recorder;
 mod registry;
+pub(crate) mod replay;
 mod session;
 mod store;
 

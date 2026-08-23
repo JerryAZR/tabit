@@ -403,6 +403,24 @@ impl GuiState {
                 self.interactions.clear();
                 self.push_notice(message, true);
             }
+            SessionEvent::ReplayStarted { .. } | SessionEvent::ReplayDone => {
+                // The pass's brackets: the replayed events between them
+                // flow through the arms above — that is the point (one
+                // set of arms renders history and live turns).
+            }
+            SessionEvent::ModelChanged {
+                provider,
+                model,
+                thinking_level,
+            } => {
+                if let Some(facts) = self.facts.as_mut() {
+                    facts.model = tabit_protocol::ModelSelection {
+                        provider,
+                        model,
+                        thinking_level,
+                    };
+                }
+            }
             SessionEvent::Error { kind, message, .. } => {
                 // One carrier for every non-terminal error condition: a
                 // minimal handler just shows the message (the ruling);

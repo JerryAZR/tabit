@@ -507,6 +507,11 @@ pub struct Session {
     /// engine's turn-boundary steering.
     mailbox: Mailbox,
     context: Vec<Message>,
+    /// The active chain, resident (the ruled in-memory contract: parse
+    /// once per open, refresh at each context re-derivation — replay
+    /// and the coming checkout read memory, nothing re-parses
+    /// mid-session).
+    chain: Vec<crate::entry::SessionEntry>,
     path: PathBuf,
     id: String,
     /// Whether this session continues an existing chain (`resume`) or
@@ -805,21 +810,7 @@ impl Session {
         sink: &mut EventSink<'_>,
     ) {
         let content = result_text(&tool_result);
-        let status = match &tool_result.status {
-            Some(rig_core::completion::ToolResultStatus::Success) => {
-                tabit_protocol::ToolResultStatus::Success
-            }
-            Some(rig_core::completion::ToolResultStatus::Failed { code }) => {
-                tabit_protocol::ToolResultStatus::Failed {
-                    // `exit_code` means exit code: the structured code is
-                    // passed through exactly when it is numeric (a shell
-                    // tool's exit status); other codes are not exit codes
-                    // and their detail already lives in the content.
-                    exit_code: code.as_deref().and_then(|code| code.parse().ok()),
-                }
-            }
-            None => tabit_protocol::ToolResultStatus::Success,
-        };
+        let status = wire_status(&tool_result.status);
         let entry_id = self.recorder.record(EntryKind::ToolResult {
             result: tool_result,
         });
@@ -1162,6 +1153,15 @@ impl Session {
         Ok(self.fold_stats(&loaded.chain))
     }
 
+    /// The replay pass (PROTOCOL.md v2): the resident chain projected
+    /// into finalized live events — the same shapes a live run produces,
+    /// ids verbatim from the log, so a frontend renders history and live
+    /// turns with one set of arms. Slice 3's cross-branch checkout
+    /// reuses this over a different chain.
+    pub fn replay_events(&self) -> Vec<SessionEvent> {
+        crate::replay::project_events(&self.chain)
+    }
+
     /// Re-derive the in-memory context from the log's active chain. If the
     /// chain ends on a dangling tool-use roundtrip (an interrupted run or
     /// a mid-batch branch point), repair it with synthesized results — the
@@ -1184,6 +1184,9 @@ impl Session {
         let reloaded = self.store.open_path(&self.path)?;
         let (context, _) = projection::project(&reloaded.chain);
         self.context = context;
+        // The chain stays resident: replay (and the coming checkout)
+        // reads this, not the file.
+        self.chain = reloaded.chain;
         Ok(repaired)
     }
 
@@ -1312,6 +1315,7 @@ impl Session {
             abort: std::sync::Arc::new(std::sync::Mutex::new(CancellationToken::new())),
             mailbox: Mailbox::default(),
             context,
+            chain: Vec::new(),
             path,
             id,
             resumed,
@@ -1431,6 +1435,28 @@ pub(crate) fn result_text(result: &rig_core::message::ToolResult) -> String {
         .filter_map(|content| content.as_text())
         .collect::<Vec<_>>()
         .join("\n")
+}
+
+/// Translate the rig-level structured status into the protocol's wire
+/// shape. `exit_code` means exit code: the structured code passes
+/// through exactly when numeric (a shell tool's exit status); other
+/// codes are not exit codes and their detail already lives in the
+/// content. Shared by the live fold and the replay projection — one
+/// translation, one truth.
+pub(crate) fn wire_status(
+    status: &Option<rig_core::completion::ToolResultStatus>,
+) -> tabit_protocol::ToolResultStatus {
+    match status {
+        Some(rig_core::completion::ToolResultStatus::Success) => {
+            tabit_protocol::ToolResultStatus::Success
+        }
+        Some(rig_core::completion::ToolResultStatus::Failed { code }) => {
+            tabit_protocol::ToolResultStatus::Failed {
+                exit_code: code.as_deref().and_then(|code| code.parse().ok()),
+            }
+        }
+        None => tabit_protocol::ToolResultStatus::Success,
+    }
 }
 
 fn add_usage(target: &mut Usage, source: &Usage) {

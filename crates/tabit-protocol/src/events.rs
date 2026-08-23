@@ -172,6 +172,28 @@ pub enum SessionEvent {
         #[serde(default, skip_serializing_if = "Option::is_none")]
         pending: Option<u64>,
     },
+    /// Replay began: the backend is re-emitting the session's active
+    /// chain as finalized live events — the same shapes a live run
+    /// produces, ids included verbatim, deltas whole. `total` is the
+    /// number of events the pass will emit between this and
+    /// `replay_done`.
+    ReplayStarted {
+        /// The pass's event count (the progress denominator).
+        total: u64,
+    },
+    /// The replay pass ended: every event it announced has been emitted.
+    ReplayDone,
+    /// The active model changed (a `ModelChange` log entry replayed, or
+    /// — from slice 3 — a `model` command applied).
+    ModelChanged {
+        /// Provider id from tabit config.
+        provider: String,
+        /// Model id within the provider.
+        model: String,
+        /// Active thinking level name, when the model defines levels.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        thinking_level: Option<String>,
+    },
     /// A provider-native output item rig does not model, preserved
     /// verbatim for forwarding.
     NativeItem {
