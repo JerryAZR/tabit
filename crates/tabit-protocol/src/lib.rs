@@ -32,7 +32,7 @@ mod model;
 mod protocol;
 mod usage;
 
-pub use events::{DiscardedMessage, InteractionOption, SessionEvent, ToolResultStatus};
+pub use events::{DiscardedMessage, ErrorKind, InteractionOption, SessionEvent, ToolResultStatus};
 pub use model::ModelSelection;
 pub use protocol::{
     ClientFrame, EventFrame, PROTOCOL_VERSION, ServerControlFrame, ServerFrame, SessionCommand,

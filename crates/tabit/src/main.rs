@@ -330,6 +330,12 @@ fn print_event(event: &SessionEvent) {
         // Not a printable stream event: run() turns it into the process
         // error (stderr, exit 1) once the stream has ended.
         SessionEvent::RunFailed { .. } => {}
+        // Non-terminal error conditions (startup degradations,
+        // persistence): stderr is the human surface in print mode —
+        // stdout stays the answer channel.
+        SessionEvent::Error { message, .. } => {
+            let _ = writeln!(std::io::stderr(), "warning: {message}");
+        }
         SessionEvent::NativeItem { .. } => {}
     }
 }
@@ -565,14 +571,14 @@ fn run() -> Result<i32, String> {
             // the user does not have. A `--continue` that finds no
             // sessions is absorbed into a fresh start (the pinned
             // startup contract; the ack's `resumed: false` says so).
-            let session = match assemble(
+            let (session, startup_notes) = match assemble(
                 &args,
                 &config,
                 &auth,
                 &SessionStore::project_default(),
                 ContinueMiss::StartFresh,
             ) {
-                Ok(session) => session,
+                Ok(assembled) => assembled,
                 Err(detail) => return json_startup_failure(&detail),
             };
             print_banner(&session);
@@ -581,7 +587,7 @@ fn run() -> Result<i32, String> {
                 .build()
                 .map_err(|e| e.to_string())?;
             Ok(runtime.block_on(async {
-                let handle = SessionHandle::spawn(session);
+                let handle = SessionHandle::spawn(session, startup_notes);
                 json::serve(
                     handle,
                     std::io::BufReader::new(std::io::stdin()),
@@ -621,7 +627,7 @@ fn print_mode(
                 .to_string(),
         );
     }
-    let mut session = assemble(
+    let (mut session, startup_notes) = assemble(
         args,
         config,
         auth,
@@ -656,7 +662,7 @@ fn print_mode(
         .build()
         .map_err(|e| e.to_string())?
         .block_on(async {
-            let mut handle = SessionHandle::spawn(session);
+            let mut handle = SessionHandle::spawn(session, startup_notes);
             {
                 let link = handle.command_link();
                 let armed = armed.clone();
@@ -883,7 +889,7 @@ fn assemble(
     auth: &Arc<AuthConfig>,
     store: &SessionStore,
     miss: ContinueMiss,
-) -> Result<Session, String> {
+) -> Result<(Session, Vec<String>), String> {
     // Default-model resolution (registry): an explicit --model wins,
     // then the resumed session's last model, then default_model in
     // providers.toml, then the first configured model.
@@ -911,10 +917,14 @@ fn assemble(
         .as_deref()
         .map(|raw| parse_model(raw, registry.config()))
         .transpose()?;
-    let selection = registry
+    let (selection, startup_notes) = registry
         .default_selection(explicit, resumed)
         .map_err(|e| e.to_string())?;
-    assemble_session(args, registry, selection, resume_target, store.clone())
+    // Startup degradations are data (ruled: external errors ride the
+    // channel): the worker emits them as `error { kind: model }` frames —
+    // the first frames after the handshake ack.
+    let session = assemble_session(args, registry, selection, resume_target, store.clone())?;
+    Ok((session, startup_notes))
 }
 
 /// Internal errors crash the process (owner ruling): a panic anywhere —
@@ -1093,6 +1103,7 @@ mod tests {
             registry
                 .default_selection(None, None)
                 .expect("preference from default_model")
+                .0
                 .provider,
             "lmstudio"
         );
@@ -1118,6 +1129,7 @@ id = "m"
             registry
                 .default_selection(None, None)
                 .expect("first-seen")
+                .0
                 .model,
             "m"
         );
@@ -1148,9 +1160,11 @@ id = "m"
         assert!(error.contains("no sessions yet"), "{error}");
 
         let cont_json = args(&["--continue", "--json"]).expect("valid json combo");
-        let session = assemble(&cont_json, &config, &auth, &store, ContinueMiss::StartFresh)
-            .expect("json mode starts fresh");
+        let (session, notes) =
+            assemble(&cont_json, &config, &auth, &store, ContinueMiss::StartFresh)
+                .expect("json mode starts fresh");
         assert!(!session.resumed(), "the fresh start is reported");
+        assert!(notes.is_empty(), "a clean config degrades nothing");
         let _ = std::fs::remove_dir_all(&dir);
     }
 

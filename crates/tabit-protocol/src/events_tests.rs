@@ -68,6 +68,8 @@ fn events_round_trip_through_json() {
         SessionEvent::RunFailed {
             message: "provider stream ended early".to_string(),
         },
+        SessionEvent::error_model("default_model `gone` is not usable"),
+        SessionEvent::error_persist_degraded(3, "records are pending on disk"),
         SessionEvent::NativeItem {
             turn_id: TURN.to_string(),
             item: serde_json::json!({"web_search_call": {}}),
@@ -79,6 +81,18 @@ fn events_round_trip_through_json() {
         assert_eq!(back, *event);
     }
 
+    // The error carrier: kind is an open string; kind-specific structure
+    // (the pending count) rides only when present.
+    assert_eq!(
+        serde_json::to_string(&SessionEvent::error_model("stale default_model"))
+            .expect("serialize"),
+        r#"{"type":"error","kind":"model","message":"stale default_model"}"#
+    );
+    assert_eq!(
+        serde_json::to_string(&SessionEvent::error_persist_degraded(3, "pending"))
+            .expect("serialize"),
+        r#"{"type":"error","kind":"persist_degraded","message":"pending","pending":3}"#
+    );
     // The wire spelling of the brackets and the truncation warning.
     assert_eq!(
         serde_json::to_string(&SessionEvent::TurnStarted {

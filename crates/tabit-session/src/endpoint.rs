@@ -26,7 +26,7 @@ use crate::interaction::InteractionHub;
 use crate::lock::lock;
 use crate::session::{AbortHandle, MailboxHandle, Session, SessionStats};
 use std::sync::{Arc, Mutex};
-use tabit_protocol::{EventFrame, ModelSelection, SessionCommand, StreamId};
+use tabit_protocol::{EventFrame, ModelSelection, SessionCommand, SessionEvent, StreamId};
 use tokio::sync::mpsc;
 use tokio_util::sync::CancellationToken;
 
@@ -97,8 +97,11 @@ fn abort_and_clear(abort: &AbortHandle, mailbox: &MailboxHandle) {
 impl SessionHandle {
     /// Hand `session` to its resident worker and get the frontend handle
     /// back. Must be called inside a tokio runtime (the worker is
-    /// spawned here).
-    pub fn spawn(mut session: Session) -> Self {
+    /// spawned here). The startup notes (model-preference degradations
+    /// from selection) are emitted as `error { kind: model }` frames —
+    /// the worker's first emissions, so they land right after the
+    /// transport's handshake ack.
+    pub fn spawn(mut session: Session, startup_notes: Vec<String>) -> Self {
         let info = SessionInfo {
             session_id: session.id().to_string(),
             session_path: session.path().display().to_string(),
@@ -139,6 +142,15 @@ impl SessionHandle {
             // them before the first pump can run.
             session.attach_interaction(worker_interaction);
             session.attach_mailbox_notices(event_tx.clone());
+            // Startup degradations are the worker's first emissions
+            // (ruled: external errors ride the channel, stderr is not a
+            // frontend concern).
+            for note in startup_notes {
+                let _ = event_tx.send(EventFrame {
+                    stream: StreamId::main(),
+                    event: SessionEvent::error_model(note),
+                });
+            }
             // The resident worker. Ownership never moves: idle is the
             // wait below, running is the pump call — two positions of
             // one loop, not two tasks.

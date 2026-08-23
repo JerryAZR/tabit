@@ -107,7 +107,7 @@ async fn a_permission_card_answered_allow_runs_the_tool() {
     .dynamic_tool(gated_tool())
     .create("C:/w")
     .expect("session");
-    let mut handle = SessionHandle::spawn(session);
+    let mut handle = SessionHandle::spawn(session, Vec::new());
     let link = handle.command_link();
 
     let frames = run_answering(&mut handle, &link, |id| {
@@ -139,7 +139,7 @@ async fn a_permission_denial_skips_the_tool_in_band() {
     .dynamic_tool(gated_tool())
     .create("C:/w")
     .expect("session");
-    let mut handle = SessionHandle::spawn(session);
+    let mut handle = SessionHandle::spawn(session, Vec::new());
     let link = handle.command_link();
 
     let frames = run_answering(&mut handle, &link, |id| {
@@ -179,7 +179,7 @@ async fn always_allow_remembers_across_calls_in_the_session() {
     .dynamic_tool(gated_tool())
     .create("C:/w")
     .expect("session");
-    let mut handle = SessionHandle::spawn(session);
+    let mut handle = SessionHandle::spawn(session, Vec::new());
     let link = handle.command_link();
 
     let frames = run_answering(&mut handle, &link, |id| {
@@ -204,7 +204,7 @@ async fn always_allow_remembers_across_calls_in_the_session() {
         .dynamic_tool(gated_tool())
         .resume(std::path::Path::new(&path))
         .expect("resume");
-    let mut handle = SessionHandle::spawn(session);
+    let mut handle = SessionHandle::spawn(session, Vec::new());
     let link = handle.command_link();
     let frames = run_answering(&mut handle, &link, |id| {
         SessionCommand::InteractionResponse {
@@ -234,7 +234,7 @@ async fn an_ask_user_tool_body_round_trips_the_question_and_answer() {
     .dynamic_tool(asking_tool())
     .create("C:/w")
     .expect("session");
-    let mut handle = SessionHandle::spawn(session);
+    let mut handle = SessionHandle::spawn(session, Vec::new());
     let link = handle.command_link();
 
     let frames = run_answering(&mut handle, &link, |id| {
@@ -263,7 +263,7 @@ async fn frontend_death_with_a_card_open_winds_the_worker_down() {
         .dynamic_tool(gated_tool())
         .create("C:/w")
         .expect("session");
-    let mut handle = SessionHandle::spawn(session);
+    let mut handle = SessionHandle::spawn(session, Vec::new());
     let mut events = handle.take_events().expect("the event stream");
 
     handle.message("run it");
@@ -343,7 +343,7 @@ async fn abort_with_a_card_open_closes_the_question_totally() {
         .dynamic_tool(gated_tool())
         .create("C:/w")
         .expect("session");
-    let mut handle = SessionHandle::spawn(session);
+    let mut handle = SessionHandle::spawn(session, Vec::new());
     let link = handle.command_link();
 
     handle.message("run it");
@@ -396,7 +396,7 @@ async fn two_open_cards_answered_in_reverse_order_both_run() {
         .dynamic_tool(gated_tool())
         .create("C:/w")
         .expect("session");
-    let mut handle = SessionHandle::spawn(session);
+    let mut handle = SessionHandle::spawn(session, Vec::new());
     let link = handle.command_link();
 
     handle.message("go");

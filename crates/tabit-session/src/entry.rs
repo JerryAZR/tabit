@@ -17,8 +17,11 @@ use rig_core::message::ToolResult;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
-/// The current session file format version.
-pub const SESSION_FORMAT_VERSION: u32 = 1;
+/// The current session file format version. v2: tool results may carry
+/// a structured `status`, and entries may reuse engine-announced turn
+/// ids (both additive; the bump keeps old readers from misparsing new
+/// files instead of silently dropping the new fields).
+pub const SESSION_FORMAT_VERSION: u32 = 2;
 
 /// The first line of a session file.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]

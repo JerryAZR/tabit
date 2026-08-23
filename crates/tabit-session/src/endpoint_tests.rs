@@ -71,13 +71,50 @@ fn finished_outputs(frames: &[EventFrame]) -> Vec<String> {
 }
 
 #[tokio::test]
+async fn startup_degradations_are_the_workers_first_frames() {
+    let store = temp_store("endpoint-notes");
+    let session = Factory::new(vec![text_turn("hi")])
+        .into_builder(store.clone())
+        .create("C:/w")
+        .expect("session");
+    let mut handle = SessionHandle::spawn(
+        session,
+        vec!["default_model `gone` is not usable".to_string()],
+    );
+
+    handle.message("go");
+    let frames = drain(&mut handle).await;
+
+    // The degradation is the first frame the frontend sees — ahead of any
+    // run event — as a `model`-kind error (external errors ride the
+    // channel; stderr is not a frontend concern).
+    match frames.first().map(|f| &f.event) {
+        Some(SessionEvent::Error { kind, message, .. }) => {
+            assert_eq!(kind, tabit_protocol::ErrorKind::MODEL);
+            assert!(message.contains("default_model"), "{message}");
+        }
+        other => panic!("the degradation must lead the stream, got {other:?}"),
+    }
+    assert!(
+        frames
+            .iter()
+            .filter(|f| matches!(f.event, SessionEvent::Error { .. }))
+            .count()
+            == 1,
+        "exactly one error frame for one note"
+    );
+    assert_eq!(finished_outputs(&frames), vec!["hi"]);
+    std::fs::remove_dir_all(store.dir()).ok();
+}
+
+#[tokio::test]
 async fn an_idle_message_runs_to_completion_over_the_stream() {
     let store = temp_store("endpoint-idle");
     let session = Factory::new(vec![text_turn("hello there")])
         .into_builder(store.clone())
         .create("C:/w")
         .expect("session");
-    let mut handle = SessionHandle::spawn(session);
+    let mut handle = SessionHandle::spawn(session, Vec::new());
 
     handle.message("hi");
     let frames = drain(&mut handle).await;
@@ -112,7 +149,7 @@ async fn a_message_mid_run_steers_instead_of_starting_a_second_run() {
         .dynamic_tool(slow_tool())
         .create("C:/w")
         .expect("session");
-    let mut handle = SessionHandle::spawn(session);
+    let mut handle = SessionHandle::spawn(session, Vec::new());
 
     handle.message("run the tool");
     // A second message while the run is in flight: submitted from the
@@ -181,7 +218,7 @@ async fn two_rapid_messages_both_land_in_order() {
         .into_builder(store.clone())
         .create("C:/w")
         .expect("session");
-    let mut handle = SessionHandle::spawn(session);
+    let mut handle = SessionHandle::spawn(session, Vec::new());
 
     handle.message("first");
     handle.message("second");
@@ -205,7 +242,7 @@ async fn abort_while_idle_discards_queued_messages() {
         .into_builder(store.clone())
         .create("C:/w")
         .expect("session");
-    let mut handle = SessionHandle::spawn(session);
+    let mut handle = SessionHandle::spawn(session, Vec::new());
 
     // Queued while idle (the worker cannot have started: no await yet),
     // then stopped before any run: the queue goes with it.
@@ -228,7 +265,7 @@ async fn abort_mid_run_discards_the_queue_and_ends_the_run() {
         .dynamic_tool(slow_tool())
         .create("C:/w")
         .expect("session");
-    let mut handle = SessionHandle::spawn(session);
+    let mut handle = SessionHandle::spawn(session, Vec::new());
 
     handle.message("run the tool");
     let mut saw_aborted = false;
@@ -319,7 +356,7 @@ async fn a_failed_run_emits_run_failed_and_ends_the_stream_cleanly() {
         .dynamic_tool(echo_tool())
         .create("C:/w")
         .expect("session");
-    let mut handle = SessionHandle::spawn(session);
+    let mut handle = SessionHandle::spawn(session, Vec::new());
 
     handle.message("will fail");
     let mut failed = 0;
@@ -342,7 +379,7 @@ async fn a_link_outlives_the_handle_and_still_submits() {
         .into_builder(store.clone())
         .create("C:/w")
         .expect("session");
-    let mut handle = SessionHandle::spawn(session);
+    let mut handle = SessionHandle::spawn(session, Vec::new());
     let link = handle.command_link();
 
     link.send(SessionCommand::Message {

@@ -48,13 +48,14 @@ api_key = "dummy"
 "#,
     );
     let explicit = ModelSelection::new("local", "m");
-    let got = registry
+    let (got, notes) = registry
         .default_selection(
             Some(explicit.clone()),
             Some(ModelSelection::new("local", "m2")),
         )
         .expect("explicit wins");
     assert_eq!(got, explicit);
+    assert!(notes.is_empty(), "an explicit choice never degrades");
 
     // An explicit choice that does not resolve is loud immediately.
     let err = registry
@@ -72,22 +73,34 @@ fn default_selection_resumed_beats_preference() {
 api_key = "dummy"
 "#,
     );
-    let got = registry
+    let (got, notes) = registry
         .default_selection(None, Some(ModelSelection::new("local", "m2")))
         .expect("resumed wins");
     assert_eq!(got, ModelSelection::new("local", "m2"));
+    assert!(
+        notes.is_empty(),
+        "a resolvable resumed model never degrades"
+    );
 }
 
 #[test]
-fn default_selection_stale_resumed_falls_back_with_a_warning() {
+fn default_selection_stale_resumed_degrades_with_a_note() {
     // Owner ruling (pi precedent): a resumed session's last model is a
-    // preference — gone from config means warn + fall back, never a
-    // blocked startup. Explicit selections keep their loud failure.
+    // preference — gone from config means a note + fall back, never a
+    // blocked startup. The note is data (an `error { kind: model }`
+    // frame), not an eprintln: events are the only thing a frontend
+    // can see. Explicit selections keep their loud failure.
     let registry = default_registry();
-    let selection = registry
+    let (selection, notes) = registry
         .default_selection(None, Some(ModelSelection::new("gone", "m")))
         .expect("falls back instead of failing");
     assert_eq!(selection.model, "m", "the first configured model");
+    assert_eq!(notes.len(), 1, "the degradation is reported");
+    assert!(
+        notes[0].contains("resumed session's model `gone/m`"),
+        "the note names the unusable selection: {}",
+        notes[0]
+    );
 }
 
 #[test]
@@ -99,7 +112,8 @@ fn default_selection_preference_includes_thinking_level() {
 api_key = "dummy"
 "#,
     );
-    let got = registry.default_selection(None, None).expect("preference");
+    let (got, notes) = registry.default_selection(None, None).expect("preference");
+    assert!(notes.is_empty());
     assert_eq!(
         got,
         ModelSelection {
@@ -113,8 +127,9 @@ api_key = "dummy"
 #[test]
 fn default_selection_falls_back_to_first_model_then_error() {
     let registry = default_registry();
-    let got = registry.default_selection(None, None).expect("first-seen");
+    let (got, notes) = registry.default_selection(None, None).expect("first-seen");
     assert_eq!(got, ModelSelection::new("local", "m"));
+    assert!(notes.is_empty());
 
     let empty = registry_with("", "");
     let err = empty
@@ -224,10 +239,14 @@ fn a_stale_default_model_falls_back_to_the_first_model() {
 api_key = \"dummy\"
 ",
         );
-        let selection = registry
+        let (selection, notes) = registry
             .default_selection(None, None)
             .expect("falls back instead of failing");
         assert_eq!(selection.model, "m", "the first configured model");
+        assert!(
+            !notes.is_empty(),
+            "the stale default_model is reported as a degradation"
+        );
     }
 }
 

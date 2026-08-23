@@ -25,13 +25,20 @@ where
     let link = handle.command_link();
     let info = handle.info().clone();
 
+    // The ack gate: the handshake ack is the transport's first
+    // obligation, and events can exist from spawn (startup degradation
+    // frames), so the forwarder waits until the reader has sent the
+    // ack. A rejected handshake drops the gate's sender — the forwarder
+    // ends without forwarding anything (the rejection is the only
+    // frame).
+    let (gate_tx, gate_rx) = tokio::sync::watch::channel(false);
+
     // The reader blocks on lines; the writer is the single owner of
     // stdout, draining one ordered channel so the handshake ack can
-    // never land behind an event (no event exists before the first
-    // command, which is sent only after the ack).
+    // never land behind an event.
     let reader_tx = writer_tx.clone();
     let reader_task =
-        tokio::task::spawn_blocking(move || read_loop(reader, link, reader_tx, &info));
+        tokio::task::spawn_blocking(move || read_loop(reader, link, reader_tx, &info, gate_tx));
     let writer_task = tokio::spawn(write_loop(writer_rx, writer));
 
     // The live forwarder: actor events reach stdout as they happen,
@@ -39,7 +46,11 @@ where
     // accumulated unread in the actor's channel until the client
     // closed stdin; the GUI sat at "queued" forever while the run was
     // already streaming.)
-    let forwarder_task = tokio::spawn(forward_events(handle.take_events(), writer_tx.clone()));
+    let forwarder_task = tokio::spawn(forward_events(
+        handle.take_events(),
+        writer_tx.clone(),
+        gate_rx,
+    ));
 
     // A panicked reader thread is a broken edge: exit nonzero.
     let exit = reader_task.await.unwrap_or(1);
@@ -59,26 +70,40 @@ where
 }
 
 /// Pump the actor's event stream into the writer channel until the
-/// stream ends.
+/// stream ends — gated on the handshake: nothing forwards before the
+/// ack has been sent.
 async fn forward_events(
     stream: Option<mpsc::UnboundedReceiver<EventFrame>>,
     out: mpsc::UnboundedSender<ServerFrame>,
+    mut gate: tokio::sync::watch::Receiver<bool>,
 ) {
     let Some(mut stream) = stream else {
         return;
     };
+    loop {
+        if *gate.borrow() {
+            break;
+        }
+        // A dropped gate means the handshake was rejected: the
+        // rejection is the only frame the client ever sees.
+        if gate.changed().await.is_err() {
+            return;
+        }
+    }
     while let Some(frame) = stream.recv().await {
         let _ = out.send(ServerFrame::Event(frame));
     }
 }
 
 /// Parse client lines and act on them until EOF (or a rejected
-/// handshake). Blocking, runs on its own thread.
+/// handshake). Blocking, runs on its own thread. Opens `gate` once the
+/// ack has been sent, releasing the event forwarder.
 fn read_loop<R: BufRead>(
     mut reader: R,
     link: SessionCommandLink,
     out: mpsc::UnboundedSender<ServerFrame>,
     info: &SessionInfo,
+    gate: tokio::sync::watch::Sender<bool>,
 ) -> i32 {
     fn control(out: &mpsc::UnboundedSender<ServerFrame>, frame: ServerControlFrame) {
         let _ = out.send(ServerFrame::Control(frame));
@@ -110,6 +135,9 @@ fn read_loop<R: BufRead>(
                             resumed: info.resumed,
                         },
                     );
+                    // The ack is queued ahead of anything the forwarder
+                    // will send: events may flow from here on.
+                    let _ = gate.send(true);
                     initialized = true;
                 } else {
                     control(
@@ -274,7 +302,7 @@ id = "m"
         turns: Vec<Vec<MockStreamEvent>>,
     ) -> (i32, Vec<ServerFrame>) {
         let session = test_session(tag, turns);
-        let handle = SessionHandle::spawn(session);
+        let handle = SessionHandle::spawn(session, Vec::new());
         let out = SharedOut::default();
         let code = serve(handle, Cursor::new(input.as_bytes().to_vec()), out.clone()).await;
         let written = String::from_utf8(out.0.lock().unwrap().clone()).expect("utf-8");
@@ -339,7 +367,7 @@ id = "m"
         // stdin (the GUI sat at "queued" while the run streamed).
         let (tx_in, rx_in) = std::sync::mpsc::channel::<String>();
         let session = test_session("live", vec![script("pong")]);
-        let handle = SessionHandle::spawn(session);
+        let handle = SessionHandle::spawn(session, Vec::new());
         let out = SharedOut::default();
         let serve_task = tokio::spawn(serve(
             handle,
@@ -350,7 +378,7 @@ id = "m"
             out.clone(),
         ));
 
-        tx_in.send(r#"{"protocol_version":1}"#.to_string()).unwrap();
+        tx_in.send(r#"{"protocol_version":2}"#.to_string()).unwrap();
         tx_in
             .send(r#"{"type":"message","text":"hi"}"#.to_string())
             .unwrap();
@@ -407,7 +435,7 @@ id = "m"
         until: impl Fn(&[String]) -> bool,
     ) -> (i32, Vec<String>) {
         let session = test_session(tag, turns);
-        let handle = SessionHandle::spawn(session);
+        let handle = SessionHandle::spawn(session, Vec::new());
         let out = SharedOut::default();
         let (tx_in, rx_in) = std::sync::mpsc::channel::<String>();
         let serve_task = tokio::spawn(serve(
@@ -448,7 +476,7 @@ id = "m"
         let (code, lines) = bridge_live(
             "roundtrip",
             vec![
-                r#"{"protocol_version":1}"#.to_string(),
+                r#"{"protocol_version":2}"#.to_string(),
                 r#"{"type":"message","text":"hi"}"#.to_string(),
             ],
             vec![script("hello")],
@@ -483,6 +511,79 @@ id = "m"
     }
 
     #[tokio::test]
+    async fn startup_degradations_follow_the_ack_and_never_precede_it() {
+        let session = test_session("degraded-startup", vec![script("hello")]);
+        let handle = SessionHandle::spawn(
+            session,
+            vec!["the resumed session's model `gone/m` is not usable".to_string()],
+        );
+        let out = SharedOut::default();
+        let (tx_in, rx_in) = std::sync::mpsc::channel::<String>();
+        let serve_task = tokio::spawn(serve(
+            handle,
+            ChannelIn {
+                lines: rx_in,
+                buf: Vec::new(),
+            },
+            out.clone(),
+        ));
+        tx_in.send(r#"{"protocol_version":2}"#.to_string()).unwrap();
+        tx_in
+            .send(r#"{"type":"message","text":"hi"}"#.to_string())
+            .unwrap();
+        tokio::time::timeout(std::time::Duration::from_secs(5), async {
+            loop {
+                if read_lines(&out).iter().any(|l| l.contains("run_finished")) {
+                    return;
+                }
+                tokio::time::sleep(std::time::Duration::from_millis(25)).await;
+            }
+        })
+        .await
+        .expect("the run must complete before timeout");
+        drop(tx_in);
+        let code = serve_task.await.unwrap();
+        assert_eq!(code, 0);
+
+        let frames = parse_frames(&read_lines(&out));
+        // The ack is the first frame; the degradation follows it and
+        // precedes every run event — the gate holds even though the
+        // worker emitted the note at spawn, before the handshake.
+        assert!(matches!(
+            frames.first(),
+            Some(ServerFrame::Control(
+                ServerControlFrame::InitializeAck { .. }
+            ))
+        ));
+        let degraded_at = frames
+            .iter()
+            .position(|frame| {
+                matches!(
+                    frame,
+                    ServerFrame::Event(EventFrame {
+                        event: tabit_session::SessionEvent::Error { kind, .. },
+                        ..
+                    }) if kind == "model"
+                )
+            })
+            .expect("the degradation frame");
+        assert_eq!(degraded_at, 1, "the note lands immediately after the ack");
+        let first_user = frames
+            .iter()
+            .position(|frame| {
+                matches!(
+                    frame,
+                    ServerFrame::Event(EventFrame {
+                        event: tabit_session::SessionEvent::UserMessage { .. },
+                        ..
+                    })
+                )
+            })
+            .expect("a user message");
+        assert!(degraded_at < first_user, "the note precedes run events");
+    }
+
+    #[tokio::test]
     async fn version_mismatch_rejects_the_connection_and_exits_nonzero() {
         let (code, frames) =
             bridge("mismatch", "{\"protocol_version\":99}\n", vec![script("x")]).await;
@@ -502,7 +603,7 @@ id = "m"
             "preinit",
             vec![
                 r#"{"type":"abort"}"#.to_string(),
-                r#"{"protocol_version":1}"#.to_string(),
+                r#"{"protocol_version":2}"#.to_string(),
                 r#"{"type":"message","text":"real"}"#.to_string(),
             ],
             vec![script("ok")],
@@ -542,7 +643,7 @@ id = "m"
             MockStreamEvent::final_response(Usage::default()),
         ];
         let session = test_session_with("eof-abort", vec![slow, finish], vec![slow_tool()]);
-        let handle = SessionHandle::spawn(session);
+        let handle = SessionHandle::spawn(session, Vec::new());
         let out = SharedOut::default();
         let (tx_in, rx_in) = std::sync::mpsc::channel::<String>();
         let serve_task = tokio::spawn(serve(
@@ -554,7 +655,7 @@ id = "m"
             out.clone(),
         ));
 
-        tx_in.send(r#"{"protocol_version":1}"#.to_string()).unwrap();
+        tx_in.send(r#"{"protocol_version":2}"#.to_string()).unwrap();
         tx_in
             .send(r#"{"type":"message","text":"slow one"}"#.to_string())
             .unwrap();
@@ -598,7 +699,7 @@ id = "m"
         // initialize is a protocol error, not a restart.
         let (code, frames) = bridge(
             "garbage",
-            "this is not json\n\n{\"protocol_version\":1}\n{\"protocol_version\":1}\n",
+            "this is not json\n\n{\"protocol_version\":2}\n{\"protocol_version\":2}\n",
             vec![script("x")],
         )
         .await;
@@ -673,22 +774,22 @@ id = "m"
     async fn broken_transport_edges_fail_or_end_cleanly() {
         // Panicking reader: broken edge, exit 1.
         let session = test_session("panic-reader", vec![script("x")]);
-        let handle = SessionHandle::spawn(session);
+        let handle = SessionHandle::spawn(session, Vec::new());
         let code = serve(handle, PanickingReader, SharedOut::default()).await;
         assert_eq!(code, 1);
 
         // Erroring reader: reads as EOF, exit 0.
         let session = test_session("error-reader", vec![script("x")]);
-        let handle = SessionHandle::spawn(session);
+        let handle = SessionHandle::spawn(session, Vec::new());
         let code = serve(handle, ErroringReader, SharedOut::default()).await;
         assert_eq!(code, 0);
 
         // Failing writer: the writer stops, the rest winds down, exit 0.
         let session = test_session("fail-writer", vec![script("x")]);
-        let handle = SessionHandle::spawn(session);
+        let handle = SessionHandle::spawn(session, Vec::new());
         let code = serve(
             handle,
-            Cursor::new(b"{\"protocol_version\":1}\n".to_vec()),
+            Cursor::new(b"{\"protocol_version\":2}\n".to_vec()),
             FailingWriter,
         )
         .await;

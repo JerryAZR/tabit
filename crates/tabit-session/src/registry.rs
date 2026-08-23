@@ -102,50 +102,55 @@ impl ModelRegistry {
     /// Precedence: `explicit` (a caller-provided choice, e.g. `--model`),
     /// then `resumed` (the session log's last model), then the configured
     /// `default_model`, then the first configured model. A `resumed`
-    /// reference that no longer resolves warns and falls back (it is
+    /// reference that no longer resolves degrades with a note (it is
     /// a preference, like default_model); only an explicit selection
-    /// fails loudly.
+    /// fails loudly. The notes are data — the session worker surfaces
+    /// them to the frontend as `error { kind: model }` frames (stderr
+    /// printing at construction is ruled out: events are the only thing
+    /// a frontend can see).
     pub fn default_selection(
         &self,
         explicit: Option<ModelSelection>,
         resumed: Option<ModelSelection>,
-    ) -> Result<ModelSelection, SessionError> {
+    ) -> Result<(ModelSelection, Vec<String>), SessionError> {
+        let mut notes = Vec::new();
         if let Some(explicit) = explicit {
             validate_selection(&explicit, &self.inner.config)?;
-            return Ok(explicit);
+            return Ok((explicit, notes));
         }
         // A resumed selection is a preference too (owner ruling, pi
         // precedent): the session's last model may be gone from
-        // config — warn and fall through to the default_model/first
-        // chain instead of blocking. Explicit selections (the arm
-        // above) stay loud; the user asked for exactly that model.
+        // config — degrade with a note instead of blocking. Explicit
+        // selections (the arm above) stay loud; the user asked for
+        // exactly that model.
         if let Some(resumed) = resumed {
             match validate_selection(&resumed, &self.inner.config) {
-                Ok(()) => return Ok(resumed),
-                Err(error) => eprintln!(
-                    "warning: the resumed session's model `{}/{}` is not usable ({}); falling back to default_model or the first configured model",
+                Ok(()) => return Ok((resumed, notes)),
+                Err(error) => notes.push(format!(
+                    "the resumed session's model `{}/{}` is not usable ({}); \
+                     falling back to default_model or the first configured model",
                     resumed.provider, resumed.model, error
-                ),
+                )),
             }
         }
         // `default_model` is a preference, not a hard reference: a
         // stale or ambiguous entry degrades to the first configured
-        // model with a visible warning (owner ruling — it must never
-        // block startup). The stderr line is deliberate: config advice
-        // for the human, not a library error path.
+        // model with a note (owner ruling — it must never block
+        // startup).
         if let Some(default) = &self.inner.config.default_model {
             match preferred_selection(default, &self.inner.config) {
-                Ok(selection) => return Ok(selection),
-                Err(message) => eprintln!(
-                    "warning: default_model `{}` is not usable ({message}); falling back to the first configured model",
+                Ok(selection) => return Ok((selection, notes)),
+                Err(message) => notes.push(format!(
+                    "default_model `{}` is not usable ({message}); falling back \
+                     to the first configured model",
                     default.model
-                ),
+                )),
             }
         }
         self.inner
             .config
             .first_model()
-            .map(|(provider, model)| ModelSelection::new(provider, model))
+            .map(|(provider, model)| (ModelSelection::new(provider, model), notes))
             .ok_or_else(|| SessionError::Config {
                 message: "any model to run with (providers.toml defines no models)".to_string(),
             })

@@ -153,6 +153,25 @@ pub enum SessionEvent {
         /// The failure, in display form.
         message: String,
     },
+    /// An error condition that is not a run terminal — config trouble,
+    /// persistence degrade, a failed `model`/`checkout` command. One
+    /// carrier for all of them so a minimal frontend implements a single
+    /// handler (show the message) while a rich one switches on `kind`.
+    /// `run_failed` stays its own event (a run terminal, not an error
+    /// condition). Unknown kinds fall back to generic display — the same
+    /// forward-compat rule as unknown event types, which is why `kind`
+    /// is an open string, not a closed enum.
+    Error {
+        /// The error kind (an open string; see the well-known values on
+        /// [`ErrorKind`]).
+        kind: String,
+        /// The error, in display form.
+        message: String,
+        /// Kind-specific structure: `persist_degraded`'s count of
+        /// records pending on disk.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        pending: Option<u64>,
+    },
     /// A provider-native output item rig does not model, preserved
     /// verbatim for forwarding.
     NativeItem {
@@ -217,6 +236,45 @@ pub enum ToolResultStatus {
         #[serde(default, skip_serializing_if = "Option::is_none")]
         exit_code: Option<i64>,
     },
+}
+
+impl SessionEvent {
+    /// A `model`-kind error: a model preference degraded (a stale
+    /// `default_model`, a resumed session's model gone) or a `model`
+    /// command failed config validation.
+    pub fn error_model(message: impl Into<String>) -> Self {
+        Self::Error {
+            kind: ErrorKind::MODEL.to_string(),
+            message: message.into(),
+            pending: None,
+        }
+    }
+
+    /// A `persist_degraded`-kind error: records are pending on disk.
+    pub fn error_persist_degraded(pending: u64, message: impl Into<String>) -> Self {
+        Self::Error {
+            kind: ErrorKind::PERSIST_DEGRADED.to_string(),
+            message: message.into(),
+            pending: Some(pending),
+        }
+    }
+}
+
+/// The well-known `error` event kinds. Open on purpose: an unknown kind
+/// from a newer backend displays generically instead of failing the
+/// frontend.
+pub struct ErrorKind;
+
+impl ErrorKind {
+    /// A model preference degraded or a `model` command failed
+    /// validation.
+    pub const MODEL: &'static str = "model";
+    /// A `checkout` command targeted a missing entry or not a cut point.
+    pub const CHECKOUT: &'static str = "checkout";
+    /// Persistence degraded: this many records are pending on disk.
+    pub const PERSIST_DEGRADED: &'static str = "persist_degraded";
+    /// Persistence recovered: pending records reached the disk.
+    pub const PERSIST_RECOVERED: &'static str = "persist_recovered";
 }
 
 #[cfg(test)]

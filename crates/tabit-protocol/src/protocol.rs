@@ -15,7 +15,7 @@ use serde::{Deserialize, Serialize};
 /// The protocol version this build speaks. Clients declare theirs in
 /// [`ClientFrame::Initialize`]; a mismatch rejects the connection at the
 /// handshake.
-pub const PROTOCOL_VERSION: u32 = 1;
+pub const PROTOCOL_VERSION: u32 = 2;
 
 /// Which stream produced an event. v1 has exactly one stream — the
 /// session's own — so every frame carries [`StreamId::main`]; sibling

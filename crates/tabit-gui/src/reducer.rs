@@ -403,6 +403,13 @@ impl GuiState {
                 self.interactions.clear();
                 self.push_notice(message, true);
             }
+            SessionEvent::Error { kind, message, .. } => {
+                // One carrier for every non-terminal error condition: a
+                // minimal handler just shows the message (the ruling);
+                // unknown kinds fall back to the same generic display.
+                let _ = kind;
+                self.push_notice(message, true);
+            }
             SessionEvent::InteractionRequested {
                 id,
                 title,
