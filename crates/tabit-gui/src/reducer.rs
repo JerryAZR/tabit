@@ -61,13 +61,23 @@ pub struct Facts {
 }
 
 /// One tool call the model issued, and whether its result arrived.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq)]
 pub struct ToolCallRow {
     pub name: String,
     pub call_id: String,
     pub internal_call_id: String,
     pub arguments: Option<String>,
     pub done: bool,
+    /// The result once it committed: its faithful content (exactly what
+    /// the model saw) and whether the execution failed.
+    pub result: Option<ToolResultRow>,
+}
+
+/// One committed tool result, as displayed under its call.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ToolResultRow {
+    pub content: String,
+    pub failed: bool,
 }
 
 /// One open interaction card (FRONTEND.md §8): a permission gate or an
@@ -351,16 +361,22 @@ impl GuiState {
                     internal_call_id,
                     arguments,
                     done: false,
+                    result: None,
                 }));
             }
             SessionEvent::ToolResult {
-                internal_call_id, ..
+                internal_call_id,
+                content,
+                status,
+                ..
             } => {
+                let failed = !matches!(status, tabit_protocol::ToolResultStatus::Success);
                 let turn = self.turn();
                 if let Some(Segment::ToolCall(tool)) = turn.segments.iter_mut().find(
                     |s| matches!(s, Segment::ToolCall(t) if t.internal_call_id == internal_call_id),
                 ) {
                     tool.done = true;
+                    tool.result = Some(ToolResultRow { content, failed });
                 }
             }
             SessionEvent::TurnRetried { .. } => {

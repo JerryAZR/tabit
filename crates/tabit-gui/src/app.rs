@@ -446,12 +446,28 @@ fn render_group(ui: &mut egui::Ui, group: &Group) {
                     Segment::ToolCall(tool) => {
                         ui.horizontal(|ui| {
                             ui.add_space(theme::ROW_INSET);
-                            let mark = if tool.done { "✓" } else { "…" };
+                            let mark = match (&tool.result, tool.done) {
+                                (Some(result), _) if result.failed => "✗",
+                                (Some(_), _) => "✓",
+                                (None, _) => "…",
+                            };
                             ui.label(
                                 egui::RichText::new(format!("{mark} {}", tool.name))
                                     .color(theme::MUTED),
                             );
                         });
+                        // The faithful copy: exactly what the model saw,
+                        // failure detail included.
+                        if let Some(result) = &tool.result {
+                            ui.horizontal(|ui| {
+                                ui.add_space(theme::ROW_INSET * 2.0);
+                                ui.label(
+                                    egui::RichText::new(result.content.clone())
+                                        .color(theme::MUTED)
+                                        .small(),
+                                );
+                            });
+                        }
                     }
                 }
             }

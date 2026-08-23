@@ -556,3 +556,36 @@ fn replay_brackets_are_inert_and_model_changed_updates_the_facts() {
     assert_eq!(state.facts.as_ref().expect("facts").model.model, "m2");
     assert_ne!(state.facts.as_ref().expect("facts").model, before);
 }
+
+#[test]
+fn tool_results_land_on_their_calls_with_content_and_failure() {
+    let mut state = GuiState::default();
+    state.reduce(ack());
+    state.reduce(user("run it"));
+    state.reduce(event(SessionEvent::ToolCall {
+        turn_id: "t1".to_string(),
+        name: "bash".to_string(),
+        call_id: "c1".to_string(),
+        internal_call_id: "i1".to_string(),
+        arguments: None,
+    }));
+    state.reduce(event(SessionEvent::ToolResult {
+        turn_id: "t1".to_string(),
+        entry_id: "e1".to_string(),
+        name: "bash".to_string(),
+        internal_call_id: "i1".to_string(),
+        content: "command exited with status 3:\nboom".to_string(),
+        status: tabit_protocol::ToolResultStatus::Failed { exit_code: Some(3) },
+    }));
+
+    let Some(Group::Turn(turn)) = state.transcript.last() else {
+        panic!("expected a turn");
+    };
+    let Some(Segment::ToolCall(row)) = turn.segments.first() else {
+        panic!("expected the tool call row");
+    };
+    assert!(row.done);
+    let result = row.result.as_ref().expect("the result landed");
+    assert!(result.failed);
+    assert!(result.content.contains("status 3"), "{}", result.content);
+}
