@@ -45,6 +45,18 @@ pub type StreamingResult = Pin<Box<dyn Stream<Item = Result<MultiTurnStreamItem,
 #[serde(tag = "type", rename_all = "camelCase")]
 #[non_exhaustive]
 pub enum MultiTurnStreamItem {
+    /// A model-call attempt committed — the request is about to be issued.
+    /// The first item of every turn: each subsequent item belongs to this
+    /// turn until the next `TurnStarted` or the terminal, so a consumer can
+    /// attribute everything (deltas, tool calls, usage) from this id alone.
+    /// The id is minted from the run's id source (ENGINE.md behavior delta
+    /// 10) and never reused: a turn retried by a hook or re-driven after a
+    /// provider failure announces again with a fresh id, and a turn that
+    /// never commits leaves its announced id uncommitted.
+    TurnStarted {
+        /// The announced turn id, stable for the whole attempt.
+        id: String,
+    },
     /// A streamed assistant content item — the content the **model emitted**:
     /// text/reasoning deltas, tool-call deltas, and, when the model turn is
     /// committed, the complete [`StreamedAssistantContent::ToolCall`] for each
@@ -324,6 +336,13 @@ impl StreamingPromptRequest {
     /// model-call budget stay queued in the source.
     pub fn steering(mut self, steering: Arc<dyn crate::agent::runner::SteeringSource>) -> Self {
         self.runner = self.runner.steering(steering);
+        self
+    }
+
+    /// Set the source of announced turn ids — see
+    /// [`AgentRunner::turn_id_source`](crate::agent::runner::AgentRunner::turn_id_source).
+    pub fn turn_id_source(mut self, source: crate::agent::runner::TurnIdSource) -> Self {
+        self.runner = self.runner.turn_id_source(source);
         self
     }
 

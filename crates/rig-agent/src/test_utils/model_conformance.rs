@@ -1652,6 +1652,7 @@ where
                 final_response = Some(response);
             }
             MultiTurnStreamItem::StreamAssistantItem(_)
+            | MultiTurnStreamItem::TurnStarted { .. }
             | MultiTurnStreamItem::ToolExecutionCommitted { .. }
             | MultiTurnStreamItem::ModelTurnRetried { .. }
             | MultiTurnStreamItem::Steer { .. } => {}

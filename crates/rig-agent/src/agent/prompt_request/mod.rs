@@ -278,6 +278,16 @@ where
         self
     }
 
+    /// Set the source of announced turn ids — see
+    /// [`AgentRunner::turn_id_source`](crate::agent::runner::AgentRunner::turn_id_source).
+    /// On the blocking surface the minted ids still reach hooks (the
+    /// context carries the id of the turn in flight); there are no stream
+    /// items to carry them.
+    pub fn turn_id_source(mut self, source: crate::agent::runner::TurnIdSource) -> Self {
+        self.runner = self.runner.turn_id_source(source);
+        self
+    }
+
     forward_prompt_setters!(runner);
     forward_tool_concurrency!(runner);
 }
@@ -769,6 +779,13 @@ where
         H: AgentHook + 'static,
     {
         self.inner = self.inner.add_hook(hook);
+        self
+    }
+
+    /// Set the source of announced turn ids — see
+    /// [`AgentRunner::turn_id_source`](crate::agent::runner::AgentRunner::turn_id_source).
+    pub fn turn_id_source(mut self, source: crate::agent::runner::TurnIdSource) -> Self {
+        self.inner = self.inner.turn_id_source(source);
         self
     }
 

@@ -2,7 +2,7 @@ use crate::agent::{ObservationAction, StreamResponseFinish, TextDelta, ToolCallD
 
 use super::*;
 use crate::agent::AgentBuilder;
-use crate::agent::hook::{AgentHook, HookContext};
+use crate::agent::hook::{AgentHook, HookContext, ModelTurnAction, ModelTurnFinished};
 use crate::agent::prompt_request::tool_result_output;
 use crate::agent::run::AgentRunStep;
 use crate::agent::run::streamed::merge_reasoning_blocks;
@@ -3752,4 +3752,237 @@ async fn steering_after_a_final_turn_gets_another_model_call() {
         })
         .expect("final response");
     assert_eq!(final_text, "steered answer");
+}
+
+/// An id source counting attempts, so announced ids are deterministic.
+fn counting_turn_ids() -> (
+    crate::agent::TurnIdSource,
+    Arc<std::sync::atomic::AtomicUsize>,
+) {
+    let counter = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+    let source = {
+        let counter = counter.clone();
+        Arc::new(move || {
+            let n = counter.fetch_add(1, Ordering::SeqCst);
+            format!("attempt-{n}")
+        }) as crate::agent::TurnIdSource
+    };
+    (source, counter)
+}
+
+/// Every model-call attempt is announced as the first item of its turn,
+/// with an id from the injected source (ENGINE.md behavior delta 10): a
+/// two-turn run (tool call, then final text) announces exactly twice, the
+/// first announcement precedes all content, and the second precedes the
+/// second turn's text.
+#[tokio::test]
+async fn each_model_call_attempt_is_announced_before_its_content() {
+    let (ids, calls) = counting_turn_ids();
+    let model = streaming_tool_then_text_model();
+    let agent = AgentBuilder::new(model).tool(MockAddTool).build();
+
+    let mut stream = agent
+        .stream_prompt("do tool work")
+        .max_turns(3)
+        .turn_id_source(ids)
+        .await;
+
+    let mut items = Vec::new();
+    while let Some(item) = stream.next().await {
+        items.push(item.expect("unexpected streaming error"));
+    }
+
+    // The very first item of the run is the first turn's announcement.
+    assert!(
+        matches!(&items.first(), Some(MultiTurnStreamItem::TurnStarted { id }) if id == "attempt-0"),
+        "the run must open with the first turn's announcement, got {:?}",
+        items.first()
+    );
+    let mut announcement_positions = Vec::new();
+    for (index, item) in items.iter().enumerate() {
+        if matches!(item, MultiTurnStreamItem::TurnStarted { .. }) {
+            announcement_positions.push(index);
+        }
+    }
+    assert_eq!(
+        announcement_positions.len(),
+        2,
+        "exactly two announcements in a two-turn run, got {announcement_positions:?}"
+    );
+    assert_eq!(
+        announcement_positions[0], 0,
+        "the first announcement precedes all content"
+    );
+    assert!(
+        matches!(&items[announcement_positions[1]], MultiTurnStreamItem::TurnStarted { id } if id == "attempt-1"),
+        "the second attempt announces a fresh id"
+    );
+    assert_eq!(calls.load(Ordering::SeqCst), 2, "one mint per attempt");
+
+    // The first turn's content (tool call, result, completion call) sits
+    // between the two announcements; the second turn's text follows the
+    // second announcement.
+    let second = announcement_positions[1];
+    let between = &items[1..second];
+    assert!(
+        between.iter().any(|item| matches!(
+            item,
+            MultiTurnStreamItem::StreamAssistantItem(StreamedAssistantContent::ToolCall { .. })
+        )),
+        "the tool call belongs to the first announced turn"
+    );
+    assert!(
+        between
+            .iter()
+            .any(|item| matches!(item, MultiTurnStreamItem::CompletionCall(_))),
+        "the first turn's completion call precedes the second announcement"
+    );
+    assert!(
+        items[second + 1..].iter().any(|item| matches!(
+            item,
+            MultiTurnStreamItem::StreamAssistantItem(StreamedAssistantContent::Text(text)) if text.text == "done"
+        )),
+        "the final text belongs to the second announced turn"
+    );
+}
+
+/// The announced id reaches hooks for the rest of its attempt: a hook
+/// observing `ModelTurnFinished` (the recorder's event) sees exactly the id
+/// that was announced for that turn.
+#[tokio::test]
+async fn hooks_observe_the_announced_turn_id() {
+    use std::sync::Mutex;
+
+    /// One observed turn finish: its announced id and one-based index.
+    type ObservedTurn = (Option<String>, usize);
+    type ObservedTurns = Arc<Mutex<Vec<ObservedTurn>>>;
+
+    #[derive(Clone, Default)]
+    struct CaptureIds(ObservedTurns);
+    impl AgentHook for CaptureIds {
+        async fn on_model_turn_finished(
+            &self,
+            ctx: &HookContext,
+            event: ModelTurnFinished<'_>,
+        ) -> ModelTurnAction {
+            self.0
+                .lock()
+                .expect("captured ids")
+                .push((ctx.turn_id(), event.turn));
+            ModelTurnAction::Continue
+        }
+    }
+
+    let (ids, _calls) = counting_turn_ids();
+    let model = streaming_tool_then_text_model();
+    let capture = CaptureIds::default();
+    let agent = AgentBuilder::new(model)
+        .tool(MockAddTool)
+        .add_hook(capture.clone())
+        .build();
+
+    let mut stream = agent
+        .stream_prompt("do tool work")
+        .max_turns(3)
+        .turn_id_source(ids)
+        .await;
+    while let Some(item) = stream.next().await {
+        item.expect("unexpected streaming error");
+    }
+
+    assert_eq!(
+        capture.0.lock().expect("captured ids").as_slice(),
+        [
+            (Some("attempt-0".to_string()), 1),
+            (Some("attempt-1".to_string()), 2)
+        ],
+        "each turn's finish hook sees that turn's announced id"
+    );
+}
+
+/// A hook-retried turn announces again with a fresh id — announced ids are
+/// never reused, and the discarded attempt's id stays distinct from the
+/// retry's (ENGINE.md behavior delta 10).
+#[tokio::test]
+async fn a_retried_attempt_announces_a_fresh_id() {
+    use std::sync::Mutex;
+
+    #[derive(Default)]
+    struct RetryFirstTurn(Mutex<usize>);
+    impl AgentHook for RetryFirstTurn {
+        async fn on_model_turn_finished(
+            &self,
+            _ctx: &HookContext,
+            _event: ModelTurnFinished<'_>,
+        ) -> ModelTurnAction {
+            let seen = {
+                let mut count = self.0.lock().expect("retry counter");
+                *count += 1;
+                *count
+            };
+            if seen == 1 {
+                ModelTurnAction::repeat()
+            } else {
+                ModelTurnAction::Continue
+            }
+        }
+    }
+
+    let (ids, _calls) = counting_turn_ids();
+    // The first scripted turn is tool-free (a retryable turn must be
+    // tool-free), the second is the accepted answer.
+    let model = MockCompletionModel::from_stream_turns([
+        vec![
+            MockStreamEvent::text("first try"),
+            MockStreamEvent::final_response_with_total_tokens(1),
+        ],
+        vec![
+            MockStreamEvent::text("second try"),
+            MockStreamEvent::final_response_with_total_tokens(2),
+        ],
+    ]);
+    let agent = AgentBuilder::new(model)
+        .add_hook(RetryFirstTurn::default())
+        .build();
+
+    let mut stream = agent
+        .stream_prompt("answer twice")
+        .max_turns(3)
+        .turn_id_source(ids)
+        .await;
+
+    let mut sequence = Vec::new();
+    while let Some(item) = stream.next().await {
+        let item = item.expect("unexpected streaming error");
+        let label = match &item {
+            MultiTurnStreamItem::TurnStarted { id } => format!("announce:{id}"),
+            MultiTurnStreamItem::ModelTurnRetried { .. } => "retried".to_string(),
+            MultiTurnStreamItem::StreamAssistantItem(StreamedAssistantContent::Text(text)) => {
+                format!("text:{}", text.text)
+            }
+            MultiTurnStreamItem::CompletionCall(_) => "completion".to_string(),
+            MultiTurnStreamItem::StreamAssistantItem(StreamedAssistantContent::Final(_)) => {
+                "final-item".to_string()
+            }
+            MultiTurnStreamItem::FinalResponse(_) => "final".to_string(),
+            _ => "other".to_string(),
+        };
+        sequence.push(label);
+    }
+
+    assert_eq!(
+        sequence,
+        vec![
+            "announce:attempt-0",
+            "text:first try",
+            "completion",
+            "retried",
+            "announce:attempt-1",
+            "text:second try",
+            "completion",
+            "final-item",
+            "final",
+        ],
+        "the discarded attempt and its retry announce distinct fresh ids"
+    );
 }

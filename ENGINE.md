@@ -215,6 +215,7 @@ during design review, the verdict is recorded.
 | steering points (when) | fetching from the `SteeringSource` (what), feeding `steer()` |
 | budget, streak, terminating flags | tool dispatch: concurrency, drop guards |
 | loop-or-exit decision | hook invocation, memory append at Done |
+| — | turn identity: minting from the injected id source, announcing `TurnStarted`, publishing the id on the hook context (delta 10) |
 
 ### What the redesign deletes
 
@@ -265,6 +266,23 @@ during design review, the verdict is recorded.
    conditioned on the turn's finish reason (a partial call from a
    length cap is handled exactly like one from broken model output —
    no cause-based carve-out).
+10. **Every model-call attempt is announced** (ruled 2026-08, v2 slice 1).
+   At the moment an attempt commits — the same point the driver advances
+   `previous_model`, after every hook stop and preparation failure, so an
+   attempt that is announced is a request that will actually be issued —
+   the driver mints a turn id from the run's id source, publishes it on
+   the hook context (hooks observe the id of the turn in flight; the
+   session's recorder stamps the committed entry with it), and emits a
+   `TurnStarted { id }` item before any content of the attempt. The id
+   source is injected: the engine's default is its short random ids, and
+   consumers that key durable records on turn identity inject their own
+   mint (tabit injects UUIDv7, so announced ids and log entry ids are
+   literally the same value). Announced ids are never reused — a
+   retried or failed attempt announces again with a fresh id, and an
+   attempt that never commits leaves its id uncommitted (the frontend
+   already discards provisional output on `TurnRetried`/abort). The
+   announcement precedes the first content byte, so consumers learn a
+   turn began before first-token latency elapses.
 
 ## Implementation judgments (refactor landing)
 

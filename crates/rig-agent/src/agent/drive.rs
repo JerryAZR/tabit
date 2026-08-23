@@ -398,6 +398,18 @@ where
                     // above left `previous_model` untouched.
                     previous_model = Some(selected_model);
 
+                    // Announce the turn (ENGINE.md behavior delta 10): the
+                    // attempt is irreversible, so this is "the model call
+                    // begins". Mint the id, publish it to hooks for the rest
+                    // of the attempt, and emit the announcement before any
+                    // content of the attempt — consumers learn the turn
+                    // started before first-token latency elapses.
+                    let turn_id = (runner.turn_id_source)();
+                    hook_ctx.set_turn_id(turn_id.clone());
+                    yield Ok(DriveItem::Item(MultiTurnStreamItem::TurnStarted {
+                        id: turn_id,
+                    }));
+
                     let mut turn_stream = source.run_model_turn(
                         &runner,
                         &hook_ctx,

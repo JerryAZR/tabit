@@ -1466,7 +1466,10 @@ async fn dropping_pending_unary_and_streaming_attempts_cancels_by_drop() {
     let pending_stream = stream_agent.stream_prompt("pending stream").await;
     let stream_task = tokio::spawn(async move {
         let mut pending_stream = pending_stream;
-        pending_stream.next().await
+        // The first poll returns the turn announcement (ENGINE.md behavior
+        // delta 10); the provider's own stream is reached on the next poll,
+        // where this run parks forever.
+        while pending_stream.next().await.is_some() {}
     });
     wait_for_notification(&stream_started).await;
     stream_task.abort();

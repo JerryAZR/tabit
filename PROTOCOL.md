@@ -245,7 +245,11 @@ histories).
   the frontend maps deltas to growing widgets. `user_message { text,
   entry_id }` (minted at drain); `tool_result` gains `entry_id` plus
   `turn_id`; turns are announced by `turn_started { id }` when the
-  model call begins — the engine mints the id there, every event of the
+  model call begins — the engine mints the id there (accepted
+  refinement, 2026-08: the engine announces with an id drawn from an
+  **injected id source** — the engine's default stays its short random
+  ids, tabit injects its UUIDv7 mint, so the mint happens engine-side at
+  announcement while the format stays the log owner's), every event of the
   turn is stamped with it (text/reasoning deltas, tool calls, usage),
   and the session records the committed entry **with that same id**,
   so live and replay ids are literally identical. (yaca's live-vs-log

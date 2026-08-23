@@ -261,7 +261,15 @@ pub struct AgentRunner {
     /// Queued user input injected at steering points; `None` disables
     /// steering for this request.
     pub(crate) steering: Option<Arc<dyn SteeringSource>>,
+    /// Called once per model-call attempt, at the moment the attempt
+    /// commits, to mint the turn's announced id. The engine's default is
+    /// its short random ids; consumers that key durable records on turn
+    /// identity inject their own mint (ENGINE.md behavior delta 10).
+    pub(crate) turn_id_source: TurnIdSource,
 }
+
+/// The source of announced turn ids — one call per model-call attempt.
+pub type TurnIdSource = Arc<dyn Fn() -> String + Send + Sync>;
 
 impl AgentRunner {
     /// Build a runner from an agent, seeding it with the agent's default hook
@@ -306,7 +314,17 @@ impl AgentRunner {
             hooks: agent.hooks.clone(),
             error_usage: None,
             steering: None,
+            turn_id_source: Arc::new(rig_core::id::generate),
         }
+    }
+
+    /// Set the source of announced turn ids (see [`TurnIdSource`]). Called
+    /// once per model-call attempt; the minted id rides the attempt's
+    /// `TurnStarted` stream item and the hook context for the rest of the
+    /// attempt.
+    pub fn turn_id_source(mut self, source: TurnIdSource) -> Self {
+        self.turn_id_source = source;
+        self
     }
 
     /// Attach the steering source whose queued messages join the run at

@@ -117,7 +117,7 @@
 
 use std::collections::HashMap;
 use std::sync::atomic::{AtomicUsize, Ordering};
-use std::{future::Future, sync::Arc};
+use std::{future::Future, sync::Arc, sync::Mutex};
 
 use crate::tool::extensions::TypeMap;
 use rig_core::{
@@ -305,6 +305,11 @@ impl Drop for ToolCallResolutionFrame<'_> {
 pub struct HookContext {
     run_id: RunId,
     turn: AtomicUsize,
+    /// The announced id of the turn in flight (ENGINE.md behavior delta
+    /// 10): set when a model-call attempt commits, read by hooks for the
+    /// rest of that attempt. `None` only before the first attempt or on
+    /// surfaces that never announce.
+    turn_id: Mutex<Option<String>>,
     is_streaming: bool,
     agent_name: Option<String>,
     scratchpad: Scratchpad,
@@ -316,6 +321,7 @@ impl HookContext {
         Self {
             run_id: RunId::generate(),
             turn: AtomicUsize::new(0),
+            turn_id: Mutex::new(None),
             is_streaming,
             agent_name,
             scratchpad: Scratchpad::default(),
@@ -327,6 +333,13 @@ impl HookContext {
         self.turn.store(turn, Ordering::Relaxed);
     }
 
+    pub(crate) fn set_turn_id(&self, id: String) {
+        *self
+            .turn_id
+            .lock()
+            .unwrap_or_else(|error| error.into_inner()) = Some(id);
+    }
+
     /// Stable run identifier.
     pub fn run_id(&self) -> &RunId {
         &self.run_id
@@ -335,6 +348,16 @@ impl HookContext {
     /// Current one-based model-call index.
     pub fn turn(&self) -> usize {
         self.turn.load(Ordering::Relaxed)
+    }
+
+    /// The announced id of the turn in flight, when one has been
+    /// announced. Stable for the whole attempt; a retried attempt
+    /// announces a fresh id (ids are never reused).
+    pub fn turn_id(&self) -> Option<String> {
+        self.turn_id
+            .lock()
+            .unwrap_or_else(|error| error.into_inner())
+            .clone()
     }
 
     /// Whether the streaming surface is driving this run.
