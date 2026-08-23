@@ -282,7 +282,12 @@ during design review, the verdict is recorded.
    attempt that never commits leaves its id uncommitted (the frontend
    already discards provisional output on `TurnRetried`/abort). The
    announcement precedes the first content byte, so consumers learn a
-   turn began before first-token latency elapses.
+   turn began before first-token latency elapses. The matching **commit
+   edge is announced too**: a turn accepted into run history emits
+   `TurnCommitted { id }` (after model-turn hooks resolve to advance),
+   so live and replay bracket a turn with the same shapes — a turn
+   discarded by a retry hook, a stop, a provider failure, or an abort
+   never commits, and its announced id stays uncommitted.
 
 ## Implementation judgments (refactor landing)
 

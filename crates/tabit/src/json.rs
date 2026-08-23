@@ -387,7 +387,7 @@ id = "m"
                     ..
                 }) if kind == "user" => Some(text.as_str()),
                 ServerFrame::Event(EventFrame {
-                    event: tabit_session::SessionEvent::TextDelta { text },
+                    event: tabit_session::SessionEvent::TextDelta { text, .. },
                     ..
                 }) if kind == "delta" => Some(text.as_str()),
                 _ => None,

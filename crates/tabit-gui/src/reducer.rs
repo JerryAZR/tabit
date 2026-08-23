@@ -256,14 +256,24 @@ impl GuiState {
                 self.transcript.push(Group::User { text });
                 self.running = true;
             }
-            SessionEvent::TextDelta { text } => {
+            SessionEvent::TurnStarted { .. } => {
+                // The model call began (before the first token): open the
+                // turn's group now so the view can grow it in place.
+                let _ = self.turn();
+            }
+            SessionEvent::TurnCommitted { .. } => {
+                // The turn's content is final and recorded; v1 grouping
+                // needs no state change (the next `TurnStarted` or terminal
+                // closes the group).
+            }
+            SessionEvent::TextDelta { text, .. } => {
                 let turn = self.turn();
                 match turn.segments.last_mut() {
                     Some(Segment::Text(buffer)) => buffer.push_str(&text),
                     _ => turn.segments.push(Segment::Text(text)),
                 }
             }
-            SessionEvent::ReasoningDelta { id, reasoning } => {
+            SessionEvent::ReasoningDelta { id, reasoning, .. } => {
                 let turn = self.turn();
                 match turn.segments.last_mut() {
                     Some(Segment::Reasoning { id: open, text }) if *open == id => {
@@ -280,6 +290,7 @@ impl GuiState {
                 call_id,
                 internal_call_id,
                 arguments,
+                ..
             } => {
                 self.turn().segments.push(Segment::ToolCall(ToolCallRow {
                     name,
@@ -310,7 +321,7 @@ impl GuiState {
                 // Per-request usage; the run terminal carries the
                 // aggregate. v1 keeps the aggregate only.
             }
-            SessionEvent::TurnTruncated => {
+            SessionEvent::TurnTruncated { .. } => {
                 // Informational (ENGINE.md behavior delta 9): the run
                 // continues; the note is the user's cue that the model hit
                 // its output cap — a steer asks it to go on.
@@ -354,7 +365,7 @@ impl GuiState {
                     free_text,
                 });
             }
-            SessionEvent::NativeItem { item } => {
+            SessionEvent::NativeItem { item, .. } => {
                 self.transcript.push(Group::Native {
                     item: item.to_string(),
                 });

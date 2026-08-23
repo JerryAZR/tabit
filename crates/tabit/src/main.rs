@@ -289,7 +289,7 @@ fn print_event(event: &SessionEvent) {
 [aborted]"
             );
         }
-        SessionEvent::TextDelta { text } => {
+        SessionEvent::TextDelta { text, .. } => {
             let _ = out.write_all(text.as_bytes());
             let _ = out.flush();
         }
@@ -306,13 +306,16 @@ fn print_event(event: &SessionEvent) {
         SessionEvent::ToolResult { name, .. } => {
             let _ = writeln!(out, "← {name} done");
         }
-        SessionEvent::TurnRetried { turn } => {
+        SessionEvent::TurnRetried { turn, .. } => {
             let _ = writeln!(out, "[turn {turn} rejected by a hook; retrying]");
         }
         SessionEvent::CompletionCall { .. } => {}
+        // Turn brackets are attribution machinery (the GUI's grouping);
+        // the terminal view shows content as it streams.
+        SessionEvent::TurnStarted { .. } | SessionEvent::TurnCommitted { .. } => {}
         // Informational (ENGINE.md behavior delta 9): the run continues;
         // the note is the user's cue that a steer can ask for more.
-        SessionEvent::TurnTruncated => {
+        SessionEvent::TurnTruncated { .. } => {
             let _ = writeln!(out, "[model output was truncated (output token limit)]");
         }
         SessionEvent::RunFinished { .. } => {
@@ -686,6 +689,7 @@ fn print_mode(
                     SessionEvent::CompletionCall {
                         input_tokens,
                         output_tokens,
+                        ..
                     } => {
                         outcome.input_tokens += input_tokens;
                         outcome.output_tokens += output_tokens;

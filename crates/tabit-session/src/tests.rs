@@ -310,7 +310,7 @@ async fn tool_roundtrip_is_recorded_and_events_name_the_tool() -> Result<(), Ses
     assert!(
         !run.events
             .iter()
-            .any(|e| matches!(e, SessionEvent::TurnTruncated)),
+            .any(|e| matches!(e, SessionEvent::TurnTruncated { .. })),
         "a non-truncated run must not emit turn_truncated"
     );
 
@@ -335,6 +335,107 @@ async fn tool_roundtrip_is_recorded_and_events_name_the_tool() -> Result<(), Ses
 
     // Projection merges the result into one user message.
     assert_eq!(session.context().len(), 4);
+    std::fs::remove_dir_all(store.dir()).ok();
+    Ok(())
+}
+
+/// Live turn ids and log entry ids are literally the same value (ENGINE.md
+/// behavior delta 10): each `turn_started`'s id is the committed
+/// `assistant_message` entry's id, every turn-scoped event is stamped with
+/// its turn's id, and `tool_result` events carry their entries' ids. This
+/// is the invariant v2 replay rides — replayed ids are these ids, verbatim.
+#[tokio::test]
+async fn announced_turn_ids_are_the_log_entry_ids() -> Result<(), SessionError> {
+    let store = temp_store("turn-ids");
+    let factory = Factory::new(vec![tool_turn("call-1", "echo"), text_turn("did it")]);
+    let mut session = factory
+        .into_builder(store.clone())
+        .dynamic_tool(echo_tool())
+        .create("C:/w")?;
+
+    let run = session.prompt("echo x").await;
+    assert_eq!(run.output, "did it");
+
+    let announced: Vec<String> = run
+        .events
+        .iter()
+        .filter_map(|e| match e {
+            SessionEvent::TurnStarted { id } => Some(id.clone()),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(announced.len(), 2, "one announcement per model call");
+    assert!(
+        uuid::Uuid::parse_str(&announced[0]).is_ok(),
+        "announced ids are UUIDv7 entry ids (the injected mint is in force), \
+         got {:?}",
+        announced[0]
+    );
+    let committed: Vec<String> = run
+        .events
+        .iter()
+        .filter_map(|e| match e {
+            SessionEvent::TurnCommitted { id } => Some(id.clone()),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(
+        committed, announced,
+        "every announced turn commits in this run, closing its bracket"
+    );
+
+    // The announced ids are exactly the committed assistant entries' ids.
+    let loaded = store.open_path(session.path()).expect("reload");
+    let assistant_ids: Vec<String> = loaded
+        .entries
+        .iter()
+        .filter_map(|e| match &e.kind {
+            EntryKind::AssistantMessage { .. } => Some(e.id.clone()),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(
+        assistant_ids, announced,
+        "live turn ids and log entry ids are the same values"
+    );
+
+    // The first turn's tool call and usage are stamped with its id, and
+    // the result event carries the result entry's id.
+    let first = &announced[0];
+    assert!(
+        run.events.iter().any(|e| matches!(e,
+            SessionEvent::ToolCall { turn_id, .. } if turn_id == first)),
+        "the tool call carries the announced turn id"
+    );
+    assert!(
+        run.events.iter().any(|e| matches!(e,
+            SessionEvent::CompletionCall { turn_id, .. } if turn_id == first)),
+        "the usage event carries the announced turn id"
+    );
+    let (result_turn, result_entry) = run
+        .events
+        .iter()
+        .find_map(|e| match e {
+            SessionEvent::ToolResult {
+                turn_id, entry_id, ..
+            } => Some((turn_id.clone(), entry_id.clone())),
+            _ => None,
+        })
+        .expect("one tool result event");
+    assert_eq!(&result_turn, first, "the result belongs to the call's turn");
+    let log_result_ids: Vec<String> = loaded
+        .entries
+        .iter()
+        .filter_map(|e| match &e.kind {
+            EntryKind::ToolResult { .. } => Some(e.id.clone()),
+            _ => None,
+        })
+        .collect();
+    assert!(
+        log_result_ids.contains(&result_entry),
+        "the tool_result event's entry_id is its log entry's id"
+    );
+
     std::fs::remove_dir_all(store.dir()).ok();
     Ok(())
 }
@@ -366,10 +467,24 @@ async fn truncated_turn_warns_and_the_run_still_completes() -> Result<(), Sessio
     assert_eq!(
         run.events
             .iter()
-            .filter(|e| matches!(e, SessionEvent::TurnTruncated))
+            .filter(|e| matches!(e, SessionEvent::TurnTruncated { .. }))
             .count(),
         1,
         "exactly one truncation warning for one truncated turn"
+    );
+    // The warning names the turn it truncated — the one this run announced.
+    let announced: Vec<&str> = run
+        .events
+        .iter()
+        .filter_map(|e| match e {
+            SessionEvent::TurnStarted { id } => Some(id.as_str()),
+            _ => None,
+        })
+        .collect();
+    assert!(
+        run.events.iter().any(|e| matches!(e,
+            SessionEvent::TurnTruncated { turn_id } if Some(turn_id.as_str()) == announced.first().copied())),
+        "the truncation warning carries the truncated turn's id"
     );
     assert!(matches!(
         run.events.last(),
@@ -731,7 +846,11 @@ async fn reasoning_deltas_surface_as_events() -> Result<(), SessionError> {
     assert!(
         run.events.iter().any(|e| matches!(
             e,
-            SessionEvent::ReasoningDelta { id, reasoning }
+            SessionEvent::ReasoningDelta {
+                id,
+                reasoning,
+                ..
+            }
                 if id == "r0" && reasoning == "pondering..."
         )),
         "reasoning delta must surface: {:?}",
@@ -1603,7 +1722,7 @@ async fn an_empty_truncated_stream_warns_and_completes() -> Result<(), SessionEr
     assert_eq!(
         run.events
             .iter()
-            .filter(|e| matches!(e, SessionEvent::TurnTruncated))
+            .filter(|e| matches!(e, SessionEvent::TurnTruncated { .. }))
             .count(),
         1,
         "the budget-exhausted empty turn still warns"

@@ -466,10 +466,11 @@ impl Session {
     ///
     /// The phases are named methods so each concern changes in one place:
     /// input staging (the v2 prompt barrier lands in [`Self::stage_input`]),
-    /// request assembly ([`Self::open_run`]), the item fold
-    /// ([`Self::drive`] — where v2 event ids mint, shared with replay), and
-    /// the terminal/durability epilogue ([`Self::conclude`] — where the
-    /// write-behind log and `messages_discarded` land).
+    /// request assembly ([`Self::open_run`] — where the UUIDv7 turn-id
+    /// mint is injected), the item fold ([`Self::drive`] — where announced
+    /// turn ids stamp events; v2 replay reuses the same ids verbatim from
+    /// the log), and the terminal/durability epilogue ([`Self::conclude`] —
+    /// where the write-behind log and `messages_discarded` land).
     async fn run_one(
         &mut self,
         batch: &[Message],
@@ -537,6 +538,11 @@ impl Session {
                 mailbox: self.mailbox.clone(),
             }))
             .tool_context(tool_context)
+            // Announced turn ids are entry ids (ENGINE.md behavior delta
+            // 10): the engine mints from tabit's UUIDv7 source, so the id
+            // a live `turn_started` carries is literally the id the
+            // committed entry keeps in the log.
+            .turn_id_source(Arc::new(crate::ids::new_entry_id) as rig_agent::TurnIdSource)
             .await
     }
 
@@ -562,6 +568,10 @@ impl Session {
         // internal id but not its name.
         let mut tool_names: std::collections::BTreeMap<String, String> =
             std::collections::BTreeMap::new();
+        // The announced id of the turn in flight: seeded by each
+        // `TurnStarted`, stamps every turn-scoped event, and outlives the
+        // turn's commit (its tool results arrive after `TurnCommitted`).
+        let mut current_turn: Option<String> = None;
         loop {
             let item = tokio::select! {
                 biased;
@@ -574,12 +584,37 @@ impl Session {
                     None => break,
                 },
             };
+            // Turn-scoped items require an announced turn; the engine
+            // guarantees `TurnStarted` is the first item of every attempt
+            // (ENGINE.md behavior delta 10), so arriving here without one
+            // is an engine-contract violation — internal, fail loud.
+            // Sanctioned crash: see the error doctrine in AGENTS.md.
+            #[allow(clippy::expect_used)]
+            let announce = |current: &Option<String>| {
+                current
+                    .clone()
+                    .expect("turn-scoped stream item before any TurnStarted")
+            };
             match item {
+                Ok(MultiTurnStreamItem::TurnStarted { id }) => {
+                    current_turn = Some(id.clone());
+                    sink.emit(SessionEvent::TurnStarted { id });
+                }
+                Ok(MultiTurnStreamItem::TurnCommitted { id }) => {
+                    sink.emit(SessionEvent::TurnCommitted { id });
+                }
                 Ok(MultiTurnStreamItem::StreamUserItem(StreamedUserContent::ToolResult {
                     tool_result,
                     internal_call_id,
                 })) => {
-                    self.note_tool_result(tool_result, internal_call_id, &mut tool_names, sink);
+                    let turn_id = announce(&current_turn);
+                    self.note_tool_result(
+                        tool_result,
+                        internal_call_id,
+                        turn_id,
+                        &mut tool_names,
+                        sink,
+                    );
                 }
                 Ok(MultiTurnStreamItem::FinalResponse(response)) => {
                     driven.output = response.output;
@@ -593,7 +628,9 @@ impl Session {
                     self.note_steer(text, sink);
                 }
                 Ok(MultiTurnStreamItem::CompletionCall(call)) => {
+                    let turn_id = announce(&current_turn);
                     sink.emit(SessionEvent::CompletionCall {
+                        turn_id: turn_id.clone(),
                         input_tokens: call.usage.input_tokens,
                         output_tokens: call.usage.output_tokens,
                     });
@@ -602,11 +639,12 @@ impl Session {
                     // continues untouched — steers drain into the next
                     // turn, the run may end normally.
                     if call.finish_reason == Some(rig_core::completion::FinishReason::Length) {
-                        sink.emit(SessionEvent::TurnTruncated);
+                        sink.emit(SessionEvent::TurnTruncated { turn_id });
                     }
                 }
                 Ok(item) => {
-                    if let Some(event) = stream_item_event(item, &mut tool_names) {
+                    let turn_id = announce(&current_turn);
+                    if let Some(event) = stream_item_event(item, turn_id, &mut tool_names) {
                         sink.emit(event);
                     }
                 }
@@ -623,19 +661,23 @@ impl Session {
         driven
     }
 
-    /// One executed tool call's result: the durable record, and the event
-    /// naming the tool through the correlation map its call populated.
+    /// One executed tool call's result: the durable record (whose entry id
+    /// rides the event), and the event naming the tool through the
+    /// correlation map its call populated.
     fn note_tool_result(
         &self,
         tool_result: rig_core::message::ToolResult,
         internal_call_id: String,
+        turn_id: String,
         tool_names: &mut std::collections::BTreeMap<String, String>,
         sink: &mut EventSink<'_>,
     ) {
-        self.recorder.record(EntryKind::ToolResult {
+        let entry_id = self.recorder.record(EntryKind::ToolResult {
             result: tool_result,
         });
         sink.emit(SessionEvent::ToolResult {
+            turn_id,
+            entry_id,
             name: tool_names
                 .get(&internal_call_id)
                 .cloned()
@@ -1121,18 +1163,24 @@ struct DriveOutcome {
 }
 
 /// Map an engine item to a session event; `None` means "not surfaced in
-/// v1".
+/// v1". Turn-scoped events carry the announced id of the turn in flight.
 fn stream_item_event(
     item: MultiTurnStreamItem,
+    turn_id: String,
     tool_names: &mut std::collections::BTreeMap<String, String>,
 ) -> Option<SessionEvent> {
     use rig_agent::streaming::StreamedAssistantContent as A;
     match item {
-        MultiTurnStreamItem::StreamAssistantItem(A::Text(text)) => {
-            Some(SessionEvent::TextDelta { text: text.text })
-        }
+        MultiTurnStreamItem::StreamAssistantItem(A::Text(text)) => Some(SessionEvent::TextDelta {
+            turn_id,
+            text: text.text,
+        }),
         MultiTurnStreamItem::StreamAssistantItem(A::ReasoningDelta { id, reasoning }) => {
-            Some(SessionEvent::ReasoningDelta { id, reasoning })
+            Some(SessionEvent::ReasoningDelta {
+                turn_id,
+                id,
+                reasoning,
+            })
         }
         MultiTurnStreamItem::StreamAssistantItem(A::ToolCall {
             tool_call,
@@ -1140,6 +1188,7 @@ fn stream_item_event(
         }) => {
             tool_names.insert(internal_call_id.clone(), tool_call.function.name.clone());
             Some(SessionEvent::ToolCall {
+                turn_id,
                 name: tool_call.function.name,
                 call_id: tool_call.id,
                 arguments: Some(tool_call.function.arguments.to_string()),
@@ -1147,15 +1196,20 @@ fn stream_item_event(
             })
         }
         MultiTurnStreamItem::StreamAssistantItem(A::Unknown(item)) => {
-            Some(SessionEvent::NativeItem { item })
+            Some(SessionEvent::NativeItem { turn_id, item })
         }
         MultiTurnStreamItem::StreamAssistantItem(_) => None,
         MultiTurnStreamItem::ToolExecutionCommitted { .. } => None,
         MultiTurnStreamItem::StreamUserItem(_) => None,
+        // `TurnStarted`/`TurnCommitted` are handled by explicit arms in
+        // `drive` — they set and read the current-turn state.
+        MultiTurnStreamItem::TurnStarted { .. } | MultiTurnStreamItem::TurnCommitted { .. } => None,
         // `CompletionCall` is handled by an explicit arm in `run_one` — it
         // can carry a second, truncation-warning event beside the usage one.
         MultiTurnStreamItem::CompletionCall(_) => None,
-        MultiTurnStreamItem::ModelTurnRetried { turn } => Some(SessionEvent::TurnRetried { turn }),
+        MultiTurnStreamItem::ModelTurnRetried { turn } => {
+            Some(SessionEvent::TurnRetried { turn_id, turn })
+        }
         MultiTurnStreamItem::FinalResponse(_) => None, // handled by the caller
         _ => None,
     }

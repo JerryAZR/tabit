@@ -21,13 +21,34 @@ pub enum SessionEvent {
         /// The message text.
         text: String,
     },
+    /// A model call began: the request is issued. The opening bracket of a
+    /// turn — every turn-scoped event until the matching `TurnCommitted`
+    /// (or the turn's discard: `TurnRetried`, a run terminal) carries this
+    /// turn's id. The id is the committed turn's eventual entry id (born
+    /// early, ENGINE.md behavior delta 10); a turn that never commits
+    /// leaves it uncommitted, and ids are never reused.
+    TurnStarted {
+        /// The announced turn id.
+        id: String,
+    },
+    /// The turn closed by `TurnStarted { id }` committed: its content is
+    /// final and durably recorded. A turn that ends in `TurnRetried`, a
+    /// run terminal, or an abort never commits.
+    TurnCommitted {
+        /// The announced id of the committed turn.
+        id: String,
+    },
     /// A text delta from the assistant.
     TextDelta {
+        /// The turn the delta belongs to.
+        turn_id: String,
         /// The delta text.
         text: String,
     },
     /// A reasoning delta from the assistant.
     ReasoningDelta {
+        /// The turn the delta belongs to.
+        turn_id: String,
         /// Correlation id (unique within the run).
         id: String,
         /// The delta text.
@@ -35,6 +56,8 @@ pub enum SessionEvent {
     },
     /// The model emitted a complete tool call (before execution decisions).
     ToolCall {
+        /// The turn the call belongs to.
+        turn_id: String,
         /// Tool name.
         name: String,
         /// Provider tool-call id.
@@ -46,6 +69,10 @@ pub enum SessionEvent {
     },
     /// A tool body finished executing and its result was committed.
     ToolResult {
+        /// The turn whose tool batch the result belongs to.
+        turn_id: String,
+        /// The result's durable entry id (minted at record time).
+        entry_id: String,
         /// Tool name.
         name: String,
         /// Rig correlation id for the execution.
@@ -54,11 +81,15 @@ pub enum SessionEvent {
     /// A completed model turn was rejected by a hook and will be retried;
     /// any provisional output for that turn should be discarded.
     TurnRetried {
+        /// The announced id of the discarded turn.
+        turn_id: String,
         /// One-based model-call index of the rejected turn.
         turn: usize,
     },
     /// A completion request finished; its usage is final for that request.
     CompletionCall {
+        /// The turn the request belongs to.
+        turn_id: String,
         /// Input tokens reported by the provider.
         input_tokens: u64,
         /// Output tokens reported by the provider.
@@ -68,7 +99,10 @@ pub enum SessionEvent {
     /// its output limit (`finish_reason: length`). Informational, not a
     /// failure — the run continues exactly as usual, and a steer is the
     /// user's way to ask the model to go on.
-    TurnTruncated,
+    TurnTruncated {
+        /// The turn that ended truncated.
+        turn_id: String,
+    },
     /// The outer loop finished successfully.
     RunFinished {
         /// The final assistant text.
@@ -87,6 +121,8 @@ pub enum SessionEvent {
     /// A provider-native output item rig does not model, preserved
     /// verbatim for forwarding.
     NativeItem {
+        /// The turn the item belongs to.
+        turn_id: String,
         /// The raw item.
         item: Value,
     },

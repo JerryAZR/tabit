@@ -57,11 +57,15 @@ fn event_frames_serialize_flat_with_the_stream_beside_the_tag() {
     let frame = EventFrame {
         stream: StreamId::main(),
         event: SessionEvent::TextDelta {
+            turn_id: "t1".to_string(),
             text: "He".to_string(),
         },
     };
     let json = serde_json::to_string(&frame).expect("serialize");
-    assert_eq!(json, r#"{"stream":"main","type":"text_delta","text":"He"}"#);
+    assert_eq!(
+        json,
+        r#"{"stream":"main","type":"text_delta","turn_id":"t1","text":"He"}"#
+    );
     assert_eq!(round_trip(&frame), frame);
 }
 
@@ -76,11 +80,33 @@ fn every_event_variant_survives_the_frame_envelope() {
         },
         EventFrame {
             stream: StreamId::main(),
+            event: SessionEvent::TurnStarted {
+                id: "t1".to_string(),
+            },
+        },
+        EventFrame {
+            stream: StreamId::main(),
             event: SessionEvent::ToolCall {
+                turn_id: "t1".to_string(),
                 name: "echo".to_string(),
                 call_id: "c1".to_string(),
                 internal_call_id: "i1".to_string(),
                 arguments: None,
+            },
+        },
+        EventFrame {
+            stream: StreamId::main(),
+            event: SessionEvent::TurnCommitted {
+                id: "t1".to_string(),
+            },
+        },
+        EventFrame {
+            stream: StreamId::main(),
+            event: SessionEvent::ToolResult {
+                turn_id: "t1".to_string(),
+                entry_id: "e1".to_string(),
+                name: "echo".to_string(),
+                internal_call_id: "i1".to_string(),
             },
         },
         EventFrame {

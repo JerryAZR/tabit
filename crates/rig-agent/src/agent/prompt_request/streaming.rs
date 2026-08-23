@@ -57,6 +57,16 @@ pub enum MultiTurnStreamItem {
         /// The announced turn id, stable for the whole attempt.
         id: String,
     },
+    /// The announced turn committed — its content is final and part of the
+    /// run's history (the durable recording hook has fired and model-turn
+    /// hooks accepted the turn). The closing bracket of the turn the
+    /// matching [`TurnStarted`](Self::TurnStarted) opened: a turn discarded
+    /// by a retry hook, a stop, a provider failure, or an abort never
+    /// commits, and its announced id stays uncommitted.
+    TurnCommitted {
+        /// The announced id of the committed turn.
+        id: String,
+    },
     /// A streamed assistant content item — the content the **model emitted**:
     /// text/reasoning deltas, tool-call deltas, and, when the model turn is
     /// committed, the complete [`StreamedAssistantContent::ToolCall`] for each
@@ -680,7 +690,16 @@ impl TurnSource for StreamingTurnSource {
                     )
                     .await;
                 match resolve_model_turn_action(run, action) {
-                    Ok(ModelTurnDecision::Advance) => {}
+                    Ok(ModelTurnDecision::Advance) => {
+                        // The closing bracket of the announced turn: the
+                        // content is final and recorded (delta 10). The
+                        // other arms never commit — the discard signal
+                        // (`ModelTurnRetried`, the terminal error) already
+                        // tells the consumer the announced id is dead.
+                        if let Some(id) = hook_ctx.turn_id() {
+                            yield Ok(MultiTurnStreamItem::TurnCommitted { id });
+                        }
+                    }
                     Ok(ModelTurnDecision::Retried) => {
                         yield Ok(MultiTurnStreamItem::ModelTurnRetried {
                             turn: hook_ctx.turn(),

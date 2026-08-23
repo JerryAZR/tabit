@@ -3844,6 +3844,21 @@ async fn each_model_call_attempt_is_announced_before_its_content() {
         )),
         "the final text belongs to the second announced turn"
     );
+
+    // Each accepted turn closes with its own commit bracket, before the
+    // next turn's announcement (turn 1) / the terminal (turn 2).
+    assert!(
+        between.iter().any(
+            |item| matches!(item, MultiTurnStreamItem::TurnCommitted { id } if id == "attempt-0")
+        ),
+        "the first turn's commit precedes the second announcement"
+    );
+    assert!(
+        items[second + 1..].iter().any(
+            |item| matches!(item, MultiTurnStreamItem::TurnCommitted { id } if id == "attempt-1")
+        ),
+        "the second turn commits before the run ends"
+    );
 }
 
 /// The announced id reaches hooks for the rest of its attempt: a hook
@@ -3956,6 +3971,7 @@ async fn a_retried_attempt_announces_a_fresh_id() {
         let item = item.expect("unexpected streaming error");
         let label = match &item {
             MultiTurnStreamItem::TurnStarted { id } => format!("announce:{id}"),
+            MultiTurnStreamItem::TurnCommitted { id } => format!("committed:{id}"),
             MultiTurnStreamItem::ModelTurnRetried { .. } => "retried".to_string(),
             MultiTurnStreamItem::StreamAssistantItem(StreamedAssistantContent::Text(text)) => {
                 format!("text:{}", text.text)
@@ -3976,13 +3992,17 @@ async fn a_retried_attempt_announces_a_fresh_id() {
             "announce:attempt-0",
             "text:first try",
             "completion",
+            // No commit for the discarded attempt — its announced id dies
+            // with the retry.
             "retried",
             "announce:attempt-1",
             "text:second try",
             "completion",
+            "committed:attempt-1",
             "final-item",
             "final",
         ],
-        "the discarded attempt and its retry announce distinct fresh ids"
+        "the discarded attempt and its retry announce distinct fresh ids, \
+         and only the accepted attempt commits"
     );
 }

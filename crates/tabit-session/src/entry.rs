@@ -54,10 +54,22 @@ pub struct SessionEntry {
 }
 
 impl SessionEntry {
-    /// Construct an entry linking to `parent_id` at the given time.
+    /// Construct an entry linking to `parent_id` at the given time, with a
+    /// freshly minted id.
     pub fn new(parent_id: Option<String>, timestamp: String, kind: EntryKind) -> Self {
+        Self::with_id(crate::ids::new_entry_id(), parent_id, timestamp, kind)
+    }
+
+    /// Construct an entry under a caller-provided id — the shape behind
+    /// announced ids (a turn's entry reuses the id the engine announced).
+    pub fn with_id(
+        id: String,
+        parent_id: Option<String>,
+        timestamp: String,
+        kind: EntryKind,
+    ) -> Self {
         Self {
-            id: crate::ids::new_entry_id(),
+            id,
             parent_id,
             timestamp,
             kind,

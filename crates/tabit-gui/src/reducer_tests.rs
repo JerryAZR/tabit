@@ -25,6 +25,7 @@ fn user(text: &str) -> InMsg {
 
 fn delta(text: &str) -> InMsg {
     event(SessionEvent::TextDelta {
+        turn_id: "t1".to_string(),
         text: text.to_string(),
     })
 }
@@ -87,20 +88,25 @@ fn tools_and_reasoning_fold_into_the_turn() {
     state.reduce(ack());
     state.reduce(user("list files"));
     state.reduce(event(SessionEvent::ReasoningDelta {
+        turn_id: "t1".to_string(),
         id: "r0".to_string(),
         reasoning: "checking ".to_string(),
     }));
     state.reduce(event(SessionEvent::ReasoningDelta {
+        turn_id: "t1".to_string(),
         id: "r0".to_string(),
         reasoning: "the ls tool".to_string(),
     }));
     state.reduce(event(SessionEvent::ToolCall {
+        turn_id: "t1".to_string(),
         name: "ls".to_string(),
         call_id: "c1".to_string(),
         internal_call_id: "i1".to_string(),
         arguments: Some("{}".to_string()),
     }));
     state.reduce(event(SessionEvent::ToolResult {
+        turn_id: "t1".to_string(),
+        entry_id: "e1".to_string(),
         name: "ls".to_string(),
         internal_call_id: "i1".to_string(),
     }));
@@ -121,17 +127,21 @@ fn segments_render_in_arrival_order() {
     state.reduce(user("check"));
     state.reduce(delta("Let me look. "));
     state.reduce(event(SessionEvent::ToolCall {
+        turn_id: "t1".to_string(),
         name: "ls".to_string(),
         call_id: "c".to_string(),
         internal_call_id: "i".to_string(),
         arguments: None,
     }));
     state.reduce(event(SessionEvent::ToolResult {
+        turn_id: "t1".to_string(),
+        entry_id: "e1".to_string(),
         name: "ls".to_string(),
         internal_call_id: "i".to_string(),
     }));
     state.reduce(delta("Found three files."));
     state.reduce(event(SessionEvent::ToolCall {
+        turn_id: "t1".to_string(),
         name: "read".to_string(),
         call_id: "c2".to_string(),
         internal_call_id: "i2".to_string(),
@@ -156,6 +166,7 @@ fn a_second_turn_opens_a_new_group() {
     state.reduce(user("a"));
     state.reduce(delta("first"));
     state.reduce(event(SessionEvent::ToolCall {
+        turn_id: "t1".to_string(),
         name: "ls".to_string(),
         call_id: "c".to_string(),
         internal_call_id: "i".to_string(),
@@ -204,7 +215,10 @@ fn turn_retried_drops_the_provisional_turn() {
     state.reduce(ack());
     state.reduce(user("a"));
     state.reduce(delta("poisoned"));
-    state.reduce(event(SessionEvent::TurnRetried { turn: 1 }));
+    state.reduce(event(SessionEvent::TurnRetried {
+        turn_id: "t1".to_string(),
+        turn: 1,
+    }));
     assert!(matches!(state.transcript.last(), Some(Group::User { .. })));
     state.reduce(delta("fixed"));
     assert_eq!(segments(&state), vec!["text:fixed"]);
@@ -441,7 +455,9 @@ fn turn_truncated_is_a_non_error_notice_and_the_run_continues() {
     state.reduce(ack());
     state.reduce(user("a"));
     state.reduce(delta("partial answer"));
-    state.reduce(event(SessionEvent::TurnTruncated));
+    state.reduce(event(SessionEvent::TurnTruncated {
+        turn_id: "t1".to_string(),
+    }));
     // Informational (ENGINE.md delta 9): the run is still live and the
     // notice renders as a non-error row.
     assert!(state.running);

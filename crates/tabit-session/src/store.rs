@@ -377,26 +377,59 @@ impl SessionWriter {
         })?;
         self.file = Some(file);
         if let Some(opening) = self.opening.take() {
-            self.append_entry(opening)?;
+            // Already inside `ensure_open` — write directly, not through
+            // `append_with_id` (which re-runs this setup).
+            self.append_entry(None, opening)?;
         }
         Ok(())
     }
 
     /// Append one record and return the persisted entry.
     pub fn append(&mut self, kind: EntryKind) -> Result<SessionEntry, SessionError> {
-        self.ensure_open()?;
-        self.append_entry(kind)
+        self.append_with_id(None, kind)
     }
 
-    fn append_entry(&mut self, kind: EntryKind) -> Result<SessionEntry, SessionError> {
-        let entry = SessionEntry::new(self.leaf.clone(), ids::now_rfc3339(), kind);
+    /// Append one record under a caller-provided entry id — for records
+    /// whose id was announced before the record existed (turns, born-early
+    /// messages). The id is trusted unique; it becomes the entry's own id
+    /// verbatim, so announced ids and log ids are the same value.
+    pub fn append_as(&mut self, id: &str, kind: EntryKind) -> Result<SessionEntry, SessionError> {
+        self.append_with_id(Some(id.to_string()), kind)
+    }
+
+    pub(crate) fn append_with_id(
+        &mut self,
+        id: Option<String>,
+        kind: EntryKind,
+    ) -> Result<SessionEntry, SessionError> {
+        self.ensure_open()?;
+        self.append_entry(id, kind)
+    }
+
+    /// Write one entry — no open-check; callers must have opened the file
+    /// (`append_with_id` and `ensure_open`'s opening write).
+    fn append_entry(
+        &mut self,
+        id: Option<String>,
+        kind: EntryKind,
+    ) -> Result<SessionEntry, SessionError> {
+        let entry = SessionEntry::with_id(
+            id.unwrap_or_else(ids::new_entry_id),
+            self.leaf.clone(),
+            ids::now_rfc3339(),
+            kind,
+        );
+        self.write_entry(entry)
+    }
+
+    fn write_entry(&mut self, entry: SessionEntry) -> Result<SessionEntry, SessionError> {
         let line = serde_json::to_string(&entry).map_err(|source| SessionError::Io {
             path: self.path.clone(),
             source: source.into(),
         })?;
         let Some(file) = self.file.as_mut() else {
-            // Unreachable through `append` (ensure_open runs first);
-            // loud rather than silently dropping the record.
+            // Unreachable through `append`/`append_as` (ensure_open runs
+            // first); loud rather than silently dropping the record.
             return Err(SessionError::Io {
                 path: self.path.clone(),
                 source: std::io::Error::other(
