@@ -434,3 +434,44 @@ fn every_run_terminal_closes_all_open_cards() {
         assert!(!state.running);
     }
 }
+
+#[test]
+fn turn_truncated_is_a_non_error_notice_and_the_run_continues() {
+    let mut state = GuiState::default();
+    state.reduce(ack());
+    state.reduce(user("a"));
+    state.reduce(delta("partial answer"));
+    state.reduce(event(SessionEvent::TurnTruncated));
+    // Informational (ENGINE.md delta 9): the run is still live and the
+    // notice renders as a non-error row.
+    assert!(state.running);
+    assert!(matches!(
+        state.transcript.last(),
+        Some(Group::Notice { error: false, .. })
+    ));
+    // Deltas after the warning keep folding (the notice is its own row,
+    // so a fresh text row opens after it — the run itself is unaffected).
+    state.reduce(delta(" continues"));
+    assert_eq!(
+        segments(&state).last().map(String::as_str),
+        Some("text: continues")
+    );
+    assert!(state.running, "the warning never ends the run");
+}
+
+#[test]
+fn abort_clears_pending_steers_with_the_cards() {
+    // Backend flag 6: abort discards the queue — the queued rows can
+    // never be acknowledged and must not pair with the next run.
+    let mut state = GuiState::default();
+    state.reduce(ack());
+    state.reduce(user("a"));
+    state.reduce(delta("working"));
+    // A mid-run send enters the waiting display (steer queued).
+    state.message_sent("steer this".to_string());
+    assert_eq!(state.pending.len(), 1);
+    state.reduce(event(SessionEvent::RunAborted {
+        output: String::new(),
+    }));
+    assert!(state.pending.is_empty(), "abort discards queued steers");
+}

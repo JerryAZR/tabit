@@ -5,8 +5,11 @@
 
 use super::*;
 use crate::SessionEvent;
+use crate::entry::EntryKind;
 use crate::tests::{Factory, temp_store, text_turn, tool_turn};
+use rig_agent::test_utils::MockStreamEvent;
 use rig_agent::tool::{DynamicTool, ToolOutput};
+use rig_core::completion::Usage;
 use serde_json::json;
 use tabit_protocol::SessionCommand;
 
@@ -71,7 +74,11 @@ async fn run_answering(
 ) -> Vec<EventFrame> {
     handle.message("go");
     let mut frames = Vec::new();
-    while let Some(frame) = handle.next_event().await {
+    loop {
+        let frame = tokio::time::timeout(std::time::Duration::from_secs(5), handle.next_event())
+            .await
+            .expect("the run must keep producing events (or end) within 5s");
+        let Some(frame) = frame else { break };
         if let SessionEvent::InteractionRequested { id, .. } = &frame.event {
             let command = answer(id);
             link.send(command);
@@ -187,6 +194,32 @@ async fn always_allow_remembers_across_calls_in_the_session() {
     // One card (the first call); the second passes on session memory.
     assert_eq!(interaction_count(&frames), 1);
     assert_eq!(finished_outputs(&frames), vec!["done"]);
+
+    // EXTENSIONS.md ruling: the memory is session state, never persisted —
+    // a resumed session (fresh process) asks again.
+    let path = handle.info().session_path.clone();
+    drop(handle);
+    let (session, _report) = Factory::new(vec![tool_turn("t3", "bash"), text_turn("again")])
+        .into_builder(store.clone())
+        .dynamic_tool(gated_tool())
+        .resume(std::path::Path::new(&path))
+        .expect("resume");
+    let mut handle = SessionHandle::spawn(session);
+    let link = handle.command_link();
+    let frames = run_answering(&mut handle, &link, |id| {
+        SessionCommand::InteractionResponse {
+            id: id.to_string(),
+            option: Some("Allow".to_string()),
+            text: None,
+        }
+    })
+    .await;
+    assert_eq!(
+        interaction_count(&frames),
+        1,
+        "a resumed session re-asks: 'Always allow' did not survive the process"
+    );
+    assert_eq!(finished_outputs(&frames), vec!["again"]);
     std::fs::remove_dir_all(store.dir()).ok();
 }
 
@@ -235,9 +268,21 @@ async fn frontend_death_with_a_card_open_winds_the_worker_down() {
 
     handle.message("run it");
     let mut saw_card = false;
-    while let Some(frame) = events.recv().await {
-        if matches!(frame.event, SessionEvent::InteractionRequested { .. }) {
+    loop {
+        let frame = tokio::time::timeout(std::time::Duration::from_secs(5), events.recv())
+            .await
+            .expect("the card must open within 5s");
+        if matches!(
+            frame,
+            Some(tabit_protocol::EventFrame {
+                event: SessionEvent::InteractionRequested { .. },
+                ..
+            })
+        ) {
             saw_card = true;
+            break;
+        }
+        if frame.is_none() {
             break;
         }
     }
@@ -256,6 +301,37 @@ async fn frontend_death_with_a_card_open_winds_the_worker_down() {
     })
     .await
     .expect("the worker must wind down when the frontend dies");
+
+    // The durability half of the ruling: the log survives the death, the
+    // interrupted call's result was synthesized AT ABORT TIME (durably —
+    // an `Aborted` marker followed by the interrupted-result entry), and
+    // the next open finds nothing dangling.
+    let path = handle.info().session_path.clone();
+    let loaded = store
+        .open_path(std::path::Path::new(&path))
+        .expect("reopen");
+    assert!(
+        loaded
+            .entries
+            .iter()
+            .any(|e| matches!(e.kind, EntryKind::Aborted))
+    );
+    assert!(
+        matches!(
+            loaded.entries.last().map(|e| &e.kind),
+            Some(EntryKind::ToolResult { .. })
+        ),
+        "the interrupted call's synthesized result is the durable tail"
+    );
+    let (resumed, report) = Factory::new(vec![text_turn("recovered")])
+        .into_builder(store.clone())
+        .resume(std::path::Path::new(&path))
+        .expect("the log reopens after the death");
+    let _ = resumed;
+    assert_eq!(
+        report.repaired_tool_calls, 0,
+        "abort-time synthesis left nothing dangling to repair"
+    );
     std::fs::remove_dir_all(store.dir()).ok();
 }
 
@@ -299,5 +375,66 @@ async fn abort_with_a_card_open_closes_the_question_totally() {
             text: None,
         });
     }
+    std::fs::remove_dir_all(store.dir()).ok();
+}
+
+/// FRONTEND.md §8: concurrent chains may hold several open requests at
+/// once, answered in any order. One turn with two gated calls under
+/// `TOOL_CONCURRENCY` opens two cards; answering the second one first
+/// still runs both and the run finishes normally.
+#[tokio::test]
+async fn two_open_cards_answered_in_reverse_order_both_run() {
+    let store = temp_store("permit-multi");
+    // One turn emitting two bash calls, then a closing text turn.
+    let turn = vec![
+        MockStreamEvent::tool_call("c1", "bash", json!({"command": "echo one"})),
+        MockStreamEvent::tool_call("c2", "bash", json!({"command": "echo two"})),
+        MockStreamEvent::final_response(Usage::default()),
+    ];
+    let session = Factory::new(vec![turn, text_turn("both ran")])
+        .into_builder(store.clone())
+        .dynamic_tool(gated_tool())
+        .create("C:/w")
+        .expect("session");
+    let mut handle = SessionHandle::spawn(session);
+    let link = handle.command_link();
+
+    handle.message("go");
+    let mut frames = Vec::new();
+    let mut open: Vec<String> = Vec::new();
+    while let Some(frame) = handle.next_event().await {
+        if let SessionEvent::InteractionRequested { id, .. } = &frame.event {
+            open.push(id.clone());
+        }
+        // Once both cards are standing, answer them in reverse order —
+        // the contract allows any order.
+        if open.len() == 2 {
+            for id in open.iter().rev() {
+                link.send(SessionCommand::InteractionResponse {
+                    id: id.clone(),
+                    option: Some("Allow".to_string()),
+                    text: None,
+                });
+            }
+            open.clear();
+        }
+        if matches!(
+            frame.event,
+            SessionEvent::RunFinished { .. }
+                | SessionEvent::RunAborted { .. }
+                | SessionEvent::RunFailed { .. }
+        ) {
+            handle.close_commands();
+        }
+        frames.push(frame);
+    }
+
+    assert_eq!(interaction_count(&frames), 2, "both gated calls asked");
+    let gated_results = frames
+        .iter()
+        .filter(|f| matches!(&f.event, SessionEvent::ToolResult { name, .. } if name == "bash"))
+        .count();
+    assert_eq!(gated_results, 2, "both calls ran despite reverse answering");
+    assert_eq!(finished_outputs(&frames), vec!["both ran"]);
     std::fs::remove_dir_all(store.dir()).ok();
 }

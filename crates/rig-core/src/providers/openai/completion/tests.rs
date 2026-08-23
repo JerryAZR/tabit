@@ -2358,3 +2358,71 @@ async fn completion_logs_request_and_response_bodies_at_trace_level() {
 
     assert_eq!(response.choice.len(), 1);
 }
+
+/// Malformed `additional_params.tools` is user config (external): the
+/// conversion fails as a typed error naming the offending payload.
+#[test]
+fn malformed_additional_params_tools_fail_loudly() {
+    let request = crate::completion::CompletionRequest {
+        additional_params: Some(serde_json::json!({"tools": "not-an-array"})),
+        model: None,
+        preamble: None,
+        chat_history: crate::OneOrMany::one("Hello".into()),
+        documents: vec![],
+        tools: vec![],
+        temperature: None,
+        max_tokens: None,
+        tool_choice: None,
+        output_schema: None,
+        record_telemetry_content: false,
+    };
+    let error = match CompletionRequest::try_from(OpenAIRequestParams {
+        model: "gpt-4o-mini".to_string(),
+        request,
+        strict_tools: false,
+        tool_result_array_content: false,
+        supports_response_format: true,
+        supports_tools: true,
+    }) {
+        Err(error) => error,
+        Ok(_) => panic!("a non-array tools payload must fail the conversion"),
+    };
+    let message = error.to_string();
+    assert!(
+        message.contains("`additional_params.tools`"),
+        "the error names the payload: {message}"
+    );
+
+    let request = crate::completion::CompletionRequest {
+        additional_params: Some(serde_json::json!({
+            "tools": [
+                {"type": "function", "function": {"description": "no name"}}
+            ]
+        })),
+        model: None,
+        preamble: None,
+        chat_history: crate::OneOrMany::one("Hello".into()),
+        documents: vec![],
+        tools: vec![],
+        temperature: None,
+        max_tokens: None,
+        tool_choice: None,
+        output_schema: None,
+        record_telemetry_content: false,
+    };
+    let error = match CompletionRequest::try_from(OpenAIRequestParams {
+        model: "gpt-4o-mini".to_string(),
+        request,
+        strict_tools: false,
+        tool_result_array_content: false,
+        supports_response_format: true,
+        supports_tools: true,
+    }) {
+        Err(error) => error,
+        Ok(_) => panic!("a function tool missing its name must fail the conversion"),
+    };
+    assert!(
+        error.to_string().contains("Invalid function tool"),
+        "the error names the invalid entry: {error}"
+    );
+}

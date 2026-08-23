@@ -163,23 +163,25 @@ where
         // order: take each document's slots by walking the counter, so a
         // landing position can never depend on batch completion order. A
         // missing slot means the provider returned fewer embeddings than the
-        // texts it was sent — an external defect, surfaced as a typed error.
+        // texts it was sent — an external defect, surfaced as a typed error
+        // naming the input position.
         let mut next_slot = 0usize;
         let mut result = Vec::with_capacity(docs.len());
-        for (doc, count) in docs {
+        for (position, (doc, count)) in docs.into_iter().enumerate() {
             let mut embeddings = Vec::with_capacity(count);
             for slot in next_slot..next_slot + count {
                 let embedding = landed.get(&slot).cloned().ok_or_else(|| {
-                    crate::embeddings::EmbeddingError::ResponseError(
-                        "missing embedding for document after batch merge".to_string(),
-                    )
+                    crate::embeddings::EmbeddingError::ResponseError(format!(
+                        "document {position} is missing an embedding after the batch merge — \
+                         the provider returned fewer embeddings than the texts it was sent"
+                    ))
                 })?;
                 embeddings.push(embedding);
             }
             let embeddings = OneOrMany::many(embeddings).map_err(|_| {
-                crate::embeddings::EmbeddingError::ResponseError(
-                    "document produced no texts to embed".to_string(),
-                )
+                crate::embeddings::EmbeddingError::ResponseError(format!(
+                    "document {position} produced no texts to embed"
+                ))
             })?;
             result.push((doc, embeddings));
             next_slot += count;
@@ -413,5 +415,75 @@ mod tests {
         let (_, embeddings) = &result[0];
         let order: Vec<&str> = embeddings.iter().map(|e| e.document.as_str()).collect();
         assert_eq!(order, ["t0", "t1", "t2", "t3", "t4", "t5"]);
+    }
+    /// A model that returns one embedding fewer than the texts it was sent
+    /// — the provider-defect half of the reassembly guards.
+    #[derive(Clone, Default)]
+    struct DroppingModel;
+
+    impl crate::embeddings::EmbeddingModel for DroppingModel {
+        const MAX_DOCUMENTS: usize = 5;
+
+        type Client = crate::client::Nothing;
+
+        fn make(_: &Self::Client, _: impl Into<String>, _: Option<usize>) -> Self {
+            Self
+        }
+
+        fn ndims(&self) -> usize {
+            1
+        }
+
+        async fn embed_texts(
+            &self,
+            documents: impl IntoIterator<Item = String> + crate::wasm_compat::WasmCompatSend,
+        ) -> Result<Vec<crate::embeddings::Embedding>, crate::embeddings::EmbeddingError> {
+            let all: Vec<String> = documents.into_iter().collect();
+            // Drop the LAST text's embedding.
+            Ok(all
+                .into_iter()
+                .take(1)
+                .map(|document| crate::embeddings::Embedding {
+                    document,
+                    vec: vec![0.0],
+                })
+                .collect())
+        }
+    }
+
+    #[tokio::test]
+    async fn a_short_provider_response_names_the_missing_document() {
+        let docs: Vec<crate::test_utils::MockTextDocument> = vec![
+            crate::test_utils::MockTextDocument::new("doc0", "first"),
+            crate::test_utils::MockTextDocument::new("doc1", "second"),
+        ];
+        let error = EmbeddingsBuilder::new(DroppingModel)
+            .documents(docs)
+            .unwrap()
+            .build()
+            .await
+            .expect_err("a short response must fail");
+        let message = error.to_string();
+        assert!(
+            message.contains("document 1"),
+            "the error names the input position: {message}"
+        );
+    }
+
+    #[tokio::test]
+    async fn a_document_with_no_texts_is_named_and_rejected() {
+        // MockMultiTextDocument with zero texts.
+        let empty = crate::test_utils::MockMultiTextDocument::new("doc0", Vec::<&str>::new());
+        let error = EmbeddingsBuilder::new(MockEmbeddingModel)
+            .document(empty)
+            .unwrap()
+            .build()
+            .await
+            .expect_err("a textless document cannot embed");
+        let message = error.to_string();
+        assert!(
+            message.contains("document 0") && message.contains("no texts"),
+            "the error names the document and the cause: {message}"
+        );
     }
 }

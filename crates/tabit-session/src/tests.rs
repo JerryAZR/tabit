@@ -305,6 +305,15 @@ async fn tool_roundtrip_is_recorded_and_events_name_the_tool() -> Result<(), Ses
         vec!["other", "user", "assistant", "tool_result", "assistant"]
     );
 
+    // Negative pin: an ordinary multi-turn run never warns about
+    // truncation (the warning fires only on a Length-class finish).
+    assert!(
+        !run.events
+            .iter()
+            .any(|e| matches!(e, SessionEvent::TurnTruncated)),
+        "a non-truncated run must not emit turn_truncated"
+    );
+
     let tool_call_events: Vec<&str> = run
         .events
         .iter()
@@ -1523,7 +1532,7 @@ extra_body = { shared = "provider", only_provider = true }
 [[providers.p.models]]
 id = "m"
 max_tokens = 512
-sampling_params = { temperature = 0.7, top_p = 0.9 }
+sampling_params = { temperature = 0.7, top_p = 0.9, top_k = 40 }
 extra_body = { shared = "model", model_only = true }
 
 [[providers.p.models.thinking_levels]]
@@ -1558,12 +1567,9 @@ extra_body = { shared = "level" }
         .as_ref()
         .and_then(|value| value.as_object())
         .expect("additional params on the request");
-    // `top_p` has no dedicated field — it rides the flattened map.
+    // `top_p`/`top_k` have no dedicated field — they ride the flattened map.
     assert_eq!(additional.get("top_p"), Some(&json!(0.9)));
-    assert!(
-        !additional.contains_key("top_k"),
-        "unset knobs contribute nothing"
-    );
+    assert_eq!(additional.get("top_k"), Some(&json!(40)));
     // The overlay: level over model over provider, earlier sources' unique
     // keys retained.
     assert_eq!(additional.get("shared"), Some(&json!("level")));
