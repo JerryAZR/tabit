@@ -580,10 +580,10 @@ fn run() -> Result<i32, String> {
             // the user does not have. A `--continue` that finds no
             // sessions is absorbed into a fresh start (the pinned
             // startup contract; the ack's `resumed: false` says so).
+            let registry = ModelRegistry::new(config, auth);
             let (session, startup_notes) = match assemble(
                 &args,
-                &config,
-                &auth,
+                &registry,
                 &SessionStore::project_default(),
                 ContinueMiss::StartFresh,
             ) {
@@ -591,7 +591,7 @@ fn run() -> Result<i32, String> {
                 Err(detail) => return json_startup_failure(&detail),
             };
             print_banner(&session);
-            let wiring = host_wiring(&args, &config, &auth, SessionStore::project_default());
+            let wiring = host_wiring(&args, &registry, SessionStore::project_default());
             let runtime = tokio::runtime::Builder::new_current_thread()
                 .enable_all()
                 .build()
@@ -609,7 +609,7 @@ fn run() -> Result<i32, String> {
         Mode::Print => {
             let config = Arc::new(config.map_err(|e| setup_guide(&e))?);
             let auth = Arc::new(auth.map_err(|e| e.to_string())?);
-            print_mode(&args, &config, &auth)
+            print_mode(&args, &ModelRegistry::new(config, auth))
         }
     }
 }
@@ -626,11 +626,7 @@ struct PrintOutcome {
     stats: Option<tabit_session::SessionStats>,
 }
 
-fn print_mode(
-    args: &Args,
-    config: &Arc<TabitConfig>,
-    auth: &Arc<AuthConfig>,
-) -> Result<i32, String> {
+fn print_mode(args: &Args, registry: &ModelRegistry) -> Result<i32, String> {
     if args.rewind.is_some() && args.session.is_none() && !args.continue_newest {
         return Err(
             "--rewind rewinds a session: pass --continue or --session <path> (see --help)"
@@ -639,8 +635,7 @@ fn print_mode(
     }
     let (mut session, startup_notes) = assemble(
         args,
-        config,
-        auth,
+        registry,
         &SessionStore::project_default(),
         ContinueMiss::Fail,
     )?;
@@ -672,7 +667,7 @@ fn print_mode(
         .build()
         .map_err(|e| e.to_string())?
         .block_on(async {
-            let wiring = host_wiring(args, config, auth, SessionStore::project_default());
+            let wiring = host_wiring(args, registry, SessionStore::project_default());
             let mut handle = SessionHost::spawn(session, startup_notes, wiring);
             let boot = handle.info().session_id.clone();
             {
@@ -908,31 +903,26 @@ fn parse_answer(session: &str, id: &str, options: &[String], line: &str) -> Sess
 /// behind closures so tabit-session stays free of front-facing wiring.
 /// The process's `--model`/`--max-turns` apply to sessions created
 /// later; `open_session` resolves by stored id and resumes that file.
-fn host_wiring(
-    args: &Args,
-    config: &Arc<TabitConfig>,
-    auth: &Arc<AuthConfig>,
-    store: SessionStore,
-) -> SessionHostWiring {
+/// One registry for the whole process (the ruling: providers are user
+/// config, not per-session) — every session the host builds shares
+/// the provider client caches.
+fn host_wiring(args: &Args, registry: &ModelRegistry, store: SessionStore) -> SessionHostWiring {
     let fresh_args = Args {
         session: None,
         continue_newest: false,
         ..args.clone()
     };
-    let fresh_config = config.clone();
-    let fresh_auth = auth.clone();
+    let fresh_registry = registry.clone();
     let fresh_store = store.clone();
     let open_args = args.clone();
-    let open_config = config.clone();
-    let open_auth = auth.clone();
+    let open_registry = registry.clone();
     let open_store = store.clone();
     SessionHostWiring {
         store,
         create: Arc::new(move || {
             assemble(
                 &fresh_args,
-                &fresh_config,
-                &fresh_auth,
+                &fresh_registry,
                 &fresh_store,
                 ContinueMiss::StartFresh,
             )
@@ -949,31 +939,25 @@ fn host_wiring(
                 session: Some(path),
                 ..open_args.clone()
             };
-            assemble(
-                &args,
-                &open_config,
-                &open_auth,
-                &open_store,
-                ContinueMiss::Fail,
-            )
+            assemble(&args, &open_registry, &open_store, ContinueMiss::Fail)
         }),
     }
 }
 
 /// Resolve config/auth into a session per the args (model selection,
 /// resume target, tools, preamble). `store` is injected so tests drive
-/// a temp store instead of the repo's.
+/// a temp store instead of the repo's. The registry is the caller's
+/// process-shared one (owner ruling: providers are user config, not
+/// per-session — one client cache per provider per process).
 fn assemble(
     args: &Args,
-    config: &Arc<TabitConfig>,
-    auth: &Arc<AuthConfig>,
+    registry: &ModelRegistry,
     store: &SessionStore,
     miss: ContinueMiss,
 ) -> Result<(Session, Vec<String>), String> {
     // Default-model resolution (registry): an explicit --model wins,
     // then the resumed session's last model, then default_model in
     // providers.toml, then the first configured model.
-    let registry = ModelRegistry::new(config.clone(), auth.clone());
     let resume_target = match (&args.session, args.continue_newest) {
         (Some(path), _) => Some(path.clone()),
         (None, true) => {
@@ -1003,7 +987,13 @@ fn assemble(
     // Startup degradations are data (ruled: external errors ride the
     // channel): the worker emits them as `error { kind: model }` frames —
     // the first frames after the handshake ack.
-    let session = assemble_session(args, registry, selection, resume_target, store.clone())?;
+    let session = assemble_session(
+        args,
+        registry.clone(),
+        selection,
+        resume_target,
+        store.clone(),
+    )?;
     Ok((session, startup_notes))
 }
 
@@ -1231,18 +1221,18 @@ id = "m"
         let store = SessionStore::new(&dir);
         let config = Arc::new(test_config());
         let auth = Arc::new(AuthConfig::default());
+        let registry = ModelRegistry::new(config.clone(), auth.clone());
         let cont_print = args(&["--continue", "-p", "hi"]).expect("valid print combo");
 
-        let error = match assemble(&cont_print, &config, &auth, &store, ContinueMiss::Fail) {
+        let error = match assemble(&cont_print, &registry, &store, ContinueMiss::Fail) {
             Err(error) => error,
             Ok(_) => panic!("print mode fails loudly on an empty store"),
         };
         assert!(error.contains("no sessions yet"), "{error}");
 
         let cont_json = args(&["--continue", "--json"]).expect("valid json combo");
-        let (session, notes) =
-            assemble(&cont_json, &config, &auth, &store, ContinueMiss::StartFresh)
-                .expect("json mode starts fresh");
+        let (session, notes) = assemble(&cont_json, &registry, &store, ContinueMiss::StartFresh)
+            .expect("json mode starts fresh");
         assert!(!session.resumed(), "the fresh start is reported");
         assert!(notes.is_empty(), "a clean config degrades nothing");
         let _ = std::fs::remove_dir_all(&dir);

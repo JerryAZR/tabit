@@ -148,6 +148,13 @@ pub type ModelFactory = Arc<dyn Fn(&str, &str) -> Result<ModelHandle, SessionErr
 impl SessionBuilder {
     /// Start building a session that will use `selection`. The selection is
     /// validated against the config immediately.
+    ///
+    /// The default model factory mints a **per-builder registry** (its
+    /// own provider client caches) — an ergonomic default for
+    /// single-session callers. Hosts serving many sessions pass one
+    /// shared factory ([`ModelRegistry::factory`]) instead: providers
+    /// are user config, process-wide, and so are their connection
+    /// pools (owner ruling, PROTOCOL.md v3).
     pub fn new(
         store: SessionStore,
         config: Arc<TabitConfig>,

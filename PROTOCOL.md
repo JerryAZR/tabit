@@ -544,6 +544,30 @@ section above; the design they locked:
   flag) rides the switcher rows; `error` events are always surfaced
   (stage 1: into the active transcript — an attribution imperfection
   accepted until multi-view).
+- **Process-shared vs session-owned (reviewed 2026-08; owner ruling:
+  the model registry is not session-owned — providers are user
+  config, process-wide).** The criterion: an object is shared iff it
+  holds a process-wide resource or a cross-session cache; immutable
+  per-session copies are fine. Reviewed against every `Session`
+  field:
+  - **Shared per process**: `TabitConfig` and `AuthConfig` (Arc'd
+    from the start) and the **model registry with its per-provider
+    HTTP client caches** — one pool per provider per process. The
+    tabit binary builds one registry and threads it through the boot
+    assembly and the host's create/open wiring (the per-assembly mint
+    is gone); `SessionBuilder::new`'s default factory still mints a
+    per-builder registry as a single-session ergonomic default,
+    documented as such.
+  - **Session-owned, correct by design**: the selection and
+    max-turns (per-session policy), the runtime leaves (mailbox,
+    abort, interaction hub — the hub's always-allowed memory is
+    session state by the EXTENSIONS.md ruling), the resident
+    chain/context, the stats, the log writer.
+  - **Session-owned copies, harmless by the criterion**: the preamble
+    string and the tool-body instances (immutable, process-stable;
+    per-session copies cost bytes and carry no cross-session cache).
+    If either ever grows a process-wide resource, it moves to the
+    shared list.
 - Deferred with the machinery reserved: unload/LRU residency,
   per-session seq + suffix streaming (write-behind gains it first),
   `checkout` (stage 2; frontend refresh = fresh replay pass), `model`
