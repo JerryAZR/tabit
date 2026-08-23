@@ -154,6 +154,19 @@ matters**: pi keeps one live session per process with an explicit
 backend swap; codex/opencode drop the backend "active" pointer entirely
 (session-addressed, client-held active, runs outlive attention).
 
+**Ruled (2026-08, owner)**: **"active session" is not a backend
+concept** — the codex/opencode model. A GUI instance is project-level;
+several top-level sessions may be concurrently active (a feature in
+one, a review in another). **Lazy loading**: the backend announces the
+available sessions at startup and fully loads/replays only the
+continued (boot) session; other sessions load on explicit frontend
+request (header-only listing keeps startup cheap with many sessions).
+**Checkout's frontend update is full re-render** (pi-proven; the
+frontend requests a fresh replay pass) — built modular so a streamed
+suffix can replace it later behind the same request shape if it ever
+becomes a measured problem. These supersede the earlier one-active-
+session worker design and the GUI-respawn new-session interim.
+
 ## v2 — ruled (2026-08; research recorded herein)
 
 **Slice 1 shipped** (2026-08; vocabulary + ids, commits 7406a38..f5372ce):
