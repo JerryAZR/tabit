@@ -254,6 +254,29 @@ The known deviation from pi's subprocess model:
   land behind it, the GUI growing each slice (ids → turn anchors,
   replay → restart-safe transcript, checkout → rewind buttons, model
   command → picker, write-behind → degraded banner).
+  **Redesign at the polish phase (ruled 2026-08, owner, after the v3
+  review round).** The walking skeleton served its purpose; its
+  reducer's state model — single-session globals with multi-session
+  semantics bolted on as conditionals — cracked repeatedly
+  (session_created dropped by the stream check, replay passes poisoning
+  liveness, cards dying at view switches), the same seam each time.
+  The **trigger**: after checkout, `model`, and write-behind's
+  per-session seq land — the remaining events that touch reducer
+  surface; until then GUI changes are minimal interim patches with the
+  seams marked, not investments in the doomed shape. The **scope**:
+  the state model and view layer are redesigned; `backend.rs`
+  (process/pipes/handshake, bug-free through v3) and the InMsg
+  vocabulary carry over. The new state model is dictated by the
+  protocol: a per-session projection (`session_id → {transcript,
+  running, pending, cards}`) plus a thin connection layer (phase,
+  facts, catalog), with attribution-by-stamp as the fold's primary
+  dimension and the learned event classes as its dispatch table
+  (connection-level vs stream-scoped vs bracket-suppressed vs
+  liveness). **Preconditions**: a short design record for the state
+  model precedes code (the GUI's ENGINE.md equivalent), tests derive
+  from it, and fixtures build frames through shared `tabit-protocol`
+  builders so a fiction shape (a frame the backend cannot produce)
+  cannot compile.
 - **Framework: egui (ruled 2026-08, after evaluation).** Runner-up
   iced (its Elm architecture matches our reducer split natively) loses
   on ecosystem for our exact surfaces — no markdown widget, no list
