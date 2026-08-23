@@ -104,6 +104,56 @@ flowchart TD
     ABORT["abort (preemptive, any await)"] -.-> RUN
 ```
 
+## Multi-session & subagent research (2026-08; pre-design, from local clones at 2026-08-23 heads)
+
+pi, codex, opencode surveyed for the conversation-pointer family
+(`new_session` / switch / checkout / subagent sessions). yaca excluded
+(has none of these). Full findings in the session log; the load-bearing
+record:
+
+**pi** (no subagents; the tree reference): append-only immutable entry
+tree; branch = in-memory leaf move, nothing written — and the leaf is
+NOT persisted (reload = last line of file), a weakness our `rewound`
+marker already fixes. The v4 harness journals pointer moves as "lanes"
+(named `{lane, leafId}` cursors) and names subagents as a lane use case
+("parallel work over shared history"). Context is always re-derived
+from the path (compaction-aware), never stored. Switch = in-process
+session swap that aborts in-flight work first; one live session per
+process. UI update on branch switch = full clear + re-render (no diff
+streaming). `fork(entryId)` copies root→target into a NEW session file
+with `parentSession` linkage (same reserved field we carry).
+
+**codex** (subagents = full threads): a subagent is a real thread — own
+ThreadId, own JSONL rollout, own actor loop, spawned fire-and-forget
+(the `spawn` tool returns an id immediately; results arrive out-of-band
+as injected messages / inter-agent ops; the parent polls via `wait`).
+Per-tree control object owns registry, depth/count limiters, and LRU
+residency (idle children evicted, lazily reloaded). Linkage:
+`parent_thread_id` in the rollout header plus a SQLite edge store. ALL
+threads' events multiplex on one connection attributed by `thread_id`;
+the TUI buffers non-active threads. There is NO server-side active
+thread — only per-connection subscriptions; switching is
+unsubscribe/resubscribe and in-flight runs keep running. TUI is an
+app-server client (in-process embedded by default; daemon exists).
+
+**opencode** (subagents = child sessions): `task` creates a real child
+session row (`parentID`, indexed, queryable, recursively deleted);
+messages persist in SQLite; same prompt pipeline as user prompts;
+foreground (tool blocks) or experimental background (returns
+immediately, result injected later). NO server-side active pointer at
+all — every API is session-addressed; the TUI "switch" is a client
+route change; per-session Runners run concurrently (per-session busy
+guards). One SSE event stream, session-scoped, with a durable
+per-session `seq` log and sync/replay routes for exact client catch-up.
+
+**Convergences** (all three): subagent conversations are durable
+first-class records, never ephemeral nested loops; all events ride one
+channel attributed by conversation id; the backend owns all
+conversation lifecycle; no restart to switch. **Divergence that
+matters**: pi keeps one live session per process with an explicit
+backend swap; codex/opencode drop the backend "active" pointer entirely
+(session-addressed, client-held active, runs outlive attention).
+
 ## v2 — ruled (2026-08; research recorded herein)
 
 **Slice 1 shipped** (2026-08; vocabulary + ids, commits 7406a38..f5372ce):
