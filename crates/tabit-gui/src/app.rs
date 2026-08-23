@@ -359,10 +359,10 @@ impl eframe::App for TabitApp {
                         }
                         y += estimated + theme::ROW_GAP;
                     }
-                    for text in &self.state.pending {
+                    for pending in &self.state.pending {
                         ui.add_space(theme::ROW_GAP);
                         ui.label(
-                            egui::RichText::new(format!("queued: {text}"))
+                            egui::RichText::new(format!("queued: {}", pending.text))
                                 .color(theme::MUTED)
                                 .italics(),
                         );

@@ -18,8 +18,11 @@ fn ack() -> InMsg {
 }
 
 fn user(text: &str) -> InMsg {
+    use std::sync::atomic::{AtomicUsize, Ordering};
+    static SEQ: AtomicUsize = AtomicUsize::new(0);
     event(SessionEvent::UserMessage {
         text: text.to_string(),
+        entry_id: format!("e{}", SEQ.fetch_add(1, Ordering::SeqCst)),
     })
 }
 
@@ -490,4 +493,44 @@ fn abort_clears_pending_steers_with_the_cards() {
         output: String::new(),
     }));
     assert!(state.pending.is_empty(), "abort discards queued steers");
+}
+
+#[test]
+fn pending_rows_resolve_by_id_not_position() {
+    let mut state = GuiState::default();
+    state.reduce(ack());
+    state.reduce(user("first message"));
+    state.running = true;
+
+    // Two identical mid-run sends: local rows first, then the backend's
+    // queued acknowledgments upgrade them by text; ids make the rows
+    // resolve individually even though the texts match.
+    state.message_sent("same text".to_string());
+    state.message_sent("same text".to_string());
+    state.reduce(event(SessionEvent::MessageQueued {
+        id: "q1".to_string(),
+        text: "same text".to_string(),
+    }));
+    state.reduce(event(SessionEvent::MessageQueued {
+        id: "q2".to_string(),
+        text: "same text".to_string(),
+    }));
+    assert_eq!(state.pending.len(), 2);
+
+    // One resolves by id (drained); the other is handed back by a
+    // discard — duplicate texts disambiguate exactly because the id,
+    // not the position or text, is the key.
+    state.reduce(event(SessionEvent::UserMessage {
+        text: "same text".to_string(),
+        entry_id: "q2".to_string(),
+    }));
+    assert_eq!(state.pending.len(), 1);
+    assert_eq!(state.pending[0].id.as_deref(), Some("q1"));
+    state.reduce(event(SessionEvent::MessagesDiscarded {
+        messages: vec![tabit_protocol::DiscardedMessage {
+            id: "q1".to_string(),
+            text: "same text".to_string(),
+        }],
+    }));
+    assert!(state.pending.is_empty(), "the discarded id leaves pending");
 }

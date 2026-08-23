@@ -20,6 +20,31 @@ pub enum SessionEvent {
     UserMessage {
         /// The message text.
         text: String,
+        /// The message's durable entry id — the id `message_queued`
+        /// announced at submit (born early: minted at accept, carried into
+        /// the log at drain).
+        entry_id: String,
+    },
+    /// A message was accepted while a run is live: it steers at the next
+    /// turn boundary. The submit-time acknowledgment for messages that
+    /// wait — idle sends never queue (they drain immediately, so
+    /// `user_message` milliseconds later is the acknowledgment). The `id`
+    /// is the message's eventual entry id; the pending display drops
+    /// exactly when a `user_message` or `messages_discarded` carrying it
+    /// arrives.
+    MessageQueued {
+        /// The message's entry id, minted at accept.
+        id: String,
+        /// The message text.
+        text: String,
+    },
+    /// Queued messages were discarded (a mailbox clear: abort, checkout,
+    /// the prompt barrier). The pairs hand back what the user authored —
+    /// ids included, so pending displays resolve by id; the messages were
+    /// never part of the conversation and are not persisted.
+    MessagesDiscarded {
+        /// The discarded messages.
+        messages: Vec<DiscardedMessage>,
     },
     /// A model call began: the request is issued. The opening bracket of a
     /// turn — every turn-scoped event until the matching `TurnCommitted`
@@ -155,6 +180,16 @@ pub struct InteractionOption {
     pub label: String,
     /// Display hint, when present.
     pub description: Option<String>,
+}
+
+/// One discarded queued message, handed back by
+/// [`SessionEvent::MessagesDiscarded`].
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct DiscardedMessage {
+    /// The entry id the message carried from accept time.
+    pub id: String,
+    /// The message text, for salvage as a draft.
+    pub text: String,
 }
 
 #[cfg(test)]

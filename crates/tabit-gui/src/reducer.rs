@@ -102,6 +102,16 @@ pub struct TurnGroup {
     pub segments: Vec<Segment>,
 }
 
+/// A mid-run submission waiting for its turn boundary. `id` is the
+/// backend's born-early entry id, learned from `message_queued` (local
+/// sends start `None`; the upgrade pairs by text — symmetric for
+/// duplicates — until the backend's id lands).
+#[derive(Debug, Clone, PartialEq)]
+pub struct PendingMessage {
+    pub id: Option<String>,
+    pub text: String,
+}
+
 /// One renderable transcript row.
 #[derive(Debug, Clone, PartialEq)]
 pub enum Group {
@@ -124,12 +134,12 @@ pub struct GuiState {
     pub phase: Phase,
     pub facts: Option<Facts>,
     pub transcript: Vec<Group>,
-    /// Steers sent mid-run, waiting for the turn boundary (v1 has no
-    /// queued-ack event; v2's id-carrying `message_queued` makes this
-    /// exact). Idle sends never queue — the queue drains immediately,
-    /// so `user_message` (milliseconds later) is the acknowledgment
-    /// (owner ruling: the queued state is for messages that wait).
-    pub pending: VecDeque<String>,
+    /// Steers sent mid-run, waiting for the turn boundary — resolved
+    /// exactly by id: `message_queued` announces the id at submit,
+    /// `user_message`/`messages_discarded` carrying it drops the row.
+    /// Idle sends never enter it (they drain immediately;
+    /// `user_message` is the acknowledgment).
+    pub pending: VecDeque<PendingMessage>,
     /// True from the first `user_message` of a run to its terminal.
     pub running: bool,
     /// Open interaction cards, oldest first.
@@ -235,7 +245,7 @@ impl GuiState {
     /// immediately and are acknowledged by `user_message` directly.
     pub fn message_sent(&mut self, text: String) {
         if self.running {
-            self.pending.push_back(text);
+            self.pending.push_back(PendingMessage { id: None, text });
         }
     }
 
@@ -248,13 +258,56 @@ impl GuiState {
 
     fn reduce_event(&mut self, frame: EventFrame) {
         match frame.event {
-            SessionEvent::UserMessage { text } => {
-                // v1: pair with the oldest waiting steer by FIFO
-                // (idle sends never entered `pending`).
-                // v2: ids make this exact.
-                self.pending.pop_front();
+            SessionEvent::UserMessage { text, entry_id } => {
+                // Resolve the pending row by id (the exact pairing);
+                // fall back to the oldest row carrying this text for
+                // sends whose queued notice never existed (idle sends)
+                // or raced the local echo. Replayed history (v2) has no
+                // pending counterpart at all.
+                if let Some(position) = self
+                    .pending
+                    .iter()
+                    .position(|p| p.id.as_deref() == Some(entry_id.as_str()))
+                    .or_else(|| {
+                        self.pending
+                            .iter()
+                            .position(|p| p.id.is_none() && p.text == text)
+                    })
+                {
+                    self.pending.remove(position);
+                }
                 self.transcript.push(Group::User { text });
                 self.running = true;
+            }
+            SessionEvent::MessageQueued { id, text } => {
+                // The backend acknowledged a waiting message: upgrade the
+                // matching local row to the id. Text pairing is
+                // symmetric under duplicates (either assignment drops
+                // the right rows); no local row means the GUI did not
+                // echo it — track it by id regardless.
+                match self
+                    .pending
+                    .iter()
+                    .position(|p| p.id.is_none() && p.text == text)
+                {
+                    Some(position) => {
+                        if let Some(row) = self.pending.get_mut(position) {
+                            row.id = Some(id);
+                        }
+                    }
+                    None => {
+                        self.pending
+                            .push_back(PendingMessage { id: Some(id), text });
+                    }
+                }
+            }
+            SessionEvent::MessagesDiscarded { messages } => {
+                // Handed back for salvage; the rows leave pending (a
+                // future draft box could re-home them — v1 drops).
+                for discarded in messages {
+                    self.pending
+                        .retain(|p| p.id.as_deref() != Some(discarded.id.as_str()));
+                }
             }
             SessionEvent::TurnStarted { .. } => {
                 // The model call began (before the first token): open the

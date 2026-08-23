@@ -35,8 +35,7 @@ use rig_agent::tool::DynamicTool;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use tabit_config::{AuthConfig, TabitConfig};
-use tabit_protocol::ModelSelection;
-use tabit_protocol::SessionEvent;
+use tabit_protocol::{EventFrame, ModelSelection, SessionEvent, StreamId};
 use tokio_util::sync::CancellationToken;
 
 /// Default model-call budget for one outer loop.
@@ -264,6 +263,24 @@ impl SessionBuilder {
     }
 }
 
+/// A queued user message with its born-early entry id (PROTOCOL.md v2):
+/// minted at accept, announced by `message_queued` when a run is live,
+/// carried into the log when the message drains, restated by
+/// `user_message { entry_id }` — and handed back by `messages_discarded`
+/// if a clear discards it first. One id, one closed ledger: every
+/// `message_queued` id ends in exactly one `user_message` or
+/// `messages_discarded`.
+pub(crate) struct QueuedMessage {
+    pub(crate) id: String,
+    pub(crate) message: Message,
+}
+
+impl QueuedMessage {
+    fn text(&self) -> String {
+        user_text(&self.message)
+    }
+}
+
 /// The run-agnostic message mailbox: the one door every user message
 /// enters ([`Session::submit`], or an engine drain mid-run), emptied by
 /// [`Session::pump`] — as the next run's initial prompt or, while a run
@@ -272,7 +289,27 @@ impl SessionBuilder {
 /// lost; only abort discards queued messages.
 #[derive(Clone, Default)]
 pub(crate) struct Mailbox {
-    queue: std::sync::Arc<std::sync::Mutex<std::collections::VecDeque<Message>>>,
+    queue: std::sync::Arc<std::sync::Mutex<std::collections::VecDeque<QueuedMessage>>>,
+    /// Entry ids of steers the engine drained this run, in drain order —
+    /// the fold pairs them with the run's `Steer` items (the engine has
+    /// no use for tabit entry ids, so the pairing lives here; drain order
+    /// is emission order, both FIFO).
+    steered: std::sync::Arc<std::sync::Mutex<std::collections::VecDeque<String>>>,
+    /// Pairs discarded by a clear with no sink at hand (abort at command
+    /// time); the run's conclusion flushes them as one
+    /// `messages_discarded`.
+    discarded: std::sync::Arc<std::sync::Mutex<Vec<QueuedMessage>>>,
+    /// True while a pump may drain at any instant (a run is live): the
+    /// gate for submit-time `message_queued` notices. Idle sends never
+    /// queue — they drain immediately, so `user_message` is the
+    /// acknowledgment.
+    live: std::sync::Arc<std::sync::atomic::AtomicBool>,
+    /// The event channel for submit-time notices — weak, so holding it
+    /// never keeps the stream alive (the interaction hub's discipline),
+    /// and absent for direct [`Session`] consumers (no frontend, no
+    /// notices). Attached by the resident worker at spawn.
+    notices:
+        std::sync::Arc<std::sync::OnceLock<tokio::sync::mpsc::WeakUnboundedSender<EventFrame>>>,
     /// Wakes the resident worker when work arrives. One permit covers any
     /// number of pushes; the queue itself is the source of truth — the
     /// signal exists only so an empty queue can be waited on.
@@ -280,21 +317,105 @@ pub(crate) struct Mailbox {
 }
 
 impl Mailbox {
+    /// Attach the event channel for submit-time notices (the resident
+    /// worker, at spawn).
+    pub(crate) fn attach_notices(&self, events: tokio::sync::mpsc::UnboundedSender<EventFrame>) {
+        let _ = self.notices.set(events.downgrade());
+    }
+
+    /// A pump began: submissions from here until [`Self::run_ended`] are
+    /// acknowledged with `message_queued`.
+    pub(crate) fn run_started(&self) {
+        self.live.store(true, std::sync::atomic::Ordering::Release);
+    }
+
+    /// The pump ended. Steers drained but never recorded (an abort raced
+    /// their `Steer` items) cannot pair anymore — drop the leftovers.
+    pub(crate) fn run_ended(&self) {
+        self.live.store(false, std::sync::atomic::Ordering::Release);
+        lock(&self.steered).clear();
+    }
+
     pub(crate) fn push(&self, message: Message) {
-        lock(&self.queue).push_back(message);
+        let queued = QueuedMessage {
+            id: crate::ids::new_entry_id(),
+            message,
+        };
+        // The live snapshot races the pump's own start/end — both orders
+        // resolve to a consistent ledger: a notice for a message that
+        // drains immediately ends in `user_message` (the GUI drops the
+        // pending row on it), and an un-noticed message drains as the
+        // next prompt with `user_message` as its only acknowledgment.
+        let live = self.live.load(std::sync::atomic::Ordering::Acquire);
+        if live {
+            self.notice_queued(queued.id.clone(), queued.text());
+        }
+        lock(&self.queue).push_back(queued);
         self.work.notify_one();
+    }
+
+    /// Tell the frontend a live-run submission waits. A dead or absent
+    /// channel is a no-op (the frontend is gone, or there never was one).
+    fn notice_queued(&self, id: String, text: String) {
+        let Some(sender) = self
+            .notices
+            .get()
+            .and_then(tokio::sync::mpsc::WeakUnboundedSender::upgrade)
+        else {
+            return;
+        };
+        let _ = sender.send(EventFrame {
+            stream: StreamId::main(),
+            event: SessionEvent::MessageQueued { id, text },
+        });
     }
 
     pub(crate) fn is_empty(&self) -> bool {
         lock(&self.queue).is_empty()
     }
 
-    pub(crate) fn clear(&self) {
-        lock(&self.queue).clear();
+    /// Discard everything queued, returning the pairs (the caller emits
+    /// `messages_discarded` where its event flow allows).
+    pub(crate) fn clear(&self) -> Vec<QueuedMessage> {
+        lock(&self.queue).drain(..).collect()
     }
 
-    fn drain_all(&self) -> Vec<Message> {
+    /// Abort semantics: discard everything queued now (nothing more may
+    /// drain), staging the pairs for the run's conclusion to emit — the
+    /// discard notice rides the wind-down, after the terminal.
+    pub(crate) fn abort_clear(&self) {
+        let cleared = self.clear();
+        lock(&self.discarded).extend(cleared);
+    }
+
+    /// The staged discard pairs, taken (the run's conclusion flushes them).
+    pub(crate) fn take_staged_discards(&self) -> Vec<QueuedMessage> {
+        std::mem::take(&mut *lock(&self.discarded))
+    }
+
+    /// Take the whole batch (idle entry: the worker's next run input).
+    fn take_batch(&self) -> Vec<QueuedMessage> {
         lock(&self.queue).drain(..).collect()
+    }
+
+    /// The engine-side drain: the batch becomes steers. Ids park in FIFO
+    /// order for the fold's `Steer` items.
+    fn take_steers(&self) -> Vec<Message> {
+        let batch = lock(&self.queue).drain(..).collect::<Vec<_>>();
+        let mut steered = lock(&self.steered);
+        batch
+            .into_iter()
+            .map(|queued| {
+                steered.push_back(queued.id);
+                queued.message
+            })
+            .collect()
+    }
+
+    /// The id of the next `Steer` item's message (drain order is
+    /// emission order). `None` means the run drained no more steers.
+    fn next_steer_id(&self) -> Option<String> {
+        lock(&self.steered).pop_front()
     }
 
     /// The work signal the resident worker waits on. A push before the
@@ -325,9 +446,10 @@ impl MailboxHandle {
         self.mailbox.is_empty()
     }
 
-    /// Discard everything queued (abort semantics).
-    pub(crate) fn clear(&self) {
-        self.mailbox.clear();
+    /// Discard everything queued under abort semantics — the pairs stage
+    /// for the run's conclusion to emit (see [`Mailbox::abort_clear`]).
+    pub(crate) fn abort_clear(&self) {
+        self.mailbox.abort_clear();
     }
 
     /// The work signal the resident worker waits on.
@@ -362,7 +484,7 @@ impl rig_agent::SteeringSource for SessionSteers {
     }
 
     fn drain(&self) -> Vec<Message> {
-        self.mailbox.drain_all()
+        self.mailbox.take_steers()
     }
 }
 
@@ -437,6 +559,9 @@ impl Session {
     /// aborted run discards the remaining queue and stops. The drive
     /// loop for frontends ([`crate::SessionHandle`]).
     pub async fn pump(&mut self, on_event: &mut (dyn FnMut(SessionEvent) + Send)) -> RunSummary {
+        // A pump may drain at any instant from here to its end: submit
+        // acknowledgments switch to `message_queued` (PROTOCOL.md v2).
+        self.mailbox.run_started();
         let mut total = RunSummary {
             outcome: RunOutcome::Completed,
             output: String::new(),
@@ -444,7 +569,7 @@ impl Session {
             events: Vec::new(),
         };
         loop {
-            let batch = self.mailbox.drain_all();
+            let batch = self.mailbox.take_batch();
             if batch.is_empty() {
                 break;
             }
@@ -456,6 +581,7 @@ impl Session {
             total.events.extend(run.events);
             total.outcome = run.outcome;
         }
+        self.mailbox.run_ended();
         total
     }
 
@@ -473,7 +599,7 @@ impl Session {
     /// where the write-behind log and `messages_discarded` land).
     async fn run_one(
         &mut self,
-        batch: &[Message],
+        batch: &[QueuedMessage],
         on_event: &mut (dyn FnMut(SessionEvent) + Send),
     ) -> RunSummary {
         // Run-scoped machinery: a fresh abort token for this loop; steers
@@ -498,18 +624,23 @@ impl Session {
 
     /// Drain-all at idle entry: the whole batch becomes this run's opening
     /// user input — one entry each, 1:1 with what the model saw — recorded
-    /// first, then handed to the engine as one conversation whose final
-    /// message is the turn being sent.
-    fn stage_input(&mut self, batch: &[Message], sink: &mut EventSink<'_>) -> Vec<Message> {
+    /// first (under each message's born-early id), then handed to the
+    /// engine as one conversation whose final message is the turn being
+    /// sent.
+    fn stage_input(&mut self, batch: &[QueuedMessage], sink: &mut EventSink<'_>) -> Vec<Message> {
         let mut history = self.context.clone();
-        for message in batch {
-            self.recorder.record(EntryKind::UserMessage {
-                message: message.clone(),
-            });
+        for queued in batch {
+            self.recorder.record_as(
+                &queued.id,
+                EntryKind::UserMessage {
+                    message: queued.message.clone(),
+                },
+            );
             sink.emit(SessionEvent::UserMessage {
-                text: user_text(message),
+                text: queued.text(),
+                entry_id: queued.id.clone(),
             });
-            history.push(message.clone());
+            history.push(queued.message.clone());
         }
         history
     }
@@ -686,20 +817,36 @@ impl Session {
         });
     }
 
-    /// A steer drained into history mid-run: one user_message entry, 1:1
-    /// with what the model saw.
+    /// A steer drained into history mid-run: one user_message entry under
+    /// the message's born-early id (the id its `message_queued` announced,
+    /// parked by the drain in FIFO order), 1:1 with what the model saw.
     fn note_steer(&self, text: String, sink: &mut EventSink<'_>) {
-        self.recorder.record(EntryKind::UserMessage {
-            message: Message::user(text.clone()),
-        });
-        sink.emit(SessionEvent::UserMessage { text });
+        // The engine drains a steer before emitting its `Steer` item and
+        // in the same order, so the parked-id FIFO always has this
+        // item's id. An empty FIFO is an engine-contract violation —
+        // internal, fail loud. Sanctioned crash (AGENTS.md doctrine).
+        #[allow(clippy::expect_used)]
+        let entry_id = self
+            .mailbox
+            .next_steer_id()
+            .expect("a Steer item must follow the drain that parked its id");
+        self.recorder.record_as(
+            &entry_id,
+            EntryKind::UserMessage {
+                message: Message::user(text.clone()),
+            },
+        );
+        sink.emit(SessionEvent::UserMessage { text, entry_id });
     }
 
     /// The run's epilogue: exactly one terminal (the fold already emitted
     /// `run_finished`; here `run_aborted` or `run_failed`), then the
     /// context re-derivation and durability checks that can follow a
-    /// terminal with a trailing `run_failed`, then the retraction of any
-    /// unanswered interaction — no asker survives the run (a racing
+    /// terminal with a trailing `run_failed`, then the discard flush —
+    /// every message a clear took while the sink could not emit for it
+    /// (abort at command time, abort's own clear) comes back as one
+    /// `messages_discarded` after the terminal — then the retraction of
+    /// any unanswered interaction — no asker survives the run (a racing
     /// response is then a total no-op).
     fn conclude(
         &mut self,
@@ -718,10 +865,10 @@ impl Session {
             sink.emit(SessionEvent::RunAborted {
                 output: output.clone(),
             });
-            // Abort means stop: discard anything queued behind the run.
-            // Nothing queued was ever acknowledged by an event, so nothing
-            // observable vanishes.
-            self.mailbox.clear();
+            // Abort means stop: discard anything queued behind the run,
+            // staging the pairs for the flush below (their pending
+            // displays resolve by id).
+            self.mailbox.abort_clear();
             outcome = RunOutcome::Aborted;
         } else if let Some(failure) = failure {
             // The log stays the source of truth: re-derive the context,
@@ -752,6 +899,26 @@ impl Session {
             });
             outcome = RunOutcome::Failed;
         }
+        // The discard flush: clears taken with no sink at hand (abort at
+        // command time) plus this conclusion's own abort clear, after the
+        // terminal — the discard notice rides the wind-down.
+        let discarded: Vec<tabit_protocol::DiscardedMessage> = self
+            .mailbox
+            .take_staged_discards()
+            .into_iter()
+            .map(|queued| {
+                let text = queued.text();
+                tabit_protocol::DiscardedMessage {
+                    id: queued.id,
+                    text,
+                }
+            })
+            .collect();
+        if !discarded.is_empty() {
+            sink.emit(SessionEvent::MessagesDiscarded {
+                messages: discarded,
+            });
+        }
         if let Some(hub) = &self.interaction {
             hub.clear_pending();
         }
@@ -779,6 +946,13 @@ impl Session {
     /// which exists only there.
     pub fn attach_interaction(&mut self, hub: InteractionHub) {
         self.interaction = Some(hub);
+    }
+
+    /// Point the mailbox's submit-time notices at the worker's event
+    /// channel (`message_queued` for live-run submissions). Called by the
+    /// session worker at spawn, alongside [`Self::attach_interaction`].
+    pub fn attach_mailbox_notices(&self, events: tokio::sync::mpsc::UnboundedSender<EventFrame>) {
+        self.mailbox.attach_notices(events);
     }
 
     /// Rewind the active chain by `turns` user messages: the leaf moves to
@@ -1216,7 +1390,7 @@ fn stream_item_event(
 }
 
 /// The text of a user message (joined text parts).
-fn user_text(message: &Message) -> String {
+pub(crate) fn user_text(message: &Message) -> String {
     let Message::User { content } = message else {
         return String::new();
     };

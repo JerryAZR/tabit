@@ -76,6 +76,7 @@ fn every_event_variant_survives_the_frame_envelope() {
             stream: StreamId::main(),
             event: SessionEvent::UserMessage {
                 text: "hi".to_string(),
+                entry_id: "e0".to_string(),
             },
         },
         EventFrame {

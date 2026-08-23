@@ -54,7 +54,7 @@ fn user_texts(frames: &[EventFrame]) -> Vec<String> {
     frames
         .iter()
         .filter_map(|frame| match &frame.event {
-            SessionEvent::UserMessage { text } => Some(text.clone()),
+            SessionEvent::UserMessage { text, .. } => Some(text.clone()),
             _ => None,
         })
         .collect()
@@ -107,18 +107,19 @@ async fn an_idle_message_runs_to_completion_over_the_stream() {
 #[tokio::test]
 async fn a_message_mid_run_steers_instead_of_starting_a_second_run() {
     let store = temp_store("endpoint-steer");
-    let session = Factory::new(vec![tool_turn("t1", "echo"), text_turn("done after steer")])
+    let session = Factory::new(vec![tool_turn("t1", "slow"), text_turn("done after steer")])
         .into_builder(store.clone())
-        .dynamic_tool(echo_tool())
+        .dynamic_tool(slow_tool())
         .create("C:/w")
         .expect("session");
     let mut handle = SessionHandle::spawn(session);
 
     handle.message("run the tool");
     // A second message while the run is in flight: submitted from the
-    // event-stream side (deterministic mid-run timing — the tool call is
-    // emitted before its execution), steered into the current run rather
-    // than queueing a second one.
+    // event-stream side while the slow tool is mid-execution (a fast tool
+    // never yields, so the run would finish before the submit lands and
+    // the message would start a second run instead), steered into the
+    // current run rather than queueing a second one.
     let mut submitted = false;
     let mut frames = Vec::new();
     while let Some(frame) = handle.next_event().await {
@@ -135,6 +136,41 @@ async fn a_message_mid_run_steers_instead_of_starting_a_second_run() {
     assert_eq!(user_texts(&frames), vec!["run the tool", "also this"]);
     // One run total: the steer extended it rather than queueing another.
     assert_eq!(finished_outputs(&frames), vec!["done after steer"]);
+
+    // The waiting steer was acknowledged at submit (`message_queued`),
+    // and only that message — the initial idle send never queues (it
+    // drains immediately; `user_message` is its acknowledgment).
+    let queued: Vec<(String, String)> = frames
+        .iter()
+        .filter_map(|frame| match &frame.event {
+            SessionEvent::MessageQueued { id, text } => Some((id.clone(), text.clone())),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(
+        queued.len(),
+        1,
+        "exactly one queued acknowledgment, for the mid-run submit"
+    );
+    assert_eq!(queued[0].1, "also this");
+    // One closed ledger: a user_message carrying that same id resolves it.
+    let steer_id = &queued[0].0;
+    assert!(
+        frames.iter().any(|frame| matches!(&frame.event,
+            SessionEvent::UserMessage { text, entry_id }
+                if text == "also this" && entry_id == steer_id)),
+        "the steer's user_message resolves its queued id"
+    );
+    // And the id is real: the log's steer entry keeps it verbatim.
+    let loaded = store
+        .open_path(handle.info().session_path.as_ref())
+        .expect("reload");
+    assert!(
+        loaded.entries.iter().any(|entry| matches!(&entry.kind,
+            crate::EntryKind::UserMessage { message }
+                if entry.id == *steer_id && crate::session::user_text(message) == "also this")),
+        "the steer's born-early id is its log entry's id"
+    );
     std::fs::remove_dir_all(store.dir()).ok();
 }
 
@@ -198,6 +234,7 @@ async fn abort_mid_run_discards_the_queue_and_ends_the_run() {
     let mut saw_aborted = false;
     let mut queued = 0;
     let mut sent = false;
+    let mut frames = Vec::new();
     while let Some(frame) = handle.next_event().await {
         match &frame.event {
             SessionEvent::ToolCall { .. } if !sent => {
@@ -213,15 +250,61 @@ async fn abort_mid_run_discards_the_queue_and_ends_the_run() {
                 link.send(SessionCommand::Abort);
             }
             SessionEvent::RunAborted { .. } => saw_aborted = true,
-            SessionEvent::UserMessage { text } if text != "run the tool" => queued += 1,
+            SessionEvent::UserMessage { text, .. } if text != "run the tool" => queued += 1,
             _ => {}
         }
         if terminal(&frame.event) {
             handle.close_commands();
         }
+        frames.push(frame);
     }
     assert!(saw_aborted);
     assert_eq!(queued, 0, "the queued message was discarded");
+    // The discard came back as an event: the staged pair, after the
+    // terminal (the notice rides the wind-down), id matching the
+    // `message_queued` acknowledgment the submit earned mid-run.
+    let aborted_at = frames
+        .iter()
+        .position(|frame| matches!(frame.event, SessionEvent::RunAborted { .. }))
+        .expect("an abort terminal");
+    let discards: Vec<(usize, Vec<(String, String)>)> = frames
+        .iter()
+        .enumerate()
+        .filter_map(|(index, frame)| match &frame.event {
+            SessionEvent::MessagesDiscarded { messages } => Some((
+                index,
+                messages
+                    .iter()
+                    .map(|m| (m.id.clone(), m.text.clone()))
+                    .collect(),
+            )),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(
+        discards.len(),
+        1,
+        "one discard event carrying the cleared queue"
+    );
+    let (discard_at, pairs) = &discards[0];
+    assert!(
+        *discard_at > aborted_at,
+        "the discard notice follows the terminal"
+    );
+    assert_eq!(pairs.len(), 1);
+    assert_eq!(pairs[0].1, "queued behind");
+    let acknowledged = frames
+        .iter()
+        .filter_map(|frame| match &frame.event {
+            SessionEvent::MessageQueued { id, text } => Some((id.clone(), text.clone())),
+            _ => None,
+        })
+        .collect::<Vec<_>>();
+    assert_eq!(
+        acknowledged,
+        vec![(pairs[0].0.clone(), "queued behind".to_string())],
+        "the discarded pair's id is the one message_queued announced"
+    );
     std::fs::remove_dir_all(store.dir()).ok();
 }
 

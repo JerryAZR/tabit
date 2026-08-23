@@ -86,10 +86,12 @@ impl SessionCommandLink {
 
 /// Abort the run in flight and discard the queue — one semantic. Both
 /// encode sites (the command link and the handle) route through here so
-/// v2's `messages_discarded` emission lands in one place.
+/// `messages_discarded` emission lands in one place: the mailbox stages
+/// the discarded pairs and the aborted run's conclusion flushes them
+/// after its terminal (PROTOCOL.md v2 — the notice rides the wind-down).
 fn abort_and_clear(abort: &AbortHandle, mailbox: &MailboxHandle) {
     abort.abort();
-    mailbox.clear();
+    mailbox.abort_clear();
 }
 
 impl SessionHandle {
@@ -132,9 +134,11 @@ impl SessionHandle {
             }
         });
         tokio::spawn(async move {
-            // The hub reaches the worker's event channel, so it exists only
-            // here — attach it before the first pump can run.
+            // The hub and the mailbox's submit-time notices both reach the
+            // worker's event channel, so both exist only here — attach
+            // them before the first pump can run.
             session.attach_interaction(worker_interaction);
+            session.attach_mailbox_notices(event_tx.clone());
             // The resident worker. Ownership never moves: idle is the
             // wait below, running is the pump call — two positions of
             // one loop, not two tasks.

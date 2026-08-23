@@ -383,7 +383,7 @@ id = "m"
             .iter()
             .filter_map(|frame| match frame {
                 ServerFrame::Event(EventFrame {
-                    event: tabit_session::SessionEvent::UserMessage { text },
+                    event: tabit_session::SessionEvent::UserMessage { text, .. },
                     ..
                 }) if kind == "user" => Some(text.as_str()),
                 ServerFrame::Event(EventFrame {

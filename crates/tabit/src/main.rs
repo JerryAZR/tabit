@@ -279,6 +279,12 @@ fn print_event(event: &SessionEvent) {
     let mut out = stdout.lock();
     match event {
         SessionEvent::UserMessage { .. } => {}
+        // The submit-time ack for messages that wait; print mode cannot
+        // submit mid-run (Esc aborts), so this never fires in practice.
+        SessionEvent::MessageQueued { .. } => {}
+        SessionEvent::MessagesDiscarded { messages } => {
+            let _ = writeln!(out, "[{} queued message(s) discarded]", messages.len());
+        }
         // Cards render on stderr in the event loop; stdout stays the
         // answer channel.
         SessionEvent::InteractionRequested { .. } => {}

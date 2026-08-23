@@ -264,7 +264,7 @@ async fn single_turn_prompt_persists_and_projects() -> Result<(), SessionError> 
     ));
 
     // Events tell the whole run in order.
-    assert!(matches!(&run.events[0], SessionEvent::UserMessage { text } if text == "hi"));
+    assert!(matches!(&run.events[0], SessionEvent::UserMessage { text, .. } if text == "hi"));
     assert!(matches!(
         run.events.last(),
         Some(SessionEvent::RunFinished { output, .. }) if output == "hello there"
@@ -1034,7 +1034,7 @@ async fn steering_during_a_run_is_recorded_one_to_one() -> Result<(), SessionErr
     assert_eq!(
         run.events
             .iter()
-            .filter(|e| matches!(e, SessionEvent::UserMessage { text } if text == "also this"))
+            .filter(|e| matches!(e, SessionEvent::UserMessage { text, .. } if text == "also this"))
             .count(),
         1
     );
@@ -1076,11 +1076,33 @@ async fn messages_queued_before_pump_all_join_the_first_run() -> Result<(), Sess
         .events
         .iter()
         .filter_map(|e| match e {
-            SessionEvent::UserMessage { text } => Some(text.as_str()),
+            SessionEvent::UserMessage { text, .. } => Some(text.as_str()),
             _ => None,
         })
         .collect();
     assert_eq!(user_texts, vec!["one", "two"]);
+    // Born-early ids: each user_message event's entry_id is the id its
+    // entry keeps in the reloaded log (PROTOCOL.md v2).
+    let event_ids: Vec<&str> = run
+        .events
+        .iter()
+        .filter_map(|e| match e {
+            SessionEvent::UserMessage { entry_id, .. } => Some(entry_id.as_str()),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(event_ids.len(), 2);
+    let loaded = store.open_path(session.path())?;
+    let log_ids: Vec<&str> = loaded
+        .entries
+        .iter()
+        .filter(|e| matches!(&e.kind, EntryKind::UserMessage { .. }))
+        .map(|e| e.id.as_str())
+        .collect();
+    assert_eq!(
+        log_ids, event_ids,
+        "batch user_message ids are the log entries' ids, in order"
+    );
     // The whole batch opens the run: no delta precedes the last message.
     let last_user = run
         .events
@@ -1168,7 +1190,7 @@ async fn abort_discards_messages_queued_behind_the_run() -> Result<(), SessionEr
                 abort.abort();
             }
             SessionEvent::RunAborted { .. } => saw_aborted = true,
-            SessionEvent::UserMessage { text } if text != "run the tool" => {
+            SessionEvent::UserMessage { text, .. } if text != "run the tool" => {
                 queued_user_messages += 1;
             }
             _ => {}

@@ -7,6 +7,17 @@ fn events_round_trip_through_json() {
     let events = vec![
         SessionEvent::UserMessage {
             text: "hi".to_string(),
+            entry_id: "0192uuidv7user".to_string(),
+        },
+        SessionEvent::MessageQueued {
+            id: "0192uuidv7queued".to_string(),
+            text: "queued while running".to_string(),
+        },
+        SessionEvent::MessagesDiscarded {
+            messages: vec![DiscardedMessage {
+                id: "0192uuidv7queued".to_string(),
+                text: "queued while running".to_string(),
+            }],
         },
         SessionEvent::TurnStarted {
             id: TURN.to_string(),
