@@ -75,16 +75,21 @@ impl SessionCommandLink {
     pub fn send(&self, command: SessionCommand) {
         match command {
             SessionCommand::Message { text } => self.mailbox.submit(text),
-            SessionCommand::Abort => {
-                self.abort.abort();
-                self.mailbox.clear();
-            }
+            SessionCommand::Abort => abort_and_clear(&self.abort, &self.mailbox),
             // Total: an unknown or dead id logs and drops inside the hub.
             SessionCommand::InteractionResponse { id, option, text } => {
                 self.interaction.respond(&id, option, text);
             }
         }
     }
+}
+
+/// Abort the run in flight and discard the queue — one semantic. Both
+/// encode sites (the command link and the handle) route through here so
+/// v2's `messages_discarded` emission lands in one place.
+fn abort_and_clear(abort: &AbortHandle, mailbox: &MailboxHandle) {
+    abort.abort();
+    mailbox.clear();
 }
 
 impl SessionHandle {
@@ -196,8 +201,7 @@ impl SessionHandle {
     /// Aborting while idle is a no-op (including on anything queued —
     /// the queue is discarded with it).
     pub fn abort(&self) {
-        self.abort.abort();
-        self.mailbox.clear();
+        abort_and_clear(&self.abort, &self.mailbox);
     }
 
     /// A cloneable submitter for threads that only send commands.

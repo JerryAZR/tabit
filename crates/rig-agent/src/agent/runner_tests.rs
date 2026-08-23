@@ -702,7 +702,6 @@ impl RecordingHook {
                     StepEventKind::CompletionCall
                         | StepEventKind::ToolCall
                         | StepEventKind::ToolResult
-                        | StepEventKind::InvalidToolCall
                 )
             })
             .collect()

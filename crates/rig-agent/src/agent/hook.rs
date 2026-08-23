@@ -612,7 +612,6 @@ pub enum StepEventKind {
     CompletionCall,
     CompletionResponse,
     ModelTurnFinished,
-    InvalidToolCall,
     ToolCall,
     ToolResult,
     TextDelta,
@@ -998,14 +997,17 @@ pub trait AgentHook: WasmCompatSend + WasmCompatSync {
         async { ModelTurnAction::Continue }
     }
 
-    /// Resolves a model-emitted tool call that cannot be dispatched as written.
+    /// Resolves a model-emitted tool call before its body runs: the gate
+    /// seam (permission, rewrites, skips).
     ///
-    /// The call may be failed, retried, repaired, skipped, or used to stop the
-    /// Runs before a valid tool call is executed.
-    ///
-    /// The hook may rewrite the current arguments, skip execution, or stop the
-    /// run. Rewrites in a [`HookStack`] are passed to subsequent hooks. The
-    /// default action executes with the current arguments.
+    /// The hook may rewrite the current arguments or skip execution (the
+    /// model sees an in-band skip result, never a silent drop). Rewrites in
+    /// a [`HookStack`] are passed to subsequent hooks. A hook that wants
+    /// the run over holds the abort leaf — nothing a hook does here may
+    /// stop or kill the tool batch (ENGINE.md's stop taxonomy: a batch is
+    /// sealed; only `on_tool_result` may set the don't-continue flag, read
+    /// after the batch settles). The default action executes the call as
+    /// written.
     fn on_tool_call(
         &self,
         _ctx: &HookContext,

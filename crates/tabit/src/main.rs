@@ -658,9 +658,16 @@ fn print_mode(
                             link.send(SessionCommand::Abort);
                             return;
                         }
-                        let card = { lock_armed(&armed).take() };
+                        // Answers apply to the oldest open card (FIFO —
+                        // FRONTEND.md §8 allows several open at once, and
+                        // concurrent permission gates make that ordinary).
+                        let card = { lock_armed(&armed).pop_front() };
                         if let Some((id, options)) = card {
                             link.send(parse_answer(&id, &options, &line));
+                            let waiting = lock_armed(&armed).len();
+                            if waiting > 0 {
+                                eprintln!("--- {waiting} more open question(s), keep answering");
+                            }
                         }
                     }
                 });
@@ -686,7 +693,7 @@ fn print_mode(
                     SessionEvent::RunFailed { message } => {
                         outcome.failed = Some(message.clone());
                         // A terminal closes every card (FRONTEND.md §8).
-                        lock_armed(&armed).take();
+                        lock_armed(&armed).clear();
                     }
                     SessionEvent::InteractionRequested {
                         id,
@@ -707,14 +714,18 @@ fn print_mode(
                                 .join("  ");
                             eprintln!("{legend}   — number, then Enter");
                         }
-                        *lock_armed(&armed) = Some((
+                        let mut queue = lock_armed(&armed);
+                        queue.push_back((
                             id.clone(),
                             options.iter().map(|o| o.label.clone()).collect(),
                         ));
+                        if queue.len() > 1 {
+                            eprintln!("({} open questions — answers apply in order)", queue.len());
+                        }
                     }
                     SessionEvent::RunFinished { .. } | SessionEvent::RunAborted { .. } => {
                         // A terminal closes every card (FRONTEND.md §8).
-                        lock_armed(&armed).take();
+                        lock_armed(&armed).clear();
                     }
                     _ => {}
                 }
@@ -751,14 +762,17 @@ enum ContinueMiss {
     StartFresh,
 }
 
-/// Lock the armed-card slot (poisoning recovers — the slot is only a
+/// Lock the armed-card queue (poisoning recovers — the queue is only a
 /// hint for the stdin reader).
-/// The armed card: its request id and button labels, waiting for one
-/// stdin line.
-type ArmedCard = Option<(String, Vec<String>)>;
-type ArmedSlot = std::sync::Arc<std::sync::Mutex<ArmedCard>>;
+/// One open interaction card: its request id and button labels, waiting
+/// for one stdin line. Several may be open at once (concurrent gates);
+/// answers apply FIFO.
+type ArmedCard = (String, Vec<String>);
+type ArmedSlot = std::sync::Arc<std::sync::Mutex<std::collections::VecDeque<ArmedCard>>>;
 
-fn lock_armed(armed: &ArmedSlot) -> std::sync::MutexGuard<'_, ArmedCard> {
+fn lock_armed(
+    armed: &ArmedSlot,
+) -> std::sync::MutexGuard<'_, std::collections::VecDeque<ArmedCard>> {
     armed.lock().unwrap_or_else(|error| error.into_inner())
 }
 

@@ -30,11 +30,16 @@ use crate::lock::lock;
 struct Inner {
     /// Where requests surface: the worker's event channel (the same one
     /// every other event rides). **Weak** on purpose: the hub
-    /// participates in the channel but must not own it — a strong
-    /// clone would keep the channel open past worker wind-down and the
-    /// event stream would never end (the termination contract). Strong
-    /// senders exist exactly while a pump is in flight, which is the
-    /// only time an ask can happen.
+    /// participates in the channel but must not own it — the handle and
+    /// command links outlive the worker, so a strong clone would keep
+    /// the channel open past wind-down and the event stream would never
+    /// end (the termination contract). Safety does not rest on sender
+    /// lifetime: a dead receiver surfaces as a failed `send`, and
+    /// post-wind-down upgrades fail, dismissing the asker.
+    ///
+    /// Note: asks bypass `run_one`'s event fold by design — they
+    /// originate on tool-chain tasks, not the worker, and reach the
+    /// channel directly; ordering with run events is channel send order.
     events: mpsc::WeakUnboundedSender<EventFrame>,
     /// Open questions by id: where the answer goes.
     pending: std::sync::Mutex<HashMap<String, oneshot::Sender<InteractionReply>>>,

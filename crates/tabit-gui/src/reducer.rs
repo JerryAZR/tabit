@@ -329,6 +329,10 @@ impl GuiState {
                 // user watched are the record.
                 self.running = false;
                 self.interactions.clear();
+                // Abort discards the queued steers (backend flag 6) — they
+                // will never be acknowledged, so the pending rows must not
+                // linger into the next run's pairing.
+                self.pending.clear();
             }
             SessionEvent::RunFailed { message } => {
                 self.running = false;

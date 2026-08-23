@@ -706,7 +706,6 @@ fn unit_hook_observes_no_event_kind() {
         StepEventKind::CompletionCall,
         StepEventKind::CompletionResponse,
         StepEventKind::ModelTurnFinished,
-        StepEventKind::InvalidToolCall,
         StepEventKind::ToolCall,
         StepEventKind::ToolResult,
         StepEventKind::TextDelta,
