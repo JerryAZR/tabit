@@ -514,15 +514,22 @@ section above; the design they locked:
   session's file is touched, a run in flight anywhere changes nothing
   (pinned by `new_session_is_never_blocked_by_a_running_session` —
   the new session is created, messaged, and finished while the boot
-  run is mid-tool). The one wait in the design: `open_session`'s pass
-  for a session whose **own** run is in flight waits for that run's
-  terminal — the same-session pause point, checkout's class, never a
-  cross-session block. The switch itself is immediate and the
-  in-flight run's live streaming renders right away; only committed
-  history waits. Why: each worker is its session's single event
-  emitter, and that exclusivity is what orders a pass against live
-  traffic — a wait-free history pass (a file-snapshot merged by
-  ids/seq) arrives with the stage-4 per-session seq primitive.
+  run is mid-tool). This is structural, not incidental: the host
+  loop's only awaits are the command channel and the shutdown token —
+  routing (including both lifecycle builders) is synchronous, its
+  locks are brief map operations never held across an await, and the
+  builders touch no worker-owned session and write no session file.
+  Any future "lifecycle needs to wait" dependency is a design bug,
+  not a tuning question. The one wait in the design:
+  `open_session`'s pass for a session whose **own** run is in flight
+  waits for that run's terminal — the same-session pause point,
+  checkout's class, never a cross-session block. The switch itself is
+  immediate and the in-flight run's live streaming renders right
+  away; only committed history waits. Why: each worker is its
+  session's single event emitter, and that exclusivity is what orders
+  a pass against live traffic — a wait-free history pass (a
+  file-snapshot merged by ids/seq) arrives with the stage-4
+  per-session seq primitive.
 - **Routing errors are stamped with the stream they concern** — the
   targeted id for targeted commands, the boot stream for untargeted
   ones. A `message`/`abort`/`interaction_response` naming an unknown

@@ -101,6 +101,17 @@ on the connection; attribute by stamp. **Route frames by stamp**
 unknown event `type`s** — both are forward-compatibility paths
 (subagent streams and new events arrive later without a version bump).
 
+**On unknown events and streams: report, don't swallow.** Skipping is
+the wire rule (never fail, never render); silently *discarding* is a
+debugging trap — a frontend older than its backend loses features
+with no trace. Log the raw line (or surface a quiet "unsupported
+frame" indicator) when you meet an unknown `type` or `stream`. Two
+strategies: clients built against the `tabit-protocol` crate recompile
+with every protocol change — parse failures are loud by design, and
+the handshake's version gate means a matched pair never exchanges
+unknown frames; hand-rolled clients should parse leniently (to a JSON
+value, switch on `type` when recognized) and log the rest.
+
 ## 3. Handshake, lifecycle, exit codes
 
 1. Your **first line** must be
