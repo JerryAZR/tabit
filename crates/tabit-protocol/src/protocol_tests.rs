@@ -13,49 +13,74 @@ where
 fn commands_round_trip_with_snake_case_tags() {
     let commands = vec![
         SessionCommand::Message {
+            session: "0197".to_string(),
             text: "hello".to_string(),
         },
-        SessionCommand::Abort,
+        SessionCommand::Abort {
+            session: "0197".to_string(),
+        },
         SessionCommand::InteractionResponse {
-            id: "0197".to_string(),
+            session: "0197".to_string(),
+            id: "0197-ask".to_string(),
             option: Some("Deny".to_string()),
             text: Some("never delete build dirs".to_string()),
         },
         SessionCommand::InteractionResponse {
-            id: "0198".to_string(),
+            session: "0197".to_string(),
+            id: "0198-ask".to_string(),
             option: None,
             text: Some("use python".to_string()),
+        },
+        SessionCommand::NewSession,
+        SessionCommand::OpenSession {
+            id: "0196".to_string(),
         },
     ];
     for command in &commands {
         assert_eq!(&round_trip(command), command);
     }
     assert_eq!(
-        serde_json::to_string(&SessionCommand::Abort).expect("serialize"),
-        r#"{"type":"abort"}"#
+        serde_json::to_string(&SessionCommand::Abort {
+            session: "s1".to_string()
+        })
+        .expect("serialize"),
+        r#"{"type":"abort","session":"s1"}"#
     );
     assert_eq!(
         serde_json::to_string(&SessionCommand::Message {
+            session: "s1".to_string(),
             text: "hi".to_string()
         })
         .expect("serialize"),
-        r#"{"type":"message","text":"hi"}"#
+        r#"{"type":"message","session":"s1","text":"hi"}"#
+    );
+    assert_eq!(
+        serde_json::to_string(&SessionCommand::NewSession).expect("serialize"),
+        r#"{"type":"new_session"}"#
+    );
+    assert_eq!(
+        serde_json::to_string(&SessionCommand::OpenSession {
+            id: "s2".to_string()
+        })
+        .expect("serialize"),
+        r#"{"type":"open_session","id":"s2"}"#
     );
     assert_eq!(
         serde_json::to_string(&SessionCommand::InteractionResponse {
+            session: "s1".to_string(),
             id: "0197".to_string(),
             option: Some("Deny".to_string()),
             text: None,
         })
         .expect("serialize"),
-        r#"{"type":"interaction_response","id":"0197","option":"Deny"}"#
+        r#"{"type":"interaction_response","session":"s1","id":"0197","option":"Deny"}"#
     );
 }
 
 #[test]
 fn event_frames_serialize_flat_with_the_stream_beside_the_tag() {
     let frame = EventFrame {
-        stream: StreamId::main(),
+        stream: StreamId::new("0197-session"),
         event: SessionEvent::TextDelta {
             turn_id: "t1".to_string(),
             text: "He".to_string(),
@@ -64,7 +89,7 @@ fn event_frames_serialize_flat_with_the_stream_beside_the_tag() {
     let json = serde_json::to_string(&frame).expect("serialize");
     assert_eq!(
         json,
-        r#"{"stream":"main","type":"text_delta","turn_id":"t1","text":"He"}"#
+        r#"{"stream":"0197-session","type":"text_delta","turn_id":"t1","text":"He"}"#
     );
     assert_eq!(round_trip(&frame), frame);
 }
@@ -73,20 +98,20 @@ fn event_frames_serialize_flat_with_the_stream_beside_the_tag() {
 fn every_event_variant_survives_the_frame_envelope() {
     let frames = vec![
         EventFrame {
-            stream: StreamId::main(),
+            stream: StreamId::new("s1"),
             event: SessionEvent::UserMessage {
                 text: "hi".to_string(),
                 entry_id: "e0".to_string(),
             },
         },
         EventFrame {
-            stream: StreamId::main(),
+            stream: StreamId::new("s1"),
             event: SessionEvent::TurnStarted {
                 id: "t1".to_string(),
             },
         },
         EventFrame {
-            stream: StreamId::main(),
+            stream: StreamId::new("s1"),
             event: SessionEvent::ToolCall {
                 turn_id: "t1".to_string(),
                 name: "echo".to_string(),
@@ -96,13 +121,13 @@ fn every_event_variant_survives_the_frame_envelope() {
             },
         },
         EventFrame {
-            stream: StreamId::main(),
+            stream: StreamId::new("s1"),
             event: SessionEvent::TurnCommitted {
                 id: "t1".to_string(),
             },
         },
         EventFrame {
-            stream: StreamId::main(),
+            stream: StreamId::new("s1"),
             event: SessionEvent::ToolResult {
                 turn_id: "t1".to_string(),
                 entry_id: "e1".to_string(),
@@ -113,20 +138,20 @@ fn every_event_variant_survives_the_frame_envelope() {
             },
         },
         EventFrame {
-            stream: StreamId::main(),
+            stream: StreamId::new("s1"),
             event: SessionEvent::RunFinished {
                 output: "done".to_string(),
                 usage: Usage::default(),
             },
         },
         EventFrame {
-            stream: StreamId::main(),
+            stream: StreamId::new("s1"),
             event: SessionEvent::RunFailed {
                 message: "boom".to_string(),
             },
         },
         EventFrame {
-            stream: StreamId::main(),
+            stream: StreamId::new("s1"),
             event: SessionEvent::InteractionRequested {
                 id: "0199".to_string(),
                 title: "Run command?".to_string(),
@@ -174,11 +199,20 @@ fn client_frames_parse_initialize_and_commands_from_one_line_shape() {
         }
     );
     let command: ClientFrame =
-        serde_json::from_str(r#"{"type":"message","text":"hi"}"#).expect("command");
+        serde_json::from_str(r#"{"type":"message","session":"s1","text":"hi"}"#).expect("command");
     assert_eq!(
         command,
         ClientFrame::Command(SessionCommand::Message {
+            session: "s1".to_string(),
             text: "hi".to_string()
+        })
+    );
+    let open: ClientFrame =
+        serde_json::from_str(r#"{"type":"open_session","id":"s2"}"#).expect("open");
+    assert_eq!(
+        open,
+        ClientFrame::Command(SessionCommand::OpenSession {
+            id: "s2".to_string()
         })
     );
     assert!(serde_json::from_str::<ClientFrame>("not json at all").is_err());
@@ -211,7 +245,7 @@ fn server_control_frames_round_trip_and_stay_distinct_from_events() {
     assert_eq!(frame, ServerFrame::Control(error));
 
     let event_line = serde_json::to_string(&EventFrame {
-        stream: StreamId::main(),
+        stream: StreamId::new("s1"),
         event: SessionEvent::RunFailed {
             message: "boom".to_string(),
         },
@@ -224,8 +258,9 @@ fn server_control_frames_round_trip_and_stay_distinct_from_events() {
 }
 
 #[test]
-fn stream_ids_compare_and_report_the_main_stream() {
-    assert!(StreamId::main().is_main());
-    assert_eq!(StreamId::MAIN, "main");
-    assert!(!StreamId("subagent-1".to_string()).is_main());
+fn stream_ids_are_the_session_ids() {
+    let stream = StreamId::new("0197-session");
+    assert_eq!(stream.as_str(), "0197-session");
+    assert_eq!(stream, StreamId::new("0197-session"));
+    assert_ne!(stream, StreamId::new("0196-other"));
 }

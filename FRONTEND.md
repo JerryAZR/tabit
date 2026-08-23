@@ -5,15 +5,14 @@ backend: what the backend provides, what it expects from you, and the
 invariants your UI can rely on. Read this document alone; you should
 not need the codebase to design a frontend.
 
-Wire shapes below are the **v2 contract**. The shipped binary today
-speaks v1 — no ids on events, and no replay/checkout/model/queue events
-yet; v2 lands as one protocol-version bump with no compatibility
-period. Design against v2. (One v1 trap: a v1 backend *silently
-ignores* unknown `initialize` fields, so a v2 client against v1 gets
-neither replay nor an error — always check the ack's `protocol_version`.
-The one-shot JSON listing edges — `--list --json`, `models --json` —
-are likewise v2; today `--list` prints a human table. `turn_truncated`
-ships in v1 already, without the `turn_id` payload.)
+Wire shapes below are the **v3 contract**. v2 shipped (ids, replay);
+v3 is the multi-session host — session-addressed commands,
+`new_session`/`open_session` on the channel, the `"main"` stream alias
+retired (the stream stamp is the session id). v3 lands as one
+protocol-version bump with no compatibility period; always check the
+ack's `protocol_version`. The one-shot JSON listing edges —
+`--list --json`, `models --json` — are likewise v2-era; today `--list`
+prints a human table.
 
 ## 1. Architecture: two processes, one pipe
 
@@ -26,16 +25,20 @@ tabit --json [--continue | --session <path>] [--model <ref>]
 - **stdout** carries protocol lines to you; **stdin** takes protocol
   lines from you; **stderr** carries human-oriented diagnostics you may
   ignore (never protocol data) — but capture it for crash reports.
-- **One backend process per session.** The session is chosen at spawn:
-  `--continue` resumes the project's newest session (nothing to
-  resume → fresh session, ack `resumed: false` — §3.1), `--session
-  <path>` a specific file, neither starts a fresh one. There is no
-  create/list/switch-session command on the long-lived channel.
+- **One backend process hosts many sessions.** The spawn flags select
+  the **boot session** — `--continue` resumes the project's newest
+  (nothing to resume → fresh, ack `resumed: false` — §3.1),
+  `--session <path>` a specific file, neither a fresh one — and the
+  backend announces the catalog (`sessions_available`) after the
+  handshake. Creating, listing, opening, and switching sessions are
+  channel commands (`new_session`, `open_session`; §5) — never process
+  tricks. One connection per backend process (ruled scope).
 - **Spawn environment.** Sessions live at `<project-root>/.tabit/
   sessions`, where project root is the nearest ancestor directory
   containing `.git`, else the cwd. Spawn the backend in the project
   directory. `--model <ref>` is `provider/model` or a bare model id
-  when unambiguous; `--max-turns <n>` also exists. The `tabit` launcher
+  when unambiguous; `--max-turns <n>` also exists (and applies to
+  sessions created later in the same process). The `tabit` launcher
   hands the GUI its exact executable via `--tabit <path>` — "can't
   find the backend" is not a failure mode in the supported flow
   (`TABIT_BIN` remains a development override).
@@ -46,10 +49,21 @@ tabit --json [--continue | --session <path>] [--model <ref>]
 - **Crash isolation is the point.** Internal backend errors panic by
   design — the process dies loudly rather than running broken. Your UI
   must survive that (see §3 and §10).
-- A session picker uses the one-shot listing `tabit --list --json`
-  (spawn, read, exit; works over ssh unchanged; re-scan on reload).
-  Rows, newest first: `{ id, created_at, cwd, entry_count, path,
-  model }`.
+
+### Responsibilities (who owns what)
+
+- **The backend owns all conversation truth**: sessions (creation,
+  loading, the catalog), the log and its tree, replay, run state,
+  queueing, ids, model selection. A frontend is a projection plus
+  input routing — every projection is rebuildable from a replay pass.
+- **The frontend owns the process lifecycle, for recovery only**:
+  spawning the backend, classifying death, explaining it, and the
+  user-triggered respawn (which re-reads config). The backend never
+  respawns itself; the frontend never manages sessions through the
+  process (spawning or killing backends to create or switch) — session
+  lifecycle is command-driven on the channel.
+- **The transport owns ordering**: ack-before-events, one ordered
+  stream per connection; frontends never reorder frames.
 
 ## 2. Wire format
 
@@ -61,27 +75,31 @@ arrive as events. Input tolerance: blank lines are skipped, a trailing
 size limit** — tool output can be large; buffer accordingly.
 
 ```
-→ {"type":"initialize","protocol_version":2,"replay":true}
-← {"type":"initialize_ack","protocol_version":2,"session_id":"…","session_path":"…",
+→ {"type":"initialize","protocol_version":3,"replay":true}
+← {"type":"initialize_ack","protocol_version":3,"session_id":"019…","session_path":"…",
    "model":{"provider":"…","model":"…","thinking_level":null},"resumed":true}
-← {"type":"replay_started","stream":"main","total":14}
+← {"type":"sessions_available","stream":"019…","sessions":[
+     {"id":"019…","created_at":"2026-08-22T…","entry_count":14}, … ]}
+← {"type":"replay_started","stream":"019…","total":14}
 ← … the transcript as finalized events …
-← {"type":"replay_done","stream":"main"}
-→ {"type":"message","text":"who are you?"}
-← {"type":"message_queued","stream":"main","id":"019…","text":"who are you?"}
-← {"type":"turn_started","stream":"main","id":"019…"}
-← {"type":"text_delta","stream":"main","turn_id":"019…","text":"I'm "}
-← {"type":"text_delta","stream":"main","turn_id":"019…","text":"tabit."}
-← {"type":"turn_committed","stream":"main","id":"019…"}
-← {"type":"run_finished","stream":"main","output":"I'm tabit.","usage":{…},"durable":true}
+← {"type":"replay_done","stream":"019…"}
+→ {"type":"message","session":"019…","text":"who are you?"}
+← {"type":"message_queued","stream":"019…","id":"019…","text":"who are you?"}
+← {"type":"turn_started","stream":"019…","id":"019…"}
+← {"type":"text_delta","stream":"019…","turn_id":"019…","text":"I'm "}
+← {"type":"text_delta","stream":"019…","turn_id":"019…","text":"tabit."}
+← {"type":"turn_committed","stream":"019…","id":"019…"}
+← {"type":"run_finished","stream":"019…","output":"I'm tabit.","usage":{…},"durable":true}
 ```
 
 Every event frame is **flat**: the event's `type` and payload fields
-sit next to `stream`. The `stream` stamp attributes concurrent
-producers; today every frame carries `"main"`. **Ignore frames with
-unknown `stream` values** (render nothing) and **skip unknown event
-`type`s** — both are forward-compatibility paths (subagent streams and
-new events arrive later without a version bump).
+sit next to `stream`. The `stream` stamp is the **session id** that
+produced the event (the boot session's id is in the ack) — the
+`"main"` alias is gone. Events from several open sessions interleave
+on the connection; attribute by stamp. **Route frames by stamp**
+(render the sessions you are viewing, ignore the rest) and **skip
+unknown event `type`s** — both are forward-compatibility paths
+(subagent streams and new events arrive later without a version bump).
 
 ## 3. Handshake, lifecycle, exit codes
 
@@ -158,14 +176,20 @@ new events arrive later without a version bump).
 ## 5. Commands
 
 All commands are total — there is no rejection. Outcomes are events.
+Session-scoped commands **always name their session** (the boot id is
+in the ack; sessions you learn from `sessions_available`/
+`session_created`). A command naming an unknown or unloaded session
+yields `error { kind: session }` stamped with the id you named.
 
 | command | when | effect |
 |---|---|---|
-| `message { text }` | any time | idle: starts a run — acknowledged directly by `user_message` (milliseconds; no queued event — nothing waits); running: steers at the next turn boundary, acknowledged by `message_queued { id, text }`. |
-| `abort` | any time | running: preempts (`run_aborted`); discards messages queued at abort time (`messages_discarded`, omitted when none). Post-abort messages queue normally and start the next run. |
+| `message { session, text }` | any time | idle: starts a run — acknowledged directly by `user_message` (milliseconds; no queued event — nothing waits); running: steers at the next turn boundary, acknowledged by `message_queued { id, text }`. |
+| `abort { session }` | any time | running: preempts (`run_aborted`); discards messages queued at abort time (`messages_discarded`, omitted when none). Post-abort messages queue normally and start the next run. Idle: no-op. |
+| `new_session` | any time | creates a fresh session (same config, tools, and `--model`/`--max-turns` as the boot); `session_created { id, path }` follows, stamped with the new id. Nothing replays (it is empty). |
+| `open_session { id }` | any time | loads the session if needed and streams a replay pass stamped with the id — the pass is the acknowledgment. Idempotent: an open session re-replays. Unknown id or unreadable file → `error { kind: session }` stamped with the id. A running session answers at its next idle beat (its in-flight run finishes first). |
 | `checkout { entry_id }` | idle only | moves the active chain; see §7. Compose abort-then-checkout if a run is live. |
 | `model { provider, model, thinking_level? }` | idle only | the next run uses this selection; validates against the backend's config. |
-| `interaction_response { id, option?, text? }` | after an `interaction_request` | answers a pending request; at least one of option/text; see §8. |
+| `interaction_response { session, id, option?, text? }` | after an `interaction_request` | answers a pending request; at least one of option/text; see §8. |
 
 `checkout` and `model` are idle-only by convention, not by error: a
 frontend derives idle/run state from events (§9) and holds the command
@@ -221,6 +245,8 @@ dead structure ahead of the data.
 
 | event | payload | when |
 |---|---|---|
+| `sessions_available` | `sessions: [{ id, created_at, entry_count }]` | once, right after the ack's startup notes: every stored session, newest first. Minimal by ruling — a plain object, fields grow when needed. A brand-new session has no file yet and is absent until it records. |
+| `session_created` | `id`, `path` | a `new_session` succeeded; stamped with the new id (its selection notes, if any, follow on the same stream). |
 | `checked_out` | `entry_id`, `base_id` | checkout succeeded. `base_id` is where your old chain and the new chain diverge; `null` means from the root (drop everything). |
 | `model_changed` | `entry_id`, `provider`, `model`, `thinking_level` | a `model` command (or startup) set the selection for the next run; it is a chain entry and a valid anchor. |
 
@@ -234,6 +260,7 @@ report (§3.5); you never mine it for user-facing meaning.
 | kind | extra fields | meaning |
 |---|---|---|
 | `model` | — | model configuration failed or degraded: a `model` command failed validation, or a startup preference (stale `default_model`, a resumed session's model gone) fell back. The fallback case is a warning — the session continues, with the fallback named in the message. |
+| `session` | — | a session command failed: `open_session` named an unknown id or an unreadable file, a command targeted an unknown session, `new_session` could not build, or the startup listing failed. Stamped with the stream it concerns (the targeted id; the boot stream for untargeted outcomes). |
 | `checkout` | — | the checkout target does not exist or is not a valid cut point (§7). |
 | `persist_degraded` | `pending` | a log flush failed (disk full?); `pending` entries are buffered in memory and retried on every commit. Nag the user about disk space. |
 | `persist_recovered` | — | the buffer drained; everything is on disk again. |
@@ -280,6 +307,17 @@ a tool batch interrupted by a crash or abort — the model context needs
 the roundtrip closed), and a replayed chain with no model entry gets a
 leading `model_changed` backfill.
 
+**Switching sessions.** Send `open_session { id }`. The full-re-render
+rule (ruled; pi-proven): clear your view of the target session
+optimistically, then apply the pass that follows (`replay_started` →
+finalized events → `replay_done`, stamped with the id). It is the same
+shape as startup replay — one transcript-rebuild path in your code,
+and the seam a future streamed suffix replaces. A session whose run is
+still in flight answers at its terminal (the pass then reflects
+everything committed). Runs you switch away from keep running
+backend-side; their events keep arriving on their own stamp — keep
+reading, attribute, and re-replay when you switch back.
+
 **Checkout.** Send `checkout { entry_id }` (idle). The event sequence
 is: `messages_discarded` (if anything pending — steers belong to the
 context they were sent into; salvage as drafts), then `checked_out
@@ -317,10 +355,10 @@ may ask repeatedly). Concurrent chains may hold several open requests
 at once; answer them in any order.
 
 ```
-← {"type":"interaction_request","stream":"main","id":"019…","title":"Run command?",
+← {"type":"interaction_request","stream":"019…","id":"019…","title":"Run command?",
    "body":"rm -rf target","options":[{"label":"Allow"},{"label":"Always allow"},
    {"label":"Deny"}],"free_text":true}
-→ {"type":"interaction_response","id":"019…","option":"Deny","text":"never delete build dirs"}
+→ {"type":"interaction_response","session":"019…","id":"019…","option":"Deny","text":"never delete build dirs"}
 ```
 
 `free_text: true` invites an optional explanation; when present it is
@@ -357,9 +395,10 @@ interaction is the tool result — the answer or denial the model saw.
   you learn them from events and replay anchors (`user_message`,
   `turn_started`, `turn_committed`, `tool_result.entry_id`,
   `model_changed.entry_id`).
-- **Ordering is total.** One connection, one ordered stream; no
-  concurrent event sources today (the `stream` stamp is forward
-  preparation).
+- **Ordering is total per stream.** One connection, one ordered
+  stream; events of one session arrive in order, a run's terminal
+  after all of its events. Events of *different* sessions interleave
+  arbitrarily — attribute by stamp, never by position.
 - **Idle/running is derivable**: running from the first `user_message`
   of a run until its terminal; idle otherwise. Startup (after
   `replay_done`) is idle. A queued-while-idle message keeps you idle
@@ -381,12 +420,14 @@ interaction is the tool result — the answer or denial the model saw.
   up to an arbitrarily high tripwire cap (breach = a runaway producer
   bug; the backend dies loudly). Keep reading. No line-size limits
   either way.
-- **No replay pagination.** The whole active chain arrives at startup,
+- **No replay pagination.** The whole active chain arrives per pass,
   however large. Cursors are a future addition.
-- **No session management on the channel.** Listing is the one-shot
-  `tabit --list --json`; switching sessions is spawning another
-  backend. Model discovery is the one-shot `tabit models --json`
-  (§11 note).
+- **No unload or residency limits.** Opened sessions stay loaded for
+  the process's life (lazy loading bounds *startup*; LRU unload is
+  deferred). Model discovery is the one-shot `tabit models --json`
+  (§11 note); the channel catalog (`sessions_available`) is announced
+  once at startup — re-scan via `tabit --list --json` if you need a
+  refresh.
 - **No event timestamps.** Entries carry wall-clock times in the
   session file; events carry none on the wire (§11).
 - **One consumer.** Events go to the single connected frontend; no

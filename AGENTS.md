@@ -33,7 +33,7 @@ Current workspace layout:
 - `crates/tabit` — the `tabit` binary: bare `tabit [path]` is the
   launcher mode (detach-spawns the GUI and exits — the supported
   entry point), print mode (`-p <PROMPT>`, `--rewind <n>`) and JSON
-  mode (`--json` — the stdio protocol edge) over the session actor
+  mode (`--json` — the stdio protocol edge) over the session host
   (create / `--continue` / `--session <path>` / `--list`)
 
 ## Design rules

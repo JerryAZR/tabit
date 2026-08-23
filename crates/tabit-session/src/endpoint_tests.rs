@@ -1,5 +1,6 @@
-//! Endpoint tests: the actor over a scripted mock session — command
-//! semantics, stream stamps, and the termination contract.
+//! Endpoint tests: the host over a scripted mock session — command
+//! semantics, stream stamps, multi-session routing, and the
+//! termination contract.
 
 use super::*;
 use crate::SessionEvent;
@@ -8,6 +9,21 @@ use rig_agent::tool::{DynamicTool, ToolOutput};
 use serde_json::json;
 use std::time::Duration;
 use tabit_protocol::SessionCommand;
+
+/// Wiring whose builders refuse (tests that never drive session
+/// lifecycle); the store stays real so the catalog is honest.
+fn plain_wiring(store: &SessionStore) -> SessionHostWiring {
+    SessionHostWiring {
+        store: store.clone(),
+        create: std::sync::Arc::new(|| Err("new_session is not driven".to_string())),
+        open: std::sync::Arc::new(|_| Err("open_session is not driven".to_string())),
+    }
+}
+
+/// The boot session id, as the host's consumer learns it.
+fn boot_id(handle: &SessionHost) -> String {
+    handle.info().session_id.clone()
+}
 
 /// A tool that takes real time, so a run is provably in flight while the
 /// actor processes commands sent alongside it (the instant mock would
@@ -39,9 +55,9 @@ fn terminal(event: &SessionEvent) -> bool {
     )
 }
 
-/// Collect frames until the actor winds down: closing the command side
-/// lets the in-flight pump finish, then the stream ends.
-async fn drain(handle: &mut SessionHandle) -> Vec<EventFrame> {
+/// Collect frames until the host winds down: closing the command side
+/// lets every in-flight pump finish, then the stream ends.
+async fn drain(handle: &mut SessionHost) -> Vec<EventFrame> {
     handle.close_commands();
     let mut frames = Vec::new();
     while let Some(frame) = handle.next_event().await {
@@ -77,17 +93,20 @@ async fn startup_degradations_are_the_workers_first_frames() {
         .into_builder(store.clone())
         .create("C:/w")
         .expect("session");
-    let mut handle = SessionHandle::spawn(
+    let mut handle = SessionHost::spawn(
         session,
         vec!["default_model `gone` is not usable".to_string()],
+        plain_wiring(&store),
     );
+    let id = boot_id(&handle);
 
-    handle.message("go");
+    handle.message(&id, "go");
     let frames = drain(&mut handle).await;
 
-    // The degradation is the first frame the frontend sees — ahead of any
-    // run event — as a `model`-kind error (external errors ride the
-    // channel; stderr is not a frontend concern).
+    // The degradation is the first frame the frontend sees — ahead of
+    // the catalog and any run event — as a `model`-kind error
+    // (external errors ride the channel; stderr is not a frontend
+    // concern).
     match frames.first().map(|f| &f.event) {
         Some(SessionEvent::Error { kind, message, .. }) => {
             assert_eq!(kind, tabit_protocol::ErrorKind::MODEL);
@@ -95,6 +114,11 @@ async fn startup_degradations_are_the_workers_first_frames() {
         }
         other => panic!("the degradation must lead the stream, got {other:?}"),
     }
+    // The catalog follows the notes, ahead of any run event.
+    assert!(matches!(
+        frames.get(1).map(|f| &f.event),
+        Some(SessionEvent::SessionsAvailable { .. })
+    ));
     assert!(
         frames
             .iter()
@@ -114,14 +138,16 @@ async fn an_idle_message_runs_to_completion_over_the_stream() {
         .into_builder(store.clone())
         .create("C:/w")
         .expect("session");
-    let mut handle = SessionHandle::spawn(session, Vec::new());
+    let mut handle = SessionHost::spawn(session, Vec::new(), plain_wiring(&store));
+    let id = boot_id(&handle);
 
-    handle.message("hi");
+    handle.message(&id, "hi");
     let frames = drain(&mut handle).await;
 
-    // Every frame is stamped with the main stream, the run is bracketed
-    // by its user message and terminal, and acceptance is observable.
-    assert!(frames.iter().all(|f| f.stream.is_main()));
+    // Every frame is stamped with the session's own stream (its id),
+    // the run is bracketed by its user message and terminal, and
+    // acceptance is observable.
+    assert!(frames.iter().all(|f| f.stream.as_str() == id));
     assert_eq!(user_texts(&frames), vec!["hi"]);
     assert_eq!(finished_outputs(&frames), vec!["hello there"]);
     assert!(matches!(
@@ -149,9 +175,10 @@ async fn a_message_mid_run_steers_instead_of_starting_a_second_run() {
         .dynamic_tool(slow_tool())
         .create("C:/w")
         .expect("session");
-    let mut handle = SessionHandle::spawn(session, Vec::new());
+    let mut handle = SessionHost::spawn(session, Vec::new(), plain_wiring(&store));
+    let id = boot_id(&handle);
 
-    handle.message("run the tool");
+    handle.message(&id, "run the tool");
     // A second message while the run is in flight: submitted from the
     // event-stream side while the slow tool is mid-execution (a fast tool
     // never yields, so the run would finish before the submit lands and
@@ -162,7 +189,7 @@ async fn a_message_mid_run_steers_instead_of_starting_a_second_run() {
     while let Some(frame) = handle.next_event().await {
         if !submitted && matches!(frame.event, SessionEvent::ToolCall { .. }) {
             submitted = true;
-            handle.message("also this");
+            handle.message(&id, "also this");
         }
         if terminal(&frame.event) {
             handle.close_commands();
@@ -218,10 +245,11 @@ async fn two_rapid_messages_both_land_in_order() {
         .into_builder(store.clone())
         .create("C:/w")
         .expect("session");
-    let mut handle = SessionHandle::spawn(session, Vec::new());
+    let mut handle = SessionHost::spawn(session, Vec::new(), plain_wiring(&store));
+    let id = boot_id(&handle);
 
-    handle.message("first");
-    handle.message("second");
+    handle.message(&id, "first");
+    handle.message(&id, "second");
     let frames = drain(&mut handle).await;
 
     // Rapid messages deterministically batch: pushes are synchronous
@@ -242,17 +270,22 @@ async fn abort_while_idle_discards_queued_messages() {
         .into_builder(store.clone())
         .create("C:/w")
         .expect("session");
-    let mut handle = SessionHandle::spawn(session, Vec::new());
+    let mut handle = SessionHost::spawn(session, Vec::new(), plain_wiring(&store));
+    let id = boot_id(&handle);
 
     // Queued while idle (the worker cannot have started: no await yet),
     // then stopped before any run: the queue goes with it.
-    handle.message("queued one");
-    handle.message("queued two");
-    handle.abort();
+    handle.message(&id, "queued one");
+    handle.message(&id, "queued two");
+    handle.abort(&id);
     let frames = drain(&mut handle).await;
+    // The startup catalog is the only frame: no run ever happened
+    // (drain already proved the stream ends cleanly).
     assert!(
-        frames.is_empty(),
-        "no run ever happened and nothing was emitted: {frames:?}"
+        frames
+            .iter()
+            .all(|f| matches!(f.event, SessionEvent::SessionsAvailable { .. })),
+        "no run ever happened and nothing but the catalog was emitted: {frames:?}"
     );
     std::fs::remove_dir_all(store.dir()).ok();
 }
@@ -265,9 +298,10 @@ async fn abort_mid_run_discards_the_queue_and_ends_the_run() {
         .dynamic_tool(slow_tool())
         .create("C:/w")
         .expect("session");
-    let mut handle = SessionHandle::spawn(session, Vec::new());
+    let mut handle = SessionHost::spawn(session, Vec::new(), plain_wiring(&store));
+    let id = boot_id(&handle);
 
-    handle.message("run the tool");
+    handle.message(&id, "run the tool");
     let mut saw_aborted = false;
     let mut queued = 0;
     let mut sent = false;
@@ -282,9 +316,12 @@ async fn abort_mid_run_discards_the_queue_and_ends_the_run() {
                 sent = true;
                 let link = handle.command_link();
                 link.send(SessionCommand::Message {
+                    session: id.clone(),
                     text: "queued behind".to_string(),
                 });
-                link.send(SessionCommand::Abort);
+                link.send(SessionCommand::Abort {
+                    session: id.clone(),
+                });
             }
             SessionEvent::RunAborted { .. } => saw_aborted = true,
             SessionEvent::UserMessage { text, .. } if text != "run the tool" => queued += 1,
@@ -356,9 +393,10 @@ async fn a_failed_run_emits_run_failed_and_ends_the_stream_cleanly() {
         .dynamic_tool(echo_tool())
         .create("C:/w")
         .expect("session");
-    let mut handle = SessionHandle::spawn(session, Vec::new());
+    let mut handle = SessionHost::spawn(session, Vec::new(), plain_wiring(&store));
+    let id = boot_id(&handle);
 
-    handle.message("will fail");
+    handle.message(&id, "will fail");
     let mut failed = 0;
     while let Some(frame) = handle.next_event().await {
         if matches!(frame.event, SessionEvent::RunFailed { .. }) {
@@ -379,10 +417,12 @@ async fn a_link_outlives_the_handle_and_still_submits() {
         .into_builder(store.clone())
         .create("C:/w")
         .expect("session");
-    let mut handle = SessionHandle::spawn(session, Vec::new());
+    let mut handle = SessionHost::spawn(session, Vec::new(), plain_wiring(&store));
+    let id = boot_id(&handle);
     let link = handle.command_link();
 
     link.send(SessionCommand::Message {
+        session: id,
         text: "via link".to_string(),
     });
     let frames = drain(&mut handle).await;
@@ -392,6 +432,257 @@ async fn a_link_outlives_the_handle_and_still_submits() {
 
 #[path = "interaction_tests.rs"]
 mod interaction_tests;
+
+/// Read frames until one matches `want`; returns it (startup
+/// announcements and unrelated streams pass through unread).
+async fn until_event(handle: &mut SessionHost, want: fn(&SessionEvent) -> bool) -> EventFrame {
+    tokio::time::timeout(Duration::from_secs(5), async {
+        loop {
+            let frame = handle
+                .next_event()
+                .await
+                .expect("the host keeps producing events");
+            if want(&frame.event) {
+                return frame;
+            }
+        }
+    })
+    .await
+    .expect("the awaited event arrives before timeout")
+}
+
+#[tokio::test]
+async fn new_session_runs_a_second_stream_and_both_route_by_id() {
+    let store = temp_store("endpoint-multi");
+    let session = Factory::new(vec![text_turn("boot answer")])
+        .into_builder(store.clone())
+        .create("C:/w")
+        .expect("session");
+    let create_store = store.clone();
+    let wiring = SessionHostWiring {
+        store: store.clone(),
+        create: std::sync::Arc::new(move || {
+            Factory::new(vec![text_turn("new answer")])
+                .into_builder(create_store.clone())
+                .create("C:/w")
+                .map(|session| (session, Vec::new()))
+                .map_err(|error| error.to_string())
+        }),
+        open: std::sync::Arc::new(|_| Err("not driven".to_string())),
+    };
+    let mut handle = SessionHost::spawn(session, Vec::new(), wiring);
+    let boot = boot_id(&handle);
+    let link = handle.command_link();
+
+    link.send(SessionCommand::NewSession);
+    let created = match until_event(&mut handle, |event| {
+        matches!(event, SessionEvent::SessionCreated { .. })
+    })
+    .await
+    .event
+    {
+        SessionEvent::SessionCreated { id, .. } => id,
+        other => panic!("expected session_created, got {other:?}"),
+    };
+    assert_ne!(created, boot, "a second session means a second stream");
+
+    // The new session answers on its own stamp; the boot session
+    // answers on its own — one channel, attribution by stamp.
+    link.send(SessionCommand::Message {
+        session: created.clone(),
+        text: "to the new one".to_string(),
+    });
+    let answered = until_event(&mut handle, |event| {
+        matches!(event, SessionEvent::RunFinished { .. })
+    })
+    .await;
+    assert_eq!(answered.stream.as_str(), created);
+    assert!(matches!(
+        &answered.event,
+        SessionEvent::RunFinished { output, .. } if output == "new answer"
+    ));
+
+    link.send(SessionCommand::Message {
+        session: boot.clone(),
+        text: "to the boot one".to_string(),
+    });
+    let answered = until_event(&mut handle, |event| {
+        matches!(event, SessionEvent::RunFinished { .. })
+    })
+    .await;
+    assert_eq!(answered.stream.as_str(), boot);
+    assert!(matches!(
+        &answered.event,
+        SessionEvent::RunFinished { output, .. } if output == "boot answer"
+    ));
+
+    // The routing proof is above (each answer on its own stamp); the
+    // wind-down just has to end cleanly with both workers joined.
+    drain(&mut handle).await;
+    std::fs::remove_dir_all(store.dir()).ok();
+}
+
+#[tokio::test]
+async fn open_session_loads_a_stored_session_and_replays_it() {
+    let store = temp_store("endpoint-open");
+    // A stored session with one round of history, written by a direct
+    // prompt (the boot session will be a different, fresh one).
+    let stored_id = {
+        let mut session = Factory::new(vec![text_turn("stored answer")])
+            .into_builder(store.clone())
+            .create("C:/w")
+            .expect("session");
+        session.prompt("hello").await;
+        session.id().to_string()
+    };
+    let boot_session = Factory::new(vec![text_turn("boot answer")])
+        .into_builder(store.clone())
+        .create("C:/w")
+        .expect("session");
+    let open_store = store.clone();
+    let wiring = SessionHostWiring {
+        store: store.clone(),
+        create: std::sync::Arc::new(|| Err("not driven".to_string())),
+        open: std::sync::Arc::new(move |id: &str| {
+            let path = open_store
+                .list()
+                .map_err(|error| error.to_string())?
+                .into_iter()
+                .find(|summary| summary.id == id)
+                .ok_or_else(|| format!("no stored session with id `{id}`"))?
+                .path;
+            Factory::new(vec![text_turn("reopened answer")])
+                .into_builder(open_store.clone())
+                .resume(&path)
+                .map(|(session, _)| (session, Vec::new()))
+                .map_err(|error| error.to_string())
+        }),
+    };
+    let mut handle = SessionHost::spawn(boot_session, Vec::new(), wiring);
+    let boot = boot_id(&handle);
+
+    // Lazy loading: the startup catalog lists the stored session (the
+    // fresh boot has not materialized on disk).
+    let catalog = match until_event(&mut handle, |event| {
+        matches!(event, SessionEvent::SessionsAvailable { .. })
+    })
+    .await
+    .event
+    {
+        SessionEvent::SessionsAvailable { sessions } => sessions,
+        other => panic!("expected sessions_available, got {other:?}"),
+    };
+    assert!(
+        catalog.iter().any(|session| session.id == stored_id),
+        "the stored session is in the catalog: {catalog:?}"
+    );
+    assert!(
+        !catalog.iter().any(|session| session.id == boot),
+        "the unmaterialized boot session is not"
+    );
+
+    // open_session loads it and answers with the pass — stamped with
+    // the opened id, carrying the stored history whole.
+    handle.command_link().send(SessionCommand::OpenSession {
+        id: stored_id.clone(),
+    });
+    let mut pass = Vec::new();
+    loop {
+        let frame = tokio::time::timeout(Duration::from_secs(5), handle.next_event())
+            .await
+            .expect("the pass keeps producing events")
+            .expect("the stream stays open through the pass");
+        assert_eq!(
+            frame.stream.as_str(),
+            stored_id,
+            "the pass is stamped with the opened id"
+        );
+        match frame.event {
+            SessionEvent::ReplayStarted { .. } => {}
+            SessionEvent::ReplayDone => break,
+            SessionEvent::Error { message, .. } => panic!("open failed: {message}"),
+            event => pass.push(kind_of(&event)),
+        }
+    }
+    assert_eq!(
+        pass,
+        vec![
+            "model_changed",
+            "user_message",
+            "turn_started",
+            "text_delta",
+            "completion_call",
+            "turn_committed",
+        ],
+        "the stored chain replays whole"
+    );
+
+    // The opened session is a live worker now: a message runs on it.
+    handle.message(&stored_id, "again");
+    let answered = until_event(&mut handle, |event| {
+        matches!(event, SessionEvent::RunFinished { .. })
+    })
+    .await;
+    assert_eq!(answered.stream.as_str(), stored_id);
+    assert!(matches!(
+        &answered.event,
+        SessionEvent::RunFinished { output, .. } if output == "reopened answer"
+    ));
+
+    // Idempotent: a second open re-replays the (now longer) chain.
+    handle.command_link().send(SessionCommand::OpenSession {
+        id: stored_id.clone(),
+    });
+    let mut pass_two = 0;
+    loop {
+        let frame = until_event(&mut handle, |event| {
+            matches!(
+                event,
+                SessionEvent::ReplayStarted { .. }
+                    | SessionEvent::ReplayDone
+                    | SessionEvent::Error { .. }
+            )
+        })
+        .await;
+        match frame.event {
+            SessionEvent::ReplayStarted { .. } => pass_two += 1,
+            SessionEvent::ReplayDone => break,
+            SessionEvent::Error { message, .. } => panic!("re-open failed: {message}"),
+            _ => {}
+        }
+    }
+    assert_eq!(pass_two, 1, "one more pass, stamped with the opened id");
+
+    drain(&mut handle).await;
+    std::fs::remove_dir_all(store.dir()).ok();
+}
+
+#[tokio::test]
+async fn an_unknown_session_target_is_a_session_error_on_that_stream() {
+    let store = temp_store("endpoint-unknown");
+    let session = Factory::new(vec![text_turn("ok")])
+        .into_builder(store.clone())
+        .create("C:/w")
+        .expect("session");
+    let mut handle = SessionHost::spawn(session, Vec::new(), plain_wiring(&store));
+
+    handle.command_link().send(SessionCommand::Message {
+        session: "no-such".to_string(),
+        text: "lost?".to_string(),
+    });
+    let error = until_event(
+        &mut handle,
+        |event| matches!(event, SessionEvent::Error { kind, .. } if kind == "session"),
+    )
+    .await;
+    assert_eq!(
+        error.stream.as_str(),
+        "no-such",
+        "stamped with the targeted id"
+    );
+    drain(&mut handle).await;
+    std::fs::remove_dir_all(store.dir()).ok();
+}
 
 #[tokio::test]
 async fn a_replay_request_streams_the_pass_onto_the_event_channel() {
@@ -412,9 +703,10 @@ async fn a_replay_request_streams_the_pass_onto_the_event_channel() {
         .resume(&path)
         .expect("resume")
         .0;
-    let mut handle = SessionHandle::spawn(session, Vec::new());
+    let mut handle = SessionHost::spawn(session, Vec::new(), plain_wiring(&store));
+    let id = boot_id(&handle);
 
-    handle.replay();
+    handle.replay(&id);
     let mut pass = Vec::new();
     let mut done = false;
     while !done {
@@ -423,6 +715,9 @@ async fn a_replay_request_streams_the_pass_onto_the_event_channel() {
             .await
             .expect("the worker answers a replay request");
         match frame.event {
+            // The startup catalog precedes the pass; session-level
+            // announcements are not pass content.
+            SessionEvent::SessionsAvailable { .. } | SessionEvent::SessionCreated { .. } => {}
             SessionEvent::ReplayStarted { .. } => pass.push("started".to_string()),
             SessionEvent::ReplayDone => {
                 pass.push("done".to_string());
@@ -447,7 +742,7 @@ async fn a_replay_request_streams_the_pass_onto_the_event_channel() {
     );
 
     // The stream continues: a message after the pass runs normally.
-    handle.message("again");
+    handle.message(&id, "again");
     let frames = drain(&mut handle).await;
     assert_eq!(user_texts(&frames), vec!["again"]);
     assert_eq!(finished_outputs(&frames), vec!["second answer"]);
@@ -464,4 +759,149 @@ fn kind_of(event: &SessionEvent) -> String {
         SessionEvent::TurnCommitted { .. } => "turn_committed".to_string(),
         other => format!("other:{other:?}"),
     }
+}
+
+#[tokio::test]
+async fn a_catalog_failure_is_the_carrier_in_place_of_the_announcement() {
+    // The store's directory unreadable (here: occupied by a file) —
+    // external error, graceful and clear: a `session`-kind error
+    // stamped boot, and no announcement behind it.
+    let dir = std::env::temp_dir().join(format!("tabit-endpoint-notadir-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::write(&dir, b"not a directory").expect("plant the blocker");
+    let session = Factory::new(vec![text_turn("hi")])
+        .into_builder(temp_store("endpoint-catalog-fail"))
+        .create("C:/w")
+        .expect("session");
+    let mut handle = SessionHost::spawn(
+        session,
+        Vec::new(),
+        SessionHostWiring {
+            store: SessionStore::new(&dir),
+            create: std::sync::Arc::new(|| Err("not driven".to_string())),
+            open: std::sync::Arc::new(|_| Err("not driven".to_string())),
+        },
+    );
+
+    let catalog_error = until_event(
+        &mut handle,
+        |event| matches!(event, SessionEvent::Error { kind, .. } if kind == "session"),
+    )
+    .await;
+    assert_eq!(
+        catalog_error.stream.as_str(),
+        handle.info().session_id,
+        "untargeted outcomes carry the boot stream"
+    );
+    // Nothing else was announced (the frames before the error are the
+    // empty-notes case: the error is first).
+    let frames = drain(&mut handle).await;
+    assert!(
+        !frames
+            .iter()
+            .any(|frame| matches!(frame.event, SessionEvent::SessionsAvailable { .. }))
+    );
+    std::fs::remove_file(&dir).ok();
+}
+
+#[tokio::test]
+async fn lifecycle_failures_and_notes_ride_the_carrier() {
+    let store = temp_store("endpoint-lifecycle-errors");
+    let session = Factory::new(vec![text_turn("hi")])
+        .into_builder(store.clone())
+        .create("C:/w")
+        .expect("session");
+    let mut handle = SessionHost::spawn(
+        session,
+        Vec::new(),
+        SessionHostWiring {
+            store: store.clone(),
+            // The builder degrades: the failure is boot-stamped, the
+            // notes are new-session-stamped.
+            create: std::sync::Arc::new(|| {
+                Err("any model to run with (providers.toml defines no models)".to_string())
+            }),
+            open: std::sync::Arc::new(|id: &str| Err(format!("no stored session with id `{id}`"))),
+        },
+    );
+    let boot = boot_id(&handle);
+    let link = handle.command_link();
+
+    // new_session cannot build: an error on the boot stream (the
+    // command had no target id).
+    link.send(SessionCommand::NewSession);
+    let error = until_event(
+        &mut handle,
+        |event| matches!(event, SessionEvent::Error { kind, .. } if kind == "session"),
+    )
+    .await;
+    assert_eq!(
+        error.stream.as_str(),
+        boot,
+        "untargeted failure stamps boot"
+    );
+
+    // open_session names a session that does not exist: an error on
+    // the targeted stream.
+    link.send(SessionCommand::OpenSession {
+        id: "no-such-session".to_string(),
+    });
+    let error = until_event(
+        &mut handle,
+        |event| matches!(event, SessionEvent::Error { kind, .. } if kind == "session"),
+    )
+    .await;
+    assert_eq!(error.stream.as_str(), "no-such-session");
+    drain(&mut handle).await;
+    std::fs::remove_dir_all(store.dir()).ok();
+}
+
+#[tokio::test]
+async fn a_created_sessions_selection_notes_follow_its_stream() {
+    let store = temp_store("endpoint-create-notes");
+    let session = Factory::new(vec![text_turn("hi")])
+        .into_builder(store.clone())
+        .create("C:/w")
+        .expect("session");
+    let create_store = store.clone();
+    let mut handle = SessionHost::spawn(
+        session,
+        Vec::new(),
+        SessionHostWiring {
+            store: store.clone(),
+            create: std::sync::Arc::new(move || {
+                Factory::new(vec![text_turn("new answer")])
+                    .into_builder(create_store.clone())
+                    .create("C:/w")
+                    .map(|session| {
+                        (
+                            session,
+                            vec!["default_model `gone` is not usable".to_string()],
+                        )
+                    })
+                    .map_err(|error| error.to_string())
+            }),
+            open: std::sync::Arc::new(|_| Err("not driven".to_string())),
+        },
+    );
+    handle.command_link().send(SessionCommand::NewSession);
+
+    // session_created first, its degradation right behind it, both on
+    // the new session's stream.
+    let created = until_event(&mut handle, |event| {
+        matches!(event, SessionEvent::SessionCreated { .. })
+    })
+    .await;
+    let created_id = match created.event {
+        SessionEvent::SessionCreated { id, .. } => id,
+        other => panic!("expected session_created, got {other:?}"),
+    };
+    let note = until_event(
+        &mut handle,
+        |event| matches!(event, SessionEvent::Error { kind, .. } if kind == "model"),
+    )
+    .await;
+    assert_eq!(note.stream.as_str(), created_id);
+    drain(&mut handle).await;
+    std::fs::remove_dir_all(store.dir()).ok();
 }

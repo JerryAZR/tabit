@@ -46,6 +46,8 @@ struct Inner {
     /// Tool names granted "Always allow" — session memory, never
     /// persisted (the test-the-path policy; EXTENSIONS.md).
     always_allowed: std::sync::Mutex<HashSet<String>>,
+    /// The stream stamp for requests (the session's id).
+    stream: StreamId,
 }
 
 /// The session's interaction router. Cheap to clone (one `Arc`).
@@ -55,13 +57,15 @@ pub struct InteractionHub {
 }
 
 impl InteractionHub {
-    /// Build the hub over the worker's event channel.
-    pub fn new(events: mpsc::UnboundedSender<EventFrame>) -> Self {
+    /// Build the hub over the worker's event channel, stamped with the
+    /// session's stream.
+    pub fn new(events: mpsc::UnboundedSender<EventFrame>, stream: StreamId) -> Self {
         Self {
             inner: Arc::new(Inner {
                 events: events.downgrade(),
                 pending: std::sync::Mutex::new(HashMap::new()),
                 always_allowed: std::sync::Mutex::new(HashSet::new()),
+                stream,
             }),
         }
     }
@@ -116,7 +120,7 @@ impl InteractionHub {
         let id = new_entry_id();
         lock(&self.inner.pending).insert(id.clone(), sender);
         let event = EventFrame {
-            stream: StreamId::main(),
+            stream: self.inner.stream.clone(),
             event: SessionEvent::InteractionRequested {
                 id: id.clone(),
                 title: prompt.title,
@@ -200,7 +204,7 @@ mod tests {
         mpsc::UnboundedSender<EventFrame>,
     ) {
         let (tx, rx) = mpsc::unbounded_channel();
-        (InteractionHub::new(tx.clone()), rx, tx)
+        (InteractionHub::new(tx.clone(), StreamId::new("s")), rx, tx)
     }
 
     fn request_from(frame: &EventFrame) -> (String, Vec<String>) {
@@ -248,7 +252,7 @@ mod tests {
         // No pump in flight (or the frontend gone): the weak upgrade
         // fails and the ask resolves unanswered instead of hanging.
         let (tx, _rx) = mpsc::unbounded_channel();
-        let hub = InteractionHub::new(tx); // the only strong sender drops here
+        let hub = InteractionHub::new(tx, StreamId::new("s")); // the only strong sender drops here
         let reply = hub
             .capability()
             .ask(InteractionPrompt::ask("anyone?"))

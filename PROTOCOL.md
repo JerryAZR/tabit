@@ -7,7 +7,7 @@ resolved flag records its decision and stays as history.
 
 ## Locked design
 
-v1 as shipped; the v2 section below amends where noted.
+v1 as shipped; the v2 and v3 sections below amend where noted.
 
 - **Commands are fire-and-forget with total semantics** — `message`
   (steers the run in flight, or starts one), `abort` (aborts the run
@@ -166,6 +166,14 @@ frontend requests a fresh replay pass) — built modular so a streamed
 suffix can replace it later behind the same request shape if it ever
 becomes a measured problem. These supersede the earlier one-active-
 session worker design and the GUI-respawn new-session interim.
+
+**Closing rulings (2026-08, owner)**: **always-explicit session
+addressing** — every session-scoped command names its target id (a
+deliberate wire break: no consumer keeps a silent default, so no
+"forgot to update" slips through); **`sessions_available` stays
+minimal** (a plain object — fields are cheap to add when needed);
+**one connection per backend process** for now. Design in the v3
+section below.
 
 ## v2 — ruled (2026-08; research recorded herein)
 
@@ -450,6 +458,82 @@ stopped-kind taxonomy replacing the `PromptCancelled` umbrella), 14
 (`run_failed` kinds), 16 (structural ack-before-events), 19 (the
 FRONTEND.md exit table as the one law); each flag's entry carries the
 settled shape.
+
+## v3 — the multi-session host (ruled 2026-08)
+
+Protocol version 3. The three closing rulings live in the research
+section above; the design they locked:
+
+- **Always-explicit session addressing.** Every session-scoped command
+  names its target id: `message { session, text }`,
+  `abort { session }`, `interaction_response { session, id, … }`. New
+  commands (below): `new_session`, `open_session { id }`.
+  Consequence: **the `"main"` stream alias is retired** — two names
+  for one stream is exactly the ambiguity this ruling exists to kill.
+  The stream stamp IS the session id; the boot session's id arrives in
+  `initialize_ack`, so every consumer knows every stream name before
+  its first event frame.
+- **The backend is a session host, not a session.** One resident host
+  loop routes commands to per-session workers — each worker is the
+  v1/v2 resident loop unchanged (exclusive session ownership, mailbox
+  + abort as shared leaves, pump to quiescence, replay answered at
+  idle) with its own mailbox, pump, abort, and interaction hub,
+  stamping its events with its session id. Runs in different sessions
+  proceed concurrently (the feature-in-one, review-in-another ruling);
+  one event channel, attribution by stamp. The termination doors are
+  the host's: polite close cancels every worker (close is not a
+  barrier — each drains first); frontend death aborts every in-flight
+  run through the shared watcher and the stream ends.
+- **Startup**: ack (boot facts) → startup notes → `sessions_available`
+  → the requested boot replay pass. Lazy loading holds: only the boot
+  session is loaded; the catalog is the store's header-only listing.
+  The announcement is queued synchronously at spawn, ahead of the
+  worker's first frame by construction. A listing failure is
+  `error { kind: session }` (stamped boot) and no announcement.
+- **`sessions_available { sessions: [{ id, created_at, entry_count }] }`**
+  — newest first, minimal by ruling. Every stored session appears,
+  including the boot's. A brand-new session (no file until its first
+  message) does not.
+- **`new_session {}` → `session_created { id, path }`** stamped with
+  the new id, followed by that session's selection notes (if any). No
+  replay — the session is empty. The host assembles it exactly like
+  the boot session (config, tools, preamble; the process's
+  `--model`/`--max-turns` apply). A build failure is
+  `error { kind: session }` stamped with the boot stream (the host's
+  primary voice; the command had no target id).
+- **`open_session { id }`** — loads the session if needed (the resume
+  path: full parse + repair) and streams a replay pass stamped with
+  the id; idempotent (an already-open session re-replays on request).
+  The pass itself is the acknowledgment. Failures (unknown id,
+  unreadable file) are `error { kind: session }` stamped with the
+  requested id. **Replay answers at the session's next idle beat** —
+  the worker owns the chain exclusively, so a background run finishes
+  first: a frontend switching to a running session sees the pass after
+  that run's terminal (stage-1 caveat, documented, revisited with
+  suffix streaming).
+- **Routing errors are stamped with the stream they concern** — the
+  targeted id for targeted commands, the boot stream for untargeted
+  ones. A `message`/`abort`/`interaction_response` naming an unknown
+  session yields `error { kind: session }` (commands stay total; the
+  shape is unchanged). `ErrorKind::SESSION = "session"` joins the
+  well-known kinds.
+- **The frontend keeps one active view** (the shipped GUI shape): the
+  transcript renders the active stream only. Switching is optimistic
+  (clear the view immediately) + `open_session` (the pass rebuilds
+  it) — the same full-re-render shape checkout will use, modular for a
+  future suffix stream. Per-session liveness (running, an attention
+  flag) rides the switcher rows; `error` events are always surfaced
+  (stage 1: into the active transcript — an attribution imperfection
+  accepted until multi-view).
+- Deferred with the machinery reserved: unload/LRU residency,
+  per-session seq + suffix streaming (write-behind gains it first),
+  `checkout` (stage 2; frontend refresh = fresh replay pass), `model`
+  (stage 3), subagents as child sessions (stage 4; `parent_session`
+  is the reserved linkage), background interaction surfacing.
+
+Staging: (1) this section — host + vocabulary + GUI command swap,
+deleting the respawn interim; (2) `checkout`; (3) `model`;
+(4) subagents.
 
 ## Open flags (numbering is fixed at creation; resolved numbers are
 skipped)

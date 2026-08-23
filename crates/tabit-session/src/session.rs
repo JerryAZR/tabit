@@ -310,6 +310,9 @@ pub(crate) struct Mailbox {
     /// notices). Attached by the resident worker at spawn.
     notices:
         std::sync::Arc<std::sync::OnceLock<tokio::sync::mpsc::WeakUnboundedSender<EventFrame>>>,
+    /// The stream stamp for those notices (the session's id), attached
+    /// with the channel.
+    notice_stream: std::sync::Arc<std::sync::OnceLock<StreamId>>,
     /// Wakes the resident worker when work arrives. One permit covers any
     /// number of pushes; the queue itself is the source of truth — the
     /// signal exists only so an empty queue can be waited on.
@@ -318,9 +321,14 @@ pub(crate) struct Mailbox {
 
 impl Mailbox {
     /// Attach the event channel for submit-time notices (the resident
-    /// worker, at spawn).
-    pub(crate) fn attach_notices(&self, events: tokio::sync::mpsc::UnboundedSender<EventFrame>) {
+    /// worker, at spawn), stamped with the session's stream.
+    pub(crate) fn attach_notices(
+        &self,
+        events: tokio::sync::mpsc::UnboundedSender<EventFrame>,
+        stream: StreamId,
+    ) {
         let _ = self.notices.set(events.downgrade());
+        let _ = self.notice_stream.set(stream);
     }
 
     /// A pump began: submissions from here until [`Self::run_ended`] are
@@ -364,8 +372,16 @@ impl Mailbox {
         else {
             return;
         };
+        // The stamp is attached with the channel; an unset stamp with a
+        // live channel is unreachable (one attach sets both).
+        #[allow(clippy::expect_used)]
+        let stream = self
+            .notice_stream
+            .get()
+            .expect("notice channel and stream attach together")
+            .clone();
         let _ = sender.send(EventFrame {
-            stream: StreamId::main(),
+            stream,
             event: SessionEvent::MessageQueued { id, text },
         });
     }
@@ -951,7 +967,7 @@ impl Session {
     }
 
     /// Attach the interaction hub. Called once by the session worker
-    /// ([`crate::endpoint::SessionHandle::spawn`]) when it takes
+    /// ([`crate::endpoint::spawn_worker`]) when it takes
     /// ownership — the hub is built over the worker's event channel,
     /// which exists only there.
     pub fn attach_interaction(&mut self, hub: InteractionHub) {
@@ -959,10 +975,15 @@ impl Session {
     }
 
     /// Point the mailbox's submit-time notices at the worker's event
-    /// channel (`message_queued` for live-run submissions). Called by the
-    /// session worker at spawn, alongside [`Self::attach_interaction`].
-    pub fn attach_mailbox_notices(&self, events: tokio::sync::mpsc::UnboundedSender<EventFrame>) {
-        self.mailbox.attach_notices(events);
+    /// channel (`message_queued` for live-run submissions), stamped with
+    /// the session's stream. Called by the session worker at spawn,
+    /// alongside [`Self::attach_interaction`].
+    pub fn attach_mailbox_notices(
+        &self,
+        events: tokio::sync::mpsc::UnboundedSender<EventFrame>,
+        stream: StreamId,
+    ) {
+        self.mailbox.attach_notices(events, stream);
     }
 
     /// Rewind the active chain by `turns` user messages: the leaf moves to

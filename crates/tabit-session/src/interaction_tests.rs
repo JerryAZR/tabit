@@ -68,11 +68,12 @@ fn interaction_count(frames: &[EventFrame]) -> usize {
 /// Drive one run to completion, answering every interaction request with
 /// `answer(id)`; returns the frames.
 async fn run_answering(
-    handle: &mut SessionHandle,
+    handle: &mut SessionHost,
     link: &crate::SessionCommandLink,
-    answer: impl Fn(&str) -> SessionCommand,
+    answer: impl Fn(&str, &str) -> SessionCommand,
 ) -> Vec<EventFrame> {
-    handle.message("go");
+    let session = handle.info().session_id.clone();
+    handle.message(&session, "go");
     let mut frames = Vec::new();
     loop {
         let frame = tokio::time::timeout(std::time::Duration::from_secs(5), handle.next_event())
@@ -80,7 +81,7 @@ async fn run_answering(
             .expect("the run must keep producing events (or end) within 5s");
         let Some(frame) = frame else { break };
         if let SessionEvent::InteractionRequested { id, .. } = &frame.event {
-            let command = answer(id);
+            let command = answer(&session, id);
             link.send(command);
         }
         if matches!(
@@ -107,11 +108,12 @@ async fn a_permission_card_answered_allow_runs_the_tool() {
     .dynamic_tool(gated_tool())
     .create("C:/w")
     .expect("session");
-    let mut handle = SessionHandle::spawn(session, Vec::new());
+    let mut handle = SessionHost::spawn(session, Vec::new(), plain_wiring(&store));
     let link = handle.command_link();
 
-    let frames = run_answering(&mut handle, &link, |id| {
+    let frames = run_answering(&mut handle, &link, |session, id| {
         SessionCommand::InteractionResponse {
+            session: session.to_string(),
             id: id.to_string(),
             option: Some("Allow".to_string()),
             text: None,
@@ -139,11 +141,12 @@ async fn a_permission_denial_skips_the_tool_in_band() {
     .dynamic_tool(gated_tool())
     .create("C:/w")
     .expect("session");
-    let mut handle = SessionHandle::spawn(session, Vec::new());
+    let mut handle = SessionHost::spawn(session, Vec::new(), plain_wiring(&store));
     let link = handle.command_link();
 
-    let frames = run_answering(&mut handle, &link, |id| {
+    let frames = run_answering(&mut handle, &link, |session, id| {
         SessionCommand::InteractionResponse {
+            session: session.to_string(),
             id: id.to_string(),
             option: Some("Deny".to_string()),
             text: Some("never in tests".to_string()),
@@ -179,11 +182,12 @@ async fn always_allow_remembers_across_calls_in_the_session() {
     .dynamic_tool(gated_tool())
     .create("C:/w")
     .expect("session");
-    let mut handle = SessionHandle::spawn(session, Vec::new());
+    let mut handle = SessionHost::spawn(session, Vec::new(), plain_wiring(&store));
     let link = handle.command_link();
 
-    let frames = run_answering(&mut handle, &link, |id| {
+    let frames = run_answering(&mut handle, &link, |session, id| {
         SessionCommand::InteractionResponse {
+            session: session.to_string(),
             id: id.to_string(),
             option: Some("Always allow".to_string()),
             text: None,
@@ -204,10 +208,11 @@ async fn always_allow_remembers_across_calls_in_the_session() {
         .dynamic_tool(gated_tool())
         .resume(std::path::Path::new(&path))
         .expect("resume");
-    let mut handle = SessionHandle::spawn(session, Vec::new());
+    let mut handle = SessionHost::spawn(session, Vec::new(), plain_wiring(&store));
     let link = handle.command_link();
-    let frames = run_answering(&mut handle, &link, |id| {
+    let frames = run_answering(&mut handle, &link, |session, id| {
         SessionCommand::InteractionResponse {
+            session: session.to_string(),
             id: id.to_string(),
             option: Some("Allow".to_string()),
             text: None,
@@ -234,11 +239,12 @@ async fn an_ask_user_tool_body_round_trips_the_question_and_answer() {
     .dynamic_tool(asking_tool())
     .create("C:/w")
     .expect("session");
-    let mut handle = SessionHandle::spawn(session, Vec::new());
+    let mut handle = SessionHost::spawn(session, Vec::new(), plain_wiring(&store));
     let link = handle.command_link();
 
-    let frames = run_answering(&mut handle, &link, |id| {
+    let frames = run_answering(&mut handle, &link, |session, id| {
         SessionCommand::InteractionResponse {
+            session: session.to_string(),
             id: id.to_string(),
             option: None,
             text: Some("main.rs".to_string()),
@@ -263,10 +269,10 @@ async fn frontend_death_with_a_card_open_winds_the_worker_down() {
         .dynamic_tool(gated_tool())
         .create("C:/w")
         .expect("session");
-    let mut handle = SessionHandle::spawn(session, Vec::new());
+    let mut handle = SessionHost::spawn(session, Vec::new(), plain_wiring(&store));
     let mut events = handle.take_events().expect("the event stream");
 
-    handle.message("run it");
+    handle.message(handle.info().session_id.as_str(), "run it");
     let mut saw_card = false;
     loop {
         let frame = tokio::time::timeout(std::time::Duration::from_secs(5), events.recv())
@@ -343,17 +349,19 @@ async fn abort_with_a_card_open_closes_the_question_totally() {
         .dynamic_tool(gated_tool())
         .create("C:/w")
         .expect("session");
-    let mut handle = SessionHandle::spawn(session, Vec::new());
+    let mut handle = SessionHost::spawn(session, Vec::new(), plain_wiring(&store));
     let link = handle.command_link();
 
-    handle.message("run it");
+    handle.message(handle.info().session_id.as_str(), "run it");
     let mut frames = Vec::new();
     let mut stale_id = None;
     while let Some(frame) = handle.next_event().await {
         if let SessionEvent::InteractionRequested { id, .. } = &frame.event {
             stale_id = Some(id.clone());
             // Abort with the card open: the question dies with the run.
-            link.send(SessionCommand::Abort);
+            link.send(SessionCommand::Abort {
+                session: handle.info().session_id.clone(),
+            });
         }
         if matches!(frame.event, SessionEvent::RunAborted { .. }) {
             handle.close_commands();
@@ -370,6 +378,7 @@ async fn abort_with_a_card_open_closes_the_question_totally() {
     // The racing answer is a total no-op: nothing hangs, nothing errors.
     if let Some(id) = stale_id {
         link.send(SessionCommand::InteractionResponse {
+            session: handle.info().session_id.clone(),
             id,
             option: Some("Allow".to_string()),
             text: None,
@@ -396,10 +405,11 @@ async fn two_open_cards_answered_in_reverse_order_both_run() {
         .dynamic_tool(gated_tool())
         .create("C:/w")
         .expect("session");
-    let mut handle = SessionHandle::spawn(session, Vec::new());
+    let mut handle = SessionHost::spawn(session, Vec::new(), plain_wiring(&store));
     let link = handle.command_link();
 
-    handle.message("go");
+    let session = handle.info().session_id.clone();
+    handle.message(&session, "go");
     let mut frames = Vec::new();
     let mut open: Vec<String> = Vec::new();
     while let Some(frame) = handle.next_event().await {
@@ -411,6 +421,7 @@ async fn two_open_cards_answered_in_reverse_order_both_run() {
         if open.len() == 2 {
             for id in open.iter().rev() {
                 link.send(SessionCommand::InteractionResponse {
+                    session: session.clone(),
                     id: id.clone(),
                     option: Some("Allow".to_string()),
                     text: None,

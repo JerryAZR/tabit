@@ -77,7 +77,10 @@ pub(crate) mod replay;
 mod session;
 mod store;
 
-pub use endpoint::{SessionCommandLink, SessionHandle, SessionInfo};
+pub use endpoint::{
+    OpenSessionSource, SessionCommandLink, SessionHost, SessionHostWiring, SessionInfo,
+    SessionSource,
+};
 pub use entry::{EntryKind, SESSION_FORMAT_VERSION, SessionEntry, SessionHeader};
 pub use error::SessionError;
 pub use interaction::InteractionHub;

@@ -3,9 +3,17 @@
 //! This module is deliberately framework-free (no egui types) and
 //! unit-tested — the ROADMAP "GUI design contract": the view is a
 //! projection of [`GuiState`], business logic never lives in it, and a
-//! future framework switch rewrites only the view layer. v1-wire
-//! caveats are marked `v2:` where the protocol's next version removes
-//! the heuristic.
+//! future framework switch rewrites only the view layer.
+//!
+//! Multi-session (protocol v3): the backend hosts many sessions and
+//! every event carries its session id as the stream stamp. The window
+//! keeps **one active view** — the transcript renders the active
+//! stream only. Switching is optimistic (clear the view immediately)
+//! and the backend's replay pass rebuilds it; per-session liveness
+//! (running, an attention flag) rides the switcher rows. Background
+//! events update liveness only — with one exception: `error` events
+//! always surface (stage 1: as a notice in the active transcript; an
+//! attribution imperfection accepted until multi-view).
 
 use std::collections::VecDeque;
 
@@ -58,6 +66,22 @@ pub struct Facts {
     /// fresh — the GUI always asks to resume, so false always means the
     /// note is warranted.
     pub resumed: bool,
+}
+
+/// One row of the session switcher: the backend's catalog (`sessions_
+/// available`, `session_created`) plus the liveness this window tracks
+/// from stamped events (background sessions keep running — the
+/// feature-in-one-review-in-another shape).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SessionRow {
+    pub id: String,
+    pub created_at: String,
+    pub entry_count: u64,
+    /// A run is live in this session (from its stamped events).
+    pub running: bool,
+    /// Something needs the user's eyes in this session (an error while
+    /// it was in the background); cleared by switching to it.
+    pub attention: bool,
 }
 
 /// One tool call the model issued, and whether its result arrived.
@@ -143,16 +167,25 @@ pub enum Group {
 pub struct GuiState {
     pub phase: Phase,
     pub facts: Option<Facts>,
+    /// The stream the transcript renders — the active session's id
+    /// (set at the handshake, at `session_created`, and by the user's
+    /// switch). Events stamped otherwise update liveness only.
+    pub active: String,
+    /// Every known session: the startup catalog plus sessions created
+    /// over this connection.
+    pub sessions: Vec<SessionRow>,
     pub transcript: Vec<Group>,
     /// Steers sent mid-run, waiting for the turn boundary — resolved
     /// exactly by id: `message_queued` announces the id at submit,
     /// `user_message`/`messages_discarded` carrying it drops the row.
     /// Idle sends never enter it (they drain immediately;
-    /// `user_message` is the acknowledgment).
+    /// `user_message` is the acknowledgment). View-local: switching
+    /// away drops the display (the backend keeps the queue).
     pub pending: VecDeque<PendingMessage>,
-    /// True from the first `user_message` of a run to its terminal.
+    /// True from the first `user_message` of a run to its terminal
+    /// (on the active stream).
     pub running: bool,
-    /// Open interaction cards, oldest first.
+    /// Open interaction cards, oldest first (the active session's).
     pub interactions: Vec<InteractionCard>,
     /// Sum of `run_finished` usage across runs.
     pub usage: Usage,
@@ -167,6 +200,8 @@ impl Default for GuiState {
         Self {
             phase: Phase::Connecting,
             facts: None,
+            active: String::new(),
+            sessions: Vec::new(),
             transcript: Vec::new(),
             pending: VecDeque::new(),
             running: false,
@@ -188,11 +223,14 @@ impl GuiState {
                 resumed,
             } => {
                 self.facts = Some(Facts {
-                    session_id,
+                    session_id: session_id.clone(),
                     session_path,
                     model,
                     resumed,
                 });
+                // The boot session's stream is its id; the transcript
+                // renders it.
+                self.active = session_id;
                 self.phase = Phase::Live;
                 // The GUI always spawns with `--continue`; a fresh
                 // start behind that ask gets one muted note (the pinned
@@ -259,6 +297,30 @@ impl GuiState {
         }
     }
 
+    /// The user picked a session in the switcher: switch the view
+    /// optimistically (clear it; the replay pass from the backend's
+    /// `open_session` rebuilds it — the full-re-render rule, pi-proven)
+    /// and seed liveness from the row. The caller sends the command.
+    pub fn open_session(&mut self, id: &str) {
+        let row = self.sessions.iter().find(|row| row.id == id);
+        let running = row.map(|row| row.running).unwrap_or(false);
+        if let Some(row) = self.sessions.iter_mut().find(|row| row.id == id) {
+            row.attention = false;
+        }
+        self.switch_view(id.to_string(), running);
+    }
+
+    /// Point the transcript at `id` with a clean slate. One path for
+    /// the switcher and `session_created` (a brand-new session is
+    /// empty — nothing replays, the clean slate IS its state).
+    fn switch_view(&mut self, id: String, running: bool) {
+        self.active = id;
+        self.transcript.clear();
+        self.pending.clear();
+        self.interactions.clear();
+        self.running = running;
+    }
+
     /// Record that a card's response was sent (optimistic close — a
     /// racing terminal already cleared it backend-side; total either
     /// way).
@@ -267,6 +329,10 @@ impl GuiState {
     }
 
     fn reduce_event(&mut self, frame: EventFrame) {
+        if frame.stream.as_str() != self.active {
+            self.reduce_background(frame.stream.as_str().to_string(), frame.event);
+            return;
+        }
         match frame.event {
             SessionEvent::UserMessage { text, entry_id } => {
                 // Resolve the pending row by id (the exact pairing);
@@ -419,10 +485,61 @@ impl GuiState {
                 self.interactions.clear();
                 self.push_notice(message, true);
             }
-            SessionEvent::ReplayStarted { .. } | SessionEvent::ReplayDone => {
-                // The pass's brackets: the replayed events between them
-                // flow through the arms above — that is the point (one
-                // set of arms renders history and live turns).
+            SessionEvent::ReplayStarted { .. } => {
+                // The structural reset: the pass that follows rebuilds
+                // the transcript from committed history, so anything the
+                // view held (a switch's optimism included) goes. The
+                // run flag is seeded at the switch and untouched here —
+                // an in-flight background run continues streaming after
+                // the pass and its terminal will settle the flag.
+                self.transcript.clear();
+                self.pending.clear();
+                self.interactions.clear();
+            }
+            SessionEvent::ReplayDone => {
+                // The pass ended; the transcript is whole (live traffic
+                // or quiescence follows).
+            }
+            SessionEvent::SessionsAvailable { sessions } => {
+                // The startup catalog: replace the rows, keeping the
+                // liveness this window already knows (background runs
+                // and attention flags survive a re-announcement).
+                self.sessions = sessions
+                    .into_iter()
+                    .map(|session| SessionRow {
+                        running: self
+                            .sessions
+                            .iter()
+                            .find(|row| row.id == session.id)
+                            .map(|row| row.running)
+                            .unwrap_or(false),
+                        attention: self
+                            .sessions
+                            .iter()
+                            .find(|row| row.id == session.id)
+                            .map(|row| row.attention)
+                            .unwrap_or(false),
+                        id: session.id,
+                        created_at: session.created_at,
+                        entry_count: session.entry_count,
+                    })
+                    .collect();
+            }
+            SessionEvent::SessionCreated { id, path } => {
+                // A brand-new session: empty (no replay comes), so the
+                // switch is complete the moment it happens.
+                self.sessions.push(SessionRow {
+                    id: id.clone(),
+                    created_at: String::new(),
+                    entry_count: 0,
+                    running: false,
+                    attention: false,
+                });
+                if let Some(facts) = self.facts.as_mut() {
+                    facts.session_id = id.clone();
+                    facts.session_path = path;
+                }
+                self.switch_view(id, false);
             }
             SessionEvent::ModelChanged {
                 provider,
@@ -464,6 +581,38 @@ impl GuiState {
                     item: item.to_string(),
                 });
             }
+        }
+    }
+
+    /// A stamped event for a session this window is not viewing:
+    /// liveness only, plus the one always-surface rule — `error`
+    /// conditions must never vanish with the view (they land in the
+    /// active transcript and mark the row).
+    fn reduce_background(&mut self, stream: String, event: SessionEvent) {
+        let row = self.sessions.iter_mut().find(|row| row.id == stream);
+        match event {
+            SessionEvent::UserMessage { .. } => {
+                if let Some(row) = row {
+                    row.running = true;
+                }
+            }
+            SessionEvent::RunFinished { .. } | SessionEvent::RunAborted { .. } => {
+                if let Some(row) = row {
+                    row.running = false;
+                }
+            }
+            SessionEvent::RunFailed { .. } => {
+                if let Some(row) = row {
+                    row.running = false;
+                }
+            }
+            SessionEvent::Error { message, .. } => {
+                if let Some(row) = row {
+                    row.attention = true;
+                }
+                self.push_notice(message, true);
+            }
+            _ => {}
         }
     }
 

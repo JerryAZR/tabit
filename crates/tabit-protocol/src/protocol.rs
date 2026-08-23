@@ -2,11 +2,12 @@
 //! stamped events it consumes, shared verbatim by every transport —
 //! typed values over in-process channels, JSON lines at a serialized
 //! edge. Commands are fire-and-forget with total semantics (a message
-//! steers the run in flight or starts one; abort stops), so this side of
-//! the protocol carries no request ids and has no rejection cases.
-//! Events carry a stream stamp because stream order alone cannot
-//! attribute concurrent producers; subagents will mint their own stream
-//! ids, which is why the stamp exists from day one.
+//! steers the run in flight or starts one; abort stops), so this side
+//! of the protocol carries no request ids and has no rejection cases.
+//! Session-scoped commands name their session explicitly (v3, ruled:
+//! no consumer keeps a silent default), and events carry a stream
+//! stamp — the session id — because stream order alone cannot
+//! attribute concurrent producers.
 
 use crate::events::SessionEvent;
 use crate::model::ModelSelection;
@@ -15,43 +16,46 @@ use serde::{Deserialize, Serialize};
 /// The protocol version this build speaks. Clients declare theirs in
 /// [`ClientFrame::Initialize`]; a mismatch rejects the connection at the
 /// handshake.
-pub const PROTOCOL_VERSION: u32 = 2;
+pub const PROTOCOL_VERSION: u32 = 3;
 
-/// Which stream produced an event. v1 has exactly one stream — the
-/// session's own — so every frame carries [`StreamId::main`]; sibling
-/// ids arrive with concurrent producers (subagents).
+/// Which session produced an event. The stamp is the session id
+/// itself (v3: the `"main"` alias is retired — one name per session);
+/// the boot session's id arrives in `initialize_ack`, so a consumer
+/// knows every stream name before its first event frame.
 #[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub struct StreamId(String);
 
 impl StreamId {
-    /// The session's own stream, as it appears on the wire.
-    pub const MAIN: &'static str = "main";
-
-    /// The session's own stream.
-    pub fn main() -> Self {
-        Self(Self::MAIN.to_string())
+    /// A session's stream: its session id.
+    pub fn new(id: impl Into<String>) -> Self {
+        Self(id.into())
     }
 
-    /// Whether this is the session's own stream.
-    pub fn is_main(&self) -> bool {
-        self.0 == Self::MAIN
+    /// The session id this stream names.
+    pub fn as_str(&self) -> &str {
+        &self.0
     }
 }
 
-/// An event stamped with the stream that produced it. This is the unit
+/// An event stamped with the session that produced it. This is the unit
 /// the backend channel carries and — serialized flat — the line a
-/// transport edge writes: `{"type":"text_delta","stream":"main",...}`.
+/// transport edge writes: `{"type":"text_delta","stream":"019…",...}`,
+/// where `stream` is the session id.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct EventFrame {
-    /// The stream that produced the event.
+    /// The session that produced the event (its id).
     pub stream: StreamId,
     /// The event itself; its `type` tag flattens next to `stream`.
     #[serde(flatten)]
     pub event: SessionEvent,
 }
 
-/// A frontend command, fire-and-forget. The behavior is total over the
-/// two session states:
+/// A frontend command, fire-and-forget. Session-scoped commands name
+/// their session explicitly (v3, ruled: a deliberate wire break — no
+/// consumer keeps a silent default, so nothing can "forget to
+/// update"); the boot session's id arrives in `initialize_ack`, other
+/// ids from `sessions_available`/`session_created`. The behavior is
+/// total over the two session states:
 ///
 /// | command               | idle                  | running                              |
 /// |-----------------------|-----------------------|--------------------------------------|
@@ -59,23 +63,32 @@ pub struct EventFrame {
 /// | `Abort`               | no-op                 | aborts; discards queued messages     |
 /// | `InteractionResponse` | no-op (logged)        | routes the answer by id to the asker |
 ///
-/// There is nothing to acknowledge and nothing to reject: outcomes are
-/// events (`user_message` for acceptance, the run terminals for results).
+/// Outcomes are events (`user_message` for acceptance, the run
+/// terminals for results); a command naming an unknown session yields
+/// `error { kind: session }` stamped with the id it named.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "type", rename_all = "snake_case")]
 pub enum SessionCommand {
-    /// A user message.
+    /// A user message for a session.
     Message {
+        /// The target session id.
+        session: String,
         /// The message text.
         text: String,
     },
-    /// Stop: abort the run in flight and discard any queued messages.
-    Abort,
+    /// Stop a session: abort the run in flight and discard any queued
+    /// messages.
+    Abort {
+        /// The target session id.
+        session: String,
+    },
     /// Answer a pending `interaction_request`. Total, like every command:
     /// at least one of `option`/`text`; a response for an unknown or dead
     /// request is a logged no-op (the asker went away with its run —
     /// terminals close everything).
     InteractionResponse {
+        /// The session whose request is being answered.
+        session: String,
         /// The request id being answered.
         id: String,
         /// The chosen option label, when answering by button.
@@ -84,6 +97,18 @@ pub enum SessionCommand {
         /// The free-text answer or explanation, when invited.
         #[serde(skip_serializing_if = "Option::is_none")]
         text: Option<String>,
+    },
+    /// Create a fresh session in this backend. The outcome is
+    /// `session_created { id, path }` (stamped with the new id) — or
+    /// `error { kind: session }` (stamped boot) if the session cannot
+    /// be built. Nothing replays; the session is empty.
+    NewSession,
+    /// Load a stored session (if needed) and replay it onto the event
+    /// channel, stamped with its id — the pass itself is the
+    /// acknowledgment. Idempotent: an already-open session re-replays.
+    OpenSession {
+        /// The stored session id to open.
+        id: String,
     },
 }
 

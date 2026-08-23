@@ -8,7 +8,7 @@ use std::time::Duration;
 use eframe::egui;
 
 use crate::backend::{self, Backend};
-use crate::reducer::{Group, GuiState, InMsg, Phase, Segment};
+use crate::reducer::{Group, GuiState, InMsg, Phase, Segment, SessionRow};
 use crate::theme;
 
 /// View-only state, expected to churn on the polish pass — kept out
@@ -23,12 +23,9 @@ struct Display {
     /// provisional until a group first renders — measured heights keep
     /// the scroll geometry stable, so the bottom stays where it is).
     heights: Vec<Option<f32>>,
-    /// The session the height cache belongs to; a new session (or a
-    /// respawn replaying a different chain) invalidates it.
-    session: Option<String>,
-    /// "New session" is armed after the first click (a second click
-    /// confirms; anything else disarms).
-    confirm_new: bool,
+    /// The stream the height cache belongs to; switching views (a
+    /// different transcript at the same indexes) invalidates it.
+    stream: String,
     /// Crash-report toggle.
     show_stderr: bool,
 }
@@ -52,18 +49,17 @@ impl TabitApp {
             cwd,
             tabit,
         };
-        app.start_backend(ctx, true);
+        app.start_backend(ctx);
         app
     }
 
-    /// Spawn the backend. `resume` reattaches to the newest session
-    /// (`--continue`); a fresh start is the GUI's "new session" path.
-    /// A spawn failure is the environment refusing — shown with the OS
+    /// Spawn the backend, booting the project's newest session. A
+    /// spawn failure is the environment refusing — shown with the OS
     /// reason and the reinstall hint.
-    fn start_backend(&mut self, ctx: egui::Context, resume: bool) {
+    fn start_backend(&mut self, ctx: egui::Context) {
         let cwd = self.cwd.clone();
         let tabit = self.tabit.clone();
-        match backend::spawn(cwd.as_deref(), tabit.as_deref(), resume, move || {
+        match backend::spawn(cwd.as_deref(), tabit.as_deref(), move || {
             ctx.request_repaint()
         }) {
             Ok(backend) => self.backend = Some(backend),
@@ -82,22 +78,32 @@ impl TabitApp {
     /// respawn re-reads config, auth, and sessions from disk (fix the
     /// file, click, the fresh handshake reflects it). The GUI never
     /// respawns on its own — every death is explained on screen, and
-    /// the user's click is the rate limiter.
+    /// the user's click is the rate limiter. Creating and switching
+    /// sessions are commands, never respawns (v3).
     fn restart(&mut self, ctx: egui::Context) {
         self.backend = None;
-        self.display.confirm_new = false;
-        self.start_backend(ctx, true);
+        self.state = GuiState::default();
+        self.start_backend(ctx);
     }
 
-    /// Start a brand-new session: drop the backend (its stdin closes —
-    /// the child aborts any in-flight run and winds down under the
-    /// death contract), reset the transcript, and spawn without
-    /// `--continue`. The old session's file stays on disk, untouched.
-    fn new_session(&mut self, ctx: egui::Context) {
-        self.backend = None;
-        self.display.confirm_new = false;
-        self.state = GuiState::default();
-        self.start_backend(ctx, false);
+    /// Create a brand-new session in the backend — a command; the old
+    /// sessions stay open behind it (switch back any time). The
+    /// `session_created` event switches the view.
+    fn new_session(&mut self) {
+        if let Some(backend) = &self.backend {
+            backend.new_session();
+        }
+    }
+
+    /// Switch the active view to a known session — optimistic clear,
+    /// then the backend's replay pass rebuilds the transcript.
+    /// Re-opening the active session is a refresh: the same clear +
+    /// replay path (idempotent by protocol design).
+    fn open_session(&mut self, id: String) {
+        self.state.open_session(&id);
+        if let Some(backend) = &self.backend {
+            backend.open_session(&id);
+        }
     }
 
     /// Send the input box — the one choke point. Text leaves the box only
@@ -113,19 +119,19 @@ impl TabitApp {
             return;
         }
         self.display.input.clear();
-        self.display.confirm_new = false;
         if let Some(backend) = &self.backend {
-            backend.send_message(&text);
+            let session = self.state.active.clone();
+            backend.send_message(&session, &text);
             self.state.message_sent(text);
         }
     }
 
     fn abort(&mut self) {
-        self.display.confirm_new = false;
         if let Some(backend) = &self.backend
             && self.state.running
         {
-            backend.abort();
+            let session = self.state.active.clone();
+            backend.abort(&session);
         }
     }
 
@@ -137,7 +143,8 @@ impl TabitApp {
             return;
         }
         if let Some(backend) = &self.backend {
-            backend.send_interaction_response(id, option, text);
+            let session = self.state.active.clone();
+            backend.send_interaction_response(&session, id, option, text);
             self.state.interaction_answered(id);
             self.display.answers.remove(id);
         }
@@ -235,16 +242,11 @@ impl eframe::App for TabitApp {
             }
             self.state.reduce(msg);
         }
-        // A different session means a different transcript at the same
-        // indexes (a respawn's replay, or the new-session action): the
+        // A different active stream means a different transcript at
+        // the same indexes (a switch's replay, or a new session): the
         // height cache belongs to the old one.
-        let session = self
-            .state
-            .facts
-            .as_ref()
-            .map(|facts| facts.session_id.clone());
-        if session != self.display.session {
-            self.display.session = session;
+        if self.state.active != self.display.stream {
+            self.display.stream = self.state.active.clone();
             self.display.heights.clear();
         }
     }
@@ -274,6 +276,41 @@ impl eframe::App for TabitApp {
                         egui::RichText::new("○").color(theme::MUTED)
                     };
                     ui.label(dot);
+                    // The session switcher: every known session (the
+                    // startup catalog plus anything created over this
+                    // connection), liveness dots included. Selecting a
+                    // row switches optimistically; the replay pass
+                    // rebuilds the view. "new session" is a command —
+                    // the old sessions stay open behind it.
+                    let selected = self
+                        .state
+                        .sessions
+                        .iter()
+                        .find(|row| row.id == self.state.active);
+                    let selected_label =
+                        selected.map_or_else(|| "session".to_string(), session_label);
+                    let mut picked = None;
+                    egui::ComboBox::from_id_salt("sessions")
+                        .selected_text(selected_label)
+                        .width(180.0)
+                        .show_ui(ui, |ui| {
+                            for row in &self.state.sessions {
+                                let label = if row.id == self.state.active {
+                                    format!("{} (this one)", session_label(row))
+                                } else {
+                                    session_label(row)
+                                };
+                                if ui.selectable_label(false, label).clicked() {
+                                    picked = Some(row.id.clone());
+                                }
+                            }
+                        });
+                    if let Some(id) = picked {
+                        self.open_session(id);
+                    }
+                    if ui.button("new session").clicked() {
+                        self.new_session();
+                    }
                     if let Some(facts) = &facts {
                         let selection = match &facts.model.thinking_level {
                             Some(level) => format!(
@@ -298,22 +335,6 @@ impl eframe::App for TabitApp {
                             ))
                             .color(theme::MUTED),
                         );
-                        // Two-click new session: the first click arms,
-                        // the second confirms — one accidental click
-                        // must not drop a live conversation. The old
-                        // session's file stays on disk, untouched.
-                        let (label, enabled) = if self.display.confirm_new {
-                            ("start new session?", true)
-                        } else {
-                            ("new session", !self.state.running)
-                        };
-                        if ui.add_enabled(enabled, egui::Button::new(label)).clicked() {
-                            if self.display.confirm_new {
-                                self.new_session(ctx.clone());
-                            } else {
-                                self.display.confirm_new = true;
-                            }
-                        }
                     });
                 }
                 Phase::Exited { clean, reason } => {
@@ -435,6 +456,25 @@ impl eframe::App for TabitApp {
             self_repaint(&ctx);
         }
     }
+}
+
+/// One switcher row's label: the id prefix, the size, and liveness
+/// marks — a run dot for live background runs, a bang for unseen
+/// errors.
+fn session_label(row: &SessionRow) -> String {
+    let prefix = row
+        .id
+        .get(..8)
+        .map(str::to_string)
+        .unwrap_or_else(|| row.id.clone());
+    let mut label = format!("{prefix} · {} entries", row.entry_count);
+    if row.running {
+        label.push_str(" ●");
+    }
+    if row.attention {
+        label.push_str(" !");
+    }
+    label
 }
 
 /// Estimated rendered height of one group — the virtualization

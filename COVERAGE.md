@@ -31,8 +31,14 @@ Defensive ("unreachable") arms follow a stricter rule:
 - The whole suite runs offline (cassette replay + test doubles). Doctests
   are NOT included in these numbers (`llvm-cov` was run without
   `--doctests`); they are gated by the same CI run.
-- Current state: **94.27% lines / 94.99% regions** (3,320 of 57,978
-  lines; re-measured after the GUI walking skeleton — the drop from
+- Current state: **93.59% lines / 94.25% regions** (3,988 of 62,239
+  lines; re-measured after the v3 multi-session host — the endpoint
+  worker became `SessionHost` routing to per-session workers at 97.4%
+  lines, protocol v3 (session-addressed commands,
+  `new_session`/`open_session`, the startup catalog, `"main"`
+  retired for stream = session id), and the GUI grew the switcher and
+  command-driven new-session over a single backend. Before that:
+  re-measured after the GUI walking skeleton — the drop from
   95.56/96.15 is the `tabit-gui` crate's justified gaps, below; the
   rest of the workspace is unchanged. Before that: re-measured after
   the `tabit-protocol` extraction — the
@@ -224,7 +230,7 @@ rather than skipping, reachable or not.)
 
 ## tabit-gui (walking skeleton)
 
-- `reducer.rs` — **covered** (91.4% lines; the residue is partial
+- `reducer.rs` — **covered** (90.5% lines; the residue is partial
   field combinations in `add` and `Facts` paths).
 - `app.rs`, `theme.rs`, `main.rs` — **justified**: egui rendering,
   the eframe event loop, and window construction have no offline
@@ -311,3 +317,40 @@ rather than skipping, reachable or not.)
   ack → pass → live-run ordering, whole-text history, and the
   no-replay default. The replay-before-work arm priority is exercised
   by the bridge test's back-to-back initialize+message.
+
+## v3 — the multi-session host (2026-08)
+
+- `endpoint.rs` host — **covered** at 97.4% lines: catalog at startup
+  (presence, lazy loading, the boot's absence before materialization),
+  two-session routing by id (each answer on its own stamp), new/open
+  lifecycle (creation frame ordering, notes on the new stream,
+  idempotent re-replay, unknown-open failure), targeted-command
+  errors stamped with the targeted id, catalog failure as the carrier
+  with no announcement, and the close-not-a-barrier drain (the
+  dedicated worker token's race — a worker observing `cancelled`
+  before the host routed the pre-close queue — was caught by exactly
+  these tests). Residue: the host loop's command-channel `None` arm
+  (every sender dropped while the receiver lives — the in-process
+  handle-drop door; the stdio edge, the real consumer, always closes
+  through `close_commands`, which IS covered) and the worker's
+  `event_tx.closed()` arm below.
+- The worker's `event_tx.closed()` arm (frontend dropped its entire
+  handle): unchanged from the pre-v3 justification — observable only
+  by dropping the receiver the test itself reads events from.
+- `json.rs` bridge on v3 — **covered**: the ack-aware harness (tests
+  learn the boot id from the ack, the honest client shape the
+  always-explicit ruling forces), sessions_available placement
+  (between ack and replay), a two-session wire round trip
+  (`new_session` → `session_created` → per-stamp messages →
+  `open_session` re-replay), unknown-session errors on the wire, and
+  `abort_all` at EOF (every EOF-ending test).
+- GUI reducer multi-session — **covered**: catalog population,
+  background liveness (running dot, attention on background errors,
+  never rendering into the transcript), optimistic switch + replay
+  rebuild, `session_created` switch with facts, the bracket reset.
+- `main.rs` wiring closures (`host_wiring`, create/open) — the create
+  path is exercised through the tabit crate's bridge tests only when
+  `new_session` is driven; the production closures' failure surfaces
+  are the endpoint-tested lifecycle arms. **Justified**: the closures
+  are thin re-assemblies of `assemble`, whose every path (config,
+  resume, degradation) is covered in `main.rs`'s own suite.

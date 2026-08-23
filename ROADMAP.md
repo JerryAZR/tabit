@@ -231,7 +231,9 @@ The known deviation from pi's subprocess model:
   only reconsidered if everything else lands and a terminal frontend is
   still wanted. The GUI is an egui app (eframe shell, egui style theming)
   speaking the item-7 protocol over the existing stdio edge: it spawns
-  `tabit --json` as a child process, one backend per session. Process
+  one `tabit --json` child process — the multi-session host (PROTOCOL.md
+  v3): sessions are created, opened, and switched by channel commands,
+  never by process tricks (the GUI-respawn interim is deleted). Process
   separation is the point, twice over: internal errors panic by doctrine,
   and the GUI must survive a backend crash (restart the session, keep UI
   state); and it is exactly the vscode-remote shape — SSH remote is the

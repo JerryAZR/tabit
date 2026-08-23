@@ -38,12 +38,12 @@ use tabit_config::{AuthConfig, TabitConfig};
 use tabit_protocol::SessionCommand;
 use tabit_session::SessionEvent;
 use tabit_session::{
-    ModelRegistry, ModelSelection, Session, SessionBuilder, SessionHandle, SessionStore,
-    build_system_prompt,
+    ModelRegistry, ModelSelection, Session, SessionBuilder, SessionHost, SessionHostWiring,
+    SessionStore, build_system_prompt,
 };
 use tabit_tools::{dynamic, dynamic_contextual};
 
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 struct Args {
     print_prompt: Option<String>,
     session: Option<PathBuf>,
@@ -68,7 +68,8 @@ usage: tabit -p <PROMPT>                  print mode: one prompt, one run
 
 bare `tabit` or `tabit <path>` launches the GUI detached (vscode-style:
 the terminal is free immediately and the GUI survives its close). The
-GUI spawns its own `tabit --json` backend per session.
+GUI spawns one `tabit --json` backend and drives it over the protocol
+(many sessions live in one backend).
 
 print mode: Esc aborts the running turn (line-buffered stdin: Esc then
 Enter). JSON mode: LF-JSONL frames — initialize, then message/abort
@@ -335,6 +336,9 @@ fn print_event(event: &SessionEvent) {
         SessionEvent::ReplayStarted { .. }
         | SessionEvent::ReplayDone
         | SessionEvent::ModelChanged { .. } => {}
+        // The host's session catalog and creations are frontend
+        // concerns; print mode is a single-session consumer.
+        SessionEvent::SessionsAvailable { .. } | SessionEvent::SessionCreated { .. } => {}
         // Non-terminal error conditions (startup degradations,
         // persistence): stderr is the human surface in print mode —
         // stdout stays the answer channel.
@@ -587,12 +591,13 @@ fn run() -> Result<i32, String> {
                 Err(detail) => return json_startup_failure(&detail),
             };
             print_banner(&session);
+            let wiring = host_wiring(&args, &config, &auth, SessionStore::project_default());
             let runtime = tokio::runtime::Builder::new_current_thread()
                 .enable_all()
                 .build()
                 .map_err(|e| e.to_string())?;
             Ok(runtime.block_on(async {
-                let handle = SessionHandle::spawn(session, startup_notes);
+                let handle = SessionHost::spawn(session, startup_notes, wiring);
                 json::serve(
                     handle,
                     std::io::BufReader::new(std::io::stdin()),
@@ -659,23 +664,28 @@ fn print_mode(
     // otherwise). Real key handling arrives with the GUI.
     let armed: ArmedSlot = std::sync::Arc::default();
 
-    // The message goes through the session actor — the same path JSON
-    // mode drives — and the stream is read to its end: the actor returns
+    // The message goes through the session host — the same path JSON
+    // mode drives — and the stream is read to its end: the host returns
     // the session before closing, so closing stats cover this run.
     let outcome = tokio::runtime::Builder::new_current_thread()
         .enable_all()
         .build()
         .map_err(|e| e.to_string())?
         .block_on(async {
-            let mut handle = SessionHandle::spawn(session, startup_notes);
+            let wiring = host_wiring(args, config, auth, SessionStore::project_default());
+            let mut handle = SessionHost::spawn(session, startup_notes, wiring);
+            let boot = handle.info().session_id.clone();
             {
                 let link = handle.command_link();
                 let armed = armed.clone();
+                let boot = boot.clone();
                 std::thread::spawn(move || {
                     use std::io::BufRead as _;
                     for line in std::io::stdin().lock().lines().by_ref().flatten() {
                         if line.starts_with('\x1b') {
-                            link.send(SessionCommand::Abort);
+                            link.send(SessionCommand::Abort {
+                                session: boot.clone(),
+                            });
                             return;
                         }
                         // Answers apply to the oldest open card (FIFO —
@@ -683,7 +693,7 @@ fn print_mode(
                         // concurrent permission gates make that ordinary).
                         let card = { lock_armed(&armed).pop_front() };
                         if let Some((id, options)) = card {
-                            link.send(parse_answer(&id, &options, &line));
+                            link.send(parse_answer(&boot, &id, &options, &line));
                             let waiting = lock_armed(&armed).len();
                             if waiting > 0 {
                                 eprintln!("--- {waiting} more open question(s), keep answering");
@@ -699,7 +709,7 @@ fn print_mode(
                 session_path: handle.info().session_path.clone(),
                 stats: None,
             };
-            handle.message(prompt);
+            handle.message(&boot, prompt);
             handle.close_commands();
             while let Some(frame) = handle.next_event().await {
                 match &frame.event {
@@ -813,8 +823,13 @@ mod interaction_answer_tests {
         ]
     }
 
-    fn answer(id: &str, options: &[String], line: &str) -> (Option<String>, Option<String>) {
-        match parse_answer(id, options, line) {
+    fn answer(
+        session: &str,
+        id: &str,
+        options: &[String],
+        line: &str,
+    ) -> (Option<String>, Option<String>) {
+        match parse_answer(session, id, options, line) {
             SessionCommand::InteractionResponse { option, text, .. } => (option, text),
             other => panic!("unexpected command: {other:?}"),
         }
@@ -823,11 +838,11 @@ mod interaction_answer_tests {
     #[test]
     fn numbered_buttons_select_by_index_with_optional_reason() {
         assert_eq!(
-            answer("i1", &options(), "1"),
+            answer("s1", "i1", &options(), "1"),
             (Some("Allow".to_string()), None)
         );
         assert_eq!(
-            answer("i2", &options(), "3 never delete build dirs"),
+            answer("s1", "i2", &options(), "3 never delete build dirs"),
             (
                 Some("Deny".to_string()),
                 Some("never delete build dirs".to_string())
@@ -838,25 +853,26 @@ mod interaction_answer_tests {
     #[test]
     fn free_text_cards_take_the_whole_line() {
         assert_eq!(
-            answer("i3", &[], "use python"),
+            answer("s1", "i3", &[], "use python"),
             (None, Some("use python".to_string()))
         );
     }
 
     #[test]
     fn empty_or_unknown_answers_fail_closed_with_nothing() {
-        assert_eq!(answer("i4", &options(), ""), (None, None));
-        assert_eq!(answer("i5", &options(), "   "), (None, None));
+        assert_eq!(answer("s1", "i4", &options(), ""), (None, None));
+        assert_eq!(answer("s1", "i5", &options(), "   "), (None, None));
         // Out-of-range numbers carry no option: the backend's default
         // (deny for permission) applies rather than a wrong button.
-        assert_eq!(answer("i6", &options(), "9"), (None, None));
+        assert_eq!(answer("s1", "i6", &options(), "9"), (None, None));
     }
 }
 
-fn parse_answer(id: &str, options: &[String], line: &str) -> SessionCommand {
+fn parse_answer(session: &str, id: &str, options: &[String], line: &str) -> SessionCommand {
     let line = line.trim();
     if line.is_empty() {
         return SessionCommand::InteractionResponse {
+            session: session.to_string(),
             id: id.to_string(),
             option: None,
             text: None,
@@ -864,6 +880,7 @@ fn parse_answer(id: &str, options: &[String], line: &str) -> SessionCommand {
     }
     if options.is_empty() {
         return SessionCommand::InteractionResponse {
+            session: session.to_string(),
             id: id.to_string(),
             option: None,
             text: Some(line.to_string()),
@@ -879,9 +896,67 @@ fn parse_answer(id: &str, options: &[String], line: &str) -> SessionCommand {
         .and_then(|n| options.get(n.checked_sub(1)?))
         .map(String::as_str);
     SessionCommand::InteractionResponse {
+        session: session.to_string(),
         id: id.to_string(),
         option: option.map(str::to_string),
         text: (!reason.is_empty()).then(|| reason.to_string()),
+    }
+}
+
+/// The host's session wiring: how `new_session`/`open_session` build
+/// sessions — the same assembly as the boot (config, tools, preamble),
+/// behind closures so tabit-session stays free of front-facing wiring.
+/// The process's `--model`/`--max-turns` apply to sessions created
+/// later; `open_session` resolves by stored id and resumes that file.
+fn host_wiring(
+    args: &Args,
+    config: &Arc<TabitConfig>,
+    auth: &Arc<AuthConfig>,
+    store: SessionStore,
+) -> SessionHostWiring {
+    let fresh_args = Args {
+        session: None,
+        continue_newest: false,
+        ..args.clone()
+    };
+    let fresh_config = config.clone();
+    let fresh_auth = auth.clone();
+    let fresh_store = store.clone();
+    let open_args = args.clone();
+    let open_config = config.clone();
+    let open_auth = auth.clone();
+    let open_store = store.clone();
+    SessionHostWiring {
+        store,
+        create: Arc::new(move || {
+            assemble(
+                &fresh_args,
+                &fresh_config,
+                &fresh_auth,
+                &fresh_store,
+                ContinueMiss::StartFresh,
+            )
+        }),
+        open: Arc::new(move |session_id: &str| {
+            let path = open_store
+                .list()
+                .map_err(|e| e.to_string())?
+                .into_iter()
+                .find(|summary| summary.id == session_id)
+                .ok_or_else(|| format!("no stored session with id `{session_id}`"))?
+                .path;
+            let args = Args {
+                session: Some(path),
+                ..open_args.clone()
+            };
+            assemble(
+                &args,
+                &open_config,
+                &open_auth,
+                &open_store,
+                ContinueMiss::Fail,
+            )
+        }),
     }
 }
 

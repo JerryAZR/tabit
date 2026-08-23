@@ -1,16 +1,28 @@
 use super::*;
 use tabit_protocol::{EventFrame, SessionEvent, StreamId};
 
+/// The session the test's [`ack`] boots; every frame from it carries
+/// this stamp (v3: the stream is the session id).
+const BOOT: &str = "s1";
+
 fn event(event: SessionEvent) -> InMsg {
     InMsg::Event(Box::new(EventFrame {
-        stream: StreamId::main(),
+        stream: StreamId::new(BOOT),
+        event,
+    }))
+}
+
+/// An event from some other session (a background stream).
+fn from(stream: &str, event: SessionEvent) -> InMsg {
+    InMsg::Event(Box::new(EventFrame {
+        stream: StreamId::new(stream),
         event,
     }))
 }
 
 fn ack() -> InMsg {
     InMsg::Ack {
-        session_id: "s1".to_string(),
+        session_id: BOOT.to_string(),
         session_path: "sessions/s1.jsonl".to_string(),
         model: tabit_protocol::ModelSelection::new("local", "m"),
         resumed: true,
@@ -588,4 +600,217 @@ fn tool_results_land_on_their_calls_with_content_and_failure() {
     let result = row.result.as_ref().expect("the result landed");
     assert!(result.failed);
     assert!(result.content.contains("status 3"), "{}", result.content);
+}
+
+#[test]
+fn the_startup_catalog_populates_the_switcher() {
+    let mut state = GuiState::default();
+    state.reduce(ack());
+    state.reduce(event(SessionEvent::SessionsAvailable {
+        sessions: vec![
+            tabit_protocol::AvailableSession {
+                id: "s2".to_string(),
+                created_at: "2026-08-22T10:00:00Z".to_string(),
+                entry_count: 7,
+            },
+            tabit_protocol::AvailableSession {
+                id: BOOT.to_string(),
+                created_at: "2026-08-22T11:00:00Z".to_string(),
+                entry_count: 3,
+            },
+        ],
+    }));
+    assert_eq!(state.sessions.len(), 2);
+    let boot = state
+        .sessions
+        .iter()
+        .find(|row| row.id == BOOT)
+        .expect("the boot session is a row");
+    assert_eq!(boot.entry_count, 3);
+    assert!(!boot.running, "nothing is running yet");
+}
+
+#[test]
+fn background_events_update_liveness_but_never_the_transcript() {
+    let mut state = GuiState::default();
+    state.reduce(ack());
+    state.reduce(event(SessionEvent::SessionsAvailable {
+        sessions: vec![tabit_protocol::AvailableSession {
+            id: "s2".to_string(),
+            created_at: "2026-08-22T10:00:00Z".to_string(),
+            entry_count: 7,
+        }],
+    }));
+
+    // A run starts in the background session: the active view is
+    // untouched, the row goes live.
+    state.reduce(from(
+        "s2",
+        SessionEvent::UserMessage {
+            text: "review this".to_string(),
+            entry_id: "e9".to_string(),
+        },
+    ));
+    state.reduce(from(
+        "s2",
+        SessionEvent::TextDelta {
+            turn_id: "t9".to_string(),
+            text: "looking".to_string(),
+        },
+    ));
+    assert!(state.transcript.is_empty(), "background text never renders");
+    assert!(!state.running, "the active session is not the one running");
+    assert!(
+        state
+            .sessions
+            .iter()
+            .find(|row| row.id == "s2")
+            .unwrap()
+            .running
+    );
+
+    // An error in the background always surfaces: a notice here, an
+    // attention mark on the row.
+    state.reduce(from(
+        "s2",
+        SessionEvent::error_persist_degraded(4, "disk full"),
+    ));
+    assert!(
+        state
+            .transcript
+            .iter()
+            .any(|group| matches!(group, Group::Notice { error: true, .. })),
+        "background errors never vanish with the view"
+    );
+    assert!(
+        state
+            .sessions
+            .iter()
+            .find(|row| row.id == "s2")
+            .unwrap()
+            .attention
+    );
+
+    // The run ends in the background; switching there clears the mark.
+    state.reduce(from(
+        "s2",
+        SessionEvent::RunFinished {
+            output: String::new(),
+            usage: Usage::default(),
+        },
+    ));
+    assert!(
+        !state
+            .sessions
+            .iter()
+            .find(|row| row.id == "s2")
+            .unwrap()
+            .running
+    );
+}
+
+#[test]
+fn switching_is_optimistic_and_the_replay_pass_rebuilds() {
+    let mut state = GuiState::default();
+    state.reduce(ack());
+    state.reduce(user("first question"));
+    state.reduce(delta("first answer"));
+    state.reduce(event(SessionEvent::SessionsAvailable {
+        sessions: vec![tabit_protocol::AvailableSession {
+            id: "s2".to_string(),
+            created_at: "2026-08-22T10:00:00Z".to_string(),
+            entry_count: 7,
+        }],
+    }));
+
+    // The user picks s2: the view clears immediately (optimistic), the
+    // open_session command follows out-of-band.
+    state.open_session("s2");
+    assert_eq!(state.active, "s2");
+    assert!(state.transcript.is_empty(), "the old view is gone at once");
+    assert!(state.pending.is_empty());
+
+    // The pass arrives on s2's stream: the reset bracket, then the
+    // rebuilt transcript — same arms as live traffic.
+    state.reduce(from("s2", SessionEvent::ReplayStarted { total: 3 }));
+    state.reduce(from(
+        "s2",
+        SessionEvent::UserMessage {
+            text: "older question".to_string(),
+            entry_id: "e1".to_string(),
+        },
+    ));
+    state.reduce(from(
+        "s2",
+        SessionEvent::TextDelta {
+            turn_id: "t1".to_string(),
+            text: "older answer".to_string(),
+        },
+    ));
+    state.reduce(from("s2", SessionEvent::ReplayDone));
+    assert_eq!(state.transcript.len(), 2);
+    assert!(
+        matches!(state.transcript.first(), Some(Group::User { text }) if text == "older question")
+    );
+
+    // A stray event for the old stream is background now.
+    state.reduce(delta("late first-session text"));
+    assert_eq!(
+        state.transcript.len(),
+        2,
+        "the un-viewed stream does not render"
+    );
+}
+
+#[test]
+fn session_created_switches_to_the_empty_new_session() {
+    let mut state = GuiState::default();
+    state.reduce(ack());
+    state.reduce(user("work in the boot session"));
+
+    state.reduce(event(SessionEvent::SessionCreated {
+        id: "s9".to_string(),
+        path: "sessions/20260822_s9.jsonl".to_string(),
+    }));
+    // The brand-new session is empty — no replay will come; the switch
+    // alone is the whole state, and the facts follow.
+    assert_eq!(state.active, "s9");
+    assert!(state.transcript.is_empty());
+    assert_eq!(state.facts.as_ref().unwrap().session_id, "s9");
+    assert_eq!(
+        state.facts.as_ref().unwrap().session_path,
+        "sessions/20260822_s9.jsonl"
+    );
+    assert_eq!(state.sessions.last().unwrap().id, "s9");
+
+    // Its first live message streams into the fresh view.
+    state.reduce(from(
+        "s9",
+        SessionEvent::UserMessage {
+            text: "clean start".to_string(),
+            entry_id: "n1".to_string(),
+        },
+    ));
+    assert!(state.running);
+    assert!(
+        matches!(state.transcript.first(), Some(Group::User { text }) if text == "clean start")
+    );
+}
+
+#[test]
+fn a_replay_bracket_resets_the_view_structurally() {
+    // Even mid-history (a checkout's pass, stage 2) the bracket is the
+    // rebuild point: prior view content cannot survive it.
+    let mut state = GuiState::default();
+    state.reduce(ack());
+    state.reduce(user("one"));
+    state.reduce(delta("answer one"));
+    state.reduce(event(SessionEvent::ReplayStarted { total: 1 }));
+    assert!(
+        state.transcript.is_empty(),
+        "the bracket discards the old view"
+    );
+    state.reduce(user("the branched history's message"));
+    state.reduce(event(SessionEvent::ReplayDone));
+    assert_eq!(state.transcript.len(), 1);
 }

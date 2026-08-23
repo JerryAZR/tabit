@@ -95,7 +95,7 @@ mod tests {
         respond: impl FnOnce(String) -> Option<(Option<String>, Option<String>)>,
     ) -> (ToolCallAction, InteractionHub, Rx) {
         let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
-        let hub = InteractionHub::new(tx.clone());
+        let hub = InteractionHub::new(tx.clone(), tabit_protocol::StreamId::new("s"));
         // The hub holds a weak sender by design (the termination
         // contract); this harness stands in for the worker's pump, so the
         // strong sender must live as long as the ask.
@@ -156,7 +156,7 @@ mod tests {
         assert_eq!(first, ToolCallAction::run());
         // Session memory: the next gated call runs with no card opened.
         let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
-        let remembering_hub = InteractionHub::new(tx);
+        let remembering_hub = InteractionHub::new(tx, tabit_protocol::StreamId::new("s"));
         remembering_hub.always_allow("bash");
         let action = gate("bash", "{}", Some(&remembering_hub)).await;
         assert_eq!(action, ToolCallAction::run());

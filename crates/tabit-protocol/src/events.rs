@@ -183,6 +183,26 @@ pub enum SessionEvent {
     },
     /// The replay pass ended: every event it announced has been emitted.
     ReplayDone,
+    /// The session catalog, announced once at startup right after the
+    /// ack's startup notes: every stored session, newest first, from a
+    /// header-only listing (lazy loading — only the boot session is
+    /// loaded). Minimal by ruling; a plain object fields can grow
+    /// into. A brand-new session has no file yet and is absent.
+    SessionsAvailable {
+        /// Every stored session, newest first.
+        sessions: Vec<AvailableSession>,
+    },
+    /// A `new_session` command succeeded: a fresh session exists in
+    /// this backend, empty (nothing replays). Stamped with the new
+    /// session's id; its selection notes, if any, follow on the same
+    /// stream.
+    SessionCreated {
+        /// The new session's id.
+        id: String,
+        /// The new session's file path (materializes at its first
+        /// user message).
+        path: String,
+    },
     /// The active model changed (a `ModelChange` log entry replayed, or
     /// — from slice 3 — a `model` command applied).
     ModelChanged {
@@ -233,6 +253,19 @@ pub struct InteractionOption {
     pub description: Option<String>,
 }
 
+/// One stored session in the startup `sessions_available` catalog.
+/// Minimal by ruling (fields grow when a consumer needs them); the
+/// header-only listing keeps startup cheap with many sessions.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct AvailableSession {
+    /// The session id — also its event stream stamp.
+    pub id: String,
+    /// Creation time (RFC 3339, from the file header).
+    pub created_at: String,
+    /// Entries in the session file (all branches and markers).
+    pub entry_count: u64,
+}
+
 /// One discarded queued message, handed back by
 /// [`SessionEvent::MessagesDiscarded`].
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -272,6 +305,17 @@ impl SessionEvent {
         }
     }
 
+    /// A `session`-kind error: a session command failed (an unknown
+    /// target id, an unreadable file, a session that could not be
+    /// built, a failed catalog listing).
+    pub fn error_session(message: impl Into<String>) -> Self {
+        Self::Error {
+            kind: ErrorKind::SESSION.to_string(),
+            message: message.into(),
+            pending: None,
+        }
+    }
+
     /// A `persist_degraded`-kind error: records are pending on disk.
     pub fn error_persist_degraded(pending: u64, message: impl Into<String>) -> Self {
         Self::Error {
@@ -291,6 +335,10 @@ impl ErrorKind {
     /// A model preference degraded or a `model` command failed
     /// validation.
     pub const MODEL: &'static str = "model";
+    /// A session command failed: an unknown target id, an unreadable
+    /// session file, a session that could not be built, a failed
+    /// catalog listing.
+    pub const SESSION: &'static str = "session";
     /// A `checkout` command targeted a missing entry or not a cut point.
     pub const CHECKOUT: &'static str = "checkout";
     /// Persistence degraded: this many records are pending on disk.

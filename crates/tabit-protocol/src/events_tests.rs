@@ -71,6 +71,25 @@ fn events_round_trip_through_json() {
         SessionEvent::error_model("default_model `gone` is not usable"),
         SessionEvent::ReplayStarted { total: 7 },
         SessionEvent::ReplayDone,
+        SessionEvent::SessionsAvailable {
+            sessions: vec![
+                AvailableSession {
+                    id: "0197".to_string(),
+                    created_at: "2026-08-22T10:00:00Z".to_string(),
+                    entry_count: 14,
+                },
+                AvailableSession {
+                    id: "0196".to_string(),
+                    created_at: "2026-08-21T09:00:00Z".to_string(),
+                    entry_count: 0,
+                },
+            ],
+        },
+        SessionEvent::SessionCreated {
+            id: "0198".to_string(),
+            path: "C:/w/.tabit/sessions/20260822_0198.jsonl".to_string(),
+        },
+        SessionEvent::error_session("no session with id `0195`"),
         SessionEvent::ModelChanged {
             provider: "p".to_string(),
             model: "m".to_string(),
@@ -99,6 +118,25 @@ fn events_round_trip_through_json() {
         serde_json::to_string(&SessionEvent::error_persist_degraded(3, "pending"))
             .expect("serialize"),
         r#"{"type":"error","kind":"persist_degraded","message":"pending","pending":3}"#
+    );
+    assert_eq!(
+        serde_json::to_string(&SessionEvent::SessionsAvailable {
+            sessions: vec![AvailableSession {
+                id: "0197".to_string(),
+                created_at: "2026-08-22T10:00:00Z".to_string(),
+                entry_count: 14,
+            }]
+        })
+        .expect("serialize"),
+        r#"{"type":"sessions_available","sessions":[{"id":"0197","created_at":"2026-08-22T10:00:00Z","entry_count":14}]}"#
+    );
+    assert_eq!(
+        serde_json::to_string(&SessionEvent::SessionCreated {
+            id: "0198".to_string(),
+            path: "C:/w/s.jsonl".to_string()
+        })
+        .expect("serialize"),
+        r#"{"type":"session_created","id":"0198","path":"C:/w/s.jsonl"}"#
     );
     // The wire spelling of the brackets and the truncation warning.
     assert_eq!(

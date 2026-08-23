@@ -52,24 +52,20 @@ fn tabit_bin(launcher_provided: Option<&Path>) -> PathBuf {
     PathBuf::from("tabit")
 }
 
-/// Spawn a backend in `cwd` (the project directory). `resume` adds
-/// `--continue`: returning users get their newest session; an empty
-/// store is absorbed backend-side into a fresh start (the ack's
-/// `resumed: false` carries the note — the pinned startup contract).
-/// `resume: false` starts a brand-new session (the GUI's "new" action).
-/// `repaint` is called after every message so the UI wakes immediately.
-#[allow(clippy::fn_params_excessive_bools)]
+/// Spawn a backend in `cwd` (the project directory), booting the
+/// newest session (`--continue`): returning users get their newest
+/// session; an empty store is absorbed backend-side into a fresh start
+/// (the ack's `resumed: false` carries the note — the pinned startup
+/// contract). Creating and switching sessions are channel commands
+/// (protocol v3) — never respawns. `repaint` is called after every
+/// message so the UI wakes immediately.
 pub fn spawn(
     cwd: Option<&Path>,
     tabit: Option<&Path>,
-    resume: bool,
     repaint: impl Fn() + Send + 'static,
 ) -> std::io::Result<Backend> {
     let mut command = Command::new(tabit_bin(tabit));
-    command.arg("--json");
-    if resume {
-        command.arg("--continue");
-    }
+    command.arg("--json").arg("--continue");
     command
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
@@ -211,24 +207,50 @@ impl Backend {
         msgs
     }
 
-    /// Send a message (steers a live run, starts one when idle).
-    pub fn send_message(&self, text: &str) {
+    /// Send a message to a session (steers a live run, starts one when
+    /// idle).
+    pub fn send_message(&self, session: &str, text: &str) {
         let _ = self.writer.send(to_wire_line(&SessionCommand::Message {
+            session: session.to_string(),
             text: text.to_string(),
         }));
     }
 
-    /// Abort the live run (and clear the queue backend-side).
-    pub fn abort(&self) {
-        let _ = self.writer.send(to_wire_line(&SessionCommand::Abort));
+    /// Abort a session's live run (and clear its queue backend-side).
+    pub fn abort(&self, session: &str) {
+        let _ = self.writer.send(to_wire_line(&SessionCommand::Abort {
+            session: session.to_string(),
+        }));
     }
 
-    /// Answer an interaction request. At least one of `option`/`text`
-    /// (empty string counts as absent); a stale id is a backend no-op.
-    pub fn send_interaction_response(&self, id: &str, option: Option<&str>, text: Option<&str>) {
+    /// Create a fresh session in the backend (the outcome arrives as
+    /// `session_created`).
+    pub fn new_session(&self) {
+        let _ = self.writer.send(to_wire_line(&SessionCommand::NewSession));
+    }
+
+    /// Open (load if needed, then replay) a stored session; the pass
+    /// that follows is the acknowledgment.
+    pub fn open_session(&self, id: &str) {
+        let _ = self.writer.send(to_wire_line(&SessionCommand::OpenSession {
+            id: id.to_string(),
+        }));
+    }
+
+    /// Answer an interaction request of a session. At least one of
+    /// `option`/`text` (empty string counts as absent); a stale id is
+    /// a backend no-op.
+    pub fn send_interaction_response(
+        &self,
+        session: &str,
+        id: &str,
+        option: Option<&str>,
+        text: Option<&str>,
+    ) {
         let _ = self
             .writer
             .send(to_wire_line(&SessionCommand::InteractionResponse {
+                session: session.to_string(),
                 id: id.to_string(),
                 option: option.filter(|o| !o.is_empty()).map(str::to_string),
                 text: text.filter(|t| !t.trim().is_empty()).map(str::to_string),
