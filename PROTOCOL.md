@@ -333,7 +333,14 @@ histories).
   events → `replay_done`), reusing the startup replay machinery. The
   GUI drops its own groups after `base_id` and applies the pass. When
   the target is an ancestor (the common rewind) the suffix is empty and
-  nothing follows. **Entry ids are born early enough to be useful.**
+  nothing follows.
+  *(Stage 2, 2026-08, superseded in part — see the v3 section: the
+  command is session-addressed; the frontend update is full re-render
+  (`base_id: null`), the suffix stream demoted to a reserved cheap
+  upgrade; mid-run checkouts park for the pause point instead of
+  erroring; and the mailbox clear is watermark-scoped — what was
+  submitted before the checkout — not everything.)*
+  **Entry ids are born early enough to be useful.**
   Uniform rule: every context entry's id appears on the wire on the
   event that announces it, and turn-scoped events carry `turn_id` so
   the frontend maps deltas to growing widgets. `user_message { text,
@@ -570,12 +577,61 @@ section above; the design they locked:
     shared list.
 - Deferred with the machinery reserved: unload/LRU residency,
   per-session seq + suffix streaming (write-behind gains it first),
-  `checkout` (stage 2; frontend refresh = fresh replay pass), `model`
-  (stage 3), subagents as child sessions (stage 4; `parent_session`
-  is the reserved linkage), background interaction surfacing.
+  `model` (stage 3), subagents as child sessions (stage 4;
+  `parent_session` is the reserved linkage), background interaction
+  surfacing.
+
+### Stage 2 — `checkout` (ruled 2026-08; shipped)
+
+- **`checkout { session, entry_id }`** — session-addressed like every
+  session-scoped command (always-explicit). The target is any entry in
+  the session's file, on or off the active chain — an off-chain target
+  is a branch switch; the next append branches from the target
+  (`git checkout <hash>`, not "rewind n").
+- **Pause-point semantics — wait, never reject.** Idle: executes
+  immediately. A run in flight: the checkout parks in the session's
+  worker and executes at the run's terminal (the pause point), before
+  the next batch drains — no implicit abort. Abort-then-checkout
+  composes race-free for the same reason: abort acts at once, the
+  parked checkout executes at the pause point however the run ended.
+  `model` (stage 3) will join this class. This replaces the v2
+  "idle-only, frontend holds the command" convention: the backend
+  never errors on timing, so no frontend needs to time it.
+- **Ordering under any interleaving.** Checkouts drain in wire order
+  at the pause point, each validated against the file as it stands
+  when it executes — a target is any file entry, so consecutive
+  checkouts never collide (the later one moves the leaf again). A
+  failing checkout (no such entry) is a no-op plus
+  `error { kind: checkout }` stamped with the session; nothing is
+  discarded for it. Messages submit to the mailbox under a monotonic
+  arrival seq; each checkout carries the watermark minted at route
+  time (host-loop order = wire order) and discards exactly what was
+  submitted **before it** — the flag-6 before/after rule applied
+  uniformly to clear sites. Messages submitted after the checkout are
+  input for the new branch: they stay queued and the pump runs them
+  against the rewound chain. So `m, C, m', C', m''` → C discards `m`,
+  C' discards `m'`, and `m''` runs on the final rewound chain (C''s
+  target — the last checkout wins). One guard makes this
+  honest mid-run: the pump yields between batches when a checkout is
+  parked (a post-checkout message can never start a batch on the old
+  chain).
+- **Frontend update: full re-render (ruled 2026-08).** The success
+  sequence is `messages_discarded` (only if anything was discarded) →
+  `checked_out { entry_id, base_id: null }` → the replay brackets
+  (`replay_started { total }` → the rewound chain as finalized events
+  → `replay_done`) — the same rebuild path as `open_session`'s switch
+  pass. `base_id` stays on the wire as the reserved suffix-upgrade
+  seam: `null` = drop everything and rebuild (today's only mode);
+  a future `Some(id)` = keep through `id`, apply the (smaller) pass —
+  the streamed-suffix optimization, adopted only if a measured
+  problem, reusing the same bracket shape.
+- `checkout` joins the routing errors rule: an unknown session yields
+  `error { kind: session }` stamped with the named id. A mid-run
+  `open_session` pass for the same session waits for the same pause
+  point (worker single-emitter exclusivity orders pass vs live).
 
 Staging: (1) this section — host + vocabulary + GUI command swap,
-deleting the respawn interim; (2) `checkout`; (3) `model`;
+deleting the respawn interim; (2) `checkout` ✓; (3) `model`;
 (4) subagents.
 
 ## Open flags (numbering is fixed at creation; resolved numbers are

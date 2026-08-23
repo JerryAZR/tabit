@@ -1960,3 +1960,34 @@ async fn replay_re_emits_the_chain_with_live_ids_and_whole_texts() -> Result<(),
     std::fs::remove_dir_all(store.dir()).ok();
     Ok(())
 }
+
+#[tokio::test]
+async fn a_paused_pump_yields_between_batches_and_keeps_the_queue() -> Result<(), SessionError> {
+    let store = temp_store("pump-pause");
+    let factory = Factory::new(vec![text_turn("a"), text_turn("b")]);
+    let mut session = factory.into_builder(store.clone()).create("C:/w")?;
+
+    // The worker's pause seam: a pump told not to start another batch
+    // returns after the current one, leaving later messages queued (a
+    // parked checkout must rewind before they run).
+    session.submit("one");
+    let first = session.pump_with_pause(&mut |_| {}, || false).await;
+    assert_eq!(first.output, "a");
+    assert_eq!(
+        first
+            .events
+            .iter()
+            .filter(|event| matches!(event, SessionEvent::RunFinished { .. }))
+            .count(),
+        1,
+        "exactly one run in the paused pump's summary"
+    );
+
+    // The message submitted after the paused pump returned still runs —
+    // the pause yields control, it does not consume the queue.
+    session.submit("two");
+    let second = session.pump(&mut |_| {}).await;
+    assert_eq!(second.output, "b");
+    std::fs::remove_dir_all(store.dir()).ok();
+    Ok(())
+}

@@ -6,8 +6,9 @@
 //! ([`Session::submit`]) — and are drained by [`Session::pump`]: as the
 //! next run's initial prompt, or — while a run is in flight — as a steer
 //! injected at the next turn boundary. Because the mailbox outlives runs,
-//! a message submitted at any instant is never lost; only abort discards
-//! queued messages. Each pump iteration is one outer loop: the user
+//! a message submitted at any instant is never lost; only the clear
+//! sites discard queued messages (abort, checkout — each only what was
+//! submitted before it). Each pump iteration is one outer loop: the user
 //! message is recorded, the rig-agent engine runs the turns (with a
 //! recorder hook persisting every completed assistant turn and tool
 //! result as it happens), and the item stream is folded into the
@@ -278,6 +279,11 @@ impl SessionBuilder {
 /// `messages_discarded`.
 pub(crate) struct QueuedMessage {
     pub(crate) id: String,
+    /// Arrival order under the mailbox's monotonic counter — what a
+    /// checkout's watermark compares against (the clear sites discard
+    /// by submission order, not queue position: drains shrink the
+    /// queue mid-run, so position alone cannot say what arrived when).
+    pub(crate) seq: u64,
     pub(crate) message: Message,
 }
 
@@ -292,10 +298,15 @@ impl QueuedMessage {
 /// [`Session::pump`] — as the next run's initial prompt or, while a run
 /// is in flight, as a steer injected at the next turn boundary. The
 /// mailbox outlives runs, so a message submitted at any instant is never
-/// lost; only abort discards queued messages.
+/// lost; only the clear sites discard (abort, checkout — each only what
+/// was submitted before it, the before/after rule both share).
 #[derive(Clone, Default)]
 pub(crate) struct Mailbox {
     queue: std::sync::Arc<std::sync::Mutex<std::collections::VecDeque<QueuedMessage>>>,
+    /// Monotonic arrival counter — the order submissions happened,
+    /// independent of drains shrinking the queue (the watermark a
+    /// checkout mints at route time compares against this).
+    seq: std::sync::Arc<std::sync::atomic::AtomicU64>,
     /// Entry ids of steers the engine drained this run, in drain order —
     /// the fold pairs them with the run's `Steer` items (the engine has
     /// no use for tabit entry ids, so the pairing lives here; drain order
@@ -353,6 +364,7 @@ impl Mailbox {
     pub(crate) fn push(&self, message: Message) {
         let queued = QueuedMessage {
             id: crate::ids::new_entry_id(),
+            seq: self.seq.fetch_add(1, std::sync::atomic::Ordering::Relaxed),
             message,
         };
         // The live snapshot races the pump's own start/end — both orders
@@ -400,6 +412,31 @@ impl Mailbox {
     /// `messages_discarded` where its event flow allows).
     pub(crate) fn clear(&self) -> Vec<QueuedMessage> {
         lock(&self.queue).drain(..).collect()
+    }
+
+    /// The arrival watermark: every message submitted so far carries a
+    /// seq below this. A checkout mints it at route time (wire order)
+    /// and discards exactly that prefix later, at its pause point.
+    pub(crate) fn arrival_watermark(&self) -> u64 {
+        self.seq.load(std::sync::atomic::Ordering::Relaxed)
+    }
+
+    /// Checkout's clear: discard the messages submitted before
+    /// `watermark`, keep the rest (they are input for the new branch).
+    /// Returns the discarded pairs for the `messages_discarded` notice.
+    pub(crate) fn discard_up_to(&self, watermark: u64) -> Vec<QueuedMessage> {
+        let mut queue = lock(&self.queue);
+        let mut dropped = Vec::new();
+        let mut kept = std::collections::VecDeque::new();
+        for queued in queue.drain(..) {
+            if queued.seq < watermark {
+                dropped.push(queued);
+            } else {
+                kept.push_back(queued);
+            }
+        }
+        *queue = kept;
+        dropped
     }
 
     /// Abort semantics: discard everything queued now (nothing more may
@@ -471,10 +508,22 @@ impl MailboxHandle {
         self.mailbox.is_empty()
     }
 
+    /// The arrival watermark the host mints onto a checkout at route
+    /// time (wire order — see [`Mailbox::arrival_watermark`]).
+    pub(crate) fn arrival_watermark(&self) -> u64 {
+        self.mailbox.arrival_watermark()
+    }
+
     /// The staged discard pairs, taken (a run conclusion, or the
     /// worker's idle beat after an idle abort).
     pub(crate) fn take_staged_discards(&self) -> Vec<QueuedMessage> {
         self.mailbox.take_staged_discards()
+    }
+
+    /// Checkout's clear, handle side — see
+    /// [`Mailbox::discard_up_to`].
+    pub(crate) fn discard_up_to(&self, watermark: u64) -> Vec<QueuedMessage> {
+        self.mailbox.discard_up_to(watermark)
     }
 
     /// The work signal the resident worker waits on.
@@ -596,6 +645,20 @@ impl Session {
     /// aborted run discards the remaining queue and stops. The drive
     /// loop for frontends ([`crate::SessionHandle`]).
     pub async fn pump(&mut self, on_event: &mut (dyn FnMut(SessionEvent) + Send)) -> RunSummary {
+        self.pump_with_pause(on_event, || true).await
+    }
+
+    /// [`Session::pump`] with a between-batches pause seam: when
+    /// `may_start_another` answers false after a batch, the pump
+    /// returns instead of draining again. The worker's use: a checkout
+    /// parked during a run must execute (and rewind the chain) before
+    /// any queued survivor starts the next batch on the old chain —
+    /// the caller re-checks its own parking lot and pumps again.
+    pub(crate) async fn pump_with_pause(
+        &mut self,
+        on_event: &mut (dyn FnMut(SessionEvent) + Send),
+        mut may_start_another: impl FnMut() -> bool,
+    ) -> RunSummary {
         // A pump may drain at any instant from here to its end: submit
         // acknowledgments switch to `message_queued` (PROTOCOL.md v2).
         self.mailbox.run_started();
@@ -617,6 +680,9 @@ impl Session {
             add_usage(&mut total.usage, &run.usage);
             total.events.extend(run.events);
             total.outcome = run.outcome;
+            if !may_start_another() {
+                break;
+            }
         }
         self.mailbox.run_ended();
         total

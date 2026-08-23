@@ -135,6 +135,21 @@ impl TabitApp {
         }
     }
 
+    /// Checkout the active session at a transcript row's entry — the
+    /// interim branch/rewind affordance (polish is a non-goal): "cut
+    /// here" on a user message. Always sent over a Live channel; the
+    /// backend parks it if a run is live, so there is no local gating
+    /// to get wrong (FRONTEND.md §7).
+    fn checkout(&mut self, entry_id: String) {
+        if self.state.phase != Phase::Live {
+            return;
+        }
+        if let Some(backend) = &self.backend {
+            let session = self.state.active.clone();
+            backend.checkout(&session, &entry_id);
+        }
+    }
+
     /// Answer one card — the send choke point for interactions (the
     /// `send` counterpart). The card closes optimistically; a stale id
     /// is a backend no-op.
@@ -426,6 +441,10 @@ impl eframe::App for TabitApp {
         egui::CentralPanel::default().show(ui, |ui| {
             let line_h = ui.text_style_height(&egui::TextStyle::Body);
             let width = ui.available_width();
+            // A row's rewind click, collected during the render pass and
+            // acted on after it (the closure cannot borrow `self` for
+            // the send).
+            let mut checkout_target: Option<String> = None;
             egui::ScrollArea::vertical()
                 .auto_shrink([false, false])
                 .stick_to_bottom(true)
@@ -445,7 +464,9 @@ impl eframe::App for TabitApp {
                         if visible {
                             ui.add_space(theme::ROW_GAP);
                             let top = ui.cursor().top();
-                            render_group(ui, group);
+                            if let Some(entry_id) = render_group(ui, group) {
+                                checkout_target = Some(entry_id);
+                            }
                             let rendered = ui.cursor().top() - top;
                             #[allow(clippy::indexing_slicing)]
                             {
@@ -465,6 +486,9 @@ impl eframe::App for TabitApp {
                         );
                     }
                 });
+            if let Some(entry_id) = checkout_target {
+                self.checkout(entry_id);
+            }
         });
 
         // 5. Keep frames coming while anything is in flight.
@@ -512,7 +536,7 @@ fn estimate_height(group: &Group, width: f32, line_h: f32) -> f32 {
         text.len().div_ceil(chars_per_line).max(1) as f32
     };
     match group {
-        Group::User { text } => text_lines(text) * line_h,
+        Group::User { text, .. } => text_lines(text) * line_h,
         Group::Turn(turn) => {
             let mut lines = 0.0;
             for segment in &turn.segments {
@@ -533,13 +557,28 @@ fn self_repaint(ctx: &egui::Context) {
     ctx.request_repaint_after(Duration::from_millis(100));
 }
 
-fn render_group(ui: &mut egui::Ui, group: &Group) {
+/// Render one transcript group. `Some(entry_id)` means the row's
+/// rewind button was clicked — the caller sends the checkout.
+fn render_group(ui: &mut egui::Ui, group: &Group) -> Option<String> {
     match group {
-        Group::User { text } => {
+        Group::User { text, entry_id } => {
+            let mut checkout = None;
             ui.horizontal(|ui| {
                 ui.add_space(theme::ROW_INSET);
                 ui.label(egui::RichText::new(format!("you: {text}")).color(theme::USER_TEXT));
+                // The interim checkout affordance: "cut here" (the
+                // chain ends at this message; the next prompt branches
+                // from it). Always enabled — the backend parks a
+                // mid-run checkout at the pause point.
+                if ui
+                    .button(egui::RichText::new("⟲").small())
+                    .on_hover_text("checkout here — rewind the session to this message")
+                    .clicked()
+                {
+                    checkout = Some(entry_id.clone());
+                }
             });
+            checkout
         }
         Group::Turn(turn) => {
             // Arrival order, exactly as the wire interleaved it.
@@ -589,6 +628,7 @@ fn render_group(ui: &mut egui::Ui, group: &Group) {
                     }
                 }
             }
+            None
         }
         Group::Notice { text, error } => {
             let color = if *error { theme::ERROR } else { theme::MUTED };
@@ -596,6 +636,7 @@ fn render_group(ui: &mut egui::Ui, group: &Group) {
                 ui.add_space(theme::ROW_INSET);
                 ui.label(egui::RichText::new(text.clone()).color(color));
             });
+            None
         }
         Group::Native { item } => {
             ui.horizontal(|ui| {
@@ -606,6 +647,7 @@ fn render_group(ui: &mut egui::Ui, group: &Group) {
                         .small(),
                 );
             });
+            None
         }
     }
 }

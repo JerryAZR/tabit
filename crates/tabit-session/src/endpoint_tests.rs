@@ -1244,3 +1244,422 @@ async fn a_replay_request_for_a_running_session_answers_after_its_terminal() {
     drain(&mut handle).await;
     std::fs::remove_dir_all(store.dir()).ok();
 }
+
+// ---------------------------------------------------------------------------
+// Checkout (PROTOCOL.md v3 stage 2): pause-point semantics, the
+// watermark discard rule, and the full-re-render pass.
+
+/// The entry id of a user message, by text, from frames collected so
+/// far (live frames — the id a frontend would learn from the event).
+fn entry_id_of(frames: &[EventFrame], text: &str) -> String {
+    frames
+        .iter()
+        .find_map(|frame| match &frame.event {
+            SessionEvent::UserMessage {
+                text: seen,
+                entry_id,
+            } if seen == text => Some(entry_id.clone()),
+            _ => None,
+        })
+        .unwrap_or_else(|| panic!("no user_message for {text:?} among {} frames", frames.len()))
+}
+
+/// Read frames into `frames` until one matches `stop` (it is included).
+async fn collect_until(
+    handle: &mut SessionHost,
+    frames: &mut Vec<EventFrame>,
+    stop: fn(&SessionEvent) -> bool,
+) {
+    loop {
+        let frame = tokio::time::timeout(Duration::from_secs(5), handle.next_event())
+            .await
+            .expect("timed out waiting for the awaited event")
+            .expect("the stream ended before the awaited event");
+        let hit = stop(&frame.event);
+        frames.push(frame);
+        if hit {
+            return;
+        }
+    }
+}
+
+/// The user texts of one checkout's pass: from its `checked_out` to
+/// the last `replay_done` (no other replay is requested here).
+fn bracket_users(frames: &[EventFrame], checked_at: usize) -> Vec<String> {
+    let done_at = frames[checked_at..]
+        .iter()
+        .position(|frame| matches!(frame.event, SessionEvent::ReplayDone))
+        .expect("the pass closes");
+    user_texts(&frames[checked_at..checked_at + done_at + 1])
+}
+
+/// The user texts of the session file's active chain — log truth.
+fn chain_users(handle: &SessionHost, store: &SessionStore) -> Vec<String> {
+    let loaded = store
+        .open_path(std::path::PathBuf::from(&handle.info().session_path).as_path())
+        .expect("reload");
+    loaded
+        .chain
+        .iter()
+        .filter_map(|entry| match &entry.kind {
+            crate::EntryKind::UserMessage { message } => Some(crate::session::user_text(message)),
+            _ => None,
+        })
+        .collect()
+}
+
+#[tokio::test]
+async fn checkout_rewinds_replays_and_branches_the_next_prompt() {
+    let store = temp_store("endpoint-checkout-idle");
+    let session = Factory::new(vec![
+        text_turn("first answer"),
+        text_turn("second answer"),
+        text_turn("branch answer"),
+    ])
+    .into_builder(store.clone())
+    .create("C:/w")
+    .expect("session");
+    let mut handle = SessionHost::spawn(session, Vec::new(), plain_wiring(&store));
+    let id = boot_id(&handle);
+
+    // Two exchanges, each to its terminal; then an idle checkout at
+    // the FIRST user entry.
+    let mut frames = Vec::new();
+    handle.message(&id, "one");
+    collect_until(&mut handle, &mut frames, terminal).await;
+    handle.message(&id, "two");
+    collect_until(&mut handle, &mut frames, terminal).await;
+    let first_entry = entry_id_of(&frames, "one");
+    handle.checkout(&id, &first_entry);
+    collect_until(&mut handle, &mut frames, |e| {
+        matches!(e, SessionEvent::ReplayDone)
+    })
+    .await;
+
+    // The success sequence: checked_out (the target, base_id null —
+    // full re-render) then a pass bracketing the rewound chain. The
+    // second exchange is off the chain now.
+    let checked_at = frames
+        .iter()
+        .position(|frame| {
+            matches!(&frame.event, SessionEvent::CheckedOut { entry_id, base_id }
+            if entry_id == &first_entry && base_id.is_none())
+        })
+        .expect("checked_out with the target and a null base_id");
+    assert_eq!(bracket_users(&frames, checked_at), vec!["one"]);
+
+    // The next prompt branches from the target: it runs, and the log's
+    // chain holds exactly the rewound prefix plus the new branch.
+    handle.message(&id, "branch");
+    frames.extend(drain(&mut handle).await);
+    assert_eq!(
+        finished_outputs(&frames),
+        vec!["first answer", "second answer", "branch answer"]
+    );
+    assert_eq!(chain_users(&handle, &store), vec!["one", "branch"]);
+    std::fs::remove_dir_all(store.dir()).ok();
+}
+
+#[tokio::test]
+async fn a_checkout_during_a_run_parks_until_the_terminal() {
+    let store = temp_store("endpoint-checkout-park");
+    let session = Factory::new(vec![
+        tool_turn("t1", "slow"),
+        text_turn("done"),
+        text_turn("branch answer"),
+    ])
+    .into_builder(store.clone())
+    .dynamic_tool(slow_tool())
+    .create("C:/w")
+    .expect("session");
+    let mut handle = SessionHost::spawn(session, Vec::new(), plain_wiring(&store));
+    let id = boot_id(&handle);
+
+    handle.message(&id, "go");
+    let mut frames = Vec::new();
+    let mut sent = false;
+    let mut saw_checked_out = false;
+    let mut go_entry = None;
+    while let Some(frame) = handle.next_event().await {
+        match &frame.event {
+            SessionEvent::UserMessage { text, entry_id } if text == "go" => {
+                go_entry = Some(entry_id.clone());
+            }
+            SessionEvent::ToolCall { .. } if !sent => {
+                // Provably mid-run (the slow tool is executing): a
+                // steer, then the checkout — both under the run.
+                sent = true;
+                handle.message(&id, "also this");
+                handle.checkout(&id, go_entry.clone().expect("go's entry id"));
+            }
+            SessionEvent::CheckedOut { .. } => saw_checked_out = true,
+            _ => {}
+        }
+        let done = matches!(frame.event, SessionEvent::ReplayDone);
+        frames.push(frame);
+        if saw_checked_out && done {
+            break;
+        }
+    }
+
+    // The run ran to its own terminal — the checkout never aborts —
+    // and the parked checkout executed at that pause point.
+    let terminal_at = frames
+        .iter()
+        .position(|frame| terminal(&frame.event))
+        .expect("the run's terminal");
+    assert!(matches!(
+        &frames[terminal_at].event,
+        SessionEvent::RunFinished { .. }
+    ));
+    let checked_at = frames
+        .iter()
+        .position(|frame| matches!(frame.event, SessionEvent::CheckedOut { .. }))
+        .expect("the parked checkout executed");
+    assert!(
+        terminal_at < checked_at,
+        "the checkout waits for the terminal"
+    );
+    // The steer drained into the run (its user_message precedes the
+    // terminal) — the ledger closed there; the rewind then takes it
+    // off the chain with the run's answer. Nothing was discarded.
+    assert_eq!(
+        user_texts(&frames[..terminal_at + 1]),
+        vec!["go", "also this"]
+    );
+    assert!(
+        !frames
+            .iter()
+            .any(|frame| matches!(frame.event, SessionEvent::MessagesDiscarded { .. }))
+    );
+    assert_eq!(bracket_users(&frames, checked_at), vec!["go"]);
+
+    // The session is fully alive after the pause point: the next
+    // prompt branches from the target.
+    handle.message(&id, "branch");
+    frames.extend(drain(&mut handle).await);
+    assert_eq!(finished_outputs(&frames), vec!["done", "branch answer"]);
+    assert_eq!(chain_users(&handle, &store), vec!["go", "branch"]);
+    std::fs::remove_dir_all(store.dir()).ok();
+}
+
+#[tokio::test]
+async fn checkout_discards_what_was_submitted_before_it_and_keeps_the_rest() {
+    let store = temp_store("endpoint-checkout-watermark");
+    let session = Factory::new(vec![text_turn("first"), text_turn("second")])
+        .into_builder(store.clone())
+        .create("C:/w")
+        .expect("session");
+    let mut handle = SessionHost::spawn(session, Vec::new(), plain_wiring(&store));
+    let id = boot_id(&handle);
+
+    // One exchange to its terminal, so the worker is provably back in
+    // its select wait when the burst routes (the sends are
+    // synchronous; the host routes all three without yielding, and
+    // the worker wakes with the checkout ready — the biased select
+    // answers it before the work signal).
+    let mut frames = Vec::new();
+    handle.message(&id, "go");
+    collect_until(&mut handle, &mut frames, terminal).await;
+    let entry = entry_id_of(&frames, "go");
+
+    handle.message(&id, "queued before");
+    handle.checkout(&id, &entry);
+    handle.message(&id, "after");
+    frames.extend(drain(&mut handle).await);
+
+    // Wire order held: the before-message died by the checkout's
+    // clear (never history — the ledger closes with the discard), the
+    // after-message survived to run on the rewound chain.
+    let discards: Vec<Vec<String>> = frames
+        .iter()
+        .filter_map(|frame| match &frame.event {
+            SessionEvent::MessagesDiscarded { messages } => {
+                Some(messages.iter().map(|m| m.text.clone()).collect())
+            }
+            _ => None,
+        })
+        .collect();
+    assert_eq!(discards, vec![vec!["queued before"]]);
+    assert!(!frames.iter().any(|frame| matches!(
+        &frame.event,
+        SessionEvent::UserMessage { text, .. } if text == "queued before"
+    )));
+    let checked_at = frames
+        .iter()
+        .position(|frame| matches!(frame.event, SessionEvent::CheckedOut { .. }))
+        .expect("checked_out");
+    assert_eq!(bracket_users(&frames, checked_at), vec!["go"]);
+    let done_at = checked_at
+        + frames[checked_at..]
+            .iter()
+            .position(|frame| matches!(frame.event, SessionEvent::ReplayDone))
+            .expect("the pass closes");
+    let after_at = frames
+        .iter()
+        .position(|frame| {
+            matches!(
+                &frame.event,
+                SessionEvent::UserMessage { text, .. } if text == "after"
+            )
+        })
+        .expect("the survivor ran");
+    assert!(
+        after_at > done_at,
+        "the survivor's user_message follows the pass"
+    );
+    assert_eq!(finished_outputs(&frames), vec!["first", "second"]);
+    assert_eq!(chain_users(&handle, &store), vec!["go", "after"]);
+    std::fs::remove_dir_all(store.dir()).ok();
+}
+
+#[tokio::test]
+async fn consecutive_checkouts_execute_in_order_and_the_last_one_wins() {
+    let store = temp_store("endpoint-checkout-order");
+    let session = Factory::new(vec![text_turn("a1"), text_turn("b1"), text_turn("c1")])
+        .into_builder(store.clone())
+        .create("C:/w")
+        .expect("session");
+    let mut handle = SessionHost::spawn(session, Vec::new(), plain_wiring(&store));
+    let id = boot_id(&handle);
+
+    let mut frames = Vec::new();
+    handle.message(&id, "one");
+    collect_until(&mut handle, &mut frames, terminal).await;
+    handle.message(&id, "two");
+    collect_until(&mut handle, &mut frames, terminal).await;
+    let first = entry_id_of(&frames, "one");
+    let second = entry_id_of(&frames, "two");
+
+    // A target is any entry in the file: rewinding past the second
+    // exchange does not invalidate it — the second checkout is a
+    // branch switch. Both execute, in wire order; the last wins.
+    handle.checkout(&id, &first);
+    handle.checkout(&id, &second);
+    frames.extend(drain(&mut handle).await);
+
+    let checked: Vec<String> = frames
+        .iter()
+        .filter_map(|frame| match &frame.event {
+            SessionEvent::CheckedOut { entry_id, .. } => Some(entry_id.clone()),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(checked, vec![first.clone(), second.clone()], "wire order");
+    let first_at = frames
+        .iter()
+        .position(|frame| {
+            matches!(&frame.event,
+            SessionEvent::CheckedOut { entry_id, .. } if entry_id == &first)
+        })
+        .expect("the first checkout");
+    let second_at = frames
+        .iter()
+        .position(|frame| {
+            matches!(&frame.event,
+            SessionEvent::CheckedOut { entry_id, .. } if entry_id == &second)
+        })
+        .expect("the second checkout");
+    assert!(first_at < second_at);
+    assert_eq!(bracket_users(&frames, first_at), vec!["one"]);
+    assert_eq!(bracket_users(&frames, second_at), vec!["one", "two"]);
+    std::fs::remove_dir_all(store.dir()).ok();
+}
+
+#[tokio::test]
+async fn an_unknown_entry_checkout_is_an_error_and_a_no_op() {
+    let store = temp_store("endpoint-checkout-unknown");
+    let session = Factory::new(vec![text_turn("a"), text_turn("b")])
+        .into_builder(store.clone())
+        .create("C:/w")
+        .expect("session");
+    let mut handle = SessionHost::spawn(session, Vec::new(), plain_wiring(&store));
+    let id = boot_id(&handle);
+
+    let mut frames = Vec::new();
+    handle.message(&id, "one");
+    collect_until(&mut handle, &mut frames, terminal).await;
+    handle.checkout(&id, "no-such-entry");
+    collect_until(&mut handle, &mut frames, |e| {
+        matches!(e, SessionEvent::Error { .. })
+    })
+    .await;
+    handle.message(&id, "two");
+    frames.extend(drain(&mut handle).await);
+
+    // The command failed loudly on the channel, kind checkout, and
+    // changed nothing: no checked_out, no discard, the conversation
+    // continues untouched.
+    assert!(frames.iter().any(|frame| matches!(&frame.event,
+        SessionEvent::Error { kind, message, .. }
+            if kind == tabit_protocol::ErrorKind::CHECKOUT && message.contains("no-such-entry"))));
+    assert!(
+        !frames
+            .iter()
+            .any(|frame| matches!(frame.event, SessionEvent::CheckedOut { .. }))
+    );
+    assert!(
+        !frames
+            .iter()
+            .any(|frame| matches!(frame.event, SessionEvent::MessagesDiscarded { .. }))
+    );
+    assert_eq!(user_texts(&frames), vec!["one", "two"]);
+    assert_eq!(finished_outputs(&frames), vec!["a", "b"]);
+    assert_eq!(chain_users(&handle, &store), vec!["one", "two"]);
+    std::fs::remove_dir_all(store.dir()).ok();
+}
+
+#[tokio::test]
+async fn abort_then_checkout_composes_at_the_pause_point() {
+    let store = temp_store("endpoint-checkout-abort");
+    let session = Factory::new(vec![tool_turn("t1", "slow"), text_turn("x")])
+        .into_builder(store.clone())
+        .dynamic_tool(slow_tool())
+        .create("C:/w")
+        .expect("session");
+    let mut handle = SessionHost::spawn(session, Vec::new(), plain_wiring(&store));
+    let id = boot_id(&handle);
+
+    // The composition a frontend sends when it wants stop-then-rewind:
+    // abort first, checkout right behind it. Race-free by design —
+    // abort acts at once, the checkout executes at the pause point
+    // however the abort wound down.
+    handle.message(&id, "go");
+    let mut frames = Vec::new();
+    let mut sent = false;
+    let mut go_entry = None;
+    while let Some(frame) = handle.next_event().await {
+        match &frame.event {
+            SessionEvent::UserMessage { text, entry_id } if text == "go" => {
+                go_entry = Some(entry_id.clone());
+            }
+            SessionEvent::ToolCall { .. } if !sent => {
+                sent = true;
+                handle.abort(&id);
+                handle.checkout(&id, go_entry.clone().expect("go's entry id"));
+            }
+            _ => {}
+        }
+        let done = matches!(frame.event, SessionEvent::ReplayDone);
+        frames.push(frame);
+        if done
+            && frames
+                .iter()
+                .any(|f| matches!(f.event, SessionEvent::CheckedOut { .. }))
+        {
+            break;
+        }
+    }
+    let aborted_at = frames
+        .iter()
+        .position(|frame| matches!(frame.event, SessionEvent::RunAborted { .. }))
+        .expect("the abort terminal");
+    let checked_at = frames
+        .iter()
+        .position(|frame| matches!(frame.event, SessionEvent::CheckedOut { .. }))
+        .expect("the checkout executed after the abort");
+    assert!(aborted_at < checked_at);
+    assert_eq!(bracket_users(&frames, checked_at), vec!["go"]);
+    assert_eq!(chain_users(&handle, &store), vec!["go"]);
+    std::fs::remove_dir_all(store.dir()).ok();
+}

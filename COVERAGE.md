@@ -31,8 +31,11 @@ Defensive ("unreachable") arms follow a stricter rule:
 - The whole suite runs offline (cassette replay + test doubles). Doctests
   are NOT included in these numbers (`llvm-cov` was run without
   `--doctests`); they are gated by the same CI run.
-- Current state: **93.59% lines / 94.27% regions** (3,991 of 62,268
-  lines; re-measured after the v3 multi-session host — the endpoint
+- Current state: **93.53% lines / 94.24% regions** (4,057 of 62,724
+  lines; re-measured after v3 stage 2 — checkout: the pause-point
+  machinery, the mailbox watermark clear, and the full-re-render pass
+  arrive fully covered per function, endpoint.rs at 97.61% lines;
+  before that: re-measured after the v3 multi-session host — the endpoint
   worker became `SessionHost` routing to per-session workers at 97.4%
   lines, protocol v3 (session-addressed commands,
   `new_session`/`open_session`, the startup catalog, `"main"`
@@ -377,3 +380,35 @@ rather than skipping, reachable or not.)
   are the endpoint-tested lifecycle arms. **Justified**: the closures
   are thin re-assemblies of `assemble`, whose every path (config,
   resume, degradation) is covered in `main.rs`'s own suite.
+
+## v3 stage 2 — checkout (2026-08)
+
+- `execute_checkout` / `emit_replay` / the mailbox watermark trio
+  (`arrival_watermark`, `discard_up_to`, the arrival `seq`) and the
+  `pump_with_pause` seam — **fully covered** (per-function lcov check;
+  `endpoint.rs` rose to 97.61% lines overall). The behavior suite:
+  idle checkout (rewind + `checked_out` + bracket + the next prompt
+  provably branching, asserted against the log's chain), mid-run
+  parking (the checkout provably under a slow-tool run, executing
+  strictly after the run's own terminal — never aborting it — with a
+  steered message's history rewound away and its ledger already
+  closed by its `user_message`), the watermark rule (idle burst in
+  wire order: the before-message comes back as exactly one
+  `messages_discarded` pair and never becomes history; the
+  after-message survives to run on the rewound chain after the pass),
+  consecutive checkouts in wire order with the last one winning (the
+  second target off-chain after the first rewind — the branch-switch
+  case), the unknown-entry error as a total no-op (kind `checkout`,
+  nothing discarded, nothing moved, conversation continues), the
+  abort-then-checkout composition at the pause point, the
+  `pump_with_pause` yield directly at the session level (paused pump
+  returns after one batch, the queue survives), the wire round trip
+  (`checked_out` with an explicit `"base_id":null`, the pass brackets,
+  the post-checkout prompt branching), and the GUI fold (the pass
+  rebuilds the transcript with entry ids intact — the next checkout
+  target — while liveness stays settled; a failed checkout surfaces
+  as a notice).
+- The worker's shutdown-arm checkout drain (`close is not a barrier`
+  for checkouts) — **covered** by the consecutive-checkouts test: both
+  commands are routed before the close, and the wind-down executes
+  both rewinds (asserted by the two ordered `checked_out` frames).

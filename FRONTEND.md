@@ -198,13 +198,16 @@ yields `error { kind: session }` stamped with the id you named.
 | `abort { session }` | any time | running: preempts (`run_aborted`); discards messages queued at abort time (`messages_discarded`, omitted when none). Post-abort messages queue normally and start the next run. Idle: no-op. |
 | `new_session` | any time | creates a fresh session (same config, tools, and `--model`/`--max-turns` as the boot); `session_created { id, path }` follows, stamped with the new id. Nothing replays (it is empty). Never waits on any session — lifecycle writes no session's file. |
 | `open_session { id }` | any time | loads the session if needed and streams a replay pass stamped with the id — the pass is the acknowledgment. Idempotent: an open session re-replays. Unknown id or unreadable file → `error { kind: session }` stamped with the id. Creating, loading, and switching never wait on the session you are leaving; the one wait is the opened session's **own** in-flight run — its pass arrives at that run's terminal (its live streaming renders immediately; only committed history waits). |
-| `checkout { entry_id }` | idle only | moves the active chain; see §7. Compose abort-then-checkout if a run is live. |
+| `checkout { session, entry_id }` | any time | moves that session's chain to the entry (any entry in the file — an off-chain target is a branch switch); see §7. Idle: immediate. Running: **parks** and executes at the run's terminal (never rejected, never aborts the run implicitly — compose abort-then-checkout to stop now). |
 | `model { provider, model, thinking_level? }` | idle only | the next run uses this selection; validates against the backend's config. |
 | `interaction_response { session, id, option?, text? }` | after an `interaction_request` | answers a pending request; at least one of option/text; see §8. |
 
-`checkout` and `model` are idle-only by convention, not by error: a
-frontend derives idle/run state from events (§9) and holds the command
-until the terminal, or aborts first.
+`model` is idle-only by convention, not by error: a frontend derives
+idle/run state from events (§9) and holds the command until the
+terminal, or aborts first. `checkout` does not even need that care —
+the backend parks it at the pause point (§7), so sending it any time
+is safe; holding it client-side until the terminal is still polite
+(your user sees the rewind apply sooner).
 
 ## 6. Events
 
@@ -217,7 +220,7 @@ unstamped control frames; everything else is a stamped event.
 |---|---|---|
 | `message_queued` | `id`, `text` | a `message` accepted while a run is live (a steer that waits). `id` is the message's entry id, minted here. Idle sends never produce this event. |
 | `user_message` | `entry_id`, `text` | the message drains into a run (opening batch or steer boundary) and becomes history. Consecutive `user_message`s = an opening batch. |
-| `messages_discarded` | `messages: [{ id, text }]` | abort (what was queued at abort time; the event arrives with the run's wind-down) and checkout (before `checked_out`). Omitted when nothing was pending. Salvage as drafts; the backend keeps no copy. |
+| `messages_discarded` | `messages: [{ id, text }]` | a clear site: abort (what was queued at abort time; the event arrives with the run's wind-down) or checkout (what was submitted before the checkout; §7, before `checked_out`). Omitted when nothing was pending. Salvage as drafts; the backend keeps no copy. |
 | `turn_started` | `id` | a model turn begins; `id` is the turn's entry id, minted here and reused at commit. |
 | `text_delta` | `turn_id`, `text` | assistant text; appends within the turn. Full-text exactly once in replay. |
 | `reasoning_delta` | `turn_id`, `id`, `reasoning` | model reasoning; `id` correlates blocks within the turn (several may interleave; same-id deltas append). Full-text once per block id in replay. |
@@ -258,7 +261,7 @@ dead structure ahead of the data.
 |---|---|---|
 | `sessions_available` | `sessions: [{ id, created_at, entry_count }]` | once, right after the ack's startup notes: every stored session, newest first. Minimal by ruling — a plain object, fields grow when needed. A brand-new session has no file yet and is absent until it records. |
 | `session_created` | `id`, `path` | a `new_session` succeeded; stamped with the new id (its selection notes, if any, follow on the same stream). |
-| `checked_out` | `entry_id`, `base_id` | checkout succeeded. `base_id` is where your old chain and the new chain diverge; `null` means from the root (drop everything). |
+| `checked_out` | `entry_id`, `base_id` | checkout succeeded. `base_id` is `null` today: drop everything and rebuild from the replay pass that follows. A non-null `base_id` is the reserved suffix mode (keep through `base_id`, apply the pass) — treat any non-null value as "rebuild from the pass" and you stay correct. |
 | `model_changed` | `entry_id`, `provider`, `model`, `thinking_level` | a `model` command (or startup) set the selection for the next run; it is a chain entry and a valid anchor. |
 
 **Errors: one generic carrier with a `kind`.** Anything that goes
@@ -331,18 +334,40 @@ away from keep running backend-side; their events keep arriving on
 their own stamp — keep reading, attribute, and re-replay when you
 switch back.
 
-**Checkout.** Send `checkout { entry_id }` (idle). The event sequence
-is: `messages_discarded` (if anything pending — steers belong to the
-context they were sent into; salvage as drafts), then `checked_out
-{ entry_id, base_id }`, then the replay brackets.
+**Checkout.** Send `checkout { session, entry_id }` any time. Idle: it
+applies immediately. Running: it **parks** — the run finishes (or you
+`abort` it first; that composition is race-free) and the checkout
+executes at the run's terminal. The success sequence on that session's
+stream: `messages_discarded` (only if messages were pending — see the
+watermark rule below), then `checked_out { entry_id, base_id: null }`,
+then the replay brackets.
 
-1. Drop every group you hold **after `base_id`** (`null` → drop all).
-2. Apply the `replay_started` … `replay_done` pass: exactly the suffix
-   you never had — the new chain from `base_id` through its **tip**
-   (the tip may sit past `entry_id` by repair/backfill entries, same
-   two honesty notes as startup replay).
-3. An ancestor target (the common "rewind") has an empty suffix: the
-   brackets arrive empty, nothing else changes.
+1. **Drop everything you hold for that session** (`base_id` is `null`
+   — full re-render, the same rule as switching sessions) and apply
+   the `replay_started` … `replay_done` pass: the rewound chain
+   through its **tip** (the tip may sit past `entry_id` by
+   repair/backfill entries, the same two honesty notes as startup
+   replay).
+2. A run that was in flight streamed to you first — its events
+   preceded the terminal that released the checkout; the pass replaces
+   whatever of it entered history.
+
+**What a checkout discards — the watermark rule.** A checkout
+discards exactly the messages **submitted before it** (each carries a
+born-early id; `messages_discarded` hands back the texts). Messages
+you send *after* a checkout are input for the new branch: they stay
+queued and run against the rewound chain. So you never need to
+synchronize with the backend's pause point — but if you want a
+message to be the new branch's first turn, sending it after you see
+`checked_out` is the way to make that deterministic.
+
+**Multiple and interleaved checkouts.** Checkouts execute in wire
+order at the pause point. A target is any entry in the session's
+file, so consecutive checkouts never collide — the later one simply
+moves the leaf again (a branch switch; each success emits its own
+`messages_discarded` + `checked_out` + pass). A checkout naming an
+entry that does not exist is a no-op plus `error { kind: checkout }`
+stamped with the session — nothing was discarded, nothing moved.
 
 **Valid cut points** (ruled). The atomic unit is the tool roundtrip:
 an assistant turn and its complete result batch commit and rewind

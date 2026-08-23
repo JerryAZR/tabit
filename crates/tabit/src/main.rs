@@ -331,10 +331,12 @@ fn print_event(event: &SessionEvent) {
         // Not a printable stream event: run() turns it into the process
         // error (stderr, exit 1) once the stream has ended.
         SessionEvent::RunFailed { .. } => {}
-        // Replay brackets and model changes never reach print mode (it
-        // never requests the pass); the arms exist for exhaustiveness.
+        // Replay brackets, checkouts, and model changes never reach
+        // print mode (it never requests the pass and has no checkout
+        // surface); the arms exist for exhaustiveness.
         SessionEvent::ReplayStarted { .. }
         | SessionEvent::ReplayDone
+        | SessionEvent::CheckedOut { .. }
         | SessionEvent::ModelChanged { .. } => {}
         // The host's session catalog and creations are frontend
         // concerns; print mode is a single-session consumer.

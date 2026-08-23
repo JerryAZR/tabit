@@ -237,6 +237,17 @@ impl Backend {
         }));
     }
 
+    /// Checkout a session at an entry (rewind/branch). Safe any time:
+    /// the backend parks it until the session's run ends (pause-point
+    /// semantics, FRONTEND.md §7). `messages_discarded` (if any) →
+    /// `checked_out` → the replay pass follow.
+    pub fn checkout(&self, session: &str, entry_id: &str) {
+        let _ = self.writer.send(to_wire_line(&SessionCommand::Checkout {
+            session: session.to_string(),
+            entry_id: entry_id.to_string(),
+        }));
+    }
+
     /// Answer an interaction request of a session. At least one of
     /// `option`/`text` (empty string counts as absent); a stale id is
     /// a backend no-op.

@@ -18,8 +18,10 @@
 //! host's routing: a message submitted mid-run steers through the
 //! session's mailbox (the engine drains at turn boundaries), abort
 //! preempts through the cancel token, and interaction answers route
-//! by id through the session's hub. Routing never blocks on a run —
-//! the host loop only selects on commands.
+//! by id through the session's hub. Checkout is the one command that
+//! needs the session itself, so it parks in the worker and executes
+//! at the pause point (idle, or the run's terminal). Routing never
+//! blocks on a run — the host loop only selects on commands.
 //!
 //! Termination (ruled 2026-08 — the core dies with the frontend):
 //!
@@ -102,6 +104,19 @@ struct Worker {
     abort: AbortHandle,
     interaction: InteractionHub,
     replay: mpsc::UnboundedSender<()>,
+    checkout: mpsc::UnboundedSender<CheckoutRequest>,
+}
+
+/// A checkout on its way to a session's worker: the wire command plus
+/// the mailbox watermark minted at route time (host-loop order is wire
+/// order). The worker executes it at a pause point — immediately when
+/// idle, or after the in-flight run's terminal — discarding exactly
+/// what was submitted before it (the flag-6 before/after rule shared
+/// by the clear sites) and keeping later messages queued for the new
+/// branch (PROTOCOL.md v3 stage 2).
+struct CheckoutRequest {
+    entry_id: String,
+    watermark: u64,
 }
 
 /// The frontend half of the backend: submit commands, receive every
@@ -338,6 +353,21 @@ impl SessionHost {
             }));
     }
 
+    /// Move a session's active chain to an entry (checkout — any entry
+    /// in the file; an off-chain target is a branch switch). Executed
+    /// at the session's pause point: immediately when idle, after the
+    /// in-flight run's terminal otherwise (never an implicit abort).
+    /// Outcomes arrive as events (`checked_out` + a replay pass, or
+    /// `error { kind: checkout }`).
+    pub fn checkout(&self, session: &str, entry_id: impl Into<String>) {
+        let _ = self
+            .commands
+            .send(HostCommand::Command(SessionCommand::Checkout {
+                session: session.to_string(),
+                entry_id: entry_id.into(),
+            }));
+    }
+
     /// Abort every session and discard every queue — the
     /// frontend-death door for transport edges (stdin EOF is death:
     /// no run outlives the consumer, ruled 2026-08). Direct, not
@@ -452,6 +482,20 @@ impl HostLoop {
             }
             HostCommand::Command(SessionCommand::NewSession) => self.new_session(),
             HostCommand::Command(SessionCommand::OpenSession { id }) => self.open_session(&id),
+            HostCommand::Command(SessionCommand::Checkout { session, entry_id }) => {
+                if let Some(worker) = self.worker(&session) {
+                    // The watermark is minted here, at route time: the
+                    // host loop processes commands in wire order, so
+                    // everything submitted before this checkout (and
+                    // only that) falls under it whenever the worker
+                    // gets to execute the rewind.
+                    let watermark = worker.mailbox.arrival_watermark();
+                    let _ = worker.checkout.send(CheckoutRequest {
+                        entry_id,
+                        watermark,
+                    });
+                }
+            }
         }
     }
 
@@ -571,6 +615,7 @@ fn spawn_worker(
     let abort = session.abort_handle();
     let interaction = InteractionHub::new(event_tx.clone(), stream.clone());
     let (replay_tx, mut replay_rx) = mpsc::unbounded_channel::<()>();
+    let (checkout_tx, mut checkout_rx) = mpsc::unbounded_channel::<CheckoutRequest>();
     let worker_mailbox = mailbox.clone();
     let task_interaction = interaction.clone();
     let join = tokio::spawn(async move {
@@ -587,16 +632,29 @@ fn spawn_worker(
             // flushed (abort while idle — there is no terminal coming;
             // mid-run aborts flush at their run's conclusion first).
             flush_staged_discards(&worker_mailbox, &event_tx, &stream);
+            // The pause point: checkouts parked during a run execute
+            // here, in wire order, before any survivor starts the next
+            // batch (a post-checkout message must never run on the old
+            // chain).
+            while let Ok(checkout) = checkout_rx.try_recv() {
+                execute_checkout(&mut session, &worker_mailbox, &event_tx, &stream, checkout);
+            }
             if !worker_mailbox.is_empty() {
+                // The pause seam: if another checkout parked while this
+                // pump drained a batch, yield back to the loop-top
+                // drain instead of starting the next batch.
                 session
-                    .pump(&mut |event| {
-                        // The receiver is gone only when the frontend
-                        // is; there is no one left to tell.
-                        let _ = event_tx.send(EventFrame {
-                            stream: stream.clone(),
-                            event,
-                        });
-                    })
+                    .pump_with_pause(
+                        &mut |event| {
+                            // The receiver is gone only when the frontend
+                            // is; there is no one left to tell.
+                            let _ = event_tx.send(EventFrame {
+                                stream: stream.clone(),
+                                event,
+                            });
+                        },
+                        || checkout_rx.is_empty(),
+                    )
                     .await;
                 continue;
             }
@@ -611,6 +669,11 @@ fn spawn_worker(
                     if !worker_mailbox.is_empty() {
                         continue;
                     }
+                    // Checkouts routed before the close are honored the
+                    // same way — rewind, then wind down.
+                    while let Ok(checkout) = checkout_rx.try_recv() {
+                        execute_checkout(&mut session, &worker_mailbox, &event_tx, &stream, checkout);
+                    }
                     // Exit through the same flush the idle beat uses:
                     // an abort's staged pairs must not die with the
                     // worker (flag 6 — nothing user-authored leaves
@@ -621,6 +684,14 @@ fn spawn_worker(
                 // The frontend is gone; the death watcher has already
                 // aborted any in-flight run, so the pump has returned.
                 _ = event_tx.closed() => break,
+                // A checkout arriving at idle executes immediately —
+                // this arm and the loop-top drain are the two halves of
+                // one pause-point rule.
+                checkout = checkout_rx.recv() => {
+                    if let Some(checkout) = checkout {
+                        execute_checkout(&mut session, &worker_mailbox, &event_tx, &stream, checkout);
+                    }
+                }
                 // Answered ahead of new work: frontends ask for the
                 // pass at the handshake or an open, before they send
                 // anything, so the pass reflects the chain as it was
@@ -632,22 +703,7 @@ fn spawn_worker(
                     // everything already queued and before anything
                     // the next message starts.
                     if replay.is_some() {
-                        let events = session.replay_events();
-                        let total = events.len() as u64;
-                        let _ = event_tx.send(EventFrame {
-                            stream: stream.clone(),
-                            event: SessionEvent::ReplayStarted { total },
-                        });
-                        for event in events {
-                            let _ = event_tx.send(EventFrame {
-                                stream: stream.clone(),
-                                event,
-                            });
-                        }
-                        let _ = event_tx.send(EventFrame {
-                            stream: stream.clone(),
-                            event: SessionEvent::ReplayDone,
-                        });
+                        emit_replay(&session, &event_tx, &stream);
                     }
                 }
                 _ = worker_mailbox.work_signal().notified() => {}
@@ -673,9 +729,79 @@ fn spawn_worker(
             abort,
             interaction,
             replay: replay_tx,
+            checkout: checkout_tx,
         },
         join,
     )
+}
+
+/// Execute one checkout at a pause point (idle or the run-terminal
+/// beat): rewind the chain — a failure is the command's error event
+/// and a total no-op, nothing discarded — then discard exactly what
+/// was submitted before the checkout (the watermark), announce
+/// `checked_out`, and re-render with a full replay pass (PROTOCOL.md
+/// v3 stage 2).
+fn execute_checkout(
+    session: &mut Session,
+    mailbox: &MailboxHandle,
+    event_tx: &mpsc::UnboundedSender<EventFrame>,
+    stream: &StreamId,
+    checkout: CheckoutRequest,
+) {
+    if let Err(error) = session.rewind_to_entry(&checkout.entry_id) {
+        let _ = event_tx.send(EventFrame {
+            stream: stream.clone(),
+            event: SessionEvent::error_checkout(error.to_string()),
+        });
+        return;
+    }
+    let discarded = mailbox.discard_up_to(checkout.watermark);
+    if !discarded.is_empty() {
+        let _ = event_tx.send(EventFrame {
+            stream: stream.clone(),
+            event: SessionEvent::MessagesDiscarded {
+                messages: discarded
+                    .into_iter()
+                    .map(|queued| tabit_protocol::DiscardedMessage {
+                        text: queued.text(),
+                        id: queued.id,
+                    })
+                    .collect(),
+            },
+        });
+    }
+    let _ = event_tx.send(EventFrame {
+        stream: stream.clone(),
+        event: SessionEvent::CheckedOut {
+            entry_id: checkout.entry_id,
+            // Full re-render (the suffix mode's reserved seam).
+            base_id: None,
+        },
+    });
+    emit_replay(session, event_tx, stream);
+}
+
+/// The replay pass (PROTOCOL.md v2): the resident chain projected
+/// into finalized live events, bracketed. One emission path for its
+/// two askers — the transport's replay request and checkout's
+/// re-render.
+fn emit_replay(session: &Session, event_tx: &mpsc::UnboundedSender<EventFrame>, stream: &StreamId) {
+    let events = session.replay_events();
+    let total = events.len() as u64;
+    let _ = event_tx.send(EventFrame {
+        stream: stream.clone(),
+        event: SessionEvent::ReplayStarted { total },
+    });
+    for event in events {
+        let _ = event_tx.send(EventFrame {
+            stream: stream.clone(),
+            event,
+        });
+    }
+    let _ = event_tx.send(EventFrame {
+        stream: stream.clone(),
+        event: SessionEvent::ReplayDone,
+    });
 }
 
 #[cfg(test)]

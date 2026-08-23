@@ -57,11 +57,12 @@ pub struct EventFrame {
 /// ids from `sessions_available`/`session_created`. The behavior is
 /// total over the two session states:
 ///
-/// | command               | idle                  | running                              |
-/// |-----------------------|-----------------------|--------------------------------------|
-/// | `Message`             | starts a run          | steers (next turn boundary)          |
-/// | `Abort`               | no-op                 | aborts; discards queued messages     |
-/// | `InteractionResponse` | no-op (logged)        | routes the answer by id to the asker |
+/// | command               | idle                   | running                              |
+/// |-----------------------|------------------------|--------------------------------------|
+/// | `Message`             | starts a run           | steers (next turn boundary)          |
+/// | `Abort`               | no-op                  | aborts; discards queued messages     |
+/// | `InteractionResponse` | no-op (logged)         | routes the answer by id to the asker |
+/// | `Checkout`            | rewinds; replays       | parks; executes at the run's terminal |
 ///
 /// Outcomes are events (`user_message` for acceptance, the run
 /// terminals for results); a command naming an unknown session yields
@@ -109,6 +110,21 @@ pub enum SessionCommand {
     OpenSession {
         /// The stored session id to open.
         id: String,
+    },
+    /// Move a session's active chain to an entry (any entry in the
+    /// session's file — an off-chain target is a branch switch). Idle:
+    /// executes immediately. A run in flight: **parks** and executes
+    /// at that run's terminal (the pause point) — never rejected,
+    /// never an implicit abort. Success emits `messages_discarded`
+    /// (only what was submitted before this command) then
+    /// `checked_out` and a full replay pass; an unknown entry emits
+    /// `error { kind: checkout }` and changes nothing
+    /// (PROTOCOL.md v3 stage 2).
+    Checkout {
+        /// The target session id.
+        session: String,
+        /// The entry the chain will end at (inclusive).
+        entry_id: String,
     },
 }
 

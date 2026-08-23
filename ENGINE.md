@@ -30,6 +30,8 @@ stateDiagram-v2
     Running --> Idle : Failed — emit run_failed
     Running --> Idle : abort preempts (token race at any await)<br/>— emit run_aborted; the ABORT SITE discarded the<br/>at-abort-time queue (notice flushes at the epilogue)
     Idle --> Idle : abort while idle — the abort site discards<br/>the queue (notice flushes at the idle beat;<br/>no-op when empty)
+    Idle --> Idle : checkout — the chain rewinds to entry_id;<br/>what was queued before the checkout is discarded<br/>(messages_discarded), then checked_out +<br/>a full replay pass
+    Running --> Idle : checkout parked mid-run executes at<br/>the terminal — this pause point — before the<br/>next Draining (no implicit abort)
 ```
 
 The **Draining** step is the outer loop's single responsibility between
@@ -59,17 +61,43 @@ so nothing interleaves, and batching is exact.
 
 **Outer-layer responsibilities:** queue custody (the always-queue
 invariant — every message yields exactly one user event or steers the
-run in flight; the only discard is abort), the Draining step
-(opening-input construction), terminal-event emission, preemption.
-Implemented today by the tabit-session actor (`pump`/`run_one` + the
-mailbox and cancel token); documented here because the entry/exit
-contracts above are what the inner machine is designed against.
+run in flight; the only discards are the clear sites, abort and
+checkout, each discarding only what was submitted before it), the
+Draining step (opening-input construction), terminal-event emission,
+preemption, pause-point operations (checkout). Implemented today by
+the tabit-session actor (`pump`/`run_one` + the mailbox and cancel
+token); documented here because the entry/exit contracts above are
+what the inner machine is designed against.
 
 **One queue, two drains:** the outer drain opens runs (Idle →
 Draining → Running); the inner drain converges turn outcomes. Both
 take the whole queue at their instant. A message arriving while idle
 lands in the outer drain; during a run, in the inner one. No-loss and
 ordering hold across both.
+
+**Pause-point operations (checkout, ruled 2026-08 stage 2).** Some
+commands rewrite the conversation itself, so they cannot run inside a
+run: `checkout { entry_id }` rewinds the chain to an entry. The ruling
+is **wait, never reject**: a checkout routed while Running parks in
+the worker (its own channel — the parking *is* the wait) and executes
+at the pause point — the terminal's transition back to Idle, before
+the next Draining. No implicit abort (abort is its own command; the
+abort-then-checkout composition is race-free precisely because the
+parked checkout executes at the pause point however the run ended).
+At the pause point, parked checkouts drain in wire order, each
+validated against the file as it stands when it executes — a target
+is any entry in the file, so consecutive checkouts never collide: the
+later one simply moves the leaf again (a branch switch). A failing
+checkout (no such entry) is a no-op plus an `error` event; nothing is
+discarded for it. The queue rule is the abort rule (flag 6) applied
+uniformly: **a clear site discards what was submitted before it** —
+each checkout carries the mailbox watermark minted at route time
+(host-loop order = wire order) and discards exactly those messages;
+later messages are input for the new branch and stay queued (the
+empties check then pumps them against the rewound chain). One guard
+makes that honest mid-run: the pump yields between batches when a
+checkout is parked, so a post-checkout message can never start a
+batch on the old chain.
 
 ## Layer 2 — the inner loop (one run's turn machine)
 

@@ -71,6 +71,11 @@ fn events_round_trip_through_json() {
         SessionEvent::error_model("default_model `gone` is not usable"),
         SessionEvent::ReplayStarted { total: 7 },
         SessionEvent::ReplayDone,
+        SessionEvent::CheckedOut {
+            entry_id: "0197".to_string(),
+            base_id: None,
+        },
+        SessionEvent::error_checkout("no entry `0199` in this session"),
         SessionEvent::SessionsAvailable {
             sessions: vec![
                 AvailableSession {

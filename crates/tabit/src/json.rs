@@ -1346,4 +1346,67 @@ id = "m"
         );
         assert!(lines.iter().any(|l| l.contains("still here")));
     }
+
+    #[tokio::test]
+    async fn a_checkout_round_trips_the_wire() {
+        let (tx_in, rx_in) = std::sync::mpsc::channel::<String>();
+        let session = test_session("checkout", vec![script("first"), script("second")]);
+        let handle = SessionHost::spawn(
+            session,
+            Vec::new(),
+            test_wiring(&test_dir("checkout"), unusable_create()),
+        );
+        let out = SharedOut::default();
+        let serve_task = tokio::spawn(serve(
+            handle,
+            ChannelIn {
+                lines: rx_in,
+                buf: Vec::new(),
+            },
+            out.clone(),
+        ));
+
+        tx_in.send(r#"{"protocol_version":3}"#.to_string()).unwrap();
+        let session_id = ack_session_id(&out).await;
+        tx_in.send(message_line(&session_id, "hi")).unwrap();
+        await_line(&out, "run_finished").await;
+
+        // The checkout target is learnable only from the user_message
+        // line — the honest client shape (entry ids come from events).
+        let entry_id = read_lines(&out)
+            .into_iter()
+            .find_map(|line| match serde_json::from_str::<ServerFrame>(&line) {
+                Ok(ServerFrame::Event(EventFrame {
+                    event: tabit_session::SessionEvent::UserMessage { text, entry_id },
+                    ..
+                })) if text == "hi" => Some(entry_id),
+                _ => None,
+            })
+            .expect("the user_message line carries the entry id");
+
+        tx_in
+            .send(format!(
+                r#"{{"type":"checkout","session":"{session_id}","entry_id":"{entry_id}"}}"#
+            ))
+            .unwrap();
+        let checked = await_line(&out, "checked_out").await;
+        assert!(
+            checked.contains(&format!(r#""entry_id":"{entry_id}""#)),
+            "the target echoes back: {checked}"
+        );
+        assert!(
+            checked.contains(r#""base_id":null"#),
+            "full re-render rides an explicit null: {checked}"
+        );
+        await_line(&out, "replay_done").await;
+
+        // The session is fully alive after the rewind: the next prompt
+        // branches and runs.
+        tx_in.send(message_line(&session_id, "again")).unwrap();
+        await_line(&out, "second").await;
+        drop(tx_in);
+        let code = serve_task.await.unwrap();
+        assert_eq!(code, 0);
+        std::fs::remove_dir_all(test_dir("checkout")).ok();
+    }
 }

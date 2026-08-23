@@ -280,7 +280,7 @@ fn idle_sends_never_queue() {
     assert!(state.pending.is_empty());
     assert!(matches!(
         state.transcript.last(),
-        Some(Group::User { text }) if text == "hello"
+        Some(Group::User { text, .. }) if text == "hello"
     ));
 }
 
@@ -771,7 +771,7 @@ fn switching_is_optimistic_and_the_replay_pass_rebuilds() {
     state.reduce(from("s2", SessionEvent::ReplayDone));
     assert_eq!(state.transcript.len(), 2);
     assert!(
-        matches!(state.transcript.first(), Some(Group::User { text }) if text == "older question")
+        matches!(state.transcript.first(), Some(Group::User { text, .. }) if text == "older question")
     );
 
     // A stray event for the old stream is background now.
@@ -822,7 +822,7 @@ fn session_created_switches_to_the_empty_new_session() {
     ));
     assert!(state.running);
     assert!(
-        matches!(state.transcript.first(), Some(Group::User { text }) if text == "clean start")
+        matches!(state.transcript.first(), Some(Group::User { text, .. }) if text == "clean start")
     );
 }
 
@@ -1135,4 +1135,85 @@ fn a_background_question_raises_attention_and_dies_with_its_run() {
         state.interactions.is_empty(),
         "the question died with its run"
     );
+}
+
+#[test]
+fn a_checkout_pass_rebuilds_the_transcript_and_liveness_stays_settled() {
+    let mut state = GuiState::default();
+    state.reduce(ack());
+    state.reduce(user("one"));
+    state.reduce(delta("first answer"));
+    state.reduce(event(SessionEvent::RunFinished {
+        output: "first answer".to_string(),
+        usage: Usage::default(),
+    }));
+    state.reduce(user("two"));
+    state.reduce(delta("second answer"));
+    state.reduce(event(SessionEvent::RunFinished {
+        output: "second answer".to_string(),
+        usage: Usage::default(),
+    }));
+    assert_eq!(state.transcript.len(), 4);
+
+    // The checkout itself changes no view state (it executes at a
+    // pause point — liveness already settled); the pass that follows
+    // IS the rebuild, the same path as a view switch.
+    state.reduce(event(SessionEvent::CheckedOut {
+        entry_id: "e0".to_string(),
+        base_id: None,
+    }));
+    assert_eq!(
+        state.transcript.len(),
+        4,
+        "checked_out alone rebuilds nothing"
+    );
+    state.reduce(event(SessionEvent::ReplayStarted { total: 2 }));
+    // A fixed id: the rebuilt row must carry the entry id verbatim —
+    // it is the next checkout target.
+    state.reduce(event(SessionEvent::UserMessage {
+        text: "one".to_string(),
+        entry_id: "target-1".to_string(),
+    }));
+    state.reduce(delta("first answer"));
+    state.reduce(event(SessionEvent::ReplayDone));
+    assert!(!state.running, "a pass is history, never liveness");
+    assert_eq!(
+        state.transcript.len(),
+        2,
+        "one user row and its answer turn"
+    );
+    assert!(matches!(
+        state.transcript.first(),
+        Some(Group::User { text, .. }) if text == "one"
+    ));
+    // The rebuilt row keeps its entry id — the next checkout target.
+    assert!(matches!(
+        state.transcript.first(),
+        Some(Group::User { entry_id, .. }) if entry_id == "target-1"
+    ));
+}
+
+#[test]
+fn a_failed_checkout_surfaces_as_an_error_notice() {
+    let mut state = GuiState::default();
+    state.reduce(ack());
+    state.reduce(user("one"));
+    state.reduce(event(SessionEvent::RunFinished {
+        output: String::new(),
+        usage: Usage::default(),
+    }));
+    state.reduce(event(SessionEvent::Error {
+        kind: "checkout".to_string(),
+        message: "no entry `nope` in this session".to_string(),
+        pending: None,
+    }));
+    match state.transcript.last() {
+        Some(Group::Notice { text, error }) => {
+            assert!(text.contains("no entry"), "{text}");
+            assert!(error);
+        }
+        other => panic!("the failed checkout surfaces, got {other:?}"),
+    }
+    // The transcript before it is untouched — the checkout was a no-op.
+    assert!(matches!(state.transcript.first(), Some(Group::User { .. })));
 }

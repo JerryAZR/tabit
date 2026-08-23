@@ -184,6 +184,20 @@ pub enum SessionEvent {
     },
     /// The replay pass ended: every event it announced has been emitted.
     ReplayDone,
+    /// A `checkout` succeeded: the session's active chain now ends at
+    /// `entry_id` (inclusive). Followed immediately by a full replay
+    /// pass bracketing the rewound chain — the pass is the re-render
+    /// (`base_id: null` = the frontend drops everything it holds; the
+    /// reserved suffix upgrade flips it to `Some` and shrinks the
+    /// pass behind the same bracket, PROTOCOL.md v3 stage 2).
+    CheckedOut {
+        /// The entry the chain now ends at — the command's target.
+        entry_id: String,
+        /// Where the frontend may stop dropping: `null` = full
+        /// re-render (today's only mode).
+        #[serde(default)]
+        base_id: Option<String>,
+    },
     /// The session catalog, announced once at startup right after the
     /// ack's startup notes: every stored session, newest first, from a
     /// header-only listing (lazy loading — only the boot session is
@@ -327,6 +341,17 @@ impl SessionEvent {
             kind: ErrorKind::PERSIST_DEGRADED.to_string(),
             message: message.into(),
             pending: Some(pending),
+        }
+    }
+
+    /// A `checkout`-kind error: a checkout command failed (an unknown
+    /// entry, or the rewind could not apply — its message carries the
+    /// detail). Nothing was discarded or moved.
+    pub fn error_checkout(message: impl Into<String>) -> Self {
+        Self::Error {
+            kind: ErrorKind::CHECKOUT.to_string(),
+            message: message.into(),
+            pending: None,
         }
     }
 }

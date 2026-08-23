@@ -153,8 +153,11 @@ pub struct PendingMessage {
 /// One renderable transcript row.
 #[derive(Debug, Clone, PartialEq)]
 pub enum Group {
-    /// A user message that entered history.
-    User { text: String },
+    /// A user message that entered history. `entry_id` is the
+    /// checkout target — the interim rewind affordance sends it back
+    /// as `checkout { session, entry_id }` ("cut here": the chain
+    /// ends at this message).
+    User { text: String, entry_id: String },
     /// Assistant output (provisional while a run is live — v1 has no
     /// commit signal; v2's `turn_committed` will make it explicit).
     Turn(TurnGroup),
@@ -487,7 +490,7 @@ impl GuiState {
                 {
                     self.pending.remove(position);
                 }
-                self.transcript.push(Group::User { text });
+                self.transcript.push(Group::User { text, entry_id });
                 if !in_replay {
                     self.running = true;
                 }
@@ -633,6 +636,12 @@ impl GuiState {
             SessionEvent::ReplayDone => {
                 // The pass ended; the transcript is whole (live traffic
                 // or quiescence follows).
+            }
+            SessionEvent::CheckedOut { .. } => {
+                // The checkout applied; the replay bracket that follows
+                // IS the state change (the same rebuild path as a view
+                // switch). No independent fold — a checkout executes at
+                // a pause point, so liveness is already settled.
             }
             SessionEvent::ModelChanged {
                 provider,

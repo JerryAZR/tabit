@@ -35,6 +35,10 @@ fn commands_round_trip_with_snake_case_tags() {
         SessionCommand::OpenSession {
             id: "0196".to_string(),
         },
+        SessionCommand::Checkout {
+            session: "0195".to_string(),
+            entry_id: "0197".to_string(),
+        },
     ];
     for command in &commands {
         assert_eq!(&round_trip(command), command);
@@ -66,6 +70,14 @@ fn commands_round_trip_with_snake_case_tags() {
         r#"{"type":"open_session","id":"s2"}"#
     );
     assert_eq!(
+        serde_json::to_string(&SessionCommand::Checkout {
+            session: "s1".to_string(),
+            entry_id: "e9".to_string()
+        })
+        .expect("serialize"),
+        r#"{"type":"checkout","session":"s1","entry_id":"e9"}"#
+    );
+    assert_eq!(
         serde_json::to_string(&SessionCommand::InteractionResponse {
             session: "s1".to_string(),
             id: "0197".to_string(),
@@ -92,6 +104,40 @@ fn event_frames_serialize_flat_with_the_stream_beside_the_tag() {
         r#"{"stream":"0197-session","type":"text_delta","turn_id":"t1","text":"He"}"#
     );
     assert_eq!(round_trip(&frame), frame);
+}
+
+#[test]
+fn checked_out_carries_its_suffix_seam_as_an_explicit_null() {
+    // `base_id` stays on the wire even in full-re-render mode (null):
+    // the reserved suffix upgrade flips it to Some without a shape
+    // change the day a measured problem wants it.
+    let frame = EventFrame {
+        stream: StreamId::new("s1"),
+        event: SessionEvent::CheckedOut {
+            entry_id: "e9".to_string(),
+            base_id: None,
+        },
+    };
+    let json = serde_json::to_string(&frame).expect("serialize");
+    assert_eq!(
+        json,
+        r#"{"stream":"s1","type":"checked_out","entry_id":"e9","base_id":null}"#
+    );
+    assert_eq!(round_trip(&frame), frame);
+    // The suffix mode's future shape parses today.
+    assert_eq!(
+        serde_json::from_str::<EventFrame>(
+            r#"{"stream":"s1","type":"checked_out","entry_id":"e9","base_id":"e3"}"#
+        )
+        .expect("suffix shape"),
+        EventFrame {
+            stream: StreamId::new("s1"),
+            event: SessionEvent::CheckedOut {
+                entry_id: "e9".to_string(),
+                base_id: Some("e3".to_string()),
+            },
+        }
+    );
 }
 
 #[test]
