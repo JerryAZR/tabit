@@ -237,25 +237,34 @@ rather than skipping, reachable or not.)
   round-trip tests; the launch path (`tabit` launcher detach-spawn)
   likewise needs a desktop session.
 
-## Interaction (permission + ask_user, 2026-08)
+## Interaction (permission + ask_user, 2026-08; remediation pass 2026-08)
 
 - `tabit-session/src/interaction.rs` — **covered**: routing, total
   no-op, retraction, weak-sender dismissal, session memory, prompt
-  shape (unit) plus five actor-level end-to-end tests (allow, deny,
-  always-allow, ask_user round-trip, abort-with-card-open).
-- `tabit-session/src/permission.rs` — **covered via the actor tests**
-  (the allow/deny/always paths run through `PermissionHook`); the
-  no-frontend fail-closed arm is reachable only by a direct `Session`
-  consumer — **JUSTIFIED**: every actor session attaches a hub, and
-  the arm is the recorded EXTENSIONS.md default.
+  shape (unit) plus actor-level end-to-end tests (allow, deny,
+  always-allow, ask_user round-trip, abort-with-card-open, two
+  concurrent cards answered in reverse order, frontend death incl. the
+  durable abort-time synthesized tail).
+- `tabit-session/src/permission.rs` — **covered directly** since the
+  remediation pass: the policy is extracted as `gate()` and its whole
+  decision table is unit-pinned (non-asked tools cardless, no-frontend
+  fail-closed naming why, Allow runs, Always allow runs + remembered
+  cardless, Deny delivers its reason verbatim, terminal-retracted ask
+  fails closed) — the actor tests were event-presence-only and could
+  not distinguish allow from deny.
+- `tabit-tools ask_user` — **covered directly** since the remediation
+  pass: all four outcomes against a scripted `UserInteraction` double
+  (text verbatim, option named, dismissal in-band, no-frontend error).
+  The actor-level round-trip remains as the seam test.
 - `tabit/bin print-mode stdin reader` (`main.rs` watcher thread,
-  card rendering) — **JUSTIFIED**: owns real stdin; `parse_answer`
-  is unit-covered (numbered buttons + reason, free text, fail-closed
-  empties).
+  card rendering incl. the FIFO card queue) — **JUSTIFIED**: owns real
+  stdin; `parse_answer` is unit-covered (numbered buttons + reason,
+  free text, fail-closed empties).
 - json bridge `InteractionResponse` passthrough — rides the generic
   `ClientFrame::Command => link.send(command)` arm, unchanged by this
   feature; the command itself is round-trip covered in tabit-protocol
   and link-routed covered in tabit-session.
 - `app.rs` cards panel / `answer()` — **justified** under the existing
   GUI skeleton policy above (view code; owner e2e pass); the reducer
-  state behind it is unit-covered.
+  state behind it is unit-covered (cards, terminals, the
+  `turn_truncated` notice, abort clearing pending steers).
