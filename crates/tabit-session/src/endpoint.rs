@@ -139,15 +139,31 @@ impl SessionCommandLink {
     }
 }
 
-/// Abort a session's run in flight and discard its queue — one
-/// semantic. All encode sites (the host's routing and the host
-/// handle) route through here so `messages_discarded` emission lands
-/// in one place: the mailbox stages the discarded pairs and the
-/// aborted run's conclusion flushes them after its terminal
-/// (PROTOCOL.md v2 — the notice rides the wind-down).
-fn abort_and_clear(abort: &AbortHandle, mailbox: &MailboxHandle) {
-    abort.abort();
-    mailbox.abort_clear();
+/// Emit `messages_discarded` for pairs staged by an abort whose run
+/// conclusion never flushed them (idle aborts; aborts racing the
+/// wind-down). Mid-run aborts flush at their terminal first — the
+/// take makes double-flush harmless.
+fn flush_staged_discards(
+    mailbox: &MailboxHandle,
+    event_tx: &mpsc::UnboundedSender<EventFrame>,
+    stream: &StreamId,
+) {
+    let staged = mailbox.take_staged_discards();
+    if staged.is_empty() {
+        return;
+    }
+    let _ = event_tx.send(EventFrame {
+        stream: stream.clone(),
+        event: SessionEvent::MessagesDiscarded {
+            messages: staged
+                .into_iter()
+                .map(|queued| tabit_protocol::DiscardedMessage {
+                    text: queued.text(),
+                    id: queued.id,
+                })
+                .collect(),
+        },
+    });
 }
 
 impl SessionHost {
@@ -178,10 +194,6 @@ impl SessionHost {
         let workers = Arc::new(Mutex::new(HashMap::new()));
         let closing_stats = Arc::new(Mutex::new(HashMap::new()));
 
-        // The host's synchronous startup emissions, ordered ahead of
-        // any worker frame by construction (one sender, sent before
-        // the worker task exists): the boot session's selection
-        // degradations, then the catalog. A listing failure is the
         // The host's synchronous startup emissions, ordered ahead of
         // any worker frame by construction (one sender, sent before
         // the worker task exists): the boot session's selection
@@ -242,6 +254,10 @@ impl SessionHost {
                     biased;
                     _ = watcher_shutdown.cancelled() => {}
                     _ = watcher_events.closed() => {
+                        // The death path's abort site: preemption
+                        // plus the one clear, inside the handle (flag
+                        // 6) — the runs' conclusions flush the discard
+                        // notices on the way out.
                         for worker in lock(&watcher_workers).values() {
                             worker.abort.abort();
                         }
@@ -328,7 +344,7 @@ impl SessionHost {
     /// routed: death preempts routing.
     pub fn abort_all(&self) {
         for worker in lock(&self.workers).values() {
-            abort_and_clear(&worker.abort, &worker.mailbox);
+            worker.abort.abort();
         }
     }
 
@@ -348,11 +364,17 @@ impl SessionHost {
         }
     }
 
-    /// Close the host's command side. Every worker finishes any
-    /// in-flight run, then — close is not a barrier — runs everything
-    /// already queued, captures [`SessionHost::closing_stats`], and
-    /// the event stream ends. Sends from surviving links that race the
-    /// wind-down still run; once the stream has ended they are no-ops.
+    /// Close the host's command side (the polite door — in-process
+    /// consumers that stay to read the stream, like print mode). Every
+    /// worker finishes any in-flight run, then — close is not a
+    /// barrier — runs everything already queued, captures
+    /// [`SessionHost::closing_stats`], and the event stream ends.
+    /// Sends that raced the wind-down land in one of two places:
+    /// before the host's post-break drain, they run; after it, the
+    /// channel is closed and they are silent no-ops (the window is a
+    /// few instructions wide; the stdio edge never uses this door —
+    /// it drops the host, the death door, so nothing unattended
+    /// runs).
     pub fn close_commands(&mut self) {
         self.shutdown.cancel();
     }
@@ -413,7 +435,7 @@ impl HostLoop {
             }
             HostCommand::Command(SessionCommand::Abort { session }) => {
                 if let Some(worker) = self.worker(&session) {
-                    abort_and_clear(&worker.abort, &worker.mailbox);
+                    worker.abort.abort();
                 }
             }
             HostCommand::Command(SessionCommand::InteractionResponse {
@@ -466,11 +488,16 @@ impl HostLoop {
         };
         let id = session.id().to_string();
         let stream = StreamId::new(id.clone());
+        // The selection rides the frame — a fresh session resolves its
+        // own model, which can differ from the boot's, and nothing
+        // else on the wire will say so (the session is empty; no
+        // `model_changed` replays).
         let _ = self.event_tx.send(EventFrame {
             stream: stream.clone(),
             event: SessionEvent::SessionCreated {
                 id: id.clone(),
                 path: session.path().display().to_string(),
+                model: session.selection().clone(),
             },
         });
         for note in notes {
@@ -556,6 +583,10 @@ fn spawn_worker(
         // wait below, running is the pump call — two positions of one
         // loop, not two tasks.
         loop {
+            // Discards staged by an abort that no run conclusion
+            // flushed (abort while idle — there is no terminal coming;
+            // mid-run aborts flush at their run's conclusion first).
+            flush_staged_discards(&worker_mailbox, &event_tx, &stream);
             if !worker_mailbox.is_empty() {
                 session
                     .pump(&mut |event| {
@@ -580,6 +611,11 @@ fn spawn_worker(
                     if !worker_mailbox.is_empty() {
                         continue;
                     }
+                    // Exit through the same flush the idle beat uses:
+                    // an abort's staged pairs must not die with the
+                    // worker (flag 6 — nothing user-authored leaves
+                    // silently, not even at close).
+                    flush_staged_discards(&worker_mailbox, &event_tx, &stream);
                     break;
                 }
                 // The frontend is gone; the death watcher has already
@@ -617,8 +653,16 @@ fn spawn_worker(
                 _ = worker_mailbox.work_signal().notified() => {}
             }
         }
-        if let Ok(session_stats) = session.stats() {
-            lock(&stats).insert(id, session_stats);
+        match session.stats() {
+            Ok(session_stats) => {
+                lock(&stats).insert(id, session_stats);
+            }
+            // Nobody is left to tell at wind-down — but silence is not
+            // the doctrine: trace it (the closing summary's absence is
+            // the user-visible symptom).
+            Err(error) => {
+                tracing::warn!(session = %id, %error, "closing stats unreadable at wind-down");
+            }
         }
         // The worker's `event_tx` drops here; the stream ends when the
         // host's does too.

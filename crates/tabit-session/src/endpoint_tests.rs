@@ -279,14 +279,25 @@ async fn abort_while_idle_discards_queued_messages() {
     handle.message(&id, "queued two");
     handle.abort(&id);
     let frames = drain(&mut handle).await;
-    // The startup catalog is the only frame: no run ever happened
-    // (drain already proved the stream ends cleanly).
-    assert!(
-        frames
-            .iter()
-            .all(|f| matches!(f.event, SessionEvent::SessionsAvailable { .. })),
-        "no run ever happened and nothing but the catalog was emitted: {frames:?}"
-    );
+    // No run ever happened — and nothing user-authored leaves
+    // silently (flag 6): both queued pairs come back as one
+    // `messages_discarded`, after the catalog.
+    let types: Vec<&str> = frames
+        .iter()
+        .map(|f| match &f.event {
+            SessionEvent::SessionsAvailable { .. } => "sessions_available",
+            SessionEvent::MessagesDiscarded { .. } => "messages_discarded",
+            _ => "other",
+        })
+        .collect();
+    assert_eq!(types, vec!["sessions_available", "messages_discarded"]);
+    let texts: Vec<String> = match &frames[1].event {
+        SessionEvent::MessagesDiscarded { messages } => {
+            messages.iter().map(|m| m.text.clone()).collect()
+        }
+        _ => panic!("expected the discard: {frames:?}"),
+    };
+    assert_eq!(texts, vec!["queued one", "queued two"]);
     std::fs::remove_dir_all(store.dir()).ok();
 }
 
@@ -481,7 +492,14 @@ async fn new_session_runs_a_second_stream_and_both_route_by_id() {
     .await
     .event
     {
-        SessionEvent::SessionCreated { id, .. } => id,
+        SessionEvent::SessionCreated { id, model, .. } => {
+            assert_eq!(
+                model,
+                tabit_protocol::ModelSelection::new("p", "m"),
+                "the frame carries the new session's selection"
+            );
+            id
+        }
         other => panic!("expected session_created, got {other:?}"),
     };
     assert_ne!(created, boot, "a second session means a second stream");
@@ -983,6 +1001,246 @@ async fn new_session_is_never_blocked_by_a_running_session() {
     })
     .await;
     assert_eq!(boot_done.stream.as_str(), boot);
+    drain(&mut handle).await;
+    std::fs::remove_dir_all(store.dir()).ok();
+}
+
+#[tokio::test]
+async fn a_post_abort_message_survives_and_runs() {
+    // Flag 6 restored to the ruling: one clear, at the abort site.
+    // What was queued at abort time is discarded (visibly); anything
+    // arriving after the abort queues normally and starts the next
+    // run — the epilogue no longer sweeps the window behind it.
+    let store = temp_store("endpoint-post-abort");
+    let session = Factory::new(vec![tool_turn("t1", "slow"), text_turn("after the abort")])
+        .into_builder(store.clone())
+        .dynamic_tool(slow_tool())
+        .create("C:/w")
+        .expect("session");
+    let mut handle = SessionHost::spawn(session, Vec::new(), plain_wiring(&store));
+    let id = boot_id(&handle);
+    let link = handle.command_link();
+
+    link.send(SessionCommand::Message {
+        session: id.clone(),
+        text: "run the slow tool".to_string(),
+    });
+    let _tool_call = until_event(&mut handle, |event| {
+        matches!(event, SessionEvent::ToolCall { .. })
+    })
+    .await;
+    // Queued behind the run, then aborted — the pair is discarded at
+    // the site, the notice flushes after the terminal.
+    link.send(SessionCommand::Message {
+        session: id.clone(),
+        text: "queued behind".to_string(),
+    });
+    link.send(SessionCommand::Abort {
+        session: id.clone(),
+    });
+    let aborted = until_event(&mut handle, |event| {
+        matches!(event, SessionEvent::RunAborted { .. })
+    })
+    .await;
+    assert_eq!(aborted.stream.as_str(), id);
+    let discarded = until_event(&mut handle, |event| {
+        matches!(event, SessionEvent::MessagesDiscarded { .. })
+    })
+    .await;
+    assert_eq!(discarded.stream.as_str(), id);
+
+    // The post-abort message (sent after the terminal): queues
+    // normally, starts the next run, runs to completion.
+    link.send(SessionCommand::Message {
+        session: id.clone(),
+        text: "after the abort".to_string(),
+    });
+    let finished = until_event(&mut handle, |event| {
+        matches!(event, SessionEvent::RunFinished { .. })
+    })
+    .await;
+    assert_eq!(finished.stream.as_str(), id);
+    assert!(matches!(
+        &finished.event,
+        SessionEvent::RunFinished { output, .. } if output == "after the abort"
+    ));
+    drain(&mut handle).await;
+    std::fs::remove_dir_all(store.dir()).ok();
+}
+
+#[tokio::test]
+async fn frontend_death_aborts_every_sessions_run() {
+    // The v3 termination contract at multi-session scale: the watcher
+    // sweeps every worker. Both sessions' runs are provably mid-tool
+    // when the receiver drops; the wind-down (observable as the boot's
+    // closing stats — the host awaits every join before the stream
+    // ends) must have aborted both, durably (an `Aborted` marker and
+    // the synthesized tail in each log).
+    let store = temp_store("endpoint-death-multi");
+    let session = Factory::new(vec![tool_turn("t1", "slow"), text_turn("never")])
+        .into_builder(store.clone())
+        .dynamic_tool(slow_tool())
+        .create("C:/w")
+        .expect("session");
+    let create_store = store.clone();
+    let wiring = SessionHostWiring {
+        store: store.clone(),
+        create: std::sync::Arc::new(move || {
+            Factory::new(vec![tool_turn("t2", "slow"), text_turn("never")])
+                .into_builder(create_store.clone())
+                .dynamic_tool(slow_tool())
+                .create("C:/w")
+                .map(|session| (session, Vec::new()))
+                .map_err(|error| error.to_string())
+        }),
+        open: std::sync::Arc::new(|_| Err("not driven".to_string())),
+    };
+    let mut handle = SessionHost::spawn(session, Vec::new(), wiring);
+    let boot = boot_id(&handle);
+    let link = handle.command_link();
+
+    link.send(SessionCommand::Message {
+        session: boot.clone(),
+        text: "run one".to_string(),
+    });
+    link.send(SessionCommand::NewSession);
+    let created = match until_event(&mut handle, |event| {
+        matches!(event, SessionEvent::SessionCreated { .. })
+    })
+    .await
+    .event
+    {
+        SessionEvent::SessionCreated { id, .. } => id,
+        other => panic!("expected session_created, got {other:?}"),
+    };
+    link.send(SessionCommand::Message {
+        session: created.clone(),
+        text: "run two".to_string(),
+    });
+    // Both runs provably in flight: one tool call per stream.
+    let mut tool_streams = Vec::new();
+    while tool_streams.len() < 2 {
+        let frame = until_event(&mut handle, |event| {
+            matches!(event, SessionEvent::ToolCall { .. })
+        })
+        .await;
+        if !tool_streams.contains(&frame.stream.as_str().to_string()) {
+            tool_streams.push(frame.stream.as_str().to_string());
+        }
+    }
+    assert_eq!(
+        tool_streams,
+        vec![boot.clone(), created.clone()],
+        "each session's run is mid-tool"
+    );
+
+    // Frontend death: the receiver drops. The wind-down ends the
+    // stream only after every worker joins — the boot's closing stats
+    // appearing proves the host finished awaiting them all.
+    let events = handle.take_events().expect("the event stream");
+    drop(events);
+    tokio::time::timeout(Duration::from_secs(5), async {
+        loop {
+            if handle.closing_stats().is_some() {
+                return;
+            }
+            tokio::time::sleep(Duration::from_millis(25)).await;
+        }
+    })
+    .await
+    .expect("the host must wind down when the frontend dies");
+
+    // Durable proof both runs aborted at the watcher's hand: each log
+    // records the abort marker.
+    let boot_path = handle.info().session_path.clone();
+    let loaded = store
+        .open_path(std::path::Path::new(&boot_path))
+        .unwrap_or_else(|error| panic!("the boot session's log reopens: {error}"));
+    assert!(
+        loaded
+            .entries
+            .iter()
+            .any(|e| matches!(e.kind, crate::EntryKind::Aborted)),
+        "the boot session recorded the abort"
+    );
+    // The created session's file materialized (its run started) and
+    // aborted the same way.
+    let created_path = store
+        .list()
+        .expect("list")
+        .into_iter()
+        .find(|summary| summary.id == created)
+        .expect("the created session materialized")
+        .path;
+    let loaded = store.open_path(&created_path).expect("created log reopens");
+    assert!(
+        loaded
+            .entries
+            .iter()
+            .any(|e| matches!(e.kind, crate::EntryKind::Aborted)),
+        "the created session recorded the abort too"
+    );
+    std::fs::remove_dir_all(store.dir()).ok();
+}
+
+#[tokio::test]
+async fn a_replay_request_for_a_running_session_answers_after_its_terminal() {
+    // "The one wait in the design" (PROTOCOL.md v3): the pass for a
+    // session whose own run is in flight waits for that run's
+    // terminal — pinned as an ordering contract, not an accident: no
+    // bracket interleaves the run's events.
+    let store = temp_store("endpoint-replay-midrun");
+    let session = Factory::new(vec![tool_turn("t1", "slow"), text_turn("done")])
+        .into_builder(store.clone())
+        .dynamic_tool(slow_tool())
+        .create("C:/w")
+        .expect("session");
+    let mut handle = SessionHost::spawn(session, Vec::new(), plain_wiring(&store));
+    let id = boot_id(&handle);
+
+    handle.message(&id, "run the slow tool");
+    let _tool_call = until_event(&mut handle, |event| {
+        matches!(event, SessionEvent::ToolCall { .. })
+    })
+    .await;
+
+    // The pass is requested mid-run. The run continues to its terminal
+    // with nothing bracketed inside it…
+    handle.replay(&id);
+    let mut saw_bracket_before_terminal = false;
+    let finished = loop {
+        let frame = handle.next_event().await.expect("the run continues");
+        match frame.event {
+            SessionEvent::ReplayStarted { .. } | SessionEvent::ReplayDone => {
+                saw_bracket_before_terminal = true;
+            }
+            SessionEvent::RunFinished { .. } => break frame,
+            _ => {}
+        }
+    };
+    assert_eq!(finished.stream.as_str(), id);
+    assert!(
+        !saw_bracket_before_terminal,
+        "the pass never interleaves the in-flight run"
+    );
+
+    // …and answers right after it, stamped with the session's id.
+    let started = until_event(&mut handle, |event| {
+        matches!(event, SessionEvent::ReplayStarted { .. })
+    })
+    .await;
+    assert_eq!(started.stream.as_str(), id);
+    loop {
+        let frame = until_event(&mut handle, |event| {
+            matches!(event, SessionEvent::ReplayDone | SessionEvent::Error { .. })
+        })
+        .await;
+        match frame.event {
+            SessionEvent::ReplayDone => break,
+            SessionEvent::Error { message, .. } => panic!("replay failed: {message}"),
+            _ => {}
+        }
+    }
     drain(&mut handle).await;
     std::fs::remove_dir_all(store.dir()).ok();
 }

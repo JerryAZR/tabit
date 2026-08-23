@@ -293,7 +293,7 @@ above — full-text deltas, same ids as live)
 
 | event | payload | when |
 |---|---|---|
-| `replay_started` | `total` | a replay pass begins (startup with `replay: true`, or after `checked_out`). `total` = **entries** to come. |
+| `replay_started` | `total` | a replay pass begins (startup with `replay: true`, or after `checked_out`). `total` = **events** to come between the brackets (the progress denominator). |
 | `replay_done` | — | the pass ends; live traffic (or quiescence) follows. |
 
 `usage` objects are protocol-owned:

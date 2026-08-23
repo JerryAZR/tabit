@@ -691,7 +691,9 @@ fn background_events_update_liveness_but_never_the_transcript() {
             .attention
     );
 
-    // The run ends in the background; switching there clears the mark.
+    // The run ends in the background; the mark SURVIVES the terminal
+    // (its whole point — the error is still unseen) and clears only
+    // when the user switches there.
     state.reduce(from(
         "s2",
         SessionEvent::RunFinished {
@@ -706,6 +708,25 @@ fn background_events_update_liveness_but_never_the_transcript() {
             .find(|row| row.id == "s2")
             .unwrap()
             .running
+    );
+    assert!(
+        state
+            .sessions
+            .iter()
+            .find(|row| row.id == "s2")
+            .unwrap()
+            .attention,
+        "an unseen error outlives its run"
+    );
+    state.open_session("s2");
+    assert!(
+        !state
+            .sessions
+            .iter()
+            .find(|row| row.id == "s2")
+            .unwrap()
+            .attention,
+        "switching there is seeing it"
     );
 }
 
@@ -777,6 +798,7 @@ fn session_created_switches_to_the_empty_new_session() {
         SessionEvent::SessionCreated {
             id: "s9".to_string(),
             path: "sessions/20260822_s9.jsonl".to_string(),
+            model: tabit_protocol::ModelSelection::new("local", "m9"),
         },
     ));
     // The brand-new session is empty — no replay will come; the switch
@@ -845,6 +867,7 @@ fn a_new_session_lands_even_while_the_current_one_runs() {
         SessionEvent::SessionCreated {
             id: "s9".to_string(),
             path: "sessions/20260822_s9.jsonl".to_string(),
+            model: tabit_protocol::ModelSelection::new("local", "m9"),
         },
     ));
     assert_eq!(
@@ -911,5 +934,205 @@ fn an_active_sessions_run_state_is_mirrored_onto_its_row() {
             .unwrap()
             .running,
         "the row reflects the run viewed live"
+    );
+}
+
+#[test]
+fn a_replay_pass_never_marks_the_session_running() {
+    // The review round's finding: a pass carries `user_message`s but
+    // never a terminal, so an unguarded fold left the session "running"
+    // forever after startup replay or a switch (phantom dot, abort
+    // button, 10 Hz repaint spin, sends misread as steers).
+    let mut state = GuiState::default();
+    state.reduce(ack());
+    state.reduce(event(SessionEvent::SessionsAvailable {
+        sessions: vec![tabit_protocol::AvailableSession {
+            id: "s2".to_string(),
+            created_at: "2026-08-22T10:00:00Z".to_string(),
+            entry_count: 9,
+        }],
+    }));
+    state.open_session("s2");
+    state.reduce(from("s2", SessionEvent::ReplayStarted { total: 3 }));
+    state.reduce(from(
+        "s2",
+        SessionEvent::UserMessage {
+            text: "history question".to_string(),
+            entry_id: "e1".to_string(),
+        },
+    ));
+    state.reduce(from(
+        "s2",
+        SessionEvent::TextDelta {
+            turn_id: "t1".to_string(),
+            text: "history answer".to_string(),
+        },
+    ));
+    // Inside the bracket: the view grows, liveness does not.
+    assert!(!state.running, "a pass is history, not a run");
+    assert!(
+        !state
+            .sessions
+            .iter()
+            .find(|row| row.id == "s2")
+            .unwrap()
+            .running,
+        "the row is not poisoned either"
+    );
+    state.reduce(from("s2", SessionEvent::ReplayDone));
+    assert!(!state.running);
+    assert!(
+        !state
+            .sessions
+            .iter()
+            .find(|row| row.id == "s2")
+            .unwrap()
+            .running
+    );
+
+    // After the bracket, live traffic tracks liveness again.
+    state.reduce(from(
+        "s2",
+        SessionEvent::UserMessage {
+            text: "a real one".to_string(),
+            entry_id: "e9".to_string(),
+        },
+    ));
+    assert!(state.running, "live runs still mark liveness");
+    state.reduce(from(
+        "s2",
+        SessionEvent::RunFinished {
+            output: String::new(),
+            usage: Usage::default(),
+        },
+    ));
+    assert!(!state.running);
+}
+
+#[test]
+fn a_background_pass_after_a_fast_switch_does_not_poison_the_row() {
+    // open B, switch away before its pass lands: the pass arrives on a
+    // non-viewed stream — its content must not mark B running.
+    let mut state = GuiState::default();
+    state.reduce(ack());
+    state.reduce(event(SessionEvent::SessionsAvailable {
+        sessions: vec![tabit_protocol::AvailableSession {
+            id: "s2".to_string(),
+            created_at: "2026-08-22T10:00:00Z".to_string(),
+            entry_count: 9,
+        }],
+    }));
+    state.open_session("s2");
+    state.open_session(BOOT); // switch back before the pass arrives
+    state.reduce(from("s2", SessionEvent::ReplayStarted { total: 1 }));
+    state.reduce(from(
+        "s2",
+        SessionEvent::UserMessage {
+            text: "late history".to_string(),
+            entry_id: "e1".to_string(),
+        },
+    ));
+    state.reduce(from("s2", SessionEvent::ReplayDone));
+    assert!(
+        !state
+            .sessions
+            .iter()
+            .find(|row| row.id == "s2")
+            .unwrap()
+            .running,
+        "a background pass is history too"
+    );
+}
+
+#[test]
+fn cards_survive_a_view_switch_and_route_by_their_own_session() {
+    // The parked-permission deadlock: switch away from a session whose
+    // run waits on a card, switch back — the card must be answerable
+    // again, and answering must reach the card's session (not the
+    // active one).
+    let mut state = GuiState::default();
+    state.reduce(ack());
+    state.reduce(event(SessionEvent::SessionsAvailable {
+        sessions: vec![tabit_protocol::AvailableSession {
+            id: "s2".to_string(),
+            created_at: "2026-08-22T10:00:00Z".to_string(),
+            entry_count: 4,
+        }],
+    }));
+    state.reduce(event(SessionEvent::InteractionRequested {
+        id: "ask-1".to_string(),
+        title: "Run command?".to_string(),
+        body: "rm -rf target".to_string(),
+        options: vec![],
+        free_text: false,
+    }));
+    assert_eq!(state.interactions.len(), 1);
+    assert_eq!(state.interactions[0].session, BOOT);
+
+    // Switch away and back: the card survives (and the switch-back's
+    // replay bracket does not clear it — cards never replay).
+    state.open_session("s2");
+    assert_eq!(state.interactions.len(), 1, "switching does not drop cards");
+    state.open_session(BOOT);
+    assert_eq!(state.interactions[0].session, BOOT);
+
+    // The terminal closes only its own session's cards.
+    state.reduce(event(SessionEvent::RunAborted {
+        output: String::new(),
+    }));
+    assert!(state.interactions.is_empty());
+}
+
+#[test]
+fn a_background_question_raises_attention_and_dies_with_its_run() {
+    let mut state = GuiState::default();
+    state.reduce(ack());
+    state.reduce(event(SessionEvent::SessionsAvailable {
+        sessions: vec![tabit_protocol::AvailableSession {
+            id: "s2".to_string(),
+            created_at: "2026-08-22T10:00:00Z".to_string(),
+            entry_count: 4,
+        }],
+    }));
+    state.reduce(from(
+        "s2",
+        SessionEvent::UserMessage {
+            text: "go".to_string(),
+            entry_id: "e1".to_string(),
+        },
+    ));
+    state.reduce(from(
+        "s2",
+        SessionEvent::InteractionRequested {
+            id: "ask-2".to_string(),
+            title: "Run command?".to_string(),
+            body: "cargo test".to_string(),
+            options: vec![],
+            free_text: false,
+        },
+    ));
+    // The card is held (answerable after switching) and the row asks
+    // for attention.
+    assert_eq!(state.interactions[0].session, "s2");
+    assert!(
+        state
+            .sessions
+            .iter()
+            .find(|row| row.id == "s2")
+            .unwrap()
+            .attention
+    );
+
+    // A background terminal closes its session's card, not the
+    // active view's state.
+    state.reduce(from(
+        "s2",
+        SessionEvent::RunAborted {
+            output: String::new(),
+        },
+    ));
+    assert!(
+        state.interactions.is_empty(),
+        "the question died with its run"
     );
 }

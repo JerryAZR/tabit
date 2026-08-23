@@ -105,11 +105,15 @@ pub struct ToolResultRow {
 }
 
 /// One open interaction card (FRONTEND.md §8): a permission gate or an
-/// ask-the-user body waiting for the user. Several may be open at once;
-/// run terminals close them all (the closing rule — the backend has no
-/// close event and needs none).
+/// ask-the-user body waiting for the user. Several may be open at
+/// once, across sessions; run terminals close them all — scoped to
+/// the terminal's session. Cards never replay; the durable record is
+/// the tool result.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct InteractionCard {
+    /// The session the question belongs to — answers route by it, the
+    /// view renders the active stream's cards.
+    pub session: String,
     pub id: String,
     pub title: String,
     pub body: String,
@@ -183,9 +187,23 @@ pub struct GuiState {
     /// away drops the display (the backend keeps the queue).
     pub pending: VecDeque<PendingMessage>,
     /// True from the first `user_message` of a run to its terminal
-    /// (on the active stream).
+    /// (on the active stream). Replay passes contain `user_message`s
+    /// but never a terminal — liveness writes are suppressed inside a
+    /// pass bracket (see `replaying`).
     pub running: bool,
-    /// Open interaction cards, oldest first (the active session's).
+    /// Streams with an open replay pass (started/stopped by the
+    /// brackets). A pass is history, not liveness: events inside it
+    /// must not mark a session running — there is no terminal coming
+    /// to settle the flag.
+    pub replaying: Vec<String>,
+    /// Open interaction cards, oldest first, across ALL sessions —
+    /// cards never replay (FRONTEND.md §8) and never survive their
+    /// run terminal, so losing them at a view switch (the stage-1
+    /// shape) made a parked permission card unrecoverable and
+    /// deadlocked the session's own replay pass (the pass waits for
+    /// the run; the run waits on the now-invisible card). The view
+    /// renders the active stream's cards; background cards raise the
+    /// row's attention flag.
     pub interactions: Vec<InteractionCard>,
     /// Sum of `run_finished` usage across runs.
     pub usage: Usage,
@@ -205,6 +223,7 @@ impl Default for GuiState {
             transcript: Vec::new(),
             pending: VecDeque::new(),
             running: false,
+            replaying: Vec::new(),
             interactions: Vec::new(),
             usage: Usage::default(),
             handshake_rejected: false,
@@ -312,12 +331,16 @@ impl GuiState {
 
     /// Point the transcript at `id` with a clean slate. One path for
     /// the switcher and `session_created` (a brand-new session is
-    /// empty — nothing replays, the clean slate IS its state).
+    /// empty — nothing replays, the clean slate IS its state). Cards
+    /// survive the switch — they are per-session live state, never
+    /// replay content, and the freshly-viewed session's cards must
+    /// render again (a parked permission card would otherwise
+    /// deadlock its own replay pass: the pass waits for the run, the
+    /// run waits on the now-invisible card).
     fn switch_view(&mut self, id: String, running: bool) {
         self.active = id;
         self.transcript.clear();
         self.pending.clear();
-        self.interactions.clear();
         self.running = running;
     }
 
@@ -350,8 +373,9 @@ impl GuiState {
     /// A `new_session` succeeded. Today the only creator is the user's
     /// own command, so the view switches to the fresh session; when
     /// subagent children mint sessions (stage 4), this is the seam
-    /// that decides view-stealing versus background rows.
-    fn session_created(&mut self, id: String, path: String) {
+    /// that decides view-stealing versus background rows. The frame
+    /// carries the new session's facts — selection included.
+    fn session_created(&mut self, id: String, path: String, model: ModelSelection) {
         // A brand-new session: empty (no replay comes), so the switch
         // is complete the moment it happens.
         self.sessions.push(SessionRow {
@@ -364,6 +388,7 @@ impl GuiState {
         if let Some(facts) = self.facts.as_mut() {
             facts.session_id = id.clone();
             facts.session_path = path;
+            facts.model = model;
         }
         self.switch_view(id, false);
     }
@@ -394,23 +419,50 @@ impl GuiState {
                 self.replace_catalog(sessions);
                 return;
             }
-            SessionEvent::SessionCreated { id, path } => {
-                self.session_created(id, path);
+            SessionEvent::SessionCreated { id, path, model } => {
+                self.session_created(id, path, model);
                 return;
+            }
+            // Pass brackets, on any stream: everything between them is
+            // history being rebuilt, never liveness (a pass carries
+            // `user_message`s but no terminal — an unguarded fold
+            // would mark the session running forever; the review
+            // round's finding).
+            SessionEvent::ReplayStarted { .. } => {
+                if !self.replaying.iter().any(|s| s == frame.stream.as_str()) {
+                    self.replaying.push(frame.stream.as_str().to_string());
+                }
+            }
+            SessionEvent::ReplayDone => {
+                self.replaying.retain(|s| s != frame.stream.as_str());
             }
             _ => {}
         }
-        // Liveness rides every run-scoped event, viewed or not: the
-        // switcher's dot must survive switching away mid-run (the
-        // `user_message` that started the run may have rendered live
-        // while active, never passing through the background path).
-        match &frame.event {
-            SessionEvent::UserMessage { .. } => self.mark_running(frame.stream.as_str(), true),
-            SessionEvent::RunFinished { .. } | SessionEvent::RunAborted { .. } => {
-                self.mark_running(frame.stream.as_str(), false);
+        // Run terminals close their session's cards (any stream — a
+        // background card dies with its run too).
+        if matches!(
+            frame.event,
+            SessionEvent::RunFinished { .. }
+                | SessionEvent::RunAborted { .. }
+                | SessionEvent::RunFailed { .. }
+        ) {
+            let stream = frame.stream.as_str();
+            self.interactions.retain(|card| card.session != stream);
+        }
+        // Liveness rides every run-scoped event, viewed or not —
+        // except inside a pass bracket — so the switcher's dot
+        // survives switching away mid-run.
+        let in_replay = self.replaying.iter().any(|s| s == frame.stream.as_str());
+        if !in_replay {
+            match &frame.event {
+                SessionEvent::UserMessage { .. } => self.mark_running(frame.stream.as_str(), true),
+                SessionEvent::RunFinished { .. }
+                | SessionEvent::RunAborted { .. }
+                | SessionEvent::RunFailed { .. } => {
+                    self.mark_running(frame.stream.as_str(), false);
+                }
+                _ => {}
             }
-            SessionEvent::RunFailed { .. } => self.mark_running(frame.stream.as_str(), false),
-            _ => {}
         }
         if frame.stream.as_str() != self.active {
             self.reduce_background(frame.stream.as_str().to_string(), frame.event);
@@ -436,7 +488,9 @@ impl GuiState {
                     self.pending.remove(position);
                 }
                 self.transcript.push(Group::User { text });
-                self.running = true;
+                if !in_replay {
+                    self.running = true;
+                }
             }
             SessionEvent::MessageQueued { id, text } => {
                 // The backend acknowledged a waiting message: upgrade the
@@ -550,14 +604,12 @@ impl GuiState {
             }
             SessionEvent::RunFinished { usage, .. } => {
                 self.running = false;
-                self.interactions.clear();
                 self.usage = add(self.usage, usage);
             }
             SessionEvent::RunAborted { .. } => {
                 // Streamed partial text stays visible — the deltas the
                 // user watched are the record.
                 self.running = false;
-                self.interactions.clear();
                 // Abort discards the queued steers (backend flag 6) — they
                 // will never be acknowledged, so the pending rows must not
                 // linger into the next run's pairing.
@@ -565,19 +617,18 @@ impl GuiState {
             }
             SessionEvent::RunFailed { message } => {
                 self.running = false;
-                self.interactions.clear();
                 self.push_notice(message, true);
             }
             SessionEvent::ReplayStarted { .. } => {
                 // The structural reset: the pass that follows rebuilds
                 // the transcript from committed history, so anything the
-                // view held (a switch's optimism included) goes. The
-                // run flag is seeded at the switch and untouched here —
-                // an in-flight background run continues streaming after
-                // the pass and its terminal will settle the flag.
+                // view held (a switch's optimism included) goes. Cards
+                // survive — they are per-session live state, never
+                // replay content (FRONTEND.md §8). The run flag is
+                // seeded at the switch and suppressed during the pass
+                // (the bracket tracking at the top of the fold).
                 self.transcript.clear();
                 self.pending.clear();
-                self.interactions.clear();
             }
             SessionEvent::ReplayDone => {
                 // The pass ended; the transcript is whole (live traffic
@@ -611,6 +662,7 @@ impl GuiState {
                 free_text,
             } => {
                 self.interactions.push(InteractionCard {
+                    session: self.active.clone(),
                     id,
                     title,
                     body,
@@ -630,15 +682,40 @@ impl GuiState {
     }
 
     /// A stamped event for a session this window is not viewing.
-    /// Liveness is already mirrored (before the split); the one rule
-    /// here: `error` conditions must never vanish with the view —
-    /// they land in the active transcript and mark the row.
+    /// Liveness is already mirrored (before the split); background
+    /// questions join the card list (the view renders the active
+    /// stream's — a parked permission card must stay answerable, or
+    /// the session deadlocks on its own replay pass), and `error`
+    /// conditions must never vanish with the view — they land in the
+    /// active transcript and mark the row.
     fn reduce_background(&mut self, stream: String, event: SessionEvent) {
-        if let SessionEvent::Error { message, .. } = event {
-            if let Some(row) = self.sessions.iter_mut().find(|row| row.id == stream) {
-                row.attention = true;
+        match event {
+            SessionEvent::Error { message, .. } => {
+                if let Some(row) = self.sessions.iter_mut().find(|row| row.id == stream) {
+                    row.attention = true;
+                }
+                self.push_notice(message, true);
             }
-            self.push_notice(message, true);
+            SessionEvent::InteractionRequested {
+                id,
+                title,
+                body,
+                options,
+                free_text,
+            } => {
+                if let Some(row) = self.sessions.iter_mut().find(|row| row.id == stream) {
+                    row.attention = true;
+                }
+                self.interactions.push(InteractionCard {
+                    session: stream,
+                    id,
+                    title,
+                    body,
+                    options: options.into_iter().map(|o| o.label).collect(),
+                    free_text,
+                });
+            }
+            _ => {}
         }
     }
 

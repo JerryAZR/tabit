@@ -28,8 +28,8 @@ stateDiagram-v2
     Draining --> Running : the batch joins the history —<br/>enter the inner loop at Preparing
     Running --> Idle : Done — emit run_finished
     Running --> Idle : Failed — emit run_failed
-    Running --> Idle : abort preempts (token race at any await)<br/>— emit run_aborted, queue discarded
-    Idle --> Idle : abort while idle — discard the queue<br/>(no-op when empty)
+    Running --> Idle : abort preempts (token race at any await)<br/>— emit run_aborted; the ABORT SITE discarded the<br/>at-abort-time queue (notice flushes at the epilogue)
+    Idle --> Idle : abort while idle — the abort site discards<br/>the queue (notice flushes at the idle beat;<br/>no-op when empty)
 ```
 
 The **Draining** step is the outer loop's single responsibility between

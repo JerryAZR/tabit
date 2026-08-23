@@ -88,6 +88,7 @@ fn events_round_trip_through_json() {
         SessionEvent::SessionCreated {
             id: "0198".to_string(),
             path: "C:/w/.tabit/sessions/20260822_0198.jsonl".to_string(),
+            model: ModelSelection::new("p", "m"),
         },
         SessionEvent::error_session("no session with id `0195`"),
         SessionEvent::ModelChanged {
@@ -133,10 +134,11 @@ fn events_round_trip_through_json() {
     assert_eq!(
         serde_json::to_string(&SessionEvent::SessionCreated {
             id: "0198".to_string(),
-            path: "C:/w/s.jsonl".to_string()
+            path: "C:/w/s.jsonl".to_string(),
+            model: ModelSelection::new("p", "m"),
         })
         .expect("serialize"),
-        r#"{"type":"session_created","id":"0198","path":"C:/w/s.jsonl"}"#
+        r#"{"type":"session_created","id":"0198","path":"C:/w/s.jsonl","model":{"provider":"p","model":"m","thinking_level":null}}"#
     );
     // The wire spelling of the brackets and the truncation warning.
     assert_eq!(

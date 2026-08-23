@@ -164,7 +164,6 @@ impl SessionBuilder {
         validate_selection(&selection, &config)?;
         let default_factory: ModelFactory =
             ModelRegistry::new(config.clone(), auth.clone()).factory();
-        drop(auth);
         Ok(Self {
             store,
             config,
@@ -283,7 +282,7 @@ pub(crate) struct QueuedMessage {
 }
 
 impl QueuedMessage {
-    fn text(&self) -> String {
+    pub(crate) fn text(&self) -> String {
         user_text(&self.message)
     }
 }
@@ -404,11 +403,14 @@ impl Mailbox {
     }
 
     /// Abort semantics: discard everything queued now (nothing more may
-    /// drain), staging the pairs for the run's conclusion to emit — the
-    /// discard notice rides the wind-down, after the terminal.
-    pub(crate) fn abort_clear(&self) {
+    /// drain), staging the pairs for a conclusion — or, when no run is
+    /// in flight, the worker's idle beat — to emit as
+    /// `messages_discarded`. The wake is what makes the idle case
+    /// visible: without a run there is no wind-down to ride.
+    pub(crate) fn abort_clear_notify(&self) {
         let cleared = self.clear();
         lock(&self.discarded).extend(cleared);
+        self.work.notify_one();
     }
 
     /// The staged discard pairs, taken (the run's conclusion flushes them).
@@ -469,10 +471,10 @@ impl MailboxHandle {
         self.mailbox.is_empty()
     }
 
-    /// Discard everything queued under abort semantics — the pairs stage
-    /// for the run's conclusion to emit (see [`Mailbox::abort_clear`]).
-    pub(crate) fn abort_clear(&self) {
-        self.mailbox.abort_clear();
+    /// The staged discard pairs, taken (a run conclusion, or the
+    /// worker's idle beat after an idle abort).
+    pub(crate) fn take_staged_discards(&self) -> Vec<QueuedMessage> {
+        self.mailbox.take_staged_discards()
     }
 
     /// The work signal the resident worker waits on.
@@ -486,12 +488,19 @@ impl MailboxHandle {
 #[derive(Clone)]
 pub struct AbortHandle {
     token: std::sync::Arc<std::sync::Mutex<CancellationToken>>,
+    mailbox: Mailbox,
 }
 
 impl AbortHandle {
-    /// Abort the current run, if any.
+    /// Abort the current run, if any, and discard what was queued at
+    /// abort time — one semantic, one site (PROTOCOL.md flag 6: the
+    /// pairs stage for the next conclusion or idle beat to emit
+    /// `messages_discarded`; messages arriving after this queue
+    /// normally and start the next run). Aborting while idle just
+    /// discards the queue.
     pub fn abort(&self) {
         lock(&self.token).cancel();
+        self.mailbox.abort_clear_notify();
     }
 }
 
@@ -898,10 +907,12 @@ impl Session {
             sink.emit(SessionEvent::RunAborted {
                 output: output.clone(),
             });
-            // Abort means stop: discard anything queued behind the run,
-            // staging the pairs for the flush below (their pending
-            // displays resolve by id).
-            self.mailbox.abort_clear();
+            // The abort SITE (the command link, or the host's death
+            // watcher) already discarded the at-abort-time queue and
+            // staged the pairs — the flush below emits the notice
+            // after this terminal (PROTOCOL.md flag 6: one clear, at
+            // the abort site; messages arriving after the abort queue
+            // normally and start the next run).
             outcome = RunOutcome::Aborted;
         } else if let Some(failure) = failure {
             // The log stays the source of truth: re-derive the context,
@@ -970,6 +981,7 @@ impl Session {
     pub fn abort_handle(&self) -> AbortHandle {
         AbortHandle {
             token: self.abort.clone(),
+            mailbox: self.mailbox.clone(),
         }
     }
 

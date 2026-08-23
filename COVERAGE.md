@@ -360,6 +360,17 @@ rather than skipping, reachable or not.)
   messaging, and completion of a second session while the boot run is
   provably mid-tool — the ruling that session lifecycle never waits on
   another session.
+- Review-round remediation (2026-08, three clean-context reviewers) —
+  **covered**: multi-session frontend death (both runs abort
+  durably, both logs record it), the running-session replay wait (no
+  bracket interleaves the in-flight run; the pass answers after the
+  terminal), the burst-EOF death door (no unattended completion), the
+  idle-abort discard made visible, post-abort message survival, the
+  replay pass never marking liveness (view flag and row, background
+  passes included), per-session cards surviving switches and dying
+  with their own run's terminal, `run_failed` as exactly-one-terminal
+  and last, the catalog's newest-first order, attention-flag
+  lifecycle, and the `replay: false` wire skip.
 - `main.rs` wiring closures (`host_wiring`, create/open) — the create
   path is exercised through the tabit crate's bridge tests only when
   `new_session` is driven; the production closures' failure surfaces

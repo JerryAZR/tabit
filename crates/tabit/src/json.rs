@@ -56,11 +56,17 @@ where
     let exit = reader_task.await.unwrap_or(1);
     // The client is gone (EOF, broken pipe, or a dead reader thread):
     // at a stdio edge that IS frontend death — abort every in-flight
-    // run rather than draining it (ruled 2026-08: the core dies with
-    // the frontend, regardless of state), then wind down. Interrupted
-    // results synthesize on the next open, exactly like a crash.
+    // run, discard every queue, and wind down (ruled 2026-08: the core
+    // dies with the frontend, regardless of state). The door is
+    // dropping the host, NOT the polite close: `close_commands` is
+    // not a barrier and would route anything still queued on the
+    // command channel — starting fresh, unattended runs for a client
+    // that is gone (the review round's finding). Dropping the host
+    // closes the command channel: the host task sees it empty, and
+    // the unrouted commands die unrouted. Interrupted results
+    // synthesize on the next open, exactly like a crash.
     host.abort_all();
-    host.close_commands();
+    drop(host);
     // The forwarder ends when the worker drops the event sender at
     // wind-down; the writer ends when every writer_tx clone is gone.
     drop(writer_tx);
@@ -1236,7 +1242,9 @@ id = "m"
         assert_ne!(created, boot, "the new session is a second stream");
         assert!(created_line.contains(&format!(r#""stream":"{created}""#)));
 
-        // The new session answers a message on its own stamp.
+        // The new session answers a message on its own stamp — the
+        // await is stream-scoped so a stale terminal line from another
+        // session can never satisfy it early.
         tx_in.send(message_line(&created, "hi again")).unwrap();
         let answer_line = await_line(&out, "new answer").await;
         assert!(answer_line.contains(&format!(r#""stream":"{created}""#)));
@@ -1254,6 +1262,58 @@ id = "m"
         drop(tx_in);
         assert_eq!(serve_task.await.unwrap(), 0);
         let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[tokio::test]
+    async fn input_closing_burst_close_never_runs_unattended_messages() {
+        // The death door is dropping the host, not the polite close: a
+        // message queued but unrouted at EOF must die unrouted (the
+        // polite close's drain would route it — starting an
+        // unattended run that spends model calls; the review round's
+        // finding). The slow tool makes "routed then aborted" and
+        // "never routed" both finish-free, so the assertion is
+        // deterministic either way.
+        let slow = vec![
+            MockStreamEvent::text("partial"),
+            MockStreamEvent::tool_call("t1", "slow", serde_json::json!({})),
+            MockStreamEvent::final_response(Usage::default()),
+        ];
+        let session = test_session_with("eof-burst", vec![slow], vec![slow_tool()]);
+        let dir = test_dir("eof-burst");
+        let handle = SessionHost::spawn(session, Vec::new(), test_wiring(&dir, unusable_create()));
+        let out = SharedOut::default();
+        // The piped-burst shape (initialize + message + immediate EOF)
+        // needs the session id, which is only knowable after the ack —
+        // so drive it live: handshake, learn the id, send the message,
+        // and close input immediately.
+        let (tx_in, rx_in) = std::sync::mpsc::channel::<String>();
+        let serve_task = tokio::spawn(serve(
+            handle,
+            ChannelIn {
+                lines: rx_in,
+                buf: Vec::new(),
+            },
+            out.clone(),
+        ));
+        tx_in.send(r#"{"protocol_version":3}"#.to_string()).unwrap();
+        let session_id = ack_session_id(&out).await;
+        tx_in.send(message_line(&session_id, "hi")).unwrap();
+        drop(tx_in);
+
+        let code = tokio::time::timeout(std::time::Duration::from_secs(5), serve_task)
+            .await
+            .expect("the bridge must exit after EOF")
+            .unwrap();
+        assert_eq!(code, 0);
+        let lines = read_lines(&out);
+        assert!(
+            !lines.iter().any(|l| l.contains("run_finished")),
+            "no unattended run completes: {lines:?}"
+        );
+        // (A message routed BEFORE the EOF legitimately entered
+        // history and aborted mid-run — that is the ruled behavior;
+        // what the death door forbids is completing runs for the
+        // gone, and routing what never got there.)
     }
 
     #[tokio::test]

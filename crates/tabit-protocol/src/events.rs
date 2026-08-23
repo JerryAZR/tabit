@@ -5,6 +5,7 @@
 //! ships in this workspace, so an added variant is a coordinated change,
 //! not a compatibility hazard.
 
+use crate::model::ModelSelection;
 use crate::usage::Usage;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
@@ -202,6 +203,10 @@ pub enum SessionEvent {
         /// The new session's file path (materializes at its first
         /// user message).
         path: String,
+        /// The selection the new session starts with (a fresh
+        /// resolution — it can differ from the boot's, e.g. a resumed
+        /// boot model vs `default_model`).
+        model: ModelSelection,
     },
     /// The active model changed (a `ModelChange` log entry replayed, or
     /// — from slice 3 — a `model` command applied).

@@ -142,8 +142,14 @@ impl TabitApp {
         if self.state.phase != Phase::Live {
             return;
         }
+        // Answers route by the card's own session — cards can belong
+        // to a background stream (visible here only while viewing it,
+        // but the routing must not assume the active stream).
+        let Some(card) = self.state.interactions.iter().find(|c| c.id == id) else {
+            return;
+        };
+        let session = card.session.clone();
         if let Some(backend) = &self.backend {
-            let session = self.state.active.clone();
             backend.send_interaction_response(&session, id, option, text);
             self.state.interaction_answered(id);
             self.display.answers.remove(id);
@@ -155,21 +161,26 @@ impl TabitApp {
     /// once, any answer order. Declared before the input panel, so it
     /// stacks directly above it.
     fn cards_panel(&mut self, ui: &mut egui::Ui) {
-        let ids: Vec<String> = self
+        // Cards are per-session; the panel renders the active
+        // session's (background cards wait on their switcher rows).
+        let active = self.state.active.clone();
+        let cards: Vec<crate::reducer::InteractionCard> = self
             .state
             .interactions
             .iter()
-            .map(|c| c.id.clone())
+            .filter(|c| c.session == active)
+            .cloned()
             .collect();
+        let ids: Vec<String> = cards.iter().map(|c| c.id.clone()).collect();
         // Drafts for closed cards (answered or terminal-closed) go away.
         self.display.answers.retain(|id, _| ids.contains(id));
-        if self.state.interactions.is_empty() {
+        if cards.is_empty() {
             return;
         }
         egui::containers::Panel::bottom("cards").show(ui, |ui| {
             // Cloned for the widget pass: the send choke point needs
             // `&mut self` back (cards are small; this is the view).
-            for card in self.state.interactions.clone() {
+            for card in cards {
                 ui.add_space(theme::ROW_GAP / 2.0);
                 ui.horizontal(|ui| {
                     ui.add_space(theme::ROW_INSET);
@@ -259,11 +270,16 @@ impl eframe::App for TabitApp {
         let facts = self.state.facts.clone();
         let pending = self.state.pending.len();
         let usage = self.state.usage;
-        let stderr_tail = self
-            .backend
-            .as_ref()
-            .map(|b| b.stderr_tail())
-            .unwrap_or_default();
+        // Only materialized once the backend is gone (the tail is a
+        // mutex-locked 200-line clone; Live frames never read it).
+        let stderr_tail = if matches!(phase, Phase::Exited { .. }) {
+            self.backend
+                .as_ref()
+                .map(|b| b.stderr_tail())
+                .unwrap_or_default()
+        } else {
+            Vec::new()
+        };
         egui::containers::Panel::top("status").show(ui, |ui| {
             ui.horizontal(|ui| match &phase {
                 Phase::Connecting => {
