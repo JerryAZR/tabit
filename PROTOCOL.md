@@ -681,11 +681,16 @@ template baked into the core. The core's interaction vocabulary is
 constructs the request itself; the hub never inspects payloads.
 
 - `interaction_request { id, ui_type, payload }`— stamped with
-  the session stream as ever; `id` backend-minted at ask (born at
-  acknowledgment); `ui_type` names the widget; `payload` opaque (a
-  JSON value).
-- `interaction_response { session, id, payload }`— **always an
-  answer**; the frontend never expresses dismissal. Dismissal is
+  the session stream as ever (events are stamped in the frame
+  envelope, never self-addressed in-body; frontends route by stamp,
+  so the session is in hand when the card arrives); `id`
+  backend-minted at ask (born at acknowledgment); `ui_type` names
+  the widget; `payload` opaque (a JSON value).
+- `interaction_response { session, id, payload }`— a command,
+  so explicitly session-addressed (v3's always-explicit ruling): the
+  echo of the request frame's stamp. Widgets answer by interaction
+  id through their host frontend and never see a session id.
+  **Always an answer**; the frontend never expresses dismissal. Dismissal is
   backend-derived (terminal retraction, dropped asker): the engine
   capability returns `Answered(payload) | Dismissed`— routing
   truth, not payload content.
