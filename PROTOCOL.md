@@ -670,6 +670,38 @@ Staging: (1) this section — host + vocabulary + GUI command swap,
 deleting the respawn interim; (2) `checkout` ✓; (3) `model`;
 (4) subagents.
 
+## Backend-level events — the optional stream (ruled 2026-08;
+lands with the interaction round)
+
+`EventFrame.stream` becomes **optional: absent means the backend
+produced the event, not any session.** Today host-level facts fake a
+session stamp—`sessions_available` and `session_created` ride the
+boot stream ("the host's primary voice"), unknown-session errors are
+stamped with an id naming no session here—and frontends must know
+to disbelieve the attribution (the GUI already folds them
+connection-level, before stream routing). The ruling names the
+distinction instead:
+
+- Stamped frames: a session produced the event; route by stamp, as
+  ever (the v3 rule—a stream is only ever a real session id; the
+  retired `"main"` alias stays retired, and no reserved `"host"`
+  stream replaces it—absence is the honest spelling).
+- Unstamped frames: **backend-level facts**. Fold them
+  connection-level—global state and notices, never
+  session-attributed. The GUI's connection-level-first fold becomes
+  the general rule, not a two-type special case.
+- Events that become unstamped: `sessions_available`,
+  `session_created` (its payload carries the new session's `id`; the
+  stamp was redundant), backend build/listing failures, and routing
+  errors for unknown sessions (the message names the id). Boot
+  startup notes stay stamped—they genuinely concern the boot
+  session's model.
+- Symmetry with commands, which already model this: commands are
+  session-addressed or host-level with no address (`new_session`);
+  events are session-stamped or host-level with no stamp. A future
+  `list_sessions` command rides the class directly: host-level
+  command, unstamped `sessions_available` reply.
+
 ## Interaction generalization (ruled 2026-08; lands with the
 interaction round)
 
