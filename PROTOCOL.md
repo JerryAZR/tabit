@@ -670,6 +670,46 @@ Staging: (1) this section — host + vocabulary + GUI command swap,
 deleting the respawn interim; (2) `checkout` ✓; (3) `model`;
 (4) subagents.
 
+## Interaction generalization (ruled 2026-08; lands with the
+interaction round)
+
+The shipped typed shapes— `interaction_request { title, body,
+options, free_text }`, `interaction_response { option?, text? }`,
+and the engine's `InteractionPrompt`/`InteractionReply`— are a
+template baked into the core. The core's interaction vocabulary is
+**routing only** (owner ruling): the asker— tool or hook—
+constructs the request itself; the hub never inspects payloads.
+
+- `interaction_request { id, ui_type, payload }`— stamped with
+  the session stream as ever; `id` backend-minted at ask (born at
+  acknowledgment); `ui_type` names the widget; `payload` opaque (a
+  JSON value).
+- `interaction_response { session, id, payload }`— **always an
+  answer**; the frontend never expresses dismissal. Dismissal is
+  backend-derived (terminal retraction, dropped asker): the engine
+  capability returns `Answered(payload) | Dismissed`— routing
+  truth, not payload content.
+- **`ui_type` namespaces**: `native:*` is reserved for the types
+  every conforming frontend renders natively (the prefix names the
+  renderer's obligation, not the ship vehicle— extension widgets
+  are equally prebuilt; they ship with the extension); `ext:<id>:*`
+  for extension types, namespaced by the extension runtime. Unknown
+  types follow report-don't-swallow: a notice, never a fabricated
+  answer.
+- **Prebuilt templates** live in a clearly separated
+  `tabit-protocol::templates` module (names, payload schemas,
+  builders) beside— never inside— the core vocabulary:
+  `native:confirm` (the permission card: title/body/options/
+  free-text; option/text answer) and `native:ask` (free text). The
+  first two templates, not special types.
+- The permission gate and the ask_user tool consume templates exactly
+  as an extension would; the hub becomes payload-blind (mint, stamp,
+  route). The GUI renders `native:*`; custom types arrive with the
+  GUI's own extension story.
+
+No compat code (the pre-release versioning ruling). Supersedes the
+v2 interaction shapes above on landing.
+
 ## Open flags (numbering is fixed at creation; resolved numbers are
 skipped)
 

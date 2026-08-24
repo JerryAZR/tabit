@@ -428,6 +428,64 @@ Pause points are enumerable — only context-carrying sites can ask
 `ToolContext`); other hook points gain the capability when a
 consumer exists.
 
+## The hook surface — closure registration (ruled 2026-08;
+implementation pending)
+
+`AgentHook` (the nine-method observer trait) is retired as the public
+authoring surface. It solved an extension-authoring problem—a
+coherent multi-event observer with shared state—inside the
+dispatch mechanism, at dispatch-layer cost: the wide defaulted
+interface (every real consumer implements exactly one method), the
+RPITIT dyn-incompatibility, and the private `DynAgentHook`/`HookStack`
+erasure layer that translates bundles back into per-event callables.
+Dispatch wants callables; bundling is the extension's concern.
+
+- **Registration is a record, not a bare closure**: `{ id, priority,
+  closure, metadata }`—the extension runtime stamps its owner id
+  onto records when it arrives. Bare closures remain sugar (generated
+  id, default priority). Attribution ("hook `perms` denied the
+  call"), introspection, and replace-by-id fall out of the id.
+- **One shape per event**: `Fn(&RunContext, Event<'_>) ->
+  BoxFuture<'static, Action>`— a single async form for all events
+  (sync events ride trivial futures) and a copy-out signature: the
+  future may not borrow, so closures take what they need from the
+  event by value before awaiting. The shape guest adapters cross
+  naturally.
+- **The order law**: per event, subscribers are stably sorted by
+  priority (`i32`; equal priorities fall back to registration order),
+  sorted when the run seals the stack. Reference priority bands are
+  extension docs, not type-level.
+- **Action algebras, stated per event** (composition in sorted
+  order): `on_tool_call`— **Skip is absorbing** (the first deny
+  in order wins; later hooks do not see the call), **Run is neutral**
+  (an early allow never stops a later gate—a hook that must
+  observe denials registers earlier; priority is also visibility);
+  `on_model_select`—the last selection in order wins and a stop
+  is terminal; patches compose sequentially. Each event's rule is
+  contract, restated under sorted order from today's semantics.
+- **`observes()` dies**—not-registered is the filter.
+- **One run context**: `HookContext` and `ToolContext` merge into a
+  single run context (run id, turn state, scratchpad, the capability
+  map with accessors) handed to hooks and tool bodies alike. "Why
+  could my tool ask the user but not my hook" is removed, not
+  documented; the interaction capability is the interaction round's
+  generic ask.
+- **Mounting and sealing**: registrations live on the session
+  builder (the extension mount—tools, hooks, later skills, one
+  surface); the stack seals per run. Reload applies to future
+  session builds—a built session is sealed (recorded choice).
+- **Failure doctrine** unchanged (AGENTS.md): extension (external)
+  failures are graceful, clear, and attributed by registration id;
+  the engine's own stay loud. The extension runtime wraps its
+  closures accordingly—nothing below it changes.
+
+The trait remains for the engine's internal multi-event observers;
+`DynAgentHook`/`HookStack` remain the storage, now built from
+records. Cross-event state is the asker's concern: captured `Arc`s
+(chains run concurrently—interior mutability was always required
+of `&self` too, so nothing is lost) or id-keyed correlation; the
+scratchpad stays engine-internal.
+
 ## Migration map (old → new)
 
 | current | new home |

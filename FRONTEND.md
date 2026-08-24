@@ -414,6 +414,16 @@ wire marker.
 
 ## 8. Interaction requests
 
+**Generalization ruled (2026-08; lands with the interaction
+round):** the typed card below becomes the `native:confirm`
+template—the wire moves to `interaction_request { id, ui_type,
+payload }` / `interaction_response { session, id, payload }`
+with opaque payloads, and this section is rewritten on landing
+(PROTOCOL.md's interaction-generalization ruling is the design).
+Frontends render `native:*` types; unknown `ui_type`s get the
+report-don't-swallow treatment—a notice, never a fabricated
+answer. The contract below is the shipped shape until then.
+
 The blocking pop-up shape, generic over permission prompts and
 ask-the-user tools (one primitive, two askers — permission fires at
 the tool's gate, ask-the-user tools ask from their bodies, and a tool
