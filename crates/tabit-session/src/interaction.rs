@@ -1,5 +1,9 @@
-//! The interaction hub — the ask pattern (ENGINE.md's tool phase;
-//! FRONTEND.md §8 is the wire contract).
+//! The interaction hub — the generic ask pattern (ENGINE.md's tool
+//! phase; FRONTEND.md §8 is the wire contract). This module knows
+//! nothing about any particular asker: hooks and tools (permission
+//! gates, ask-the-user tools) are dev-time or extension policy that
+//! lives elsewhere and consumes the capability; their vocabulary and
+//! state never leak here.
 //!
 //! One hub per session worker, the actor's third shared leaf beside
 //! the mailbox and abort: [`InteractionHub::ask`] is called from tool
@@ -12,15 +16,13 @@
 //! with their chains — drop is the cancellation), and the frontend
 //! closes cards on terminals, so no close event exists.
 
-use std::collections::{HashMap, HashSet};
+use std::collections::HashMap;
 use std::sync::Arc;
 
 use futures::future::BoxFuture;
 use tokio::sync::{mpsc, oneshot};
 
-use rig_agent::tool::interaction::{
-    InteractionChoice, InteractionPrompt, InteractionReply, UserInteraction,
-};
+use rig_agent::tool::interaction::{InteractionPrompt, InteractionReply, UserInteraction};
 use tabit_protocol::{EventFrame, InteractionOption, SessionEvent, StreamId};
 
 use crate::ids::new_entry_id;
@@ -43,9 +45,6 @@ struct Inner {
     events: mpsc::WeakUnboundedSender<EventFrame>,
     /// Open questions by id: where the answer goes.
     pending: std::sync::Mutex<HashMap<String, oneshot::Sender<InteractionReply>>>,
-    /// Tool names granted "Always allow" — session memory, never
-    /// persisted (the test-the-path policy; EXTENSIONS.md).
-    always_allowed: std::sync::Mutex<HashSet<String>>,
     /// The stream stamp for requests (the session's id).
     stream: StreamId,
 }
@@ -64,7 +63,6 @@ impl InteractionHub {
             inner: Arc::new(Inner {
                 events: events.downgrade(),
                 pending: std::sync::Mutex::new(HashMap::new()),
-                always_allowed: std::sync::Mutex::new(HashSet::new()),
                 stream,
             }),
         }
@@ -97,16 +95,6 @@ impl InteractionHub {
     /// died with the run, and the senders must not linger.
     pub fn clear_pending(&self) {
         lock(&self.inner.pending).clear();
-    }
-
-    /// Whether "Always allow" covers this tool (session memory).
-    pub fn is_always_allowed(&self, tool: &str) -> bool {
-        lock(&self.inner.always_allowed).contains(tool)
-    }
-
-    /// Remember "Always allow" for this tool (session memory).
-    pub fn always_allow(&self, tool: &str) {
-        lock(&self.inner.always_allowed).insert(tool.to_string());
     }
 
     /// Register the question, surface it, and await the answer. Drop is
@@ -161,33 +149,6 @@ impl UserInteraction for InteractionHub {
     fn ask(&self, prompt: InteractionPrompt) -> BoxFuture<'static, InteractionReply> {
         let hub = self.clone();
         Box::pin(async move { hub.ask_once(prompt).await })
-    }
-}
-
-/// The permission gate's wire vocabulary: the option labels a frontend
-/// renders as the card's buttons (FRONTEND.md §8). Shared with the
-/// permission module.
-pub mod permission_labels {
-    pub const ALLOW: &str = "Allow";
-    pub const ALWAYS_ALLOW: &str = "Always allow";
-    pub const DENY: &str = "Deny";
-}
-
-/// Build the permission prompt for a gated tool call: the three-button
-/// card with free text on (a denial reason is delivered to the model).
-pub(crate) fn permission_prompt(tool: &str, args: &str) -> InteractionPrompt {
-    InteractionPrompt {
-        title: format!("Allow `{tool}` to run?"),
-        body: args.to_string(),
-        options: vec![
-            InteractionChoice::new(permission_labels::ALLOW),
-            InteractionChoice {
-                label: permission_labels::ALWAYS_ALLOW.to_string(),
-                description: Some("skip prompts for this tool until the session ends".to_string()),
-            },
-            InteractionChoice::new(permission_labels::DENY),
-        ],
-        free_text: true,
     }
 }
 
@@ -276,28 +237,5 @@ mod tests {
             asker.await.expect("asker finished"),
             InteractionReply::unanswered()
         );
-    }
-
-    #[test]
-    fn always_allow_is_session_memory() {
-        let (hub, _rx, _tx) = hub_with_channel();
-        assert!(!hub.is_always_allowed("bash"));
-        hub.always_allow("bash");
-        assert!(hub.is_always_allowed("bash"));
-    }
-
-    #[test]
-    fn permission_prompts_carry_the_three_buttons_and_free_text() {
-        let prompt = permission_prompt("bash", "{\"command\":\"ls\"}");
-        assert!(prompt.free_text);
-        assert_eq!(
-            prompt
-                .options
-                .iter()
-                .map(|c| c.label.as_str())
-                .collect::<Vec<_>>(),
-            ["Allow", "Always allow", "Deny"]
-        );
-        assert_eq!(prompt.body, "{\"command\":\"ls\"}");
     }
 }

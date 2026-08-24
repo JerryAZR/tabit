@@ -31,8 +31,11 @@
 //! Terminology (see AGENTS.md): one [`Session::prompt`] is one **outer
 //! loop**; a **turn** is one model call within it; the **tool-use
 //! roundtrip** is the boundary between a turn's tool calls and the next
-//! model call. Steering, permission checks, and the extension framework
-//! are future insertions at that boundary.
+//! model call. Steering and the extension framework are future
+//! insertions at that boundary; tool-call policy (the dev-time
+//! permission gate) mounts through the tool-gate seam
+//! ([`SessionBuilder::tool_gate`]), assembled by the binary{EM} the
+//! core carries no policy of its own.
 //!
 //! # Example
 //!
@@ -64,6 +67,7 @@
 mod endpoint;
 mod entry;
 mod error;
+mod gate;
 mod ids;
 mod interaction;
 mod lock;
@@ -83,9 +87,10 @@ pub use endpoint::{
 };
 pub use entry::{EntryKind, SESSION_FORMAT_VERSION, SessionEntry, SessionHeader};
 pub use error::SessionError;
+pub use gate::ToolGate;
 pub use interaction::InteractionHub;
 pub use model::validate_selection;
-pub use permission::{PERMISSION_ASK_TOOLS, PermissionHook};
+pub use permission::{PERMISSION_ASK_TOOLS, PermissionHook, PermissionMemory};
 pub use projection::DanglingToolCalls;
 pub use prompt::build_system_prompt;
 pub use registry::ModelRegistry;

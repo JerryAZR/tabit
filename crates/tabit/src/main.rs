@@ -397,7 +397,21 @@ fn assemble_session(
     .dynamic_tool(dynamic(tabit_tools::Ls))
     .dynamic_tool(dynamic_contextual(tabit_tools::Bash))
     .dynamic_tool(dynamic_contextual(tabit_tools::AskUser))
-    .model_factory(registry.factory());
+    .model_factory(registry.factory())
+    // The dev-time permission gate, mounted by the assembly (the
+    // tool-gate seam): session-scoped "Always allow" memory captured
+    // per session build, the hub handed to each run's gate. Deleting
+    // the gate before release is deleting permission.rs and this one
+    // mount (EXTENSIONS.md).
+    .tool_gate({
+        let memory = tabit_session::PermissionMemory::default();
+        std::sync::Arc::new(move |hub: Option<&tabit_session::InteractionHub>| {
+            std::sync::Arc::new(tabit_session::PermissionHook::new(
+                hub.cloned(),
+                memory.clone(),
+            )) as std::sync::Arc<dyn tabit_session::ToolGate>
+        })
+    });
     if let Some(max_turns) = args.max_turns {
         builder = builder.max_turns(max_turns);
     }

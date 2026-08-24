@@ -76,6 +76,32 @@ own components are first-party hook sets, not privileged). The
 deletable surface is the policy; the hub, the wire shapes, and the
 capability are permanent infrastructure the extension inherits.
 
+## Tool-call policy mounts through the tool-gate seam (2026-08)
+
+Ruled (the permission-leak review): the core's interaction path is
+generic— it routes responses by id and knows no asker's vocabulary
+or state. Tool-call policy (the dev-time permission gate today, the
+real permission system later) is **assembly-mounted**:
+`SessionBuilder::tool_gate(factory)` builds the gate per run with the
+session's interaction hub; the binary provides the factory, a captured
+memory makes policy state session-scoped, and the core mounts
+whatever arrives beside the recorder without naming a type
+(`gate.rs`— `ToolGate` is dyn-compatible because the engine's
+`AgentHook` is not). Deleting the dev-time gate before release is
+deleting `permission.rs` and the one assembly mount— through the
+same door the real system enters.
+
+Implications:
+
+- An extension providing tool-call policy implements `ToolGate` and is
+  mounted by the assembly; it never patches the session or the engine
+  hook chain.
+- Policy state (grants, denials) is the gate's own— held in the
+  factory's captured memory, runtime-only (see the interaction-state
+  entry below).
+- The gate may ask through the hub or decide statically; skipping with
+  an explanatory message is the in-band denial channel.
+
 ## Interaction state is runtime-only (2026-08)
 
 Ruled: interaction requests never persist and never replay. The

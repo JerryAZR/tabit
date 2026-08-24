@@ -14,6 +14,17 @@ use serde_json::json;
 use tabit_protocol::SessionCommand;
 
 /// The gated name with a harmless body: the permission card is the point.
+/// The dev-time gate's factory, mounted through the seam exactly as
+/// the binary assembles it — these tests are the seam's end-to-end
+/// coverage.
+fn gated_gate() -> crate::gate::ToolGateFactory {
+    let memory = crate::PermissionMemory::default();
+    std::sync::Arc::new(move |hub| {
+        std::sync::Arc::new(crate::PermissionHook::new(hub.cloned(), memory.clone()))
+            as std::sync::Arc<dyn crate::ToolGate>
+    })
+}
+
 fn gated_tool() -> DynamicTool {
     DynamicTool::new(
         "bash",
@@ -106,6 +117,7 @@ async fn a_permission_card_answered_allow_runs_the_tool() {
     ])
     .into_builder(store.clone())
     .dynamic_tool(gated_tool())
+    .tool_gate(gated_gate())
     .create("C:/w")
     .expect("session");
     let mut handle = SessionHost::spawn(session, Vec::new(), plain_wiring(&store));
@@ -139,6 +151,7 @@ async fn a_permission_denial_skips_the_tool_in_band() {
     ])
     .into_builder(store.clone())
     .dynamic_tool(gated_tool())
+    .tool_gate(gated_gate())
     .create("C:/w")
     .expect("session");
     let mut handle = SessionHost::spawn(session, Vec::new(), plain_wiring(&store));
@@ -180,6 +193,7 @@ async fn always_allow_remembers_across_calls_in_the_session() {
     ])
     .into_builder(store.clone())
     .dynamic_tool(gated_tool())
+    .tool_gate(gated_gate())
     .create("C:/w")
     .expect("session");
     let mut handle = SessionHost::spawn(session, Vec::new(), plain_wiring(&store));
@@ -206,6 +220,7 @@ async fn always_allow_remembers_across_calls_in_the_session() {
     let (session, _report) = Factory::new(vec![tool_turn("t3", "bash"), text_turn("again")])
         .into_builder(store.clone())
         .dynamic_tool(gated_tool())
+        .tool_gate(gated_gate())
         .resume(std::path::Path::new(&path))
         .expect("resume");
     let mut handle = SessionHost::spawn(session, Vec::new(), plain_wiring(&store));
@@ -267,6 +282,7 @@ async fn frontend_death_with_a_card_open_winds_the_worker_down() {
     let session = Factory::new(vec![tool_turn("t1", "bash"), text_turn("unreachable")])
         .into_builder(store.clone())
         .dynamic_tool(gated_tool())
+        .tool_gate(gated_gate())
         .create("C:/w")
         .expect("session");
     let mut handle = SessionHost::spawn(session, Vec::new(), plain_wiring(&store));
@@ -347,6 +363,7 @@ async fn abort_with_a_card_open_closes_the_question_totally() {
     let session = Factory::new(vec![tool_turn("t1", "bash"), text_turn("unreachable")])
         .into_builder(store.clone())
         .dynamic_tool(gated_tool())
+        .tool_gate(gated_gate())
         .create("C:/w")
         .expect("session");
     let mut handle = SessionHost::spawn(session, Vec::new(), plain_wiring(&store));
@@ -403,6 +420,7 @@ async fn two_open_cards_answered_in_reverse_order_both_run() {
     let session = Factory::new(vec![turn, text_turn("both ran")])
         .into_builder(store.clone())
         .dynamic_tool(gated_tool())
+        .tool_gate(gated_gate())
         .create("C:/w")
         .expect("session");
     let mut handle = SessionHost::spawn(session, Vec::new(), plain_wiring(&store));

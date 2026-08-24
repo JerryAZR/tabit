@@ -1,47 +1,116 @@
-//! The permission gate — the core's basic, test-the-path policy
-//! (EXTENSIONS.md): ask before the listed tools run, remember "Always
-//! allow" for the session, deny maps to the engine's existing `Skip`
-//! (an in-band synthetic result — the model is told, siblings are
-//! unaffected, nothing kills a batch). The real permission system is
-//! an extension over the same seams; this module is the deletable
-//! placeholder that proves the interaction path.
+//! The permission gate — dev-time policy, mounted by the assembly
+//! through the builder's interaction-hook seam (EXTENSIONS.md): ask
+//! before the listed tools run, remember "Always allow" for the
+//! session, deny maps to the engine's existing `Skip` (an in-band
+//! synthetic result — the model is told, siblings are unaffected,
+//! nothing kills a batch). The core's generic interaction path (the
+//! hub) carries none of this: deleting this module and the one
+//! assembly line that mounts it removes every trace of permission
+//! from the backend. The real permission system is an extension over
+//! the same seam.
 
-use rig_agent::agent::hook::{AgentHook, HookContext, ToolCall, ToolCallAction};
+use std::collections::HashSet;
+use std::sync::Arc;
 
-use crate::interaction::{InteractionHub, permission_labels, permission_prompt};
+use futures::future::BoxFuture;
 
-/// Tools the core gate asks about. Everything else passes the gate
-/// silently.
+use rig_agent::agent::hook::ToolCallAction;
+
+use crate::gate::ToolGate;
+use crate::interaction::InteractionHub;
+use crate::lock::lock;
+
+/// Tools the dev-time gate asks about. Everything else passes the
+/// gate silently.
 pub const PERMISSION_ASK_TOOLS: &[&str] = &["bash"];
 
-/// The pre-body permission gate, installed on every session's runs like
-/// `RecorderHook` is. Without an interaction frontend (a direct
-/// [`crate::Session`] consumer rather than the actor) the gate fails
-/// closed: the call does not run and the model is told why.
+/// Session-scoped "Always allow" memory — the gate's own state, never
+/// persisted (the test-the-path policy; EXTENSIONS.md). The assembly
+/// creates one per session and threads it to every run's hook, which
+/// is what makes the memory outlive runs without the hub (generic
+/// routing) ever knowing it exists.
+#[derive(Clone, Default)]
+pub struct PermissionMemory {
+    tools: Arc<std::sync::Mutex<HashSet<String>>>,
+}
+
+impl PermissionMemory {
+    /// Whether "Always allow" covers this tool.
+    pub fn contains(&self, tool: &str) -> bool {
+        lock(&self.tools).contains(tool)
+    }
+
+    /// Remember "Always allow" for this tool.
+    pub fn insert(&self, tool: &str) {
+        lock(&self.tools).insert(tool.to_string());
+    }
+}
+
+/// The gate's wire vocabulary: the option labels a frontend renders
+/// as the card's buttons (FRONTEND.md §8).
+pub mod permission_labels {
+    pub const ALLOW: &str = "Allow";
+    pub const ALWAYS_ALLOW: &str = "Always allow";
+    pub const DENY: &str = "Deny";
+}
+
+/// Build the permission prompt for a gated tool call: the three-button
+/// card with free text on (a denial reason is delivered to the model).
+pub(crate) fn permission_prompt(
+    tool: &str,
+    args: &str,
+) -> rig_agent::tool::interaction::InteractionPrompt {
+    rig_agent::tool::interaction::InteractionPrompt {
+        title: format!("Allow `{tool}` to run?"),
+        body: args.to_string(),
+        options: vec![
+            rig_agent::tool::interaction::InteractionChoice::new(permission_labels::ALLOW),
+            rig_agent::tool::interaction::InteractionChoice {
+                label: permission_labels::ALWAYS_ALLOW.to_string(),
+                description: Some("skip prompts for this tool until the session ends".to_string()),
+            },
+            rig_agent::tool::interaction::InteractionChoice::new(permission_labels::DENY),
+        ],
+        free_text: true,
+    }
+}
+
+/// The pre-body permission gate, mounted per run by the assembly's
+/// hook factory (the interaction-hook seam). Without an interaction
+/// frontend (a direct [`crate::Session`] consumer rather than the
+/// actor) the gate fails closed: the call does not run and the model
+/// is told why.
 pub struct PermissionHook {
     hub: Option<InteractionHub>,
+    memory: PermissionMemory,
 }
 
 impl PermissionHook {
     /// Build the gate over the session's hub (`None` = no frontend:
-    /// fail closed).
-    pub fn new(hub: Option<InteractionHub>) -> Self {
-        Self { hub }
+    /// fail closed) and its session-scoped memory.
+    pub fn new(hub: Option<InteractionHub>, memory: PermissionMemory) -> Self {
+        Self { hub, memory }
     }
 }
 
-impl AgentHook for PermissionHook {
-    async fn on_tool_call(&self, _ctx: &HookContext, event: ToolCall<'_>) -> ToolCallAction {
-        let ToolCall {
-            tool_name, args, ..
-        } = event;
-        gate(tool_name, args, self.hub.as_ref()).await
+impl ToolGate for PermissionHook {
+    fn on_tool_call(&self, tool_name: &str, args: &str) -> BoxFuture<'static, ToolCallAction> {
+        let hub = self.hub.clone();
+        let memory = self.memory.clone();
+        let tool_name = tool_name.to_string();
+        let args = args.to_string();
+        Box::pin(async move { gate(&tool_name, &args, hub.as_ref(), &memory).await })
     }
 }
 
 /// The gate's decision for one call — the whole policy, extracted so the
 /// decision table is directly testable (`on_tool_call` is a thin adapter).
-async fn gate(tool_name: &str, args: &str, hub: Option<&InteractionHub>) -> ToolCallAction {
+async fn gate(
+    tool_name: &str,
+    args: &str,
+    hub: Option<&InteractionHub>,
+    memory: &PermissionMemory,
+) -> ToolCallAction {
     if !PERMISSION_ASK_TOOLS.contains(&tool_name) {
         return ToolCallAction::run();
     }
@@ -51,7 +120,7 @@ async fn gate(tool_name: &str, args: &str, hub: Option<&InteractionHub>) -> Tool
              frontend to grant it — the call did not run"
         ));
     };
-    if hub.is_always_allowed(tool_name) {
+    if memory.contains(tool_name) {
         return ToolCallAction::run();
     }
     let reply = hub
@@ -61,7 +130,7 @@ async fn gate(tool_name: &str, args: &str, hub: Option<&InteractionHub>) -> Tool
     match reply.option.as_deref() {
         Some(permission_labels::ALLOW) => ToolCallAction::run(),
         Some(permission_labels::ALWAYS_ALLOW) => {
-            hub.always_allow(tool_name);
+            memory.insert(tool_name);
             ToolCallAction::run()
         }
         // Deny — including a dismissed, retracted, or unrecognized
@@ -89,11 +158,11 @@ mod tests {
 
     /// Drive `gate` to its decision for `bash`, answering the card it opens
     /// with `respond(id)`; `None` retracts the ask instead (a run terminal).
-    /// Returns the decision, the hub (for follow-up memory checks), and the
+    /// Returns the decision, the memory (for follow-up checks), and the
     /// still-open channel. Fails — never hangs — if the gate stalls.
     async fn decide_with(
         respond: impl FnOnce(String) -> Option<(Option<String>, Option<String>)>,
-    ) -> (ToolCallAction, InteractionHub, Rx) {
+    ) -> (ToolCallAction, PermissionMemory, Rx) {
         let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
         let hub = InteractionHub::new(tx.clone(), tabit_protocol::StreamId::new("s"));
         // The hub holds a weak sender by design (the termination
@@ -101,8 +170,11 @@ mod tests {
         // strong sender must live as long as the ask.
         let _worker_sender = tx;
         let asker = hub.clone();
-        let decision =
-            tokio::spawn(async move { gate("bash", "{\"command\":\"ls\"}", Some(&asker)).await });
+        let memory = PermissionMemory::default();
+        let gate_memory = memory.clone();
+        let decision = tokio::spawn(async move {
+            gate("bash", "{\"command\":\"ls\"}", Some(&asker), &gate_memory).await
+        });
         let frame = tokio::time::timeout(Duration::from_secs(5), rx.recv())
             .await
             .expect("the gate must open its card within 5s");
@@ -113,25 +185,31 @@ mod tests {
             Some((option, text)) => {
                 hub.respond(&id, option, text);
                 let action = decision.await.expect("the asker resolves after an answer");
-                (action, hub, rx)
+                (action, memory, rx)
             }
             None => {
                 hub.clear_pending();
                 let action = decision.await.expect("the asker resolves after retraction");
-                (action, hub, rx)
+                (action, memory, rx)
             }
         }
     }
 
     #[tokio::test]
     async fn tools_outside_the_ask_list_run_without_a_card() {
-        let action = gate("read", "{}", None).await;
+        let action = gate("read", "{}", None, &PermissionMemory::default()).await;
         assert_eq!(action, ToolCallAction::run());
     }
 
     #[tokio::test]
     async fn without_a_frontend_the_gate_fails_closed_and_says_why() {
-        let action = gate("bash", "{\"command\":\"ls\"}", None).await;
+        let action = gate(
+            "bash",
+            "{\"command\":\"ls\"}",
+            None,
+            &PermissionMemory::default(),
+        )
+        .await;
         let ToolCallAction::Skip(message) = action else {
             panic!("a gated call without a frontend must not run");
         };
@@ -143,30 +221,30 @@ mod tests {
 
     #[tokio::test]
     async fn allow_runs_the_call() {
-        let (action, _hub, mut rx) =
+        let (action, memory, mut rx) =
             decide_with(|_id| Some((Some("Allow".to_string()), None))).await;
         assert_eq!(action, ToolCallAction::run());
-        assert!(rx.try_recv().is_err(), "allow remembers nothing");
+        assert!(!memory.contains("bash"), "allow remembers nothing");
+        assert!(rx.try_recv().is_err());
     }
 
     #[tokio::test]
     async fn always_allow_runs_and_makes_the_next_call_cardless() {
-        let (first, hub, _rx) =
+        let (first, memory, _rx) =
             decide_with(|_id| Some((Some("Always allow".to_string()), None))).await;
         assert_eq!(first, ToolCallAction::run());
         // Session memory: the next gated call runs with no card opened.
+        assert!(memory.contains("bash"));
         let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
-        let remembering_hub = InteractionHub::new(tx, tabit_protocol::StreamId::new("s"));
-        remembering_hub.always_allow("bash");
-        let action = gate("bash", "{}", Some(&remembering_hub)).await;
+        let hub = InteractionHub::new(tx, tabit_protocol::StreamId::new("s"));
+        let action = gate("bash", "{}", Some(&hub), &memory).await;
         assert_eq!(action, ToolCallAction::run());
         assert!(rx.try_recv().is_err(), "a remembered tool asks nothing");
-        let _ = hub;
     }
 
     #[tokio::test]
     async fn deny_delivers_the_reason_with_the_skip() {
-        let (action, _hub, _rx) =
+        let (action, _memory, _rx) =
             decide_with(|_id| Some((Some("Deny".to_string()), Some("too risky".to_string()))))
                 .await;
         let ToolCallAction::Skip(message) = action else {
@@ -180,7 +258,7 @@ mod tests {
 
     #[tokio::test]
     async fn an_unanswered_card_retracted_by_a_terminal_fails_closed() {
-        let (action, _hub, _rx) = decide_with(|_id| None).await;
+        let (action, _memory, _rx) = decide_with(|_id| None).await;
         let ToolCallAction::Skip(message) = action else {
             panic!("a dismissed ask must not run the call");
         };
@@ -188,5 +266,31 @@ mod tests {
             message, "the user denied `bash` — the call did not run",
             "dismissal is a denial without a reason"
         );
+    }
+
+    #[test]
+    fn permission_prompts_carry_the_three_buttons_and_free_text() {
+        let prompt = permission_prompt("bash", "{\"command\":\"ls\"}");
+        assert!(prompt.free_text);
+        assert_eq!(
+            prompt
+                .options
+                .iter()
+                .map(|c| c.label.as_str())
+                .collect::<Vec<_>>(),
+            ["Allow", "Always allow", "Deny"]
+        );
+        assert_eq!(prompt.body, "{\"command\":\"ls\"}");
+    }
+
+    #[test]
+    fn the_memory_is_the_gate_state_not_the_hubs() {
+        let memory = PermissionMemory::default();
+        assert!(!memory.contains("bash"));
+        memory.insert("bash");
+        assert!(memory.contains("bash"));
+        // A clone shares the session's memory (the factory threads one
+        // memory to every run's hook).
+        assert!(memory.clone().contains("bash"));
     }
 }

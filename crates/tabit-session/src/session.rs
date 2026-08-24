@@ -22,7 +22,6 @@ use crate::error::SessionError;
 use crate::interaction::InteractionHub;
 use crate::lock::lock;
 use crate::model::validate_selection;
-use crate::permission::PermissionHook;
 use crate::projection;
 use crate::recorder::{RecorderHook, SessionRecorder};
 use crate::registry::ModelRegistry;
@@ -139,6 +138,7 @@ pub struct SessionBuilder {
     tools: Vec<DynamicTool>,
     max_turns: usize,
     model_factory: ModelFactory,
+    tool_gate_factory: Option<crate::gate::ToolGateFactory>,
 }
 
 /// Builds the model behind a selection: `(provider, model)` ids to a
@@ -173,6 +173,7 @@ impl SessionBuilder {
             tools: Vec::new(),
             max_turns: DEFAULT_MAX_TURNS,
             model_factory: default_factory,
+            tool_gate_factory: None,
         })
     }
 
@@ -191,6 +192,15 @@ impl SessionBuilder {
     /// Model-call budget per outer loop.
     pub fn max_turns(mut self, max_turns: usize) -> Self {
         self.max_turns = max_turns;
+        self
+    }
+
+    /// Mount a tool gate on every run (the assembly's
+    /// seam for dev-time/extension policy{EM} the permission gate).
+    /// The factory is called once per run with the session's hub; a
+    /// captured memory makes session-scoped state out of it.
+    pub fn tool_gate(mut self, factory: crate::gate::ToolGateFactory) -> Self {
+        self.tool_gate_factory = Some(factory);
         self
     }
 
@@ -545,6 +555,9 @@ pub struct Session {
     tools: Vec<DynamicTool>,
     max_turns: usize,
     model_factory: ModelFactory,
+    /// The assembly's interaction-hook factory (see
+    /// [`SessionBuilder::tool_gate`]); mounted on every run.
+    tool_gate_factory: Option<crate::gate::ToolGateFactory>,
     agent: Arc<Agent>,
     recorder: Arc<SessionRecorder>,
     /// Per-run cancellation token, refreshed by every outer loop; the
@@ -725,16 +738,20 @@ impl Session {
     ) -> rig_agent::agent::StreamingResult {
         let mut tool_context = rig_agent::tool::ToolContext::new();
         tool_context.insert(run_token.clone());
-        let permission = PermissionHook::new(self.interaction.clone());
         if let Some(hub) = &self.interaction {
             tool_context.insert(hub.capability());
         }
-        self.agent
+        let mut request = self
+            .agent
             .stream_chat(history)
             .max_turns(self.max_turns)
             .tool_concurrency(TOOL_CONCURRENCY)
-            .add_hook(RecorderHook(self.recorder.clone()))
-            .add_hook(permission)
+            .add_hook(RecorderHook(self.recorder.clone()));
+        if let Some(factory) = &self.tool_gate_factory {
+            let gate = factory(self.interaction.as_ref());
+            request = request.add_hook(crate::gate::GateHook(gate));
+        }
+        request
             .steering(Arc::new(SessionSteers {
                 mailbox: self.mailbox.clone(),
             }))
@@ -1389,6 +1406,7 @@ impl Session {
             tools: builder.tools,
             max_turns: builder.max_turns,
             model_factory: builder.model_factory,
+            tool_gate_factory: builder.tool_gate_factory,
             agent: Arc::new(AgentBuilder::new(ModelHandle::new(placeholder_model())).build()),
             recorder,
             abort: std::sync::Arc::new(std::sync::Mutex::new(CancellationToken::new())),

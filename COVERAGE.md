@@ -381,6 +381,21 @@ rather than skipping, reachable or not.)
   are thin re-assemblies of `assemble`, whose every path (config,
   resume, degradation) is covered in `main.rs`'s own suite.
 
+## Tool-gate seam (2026-08, the permission-leak review)
+
+- `gate.rs` {EM} **covered end to end**: `ToolGate`/`ToolGateFactory`
+  mount through `SessionBuilder::tool_gate`, and the actor-level
+  permission suite (allow, deny with reason, always-allow session
+  memory across calls and across runs, reverse-order cards, abort and
+  frontend death with a card open) now runs entirely through the seam
+  {EM} it is the seam's coverage. The `GateHook` adapter rides every
+  one of those runs. Unit: the decision table (`gate()`), the memory's
+  sharing semantics, the prompt shape.
+- `interaction.rs` after the strip {EM} the hub's own suite (routing,
+  no-op, retraction, weak-sender dismissal) is unchanged and green;
+  the permission vocabulary tests moved to `permission.rs` with the
+  vocabulary.
+
 ## v3 stage 2 — checkout (2026-08)
 
 - `execute_checkout` / `emit_replay` / the mailbox watermark trio
