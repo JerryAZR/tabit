@@ -650,10 +650,17 @@ section above; the design they locked:
 - **Residency note.** Verification reads a resident entry-id set —
   seeded at open from the file, inserted at every append, every id
   the file has ever held (dropped branches included; markers too) —
-  so it is a read-only lookup, never a file re-parse. The execution
-  path still re-opens the file to rebuild the chain and re-derive
-  context (the scheduled in-memory-contract work, the same class as
-  `rewind`/`stats`).
+  a read-only lookup, never a file re-parse. The publishing invariant
+  is **publication precedes announcement**: an id enters the set at
+  commit, before the event carrying it is emitted, so an id the
+  frontend can name is validatable the instant it can name it — no
+  staleness window exists. Born-early ids (an uncommitted turn's
+  `turn_started` id, a queued message's `message_queued` id) are
+  deliberately absent until they commit; they are not valid targets
+  (an incomplete message has no position in the chain to rewind to).
+  The execution path still re-opens the file to rebuild the chain and
+  re-derive context (the scheduled in-memory-contract work, the same
+  class as `rewind`/`stats`).
 - `checkout` joins the routing errors rule: an unknown session yields
   `error { kind: session }` stamped with the named id. A mid-run
   `open_session` pass for the same session waits for the same pause

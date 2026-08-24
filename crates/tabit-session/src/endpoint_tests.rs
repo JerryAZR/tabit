@@ -1832,6 +1832,142 @@ async fn a_pass_answers_ahead_of_a_queued_message_at_the_beat() {
 }
 
 #[tokio::test]
+async fn an_id_announced_mid_run_is_validatable_the_moment_it_is_knowable() {
+    let store = temp_store("endpoint-checkout-live-id");
+    let session = Factory::new(vec![tool_turn("t1", "slow"), text_turn("done")])
+        .into_builder(store.clone())
+        .dynamic_tool(slow_tool())
+        .create("C:/w")
+        .expect("session");
+    let mut handle = SessionHost::spawn(session, Vec::new(), plain_wiring(&store));
+    let id = boot_id(&handle);
+
+    // Publication precedes announcement: the steer's user_message id
+    // was committed before the event carrying it was emitted, so a
+    // checkout targeting it validates at receive — provably mid-run —
+    // and parks for the pause point. (Beat-time collection would miss
+    // this id until the run ended; commit-time publication cannot.)
+    handle.message(&id, "go");
+    let mut frames = Vec::new();
+    let mut sent = false;
+    let mut saw_checked_out = false;
+    let mut steer_entry = None;
+    while let Some(frame) = handle.next_event().await {
+        match &frame.event {
+            SessionEvent::ToolCall { .. } if !sent => {
+                sent = true;
+                handle.message(&id, "a correction");
+            }
+            SessionEvent::UserMessage { text, entry_id } if text == "a correction" => {
+                // Mid-run (the answer turn has not started): the id is
+                // already committed, so the checkout must validate.
+                steer_entry = Some(entry_id.clone());
+                handle.checkout(&id, entry_id.clone());
+            }
+            SessionEvent::Error { kind, .. } if kind == tabit_protocol::ErrorKind::CHECKOUT => {
+                panic!("a committed, announced id validated at receive");
+            }
+            SessionEvent::CheckedOut { .. } => saw_checked_out = true,
+            _ => {}
+        }
+        let done = matches!(frame.event, SessionEvent::ReplayDone);
+        frames.push(frame);
+        if saw_checked_out && done {
+            break;
+        }
+    }
+    let checked_at = frames
+        .iter()
+        .position(|frame| {
+            matches!(&frame.event,
+            SessionEvent::CheckedOut { entry_id, .. } if Some(entry_id) == steer_entry.as_ref())
+        })
+        .expect("the checkout rewound to the steer's entry");
+    // The chain now ends AT the steer: both user messages in the
+    // bracket, the answer turn that followed is gone.
+    assert_eq!(
+        bracket_users(&frames, checked_at),
+        vec!["go", "a correction"]
+    );
+    assert_eq!(chain_users(&handle, &store), vec!["go", "a correction"]);
+    std::fs::remove_dir_all(store.dir()).ok();
+}
+
+#[tokio::test]
+async fn a_checkout_targeting_a_queued_steer_misses_and_is_a_no_op() {
+    let store = temp_store("endpoint-checkout-queued-id");
+    let session = Factory::new(vec![tool_turn("t1", "slow"), text_turn("done")])
+        .into_builder(store.clone())
+        .dynamic_tool(slow_tool())
+        .create("C:/w")
+        .expect("session");
+    let mut handle = SessionHost::spawn(session, Vec::new(), plain_wiring(&store));
+    let id = boot_id(&handle);
+
+    // A queued steer is announced (message_queued, born-early id) but
+    // not committed — it cannot be in the snapshot. The checkout
+    // targeting it misses at receive: an immediate error, and NOTHING
+    // else — the failed checkout discards nothing, so the steer stays
+    // queued and drains into the run exactly as if no checkout was
+    // sent.
+    handle.message(&id, "go");
+    let mut frames = Vec::new();
+    let mut submitted = false;
+    while let Some(frame) = handle.next_event().await {
+        match &frame.event {
+            SessionEvent::ToolCall { .. } if !submitted => {
+                submitted = true;
+                handle.message(&id, "queued steer");
+            }
+            SessionEvent::MessageQueued {
+                id: queued_id,
+                text,
+            } if text == "queued steer" => {
+                handle.checkout(&id, queued_id.clone());
+            }
+            _ => {}
+        }
+        let done = terminal(&frame.event);
+        frames.push(frame);
+        if done {
+            break;
+        }
+    }
+    // The miss errored at receive — ahead of the run's terminal.
+    let error_at = frames
+        .iter()
+        .position(|frame| {
+            matches!(&frame.event,
+            SessionEvent::Error { kind, .. } if kind == tabit_protocol::ErrorKind::CHECKOUT)
+        })
+        .expect("the validation miss");
+    let terminal_at = frames
+        .iter()
+        .position(|frame| terminal(&frame.event))
+        .expect("the run's terminal");
+    assert!(
+        error_at < terminal_at,
+        "the miss errors immediately — the steer is not committed truth"
+    );
+    // Total no-op: the steer was never discarded (it drained into the
+    // run as its user_message), nothing rewound, no pass.
+    assert!(frames.iter().any(|frame| matches!(&frame.event,
+        SessionEvent::UserMessage { text, .. } if text == "queued steer")));
+    assert!(
+        !frames
+            .iter()
+            .any(|frame| matches!(frame.event, SessionEvent::MessagesDiscarded { .. }))
+    );
+    assert!(
+        !frames
+            .iter()
+            .any(|frame| matches!(frame.event, SessionEvent::CheckedOut { .. }))
+    );
+    assert_eq!(chain_users(&handle, &store), vec!["go", "queued steer"]);
+    std::fs::remove_dir_all(store.dir()).ok();
+}
+
+#[tokio::test]
 async fn abort_then_checkout_composes_at_the_pause_point() {
     let store = temp_store("endpoint-checkout-abort");
     let session = Factory::new(vec![tool_turn("t1", "slow"), text_turn("x")])
