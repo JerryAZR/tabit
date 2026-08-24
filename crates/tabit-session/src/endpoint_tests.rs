@@ -1420,18 +1420,24 @@ async fn a_checkout_during_a_run_parks_until_the_terminal() {
         terminal_at < checked_at,
         "the checkout waits for the terminal"
     );
-    // The steer drained into the run (its user_message precedes the
-    // terminal) — the ledger closed there; the rewind then takes it
-    // off the chain with the run's answer. Nothing was discarded.
-    assert_eq!(
-        user_texts(&frames[..terminal_at + 1]),
-        vec!["go", "also this"]
-    );
+    // Discard-at-receive: the steer submitted before the checkout was
+    // still pending when the checkout arrived, so it died there — the
+    // discard notice lands mid-run, ahead of the terminal, and it
+    // never became history (no user_message for it, ever).
+    let discard_at = frames
+        .iter()
+        .position(|frame| {
+            matches!(&frame.event,
+            SessionEvent::MessagesDiscarded { messages }
+                if messages.iter().any(|m| m.text == "also this"))
+        })
+        .expect("the steer was discarded at receive");
     assert!(
-        !frames
-            .iter()
-            .any(|frame| matches!(frame.event, SessionEvent::MessagesDiscarded { .. }))
+        discard_at < terminal_at,
+        "the discard is immediate — it does not wait for the run"
     );
+    assert!(!frames.iter().any(|frame| matches!(&frame.event,
+        SessionEvent::UserMessage { text, .. } if text == "also this")));
     assert_eq!(bracket_users(&frames, checked_at), vec!["go"]);
 
     // The session is fully alive after the pause point: the next
@@ -1454,10 +1460,10 @@ async fn checkout_discards_what_was_submitted_before_it_and_keeps_the_rest() {
     let id = boot_id(&handle);
 
     // One exchange to its terminal, so the worker is provably back in
-    // its select wait when the burst routes (the sends are
-    // synchronous; the host routes all three without yielding, and
-    // the worker wakes with the checkout ready — the biased select
-    // answers it before the work signal).
+    // its wait when the burst routes: the handler acts at receive, in
+    // wire order — the before-message is cleared by the checkout's
+    // handler, the after-message lands after it and survives for the
+    // new branch.
     let mut frames = Vec::new();
     handle.message(&id, "go");
     collect_until(&mut handle, &mut frames, terminal).await;
@@ -1710,6 +1716,118 @@ async fn an_unknown_checkout_during_a_run_errors_immediately() {
             .iter()
             .any(|frame| matches!(frame.event, SessionEvent::CheckedOut { .. }))
     );
+    std::fs::remove_dir_all(store.dir()).ok();
+}
+
+#[tokio::test]
+async fn an_abort_discards_a_pending_checkout() {
+    let store = temp_store("endpoint-checkout-abort-drop");
+    let session = Factory::new(vec![tool_turn("t1", "slow"), text_turn("never")])
+        .into_builder(store.clone())
+        .dynamic_tool(slow_tool())
+        .create("C:/w")
+        .expect("session");
+    let mut handle = SessionHost::spawn(session, Vec::new(), plain_wiring(&store));
+    let id = boot_id(&handle);
+
+    // Checkout first, abort right behind it — drop-all-pending-intent:
+    // the parked rewind dies with the abort (no checked_out will
+    // follow; the abort is the marker), and the session is simply
+    // idle after the run unwinds.
+    handle.message(&id, "go");
+    let mut frames = Vec::new();
+    let mut sent = false;
+    let mut go_entry = None;
+    while let Some(frame) = handle.next_event().await {
+        match &frame.event {
+            SessionEvent::UserMessage { text, entry_id } if text == "go" => {
+                go_entry = Some(entry_id.clone());
+            }
+            SessionEvent::ToolCall { .. } if !sent => {
+                sent = true;
+                handle.checkout(&id, go_entry.clone().expect("go's entry id"));
+                handle.abort(&id);
+            }
+            _ => {}
+        }
+        let done = terminal(&frame.event);
+        frames.push(frame);
+        if done {
+            break;
+        }
+    }
+    assert!(
+        frames
+            .iter()
+            .any(|frame| matches!(frame.event, SessionEvent::RunAborted { .. })),
+        "the abort ended the run"
+    );
+    assert!(
+        !frames
+            .iter()
+            .any(|frame| matches!(frame.event, SessionEvent::CheckedOut { .. })),
+        "the pending checkout died with the abort — no outcome event"
+    );
+    assert!(
+        !frames
+            .iter()
+            .any(|frame| matches!(frame.event, SessionEvent::ReplayStarted { .. })),
+        "no pass followed — nothing rewound"
+    );
+    assert_eq!(chain_users(&handle, &store), vec!["go"]);
+    std::fs::remove_dir_all(store.dir()).ok();
+}
+
+#[tokio::test]
+async fn a_pass_answers_ahead_of_a_queued_message_at_the_beat() {
+    let store = temp_store("endpoint-replay-vs-message");
+    let session = Factory::new(vec![text_turn("first"), text_turn("second")])
+        .into_builder(store.clone())
+        .create("C:/w")
+        .expect("session");
+    let mut handle = SessionHost::spawn(session, Vec::new(), plain_wiring(&store));
+    let id = boot_id(&handle);
+
+    // One exchange to its terminal, so the worker is back in its wait;
+    // then a message and a replay request, in that wire order. The
+    // beat's ruled order: the pass serves first (a read of the chain
+    // as it stands) and excludes the not-yet-drained message; the
+    // message then batches and renders live after the bracket.
+    let mut frames = Vec::new();
+    handle.message(&id, "one");
+    collect_until(&mut handle, &mut frames, terminal).await;
+    handle.message(&id, "next");
+    handle.replay(&id);
+    collect_until(&mut handle, &mut frames, |e| {
+        matches!(e, SessionEvent::ReplayDone)
+    })
+    .await;
+    frames.extend(drain(&mut handle).await);
+
+    let pass_at = frames
+        .iter()
+        .position(|frame| matches!(frame.event, SessionEvent::ReplayStarted { .. }))
+        .expect("the pass");
+    let done_at = frames
+        .iter()
+        .rposition(|frame| matches!(frame.event, SessionEvent::ReplayDone))
+        .expect("the pass closes");
+    let next_at = frames
+        .iter()
+        .position(|frame| {
+            matches!(&frame.event,
+            SessionEvent::UserMessage { text, .. } if text == "next")
+        })
+        .expect("the message ran");
+    assert!(
+        next_at > done_at,
+        "the pass answers ahead of the queued message"
+    );
+    // The pass reflects the chain as of the beat: "one" is in, the
+    // still-queued "next" is not (it renders live after the bracket).
+    let pass_users = user_texts(&frames[pass_at..=done_at]);
+    assert_eq!(pass_users, vec!["one"]);
+    assert_eq!(finished_outputs(&frames), vec!["first", "second"]);
     std::fs::remove_dir_all(store.dir()).ok();
 }
 

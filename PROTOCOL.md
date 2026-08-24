@@ -597,49 +597,46 @@ section above; the design they locked:
   `model` (stage 3) will join this class. This replaces the v2
   "idle-only, frontend holds the command" convention: the backend
   never errors on timing, so no frontend needs to time it.
-- **Ordering under any interleaving.** Concurrently parked checkouts
-  **collapse to the last** — A then B then C is one intent re-aimed at
-  C (owner ruling 2026-08: "why not just checkout C?"); superseded
-  checkouts emit nothing. The collapse is lossless: watermarks grow
-  with route order, so the survivor's watermark discards exactly the
-  union the sequential executions would have. Checkouts spaced across
-  idle beats (each finding the worker back in its wait) execute one
-  by one. **Verification is loop-independent**: the target is checked
-  at route time against the resident entry-id set (read-only, like
-  the lifecycle builders), so an unknown entry errors immediately —
-  even mid-run — and never parks; only valid checkouts wait.
-  Execution-time failures (the rewind cannot apply) remain no-op
-  `error { kind: checkout }` events at the pause point. Messages
-  submit to the mailbox under a monotonic arrival seq; the survivor
-  carries the watermark minted at route time (host-loop order = wire
-  order) and discards exactly what was submitted **before it and is
-  still queued at the pause point** — the flag-6 before/after rule
-  applied uniformly to clear sites. The finishing run's boundary
-  drains outrank the discard: a pre-checkout message the run drained
-  became history (the rewind drops it); only the still-queued
-  remainder is discarded. Messages submitted after the checkout are
-  input for the new branch: they stay queued and the pump runs them
-  against the rewound chain. So `m, C, m', C', m''` → the survivor
-  C' discards `m` and `m'` (whichever of them never drained), and
-  `m''` runs on the rewound chain (C''s target). One guard makes this
-  honest mid-run: the pump yields between batches when a checkout is
-  parked (a post-checkout message can never start a batch on the old
-  chain).
-- **The discard rides the execution, not the receive** (implementation
-  judgment, recorded for review): the watermark is minted at route
-  time — a pure counter read, no side effect — and the pairs leave
-  the mailbox only after the rewind succeeded, immediately before
-  `checked_out`. Consequences: an execution-time failure is a total
-  no-op; the run in flight is untouched until its own terminal (its
-  drains keep consuming the queue, so tokens can be spent on a
-  pre-checkout message the doomed run then absorbs —
-  abort-then-checkout is the stop-now composition when that matters);
-  and the discard lands in event order at one emission site. The
-  alternative — a receive-time clear, abort-style — would kill that
-  message early but costs a side effect on a failed command (cleared
-  before the rewind validates) and modifies the in-flight run's
-  inputs, which is abort's job; the current choice stands unless the
-  wasted-token case matters in practice.
+- **The command path (ruled 2026-08, design review): the router only
+  routes.** The host loop resolves a session address and forwards to
+  the session's handler— module code at the dequeue point—and
+  routing failures (an unknown session) are its only errors. The
+  handler owns command semantics and the session's pending intent
+  (the mailbox, a pending-checkout slot, a replay flag, the cancel
+  token, the interaction hub); the worker alone owns the session, so
+  **session mutations wait for the worker's beat; everything else
+  acts at receive.**
+- **Checkout, at receive:** the handler validates the target against
+  its resident id truth (the recorder's set— every id the
+  append-only file has ever held; a bad target errors immediately,
+  even mid-run), **clears the still-pending messages**— exactly
+  the ones `message_queued` announced that nothing drained, handed
+  back as `messages_discarded` right away, so their fate is decided
+  the moment the checkout is accepted (what already entered the
+  conversation is history; the rewind drops it)— and parks in the
+  slot. A slot, not a queue: **concurrently parked checkouts collapse
+  to the last** (A then B then C is one intent re-aimed at C— owner
+  ruling: "why not just checkout C?"); superseded checkouts emit
+  nothing. Checkouts spaced across idle beats (each finding the
+  worker back in its wait) execute one by one.
+- **Abort is drop-all-pending-intent:** cancel, clear the messages,
+  and clear the checkout slot— a pending checkout dies with the
+  abort, emitting nothing (no `checked_out` follows; the abort is the
+  marker, like interaction requests dying with run terminals). The
+  composition is directional: abort-then-checkout works (the checkout
+  parks after the clear); checkout-then-abort drops the rewind.
+- **The beat** serves, in order: a parked replay pass (a read of the
+  chain as it stands— reads never hold writes, messages keep
+  flowing; a pass requested ahead of a message answers ahead of it,
+  and a message's inclusion in a pass is decided solely by whether it
+  drained before the beat), then the parked checkout (rewind— an
+  execution-time failure such as persist trouble or a gone model is a
+  no-op plus `error { kind: checkout }`), then message batches.
+- One accepted race remains: an idle send immediately followed by a
+  checkout (idle sends are never queued-acknowledged) can still have
+  its message grabbed by the worker's batch on a multi-threaded
+  runtime— both outcomes converge on the same conversation (the
+  message is not in the new branch) and resolve visibly either way.
 - **Frontend update: full re-render (ruled 2026-08).** The success
   sequence is `messages_discarded` (only if anything was discarded) →
   `checked_out { entry_id, base_id: null }` → the replay brackets

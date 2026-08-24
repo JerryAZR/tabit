@@ -413,12 +413,23 @@ rather than skipping, reachable or not.)
   for checkouts) — **covered** by the collapse test's pre-close burst:
   the commands route before the close and the wind-down executes the
   survivor.
-- Verification round (same day, owner review): checkout verification
-  moved host-side and loop-independent — **covered**: the resident
-  entry-id set (recorder-maintained, seeded at resume — pinned by
-  `resumed_sessions_probe_ids_from_earlier_processes` answering for an
-  off-chain id an earlier process wrote), route-time rejection (the
-  error beats a provably-mid-tool run's terminal — verification never
-  parks; the run finishes untouched), and the off-chain branch switch
-  through the probe (collapse test phase 3). The set insertion rides
-  the append paths every other test already exercises.
+- Command-path round (owner design review, ruled): the router only
+  routes— resolve-and-forward into per-session handlers—and the
+  behavior suite now pins the final semantics end to end: discard at
+  receive (the parking test's steer dies at the checkout's handler,
+  the notice beating the terminal, never becoming history), abort
+  drops a pending checkout (run_aborted with no checked_out and no
+  pass; the chain unmoved), the pass-before-batch beat order (a read
+  requested after a message still answers ahead of it, excluding the
+  not-yet-drained message), the collapse (slot replace; off-chain
+  switch through the recorder's id set), the immediate
+  unknown-entry error (validation lives in the handler at receive),
+  and the abort-then-checkout composition (directional now: abort
+  first works, checkout first dies with the abort). The strong-sender
+  bug the round introduced and fixed in flight: the delivery surface
+  initially held a strong event-channel sender, and since the host's
+  routing table outlives the workers, the stream could never close—
+  the handler now holds a weak sender per the channel-lifetime
+  discipline (the hub, the mailbox notices), pinned by every
+  EOF-reading test hanging until it was fixed.
+

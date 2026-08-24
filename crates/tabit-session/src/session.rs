@@ -286,11 +286,6 @@ impl SessionBuilder {
 /// `messages_discarded`.
 pub(crate) struct QueuedMessage {
     pub(crate) id: String,
-    /// Arrival order under the mailbox's monotonic counter — what a
-    /// checkout's watermark compares against (the clear sites discard
-    /// by submission order, not queue position: drains shrink the
-    /// queue mid-run, so position alone cannot say what arrived when).
-    pub(crate) seq: u64,
     pub(crate) message: Message,
 }
 
@@ -310,10 +305,6 @@ impl QueuedMessage {
 #[derive(Clone, Default)]
 pub(crate) struct Mailbox {
     queue: std::sync::Arc<std::sync::Mutex<std::collections::VecDeque<QueuedMessage>>>,
-    /// Monotonic arrival counter — the order submissions happened,
-    /// independent of drains shrinking the queue (the watermark a
-    /// checkout mints at route time compares against this).
-    seq: std::sync::Arc<std::sync::atomic::AtomicU64>,
     /// Entry ids of steers the engine drained this run, in drain order —
     /// the fold pairs them with the run's `Steer` items (the engine has
     /// no use for tabit entry ids, so the pairing lives here; drain order
@@ -371,7 +362,6 @@ impl Mailbox {
     pub(crate) fn push(&self, message: Message) {
         let queued = QueuedMessage {
             id: crate::ids::new_entry_id(),
-            seq: self.seq.fetch_add(1, std::sync::atomic::Ordering::Relaxed),
             message,
         };
         // The live snapshot races the pump's own start/end — both orders
@@ -419,31 +409,6 @@ impl Mailbox {
     /// `messages_discarded` where its event flow allows).
     pub(crate) fn clear(&self) -> Vec<QueuedMessage> {
         lock(&self.queue).drain(..).collect()
-    }
-
-    /// The arrival watermark: every message submitted so far carries a
-    /// seq below this. A checkout mints it at route time (wire order)
-    /// and discards exactly that prefix later, at its pause point.
-    pub(crate) fn arrival_watermark(&self) -> u64 {
-        self.seq.load(std::sync::atomic::Ordering::Relaxed)
-    }
-
-    /// Checkout's clear: discard the messages submitted before
-    /// `watermark`, keep the rest (they are input for the new branch).
-    /// Returns the discarded pairs for the `messages_discarded` notice.
-    pub(crate) fn discard_up_to(&self, watermark: u64) -> Vec<QueuedMessage> {
-        let mut queue = lock(&self.queue);
-        let mut dropped = Vec::new();
-        let mut kept = std::collections::VecDeque::new();
-        for queued in queue.drain(..) {
-            if queued.seq < watermark {
-                dropped.push(queued);
-            } else {
-                kept.push_back(queued);
-            }
-        }
-        *queue = kept;
-        dropped
     }
 
     /// Abort semantics: discard everything queued now (nothing more may
@@ -515,22 +480,17 @@ impl MailboxHandle {
         self.mailbox.is_empty()
     }
 
-    /// The arrival watermark the host mints onto a checkout at route
-    /// time (wire order — see [`Mailbox::arrival_watermark`]).
-    pub(crate) fn arrival_watermark(&self) -> u64 {
-        self.mailbox.arrival_watermark()
+    /// The still-pending pairs, cleared (the checkout handler's
+    /// receive-time discard {EM} see [`Mailbox::clear`]); the caller
+    /// emits the `messages_discarded` notice.
+    pub(crate) fn clear(&self) -> Vec<QueuedMessage> {
+        self.mailbox.clear()
     }
 
     /// The staged discard pairs, taken (a run conclusion, or the
     /// worker's idle beat after an idle abort).
     pub(crate) fn take_staged_discards(&self) -> Vec<QueuedMessage> {
         self.mailbox.take_staged_discards()
-    }
-
-    /// Checkout's clear, handle side — see
-    /// [`Mailbox::discard_up_to`].
-    pub(crate) fn discard_up_to(&self, watermark: u64) -> Vec<QueuedMessage> {
-        self.mailbox.discard_up_to(watermark)
     }
 
     /// The work signal the resident worker waits on.

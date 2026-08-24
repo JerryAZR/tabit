@@ -77,42 +77,54 @@ ordering hold across both.
 
 **Pause-point operations (checkout, ruled 2026-08 stage 2).** Some
 commands rewrite the conversation itself, so they cannot run inside a
-run: `checkout { entry_id }` rewinds the chain to an entry. But only
-the *execution* needs that treatment — **verification is
-loop-independent** (the owner's framing): a read-only lookup in the
-resident entry-id set, done synchronously at route time like the
-lifecycle builders. An unknown target errors immediately, even
-mid-run, and never parks; only a valid checkout waits. The ruling for
-the execution is **wait, never reject**: a checkout routed while
-Running parks in the worker (its own channel — the parking *is* the
-wait) and executes at the pause point — the terminal's transition
-back to Idle, before the next Draining. No implicit abort (abort is
-its own command; the abort-then-checkout composition is race-free
-precisely because the parked checkout executes at the pause point
-however the run ended). At the pause point, concurrently parked
-checkouts **collapse to the last** — A, then B, then C is one intent
-re-aimed at C (owner ruling: "why not just checkout C?"), and the
-collapse is lossless: watermarks grow with route order, so the
-survivor's discard set is the union the sequential executions would
-have produced. Superseded checkouts emit nothing; checkouts spaced
-across idle beats (each finding the worker back in its wait) still
-execute one by one. Execution-time failures (the rewind cannot apply)
-are a no-op plus an `error` event — nothing moved, nothing discarded.
-The queue rule is the abort rule (flag 6) applied uniformly: **a
-clear site discards what was submitted before it — of what is still
-queued when it acts.** The finishing run's boundary drains outrank
-the discard (they belong to the run, and checkout never touches the
-run): a pre-checkout message the run drained became history — the
-rewind drops it — and only the messages still queued at the pause
-point are discarded, by the watermark minted at route time
-(host-loop order = wire order). Messages submitted after the
-checkout are input for the new branch and stay queued (the empties
-check then pumps them against the rewound chain). The discard itself
-thus rides the execution, not the receive (implementation judgment,
-under owner review): a failed checkout has had no side effects, and
-abort remains the stop-now lever. One guard makes the mid-run case
-honest: the pump yields between batches when a checkout is parked, so
-a post-checkout message can never start a batch on the old chain.
+run: `checkout { entry_id }` rewinds the chain to an entry. The
+command path that serves this (owner-ruled through design review):
+
+- **The router only routes.** The host loop resolves a session
+  address and forwards into the session's handler— module code
+  running synchronously at the dequeue point, opaque to the router.
+  Routing failures (an unknown session) are the router's only errors;
+  every command's semantics— validation included— live in the
+  handler.
+- **Pending intent is shared; the session is not.** The handler owns
+  the per-session pending state: the mailbox (messages), a
+  pending-checkout slot, a replay-request flag, the cancel token, the
+  interaction hub. The worker task alone owns the session, so the one
+  forced boundary is: session mutations wait for the worker's beat.
+  Everything else can act at receive.
+- **Checkout, at receive:** validate the target against the
+  module's own id truth (a resident set the recorder maintains— every
+  id the append-only file has ever held, dropped branches included;
+  a bad target errors immediately, even mid-run) **— then clear the
+  still-pending messages** (their fate is decided the moment the
+  checkout is accepted— what `message_queued` announced and nothing
+  drained comes back as `messages_discarded` right away; what already
+  entered the conversation is history the rewind drops) **— then
+  park in the slot** (a slot, not a queue: a newer checkout replaces
+  an older— concurrently parked checkouts are one intent re-aimed,
+  and the collapse is lossless since each receive-clear already took
+  everything pending before it).
+- **Abort is drop-all-pending-intent:** cancel the run, clear the
+  messages, clear the checkout slot. A discarded pending checkout
+  emits nothing— no `checked_out` follows; the abort is the marker.
+- **The beat** (idle wake, loop-top after a pump, the between-batches
+  seam, the pre-close drain— one drain point in code): flush staged
+  discards, then serve a parked **pass** (a read of the chain as it
+  stands— reads and rewinds requested ahead of a message answer
+  ahead of it; a message's inclusion in a pass is decided solely by
+  whether it drained before the beat), then take the **checkout slot**
+  (rewind— an execution-time failure is a no-op plus an `error`
+  event; verification already caught the common failure at receive),
+  then batch messages. The between-batches seam (the pump yields when
+  the slot is set) keeps a post-checkout message from ever starting a
+  batch on the old chain.
+- **Replay is a read that rides the beat only for emission
+  coherence:** its pass shares the session's event stream with the
+  run's frames, unmergeable without a per-session sequence number.
+  The stage-4 seq primitive lifts it into a wait-free read— served
+  at receive from a published chain snapshot, like any other read.
+  Reads never hold writes: messages keep flowing while a pass is
+  parked.
 
 ## Layer 2 — the inner loop (one run's turn machine)
 

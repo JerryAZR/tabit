@@ -14,14 +14,19 @@
 //! (`sessions_available`) is a header-only listing so lazy loading
 //! holds: only the boot session is resident at startup.
 //!
-//! The mid-run capabilities stay shared leaves reached through the
-//! host's routing: a message submitted mid-run steers through the
-//! session's mailbox (the engine drains at turn boundaries), abort
-//! preempts through the cancel token, and interaction answers route
-//! by id through the session's hub. Checkout is the one command that
-//! needs the session itself, so it parks in the worker and executes
-//! at the pause point (idle, or the run's terminal). Routing never
-//! blocks on a run — the host loop only selects on commands.
+//! The command path (ruled 2026-08): **the router only routes** —
+//! the host loop resolves a session address and forwards into that
+//! session's handler, a black box to the router; routing failures
+//! (an unknown session) are its only errors. The handler
+//! ([`Worker::deliver`], module code running synchronously at the
+//! dequeue point) owns every command's semantics and the session's
+//! pending intent: the mailbox (messages — consumed mid-run by the
+//! engine as steers, at the beat by the worker as batches), the
+//! cancel token, the interaction hub, a pending-checkout slot, and a
+//! replay-request flag. The worker task owns the session itself and
+//! serves its beat — passes, then a parked checkout (the rewind, the
+//! one session mutation), then message batches — so routing never
+//! blocks on a run.
 //!
 //! Termination (ruled 2026-08 — the core dies with the frontend):
 //!
@@ -96,30 +101,132 @@ enum HostCommand {
     Replay(String),
 }
 
-/// One session's shared leaves, as the host routes to them. The
-/// worker task holds the session itself.
+/// One session's delivery surface — the module's handler at the
+/// command dequeue point, opaque to the router (owner ruling 2026-08:
+/// **the router only routes** — it resolves a session address and
+/// forwards; every command's semantics live here, in module code,
+/// running synchronously at receive). The worker task holds the
+/// session itself and consumes the pending intent this struct
+/// manages: the beat serves parked passes, then a parked checkout,
+/// then batches messages.
 #[derive(Clone)]
 struct Worker {
     mailbox: MailboxHandle,
     abort: AbortHandle,
     interaction: InteractionHub,
-    replay: mpsc::UnboundedSender<()>,
-    checkout: mpsc::UnboundedSender<CheckoutRequest>,
-    /// The read-only entry-id probe — checkout verification at route
-    /// time (see [`crate::recorder::EntryIdProbe`]).
+    /// The event channel and this session's stamp, for the handler's
+    /// own emissions (checkout errors and clears) — a module talking
+    /// to its frontend, not the router's business. Weak, per the
+    /// channel-lifetime discipline (the hub, the mailbox notices): the
+    /// delivery surface lives as long as the host's routing table, and
+    /// a strong sender would keep the event stream open after every
+    /// real producer is gone — the stream ends with the frontend, not
+    /// with the table. A dead channel simply means nobody is left to
+    /// tell.
+    events: mpsc::WeakUnboundedSender<EventFrame>,
+    stream: StreamId,
+    /// The read-only entry-id probe — checkout verification at receive
+    /// (see [`crate::recorder::EntryIdProbe`]).
     entry_probe: crate::recorder::EntryIdProbe,
+    /// Pending checkout intent — a slot, not a queue: a newer checkout
+    /// replaces an older (collapse; the newer intent is the intent),
+    /// abort clears it (drop-all-pending-intent), and the worker takes
+    /// it at its beat for the rewind.
+    checkout_slot: Arc<Mutex<Option<String>>>,
+    /// A parked replay request (idempotent read — one flag collapses
+    /// any number of requests; the beat serves it before batching).
+    replay_due: Arc<std::sync::atomic::AtomicBool>,
 }
 
-/// A checkout on its way to a session's worker: the wire command plus
-/// the mailbox watermark minted at route time (host-loop order is wire
-/// order). The worker executes it at a pause point — immediately when
-/// idle, or after the in-flight run's terminal — discarding exactly
-/// what was submitted before it (the flag-6 before/after rule shared
-/// by the clear sites) and keeping later messages queued for the new
-/// branch (PROTOCOL.md v3 stage 2).
-struct CheckoutRequest {
-    entry_id: String,
-    watermark: u64,
+impl Worker {
+    /// Deliver a session-scoped command — the handler at the dequeue
+    /// point. Everything from here down is this module's semantics.
+    #[allow(clippy::unreachable)]
+    #[allow(clippy::unreachable)]
+    fn deliver(&self, command: SessionCommand) {
+        match command {
+            SessionCommand::Message { text, .. } => self.mailbox.submit(text),
+            SessionCommand::Abort { .. } => {
+                // Drop-all-pending-intent: the run (the abort leaf's
+                // cancel plus its message clear) and any parked
+                // checkout. What already drained is history and stays
+                // for the log to tell. A discarded pending checkout
+                // emits nothing — no `checked_out` will follow; the
+                // abort is the marker (FRONTEND.md §7).
+                self.abort.abort();
+                *lock(&self.checkout_slot) = None;
+            }
+            SessionCommand::InteractionResponse {
+                id, option, text, ..
+            } => {
+                // Total: an unknown or dead id logs and drops inside
+                // the hub.
+                self.interaction.respond(&id, option, text);
+            }
+            SessionCommand::Checkout { entry_id, .. } => {
+                // Validate against this module's own id truth, here at
+                // receive: a bad target errors immediately — even
+                // mid-run — and nothing else happens.
+                if !self.entry_probe.contains(&entry_id) {
+                    if let Some(events) = self.events.upgrade() {
+                        let _ = events.send(EventFrame {
+                            stream: self.stream.clone(),
+                            event: SessionEvent::error_checkout(format!(
+                                "no entry `{entry_id}` in this session"
+                            )),
+                        });
+                    }
+                    return;
+                }
+                // Discard-at-receive (ruled): the still-pending
+                // messages — the ones `message_queued` announced that
+                // nothing has drained — are cleared now, in wire
+                // order, so their fate is decided the moment the
+                // checkout is accepted. What already entered the
+                // conversation is history the rewind will drop.
+                let cleared = self.mailbox.clear();
+                if !cleared.is_empty()
+                    && let Some(events) = self.events.upgrade()
+                {
+                    let _ = events.send(EventFrame {
+                        stream: self.stream.clone(),
+                        event: SessionEvent::MessagesDiscarded {
+                            messages: cleared
+                                .into_iter()
+                                .map(|queued| tabit_protocol::DiscardedMessage {
+                                    text: queued.text(),
+                                    id: queued.id,
+                                })
+                                .collect(),
+                        },
+                    });
+                }
+                // Pending intent, not a queue: the newer checkout is
+                // the intent.
+                lock(&self.checkout_slot).replace(entry_id);
+                self.mailbox.work_signal().notify_one();
+            }
+            // Lifecycle is not session-scoped — the router forwards
+            // those to the lifecycle handler. Unreachable by
+            // construction; sanctioned crash: see the error doctrine
+            // in AGENTS.md.
+            SessionCommand::NewSession | SessionCommand::OpenSession { .. } => {
+                unreachable!("lifecycle commands are routed to the lifecycle handler")
+            }
+        }
+    }
+
+    /// Park a replay request for the next beat. A read never holds
+    /// writes: messages keep flowing (a live run steers them, an idle
+    /// queue batches them), and the beat serves the pass ahead of the
+    /// next batch — the pass reflects the chain as of the beat, and a
+    /// message that has not drained by then renders live after the
+    /// bracket (PROTOCOL.md v3 stage 2).
+    fn deliver_replay(&self) {
+        self.replay_due
+            .store(true, std::sync::atomic::Ordering::Release);
+        self.mailbox.work_signal().notify_one();
+    }
 }
 
 /// The frontend half of the backend: submit commands, receive every
@@ -435,6 +542,25 @@ impl SessionHost {
     }
 }
 
+/// The session a session-scoped command names (v3's always-explicit
+/// addressing — lifecycle commands are the exception and never reach
+/// this helper).
+#[allow(clippy::unreachable)]
+fn session_address(command: &SessionCommand) -> &str {
+    match command {
+        SessionCommand::Message { session, .. }
+        | SessionCommand::Abort { session }
+        | SessionCommand::InteractionResponse { session, .. }
+        | SessionCommand::Checkout { session, .. } => session,
+        // Matched before the session-scoped arm in `handle`;
+        // unreachable by construction. Sanctioned crash: see the
+        // error doctrine in AGENTS.md.
+        SessionCommand::NewSession | SessionCommand::OpenSession { .. } => {
+            unreachable!("lifecycle commands carry no session address")
+        }
+    }
+}
+
 /// The host loop's own state: what routing needs, plus the worker
 /// joins it owns to the end (awaiting them is what orders the stream's
 /// end after every worker's last event) and the workers' shutdown
@@ -450,70 +576,24 @@ struct HostLoop {
 }
 
 impl HostLoop {
-    /// Route one command to its session (or the wiring, for lifecycle
-    /// commands). Errors ride the carrier stamped with the stream they
-    /// concern — the targeted id for targeted commands, the boot
-    /// stream for untargeted outcomes (PROTOCOL.md v3).
+    /// Route one command. The router only routes: lifecycle is the
+    /// host's own module (the v3 ruling — session lifecycle never
+    /// waits on a session); everything else is session-scoped, so
+    /// resolve the address and forward into the session's handler —
+    /// a black box to this loop. The only errors born here are
+    /// routing failures (an unknown session).
     fn handle(&mut self, command: HostCommand) {
         match command {
-            HostCommand::Replay(session) => {
-                if let Some(worker) = self.worker(&session) {
-                    let _ = worker.replay.send(());
-                }
-            }
-            HostCommand::Command(SessionCommand::Message { session, text }) => {
-                if let Some(worker) = self.worker(&session) {
-                    worker.mailbox.submit(text);
-                }
-            }
-            HostCommand::Command(SessionCommand::Abort { session }) => {
-                if let Some(worker) = self.worker(&session) {
-                    worker.abort.abort();
-                }
-            }
-            HostCommand::Command(SessionCommand::InteractionResponse {
-                session,
-                id,
-                option,
-                text,
-            }) => {
-                if let Some(worker) = self.worker(&session) {
-                    // Total: an unknown or dead id logs and drops
-                    // inside the hub.
-                    worker.interaction.respond(&id, option, text);
-                }
-            }
             HostCommand::Command(SessionCommand::NewSession) => self.new_session(),
             HostCommand::Command(SessionCommand::OpenSession { id }) => self.open_session(&id),
-            HostCommand::Command(SessionCommand::Checkout { session, entry_id }) => {
+            HostCommand::Replay(session) => {
                 if let Some(worker) = self.worker(&session) {
-                    // Verification is loop-independent, the same class
-                    // as the lifecycle builders: a read-only lookup in
-                    // the resident id set, synchronous here at route
-                    // time. An unknown target errors immediately —
-                    // even mid-run — and never parks; only a valid
-                    // checkout waits for the pause point, because the
-                    // execution mutates the session and that ownership
-                    // is the worker's.
-                    if !worker.entry_probe.contains(&entry_id) {
-                        let _ = self.event_tx.send(EventFrame {
-                            stream: StreamId::new(session.clone()),
-                            event: SessionEvent::error_checkout(format!(
-                                "no entry `{entry_id}` in session `{session}`"
-                            )),
-                        });
-                        return;
-                    }
-                    // The watermark is minted here, at route time: the
-                    // host loop processes commands in wire order, so
-                    // everything submitted before this checkout (and
-                    // only that) falls under it whenever the worker
-                    // gets to execute the rewind.
-                    let watermark = worker.mailbox.arrival_watermark();
-                    let _ = worker.checkout.send(CheckoutRequest {
-                        entry_id,
-                        watermark,
-                    });
+                    worker.deliver_replay();
+                }
+            }
+            HostCommand::Command(command) => {
+                if let Some(worker) = self.worker(session_address(&command)) {
+                    worker.deliver(command);
                 }
             }
         }
@@ -578,7 +658,7 @@ impl HostLoop {
     /// pass — the pass itself is the acknowledgment.
     fn open_session(&mut self, id: &str) {
         if let Some(worker) = lock(&self.workers).get(id).cloned() {
-            let _ = worker.replay.send(());
+            worker.deliver_replay();
             return;
         }
         let (session, notes) = match (self.wiring.open)(id) {
@@ -601,7 +681,7 @@ impl HostLoop {
             });
         }
         let worker = self.add_worker(id.to_string(), session);
-        let _ = worker.replay.send(());
+        worker.deliver_replay();
     }
 
     /// Spawn a session's worker and register it. Returns the routing
@@ -634,47 +714,60 @@ fn spawn_worker(
     let mailbox = session.mailbox_handle();
     let abort = session.abort_handle();
     let interaction = InteractionHub::new(event_tx.clone(), stream.clone());
-    let (replay_tx, mut replay_rx) = mpsc::unbounded_channel::<()>();
-    let (checkout_tx, mut checkout_rx) = mpsc::unbounded_channel::<CheckoutRequest>();
+    let checkout_slot = Arc::new(Mutex::new(None::<String>));
+    let replay_due = Arc::new(std::sync::atomic::AtomicBool::new(false));
+    let worker_events = event_tx.downgrade();
+    let worker_stream = stream.clone();
     let entry_probe = session.entry_id_probe();
+    let worker_slot = checkout_slot.clone();
+    let worker_replay_due = replay_due.clone();
     let worker_mailbox = mailbox.clone();
     let task_interaction = interaction.clone();
     let join = tokio::spawn(async move {
         // The hub and the mailbox's submit-time notices both reach the
-        // event channel, so both exist only here — attach them before
+        // event channel, so both exist only here - attach them before
         // the first pump can run.
         session.attach_interaction(task_interaction);
         session.attach_mailbox_notices(event_tx.clone(), stream.clone());
-        // The resident worker. Ownership never moves: idle is the
-        // wait below, running is the pump call — two positions of one
-        // loop, not two tasks.
+        // The resident worker. Ownership never moves: idle is the wait
+        // below, running is the pump call - two positions of one loop,
+        // not two tasks. One wake (the work signal) serves every
+        // pending thing; the beat at the loop top is the single drain
+        // point.
         loop {
             // Discards staged by an abort that no run conclusion
-            // flushed (abort while idle — there is no terminal coming;
+            // flushed (abort while idle - there is no terminal coming;
             // mid-run aborts flush at their run's conclusion first).
             flush_staged_discards(&worker_mailbox, &event_tx, &stream);
-            // The pause point: the parked checkout — the last one
-            // sent; see [`take_parked_checkout`] — executes here,
-            // before any survivor starts the next batch (a
-            // post-checkout message must never run on the old chain).
-            if let Some(checkout) = take_parked_checkout(&mut checkout_rx) {
-                execute_checkout(&mut session, &worker_mailbox, &event_tx, &stream, checkout);
+            // The beat, in its ruled order: a parked pass answers
+            // first (a read of the chain as it stands), then a parked
+            // checkout (the rewind - the one session mutation - plus
+            // its re-render), then the empties check batches messages.
+            // Reads and rewinds requested ahead of a message answer
+            // ahead of it; a message's inclusion in a pass is decided
+            // solely by whether it drained before the beat.
+            if replay_due.swap(false, std::sync::atomic::Ordering::Acquire) {
+                emit_replay(&session, &event_tx, &stream);
+            }
+            if let Some(entry_id) = lock(&checkout_slot).take() {
+                execute_checkout(&mut session, &event_tx, &stream, entry_id);
             }
             if !worker_mailbox.is_empty() {
-                // The pause seam: if another checkout parked while this
-                // pump drained a batch, yield back to the loop-top
-                // drain instead of starting the next batch.
+                // The pause seam: a checkout parked while this pump
+                // drained a batch must rewind before a survivor starts
+                // the next batch on the old chain.
                 session
                     .pump_with_pause(
                         &mut |event| {
-                            // The receiver is gone only when the frontend
-                            // is; there is no one left to tell.
+                            // The receiver is gone only when the
+                            // frontend is; there is no one left to
+                            // tell.
                             let _ = event_tx.send(EventFrame {
                                 stream: stream.clone(),
                                 event,
                             });
                         },
-                        || checkout_rx.is_empty(),
+                        || lock(&checkout_slot).is_none(),
                     )
                     .await;
                 continue;
@@ -684,52 +777,33 @@ fn spawn_worker(
                 _ = shutdown.cancelled() => {
                     // Close is not a barrier: pushes are synchronous,
                     // so anything sent before closing is already
-                    // queued — run it before winding down. (Pushes
+                    // queued - run it before winding down. (Pushes
                     // that race the wind-down simply run too; nothing
                     // is lost.)
                     if !worker_mailbox.is_empty() {
                         continue;
                     }
-                    // Checkouts routed before the close are honored the
-                    // same way — the last one rewinds, then wind down.
-                    if let Some(checkout) = take_parked_checkout(&mut checkout_rx) {
-                        execute_checkout(&mut session, &worker_mailbox, &event_tx, &stream, checkout);
+                    // Serve what the handler parked ahead of the
+                    // close, then wind down through the same flush the
+                    // idle beat uses - an abort's staged pairs must
+                    // not die with the worker (flag 6 - nothing
+                    // user-authored leaves silently, not even at
+                    // close).
+                    if replay_due.swap(false, std::sync::atomic::Ordering::Acquire) {
+                        emit_replay(&session, &event_tx, &stream);
                     }
-                    // Exit through the same flush the idle beat uses:
-                    // an abort's staged pairs must not die with the
-                    // worker (flag 6 — nothing user-authored leaves
-                    // silently, not even at close).
+                    if let Some(entry_id) = lock(&checkout_slot).take() {
+                        execute_checkout(&mut session, &event_tx, &stream, entry_id);
+                    }
                     flush_staged_discards(&worker_mailbox, &event_tx, &stream);
                     break;
                 }
                 // The frontend is gone; the death watcher has already
                 // aborted any in-flight run, so the pump has returned.
                 _ = event_tx.closed() => break,
-                // A checkout arriving at idle executes immediately —
-                // this arm and the loop-top drain are the two halves of
-                // one pause-point rule.
-                checkout = checkout_rx.recv() => {
-                    // The wake takes one; drain the rest — only the
-                    // last parked checkout executes.
-                    let last = take_parked_checkout(&mut checkout_rx).or(checkout);
-                    if let Some(checkout) = last {
-                        execute_checkout(&mut session, &worker_mailbox, &event_tx, &stream, checkout);
-                    }
-                }
-                // Answered ahead of new work: frontends ask for the
-                // pass at the handshake or an open, before they send
-                // anything, so the pass reflects the chain as it was
-                // when they asked — not whatever arrived since.
-                replay = replay_rx.recv() => {
-                    // Answered at idle, so nothing can interleave: the
-                    // pass is the resident chain projected, sent on
-                    // this worker's own sender — it lands after
-                    // everything already queued and before anything
-                    // the next message starts.
-                    if replay.is_some() {
-                        emit_replay(&session, &event_tx, &stream);
-                    }
-                }
+                // The one wake: any pending thing (a message push, a
+                // parked checkout or pass, an abort) lands here and
+                // loops back to the beat.
                 _ = worker_mailbox.work_signal().notified() => {}
             }
         }
@@ -737,7 +811,7 @@ fn spawn_worker(
             Ok(session_stats) => {
                 lock(&stats).insert(id, session_stats);
             }
-            // Nobody is left to tell at wind-down — but silence is not
+            // Nobody is left to tell at wind-down - but silence is not
             // the doctrine: trace it (the closing summary's absence is
             // the user-visible symptom).
             Err(error) => {
@@ -752,78 +826,39 @@ fn spawn_worker(
             mailbox,
             abort,
             interaction,
-            replay: replay_tx,
-            checkout: checkout_tx,
+            events: worker_events,
+            stream: worker_stream,
             entry_probe,
+            checkout_slot: worker_slot,
+            replay_due: worker_replay_due,
         },
         join,
     )
 }
 
-/// Drain the parked checkouts to pending intent: only the **last**
-/// executes. Concurrently parked checkouts are one intent re-aimed (A,
-/// then B, then C — the user's final target is C; owner ruling
-/// 2026-08), and executing superseded rewinds would emit full replay
-/// passes the next one immediately obsoletes. The collapse loses
-/// nothing: watermarks grow with route order, so the survivor's
-/// watermark discards exactly the union sequential executions would
-/// have. Checkouts spaced across idle beats (each finding the worker
-/// back in its wait) still execute one by one — supersession applies
-/// only to what is parked at the same instant.
-fn take_parked_checkout(
-    checkout_rx: &mut mpsc::UnboundedReceiver<CheckoutRequest>,
-) -> Option<CheckoutRequest> {
-    let mut last = None;
-    while let Ok(checkout) = checkout_rx.try_recv() {
-        last = Some(checkout);
-    }
-    last
-}
-
-/// Execute one checkout at a pause point (idle or the run-terminal
-/// beat): rewind the chain — a failure is the command's error event
-/// and a total no-op, nothing discarded — then discard exactly what
-/// was submitted before the checkout (the watermark), announce
-/// `checked_out`, and re-render with a full replay pass (PROTOCOL.md
-/// v3 stage 2). The discard is part of this execution, not of the
-/// receive: the watermark was minted at route time (a pure counter
-/// read), and the pairs leave the mailbox only after the rewind
-/// succeeded — until then the run in flight is untouched, and a
-/// pre-checkout steer may still drain into it (to be rewound away
-/// here; abort is the stop-now lever, not checkout).
+/// Execute the parked checkout at a pause point: rewind the chain,
+/// announce, re-render. The discard already happened at receive (the
+/// handler's clear); an execution-time failure - the rewind cannot
+/// apply - is the command's error event and a no-op (verification
+/// caught the common failure at receive; these are the environmental
+/// ones: persist trouble, the chain's model gone from config).
 fn execute_checkout(
     session: &mut Session,
-    mailbox: &MailboxHandle,
     event_tx: &mpsc::UnboundedSender<EventFrame>,
     stream: &StreamId,
-    checkout: CheckoutRequest,
+    entry_id: String,
 ) {
-    if let Err(error) = session.rewind_to_entry(&checkout.entry_id) {
+    if let Err(error) = session.rewind_to_entry(&entry_id) {
         let _ = event_tx.send(EventFrame {
             stream: stream.clone(),
             event: SessionEvent::error_checkout(error.to_string()),
         });
         return;
     }
-    let discarded = mailbox.discard_up_to(checkout.watermark);
-    if !discarded.is_empty() {
-        let _ = event_tx.send(EventFrame {
-            stream: stream.clone(),
-            event: SessionEvent::MessagesDiscarded {
-                messages: discarded
-                    .into_iter()
-                    .map(|queued| tabit_protocol::DiscardedMessage {
-                        text: queued.text(),
-                        id: queued.id,
-                    })
-                    .collect(),
-            },
-        });
-    }
     let _ = event_tx.send(EventFrame {
         stream: stream.clone(),
         event: SessionEvent::CheckedOut {
-            entry_id: checkout.entry_id,
+            entry_id,
             // Full re-render (the suffix mode's reserved seam).
             base_id: None,
         },

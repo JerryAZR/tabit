@@ -195,10 +195,10 @@ yields `error { kind: session }` stamped with the id you named.
 | command | when | effect |
 |---|---|---|
 | `message { session, text }` | any time | idle: starts a run — acknowledged directly by `user_message` (milliseconds; no queued event — nothing waits); running: steers at the next turn boundary, acknowledged by `message_queued { id, text }`. |
-| `abort { session }` | any time | running: preempts (`run_aborted`); discards messages queued at abort time (`messages_discarded`, omitted when none). Post-abort messages queue normally and start the next run. Idle: no-op. |
+| `abort { session }` | any time | running: preempts (`run_aborted`); discards messages queued at abort time (`messages_discarded`, omitted when none) **and any pending checkout** (§7 — no `checked_out` follows it; reset pending-rewind UI here). Post-abort messages queue normally and start the next run. Idle: no-op. |
 | `new_session` | any time | creates a fresh session (same config, tools, and `--model`/`--max-turns` as the boot); `session_created { id, path }` follows, stamped with the new id. Nothing replays (it is empty). Never waits on any session — lifecycle writes no session's file. |
 | `open_session { id }` | any time | loads the session if needed and streams a replay pass stamped with the id — the pass is the acknowledgment. Idempotent: an open session re-replays. Unknown id or unreadable file → `error { kind: session }` stamped with the id. Creating, loading, and switching never wait on the session you are leaving; the one wait is the opened session's **own** in-flight run — its pass arrives at that run's terminal (its live streaming renders immediately; only committed history waits). |
-| `checkout { session, entry_id }` | any time | moves that session's chain to the entry (any entry in the file — an off-chain target is a branch switch); see §7. The target is verified on receipt — an unknown entry errors immediately, even mid-run. A valid checkout: idle → applies immediately; running → **parks** and executes at the run's terminal (never rejected, never aborts the run implicitly — compose abort-then-checkout to stop now). |
+| `checkout { session, entry_id }` | any time | moves that session's chain to the entry (any entry in the file— an off-chain target is a branch switch); see §7. **On receipt:** the target is verified (unknown entry → immediate `error { kind: checkout }`, nothing else happens) and the still-pending messages are discarded (`messages_discarded`, handed back as drafts). The rewind itself: idle → applies immediately; running → parks and executes at the run's terminal (never aborts the run implicitly— compose abort-then-checkout to stop now). |
 | `model { provider, model, thinking_level? }` | idle only | the next run uses this selection; validates against the backend's config. |
 | `interaction_response { session, id, option?, text? }` | after an `interaction_request` | answers a pending request; at least one of option/text; see §8. |
 
@@ -361,27 +361,41 @@ synchronize with the backend's pause point — but if you want a
 message to be the new branch's first turn, sending it after you see
 `checked_out` is the way to make that deterministic.
 
-**When the discard happens.** At the checkout's execution — the pause
-point, not the moment you send the command — and it takes only what
-is *still pending* then. The finishing run's turn-boundary drains
-outrank it: a message you sent before the checkout that the run
-drains becomes history for the duration (its `user_message` is real,
-tokens were spent) and the rewind drops it with everything else;
-only what never drained comes back as `messages_discarded`. Send
-`abort` first when you want the run stopped now rather than left to
-finish. A checkout that fails at execution (the
-`error { kind: checkout }` event) has discarded nothing; an unknown
-entry never even parks — it errors on receipt.
+**When the discard happens: on receipt.** The still-pending messages—
+exactly the ones `message_queued` announced that have not drained—
+are cleared the moment the checkout is accepted, and handed back
+immediately as drafts. Their fate is decided right there, not by the
+finishing run's internal timing: a message you sent before the
+checkout either already entered the conversation (you saw its
+`user_message`— the rewind drops it with everything else after the
+target) or it comes back as `messages_discarded`. Messages sent after
+the checkout are input for the new branch: they queue normally and
+run against the rewound chain. (One narrow race: an idle send
+immediately followed by a checkout can still have its message grabbed
+by the worker's batch— both outcomes leave it out of the new
+branch, visibly.)
 
-**Multiple and interleaved checkouts.** Checkouts that pile up before
-the pause point **collapse to the last one** — only it executes and
-emits (`messages_discarded` if any, one `checked_out`, one pass);
-superseded checkouts emit nothing, not even an error. The collapse
-loses no messages: the survivor discards exactly what was submitted
-before it (the union of the sequential discards). Checkouts you space
-across idle beats (one fully applies before you send the next)
-execute one at a time. An unknown entry errors on receipt — it never
-parks, so it is never superseded either.
+**Multiple checkouts.** Checkouts that pile up before the pause point
+**collapse to the last one**— only it executes and emits
+(`messages_discarded` for what was pending at its receive, one
+`checked_out`, one pass); superseded checkouts emit nothing, not even
+an error. Checkouts spaced across idle beats (one fully applies
+before you send the next) execute one at a time. An unknown entry
+errors on receipt— it never parks, so it is never superseded
+either.
+
+**Abort drops a pending checkout.** Abort is drop-all-pending-intent:
+messages and any checkout still waiting for the pause point. No event
+marks the discarded checkout— no `checked_out` will follow; treat
+the abort as canceling it, and resend the checkout after the abort if
+you still want the rewind.
+
+**Replay vs. messages.** A pass never holds messages: they keep
+flowing while a pass is parked, and at the session's beat the pass is
+served **before** the next message batch— a read requested after a
+message still answers ahead of it. A message's inclusion in a pass is
+decided solely by whether it drained before the beat (drained → in
+the pass; queued → it renders live right after `replay_done`).
 
 **Valid cut points** (ruled). The atomic unit is the tool roundtrip:
 an assistant turn and its complete result batch commit and rewind
