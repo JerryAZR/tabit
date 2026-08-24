@@ -444,7 +444,13 @@ Dispatch wants callables; bundling is the extension's concern.
   closure, metadata }`—the extension runtime stamps its owner id
   onto records when it arrives. Bare closures remain sugar (generated
   id, default priority). Attribution ("hook `perms` denied the
-  call"), introspection, and replace-by-id fall out of the id.
+  call"), introspection, and replace-by-id fall out of the id. The id
+  is **author-chosen** (a declared artifact, like a tool name—the
+  author namespaces it, `ext:<id>:<name>` when the runtime arrives);
+  it never reaches the wire, and it is never the interaction id—a
+  registration names a subscription, a transaction id names one ask.
+  Attribution may flow into an ask's *payload*; routing never knows
+  which hook asked.
 - **One shape per event**: `Fn(&RunContext, Event<'_>) ->
   BoxFuture<'static, Action>`— a single async form for all events
   (sync events ride trivial futures) and a copy-out signature: the
