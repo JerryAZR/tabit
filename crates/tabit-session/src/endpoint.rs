@@ -634,8 +634,10 @@ impl HostLoop {
         // own model, which can differ from the boot's, and nothing
         // else on the wire will say so (the session is empty; no
         // `model_changed` replays).
+        // Backend-level: the payload carries the new session's id (no
+        // faked stamp — the optional-stream ruling).
         let _ = self.event_tx.send(EventFrame {
-            stream: Some(stream.clone()),
+            stream: None,
             event: SessionEvent::SessionCreated {
                 id: id.clone(),
                 path: session.path().display().to_string(),

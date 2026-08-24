@@ -1240,7 +1240,11 @@ id = "m"
             other => panic!("expected session_created, got {other:?}"),
         };
         assert_ne!(created, boot, "the new session is a second stream");
-        assert!(created_line.contains(&format!(r#""stream":"{created}""#)));
+        // Backend-level: no stream field on the creation line; the
+    // payload names the session (the optional-stream ruling — this
+    // was the assertion that once pinned the faked stamp).
+    assert!(!created_line.contains("stream"));
+    assert!(created_line.contains(&format!(r#""id":"{created}""#)));;
 
         // The new session answers a message on its own stamp — the
         // await is stream-scoped so a stale terminal line from another

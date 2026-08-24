@@ -924,12 +924,17 @@ async fn a_created_sessions_selection_notes_follow_its_stream() {
     );
     handle.command_link().send(SessionCommand::NewSession);
 
-    // session_created first, its degradation right behind it, both on
-    // the new session's stream.
+    // session_created first — backend-level, no faked stamp (the
+    // payload names the session; regression pin: a silent edit miss
+    // once left this stamped with the new stream, and the GUI's
+    // new-session button died on the stream-routed path). Its
+    // degradation follows on the new session's stream: a fact about
+    // that session, whose name the payload just gave.
     let created = until_event(&mut handle, |event| {
         matches!(event, SessionEvent::SessionCreated { .. })
     })
     .await;
+    assert_eq!(created.stream, None, "creation is backend-level");
     let created_id = match created.event {
         SessionEvent::SessionCreated { id, .. } => id,
         other => panic!("expected session_created, got {other:?}"),

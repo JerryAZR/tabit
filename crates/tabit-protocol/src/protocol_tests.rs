@@ -107,6 +107,22 @@ fn event_frames_serialize_flat_with_the_stream_beside_the_tag() {
 }
 
 #[test]
+fn backend_level_lines_parse_as_events_with_no_stream() {
+    // The optional-stream ruling on the wire: creation carries no
+    // faked stamp, and the untagged ServerFrame still resolves it to
+    // the event variant (a GUI-side regression once left this shape
+    // unparsed-looking; the parse was always fine, the stamp was not).
+    let line = r#"{"type":"session_created","id":"019a","path":"C:/w/.tabit/sessions/x.jsonl","model":{"provider":"p","model":"m","thinking_level":null}}"#;
+    match serde_json::from_str::<ServerFrame>(line).expect("the unstamped line parses") {
+        ServerFrame::Event(frame) => {
+            assert_eq!(frame.stream, None);
+            assert!(matches!(frame.event, SessionEvent::SessionCreated { id, .. } if id == "019a"));
+        }
+        other => panic!("the event variant, got {other:?}"),
+    }
+}
+
+#[test]
 fn checked_out_carries_its_suffix_seam_as_an_explicit_null() {
     // `base_id` stays on the wire even in full-re-render mode (null):
     // the reserved suffix upgrade flips it to Some without a shape
