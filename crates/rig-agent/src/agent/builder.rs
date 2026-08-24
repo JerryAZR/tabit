@@ -846,7 +846,7 @@ mod tests {
         };
 
         let action = hook
-            .on_completion_call(&HookContext::new(false, None), event)
+            .on_completion_call(&HookContext::new(false, None, Default::default()), event)
             .await;
         assert!(matches!(action, CompletionCallAction::Continue));
     }

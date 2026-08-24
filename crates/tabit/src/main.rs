@@ -403,15 +403,9 @@ fn assemble_session(
     // per session build, the hub handed to each run's gate. Deleting
     // the gate before release is deleting permission.rs and this one
     // mount (EXTENSIONS.md).
-    .tool_gate({
-        let memory = tabit_session::PermissionMemory::default();
-        std::sync::Arc::new(move |hub: Option<&tabit_session::InteractionHub>| {
-            std::sync::Arc::new(tabit_session::PermissionHook::new(
-                hub.cloned(),
-                memory.clone(),
-            )) as std::sync::Arc<dyn tabit_session::ToolGate>
-        })
-    });
+    .hooks(tabit_session::permission_gate(
+        tabit_session::PermissionMemory::default(),
+    ));
     if let Some(max_turns) = args.max_turns {
         builder = builder.max_turns(max_turns);
     }

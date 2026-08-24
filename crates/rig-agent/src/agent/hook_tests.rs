@@ -20,7 +20,7 @@ async fn nested_completion_patches_compose() {
     let prompt = Message::user("hi");
     let action = outer
         .on_completion_call(
-            &HookContext::new(false, None),
+            &HookContext::new(false, None, Default::default()),
             CompletionCall {
                 prompt: &prompt,
                 history: &[],
@@ -64,7 +64,7 @@ async fn tool_call_rewrites_chain_in_registration_order() {
 
     let action = stack
         .on_tool_call(
-            &HookContext::new(false, None),
+            &HookContext::new(false, None, Default::default()),
             ToolCall {
                 tool_name: "tool",
                 tool_call_id: Some("provider-id"),
@@ -122,7 +122,7 @@ async fn result_rewrites_chain_without_mutating_raw_result_or_context() {
 
     let action = stack
         .on_tool_result(
-            &HookContext::new(false, None),
+            &HookContext::new(false, None, Default::default()),
             ToolResultEvent {
                 tool_name: "tool",
                 tool_call_id: None,
@@ -193,7 +193,7 @@ async fn terminal_result_action_short_circuits_later_hooks() {
     let context = ToolContext::new();
     let action = stack
         .on_tool_result(
-            &HookContext::new(false, None),
+            &HookContext::new(false, None, Default::default()),
             ToolResultEvent {
                 tool_name: "tool",
                 tool_call_id: None,
@@ -218,7 +218,7 @@ use std::sync::{
 use serde_json::{Value, json};
 
 fn ctx() -> HookContext {
-    HookContext::new(false, Some("test-agent".to_string()))
+    HookContext::new(false, Some("test-agent".to_string()), Default::default())
 }
 
 fn model(label: &str) -> ModelHandle {
@@ -798,7 +798,7 @@ fn scratchpad_is_shared_across_clones() {
 
 #[test]
 fn hook_context_reports_identity_and_turn() {
-    let context = HookContext::new(true, Some("agent".into()));
+    let context = HookContext::new(true, Some("agent".into()), Default::default());
     assert!(context.is_streaming());
     assert_eq!(context.agent_name(), Some("agent"));
     context.set_turn(3);
@@ -1077,7 +1077,7 @@ async fn dropped_tool_call_dispatch_future_releases_its_resolution_frame() {
     // Poll the erased dispatch future once (creating its resolution
     // frame), then drop it unfinished: `ToolCallResolutionFrame::drop`
     // must clean the frame up so later resolutions stay balanced.
-    let mut dispatch = stack.hooks[0].tool_call(&context, tool_call_event());
+    let mut dispatch = stack.hooks[0].2.tool_call(&context, tool_call_event());
     tokio::select! {
         biased;
         _ = &mut dispatch => panic!("the hook must never resolve"),
@@ -1111,4 +1111,47 @@ fn action_types_are_event_specific() {
     let calls = AtomicUsize::new(0);
     calls.fetch_add(1, Ordering::Relaxed);
     assert_eq!(calls.load(Ordering::Relaxed), 1);
+}
+
+#[tokio::test]
+async fn closure_records_order_by_priority_and_deny_is_absorbing() {
+    let seen = Arc::new(std::sync::Mutex::new(Vec::new()));
+    let note = |label: &'static str| -> crate::agent::ToolCallFn {
+        let seen = seen.clone();
+        Box::new(move |_, _| {
+            let seen = seen.clone();
+            Box::pin(async move {
+                seen.lock().unwrap().push(label);
+                ToolCallAction::run()
+            })
+        })
+    };
+    // Registered late (auditor) but sorted first (priority -10); the
+    // deny at 0 absorbs; the equal-priority tie keeps registration
+    // order (first before second).
+    let stack = HookStack::new()
+        .hook(("first", 0), on::tool_call(note("first")))
+        .hook(("auditor", -10), on::tool_call(note("auditor")))
+        .hook(
+            ("denier", 0),
+            on::tool_call(|_, _| Box::pin(async { ToolCallAction::skip("no") })),
+        )
+        .hook(("second", 0), on::tool_call(note("second")));
+    let action = AgentHook::on_tool_call(
+        &stack,
+        &HookContext::new(false, None, Default::default()),
+        ToolCall {
+            tool_name: "t",
+            tool_call_id: None,
+            internal_call_id: "i",
+            args: "{}",
+        },
+    )
+    .await;
+    assert!(matches!(action, ToolCallAction::Skip(reason) if reason == "no"));
+    assert_eq!(
+        *seen.lock().unwrap(),
+        vec!["auditor", "first"],
+        "priority orders; the deny absorbs before `second`"
+    );
 }

@@ -2399,7 +2399,7 @@ mod tests {
 
     #[tokio::test]
     async fn rewrite_and_result_hooks_leave_non_add_tools_untouched() {
-        let context = HookContext::new(false, None);
+        let context = HookContext::new(false, None, Default::default());
         let rewrite = RewriteArgument {
             key: "x",
             value: serde_json::json!(7),

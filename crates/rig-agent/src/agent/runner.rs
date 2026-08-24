@@ -1085,9 +1085,8 @@ impl TurnSource for UnaryTurnSource {
                 yield Err(StreamingError::Prompt(Box::new(run.cancel_error(reason))));
                 return;
             }
-            let action = runner
-                .hooks
-                .on_model_turn_finished(
+            let action = AgentHook::on_model_turn_finished(
+                &runner.hooks,
                     hook_ctx,
                     ModelTurnFinished {
                         turn: hook_ctx.turn(),

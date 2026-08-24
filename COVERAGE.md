@@ -405,6 +405,21 @@ rather than skipping, reachable or not.)
   stamped-creation fixtures were the fiction shape the round
   deletes).
 
+## Hook surface, shipped (2026-08, round 2)
+
+- The registration record + priority law is engine-pinned
+  (`closure_records_order_by_priority_and_deny_is_absorbing`:
+  stable sort by priority with registration-order tiebreak, Skip
+  absorbing—the auditor-before-denier consequence asserted
+  directly). The permission actor suite (allow/deny/always-allow/
+  abort/death) now runs through the value seam end to end—which is
+  also the unified-context pin: the gate's closure asks through
+  `ctx.interaction()`, the same capability map tools read. The
+  run-context snapshot costs one ToolContext clone per run
+  (`agent_dispatch_snapshot_clones_once...` counts it).
+- `gate.rs` (ToolGate/GateHook) is deleted; the factory seam became
+  `SessionBuilder::hooks(HookStack)` — a plain value.
+
 ## Tool-gate seam (2026-08, the permission-leak review)
 
 - `gate.rs` {EM} **covered end to end**: `ToolGate`/`ToolGateFactory`

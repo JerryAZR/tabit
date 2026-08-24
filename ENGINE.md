@@ -429,7 +429,7 @@ Pause points are enumerable — only context-carrying sites can ask
 consumer exists.
 
 ## The hook surface — closure registration (ruled 2026-08;
-implementation pending)
+shipped)
 
 `AgentHook` (the nine-method observer trait) is retired as the public
 authoring surface. It solved an extension-authoring problem—a

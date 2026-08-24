@@ -67,7 +67,6 @@
 mod endpoint;
 mod entry;
 mod error;
-mod gate;
 mod ids;
 mod interaction;
 mod lock;
@@ -87,10 +86,9 @@ pub use endpoint::{
 };
 pub use entry::{EntryKind, SESSION_FORMAT_VERSION, SessionEntry, SessionHeader};
 pub use error::SessionError;
-pub use gate::ToolGate;
 pub use interaction::InteractionHub;
 pub use model::validate_selection;
-pub use permission::{PERMISSION_ASK_TOOLS, PermissionHook, PermissionMemory};
+pub use permission::{PERMISSION_ASK_TOOLS, PermissionMemory, permission_gate};
 pub use projection::DanglingToolCalls;
 pub use prompt::build_system_prompt;
 pub use registry::ModelRegistry;

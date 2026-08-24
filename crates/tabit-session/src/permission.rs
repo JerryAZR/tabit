@@ -12,12 +12,8 @@
 use std::collections::HashSet;
 use std::sync::Arc;
 
-use futures::future::BoxFuture;
-
 use rig_agent::agent::hook::ToolCallAction;
 
-use crate::gate::ToolGate;
-use crate::interaction::InteractionHub;
 use crate::lock::lock;
 
 /// Tools the dev-time gate asks about. Everything else passes the
@@ -79,32 +75,21 @@ pub(crate) fn permission_ask(tool: &str, args: &str) -> (&'static str, serde_jso
     )
 }
 
-/// The pre-body permission gate, mounted per run by the assembly's
-/// hook factory (the interaction-hook seam). Without an interaction
-/// frontend (a direct [`crate::Session`] consumer rather than the
-/// actor) the gate fails closed: the call does not run and the model
-/// is told why.
-pub struct PermissionHook {
-    hub: Option<InteractionHub>,
-    memory: PermissionMemory,
-}
-
-impl PermissionHook {
-    /// Build the gate over the session's hub (`None` = no frontend:
-    /// fail closed) and its session-scoped memory.
-    pub fn new(hub: Option<InteractionHub>, memory: PermissionMemory) -> Self {
-        Self { hub, memory }
-    }
-}
-
-impl ToolGate for PermissionHook {
-    fn on_tool_call(&self, tool_name: &str, args: &str) -> BoxFuture<'static, ToolCallAction> {
-        let hub = self.hub.clone();
-        let memory = self.memory.clone();
-        let tool_name = tool_name.to_string();
-        let args = args.to_string();
-        Box::pin(async move { gate(&tool_name, &args, hub.as_ref(), &memory).await })
-    }
+/// The gate as a mounted hook stack: one `on_tool_call` closure over
+/// the session-scoped memory, asking through the run context (the
+/// unified capability map — hooks and tools ask the same way).
+#[allow(clippy::expect_used)] // sanctioned crash: pure-data serialization
+pub fn permission_gate(memory: PermissionMemory) -> rig_agent::agent::HookStack {
+    rig_agent::agent::HookStack::new().hook(
+        ("permission", 0),
+        rig_agent::agent::on::tool_call(move |ctx, call| {
+            let memory = memory.clone();
+            let tool_name = call.tool_name.to_string();
+            let args = call.args.to_string();
+            let interaction = ctx.interaction();
+            Box::pin(async move { gate(&tool_name, &args, interaction.as_deref(), &memory).await })
+        }),
+    )
 }
 
 /// The gate's decision for one call — the whole policy, extracted so the
@@ -112,7 +97,7 @@ impl ToolGate for PermissionHook {
 async fn gate(
     tool_name: &str,
     args: &str,
-    hub: Option<&InteractionHub>,
+    hub: Option<&dyn rig_agent::tool::interaction::UserInteraction>,
     memory: &PermissionMemory,
 ) -> ToolCallAction {
     if !PERMISSION_ASK_TOOLS.contains(&tool_name) {
@@ -128,7 +113,7 @@ async fn gate(
         return ToolCallAction::run();
     }
     let (ui_type, payload) = permission_ask(tool_name, args);
-    let reply = match hub.capability().request(ui_type, payload).await {
+    let reply = match hub.request(ui_type, payload).await {
         rig_agent::tool::interaction::InteractionOutcome::Answered(payload) => {
             serde_json::from_value::<tabit_protocol::templates::ConfirmAnswer>(payload)
                 .unwrap_or_default()
@@ -162,6 +147,7 @@ async fn gate(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::interaction::InteractionHub;
     use std::time::Duration;
     use tabit_protocol::{EventFrame, SessionEvent};
 

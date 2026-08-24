@@ -678,9 +678,8 @@ impl TurnSource for StreamingTurnSource {
             // Suppressed for recovered turns, mirroring the blocking surface's
             // `Continue` arm.
             if !turn_recovered {
-                let action = runner
-                    .hooks
-                    .on_model_turn_finished(
+                let action = AgentHook::on_model_turn_finished(
+                    &runner.hooks,
                         hook_ctx,
                         ModelTurnFinished {
                             turn: hook_ctx.turn(),

@@ -532,8 +532,8 @@ async fn agent_dispatch_snapshot_clones_once_and_isolates_tool_mutations() {
     assert_eq!(*results.0.lock().expect("result values"), vec![1, 1]);
     assert_eq!(
         clones.load(Ordering::SeqCst),
-        2,
-        "each of the two agent dispatches should clone inbound context once"
+        3,
+        "two dispatch clones (one per tool) plus the run-context snapshot \n         (hooks read the same capability map tools do, snapshotted once \n         per run)"
     );
 }
 
@@ -8584,8 +8584,8 @@ async fn concurrent_runs_of_same_agent_have_independent_retry_budgets() {
 #[tokio::test]
 async fn retry_scratchpad_state_is_isolated_by_run_and_hook_instance() {
     let shared_hook = BoundedResponseRetry::new("rejected", 1, TestRetryMode::Repeat);
-    let first_ctx = HookContext::new(false, None);
-    let second_ctx = HookContext::new(false, None);
+    let first_ctx = HookContext::new(false, None, Default::default());
+    let second_ctx = HookContext::new(false, None, Default::default());
     let content = OneOrMany::one(AssistantContent::text("rejected"));
     let first_event = ModelTurnFinished {
         turn: 1,
@@ -8607,7 +8607,7 @@ async fn retry_scratchpad_state_is_isolated_by_run_and_hook_instance() {
         ModelTurnAction::Stop(_)
     ));
 
-    let same_run_ctx = HookContext::new(false, None);
+    let same_run_ctx = HookContext::new(false, None, Default::default());
     let first_hook = BoundedResponseRetry::new("first", 1, TestRetryMode::Repeat);
     let second_hook = BoundedResponseRetry::new("second", 1, TestRetryMode::Repeat);
     let first_content = OneOrMany::one(AssistantContent::text("first"));
@@ -8661,7 +8661,7 @@ async fn model_turn_action_short_circuits_flat_and_nested_hook_stacks() {
         content: &content,
         usage: Usage::new(),
     };
-    let ctx = HookContext::new(false, None);
+    let ctx = HookContext::new(false, None, Default::default());
 
     let first_calls = Arc::new(AtomicU32::new(0));
     let retry_calls = Arc::new(AtomicU32::new(0));

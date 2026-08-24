@@ -138,7 +138,7 @@ pub struct SessionBuilder {
     tools: Vec<DynamicTool>,
     max_turns: usize,
     model_factory: ModelFactory,
-    tool_gate_factory: Option<crate::gate::ToolGateFactory>,
+    run_hooks: Option<rig_agent::agent::HookStack>,
 }
 
 /// Builds the model behind a selection: `(provider, model)` ids to a
@@ -173,7 +173,7 @@ impl SessionBuilder {
             tools: Vec::new(),
             max_turns: DEFAULT_MAX_TURNS,
             model_factory: default_factory,
-            tool_gate_factory: None,
+            run_hooks: None,
         })
     }
 
@@ -199,8 +199,8 @@ impl SessionBuilder {
     /// seam for dev-time/extension policy{EM} the permission gate).
     /// The factory is called once per run with the session's hub; a
     /// captured memory makes session-scoped state out of it.
-    pub fn tool_gate(mut self, factory: crate::gate::ToolGateFactory) -> Self {
-        self.tool_gate_factory = Some(factory);
+    pub fn hooks(mut self, stack: rig_agent::agent::HookStack) -> Self {
+        self.run_hooks = Some(stack);
         self
     }
 
@@ -557,7 +557,7 @@ pub struct Session {
     model_factory: ModelFactory,
     /// The assembly's interaction-hook factory (see
     /// [`SessionBuilder::tool_gate`]); mounted on every run.
-    tool_gate_factory: Option<crate::gate::ToolGateFactory>,
+    run_hooks: Option<rig_agent::agent::HookStack>,
     agent: Arc<Agent>,
     recorder: Arc<SessionRecorder>,
     /// Per-run cancellation token, refreshed by every outer loop; the
@@ -747,9 +747,8 @@ impl Session {
             .max_turns(self.max_turns)
             .tool_concurrency(TOOL_CONCURRENCY)
             .add_hook(RecorderHook(self.recorder.clone()));
-        if let Some(factory) = &self.tool_gate_factory {
-            let gate = factory(self.interaction.as_ref());
-            request = request.add_hook(crate::gate::GateHook(gate));
+        if let Some(stack) = &self.run_hooks {
+            request = request.add_hook(stack.clone());
         }
         request
             .steering(Arc::new(SessionSteers {
@@ -1406,7 +1405,7 @@ impl Session {
             tools: builder.tools,
             max_turns: builder.max_turns,
             model_factory: builder.model_factory,
-            tool_gate_factory: builder.tool_gate_factory,
+            run_hooks: builder.run_hooks,
             agent: Arc::new(AgentBuilder::new(ModelHandle::new(placeholder_model())).build()),
             recorder,
             abort: std::sync::Arc::new(std::sync::Mutex::new(CancellationToken::new())),

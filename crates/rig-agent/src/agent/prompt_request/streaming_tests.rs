@@ -988,7 +988,7 @@ async fn execution_commit_items_are_not_emitted_when_run_commit_fails() {
     // `AgentRun` rejects the result before any commit-labelled item escapes.
     calls[0].tool_call.id = "mismatched_call".to_string();
 
-    let hook_context = HookContext::new(true, None);
+    let hook_context = HookContext::new(true, None, Default::default());
     hook_context.set_turn(1);
     let mut stream = drive_tool_calls(
         &runner,
