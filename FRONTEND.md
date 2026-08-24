@@ -361,13 +361,24 @@ synchronize with the backend's pause point — but if you want a
 message to be the new branch's first turn, sending it after you see
 `checked_out` is the way to make that deterministic.
 
-**Multiple and interleaved checkouts.** Checkouts execute in wire
-order at the pause point. A target is any entry in the session's
-file, so consecutive checkouts never collide — the later one simply
-moves the leaf again (a branch switch; each success emits its own
-`messages_discarded` + `checked_out` + pass). A checkout naming an
-entry that does not exist is a no-op plus `error { kind: checkout }`
-stamped with the session — nothing was discarded, nothing moved.
+**When the discard happens.** At the checkout's execution — the pause
+point, not the moment you send the command. Until then the run in
+flight keeps draining: a message you sent before the checkout can
+still steer that run (its `user_message` is real history for the
+duration) and is then rewound away with it. Send `abort` first when
+you want the run stopped now. A checkout that fails (the
+`error { kind: checkout }` event) has discarded nothing.
+
+**Multiple and interleaved checkouts.** Checkouts that pile up before
+the pause point **collapse to the last one** — only it executes and
+emits (`messages_discarded` if any, one `checked_out`, one pass);
+superseded checkouts emit nothing, not even an error. The collapse
+loses no messages: the survivor discards exactly what was submitted
+before it (the union of the sequential discards). Checkouts you space
+across idle beats (one fully applies before you send the next)
+execute one at a time. A checkout naming an entry that does not exist
+is a no-op plus `error { kind: checkout }` stamped with the session —
+nothing was discarded, nothing moved.
 
 **Valid cut points** (ruled). The atomic unit is the tool roundtrip:
 an assistant turn and its complete result batch commit and rewind

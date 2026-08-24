@@ -396,9 +396,10 @@ rather than skipping, reachable or not.)
   wire order: the before-message comes back as exactly one
   `messages_discarded` pair and never becomes history; the
   after-message survives to run on the rewound chain after the pass),
-  consecutive checkouts in wire order with the last one winning (the
-  second target off-chain after the first rewind — the branch-switch
-  case), the unknown-entry error as a total no-op (kind `checkout`,
+  concurrently parked checkouts collapsing to the last (supersession:
+  one `checked_out`, one pass, the superseded target never applies)
+  plus a spaced checkout executing separately (the branch switch
+  back), the unknown-entry error as a total no-op (kind `checkout`,
   nothing discarded, nothing moved, conversation continues), the
   abort-then-checkout composition at the pause point, the
   `pump_with_pause` yield directly at the session level (paused pump

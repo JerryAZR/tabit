@@ -84,20 +84,28 @@ at the pause point — the terminal's transition back to Idle, before
 the next Draining. No implicit abort (abort is its own command; the
 abort-then-checkout composition is race-free precisely because the
 parked checkout executes at the pause point however the run ended).
-At the pause point, parked checkouts drain in wire order, each
-validated against the file as it stands when it executes — a target
-is any entry in the file, so consecutive checkouts never collide: the
-later one simply moves the leaf again (a branch switch). A failing
-checkout (no such entry) is a no-op plus an `error` event; nothing is
-discarded for it. The queue rule is the abort rule (flag 6) applied
-uniformly: **a clear site discards what was submitted before it** —
-each checkout carries the mailbox watermark minted at route time
-(host-loop order = wire order) and discards exactly those messages;
-later messages are input for the new branch and stay queued (the
-empties check then pumps them against the rewound chain). One guard
-makes that honest mid-run: the pump yields between batches when a
-checkout is parked, so a post-checkout message can never start a
-batch on the old chain.
+At the pause point, concurrently parked checkouts **collapse to the
+last** — A, then B, then C is one intent re-aimed at C (owner ruling:
+"why not just checkout C?"), and the collapse is lossless: watermarks
+grow with route order, so the survivor's discard set is the union the
+sequential executions would have produced. Superseded checkouts emit
+nothing; checkouts spaced across idle beats (each finding the worker
+back in its wait) still execute one by one. The survivor is validated
+against the file as it stands; a failing checkout (no such entry) is
+a no-op plus an `error` event — nothing moved, nothing discarded. The
+queue rule is the abort rule (flag 6) applied uniformly: **a clear
+site discards what was submitted before it** — the survivor carries
+the mailbox watermark minted at route time (host-loop order = wire
+order) and discards exactly those messages; later messages are input
+for the new branch and stay queued (the empties check then pumps them
+against the rewound chain). The discard itself rides the execution,
+not the receive (implementation judgment, under owner review): until
+the pause point the run in flight is untouched (a pre-checkout steer
+may still drain into it and be rewound away here — abort is the
+stop-now lever, not checkout), and a failed checkout has had no side
+effects. One guard makes the mid-run case
+honest: the pump yields between batches when a checkout is parked, so
+a post-checkout message can never start a batch on the old chain.
 
 ## Layer 2 — the inner loop (one run's turn machine)
 

@@ -632,11 +632,11 @@ fn spawn_worker(
             // flushed (abort while idle — there is no terminal coming;
             // mid-run aborts flush at their run's conclusion first).
             flush_staged_discards(&worker_mailbox, &event_tx, &stream);
-            // The pause point: checkouts parked during a run execute
-            // here, in wire order, before any survivor starts the next
-            // batch (a post-checkout message must never run on the old
-            // chain).
-            while let Ok(checkout) = checkout_rx.try_recv() {
+            // The pause point: the parked checkout — the last one
+            // sent; see [`take_parked_checkout`] — executes here,
+            // before any survivor starts the next batch (a
+            // post-checkout message must never run on the old chain).
+            if let Some(checkout) = take_parked_checkout(&mut checkout_rx) {
                 execute_checkout(&mut session, &worker_mailbox, &event_tx, &stream, checkout);
             }
             if !worker_mailbox.is_empty() {
@@ -670,8 +670,8 @@ fn spawn_worker(
                         continue;
                     }
                     // Checkouts routed before the close are honored the
-                    // same way — rewind, then wind down.
-                    while let Ok(checkout) = checkout_rx.try_recv() {
+                    // same way — the last one rewinds, then wind down.
+                    if let Some(checkout) = take_parked_checkout(&mut checkout_rx) {
                         execute_checkout(&mut session, &worker_mailbox, &event_tx, &stream, checkout);
                     }
                     // Exit through the same flush the idle beat uses:
@@ -688,7 +688,10 @@ fn spawn_worker(
                 // this arm and the loop-top drain are the two halves of
                 // one pause-point rule.
                 checkout = checkout_rx.recv() => {
-                    if let Some(checkout) = checkout {
+                    // The wake takes one; drain the rest — only the
+                    // last parked checkout executes.
+                    let last = take_parked_checkout(&mut checkout_rx).or(checkout);
+                    if let Some(checkout) = last {
                         execute_checkout(&mut session, &worker_mailbox, &event_tx, &stream, checkout);
                     }
                 }
@@ -735,12 +738,37 @@ fn spawn_worker(
     )
 }
 
+/// Drain the parked checkouts to pending intent: only the **last**
+/// executes. Concurrently parked checkouts are one intent re-aimed (A,
+/// then B, then C — the user's final target is C; owner ruling
+/// 2026-08), and executing superseded rewinds would emit full replay
+/// passes the next one immediately obsoletes. The collapse loses
+/// nothing: watermarks grow with route order, so the survivor's
+/// watermark discards exactly the union sequential executions would
+/// have. Checkouts spaced across idle beats (each finding the worker
+/// back in its wait) still execute one by one — supersession applies
+/// only to what is parked at the same instant.
+fn take_parked_checkout(
+    checkout_rx: &mut mpsc::UnboundedReceiver<CheckoutRequest>,
+) -> Option<CheckoutRequest> {
+    let mut last = None;
+    while let Ok(checkout) = checkout_rx.try_recv() {
+        last = Some(checkout);
+    }
+    last
+}
+
 /// Execute one checkout at a pause point (idle or the run-terminal
 /// beat): rewind the chain — a failure is the command's error event
 /// and a total no-op, nothing discarded — then discard exactly what
 /// was submitted before the checkout (the watermark), announce
 /// `checked_out`, and re-render with a full replay pass (PROTOCOL.md
-/// v3 stage 2).
+/// v3 stage 2). The discard is part of this execution, not of the
+/// receive: the watermark was minted at route time (a pure counter
+/// read), and the pairs leave the mailbox only after the rewind
+/// succeeded — until then the run in flight is untouched, and a
+/// pre-checkout steer may still drain into it (to be rewound away
+/// here; abort is the stop-now lever, not checkout).
 fn execute_checkout(
     session: &mut Session,
     mailbox: &MailboxHandle,

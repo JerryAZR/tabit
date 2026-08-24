@@ -1514,9 +1514,9 @@ async fn checkout_discards_what_was_submitted_before_it_and_keeps_the_rest() {
 }
 
 #[tokio::test]
-async fn consecutive_checkouts_execute_in_order_and_the_last_one_wins() {
-    let store = temp_store("endpoint-checkout-order");
-    let session = Factory::new(vec![text_turn("a1"), text_turn("b1"), text_turn("c1")])
+async fn parked_checkouts_collapse_to_the_last_and_spaced_ones_execute() {
+    let store = temp_store("endpoint-checkout-collapse");
+    let session = Factory::new(vec![text_turn("a1"), text_turn("b1")])
         .into_builder(store.clone())
         .create("C:/w")
         .expect("session");
@@ -1531,13 +1531,15 @@ async fn consecutive_checkouts_execute_in_order_and_the_last_one_wins() {
     let first = entry_id_of(&frames, "one");
     let second = entry_id_of(&frames, "two");
 
-    // A target is any entry in the file: rewinding past the second
-    // exchange does not invalidate it — the second checkout is a
-    // branch switch. Both execute, in wire order; the last wins.
+    // Two checkouts routed before the worker wakes: one intent,
+    // re-aimed — only the last executes (one checked_out, one pass;
+    // the superseded target never applies, no event for it).
     handle.checkout(&id, &first);
     handle.checkout(&id, &second);
-    frames.extend(drain(&mut handle).await);
-
+    collect_until(&mut handle, &mut frames, |e| {
+        matches!(e, SessionEvent::ReplayDone)
+    })
+    .await;
     let checked: Vec<String> = frames
         .iter()
         .filter_map(|frame| match &frame.event {
@@ -1545,24 +1547,43 @@ async fn consecutive_checkouts_execute_in_order_and_the_last_one_wins() {
             _ => None,
         })
         .collect();
-    assert_eq!(checked, vec![first.clone(), second.clone()], "wire order");
-    let first_at = frames
+    assert_eq!(
+        checked,
+        vec![second.clone()],
+        "only the last parked checkout executes"
+    );
+    let survivor_at = frames
         .iter()
-        .position(|frame| {
-            matches!(&frame.event,
-            SessionEvent::CheckedOut { entry_id, .. } if entry_id == &first)
-        })
-        .expect("the first checkout");
-    let second_at = frames
+        .rposition(|frame| matches!(frame.event, SessionEvent::CheckedOut { .. }))
+        .expect("the survivor");
+    assert_eq!(bracket_users(&frames, survivor_at), vec!["one", "two"]);
+
+    // Spaced across an idle beat (the survivor fully applied first):
+    // the branch switch back executes on its own — supersession
+    // applies only to what parks at the same instant.
+    handle.checkout(&id, &first);
+    collect_until(&mut handle, &mut frames, |e| {
+        matches!(e, SessionEvent::ReplayDone)
+    })
+    .await;
+    let checked: Vec<String> = frames
         .iter()
-        .position(|frame| {
-            matches!(&frame.event,
-            SessionEvent::CheckedOut { entry_id, .. } if entry_id == &second)
+        .filter_map(|frame| match &frame.event {
+            SessionEvent::CheckedOut { entry_id, .. } => Some(entry_id.clone()),
+            _ => None,
         })
-        .expect("the second checkout");
-    assert!(first_at < second_at);
-    assert_eq!(bracket_users(&frames, first_at), vec!["one"]);
-    assert_eq!(bracket_users(&frames, second_at), vec!["one", "two"]);
+        .collect();
+    assert_eq!(
+        checked,
+        vec![second, first],
+        "a spaced checkout executes separately"
+    );
+    let spaced_at = frames
+        .iter()
+        .rposition(|frame| matches!(frame.event, SessionEvent::CheckedOut { .. }))
+        .expect("the spaced checkout");
+    assert_eq!(bracket_users(&frames, spaced_at), vec!["one"]);
+    assert_eq!(chain_users(&handle, &store), vec!["one"]);
     std::fs::remove_dir_all(store.dir()).ok();
 }
 
