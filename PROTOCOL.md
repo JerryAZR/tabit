@@ -957,6 +957,33 @@ carrying the attempt's usage — projection skips it (not model context),
 stats count it, the log stays the cost source of truth. Implementation
 rides the v2 session work.
 
+### 23. Mid-roundtrip checkout targets — OPEN (deferred; owner)
+
+What a checkout to a target inside a tool roundtrip should mean: the
+turn's id, or a single `tool_result` in a batch. The machinery today
+cuts as requested and synthesizes interrupted results for whatever
+calls the cut strands (the resume/crash repair, applied at the new
+leaf— `rewinding_mid_batch_repairs_only_the_unanswered_call` pins
+it), so no target can ever leave a half-open roundtrip. The contract
+declares user messages, committed turns, and model changes as the
+intended cut points, but the backend is total over file entries— a
+tension worth resolving. Alternatives (owner):
+
+1. **Cut as requested + synthesize** (current) — total, honest in
+   the bracket (the synthesized bodies say what happened); a mid-batch
+   target yields a history of real + synthesized siblings.
+2. **Reject as invalid cut points** — the enforced contract;
+   verification thickens from id-existence to id-kind (the resident
+   set grows a kind, still a snapshot); costs totality over file
+   entries.
+3. **Auto-extend to include the real results** — the cut lands
+   past the requested target (the `checked_out` echo must say where);
+   "extend" still needs (1)'s repair for calls that never ran.
+
+Deferred (owner ruling): no alternative touches the command-path
+architecture— all three are policy inside the rewind layer, between
+verification and execution.
+
 ## Resolved
 
 - **1 — Resident loop** (supersedes 4, 5, 7, 12): one worker task owns
