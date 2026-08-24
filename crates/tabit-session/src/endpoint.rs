@@ -156,12 +156,10 @@ impl Worker {
                 self.abort.abort();
                 *lock(&self.checkout_slot) = None;
             }
-            SessionCommand::InteractionResponse {
-                id, option, text, ..
-            } => {
+            SessionCommand::InteractionResponse { id, payload, .. } => {
                 // Total: an unknown or dead id logs and drops inside
-                // the hub.
-                self.interaction.respond(&id, option, text);
+                // the hub; the payload is the asker's to parse.
+                self.interaction.respond(&id, payload);
             }
             SessionCommand::Checkout { entry_id, .. } => {
                 // Validate against this module's own id truth, here at
@@ -170,7 +168,7 @@ impl Worker {
                 if !self.entry_probe.contains(&entry_id) {
                     if let Some(events) = self.events.upgrade() {
                         let _ = events.send(EventFrame {
-                            stream: self.stream.clone(),
+                            stream: Some(self.stream.clone()),
                             event: SessionEvent::error_checkout(format!(
                                 "no entry `{entry_id}` in this session"
                             )),
@@ -189,7 +187,7 @@ impl Worker {
                     && let Some(events) = self.events.upgrade()
                 {
                     let _ = events.send(EventFrame {
-                        stream: self.stream.clone(),
+                        stream: Some(self.stream.clone()),
                         event: SessionEvent::MessagesDiscarded {
                             messages: cleared
                                 .into_iter()
@@ -278,7 +276,7 @@ fn flush_staged_discards(
         return;
     }
     let _ = event_tx.send(EventFrame {
-        stream: stream.clone(),
+        stream: Some(stream.clone()),
         event: SessionEvent::MessagesDiscarded {
             messages: staged
                 .into_iter()
@@ -327,14 +325,16 @@ impl SessionHost {
         // (ruled: external errors ride the channel; PROTOCOL.md v3).
         for note in startup_notes {
             let _ = event_tx.send(EventFrame {
-                stream: boot_stream.clone(),
+                stream: Some(boot_stream.clone()),
                 event: SessionEvent::error_model(note),
             });
         }
         match wiring.store.list() {
             Ok(summaries) => {
+                // Backend-level: no session produced this (the optional-
+                // stream ruling).
                 let _ = event_tx.send(EventFrame {
-                    stream: boot_stream.clone(),
+                    stream: None,
                     event: SessionEvent::SessionsAvailable {
                         sessions: summaries
                             .into_iter()
@@ -349,7 +349,7 @@ impl SessionHost {
             }
             Err(error) => {
                 let _ = event_tx.send(EventFrame {
-                    stream: boot_stream.clone(),
+                    stream: None,
                     event: SessionEvent::error_session(format!("could not list sessions: {error}")),
                 });
             }
@@ -399,7 +399,6 @@ impl SessionHost {
             event_tx,
             stats: closing_stats.clone(),
             worker_shutdown,
-            boot_id: boot_id.clone(),
             joins: vec![boot_join],
         };
         let host_shutdown = shutdown.clone();
@@ -571,7 +570,6 @@ struct HostLoop {
     event_tx: mpsc::UnboundedSender<EventFrame>,
     stats: Arc<Mutex<HashMap<String, SessionStats>>>,
     worker_shutdown: CancellationToken,
-    boot_id: String,
     joins: Vec<JoinHandle<()>>,
 }
 
@@ -604,7 +602,7 @@ impl HostLoop {
     fn worker(&self, session: &str) -> Option<Worker> {
         lock(&self.workers).get(session).cloned().or_else(|| {
             let _ = self.event_tx.send(EventFrame {
-                stream: StreamId::new(session.to_string()),
+                stream: None,
                 event: SessionEvent::error_session(format!(
                     "unknown session `{session}` — not open in this backend \
                      (open_session loads it; sessions_available lists the stored ones)"
@@ -622,7 +620,7 @@ impl HostLoop {
             Ok(built) => built,
             Err(message) => {
                 let _ = self.event_tx.send(EventFrame {
-                    stream: StreamId::new(self.boot_id.clone()),
+                    stream: None,
                     event: SessionEvent::error_session(format!(
                         "could not build a new session: {message}"
                     )),
@@ -637,7 +635,7 @@ impl HostLoop {
         // else on the wire will say so (the session is empty; no
         // `model_changed` replays).
         let _ = self.event_tx.send(EventFrame {
-            stream: stream.clone(),
+            stream: Some(stream.clone()),
             event: SessionEvent::SessionCreated {
                 id: id.clone(),
                 path: session.path().display().to_string(),
@@ -646,7 +644,7 @@ impl HostLoop {
         });
         for note in notes {
             let _ = self.event_tx.send(EventFrame {
-                stream: stream.clone(),
+                stream: Some(stream.clone()),
                 event: SessionEvent::error_model(note),
             });
         }
@@ -665,7 +663,7 @@ impl HostLoop {
             Ok(loaded) => loaded,
             Err(message) => {
                 let _ = self.event_tx.send(EventFrame {
-                    stream: StreamId::new(id.to_string()),
+                    stream: None,
                     event: SessionEvent::error_session(format!(
                         "could not open session `{id}`: {message}"
                     )),
@@ -676,7 +674,7 @@ impl HostLoop {
         let stream = StreamId::new(id.to_string());
         for note in notes {
             let _ = self.event_tx.send(EventFrame {
-                stream: stream.clone(),
+                stream: Some(stream.clone()),
                 event: SessionEvent::error_model(note),
             });
         }
@@ -763,7 +761,7 @@ fn spawn_worker(
                             // frontend is; there is no one left to
                             // tell.
                             let _ = event_tx.send(EventFrame {
-                                stream: stream.clone(),
+                                stream: Some(stream.clone()),
                                 event,
                             });
                         },
@@ -850,13 +848,13 @@ fn execute_checkout(
 ) {
     if let Err(error) = session.rewind_to_entry(&entry_id) {
         let _ = event_tx.send(EventFrame {
-            stream: stream.clone(),
+            stream: Some(stream.clone()),
             event: SessionEvent::error_checkout(error.to_string()),
         });
         return;
     }
     let _ = event_tx.send(EventFrame {
-        stream: stream.clone(),
+        stream: Some(stream.clone()),
         event: SessionEvent::CheckedOut {
             entry_id,
             // Full re-render (the suffix mode's reserved seam).
@@ -874,17 +872,17 @@ fn emit_replay(session: &Session, event_tx: &mpsc::UnboundedSender<EventFrame>, 
     let events = session.replay_events();
     let total = events.len() as u64;
     let _ = event_tx.send(EventFrame {
-        stream: stream.clone(),
+        stream: Some(stream.clone()),
         event: SessionEvent::ReplayStarted { total },
     });
     for event in events {
         let _ = event_tx.send(EventFrame {
-            stream: stream.clone(),
+            stream: Some(stream.clone()),
             event,
         });
     }
     let _ = event_tx.send(EventFrame {
-        stream: stream.clone(),
+        stream: Some(stream.clone()),
         event: SessionEvent::ReplayDone,
     });
 }

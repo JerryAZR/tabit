@@ -147,7 +147,12 @@ async fn an_idle_message_runs_to_completion_over_the_stream() {
     // Every frame is stamped with the session's own stream (its id),
     // the run is bracketed by its user message and terminal, and
     // acceptance is observable.
-    assert!(frames.iter().all(|f| f.stream.as_str() == id));
+    // Session frames carry the stamp; the catalog is backend-level.
+    assert!(
+        frames
+            .iter()
+            .all(|f| f.stream.as_ref().is_none_or(|s| s.as_str() == id))
+    );
     assert_eq!(user_texts(&frames), vec!["hi"]);
     assert_eq!(finished_outputs(&frames), vec!["hello there"]);
     assert!(matches!(
@@ -514,7 +519,10 @@ async fn new_session_runs_a_second_stream_and_both_route_by_id() {
         matches!(event, SessionEvent::RunFinished { .. })
     })
     .await;
-    assert_eq!(answered.stream.as_str(), created);
+    assert_eq!(
+        answered.stream.as_ref().map(StreamId::as_str),
+        Some(created.as_str())
+    );
     assert!(matches!(
         &answered.event,
         SessionEvent::RunFinished { output, .. } if output == "new answer"
@@ -528,7 +536,10 @@ async fn new_session_runs_a_second_stream_and_both_route_by_id() {
         matches!(event, SessionEvent::RunFinished { .. })
     })
     .await;
-    assert_eq!(answered.stream.as_str(), boot);
+    assert_eq!(
+        answered.stream.as_ref().map(StreamId::as_str),
+        Some(boot.as_str())
+    );
     assert!(matches!(
         &answered.event,
         SessionEvent::RunFinished { output, .. } if output == "boot answer"
@@ -611,8 +622,8 @@ async fn open_session_loads_a_stored_session_and_replays_it() {
             .expect("the pass keeps producing events")
             .expect("the stream stays open through the pass");
         assert_eq!(
-            frame.stream.as_str(),
-            stored_id,
+            frame.stream.as_ref().map(StreamId::as_str),
+            Some(stored_id.as_str()),
             "the pass is stamped with the opened id"
         );
         match frame.event {
@@ -641,7 +652,10 @@ async fn open_session_loads_a_stored_session_and_replays_it() {
         matches!(event, SessionEvent::RunFinished { .. })
     })
     .await;
-    assert_eq!(answered.stream.as_str(), stored_id);
+    assert_eq!(
+        answered.stream.as_ref().map(StreamId::as_str),
+        Some(stored_id.as_str())
+    );
     assert!(matches!(
         &answered.event,
         SessionEvent::RunFinished { output, .. } if output == "reopened answer"
@@ -676,7 +690,7 @@ async fn open_session_loads_a_stored_session_and_replays_it() {
 }
 
 #[tokio::test]
-async fn an_unknown_session_target_is_a_session_error_on_that_stream() {
+async fn an_unknown_session_target_is_a_backend_level_session_error() {
     let store = temp_store("endpoint-unknown");
     let session = Factory::new(vec![text_turn("ok")])
         .into_builder(store.clone())
@@ -694,10 +708,15 @@ async fn an_unknown_session_target_is_a_session_error_on_that_stream() {
     )
     .await;
     assert_eq!(
-        error.stream.as_str(),
-        "no-such",
-        "stamped with the targeted id"
+        error.stream, None,
+        "routing errors are backend-level — the message names the id"
     );
+    match &error.event {
+        SessionEvent::Error { message, .. } => {
+            assert!(message.contains("no-such"), "{message}");
+        }
+        other => panic!("the routing error, got {other:?}"),
+    }
     drain(&mut handle).await;
     std::fs::remove_dir_all(store.dir()).ok();
 }
@@ -807,9 +826,8 @@ async fn a_catalog_failure_is_the_carrier_in_place_of_the_announcement() {
     )
     .await;
     assert_eq!(
-        catalog_error.stream.as_str(),
-        handle.info().session_id,
-        "untargeted outcomes carry the boot stream"
+        catalog_error.stream, None,
+        "backend-level outcomes carry no faked session stamp"
     );
     // Nothing else was announced (the frames before the error are the
     // empty-notes case: the error is first).
@@ -842,25 +860,21 @@ async fn lifecycle_failures_and_notes_ride_the_carrier() {
             open: std::sync::Arc::new(|id: &str| Err(format!("no stored session with id `{id}`"))),
         },
     );
-    let boot = boot_id(&handle);
+    let _boot = boot_id(&handle);
     let link = handle.command_link();
 
-    // new_session cannot build: an error on the boot stream (the
-    // command had no target id).
+    // new_session cannot build: a backend-level error (the command
+    // had no target id; no faked stamp).
     link.send(SessionCommand::NewSession);
     let error = until_event(
         &mut handle,
         |event| matches!(event, SessionEvent::Error { kind, .. } if kind == "session"),
     )
     .await;
-    assert_eq!(
-        error.stream.as_str(),
-        boot,
-        "untargeted failure stamps boot"
-    );
+    assert_eq!(error.stream, None, "untargeted failure is backend-level");
 
-    // open_session names a session that does not exist: an error on
-    // the targeted stream.
+    // open_session names a session that does not exist: a
+    // backend-level error naming it.
     link.send(SessionCommand::OpenSession {
         id: "no-such-session".to_string(),
     });
@@ -869,7 +883,13 @@ async fn lifecycle_failures_and_notes_ride_the_carrier() {
         |event| matches!(event, SessionEvent::Error { kind, .. } if kind == "session"),
     )
     .await;
-    assert_eq!(error.stream.as_str(), "no-such-session");
+    assert_eq!(error.stream, None);
+    match &error.event {
+        SessionEvent::Error { message, .. } => {
+            assert!(message.contains("no-such-session"), "{message}")
+        }
+        other => panic!("the open failure, got {other:?}"),
+    }
     drain(&mut handle).await;
     std::fs::remove_dir_all(store.dir()).ok();
 }
@@ -919,7 +939,10 @@ async fn a_created_sessions_selection_notes_follow_its_stream() {
         |event| matches!(event, SessionEvent::Error { kind, .. } if kind == "model"),
     )
     .await;
-    assert_eq!(note.stream.as_str(), created_id);
+    assert_eq!(
+        note.stream.as_ref().map(StreamId::as_str),
+        Some(created_id.as_str())
+    );
     drain(&mut handle).await;
     std::fs::remove_dir_all(store.dir()).ok();
 }
@@ -986,8 +1009,8 @@ async fn new_session_is_never_blocked_by_a_running_session() {
     })
     .await;
     assert_eq!(
-        finished.stream.as_str(),
-        created,
+        finished.stream.as_ref().map(StreamId::as_str),
+        Some(created.as_str()),
         "the new session's terminal arrives before the boot run's"
     );
 
@@ -1000,7 +1023,10 @@ async fn new_session_is_never_blocked_by_a_running_session() {
         )
     })
     .await;
-    assert_eq!(boot_done.stream.as_str(), boot);
+    assert_eq!(
+        boot_done.stream.as_ref().map(StreamId::as_str),
+        Some(boot.as_str())
+    );
     drain(&mut handle).await;
     std::fs::remove_dir_all(store.dir()).ok();
 }
@@ -1042,12 +1068,18 @@ async fn a_post_abort_message_survives_and_runs() {
         matches!(event, SessionEvent::RunAborted { .. })
     })
     .await;
-    assert_eq!(aborted.stream.as_str(), id);
+    assert_eq!(
+        aborted.stream.as_ref().map(StreamId::as_str),
+        Some(id.as_str())
+    );
     let discarded = until_event(&mut handle, |event| {
         matches!(event, SessionEvent::MessagesDiscarded { .. })
     })
     .await;
-    assert_eq!(discarded.stream.as_str(), id);
+    assert_eq!(
+        discarded.stream.as_ref().map(StreamId::as_str),
+        Some(id.as_str())
+    );
 
     // The post-abort message (sent after the terminal): queues
     // normally, starts the next run, runs to completion.
@@ -1059,7 +1091,10 @@ async fn a_post_abort_message_survives_and_runs() {
         matches!(event, SessionEvent::RunFinished { .. })
     })
     .await;
-    assert_eq!(finished.stream.as_str(), id);
+    assert_eq!(
+        finished.stream.as_ref().map(StreamId::as_str),
+        Some(id.as_str())
+    );
     assert!(matches!(
         &finished.event,
         SessionEvent::RunFinished { output, .. } if output == "after the abort"
@@ -1124,8 +1159,14 @@ async fn frontend_death_aborts_every_sessions_run() {
             matches!(event, SessionEvent::ToolCall { .. })
         })
         .await;
-        if !tool_streams.contains(&frame.stream.as_str().to_string()) {
-            tool_streams.push(frame.stream.as_str().to_string());
+        let stamp = frame
+            .stream
+            .as_ref()
+            .map(StreamId::as_str)
+            .unwrap_or_default()
+            .to_string();
+        if !tool_streams.contains(&stamp) {
+            tool_streams.push(stamp);
         }
     }
     assert_eq!(
@@ -1218,7 +1259,10 @@ async fn a_replay_request_for_a_running_session_answers_after_its_terminal() {
             _ => {}
         }
     };
-    assert_eq!(finished.stream.as_str(), id);
+    assert_eq!(
+        finished.stream.as_ref().map(StreamId::as_str),
+        Some(id.as_str())
+    );
     assert!(
         !saw_bracket_before_terminal,
         "the pass never interleaves the in-flight run"
@@ -1229,7 +1273,10 @@ async fn a_replay_request_for_a_running_session_answers_after_its_terminal() {
         matches!(event, SessionEvent::ReplayStarted { .. })
     })
     .await;
-    assert_eq!(started.stream.as_str(), id);
+    assert_eq!(
+        started.stream.as_ref().map(StreamId::as_str),
+        Some(id.as_str())
+    );
     loop {
         let frame = until_event(&mut handle, |event| {
             matches!(event, SessionEvent::ReplayDone | SessionEvent::Error { .. })

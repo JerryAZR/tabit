@@ -537,12 +537,13 @@ section above; the design they locked:
   a pass against live traffic — a wait-free history pass (a
   file-snapshot merged by ids/seq) arrives with the stage-4
   per-session seq primitive.
-- **Routing errors are stamped with the stream they concern** — the
-  targeted id for targeted commands, the boot stream for untargeted
-  ones. A `message`/`abort`/`interaction_response` naming an unknown
-  session yields `error { kind: session }` (commands stay total; the
-  shape is unchanged). `ErrorKind::SESSION = "session"` joins the
-  well-known kinds.
+- **Routing errors (v3 as shipped; v4 amendment)**: a
+  `message`/`abort`/`interaction_response` naming an unknown session
+  yields `error { kind: session }` — stamped with the targeted id
+  in v3; as of v4 a **backend-level frame** (no stamp, the message
+  names the id — see the backend-level-events section). Commands
+  stay total. `ErrorKind::SESSION = "session"` joins the well-known
+  kinds.
 - **The frontend keeps one active view** (the shipped GUI shape): the
   transcript renders the active stream only. Switching is optimistic
   (clear the view immediately) + `open_session` (the pass rebuilds

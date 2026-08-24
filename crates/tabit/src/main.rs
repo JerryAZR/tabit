@@ -703,8 +703,8 @@ fn print_mode(args: &Args, registry: &ModelRegistry) -> Result<i32, String> {
                         // FRONTEND.md §8 allows several open at once, and
                         // concurrent permission gates make that ordinary).
                         let card = { lock_armed(&armed).pop_front() };
-                        if let Some((id, options)) = card {
-                            link.send(parse_answer(&boot, &id, &options, &line));
+                        if let Some((id, ui_type, options)) = card {
+                            link.send(parse_answer(&boot, &id, &ui_type, &options, &line));
                             let waiting = lock_armed(&armed).len();
                             if waiting > 0 {
                                 eprintln!("--- {waiting} more open question(s), keep answering");
@@ -739,30 +739,77 @@ fn print_mode(args: &Args, registry: &ModelRegistry) -> Result<i32, String> {
                     }
                     SessionEvent::InteractionRequested {
                         id,
-                        title,
-                        body,
-                        options,
+                        ui_type,
+                        payload,
                         ..
                     } => {
-                        eprintln!("\n--- {title}\n{body}");
-                        if options.is_empty() {
-                            eprintln!("(type your answer, then Enter)");
-                        } else {
-                            let legend = options
-                                .iter()
-                                .enumerate()
-                                .map(|(n, o)| format!("{}) {}", n + 1, o.label))
-                                .collect::<Vec<_>>()
-                                .join("  ");
-                            eprintln!("{legend}   — number, then Enter");
-                        }
-                        let mut queue = lock_armed(&armed);
-                        queue.push_back((
-                            id.clone(),
-                            options.iter().map(|o| o.label.clone()).collect(),
-                        ));
-                        if queue.len() > 1 {
-                            eprintln!("({} open questions — answers apply in order)", queue.len());
+                        // A template consumer like any frontend: render
+                        // the natives, report the rest (never answer a
+                        // widget this surface cannot construct).
+                        use tabit_protocol::templates;
+                        match ui_type.as_str() {
+                            templates::ui::CONFIRM => {
+                                let Ok(card) =
+                                    serde_json::from_value::<templates::ConfirmCard>(payload.clone())
+                                else {
+                                    eprintln!(
+                                        "(a confirm card arrived in a shape this surface cannot read)"
+                                    );
+                                    continue;
+                                };
+                                eprintln!("
+--- {}
+{}", card.title, card.body);
+                                if card.options.is_empty() {
+                                    eprintln!("(type your answer, then Enter)");
+                                } else {
+                                    let legend = card
+                                        .options
+                                        .iter()
+                                        .enumerate()
+                                        .map(|(n, o)| format!("{}) {}", n + 1, o.label))
+                                        .collect::<Vec<_>>()
+                                        .join("  ");
+                                    eprintln!("{legend}   — number, then Enter");
+                                }
+                                let mut queue = lock_armed(&armed);
+                                queue.push_back((
+                                    id.clone(),
+                                    ui_type.clone(),
+                                    card.options.into_iter().map(|o| o.label).collect(),
+                                ));
+                                if queue.len() > 1 {
+                                    eprintln!(
+                                        "({} open questions — answers apply in order)",
+                                        queue.len()
+                                    );
+                                }
+                            }
+                            templates::ui::ASK => {
+                                let Ok(card) =
+                                    serde_json::from_value::<templates::AskCard>(payload.clone())
+                                else {
+                                    eprintln!(
+                                        "(an ask card arrived in a shape this surface cannot read)"
+                                    );
+                                    continue;
+                                };
+                                eprintln!("
+--- Question from the assistant
+{}", card.prompt);
+                                eprintln!("(type your answer, then Enter)");
+                                let mut queue = lock_armed(&armed);
+                                queue.push_back((id.clone(), ui_type.clone(), Vec::new()));
+                                if queue.len() > 1 {
+                                    eprintln!(
+                                        "({} open questions — answers apply in order)",
+                                        queue.len()
+                                    );
+                                }
+                            }
+                            other => eprintln!(
+                                "(unsupported interaction widget `{other}` — not answered)"
+                            ),
                         }
                     }
                     SessionEvent::RunFinished { .. } | SessionEvent::RunAborted { .. } => {
@@ -806,10 +853,10 @@ enum ContinueMiss {
 
 /// Lock the armed-card queue (poisoning recovers — the queue is only a
 /// hint for the stdin reader).
-/// One open interaction card: its request id and button labels, waiting
-/// for one stdin line. Several may be open at once (concurrent gates);
-/// answers apply FIFO.
-type ArmedCard = (String, Vec<String>);
+/// One open interaction card: its request id, widget type, and button
+/// labels, waiting for one stdin line. Several may be open at once
+/// (concurrent gates); answers apply FIFO.
+type ArmedCard = (String, String, Vec<String>);
 type ArmedSlot = std::sync::Arc<std::sync::Mutex<std::collections::VecDeque<ArmedCard>>>;
 
 fn lock_armed(
@@ -837,11 +884,16 @@ mod interaction_answer_tests {
     fn answer(
         session: &str,
         id: &str,
+        ui_type: &str,
         options: &[String],
         line: &str,
     ) -> (Option<String>, Option<String>) {
-        match parse_answer(session, id, options, line) {
-            SessionCommand::InteractionResponse { option, text, .. } => (option, text),
+        match parse_answer(session, id, ui_type, options, line) {
+            SessionCommand::InteractionResponse { payload, .. } => {
+                let parsed: tabit_protocol::templates::ConfirmAnswer =
+                    serde_json::from_value(payload).expect("the template payload parses");
+                (parsed.option, parsed.text)
+            }
             other => panic!("unexpected command: {other:?}"),
         }
     }
@@ -849,11 +901,23 @@ mod interaction_answer_tests {
     #[test]
     fn numbered_buttons_select_by_index_with_optional_reason() {
         assert_eq!(
-            answer("s1", "i1", &options(), "1"),
+            answer(
+                "s1",
+                "i1",
+                tabit_protocol::templates::ui::CONFIRM,
+                &options(),
+                "1"
+            ),
             (Some("Allow".to_string()), None)
         );
         assert_eq!(
-            answer("s1", "i2", &options(), "3 never delete build dirs"),
+            answer(
+                "s1",
+                "i2",
+                tabit_protocol::templates::ui::CONFIRM,
+                &options(),
+                "3 never delete build dirs"
+            ),
             (
                 Some("Deny".to_string()),
                 Some("never delete build dirs".to_string())
@@ -864,53 +928,107 @@ mod interaction_answer_tests {
     #[test]
     fn free_text_cards_take_the_whole_line() {
         assert_eq!(
-            answer("s1", "i3", &[], "use python"),
+            answer(
+                "s1",
+                "i3",
+                tabit_protocol::templates::ui::CONFIRM,
+                &[],
+                "use python"
+            ),
             (None, Some("use python".to_string()))
         );
     }
 
     #[test]
     fn empty_or_unknown_answers_fail_closed_with_nothing() {
-        assert_eq!(answer("s1", "i4", &options(), ""), (None, None));
-        assert_eq!(answer("s1", "i5", &options(), "   "), (None, None));
+        assert_eq!(
+            answer(
+                "s1",
+                "i4",
+                tabit_protocol::templates::ui::CONFIRM,
+                &options(),
+                ""
+            ),
+            (None, None)
+        );
+        assert_eq!(
+            answer(
+                "s1",
+                "i5",
+                tabit_protocol::templates::ui::CONFIRM,
+                &options(),
+                "   "
+            ),
+            (None, None)
+        );
         // Out-of-range numbers carry no option: the backend's default
         // (deny for permission) applies rather than a wrong button.
-        assert_eq!(answer("s1", "i6", &options(), "9"), (None, None));
+        assert_eq!(
+            answer(
+                "s1",
+                "i6",
+                tabit_protocol::templates::ui::CONFIRM,
+                &options(),
+                "9"
+            ),
+            (None, None)
+        );
     }
 }
 
-fn parse_answer(session: &str, id: &str, options: &[String], line: &str) -> SessionCommand {
+#[allow(clippy::expect_used)] // sanctioned crash: pure-data serialization (AGENTS.md doctrine)
+fn parse_answer(
+    session: &str,
+    id: &str,
+    ui_type: &str,
+    options: &[String],
+    line: &str,
+) -> SessionCommand {
+    use tabit_protocol::templates;
     let line = line.trim();
-    if line.is_empty() {
-        return SessionCommand::InteractionResponse {
-            session: session.to_string(),
-            id: id.to_string(),
+    let answer = if ui_type == templates::ui::ASK {
+        templates::ConfirmAnswer::default(); // unreachable shape for ask
+        templates::ConfirmAnswer {
             option: None,
-            text: None,
-        };
-    }
-    if options.is_empty() {
-        return SessionCommand::InteractionResponse {
-            session: session.to_string(),
-            id: id.to_string(),
-            option: None,
-            text: Some(line.to_string()),
-        };
-    }
-    let (number, reason) = match line.split_once(char::is_whitespace) {
-        Some((number, reason)) => (number, reason.trim()),
-        None => (line, ""),
+            text: (!line.is_empty()).then(|| line.to_string()),
+        }
+    } else {
+        // native:confirm: numbered buttons parse as `2` or `2 reason`;
+        // a free-text card takes the whole line; anything else answers
+        // with nothing (the backend's fail-closed default, so a card
+        // can never hang).
+        if line.is_empty() || options.is_empty() {
+            templates::ConfirmAnswer {
+                option: None,
+                text: (!line.is_empty() && options.is_empty()).then(|| line.to_string()),
+            }
+        } else {
+            let (number, reason) = match line.split_once(char::is_whitespace) {
+                Some((number, reason)) => (number, reason.trim()),
+                None => (line, ""),
+            };
+            let option = number
+                .parse::<usize>()
+                .ok()
+                .and_then(|n| options.get(n.checked_sub(1)?))
+                .map(String::as_str);
+            templates::ConfirmAnswer {
+                option: option.map(str::to_string),
+                text: (!reason.is_empty()).then(|| reason.to_string()),
+            }
+        }
     };
-    let option = number
-        .parse::<usize>()
-        .ok()
-        .and_then(|n| options.get(n.checked_sub(1)?))
-        .map(String::as_str);
+    // The ask template's answer shape is the text-only projection.
+    let payload = if ui_type == templates::ui::ASK {
+        serde_json::to_value(templates::AskAnswer { text: answer.text })
+            .expect("template payloads always serialize")
+    } else {
+        serde_json::to_value(answer).expect("template payloads always serialize")
+    };
     SessionCommand::InteractionResponse {
         session: session.to_string(),
         id: id.to_string(),
-        option: option.map(str::to_string),
-        text: (!reason.is_empty()).then(|| reason.to_string()),
+        payload,
     }
 }
 

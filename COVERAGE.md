@@ -381,6 +381,30 @@ rather than skipping, reachable or not.)
   are thin re-assemblies of `assemble`, whose every path (config,
   resume, degradation) is covered in `main.rs`'s own suite.
 
+## v4 {EM} interaction generalization + backend-level events (2026-08)
+
+- The generic shapes are round-trip and shape-pinned in
+  tabit-protocol: `interaction_request { id, ui_type, payload }` /
+  `interaction_response { session, id, payload }`, the templates
+  module (`native:confirm`/`native:ask` payloads, answers with
+  absent-when-None fields), the optional `stream` (absent =
+  backend-level), and every stamped-frame test now holds `Some(..)`.
+- The hub is payload-blind and directly unit-covered (routing, the
+  verbatim ui_type/payload passthrough with the stream stamp, the
+  total no-op, weak-sender dismissal, terminal retraction {EM} all on
+  raw payloads). The permission gate's decision table runs unchanged
+  over the confirm template (payload answers); `ask_user` runs over
+  the ask template against the scripted capability.
+- Actor-level: the allow/deny/always-allow/abort/death suite answers
+  with payloads; the wire suite pins the v4 handshake, unstamped
+  routing errors (no stream field, message names the id), and the
+  backend-level catalog/creation frames.
+- GUI: connection-level fold for unstamped frames (catalog,
+  creation, backend errors), template-typed cards, unknown-ui_type
+  notices; the fixtures build the honest unstamped shapes (the old
+  stamped-creation fixtures were the fiction shape the round
+  deletes).
+
 ## Tool-gate seam (2026-08, the permission-leak review)
 
 - `gate.rs` {EM} **covered end to end**: `ToolGate`/`ToolGateFactory`

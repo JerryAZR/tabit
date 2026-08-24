@@ -150,6 +150,37 @@ impl TabitApp {
         }
     }
 
+    /// The answer payload for a card, by its template.
+    #[allow(clippy::expect_used)] // sanctioned crash: pure-data serialization (AGENTS.md doctrine)
+    fn answer_payload(
+        &self,
+        card: &crate::reducer::InteractionCard,
+        option: Option<&str>,
+        text: Option<&str>,
+    ) -> serde_json::Value {
+        let clean = |value: Option<&str>, trim: bool| {
+            value
+                .map(|v| if trim { v.trim() } else { v })
+                .filter(|v| !v.is_empty())
+                .map(str::to_string)
+        };
+        match card {
+            crate::reducer::InteractionCard::Confirm { .. } => {
+                serde_json::to_value(tabit_protocol::templates::ConfirmAnswer {
+                    option: clean(option, false),
+                    text: clean(text, true),
+                })
+                .expect("template payloads always serialize")
+            }
+            crate::reducer::InteractionCard::Ask { .. } => {
+                serde_json::to_value(tabit_protocol::templates::AskAnswer {
+                    text: clean(text, true),
+                })
+                .expect("template payloads always serialize")
+            }
+        }
+    }
+
     /// Answer one card — the send choke point for interactions (the
     /// `send` counterpart). The card closes optimistically; a stale id
     /// is a backend no-op.
@@ -160,12 +191,13 @@ impl TabitApp {
         // Answers route by the card's own session — cards can belong
         // to a background stream (visible here only while viewing it,
         // but the routing must not assume the active stream).
-        let Some(card) = self.state.interactions.iter().find(|c| c.id == id) else {
+        let Some(card) = self.state.interactions.iter().find(|c| c.id() == id) else {
             return;
         };
-        let session = card.session.clone();
+        let session = card.session().to_string();
+        let payload = self.answer_payload(card, option, text);
         if let Some(backend) = &self.backend {
-            backend.send_interaction_response(&session, id, option, text);
+            backend.send_interaction_response(&session, id, &payload);
             self.state.interaction_answered(id);
             self.display.answers.remove(id);
         }
@@ -183,10 +215,10 @@ impl TabitApp {
             .state
             .interactions
             .iter()
-            .filter(|c| c.session == active)
+            .filter(|c| c.session() == active)
             .cloned()
             .collect();
-        let ids: Vec<String> = cards.iter().map(|c| c.id.clone()).collect();
+        let ids: Vec<String> = cards.iter().map(|c| c.id().to_string()).collect();
         // Drafts for closed cards (answered or terminal-closed) go away.
         self.display.answers.retain(|id, _| ids.contains(id));
         if cards.is_empty() {
@@ -197,34 +229,53 @@ impl TabitApp {
             // `&mut self` back (cards are small; this is the view).
             for card in cards {
                 ui.add_space(theme::ROW_GAP / 2.0);
+                // The template decides the shape; each variant renders
+                // its own heading, content, and answer affordances.
+                let (id, heading, content, options, free_text) = match &card {
+                    crate::reducer::InteractionCard::Confirm {
+                        id,
+                        title,
+                        body,
+                        options,
+                        free_text,
+                        ..
+                    } => (
+                        id.clone(),
+                        title.clone(),
+                        Some(body.clone()),
+                        options.clone(),
+                        *free_text,
+                    ),
+                    crate::reducer::InteractionCard::Ask { id, prompt, .. } => (
+                        id.clone(),
+                        "Question from the assistant".to_string(),
+                        Some(prompt.clone()),
+                        Vec::new(),
+                        true,
+                    ),
+                };
                 ui.horizontal(|ui| {
                     ui.add_space(theme::ROW_INSET);
-                    ui.label(
-                        egui::RichText::new(&card.title)
-                            .strong()
-                            .color(theme::ACCENT),
-                    );
+                    ui.label(egui::RichText::new(heading).strong().color(theme::ACCENT));
                 });
-                ui.horizontal(|ui| {
-                    ui.add_space(theme::ROW_INSET);
-                    ui.label(
-                        egui::RichText::new(card.body.clone())
-                            .monospace()
-                            .color(theme::TEXT),
-                    );
-                });
+                if let Some(content) = content {
+                    ui.horizontal(|ui| {
+                        ui.add_space(theme::ROW_INSET);
+                        ui.label(egui::RichText::new(content).monospace().color(theme::TEXT));
+                    });
+                }
                 ui.horizontal(|ui| {
                     ui.add_space(theme::ROW_INSET);
                     let mut sent: Option<Option<String>> = None;
-                    for label in &card.options {
+                    for label in &options {
                         if ui.button(label.clone()).clicked() {
                             sent = Some(Some(label.clone()));
                         }
                     }
-                    if card.free_text {
-                        let draft = self.display.answers.entry(card.id.clone()).or_default();
+                    if free_text {
+                        let draft = self.display.answers.entry(id.clone()).or_default();
                         let field = ui.add(egui::TextEdit::singleline(draft).hint_text(
-                            if card.options.is_empty() {
+                            if options.is_empty() {
                                 "your answer"
                             } else {
                                 "optional note (goes to the model)"
@@ -241,10 +292,10 @@ impl TabitApp {
                         let text = self
                             .display
                             .answers
-                            .get(&card.id)
+                            .get(&id)
                             .map(|d| d.trim().to_string())
                             .filter(|t| !t.is_empty());
-                        self.answer(&card.id, choice.as_deref(), text.as_deref());
+                        self.answer(&id, choice.as_deref(), text.as_deref());
                     }
                 });
             }

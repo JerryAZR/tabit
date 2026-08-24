@@ -148,19 +148,34 @@ pub async fn ask_user(
     #[rig(context)] context: &mut ToolContext,
     question: String,
 ) -> Result<String, ToolExecutionError> {
-    use rig_agent::tool::interaction::{InteractionPrompt, UserInteraction};
+    use rig_agent::tool::interaction::UserInteraction;
     let Some(interaction) = context.get::<std::sync::Arc<dyn UserInteraction>>() else {
         return Err(ToolExecutionError::other(
-            "this session has no interactive frontend — there is no user to ask; state that \
-             and continue with what you have",
+            "this session has no interactive frontend — there is no user to ask; state that              and continue with what you have",
         ));
     };
-    let reply = interaction.ask(InteractionPrompt::ask(question)).await;
-    Ok(match (reply.text, reply.option) {
-        (Some(text), _) => text,
-        (None, Some(option)) => format!("the user chose: {option}"),
-        (None, None) => "the user dismissed the question without answering".to_string(),
-    })
+    // An ordinary template consumer: native:ask, payload opaque to the
+    // core.
+    let payload = serde_json::to_value(tabit_protocol::templates::AskCard { prompt: question })
+        .map_err(|error| ToolExecutionError::other(error.to_string()))?;
+    Ok(
+        match interaction
+            .request(tabit_protocol::templates::ui::ASK, payload)
+            .await
+        {
+            rig_agent::tool::interaction::InteractionOutcome::Answered(payload) => {
+                match serde_json::from_value::<tabit_protocol::templates::AskAnswer>(payload) {
+                    Ok(answer) => answer.text.unwrap_or_else(|| {
+                        "the user dismissed the question without answering".to_string()
+                    }),
+                    Err(_) => "the user's answer could not be read".to_string(),
+                }
+            }
+            rig_agent::tool::interaction::InteractionOutcome::Dismissed => {
+                "the user dismissed the question without answering".to_string()
+            }
+        },
+    )
 }
 
 /// Run a shell command. On Windows the tool prefers `bash` on PATH (Git

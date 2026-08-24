@@ -245,23 +245,27 @@ async fn pre_cancelled_bash_never_runs() {
 // --- ask_user: the shipped tool against a scripted interaction capability ---
 
 use futures::future::BoxFuture;
-use rig_agent::tool::interaction::{InteractionPrompt, InteractionReply, UserInteraction};
+use rig_agent::tool::interaction::{InteractionOutcome, UserInteraction};
 
-/// A capability double that answers every ask with one canned reply — the
-/// shipped tool's mapping is the DUT, not the roundtrip.
-struct ScriptedInteraction(InteractionReply);
+/// A capability double that answers every ask with one canned outcome ---
+/// the shipped tool's mapping is the DUT, not the roundtrip.
+struct ScriptedInteraction(InteractionOutcome);
 
 impl UserInteraction for ScriptedInteraction {
-    fn ask(&self, _prompt: InteractionPrompt) -> BoxFuture<'static, InteractionReply> {
+    fn request(
+        &self,
+        _ui_type: &str,
+        _payload: serde_json::Value,
+    ) -> BoxFuture<'static, InteractionOutcome> {
         let reply = self.0.clone();
         Box::pin(async move { reply })
     }
 }
 
-async fn ask_with(reply: InteractionReply) -> Result<String, ToolExecutionError> {
+async fn ask_with(outcome: InteractionOutcome) -> Result<String, ToolExecutionError> {
     let mut context = ctx();
     let capability: std::sync::Arc<dyn UserInteraction> =
-        std::sync::Arc::new(ScriptedInteraction(reply));
+        std::sync::Arc::new(ScriptedInteraction(outcome));
     context.insert(capability);
     <AskUser as rig_agent::tool::Tool>::call(
         &AskUser,
@@ -275,29 +279,17 @@ async fn ask_with(reply: InteractionReply) -> Result<String, ToolExecutionError>
 
 #[tokio::test]
 async fn ask_user_returns_free_text_verbatim() {
-    let reply = ask_with(InteractionReply {
-        option: None,
-        text: Some("main.rs".to_string()),
-    })
+    let reply = ask_with(InteractionOutcome::Answered(serde_json::json!({
+        "text": "main.rs"
+    })))
     .await
     .expect("an answered ask succeeds");
     assert_eq!(reply, "main.rs");
 }
 
 #[tokio::test]
-async fn ask_user_names_a_chosen_option() {
-    let reply = ask_with(InteractionReply {
-        option: Some("Option B".to_string()),
-        text: None,
-    })
-    .await
-    .expect("an answered ask succeeds");
-    assert_eq!(reply, "the user chose: Option B");
-}
-
-#[tokio::test]
 async fn ask_user_reports_a_dismissal_in_band() {
-    let reply = ask_with(InteractionReply::unanswered())
+    let reply = ask_with(InteractionOutcome::Dismissed)
         .await
         .expect("a dismissed ask is not an error — the model is told");
     assert_eq!(reply, "the user dismissed the question without answering");

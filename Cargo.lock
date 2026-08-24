@@ -4780,6 +4780,7 @@ dependencies = [
  "rig-derive",
  "serde",
  "serde_json",
+ "tabit-protocol",
  "tokio",
  "tokio-util",
 ]

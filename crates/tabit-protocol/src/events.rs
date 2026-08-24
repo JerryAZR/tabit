@@ -241,35 +241,25 @@ pub enum SessionEvent {
         /// The raw item.
         item: Value,
     },
-    /// A tool gate (permission) or tool body asked the user a question;
-    /// answered by `SessionCommand::InteractionResponse`. Several may be
-    /// open at once (concurrent chains, any answer order). A run terminal
-    /// closes every unanswered request — there is no close event, and none
-    /// is needed: a question lives inside its tool's execution, and the run
-    /// always ends in exactly one terminal. Never persisted, never
-    /// replayed; the durable record is the tool result.
+    /// A tool or hook asked the user a question; answered by
+    /// `SessionCommand::InteractionResponse`. The vocabulary is
+    /// routing-generic (v4): `ui_type` names the widget the frontend
+    /// should render — `native:*` types render in every conforming
+    /// frontend (see `templates`), extension types (`ext:<id>:*`)
+    /// render where the extension's widgets live — and `payload` is
+    /// opaque cargo the asker shaped however it wants. Several may be
+    /// open at once (concurrent chains, any answer order); a run
+    /// terminal closes every unanswered request — no close event,
+    /// none needed. Never persisted, never replayed; the durable
+    /// record is the tool result.
     InteractionRequested {
         /// Backend-minted request id (UUIDv7, like every protocol id).
         id: String,
-        /// Short card heading (e.g. "Run command?").
-        title: String,
-        /// The question or the content under review (e.g. the command).
-        body: String,
-        /// Button-style answers; empty for pure free-text asks.
-        options: Vec<InteractionOption>,
-        /// Whether an optional free-text answer/explanation is invited;
-        /// a present text is delivered to the model.
-        free_text: bool,
+        /// The widget type (`templates` owns the native names).
+        ui_type: String,
+        /// The ask, opaque to the core.
+        payload: serde_json::Value,
     },
-}
-
-/// One button-style answer on an interaction request.
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
-pub struct InteractionOption {
-    /// The answer's label; the response echoes it in `option`.
-    pub label: String,
-    /// Display hint, when present.
-    pub description: Option<String>,
 }
 
 /// One stored session in the startup `sessions_available` catalog.

@@ -406,7 +406,7 @@ impl Mailbox {
             .expect("notice channel and stream attach together")
             .clone();
         let _ = sender.send(EventFrame {
-            stream,
+            stream: Some(stream),
             event: SessionEvent::MessageQueued { id, text },
         });
     }

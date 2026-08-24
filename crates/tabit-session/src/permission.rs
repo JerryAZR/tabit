@@ -54,25 +54,29 @@ pub mod permission_labels {
     pub const DENY: &str = "Deny";
 }
 
-/// Build the permission prompt for a gated tool call: the three-button
-/// card with free text on (a denial reason is delivered to the model).
-pub(crate) fn permission_prompt(
-    tool: &str,
-    args: &str,
-) -> rig_agent::tool::interaction::InteractionPrompt {
-    rig_agent::tool::interaction::InteractionPrompt {
+/// Build the permission ask: the `native:confirm` template with this
+/// gate's three buttons and free text on (a denial reason is delivered
+/// to the model). An ordinary template consumer — the core
+/// never knows these labels.
+#[allow(clippy::expect_used)] // sanctioned crash: pure-data serialization (AGENTS.md doctrine)
+pub(crate) fn permission_ask(tool: &str, args: &str) -> (&'static str, serde_json::Value) {
+    let card = tabit_protocol::templates::ConfirmCard {
         title: format!("Allow `{tool}` to run?"),
         body: args.to_string(),
         options: vec![
-            rig_agent::tool::interaction::InteractionChoice::new(permission_labels::ALLOW),
-            rig_agent::tool::interaction::InteractionChoice {
+            tabit_protocol::templates::ConfirmOption::new(permission_labels::ALLOW),
+            tabit_protocol::templates::ConfirmOption {
                 label: permission_labels::ALWAYS_ALLOW.to_string(),
                 description: Some("skip prompts for this tool until the session ends".to_string()),
             },
-            rig_agent::tool::interaction::InteractionChoice::new(permission_labels::DENY),
+            tabit_protocol::templates::ConfirmOption::new(permission_labels::DENY),
         ],
         free_text: true,
-    }
+    };
+    (
+        tabit_protocol::templates::ui::CONFIRM,
+        serde_json::to_value(card).expect("template payloads always serialize"),
+    )
 }
 
 /// The pre-body permission gate, mounted per run by the assembly's
@@ -123,10 +127,17 @@ async fn gate(
     if memory.contains(tool_name) {
         return ToolCallAction::run();
     }
-    let reply = hub
-        .capability()
-        .ask(permission_prompt(tool_name, args))
-        .await;
+    let (ui_type, payload) = permission_ask(tool_name, args);
+    let reply = match hub.capability().request(ui_type, payload).await {
+        rig_agent::tool::interaction::InteractionOutcome::Answered(payload) => {
+            serde_json::from_value::<tabit_protocol::templates::ConfirmAnswer>(payload)
+                .unwrap_or_default()
+        }
+        // Dismissed — the gate fails closed.
+        rig_agent::tool::interaction::InteractionOutcome::Dismissed => {
+            tabit_protocol::templates::ConfirmAnswer::default()
+        }
+    };
     match reply.option.as_deref() {
         Some(permission_labels::ALLOW) => ToolCallAction::run(),
         Some(permission_labels::ALWAYS_ALLOW) => {
@@ -182,8 +193,8 @@ mod tests {
             panic!("expected an interaction request");
         };
         match respond(id.clone()) {
-            Some((option, text)) => {
-                hub.respond(&id, option, text);
+            Some(answer) => {
+                hub.respond(&id, serde_json::json!(answer));
                 let action = decision.await.expect("the asker resolves after an answer");
                 (action, memory, rx)
             }
@@ -269,18 +280,20 @@ mod tests {
     }
 
     #[test]
-    fn permission_prompts_carry_the_three_buttons_and_free_text() {
-        let prompt = permission_prompt("bash", "{\"command\":\"ls\"}");
-        assert!(prompt.free_text);
+    fn permission_asks_with_the_confirm_template() {
+        let (ui_type, payload) = permission_ask("bash", "{\"command\":\"ls\"}");
+        assert_eq!(ui_type, tabit_protocol::templates::ui::CONFIRM);
+        let card: tabit_protocol::templates::ConfirmCard =
+            serde_json::from_value(payload).expect("the template payload parses");
+        assert!(card.free_text);
         assert_eq!(
-            prompt
-                .options
+            card.options
                 .iter()
-                .map(|c| c.label.as_str())
+                .map(|o| o.label.as_str())
                 .collect::<Vec<_>>(),
             ["Allow", "Always allow", "Deny"]
         );
-        assert_eq!(prompt.body, "{\"command\":\"ls\"}");
+        assert_eq!(card.body, "{\"command\":\"ls\"}");
     }
 
     #[test]

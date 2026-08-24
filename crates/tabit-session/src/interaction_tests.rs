@@ -50,7 +50,7 @@ fn asking_tool() -> DynamicTool {
         json!({"type":"object","properties":{"question":{"type":"string"}}}),
         |ctx, args| {
             Box::pin(async move {
-                use rig_agent::tool::interaction::{InteractionPrompt, UserInteraction};
+                use rig_agent::tool::interaction::UserInteraction;
                 let question = args
                     .get("question")
                     .and_then(|v| v.as_str())
@@ -60,9 +60,23 @@ fn asking_tool() -> DynamicTool {
                 else {
                     return Ok(ToolOutput::text("no interactive frontend"));
                 };
-                let reply = interaction.ask(InteractionPrompt::ask(question)).await;
+                let payload =
+                    serde_json::to_value(tabit_protocol::templates::AskCard { prompt: question })
+                        .expect("the ask template serializes");
+                let reply = interaction
+                    .request(tabit_protocol::templates::ui::ASK, payload)
+                    .await;
+                let text = match reply {
+                    rig_agent::tool::interaction::InteractionOutcome::Answered(payload) => {
+                        serde_json::from_value::<tabit_protocol::templates::AskAnswer>(payload)
+                            .map(|a| a.text)
+                            .ok()
+                            .flatten()
+                    }
+                    rig_agent::tool::interaction::InteractionOutcome::Dismissed => None,
+                };
                 Ok(ToolOutput::text(
-                    reply.text.unwrap_or_else(|| "dismissed".to_string()),
+                    text.unwrap_or_else(|| "dismissed".to_string()),
                 ))
             })
         },
@@ -127,8 +141,7 @@ async fn a_permission_card_answered_allow_runs_the_tool() {
         SessionCommand::InteractionResponse {
             session: session.to_string(),
             id: id.to_string(),
-            option: Some("Allow".to_string()),
-            text: None,
+            payload: json!({"option": "Allow"}),
         }
     })
     .await;
@@ -161,8 +174,7 @@ async fn a_permission_denial_skips_the_tool_in_band() {
         SessionCommand::InteractionResponse {
             session: session.to_string(),
             id: id.to_string(),
-            option: Some("Deny".to_string()),
-            text: Some("never in tests".to_string()),
+            payload: json!({"option": "Deny", "text": "never in tests"}),
         }
     })
     .await;
@@ -203,8 +215,7 @@ async fn always_allow_remembers_across_calls_in_the_session() {
         SessionCommand::InteractionResponse {
             session: session.to_string(),
             id: id.to_string(),
-            option: Some("Always allow".to_string()),
-            text: None,
+            payload: json!({"option": "Always allow"}),
         }
     })
     .await;
@@ -229,8 +240,7 @@ async fn always_allow_remembers_across_calls_in_the_session() {
         SessionCommand::InteractionResponse {
             session: session.to_string(),
             id: id.to_string(),
-            option: Some("Allow".to_string()),
-            text: None,
+            payload: json!({"option": "Allow"}),
         }
     })
     .await;
@@ -261,8 +271,7 @@ async fn an_ask_user_tool_body_round_trips_the_question_and_answer() {
         SessionCommand::InteractionResponse {
             session: session.to_string(),
             id: id.to_string(),
-            option: None,
-            text: Some("main.rs".to_string()),
+            payload: json!({"option": null, "text": "main.rs"}),
         }
     })
     .await;
@@ -397,8 +406,7 @@ async fn abort_with_a_card_open_closes_the_question_totally() {
         link.send(SessionCommand::InteractionResponse {
             session: handle.info().session_id.clone(),
             id,
-            option: Some("Allow".to_string()),
-            text: None,
+            payload: json!({"option": "Allow"}),
         });
     }
     std::fs::remove_dir_all(store.dir()).ok();
@@ -441,8 +449,7 @@ async fn two_open_cards_answered_in_reverse_order_both_run() {
                 link.send(SessionCommand::InteractionResponse {
                     session: session.clone(),
                     id: id.clone(),
-                    option: Some("Allow".to_string()),
-                    text: None,
+                    payload: json!({"option": "Allow", "text": null}),
                 });
             }
             open.clear();

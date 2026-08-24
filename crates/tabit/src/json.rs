@@ -496,7 +496,7 @@ id = "m"
             out.clone(),
         ));
 
-        tx_in.send(r#"{"protocol_version":3}"#.to_string()).unwrap();
+        tx_in.send(r#"{"protocol_version":4}"#.to_string()).unwrap();
         let session_id = ack_session_id(&out).await;
         tx_in.send(message_line(&session_id, "hi")).unwrap();
 
@@ -600,7 +600,7 @@ id = "m"
     async fn handshake_then_round_trip_over_memory_buffers() {
         let (code, lines) = bridge_live(
             "roundtrip",
-            r#"{"protocol_version":3}"#,
+            r#"{"protocol_version":4}"#,
             |session| vec![message_line(session, "hi")],
             vec![script("hello")],
             |lines| lines.iter().any(|l| l.contains("run_finished")),
@@ -651,7 +651,7 @@ id = "m"
             },
             out.clone(),
         ));
-        tx_in.send(r#"{"protocol_version":3}"#.to_string()).unwrap();
+        tx_in.send(r#"{"protocol_version":4}"#.to_string()).unwrap();
         let session_id = ack_session_id(&out).await;
         tx_in.send(message_line(&session_id, "hi")).unwrap();
         tokio::time::timeout(std::time::Duration::from_secs(5), async {
@@ -744,7 +744,7 @@ id = "m"
             .send(r#"{"type":"abort","session":"any"}"#.to_string())
             .unwrap();
         await_line(&out, "protocol_error").await;
-        tx_in.send(r#"{"protocol_version":3}"#.to_string()).unwrap();
+        tx_in.send(r#"{"protocol_version":4}"#.to_string()).unwrap();
         let session_id = ack_session_id(&out).await;
         tx_in.send(message_line(&session_id, "real")).unwrap();
         tokio::time::timeout(std::time::Duration::from_secs(5), async {
@@ -808,7 +808,7 @@ id = "m"
             out.clone(),
         ));
 
-        tx_in.send(r#"{"protocol_version":3}"#.to_string()).unwrap();
+        tx_in.send(r#"{"protocol_version":4}"#.to_string()).unwrap();
         let session_id = ack_session_id(&out).await;
         tx_in.send(message_line(&session_id, "slow one")).unwrap();
 
@@ -851,7 +851,7 @@ id = "m"
         // initialize is a protocol error, not a restart.
         let (code, frames) = bridge(
             "garbage",
-            "this is not json\n\n{\"protocol_version\":3}\n{\"protocol_version\":3}\n",
+            "this is not json\n\n{\"protocol_version\":4}\n{\"protocol_version\":4}\n",
             vec![script("x")],
         )
         .await;
@@ -953,7 +953,7 @@ id = "m"
         );
         let code = serve(
             handle,
-            Cursor::new(b"{\"protocol_version\":3}\n".to_vec()),
+            Cursor::new(b"{\"protocol_version\":4}\n".to_vec()),
             FailingWriter,
         )
         .await;
@@ -1025,7 +1025,7 @@ id = "m"
             out.clone(),
         ));
         tx_in
-            .send(r#"{"protocol_version":3,"replay":true}"#.to_string())
+            .send(r#"{"protocol_version":4,"replay":true}"#.to_string())
             .unwrap();
         let session_id = ack_session_id(&out).await;
         tx_in.send(message_line(&session_id, "again")).unwrap();
@@ -1125,7 +1125,7 @@ id = "m"
     async fn initialize_without_replay_gets_no_pass() {
         let (code, frames) = bridge(
             "no-replay",
-            r#"{"protocol_version":3}"#,
+            r#"{"protocol_version":4}"#,
             vec![script("hello")],
         )
         .await;
@@ -1223,7 +1223,7 @@ id = "m"
 
         // Handshake, then one live round trip so the boot session
         // materializes on disk (the catalog lists stored files only).
-        tx_in.send(r#"{"protocol_version":3}"#.to_string()).unwrap();
+        tx_in.send(r#"{"protocol_version":4}"#.to_string()).unwrap();
         let boot = ack_session_id(&out).await;
         tx_in.send(message_line(&boot, "hello")).unwrap();
         await_line(&out, "run_finished").await;
@@ -1295,7 +1295,7 @@ id = "m"
             },
             out.clone(),
         ));
-        tx_in.send(r#"{"protocol_version":3}"#.to_string()).unwrap();
+        tx_in.send(r#"{"protocol_version":4}"#.to_string()).unwrap();
         let session_id = ack_session_id(&out).await;
         tx_in.send(message_line(&session_id, "hi")).unwrap();
         drop(tx_in);
@@ -1320,7 +1320,7 @@ id = "m"
     async fn a_message_for_an_unknown_session_is_a_session_error() {
         let (code, lines) = bridge_live(
             "unknown-session",
-            r#"{"protocol_version":3}"#,
+            r#"{"protocol_version":4}"#,
             |session| {
                 vec![
                     message_line("no-such-session", "lost?"),
@@ -1340,9 +1340,15 @@ id = "m"
             .iter()
             .find(|l| l.contains("\"kind\":\"session\""))
             .expect("the session error");
+        // Routing errors are backend-level (the optional-stream
+        // ruling): no faked stamp; the message names the id.
         assert!(
-            error_line.contains(r#""stream":"no-such-session""#),
-            "the error is stamped with the targeted id: {error_line}"
+            !error_line.contains("stream"),
+            "the routing error carries no stamp: {error_line}"
+        );
+        assert!(
+            error_line.contains("no-such-session"),
+            "the message names the target: {error_line}"
         );
         assert!(lines.iter().any(|l| l.contains("still here")));
     }
@@ -1366,7 +1372,7 @@ id = "m"
             out.clone(),
         ));
 
-        tx_in.send(r#"{"protocol_version":3}"#.to_string()).unwrap();
+        tx_in.send(r#"{"protocol_version":4}"#.to_string()).unwrap();
         let session_id = ack_session_id(&out).await;
         tx_in.send(message_line(&session_id, "hi")).unwrap();
         await_line(&out, "run_finished").await;

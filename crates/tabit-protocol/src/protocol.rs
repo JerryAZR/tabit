@@ -16,7 +16,7 @@ use serde::{Deserialize, Serialize};
 /// The protocol version this build speaks. Clients declare theirs in
 /// [`ClientFrame::Initialize`]; a mismatch rejects the connection at the
 /// handshake.
-pub const PROTOCOL_VERSION: u32 = 3;
+pub const PROTOCOL_VERSION: u32 = 4;
 
 /// Which session produced an event. The stamp is the session id
 /// itself (v3: the `"main"` alias is retired — one name per session);
@@ -37,14 +37,21 @@ impl StreamId {
     }
 }
 
-/// An event stamped with the session that produced it. This is the unit
-/// the backend channel carries and — serialized flat — the line a
-/// transport edge writes: `{"type":"text_delta","stream":"019…",...}`,
-/// where `stream` is the session id.
+/// An event, optionally stamped with the session that produced it.
+/// This is the unit the backend channel carries and — serialized
+/// flat — the line a transport edge writes:
+/// `{"type":"text_delta","stream":"019…",...}`. The stamp is the
+/// session id (v3) and is **absent for backend-level events** (v4):
+/// a fact the backend itself produced (the session catalog,
+/// `session_created`, host failures) carries no session attribution,
+/// and frontends fold unstamped frames connection-level (ruled
+/// 2026-08 — no faked session ids).
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct EventFrame {
-    /// The session that produced the event (its id).
-    pub stream: StreamId,
+    /// The session that produced the event (its id); `None` for
+    /// backend-level events.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub stream: Option<StreamId>,
     /// The event itself; its `type` tag flattens next to `stream`.
     #[serde(flatten)]
     pub event: SessionEvent,
@@ -84,20 +91,19 @@ pub enum SessionCommand {
         session: String,
     },
     /// Answer a pending `interaction_request`. Total, like every command:
-    /// at least one of `option`/`text`; a response for an unknown or dead
-    /// request is a logged no-op (the asker went away with its run —
-    /// terminals close everything).
+    /// a response for an unknown or dead request is a logged no-op (the
+    /// asker went away with its run — terminals close everything). The
+    /// `payload` is the answer shaped by the asking template's
+    /// convention (v4) — always an answer; the frontend never
+    /// expresses dismissal (that is backend-derived).
     InteractionResponse {
-        /// The session whose request is being answered.
+        /// The session whose request is being answered (the echo of
+        /// the request frame's stamp — v3's always-explicit rule).
         session: String,
         /// The request id being answered.
         id: String,
-        /// The chosen option label, when answering by button.
-        #[serde(skip_serializing_if = "Option::is_none")]
-        option: Option<String>,
-        /// The free-text answer or explanation, when invited.
-        #[serde(skip_serializing_if = "Option::is_none")]
-        text: Option<String>,
+        /// The answer payload (see `templates`).
+        payload: serde_json::Value,
     },
     /// Create a fresh session in this backend. The outcome is
     /// `session_created { id, path }` (stamped with the new id) — or

@@ -104,23 +104,51 @@ pub struct ToolResultRow {
     pub failed: bool,
 }
 
-/// One open interaction card (FRONTEND.md §8): a permission gate or an
-/// ask-the-user body waiting for the user. Several may be open at
-/// once, across sessions; run terminals close them all — scoped to
-/// the terminal's session. Cards never replay; the durable record is
-/// the tool result.
+/// One open interaction card, typed by its template (FRONTEND.md §8):
+/// the `native:confirm` card (the permission gate's three-button ask)
+/// and the `native:ask` free-text card. Several may be open at once,
+/// across sessions; run terminals close them all — scoped to the
+/// terminal's session. Cards never replay; the durable record is the
+/// tool result. Unknown `ui_type`s are not cards — the frontend
+/// cannot construct their answers — they surface as notices.
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub struct InteractionCard {
-    /// The session the question belongs to — answers route by it, the
-    /// view renders the active stream's cards.
-    pub session: String,
-    pub id: String,
-    pub title: String,
-    pub body: String,
-    /// Button labels.
-    pub options: Vec<String>,
-    /// Whether a free-text answer/explanation is invited.
-    pub free_text: bool,
+pub enum InteractionCard {
+    /// `native:confirm` (the payload parsed at reduce time).
+    Confirm {
+        /// The session the question belongs to — answers route by it.
+        session: String,
+        id: String,
+        title: String,
+        body: String,
+        /// Button labels.
+        options: Vec<String>,
+        /// Whether a free-text answer/explanation is invited.
+        free_text: bool,
+    },
+    /// `native:ask`.
+    Ask {
+        session: String,
+        id: String,
+        prompt: String,
+    },
+}
+
+impl InteractionCard {
+    /// The request id (answers address it).
+    pub fn id(&self) -> &str {
+        match self {
+            InteractionCard::Confirm { id, .. } | InteractionCard::Ask { id, .. } => id,
+        }
+    }
+
+    /// The session the question belongs to.
+    pub fn session(&self) -> &str {
+        match self {
+            InteractionCard::Confirm { session, .. } | InteractionCard::Ask { session, .. } => {
+                session
+            }
+        }
+    }
 }
 
 /// One arrival-ordered piece of a turn. The wire interleaves
@@ -396,6 +424,22 @@ impl GuiState {
         self.switch_view(id, false);
     }
 
+    /// The backend-level fold: unstamped frames are connection facts,
+    /// never session-attributed (the optional-stream ruling).
+    fn reduce_backend_event(&mut self, event: SessionEvent) {
+        match event {
+            SessionEvent::SessionsAvailable { sessions } => self.replace_catalog(sessions),
+            SessionEvent::SessionCreated { id, path, model } => {
+                self.session_created(id, path, model)
+            }
+            // Backend-level errors (routing failures, build/listing
+            // failures): connection-level notices; there is no session
+            // row to mark.
+            SessionEvent::Error { message, .. } => self.push_notice(message, true),
+            _ => {}
+        }
+    }
+
     /// Record a session's run liveness on its switcher row (every
     /// stream, viewed or not — the dot must survive a switch).
     fn mark_running(&mut self, stream: &str, running: bool) {
@@ -408,36 +452,32 @@ impl GuiState {
     /// racing terminal already cleared it backend-side; total either
     /// way).
     pub fn interaction_answered(&mut self, id: &str) {
-        self.interactions.retain(|card| card.id != id);
+        self.interactions.retain(|card| card.id() != id);
     }
 
     fn reduce_event(&mut self, frame: EventFrame) {
-        // Host-level announcements are connection-scoped, not stream
-        // content: `session_created` arrives stamped with the NEW
-        // session's id — by definition not the stream being viewed —
-        // and must still switch the view (the v3 GUI bug: the stream
-        // check ate it, so "new session" did nothing).
+        // Backend-level events carry no session stamp (the optional-
+        // stream ruling): fold them connection-level — never
+        // session-attributed. One rule for the catalog, session
+        // creation, and backend errors, instead of the old
+        // two-type special case.
+        let stream = match frame.stream {
+            Some(stream) => stream.as_str().to_string(),
+            None => return self.reduce_backend_event(frame.event),
+        };
         match frame.event {
-            SessionEvent::SessionsAvailable { sessions } => {
-                self.replace_catalog(sessions);
-                return;
-            }
-            SessionEvent::SessionCreated { id, path, model } => {
-                self.session_created(id, path, model);
-                return;
-            }
             // Pass brackets, on any stream: everything between them is
             // history being rebuilt, never liveness (a pass carries
             // `user_message`s but no terminal — an unguarded fold
             // would mark the session running forever; the review
             // round's finding).
             SessionEvent::ReplayStarted { .. } => {
-                if !self.replaying.iter().any(|s| s == frame.stream.as_str()) {
-                    self.replaying.push(frame.stream.as_str().to_string());
+                if !self.replaying.iter().any(|s| s == &stream) {
+                    self.replaying.push(stream.clone());
                 }
             }
             SessionEvent::ReplayDone => {
-                self.replaying.retain(|s| s != frame.stream.as_str());
+                self.replaying.retain(|s| s != &stream);
             }
             _ => {}
         }
@@ -449,26 +489,25 @@ impl GuiState {
                 | SessionEvent::RunAborted { .. }
                 | SessionEvent::RunFailed { .. }
         ) {
-            let stream = frame.stream.as_str();
-            self.interactions.retain(|card| card.session != stream);
+            self.interactions.retain(|card| card.session() != stream);
         }
         // Liveness rides every run-scoped event, viewed or not —
         // except inside a pass bracket — so the switcher's dot
         // survives switching away mid-run.
-        let in_replay = self.replaying.iter().any(|s| s == frame.stream.as_str());
+        let in_replay = self.replaying.iter().any(|s| s == &stream);
         if !in_replay {
             match &frame.event {
-                SessionEvent::UserMessage { .. } => self.mark_running(frame.stream.as_str(), true),
+                SessionEvent::UserMessage { .. } => self.mark_running(&stream, true),
                 SessionEvent::RunFinished { .. }
                 | SessionEvent::RunAborted { .. }
                 | SessionEvent::RunFailed { .. } => {
-                    self.mark_running(frame.stream.as_str(), false);
+                    self.mark_running(&stream, false);
                 }
                 _ => {}
             }
         }
-        if frame.stream.as_str() != self.active {
-            self.reduce_background(frame.stream.as_str().to_string(), frame.event);
+        if stream != self.active {
+            self.reduce_background(stream, frame.event);
             return;
         }
         match frame.event {
@@ -665,27 +704,18 @@ impl GuiState {
             }
             SessionEvent::InteractionRequested {
                 id,
-                title,
-                body,
-                options,
-                free_text,
+                ui_type,
+                payload,
             } => {
-                self.interactions.push(InteractionCard {
-                    session: self.active.clone(),
-                    id,
-                    title,
-                    body,
-                    options: options.into_iter().map(|o| o.label).collect(),
-                    free_text,
-                });
+                self.open_card(&stream, id, ui_type, payload);
             }
             SessionEvent::NativeItem { item, .. } => {
                 self.transcript.push(Group::Native {
                     item: item.to_string(),
                 });
             }
-            // Consumed by the connection-level handling at the top of
-            // the fold; unreachable on a stream path.
+            // Consumed by the backend-level fold; unreachable on a
+            // stream path.
             SessionEvent::SessionsAvailable { .. } | SessionEvent::SessionCreated { .. } => {}
         }
     }
@@ -707,24 +737,56 @@ impl GuiState {
             }
             SessionEvent::InteractionRequested {
                 id,
-                title,
-                body,
-                options,
-                free_text,
+                ui_type,
+                payload,
             } => {
                 if let Some(row) = self.sessions.iter_mut().find(|row| row.id == stream) {
                     row.attention = true;
                 }
-                self.interactions.push(InteractionCard {
-                    session: stream,
-                    id,
-                    title,
-                    body,
-                    options: options.into_iter().map(|o| o.label).collect(),
-                    free_text,
-                });
+                self.open_card(&stream, id, ui_type, payload);
             }
             _ => {}
+        }
+    }
+
+    /// Open a card for an interaction request, typed by its template:
+    /// `native:*` parse into cards; anything else surfaces as a notice
+    /// (report-don't-swallow) — this frontend cannot construct the
+    /// answer its widget would want.
+    fn open_card(&mut self, stream: &str, id: String, ui_type: String, payload: serde_json::Value) {
+        use tabit_protocol::templates;
+        match ui_type.as_str() {
+            templates::ui::CONFIRM => {
+                match serde_json::from_value::<templates::ConfirmCard>(payload) {
+                    Ok(card) => self.interactions.push(InteractionCard::Confirm {
+                        session: stream.to_string(),
+                        id,
+                        title: card.title,
+                        body: card.body,
+                        options: card.options.into_iter().map(|o| o.label).collect(),
+                        free_text: card.free_text,
+                    }),
+                    Err(_) => self.push_notice(
+                        format!("a {ui_type} card arrived in a shape this frontend cannot read"),
+                        true,
+                    ),
+                }
+            }
+            templates::ui::ASK => match serde_json::from_value::<templates::AskCard>(payload) {
+                Ok(card) => self.interactions.push(InteractionCard::Ask {
+                    session: stream.to_string(),
+                    id,
+                    prompt: card.prompt,
+                }),
+                Err(_) => self.push_notice(
+                    format!("a {ui_type} card arrived in a shape this frontend cannot read"),
+                    true,
+                ),
+            },
+            other => self.push_notice(
+                format!("unsupported interaction widget `{other}` — not answered"),
+                true,
+            ),
         }
     }
 

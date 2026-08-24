@@ -248,23 +248,16 @@ impl Backend {
         }));
     }
 
-    /// Answer an interaction request of a session. At least one of
-    /// `option`/`text` (empty string counts as absent); a stale id is
-    /// a backend no-op.
-    pub fn send_interaction_response(
-        &self,
-        session: &str,
-        id: &str,
-        option: Option<&str>,
-        text: Option<&str>,
-    ) {
+    /// Answer an interaction request of a session. The payload is the
+    /// answer shaped by the asking template; a stale id is a backend
+    /// no-op.
+    pub fn send_interaction_response(&self, session: &str, id: &str, payload: &serde_json::Value) {
         let _ = self
             .writer
             .send(to_wire_line(&SessionCommand::InteractionResponse {
                 session: session.to_string(),
                 id: id.to_string(),
-                option: option.filter(|o| !o.is_empty()).map(str::to_string),
-                text: text.filter(|t| !t.trim().is_empty()).map(str::to_string),
+                payload: payload.clone(),
             }));
     }
 

@@ -22,14 +22,15 @@ fn commands_round_trip_with_snake_case_tags() {
         SessionCommand::InteractionResponse {
             session: "0197".to_string(),
             id: "0197-ask".to_string(),
-            option: Some("Deny".to_string()),
-            text: Some("never delete build dirs".to_string()),
+            payload: serde_json::json!({
+                "option": "Deny",
+                "text": "never delete build dirs"
+            }),
         },
         SessionCommand::InteractionResponse {
             session: "0197".to_string(),
             id: "0198-ask".to_string(),
-            option: None,
-            text: Some("use python".to_string()),
+            payload: serde_json::json!({"text": "use python"}),
         },
         SessionCommand::NewSession,
         SessionCommand::OpenSession {
@@ -81,18 +82,17 @@ fn commands_round_trip_with_snake_case_tags() {
         serde_json::to_string(&SessionCommand::InteractionResponse {
             session: "s1".to_string(),
             id: "0197".to_string(),
-            option: Some("Deny".to_string()),
-            text: None,
+            payload: serde_json::json!({"option": "Deny"}),
         })
         .expect("serialize"),
-        r#"{"type":"interaction_response","session":"s1","id":"0197","option":"Deny"}"#
+        r#"{"type":"interaction_response","session":"s1","id":"0197","payload":{"option":"Deny"}}"#
     );
 }
 
 #[test]
 fn event_frames_serialize_flat_with_the_stream_beside_the_tag() {
     let frame = EventFrame {
-        stream: StreamId::new("0197-session"),
+        stream: Some(StreamId::new("0197-session")),
         event: SessionEvent::TextDelta {
             turn_id: "t1".to_string(),
             text: "He".to_string(),
@@ -112,7 +112,7 @@ fn checked_out_carries_its_suffix_seam_as_an_explicit_null() {
     // the reserved suffix upgrade flips it to Some without a shape
     // change the day a measured problem wants it.
     let frame = EventFrame {
-        stream: StreamId::new("s1"),
+        stream: Some(StreamId::new("s1")),
         event: SessionEvent::CheckedOut {
             entry_id: "e9".to_string(),
             base_id: None,
@@ -131,7 +131,7 @@ fn checked_out_carries_its_suffix_seam_as_an_explicit_null() {
         )
         .expect("suffix shape"),
         EventFrame {
-            stream: StreamId::new("s1"),
+            stream: Some(StreamId::new("s1")),
             event: SessionEvent::CheckedOut {
                 entry_id: "e9".to_string(),
                 base_id: Some("e3".to_string()),
@@ -144,20 +144,20 @@ fn checked_out_carries_its_suffix_seam_as_an_explicit_null() {
 fn every_event_variant_survives_the_frame_envelope() {
     let frames = vec![
         EventFrame {
-            stream: StreamId::new("s1"),
+            stream: Some(StreamId::new("s1")),
             event: SessionEvent::UserMessage {
                 text: "hi".to_string(),
                 entry_id: "e0".to_string(),
             },
         },
         EventFrame {
-            stream: StreamId::new("s1"),
+            stream: Some(StreamId::new("s1")),
             event: SessionEvent::TurnStarted {
                 id: "t1".to_string(),
             },
         },
         EventFrame {
-            stream: StreamId::new("s1"),
+            stream: Some(StreamId::new("s1")),
             event: SessionEvent::ToolCall {
                 turn_id: "t1".to_string(),
                 name: "echo".to_string(),
@@ -167,13 +167,13 @@ fn every_event_variant_survives_the_frame_envelope() {
             },
         },
         EventFrame {
-            stream: StreamId::new("s1"),
+            stream: Some(StreamId::new("s1")),
             event: SessionEvent::TurnCommitted {
                 id: "t1".to_string(),
             },
         },
         EventFrame {
-            stream: StreamId::new("s1"),
+            stream: Some(StreamId::new("s1")),
             event: SessionEvent::ToolResult {
                 turn_id: "t1".to_string(),
                 entry_id: "e1".to_string(),
@@ -184,39 +184,37 @@ fn every_event_variant_survives_the_frame_envelope() {
             },
         },
         EventFrame {
-            stream: StreamId::new("s1"),
+            stream: Some(StreamId::new("s1")),
             event: SessionEvent::RunFinished {
                 output: "done".to_string(),
                 usage: Usage::default(),
             },
         },
         EventFrame {
-            stream: StreamId::new("s1"),
+            stream: Some(StreamId::new("s1")),
             event: SessionEvent::RunFailed {
                 message: "boom".to_string(),
             },
         },
         EventFrame {
-            stream: StreamId::new("s1"),
+            stream: Some(StreamId::new("s1")),
             event: SessionEvent::InteractionRequested {
                 id: "0199".to_string(),
-                title: "Run command?".to_string(),
-                body: "rm -rf target".to_string(),
-                options: vec![
-                    crate::InteractionOption {
-                        label: "Allow".to_string(),
-                        description: None,
-                    },
-                    crate::InteractionOption {
-                        label: "Always allow".to_string(),
-                        description: Some("for this session".to_string()),
-                    },
-                    crate::InteractionOption {
-                        label: "Deny".to_string(),
-                        description: None,
-                    },
-                ],
-                free_text: true,
+                ui_type: crate::templates::ui::CONFIRM.to_string(),
+                payload: serde_json::to_value(crate::templates::ConfirmCard {
+                    title: "Run command?".to_string(),
+                    body: "rm -rf target".to_string(),
+                    options: vec![
+                        crate::templates::ConfirmOption::new("Allow"),
+                        crate::templates::ConfirmOption {
+                            label: "Always allow".to_string(),
+                            description: Some("for this session".to_string()),
+                        },
+                        crate::templates::ConfirmOption::new("Deny"),
+                    ],
+                    free_text: true,
+                })
+                .expect("payload"),
             },
         },
     ];
@@ -291,7 +289,7 @@ fn server_control_frames_round_trip_and_stay_distinct_from_events() {
     assert_eq!(frame, ServerFrame::Control(error));
 
     let event_line = serde_json::to_string(&EventFrame {
-        stream: StreamId::new("s1"),
+        stream: Some(StreamId::new("s1")),
         event: SessionEvent::RunFailed {
             message: "boom".to_string(),
         },

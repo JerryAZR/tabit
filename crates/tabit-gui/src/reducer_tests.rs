@@ -7,7 +7,7 @@ const BOOT: &str = "s1";
 
 fn event(event: SessionEvent) -> InMsg {
     InMsg::Event(Box::new(EventFrame {
-        stream: StreamId::new(BOOT),
+        stream: Some(StreamId::new(BOOT)),
         event,
     }))
 }
@@ -15,7 +15,16 @@ fn event(event: SessionEvent) -> InMsg {
 /// An event from some other session (a background stream).
 fn from(stream: &str, event: SessionEvent) -> InMsg {
     InMsg::Event(Box::new(EventFrame {
-        stream: StreamId::new(stream),
+        stream: Some(StreamId::new(stream)),
+        event,
+    }))
+}
+
+/// A backend-level frame: no session stamp (the optional-stream
+/// ruling) — the honest shape for the catalog and session creation.
+fn backend(event: SessionEvent) -> InMsg {
+    InMsg::Event(Box::new(EventFrame {
+        stream: None,
         event,
     }))
 }
@@ -417,22 +426,26 @@ fn interaction_cards_open_in_order_and_close_on_answer() {
     ] {
         state.reduce(event(SessionEvent::InteractionRequested {
             id: id.to_string(),
-            title: title.to_string(),
-            body: "body".to_string(),
-            options: vec![tabit_protocol::InteractionOption {
-                label: "Allow".to_string(),
-                description: None,
-            }],
-            free_text: true,
+            ui_type: tabit_protocol::templates::ui::CONFIRM.to_string(),
+            payload: serde_json::json!({
+                "title": title,
+                "body": "body",
+                "options": [{"label": "Allow"}],
+                "free_text": true
+            }),
         }));
     }
     assert_eq!(state.interactions.len(), 2);
-    assert_eq!(state.interactions[0].id, "i1");
-    assert_eq!(state.interactions[1].options, vec!["Allow".to_string()]);
+    assert_eq!(state.interactions[0].id(), "i1");
+    assert!(matches!(
+        &state.interactions[1],
+        super::InteractionCard::Confirm { options, .. }
+            if options == &vec!["Allow".to_string()]
+    ));
 
     state.interaction_answered("i1");
     assert_eq!(state.interactions.len(), 1);
-    assert_eq!(state.interactions[0].id, "i2");
+    assert_eq!(state.interactions[0].id(), "i2");
 }
 
 #[test]
@@ -454,10 +467,8 @@ fn every_run_terminal_closes_all_open_cards() {
         state.reduce(user("go"));
         state.reduce(event(SessionEvent::InteractionRequested {
             id: "i1".to_string(),
-            title: "Allow `bash` to run?".to_string(),
-            body: "rm -rf target".to_string(),
-            options: Vec::new(),
-            free_text: true,
+            ui_type: tabit_protocol::templates::ui::ASK.to_string(),
+            payload: serde_json::json!({"prompt": "rm -rf target?"}),
         }));
         state.reduce(event(terminal));
         assert!(
@@ -606,7 +617,7 @@ fn tool_results_land_on_their_calls_with_content_and_failure() {
 fn the_startup_catalog_populates_the_switcher() {
     let mut state = GuiState::default();
     state.reduce(ack());
-    state.reduce(event(SessionEvent::SessionsAvailable {
+    state.reduce(backend(SessionEvent::SessionsAvailable {
         sessions: vec![
             tabit_protocol::AvailableSession {
                 id: "s2".to_string(),
@@ -634,7 +645,7 @@ fn the_startup_catalog_populates_the_switcher() {
 fn background_events_update_liveness_but_never_the_transcript() {
     let mut state = GuiState::default();
     state.reduce(ack());
-    state.reduce(event(SessionEvent::SessionsAvailable {
+    state.reduce(backend(SessionEvent::SessionsAvailable {
         sessions: vec![tabit_protocol::AvailableSession {
             id: "s2".to_string(),
             created_at: "2026-08-22T10:00:00Z".to_string(),
@@ -736,7 +747,7 @@ fn switching_is_optimistic_and_the_replay_pass_rebuilds() {
     state.reduce(ack());
     state.reduce(user("first question"));
     state.reduce(delta("first answer"));
-    state.reduce(event(SessionEvent::SessionsAvailable {
+    state.reduce(backend(SessionEvent::SessionsAvailable {
         sessions: vec![tabit_protocol::AvailableSession {
             id: "s2".to_string(),
             created_at: "2026-08-22T10:00:00Z".to_string(),
@@ -789,18 +800,13 @@ fn session_created_switches_to_the_empty_new_session() {
     state.reduce(ack());
     state.reduce(user("work in the boot session"));
 
-    // Realistic shape: the creation frame is stamped with the NEW
-    // session's stream — by definition not the one being viewed. (The
-    // v3 bug: the stream check ate exactly this frame, so the button
-    // did nothing.)
-    state.reduce(from(
-        "s9",
-        SessionEvent::SessionCreated {
-            id: "s9".to_string(),
-            path: "sessions/20260822_s9.jsonl".to_string(),
-            model: tabit_protocol::ModelSelection::new("local", "m9"),
-        },
-    ));
+    // Honest shape: the creation frame is backend-level (no stamp;
+    // the payload carries the new id).
+    state.reduce(backend(SessionEvent::SessionCreated {
+        id: "s9".to_string(),
+        path: "sessions/20260822_s9.jsonl".to_string(),
+        model: tabit_protocol::ModelSelection::new("local", "m9"),
+    }));
     // The brand-new session is empty — no replay will come; the switch
     // alone is the whole state, and the facts follow.
     assert_eq!(state.active, "s9");
@@ -852,7 +858,7 @@ fn a_new_session_lands_even_while_the_current_one_runs() {
     // show on its row.
     let mut state = GuiState::default();
     state.reduce(ack());
-    state.reduce(event(SessionEvent::SessionsAvailable {
+    state.reduce(backend(SessionEvent::SessionsAvailable {
         sessions: vec![tabit_protocol::AvailableSession {
             id: BOOT.to_string(),
             created_at: "2026-08-22T11:00:00Z".to_string(),
@@ -862,14 +868,11 @@ fn a_new_session_lands_even_while_the_current_one_runs() {
     state.reduce(user("work in progress"));
     assert!(state.running);
 
-    state.reduce(from(
-        "s9",
-        SessionEvent::SessionCreated {
-            id: "s9".to_string(),
-            path: "sessions/20260822_s9.jsonl".to_string(),
-            model: tabit_protocol::ModelSelection::new("local", "m9"),
-        },
-    ));
+    state.reduce(backend(SessionEvent::SessionCreated {
+        id: "s9".to_string(),
+        path: "sessions/20260822_s9.jsonl".to_string(),
+        model: tabit_protocol::ModelSelection::new("local", "m9"),
+    }));
     assert_eq!(
         state.active, "s9",
         "creation switches immediately, mid-run or not"
@@ -918,7 +921,7 @@ fn an_active_sessions_run_state_is_mirrored_onto_its_row() {
     // the active/background split).
     let mut state = GuiState::default();
     state.reduce(ack());
-    state.reduce(event(SessionEvent::SessionsAvailable {
+    state.reduce(backend(SessionEvent::SessionsAvailable {
         sessions: vec![tabit_protocol::AvailableSession {
             id: BOOT.to_string(),
             created_at: "2026-08-22T11:00:00Z".to_string(),
@@ -945,7 +948,7 @@ fn a_replay_pass_never_marks_the_session_running() {
     // button, 10 Hz repaint spin, sends misread as steers).
     let mut state = GuiState::default();
     state.reduce(ack());
-    state.reduce(event(SessionEvent::SessionsAvailable {
+    state.reduce(backend(SessionEvent::SessionsAvailable {
         sessions: vec![tabit_protocol::AvailableSession {
             id: "s2".to_string(),
             created_at: "2026-08-22T10:00:00Z".to_string(),
@@ -1015,7 +1018,7 @@ fn a_background_pass_after_a_fast_switch_does_not_poison_the_row() {
     // non-viewed stream — its content must not mark B running.
     let mut state = GuiState::default();
     state.reduce(ack());
-    state.reduce(event(SessionEvent::SessionsAvailable {
+    state.reduce(backend(SessionEvent::SessionsAvailable {
         sessions: vec![tabit_protocol::AvailableSession {
             id: "s2".to_string(),
             created_at: "2026-08-22T10:00:00Z".to_string(),
@@ -1052,7 +1055,7 @@ fn cards_survive_a_view_switch_and_route_by_their_own_session() {
     // active one).
     let mut state = GuiState::default();
     state.reduce(ack());
-    state.reduce(event(SessionEvent::SessionsAvailable {
+    state.reduce(backend(SessionEvent::SessionsAvailable {
         sessions: vec![tabit_protocol::AvailableSession {
             id: "s2".to_string(),
             created_at: "2026-08-22T10:00:00Z".to_string(),
@@ -1061,20 +1064,23 @@ fn cards_survive_a_view_switch_and_route_by_their_own_session() {
     }));
     state.reduce(event(SessionEvent::InteractionRequested {
         id: "ask-1".to_string(),
-        title: "Run command?".to_string(),
-        body: "rm -rf target".to_string(),
-        options: vec![],
-        free_text: false,
+        ui_type: tabit_protocol::templates::ui::CONFIRM.to_string(),
+        payload: serde_json::json!({
+            "title": "Run command?",
+            "body": "rm -rf target",
+            "options": [],
+            "free_text": false
+        }),
     }));
     assert_eq!(state.interactions.len(), 1);
-    assert_eq!(state.interactions[0].session, BOOT);
+    assert_eq!(state.interactions[0].session(), BOOT);
 
     // Switch away and back: the card survives (and the switch-back's
     // replay bracket does not clear it — cards never replay).
     state.open_session("s2");
     assert_eq!(state.interactions.len(), 1, "switching does not drop cards");
     state.open_session(BOOT);
-    assert_eq!(state.interactions[0].session, BOOT);
+    assert_eq!(state.interactions[0].session(), BOOT);
 
     // The terminal closes only its own session's cards.
     state.reduce(event(SessionEvent::RunAborted {
@@ -1087,7 +1093,7 @@ fn cards_survive_a_view_switch_and_route_by_their_own_session() {
 fn a_background_question_raises_attention_and_dies_with_its_run() {
     let mut state = GuiState::default();
     state.reduce(ack());
-    state.reduce(event(SessionEvent::SessionsAvailable {
+    state.reduce(backend(SessionEvent::SessionsAvailable {
         sessions: vec![tabit_protocol::AvailableSession {
             id: "s2".to_string(),
             created_at: "2026-08-22T10:00:00Z".to_string(),
@@ -1105,15 +1111,18 @@ fn a_background_question_raises_attention_and_dies_with_its_run() {
         "s2",
         SessionEvent::InteractionRequested {
             id: "ask-2".to_string(),
-            title: "Run command?".to_string(),
-            body: "cargo test".to_string(),
-            options: vec![],
-            free_text: false,
+            ui_type: tabit_protocol::templates::ui::CONFIRM.to_string(),
+            payload: serde_json::json!({
+                "title": "Run command?",
+                "body": "cargo test",
+                "options": [],
+                "free_text": false
+            }),
         },
     ));
     // The card is held (answerable after switching) and the row asks
     // for attention.
-    assert_eq!(state.interactions[0].session, "s2");
+    assert_eq!(state.interactions[0].session(), "s2");
     assert!(
         state
             .sessions
