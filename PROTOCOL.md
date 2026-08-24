@@ -604,35 +604,42 @@ section above; the design they locked:
   with route order, so the survivor's watermark discards exactly the
   union the sequential executions would have. Checkouts spaced across
   idle beats (each finding the worker back in its wait) execute one
-  by one. The survivor is validated against the file as it stands; a
-  failing checkout (no such entry) is a no-op plus
-  `error { kind: checkout }` stamped with the session — nothing
-  moved, nothing discarded. Messages submit to the mailbox under a
-  monotonic arrival seq; the survivor carries the watermark minted at
-  route time (host-loop order = wire order) and discards exactly what
-  was submitted **before it** — the flag-6 before/after rule applied
-  uniformly to clear sites. Messages submitted after the checkout are
+  by one. **Verification is loop-independent**: the target is checked
+  at route time against the resident entry-id set (read-only, like
+  the lifecycle builders), so an unknown entry errors immediately —
+  even mid-run — and never parks; only valid checkouts wait.
+  Execution-time failures (the rewind cannot apply) remain no-op
+  `error { kind: checkout }` events at the pause point. Messages
+  submit to the mailbox under a monotonic arrival seq; the survivor
+  carries the watermark minted at route time (host-loop order = wire
+  order) and discards exactly what was submitted **before it and is
+  still queued at the pause point** — the flag-6 before/after rule
+  applied uniformly to clear sites. The finishing run's boundary
+  drains outrank the discard: a pre-checkout message the run drained
+  became history (the rewind drops it); only the still-queued
+  remainder is discarded. Messages submitted after the checkout are
   input for the new branch: they stay queued and the pump runs them
   against the rewound chain. So `m, C, m', C', m''` → the survivor
-  C' discards `m` and `m'`, and `m''` runs on the rewound chain
-  (C''s target). One guard makes this honest mid-run: the pump yields
-  between batches when a checkout is parked (a post-checkout message
-  can never start a batch on the old chain).
+  C' discards `m` and `m'` (whichever of them never drained), and
+  `m''` runs on the rewound chain (C''s target). One guard makes this
+  honest mid-run: the pump yields between batches when a checkout is
+  parked (a post-checkout message can never start a batch on the old
+  chain).
 - **The discard rides the execution, not the receive** (implementation
   judgment, recorded for review): the watermark is minted at route
   time — a pure counter read, no side effect — and the pairs leave
   the mailbox only after the rewind succeeded, immediately before
-  `checked_out`. Consequences: a failed checkout is a total no-op;
-  the run in flight is untouched until its own terminal (a
-  pre-checkout steer may still drain into the finishing run and be
-  rewound away at the pause point — abort-then-checkout is the
-  stop-now composition when those tokens matter); and the discard
-  lands in event order at one emission site. The alternative — a
-  receive-time clear, abort-style — would kill the doomed steer early
-  but costs a side effect on a failed command (cleared before
-  validation) and modifies the in-flight run's inputs, which is
-  abort's job; the current choice stands unless the wasted-steer case
-  matters in practice.
+  `checked_out`. Consequences: an execution-time failure is a total
+  no-op; the run in flight is untouched until its own terminal (its
+  drains keep consuming the queue, so tokens can be spent on a
+  pre-checkout message the doomed run then absorbs —
+  abort-then-checkout is the stop-now composition when that matters);
+  and the discard lands in event order at one emission site. The
+  alternative — a receive-time clear, abort-style — would kill that
+  message early but costs a side effect on a failed command (cleared
+  before the rewind validates) and modifies the in-flight run's
+  inputs, which is abort's job; the current choice stands unless the
+  wasted-token case matters in practice.
 - **Frontend update: full re-render (ruled 2026-08).** The success
   sequence is `messages_discarded` (only if anything was discarded) →
   `checked_out { entry_id, base_id: null }` → the replay brackets
@@ -643,6 +650,13 @@ section above; the design they locked:
   a future `Some(id)` = keep through `id`, apply the (smaller) pass —
   the streamed-suffix optimization, adopted only if a measured
   problem, reusing the same bracket shape.
+- **Residency note.** Verification reads a resident entry-id set —
+  seeded at open from the file, inserted at every append, every id
+  the file has ever held (dropped branches included; markers too) —
+  so it is a read-only lookup, never a file re-parse. The execution
+  path still re-opens the file to rebuild the chain and re-derive
+  context (the scheduled in-memory-contract work, the same class as
+  `rewind`/`stats`).
 - `checkout` joins the routing errors rule: an unknown session yields
   `error { kind: session }` stamped with the named id. A mid-run
   `open_session` pass for the same session waits for the same pause

@@ -245,6 +245,13 @@ impl SessionBuilder {
         }
         validate_selection(&self.selection, &self.config)?;
         let mut session = Session::assemble(self, writer, context, true)?;
+        // The id set must answer for entries earlier processes wrote
+        // (dropped branches included — off-chain ids are checkout
+        // targets, the branch-switch case); this process's records
+        // insert themselves as they append.
+        session
+            .recorder
+            .seed_ids(loaded.entries.iter().map(|entry| entry.id.clone()));
         let same_model = matches!(
             last,
             Some((provider, model, level))
@@ -1041,6 +1048,12 @@ impl Session {
         MailboxHandle {
             mailbox: self.mailbox.clone(),
         }
+    }
+
+    /// The read-only entry-id probe (checkout verification at route
+    /// time — see [`crate::recorder::EntryIdProbe`]).
+    pub(crate) fn entry_id_probe(&self) -> crate::recorder::EntryIdProbe {
+        self.recorder.id_probe()
     }
 
     /// A handle for aborting the current outer loop. See [`AbortHandle`].

@@ -198,7 +198,7 @@ yields `error { kind: session }` stamped with the id you named.
 | `abort { session }` | any time | running: preempts (`run_aborted`); discards messages queued at abort time (`messages_discarded`, omitted when none). Post-abort messages queue normally and start the next run. Idle: no-op. |
 | `new_session` | any time | creates a fresh session (same config, tools, and `--model`/`--max-turns` as the boot); `session_created { id, path }` follows, stamped with the new id. Nothing replays (it is empty). Never waits on any session — lifecycle writes no session's file. |
 | `open_session { id }` | any time | loads the session if needed and streams a replay pass stamped with the id — the pass is the acknowledgment. Idempotent: an open session re-replays. Unknown id or unreadable file → `error { kind: session }` stamped with the id. Creating, loading, and switching never wait on the session you are leaving; the one wait is the opened session's **own** in-flight run — its pass arrives at that run's terminal (its live streaming renders immediately; only committed history waits). |
-| `checkout { session, entry_id }` | any time | moves that session's chain to the entry (any entry in the file — an off-chain target is a branch switch); see §7. Idle: immediate. Running: **parks** and executes at the run's terminal (never rejected, never aborts the run implicitly — compose abort-then-checkout to stop now). |
+| `checkout { session, entry_id }` | any time | moves that session's chain to the entry (any entry in the file — an off-chain target is a branch switch); see §7. The target is verified on receipt — an unknown entry errors immediately, even mid-run. A valid checkout: idle → applies immediately; running → **parks** and executes at the run's terminal (never rejected, never aborts the run implicitly — compose abort-then-checkout to stop now). |
 | `model { provider, model, thinking_level? }` | idle only | the next run uses this selection; validates against the backend's config. |
 | `interaction_response { session, id, option?, text? }` | after an `interaction_request` | answers a pending request; at least one of option/text; see §8. |
 
@@ -362,12 +362,16 @@ message to be the new branch's first turn, sending it after you see
 `checked_out` is the way to make that deterministic.
 
 **When the discard happens.** At the checkout's execution — the pause
-point, not the moment you send the command. Until then the run in
-flight keeps draining: a message you sent before the checkout can
-still steer that run (its `user_message` is real history for the
-duration) and is then rewound away with it. Send `abort` first when
-you want the run stopped now. A checkout that fails (the
-`error { kind: checkout }` event) has discarded nothing.
+point, not the moment you send the command — and it takes only what
+is *still pending* then. The finishing run's turn-boundary drains
+outrank it: a message you sent before the checkout that the run
+drains becomes history for the duration (its `user_message` is real,
+tokens were spent) and the rewind drops it with everything else;
+only what never drained comes back as `messages_discarded`. Send
+`abort` first when you want the run stopped now rather than left to
+finish. A checkout that fails at execution (the
+`error { kind: checkout }` event) has discarded nothing; an unknown
+entry never even parks — it errors on receipt.
 
 **Multiple and interleaved checkouts.** Checkouts that pile up before
 the pause point **collapse to the last one** — only it executes and
@@ -376,9 +380,8 @@ superseded checkouts emit nothing, not even an error. The collapse
 loses no messages: the survivor discards exactly what was submitted
 before it (the union of the sequential discards). Checkouts you space
 across idle beats (one fully applies before you send the next)
-execute one at a time. A checkout naming an entry that does not exist
-is a no-op plus `error { kind: checkout }` stamped with the session —
-nothing was discarded, nothing moved.
+execute one at a time. An unknown entry errors on receipt — it never
+parks, so it is never superseded either.
 
 **Valid cut points** (ruled). The atomic unit is the tool roundtrip:
 an assistant turn and its complete result batch commit and rewind

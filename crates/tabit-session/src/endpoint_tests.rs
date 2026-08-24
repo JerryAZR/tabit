@@ -1575,7 +1575,7 @@ async fn parked_checkouts_collapse_to_the_last_and_spaced_ones_execute() {
         .collect();
     assert_eq!(
         checked,
-        vec![second, first],
+        vec![second.clone(), first.clone()],
         "a spaced checkout executes separately"
     );
     let spaced_at = frames
@@ -1584,6 +1584,33 @@ async fn parked_checkouts_collapse_to_the_last_and_spaced_ones_execute() {
         .expect("the spaced checkout");
     assert_eq!(bracket_users(&frames, spaced_at), vec!["one"]);
     assert_eq!(chain_users(&handle, &store), vec!["one"]);
+
+    // And back the other way: "two" is off-chain now (dropped by the
+    // spaced checkout) and still a valid target — its id lives in the
+    // resident set. The branch switch.
+    handle.checkout(&id, &second);
+    collect_until(&mut handle, &mut frames, |e| {
+        matches!(e, SessionEvent::ReplayDone)
+    })
+    .await;
+    let checked: Vec<String> = frames
+        .iter()
+        .filter_map(|frame| match &frame.event {
+            SessionEvent::CheckedOut { entry_id, .. } => Some(entry_id.clone()),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(
+        checked,
+        vec![second.clone(), first, second],
+        "the off-chain switch executes"
+    );
+    let switch_at = frames
+        .iter()
+        .rposition(|frame| matches!(frame.event, SessionEvent::CheckedOut { .. }))
+        .expect("the switch");
+    assert_eq!(bracket_users(&frames, switch_at), vec!["one", "two"]);
+    assert_eq!(chain_users(&handle, &store), vec!["one", "two"]);
     std::fs::remove_dir_all(store.dir()).ok();
 }
 
@@ -1627,6 +1654,62 @@ async fn an_unknown_entry_checkout_is_an_error_and_a_no_op() {
     assert_eq!(user_texts(&frames), vec!["one", "two"]);
     assert_eq!(finished_outputs(&frames), vec!["a", "b"]);
     assert_eq!(chain_users(&handle, &store), vec!["one", "two"]);
+    std::fs::remove_dir_all(store.dir()).ok();
+}
+
+#[tokio::test]
+async fn an_unknown_checkout_during_a_run_errors_immediately() {
+    let store = temp_store("endpoint-checkout-verify");
+    let session = Factory::new(vec![tool_turn("t1", "slow"), text_turn("done")])
+        .into_builder(store.clone())
+        .dynamic_tool(slow_tool())
+        .create("C:/w")
+        .expect("session");
+    let mut handle = SessionHost::spawn(session, Vec::new(), plain_wiring(&store));
+    let id = boot_id(&handle);
+
+    // Verification is loop-independent: routed while the slow tool is
+    // provably mid-execution, the bad target errors at route time —
+    // before the run's terminal. It never parks behind the run.
+    handle.message(&id, "go");
+    let mut frames = Vec::new();
+    let mut sent = false;
+    while let Some(frame) = handle.next_event().await {
+        if !sent && matches!(frame.event, SessionEvent::ToolCall { .. }) {
+            sent = true;
+            handle.checkout(&id, "no-such-entry");
+        }
+        let done = terminal(&frame.event);
+        frames.push(frame);
+        if done {
+            break;
+        }
+    }
+    let error_at = frames
+        .iter()
+        .position(|frame| {
+            matches!(&frame.event,
+            SessionEvent::Error { kind, message, .. }
+                if kind == tabit_protocol::ErrorKind::CHECKOUT && message.contains("no-such-entry"))
+        })
+        .expect("the verification error");
+    let terminal_at = frames
+        .iter()
+        .position(|frame| terminal(&frame.event))
+        .expect("the run's terminal");
+    assert!(
+        error_at < terminal_at,
+        "verification never waits for the run"
+    );
+    assert!(
+        matches!(&frames[terminal_at].event, SessionEvent::RunFinished { .. }),
+        "the run was untouched by the bad checkout"
+    );
+    assert!(
+        !frames
+            .iter()
+            .any(|frame| matches!(frame.event, SessionEvent::CheckedOut { .. }))
+    );
     std::fs::remove_dir_all(store.dir()).ok();
 }
 

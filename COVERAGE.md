@@ -410,6 +410,15 @@ rather than skipping, reachable or not.)
   target — while liveness stays settled; a failed checkout surfaces
   as a notice).
 - The worker's shutdown-arm checkout drain (`close is not a barrier`
-  for checkouts) — **covered** by the consecutive-checkouts test: both
-  commands are routed before the close, and the wind-down executes
-  both rewinds (asserted by the two ordered `checked_out` frames).
+  for checkouts) — **covered** by the collapse test's pre-close burst:
+  the commands route before the close and the wind-down executes the
+  survivor.
+- Verification round (same day, owner review): checkout verification
+  moved host-side and loop-independent — **covered**: the resident
+  entry-id set (recorder-maintained, seeded at resume — pinned by
+  `resumed_sessions_probe_ids_from_earlier_processes` answering for an
+  off-chain id an earlier process wrote), route-time rejection (the
+  error beats a provably-mid-tool run's terminal — verification never
+  parks; the run finishes untouched), and the off-chain branch switch
+  through the probe (collapse test phase 3). The set insertion rides
+  the append paths every other test already exercises.

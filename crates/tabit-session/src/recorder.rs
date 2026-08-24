@@ -13,8 +13,28 @@ use crate::store::SessionWriter;
 use rig_agent::agent::hook::{AgentHook, HookContext, ModelTurnAction, ModelTurnFinished};
 use rig_core::completion::Message;
 use rig_core::wasm_compat::WasmCompatSend;
+use std::collections::HashSet;
 use std::future::Future;
 use std::sync::{Arc, Mutex};
+
+/// Read-only probe over every entry id the file has ever held — the
+/// append-only log never removes ids, so the set only grows. This is
+/// what checkout **verification** reads at route time (host-side,
+/// synchronous, loop-independent — the same class as the lifecycle
+/// builders): a read-only id lookup, never a file re-parse and never
+/// a wait on the worker. Insertion happens in the recorder's append
+/// path; the seed at open covers ids written by earlier processes.
+#[derive(Clone)]
+pub(crate) struct EntryIdProbe {
+    ids: Arc<Mutex<HashSet<String>>>,
+}
+
+impl EntryIdProbe {
+    /// Whether `id` names an entry in the session file.
+    pub(crate) fn contains(&self, id: &str) -> bool {
+        crate::lock::lock(&self.ids).contains(id)
+    }
+}
 
 /// Appends records to the session log.
 pub struct SessionRecorder {
@@ -22,6 +42,8 @@ pub struct SessionRecorder {
     /// The first persistence failure, if any; checked by the session when
     /// the run returns.
     first_error: Mutex<Option<String>>,
+    /// Every entry id this file has ever held (see [`EntryIdProbe`]).
+    ids: Arc<Mutex<HashSet<String>>>,
 }
 
 impl SessionRecorder {
@@ -30,6 +52,21 @@ impl SessionRecorder {
         Self {
             writer: Mutex::new(writer),
             first_error: Mutex::new(None),
+            ids: Arc::new(Mutex::new(HashSet::new())),
+        }
+    }
+
+    /// Seed the id set with entries already in the file (the resume
+    /// path — ids written by earlier processes). Ids recorded from
+    /// here on insert themselves in [`Self::append`].
+    pub fn seed_ids(&self, ids: impl IntoIterator<Item = String>) {
+        crate::lock::lock(&self.ids).extend(ids);
+    }
+
+    /// The read-only id probe (checkout verification at route time).
+    pub fn id_probe(&self) -> EntryIdProbe {
+        EntryIdProbe {
+            ids: self.ids.clone(),
         }
     }
 
@@ -57,7 +94,10 @@ impl SessionRecorder {
     fn append(&self, id: Option<String>, kind: EntryKind) -> String {
         let appended = crate::lock::lock(&self.writer).append_with_id(id, kind);
         match appended {
-            Ok(entry) => entry.id,
+            Ok(entry) => {
+                crate::lock::lock(&self.ids).insert(entry.id.clone());
+                entry.id
+            }
             Err(error) => {
                 self.note_error(error);
                 String::new()
@@ -67,10 +107,14 @@ impl SessionRecorder {
 
     /// Record a rewind: a `rewound` marker plus the leaf move, under the
     /// same single writer. Persistence failures are captured like
-    /// [`SessionRecorder::record`].
+    /// [`Self::record`]. The marker's id joins the set — the probe
+    /// answers for every id the file holds, exactly like the file.
     pub fn rewind_to(&self, to: Option<&str>) {
-        if let Err(error) = crate::lock::lock(&self.writer).rewind_to(to) {
-            self.note_error(error);
+        match crate::lock::lock(&self.writer).rewind_to(to) {
+            Ok(marker_id) => {
+                crate::lock::lock(&self.ids).insert(marker_id);
+            }
+            Err(error) => self.note_error(error),
         }
     }
 

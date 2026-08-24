@@ -459,13 +459,14 @@ impl SessionWriter {
     /// ended — then move the leaf to `to`, so the next append branches
     /// from there (`None` branches from the root). The caller proves `to`
     /// names an entry in this log; the marker alone makes the move durable
-    /// even if nothing follows.
-    pub fn rewind_to(&mut self, to: Option<&str>) -> Result<(), SessionError> {
-        self.append(EntryKind::Rewound {
+    /// even if nothing follows. Returns the marker's own entry id (the
+    /// recorder tracks it — every id the file holds is a probe answer).
+    pub fn rewind_to(&mut self, to: Option<&str>) -> Result<String, SessionError> {
+        let marker = self.append(EntryKind::Rewound {
             to: to.map(str::to_string),
         })?;
         self.leaf = to.map(str::to_string);
-        Ok(())
+        Ok(marker.id)
     }
 
     /// The session file path.

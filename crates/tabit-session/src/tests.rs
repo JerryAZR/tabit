@@ -1991,3 +1991,36 @@ async fn a_paused_pump_yields_between_batches_and_keeps_the_queue() -> Result<()
     std::fs::remove_dir_all(store.dir()).ok();
     Ok(())
 }
+
+#[tokio::test]
+async fn resumed_sessions_probe_ids_from_earlier_processes() -> Result<(), SessionError> {
+    let store = temp_store("entry-probe-resume");
+    let factory = Factory::new(vec![text_turn("a"), text_turn("b"), text_turn("c")]);
+    let mut session = factory.clone().into_builder(store.clone()).create("C:/w")?;
+    session.prompt("one").await;
+    session.prompt("two").await;
+    // The second exchange's user entry — about to go off-chain.
+    let loaded = store.open_path(session.path())?;
+    let off_chain = loaded
+        .entries
+        .iter()
+        .find_map(|entry| match &entry.kind {
+            EntryKind::UserMessage { message } if crate::session::user_text(message) == "two" => {
+                Some(entry.id.clone())
+            }
+            _ => None,
+        })
+        .expect("the second user entry");
+    let path = session.path().to_path_buf();
+    session.rewind(1)?;
+    drop(session);
+
+    // A fresh session over the same file (the next process): the
+    // probe answers for entries it never recorded — off-chain
+    // branches included, the checkout branch-switch case.
+    let (resumed, _) = factory.into_builder(store.clone()).resume(&path)?;
+    assert!(resumed.entry_id_probe().contains(&off_chain));
+    assert!(!resumed.entry_id_probe().contains("never-recorded"));
+    std::fs::remove_dir_all(store.dir()).ok();
+    Ok(())
+}

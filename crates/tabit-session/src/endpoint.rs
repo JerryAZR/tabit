@@ -105,6 +105,9 @@ struct Worker {
     interaction: InteractionHub,
     replay: mpsc::UnboundedSender<()>,
     checkout: mpsc::UnboundedSender<CheckoutRequest>,
+    /// The read-only entry-id probe — checkout verification at route
+    /// time (see [`crate::recorder::EntryIdProbe`]).
+    entry_probe: crate::recorder::EntryIdProbe,
 }
 
 /// A checkout on its way to a session's worker: the wire command plus
@@ -484,6 +487,23 @@ impl HostLoop {
             HostCommand::Command(SessionCommand::OpenSession { id }) => self.open_session(&id),
             HostCommand::Command(SessionCommand::Checkout { session, entry_id }) => {
                 if let Some(worker) = self.worker(&session) {
+                    // Verification is loop-independent, the same class
+                    // as the lifecycle builders: a read-only lookup in
+                    // the resident id set, synchronous here at route
+                    // time. An unknown target errors immediately —
+                    // even mid-run — and never parks; only a valid
+                    // checkout waits for the pause point, because the
+                    // execution mutates the session and that ownership
+                    // is the worker's.
+                    if !worker.entry_probe.contains(&entry_id) {
+                        let _ = self.event_tx.send(EventFrame {
+                            stream: StreamId::new(session.clone()),
+                            event: SessionEvent::error_checkout(format!(
+                                "no entry `{entry_id}` in session `{session}`"
+                            )),
+                        });
+                        return;
+                    }
                     // The watermark is minted here, at route time: the
                     // host loop processes commands in wire order, so
                     // everything submitted before this checkout (and
@@ -616,6 +636,7 @@ fn spawn_worker(
     let interaction = InteractionHub::new(event_tx.clone(), stream.clone());
     let (replay_tx, mut replay_rx) = mpsc::unbounded_channel::<()>();
     let (checkout_tx, mut checkout_rx) = mpsc::unbounded_channel::<CheckoutRequest>();
+    let entry_probe = session.entry_id_probe();
     let worker_mailbox = mailbox.clone();
     let task_interaction = interaction.clone();
     let join = tokio::spawn(async move {
@@ -733,6 +754,7 @@ fn spawn_worker(
             interaction,
             replay: replay_tx,
             checkout: checkout_tx,
+            entry_probe,
         },
         join,
     )
