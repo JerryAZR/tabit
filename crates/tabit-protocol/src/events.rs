@@ -208,9 +208,10 @@ pub enum SessionEvent {
         sessions: Vec<AvailableSession>,
     },
     /// A `new_session` command succeeded: a fresh session exists in
-    /// this backend, empty (nothing replays). Stamped with the new
-    /// session's id; its selection notes, if any, follow on the same
-    /// stream.
+    /// this backend, empty (nothing replays). Unstamped,
+    /// backend-level — the payload carries the new session's id (the
+    /// optional-stream ruling); its selection notes, if any, follow
+    /// stamped with the new session's id.
     SessionCreated {
         /// The new session's id.
         id: String,

@@ -1969,10 +1969,26 @@ async fn a_paused_pump_yields_between_batches_and_keeps_the_queue() -> Result<()
 
     // The worker's pause seam: a pump told not to start another batch
     // returns after the current one, leaving later messages queued (a
-    // parked checkout must rewind before they run).
+    // parked checkout must rewind before they run). The survivor is
+    // submitted at the first run's terminal — after the engine
+    // drained, before the predicate — so the queue is genuinely
+    // non-empty at the decision point: a pump that ignored the
+    // predicate would run it here and now.
+    let mailbox = session.mailbox_handle();
+    let mut survivor_submitted = false;
     session.submit("one");
-    let first = session.pump_with_pause(&mut |_| {}, || false).await;
-    assert_eq!(first.output, "a");
+    let first = session
+        .pump_with_pause(
+            &mut |event| {
+                if matches!(event, SessionEvent::RunFinished { .. }) && !survivor_submitted {
+                    survivor_submitted = true;
+                    mailbox.submit("two");
+                }
+            },
+            || false,
+        )
+        .await;
+    assert_eq!(first.output, "a", "the paused pump ran one batch only");
     assert_eq!(
         first
             .events
@@ -1983,9 +1999,8 @@ async fn a_paused_pump_yields_between_batches_and_keeps_the_queue() -> Result<()
         "exactly one run in the paused pump's summary"
     );
 
-    // The message submitted after the paused pump returned still runs —
-    // the pause yields control, it does not consume the queue.
-    session.submit("two");
+    // The queued survivor still runs — the pause yields control, it
+    // does not consume the queue.
     let second = session.pump(&mut |_| {}).await;
     assert_eq!(second.output, "b");
     std::fs::remove_dir_all(store.dir()).ok();

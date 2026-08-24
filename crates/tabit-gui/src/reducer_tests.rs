@@ -1226,3 +1226,164 @@ fn a_failed_checkout_surfaces_as_an_error_notice() {
     // The transcript before it is untouched — the checkout was a no-op.
     assert!(matches!(state.transcript.first(), Some(Group::User { .. })));
 }
+
+#[test]
+fn unknown_and_malformed_interaction_widgets_surface_as_notices_not_cards() {
+    let mut state = GuiState::default();
+    state.reduce(ack());
+    // An extension widget this frontend cannot render: reported, never
+    // answered, never a card.
+    state.reduce(event(SessionEvent::InteractionRequested {
+        id: "i1".to_string(),
+        ui_type: "ext:demo:map".to_string(),
+        payload: serde_json::json!({"region": "north"}),
+    }));
+    match state.transcript.last() {
+        Some(Group::Notice { text, error }) => {
+            assert!(text.contains("ext:demo:map"), "{text}");
+            assert!(text.contains("not answered"), "{text}");
+            assert!(error);
+        }
+        other => panic!("the unknown widget surfaces, got {other:?}"),
+    }
+    assert!(state.interactions.is_empty());
+    // A native card in a shape this frontend cannot parse: same
+    // treatment — a notice, not a broken card.
+    state.reduce(event(SessionEvent::InteractionRequested {
+        id: "i2".to_string(),
+        ui_type: tabit_protocol::templates::ui::CONFIRM.to_string(),
+        payload: serde_json::json!({"unexpected": true}),
+    }));
+    match state.transcript.last() {
+        Some(Group::Notice { text, error }) => {
+            assert!(text.contains("cannot read"), "{text}");
+            assert!(error);
+        }
+        other => panic!("the malformed payload surfaces, got {other:?}"),
+    }
+    assert!(
+        state.interactions.is_empty(),
+        "no card opened for either request"
+    );
+}
+
+#[test]
+fn a_catalog_reannouncement_preserves_liveness_and_attention() {
+    let mut state = GuiState::default();
+    state.reduce(ack());
+    let catalog = || {
+        backend(SessionEvent::SessionsAvailable {
+            sessions: vec![tabit_protocol::AvailableSession {
+                id: "s2".to_string(),
+                created_at: "2026-08-22T10:00:00Z".to_string(),
+                entry_count: 3,
+            }],
+        })
+    };
+    state.reduce(catalog());
+    // Liveness from a background stream: a run starts, and an error
+    // raises the attention flag.
+    state.reduce(from(
+        "s2",
+        SessionEvent::UserMessage {
+            text: "go".to_string(),
+            entry_id: "e0".to_string(),
+        },
+    ));
+    state.reduce(from(
+        "s2",
+        SessionEvent::Error {
+            kind: "model".to_string(),
+            message: "background failure".to_string(),
+            pending: None,
+        },
+    ));
+    let row = state
+        .sessions
+        .iter()
+        .find(|row| row.id == "s2")
+        .expect("the catalog row");
+    assert!(row.running && row.attention);
+    // The re-announcement keeps what the window already knows.
+    state.reduce(catalog());
+    let row = state
+        .sessions
+        .iter()
+        .find(|row| row.id == "s2")
+        .expect("the re-announced row");
+    assert!(row.running, "a re-announced row keeps its run dot");
+    assert!(row.attention, "a re-announced row keeps its attention flag");
+}
+
+#[test]
+fn a_backend_only_queued_notice_tracks_by_id_until_resolved() {
+    let mut state = GuiState::default();
+    state.reduce(ack());
+    state.reduce(user("go"));
+    // No local echo for this one — the notice itself must open the row.
+    state.reduce(event(SessionEvent::MessageQueued {
+        id: "q9".to_string(),
+        text: "from another surface".to_string(),
+    }));
+    assert_eq!(state.pending.len(), 1);
+    assert_eq!(state.pending[0].id.as_deref(), Some("q9"));
+    // Resolved exactly by id: the user_message carrying it.
+    state.reduce(event(SessionEvent::UserMessage {
+        text: "from another surface".to_string(),
+        entry_id: "q9".to_string(),
+    }));
+    assert_eq!(state.pending.len(), 0, "the row left when its id drained");
+    // And the discard resolution path: a queued row leaves by id too.
+    state.reduce(event(SessionEvent::MessageQueued {
+        id: "q10".to_string(),
+        text: "queued".to_string(),
+    }));
+    state.reduce(event(SessionEvent::MessagesDiscarded {
+        messages: vec![tabit_protocol::DiscardedMessage {
+            id: "q10".to_string(),
+            text: "queued".to_string(),
+        }],
+    }));
+    assert_eq!(state.pending.len(), 0, "the discard dropped its row");
+}
+
+#[test]
+fn a_provider_native_item_folds_as_its_own_row() {
+    let mut state = GuiState::default();
+    state.reduce(ack());
+    state.reduce(user("search"));
+    state.reduce(delta("checking "));
+    assert_eq!(segments(&state), vec!["text:checking "]);
+    state.reduce(event(SessionEvent::NativeItem {
+        turn_id: "t1".to_string(),
+        item: serde_json::json!({"web_search_call": {}}),
+    }));
+    assert!(matches!(
+        state.transcript.last(),
+        Some(Group::Native { item }) if item.contains("web_search_call")
+    ));
+    // The turn's text segment closed before the native row — the item
+    // never joins the text buffer.
+    let Some(Group::Turn(turn)) = state.transcript.iter().rev().nth(1) else {
+        panic!("the turn group sits under the native row");
+    };
+    assert!(matches!(
+        turn.segments.last(),
+        Some(Segment::Text(text)) if text == "checking "
+    ));
+}
+
+#[test]
+fn a_signal_death_is_reported_as_a_kill_not_an_exit_code() {
+    let mut state = GuiState::default();
+    state.reduce(ack());
+    state.reduce(InMsg::BackendExited { code: None });
+    let Phase::Exited { clean, reason } = &state.phase else {
+        panic!("the exit settled the phase");
+    };
+    assert!(
+        reason.contains("killed"),
+        "the reason says killed: {reason}"
+    );
+    assert!(*clean, "an idle death lost nothing");
+}

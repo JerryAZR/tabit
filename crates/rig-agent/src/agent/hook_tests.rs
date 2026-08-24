@@ -1062,11 +1062,14 @@ fn hook_stack_len_reports_registration_count() {
 }
 
 #[test]
-fn hook_stack_debug_reports_hook_count() {
+fn hook_stack_debug_lists_registration_ids() {
     let mut stack = HookStack::new();
     stack.push(());
     let debug = format!("{stack:?}");
-    assert!(debug.contains("len: 1"), "hook count missing: {debug}");
+    assert!(
+        debug.contains("trait-0"),
+        "the registration id is the stack's identity: {debug}"
+    );
 }
 
 #[tokio::test]
@@ -1077,7 +1080,7 @@ async fn dropped_tool_call_dispatch_future_releases_its_resolution_frame() {
     // Poll the erased dispatch future once (creating its resolution
     // frame), then drop it unfinished: `ToolCallResolutionFrame::drop`
     // must clean the frame up so later resolutions stay balanced.
-    let mut dispatch = stack.hooks[0].2.tool_call(&context, tool_call_event());
+    let mut dispatch = stack.hooks[0].hook.tool_call(&context, tool_call_event());
     tokio::select! {
         biased;
         _ = &mut dispatch => panic!("the hook must never resolve"),
@@ -1154,4 +1157,37 @@ async fn closure_records_order_by_priority_and_deny_is_absorbing() {
         vec!["auditor", "first"],
         "priority orders; the deny absorbs before `second`"
     );
+}
+
+#[tokio::test]
+async fn turn_finished_closures_observe_in_priority_order() {
+    let seen = Arc::new(std::sync::Mutex::new(Vec::new()));
+    let note = |label: &'static str| -> crate::agent::ModelTurnFinishedFn {
+        let seen = seen.clone();
+        Box::new(move |_, _| {
+            let seen = seen.clone();
+            Box::pin(async move {
+                seen.lock().unwrap().push(label);
+                ModelTurnAction::Continue
+            })
+        })
+    };
+    // The observation point shares the order law: priority first,
+    // registration order breaking ties.
+    let stack = HookStack::new()
+        .hook(("late", 0), on::model_turn_finished(note("late")))
+        .hook(("early", -5), on::model_turn_finished(note("early")));
+    let content = OneOrMany::one(AssistantContent::text("done"));
+    let action = AgentHook::on_model_turn_finished(
+        &stack,
+        &HookContext::new(false, None, Default::default()),
+        ModelTurnFinished {
+            turn: 1,
+            content: &content,
+            usage: Usage::default(),
+        },
+    )
+    .await;
+    assert!(matches!(action, ModelTurnAction::Continue));
+    assert_eq!(*seen.lock().unwrap(), vec!["early", "late"]);
 }

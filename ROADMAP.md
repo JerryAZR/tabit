@@ -276,7 +276,15 @@ The known deviation from pi's subprocess model:
   model precedes code (the GUI's ENGINE.md equivalent), tests derive
   from it, and fixtures build frames through shared `tabit-protocol`
   builders so a fiction shape (a frame the backend cannot produce)
-  cannot compile.
+  cannot compile. Known stage-1 behaviors deferred to the redesign
+  (2026-08, live testing + review): switching back to a mid-run
+  session shows an empty transcript until that run's terminal (the
+  optimistic clear waits for the replay pass, which correctly parks
+  behind the run — the parked-replay ruling), and `Facts` follows
+  only `session_created` — a switcher switch leaves the status strip
+  naming the previous session's model until a replayed
+  `model_changed` happens to arrive. Both die with the per-session
+  projection.
 - **Framework: egui (ruled 2026-08, after evaluation).** Runner-up
   iced (its Elm architecture matches our reducer split natively) loses
   on ecosystem for our exact surfaces — no markdown widget, no list

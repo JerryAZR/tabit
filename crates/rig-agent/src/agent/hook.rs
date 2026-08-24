@@ -314,7 +314,7 @@ pub struct HookContext {
     agent_name: Option<String>,
     scratchpad: Scratchpad,
     tool_call_rewrite_frames: ToolCallRewriteFrames,
-    /// The run's capability map {EM} the same [`ToolContext`] the tool
+    /// The run's capability map — the same [`ToolContext`] the tool
     /// bodies read (snapshot at run start), so hooks and tools see one
     /// set of capabilities: "why could my tool ask but not my hook" is
     /// removed, not documented (the unified run context).
@@ -380,16 +380,9 @@ impl HookContext {
         self.agent_name.as_deref()
     }
 
-    /// Shared run scratchpad.
-    /// The run's capabilities — the same map tools read. Returns
-    /// the interaction capability when one was inserted (the generic
-    /// ask; hooks and tools ask the same way).
-    pub fn capabilities(&self) -> &crate::tool::ToolContext {
-        &self.capabilities
-    }
-
     /// The run's [`UserInteraction`](crate::tool::interaction::UserInteraction)
-    /// capability, when the host inserted one.
+    /// capability, when the host inserted one — hooks and tools ask
+    /// the same way (the unified run context).
     pub fn interaction(
         &self,
     ) -> Option<std::sync::Arc<dyn crate::tool::interaction::UserInteraction>> {
@@ -398,6 +391,7 @@ impl HookContext {
             .cloned()
     }
 
+    /// Shared run scratchpad.
     pub fn scratchpad(&self) -> &Scratchpad {
         &self.scratchpad
     }
@@ -1341,7 +1335,6 @@ pub mod on {
 /// ("not registered" is the filter). This round ships the two points
 /// consumers exist for; the remaining events join as consumers do.
 pub(crate) struct ClosureHook {
-    kind: StepEventKind,
     tool_call: Option<ToolCallFn>,
     model_turn_finished: Option<ModelTurnFinishedFn>,
 }
@@ -1364,37 +1357,32 @@ impl AgentHook for ClosureHook {
         }
     }
     fn observes(&self, kind: StepEventKind) -> bool {
-        kind == self.kind
+        match kind {
+            StepEventKind::ToolCall => self.tool_call.is_some(),
+            StepEventKind::ModelTurnFinished => self.model_turn_finished.is_some(),
+            _ => false,
+        }
     }
 }
 
 impl HookStack {
     /// Register a closure at its event point: `.hook(spec, on::tool_call(|ctx, call| ...))`.
-    /// `on_tool_call` is the pre-call gate point {EM} Skip is absorbing
+    /// `on_tool_call` is the pre-call gate point — Skip is absorbing
     /// (the first deny in priority order wins; later registrations do
     /// not see the call), Run is neutral.
     pub fn hook(mut self, spec: impl Into<HookSpec>, on: OnEvent) -> Self {
         let spec = spec.into();
-        let (kind, closure) = match on {
-            OnEvent::ToolCall(f) => (
-                StepEventKind::ToolCall,
-                ClosureHook {
-                    kind: StepEventKind::ToolCall,
-                    tool_call: Some(f),
-                    model_turn_finished: None,
-                },
-            ),
-            OnEvent::ModelTurnFinished(f) => (
-                StepEventKind::ModelTurnFinished,
-                ClosureHook {
-                    kind: StepEventKind::ModelTurnFinished,
-                    tool_call: None,
-                    model_turn_finished: Some(f),
-                },
-            ),
+        let closure = match on {
+            OnEvent::ToolCall(f) => ClosureHook {
+                tool_call: Some(f),
+                model_turn_finished: None,
+            },
+            OnEvent::ModelTurnFinished(f) => ClosureHook {
+                tool_call: None,
+                model_turn_finished: Some(f),
+            },
         };
-        self.push_prioritized(spec.priority, std::sync::Arc::new(closure));
-        let _ = kind;
+        self.push_prioritized(spec.id, spec.priority, std::sync::Arc::new(closure));
         self
     }
 }
@@ -1406,18 +1394,29 @@ impl HookStack {
 /// Nested stacks preserve the same composition semantics.
 #[derive(Clone, Default)]
 pub struct HookStack {
-    // (priority, registration seq, hook): kept stably sorted by
-    // priority on every push (stacks are tiny), equal priorities
-    // preserving registration order {EM} the order law (ENGINE.md's
-    // hook surface). Trait hooks push at priority 0; records carry
-    // their own.
-    hooks: Vec<(i32, u64, Arc<dyn DynAgentHook>)>,
+    // Registered records, stably sorted by priority on every push
+    // (stacks are tiny), equal priorities preserving registration
+    // order — the order law (ENGINE.md's hook surface).
+    hooks: Vec<StackedHook>,
+}
+
+/// One registration inside a [`HookStack`] — the record the hook
+/// surface is built on (ENGINE.md): the author-chosen id (attribution
+/// and replace-by-id fall out of it when consumers appear), the
+/// priority, the registration sequence (the stable-sort tiebreak),
+/// and the hook itself.
+#[derive(Clone)]
+struct StackedHook {
+    id: String,
+    priority: i32,
+    seq: u64,
+    hook: Arc<dyn DynAgentHook>,
 }
 
 impl std::fmt::Debug for HookStack {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("HookStack")
-            .field("len", &self.hooks.len())
+            .field("hooks", &self.ids())
             .finish()
     }
 }
@@ -1435,19 +1434,34 @@ impl HookStack {
         stack
     }
 
+    /// The registration ids in resolution order (priority, then
+    /// registration) — a stack's identity for debugging and the
+    /// foundation for attribution surfaces.
+    pub fn ids(&self) -> Vec<&str> {
+        self.hooks.iter().map(|record| record.id.as_str()).collect()
+    }
+
     /// Appends a trait hook at the default priority (0): registration
     /// order among trait hooks is preserved exactly.
     pub fn push<H: AgentHook + 'static>(&mut self, hook: H) {
-        self.push_prioritized(0, Arc::new(hook));
+        // Trait hooks carry no author id; the sequence keeps each
+        // synthetic name distinct.
+        let id = format!("trait-{}", self.hooks.len());
+        self.push_prioritized(id, 0, Arc::new(hook));
     }
 
     /// Appends a hook entry at `priority` and restores the sort
     /// (stable: equal priorities keep insertion order).
-    fn push_prioritized(&mut self, priority: i32, hook: Arc<dyn DynAgentHook>) {
+    fn push_prioritized(&mut self, id: String, priority: i32, hook: Arc<dyn DynAgentHook>) {
         let seq = self.hooks.len() as u64;
-        self.hooks.push((priority, seq, hook));
+        self.hooks.push(StackedHook {
+            id,
+            priority,
+            seq,
+            hook,
+        });
         self.hooks
-            .sort_by_key(|(priority, seq, _)| (*priority, *seq));
+            .sort_by_key(|record| (record.priority, record.seq));
     }
 
     /// Returns `true` when the stack contains no hooks.
@@ -1468,7 +1482,8 @@ impl HookStack {
         event: ToolCall<'_>,
     ) -> (ToolCallAction, Option<serde_json::Value>) {
         let mut effective = None;
-        for (_, _, hook) in &self.hooks {
+        for record in &self.hooks {
+            let hook = &record.hook;
             let rewritten = effective.as_ref().map(json_utils::serialize_json_value);
             let current = ToolCall {
                 args: rewritten.as_deref().unwrap_or(event.args),
@@ -1491,18 +1506,6 @@ impl HookStack {
     }
 }
 
-async fn first_stop<I>(futures: I) -> ObservationAction
-where
-    I: IntoIterator<Item = ObservationAction>,
-{
-    for action in futures {
-        if !matches!(action, ObservationAction::Continue) {
-            return action;
-        }
-    }
-    ObservationAction::Continue
-}
-
 impl AgentHook for HookStack {
     fn on_model_select(
         &self,
@@ -1510,10 +1513,10 @@ impl AgentHook for HookStack {
         event: ModelSelection<'_>,
     ) -> ModelSelectionAction {
         let mut selected = None;
-        for (_, _, hook) in &self.hooks {
+        for record in &self.hooks {
             let action = {
                 let selected_model = selected.as_ref().unwrap_or(event.selected_model);
-                hook.model_select(
+                record.hook.model_select(
                     ctx,
                     ModelSelection {
                         selected_model,
@@ -1536,8 +1539,8 @@ impl AgentHook for HookStack {
         event: CompletionCall<'_>,
     ) -> CompletionCallAction {
         let mut merged: Option<RequestPatch> = None;
-        for (_, _, hook) in &self.hooks {
-            match hook.completion_call(ctx, event).await {
+        for record in &self.hooks {
+            match record.hook.completion_call(ctx, event).await {
                 CompletionCallAction::Continue => {}
                 CompletionCallAction::Patch(patch) => {
                     merged = Some(merged.map_or(patch.clone(), |value| value.merge(patch)))
@@ -1556,24 +1559,21 @@ impl AgentHook for HookStack {
         ctx: &HookContext,
         event: CompletionResponse<'_>,
     ) -> ObservationAction {
-        let mut actions = Vec::new();
-        for (_, _, hook) in &self.hooks {
-            let action = hook.completion_response(ctx, event).await;
-            let stop = !matches!(action, ObservationAction::Continue);
-            actions.push(action);
-            if stop {
-                break;
+        for record in &self.hooks {
+            let action = record.hook.completion_response(ctx, event).await;
+            if !matches!(action, ObservationAction::Continue) {
+                return action;
             }
         }
-        first_stop(actions).await
+        ObservationAction::Continue
     }
     async fn on_model_turn_finished(
         &self,
         ctx: &HookContext,
         event: ModelTurnFinished<'_>,
     ) -> ModelTurnAction {
-        for (_, _, hook) in &self.hooks {
-            let action = hook.model_turn_finished(ctx, event).await;
+        for record in &self.hooks {
+            let action = record.hook.model_turn_finished(ctx, event).await;
             if !matches!(action, ModelTurnAction::Continue) {
                 return action;
             }
@@ -1596,12 +1596,12 @@ impl AgentHook for HookStack {
         event: ToolResultEvent<'_>,
     ) -> ToolResultAction {
         let mut effective: Option<ToolOutput> = None;
-        for (_, _, hook) in &self.hooks {
+        for record in &self.hooks {
             let current = ToolResultEvent {
                 presentation: effective.as_ref().unwrap_or(event.presentation),
                 ..event
             };
-            match hook.tool_result(ctx, current).await {
+            match record.hook.tool_result(ctx, current).await {
                 ToolResultAction::Keep => {}
                 ToolResultAction::Rewrite(value) => effective = Some(value),
                 stop @ ToolResultAction::Stop(_) => return stop,
@@ -1610,8 +1610,8 @@ impl AgentHook for HookStack {
         effective.map_or(ToolResultAction::Keep, ToolResultAction::Rewrite)
     }
     async fn on_text_delta(&self, ctx: &HookContext, event: TextDelta<'_>) -> ObservationAction {
-        for (_, _, hook) in &self.hooks {
-            let action = hook.text_delta(ctx, event).await;
+        for record in &self.hooks {
+            let action = record.hook.text_delta(ctx, event).await;
             if !matches!(action, ObservationAction::Continue) {
                 return action;
             }
@@ -1623,8 +1623,8 @@ impl AgentHook for HookStack {
         ctx: &HookContext,
         event: ToolCallDelta<'_>,
     ) -> ObservationAction {
-        for (_, _, hook) in &self.hooks {
-            let action = hook.tool_call_delta(ctx, event).await;
+        for record in &self.hooks {
+            let action = record.hook.tool_call_delta(ctx, event).await;
             if !matches!(action, ObservationAction::Continue) {
                 return action;
             }
@@ -1636,8 +1636,8 @@ impl AgentHook for HookStack {
         ctx: &HookContext,
         event: StreamResponseFinish<'_>,
     ) -> ObservationAction {
-        for (_, _, hook) in &self.hooks {
-            let action = hook.stream_response_finish(ctx, event).await;
+        for record in &self.hooks {
+            let action = record.hook.stream_response_finish(ctx, event).await;
             if !matches!(action, ObservationAction::Continue) {
                 return action;
             }
@@ -1645,7 +1645,7 @@ impl AgentHook for HookStack {
         ObservationAction::Continue
     }
     fn observes(&self, kind: StepEventKind) -> bool {
-        self.hooks.iter().any(|(_, _, hook)| hook.observes(kind))
+        self.hooks.iter().any(|record| record.hook.observes(kind))
     }
 }
 

@@ -1615,6 +1615,17 @@ async fn parked_checkouts_collapse_to_the_last_and_spaced_ones_execute() {
         .rposition(|frame| matches!(frame.event, SessionEvent::CheckedOut { .. }))
         .expect("the survivor");
     assert_eq!(bracket_users(&frames, survivor_at), vec!["one", "two"]);
+    // The pass's progress denominator is its own length (the frame
+    // right after the announce opens it; the slice starts past the
+    // opener so only pass events count).
+    let SessionEvent::ReplayStarted { total } = &frames[survivor_at + 1].event else {
+        panic!("the re-render pass opens right after checked_out");
+    };
+    let pass_len = frames[survivor_at + 2..]
+        .iter()
+        .position(|frame| matches!(frame.event, SessionEvent::ReplayDone))
+        .expect("the pass closes");
+    assert_eq!(*total, pass_len as u64);
 
     // Spaced across an idle beat (the survivor fully applied first):
     // the branch switch back executes on its own — supersession
@@ -1669,6 +1680,152 @@ async fn parked_checkouts_collapse_to_the_last_and_spaced_ones_execute() {
         .expect("the switch");
     assert_eq!(bracket_users(&frames, switch_at), vec!["one", "two"]);
     assert_eq!(chain_users(&handle, &store), vec!["one", "two"]);
+    std::fs::remove_dir_all(store.dir()).ok();
+}
+
+/// Close is not a barrier: a checkout routed ahead of the polite close
+/// is honored — the wind-down serves what the handler parked (the
+/// shutdown arm of the beat) before the worker exits.
+#[tokio::test]
+async fn a_checkout_parked_at_the_close_executes_before_wind_down() {
+    let store = temp_store("endpoint-checkout-close");
+    let session = Factory::new(vec![text_turn("a"), text_turn("b")])
+        .into_builder(store.clone())
+        .create("C:/w")
+        .expect("session");
+    let mut handle = SessionHost::spawn(session, Vec::new(), plain_wiring(&store));
+    let id = boot_id(&handle);
+
+    let mut frames = Vec::new();
+    handle.message(&id, "one");
+    collect_until(&mut handle, &mut frames, terminal).await;
+    handle.message(&id, "two");
+    collect_until(&mut handle, &mut frames, terminal).await;
+    let first = entry_id_of(&frames, "one");
+
+    // Routed, then the close lands immediately after: the survivor
+    // must still execute — at a woken beat or the shutdown arm, the
+    // wind-down serves both.
+    handle.checkout(&id, &first);
+    let frames = drain(&mut handle).await;
+
+    let checked: Vec<&str> = frames
+        .iter()
+        .filter_map(|frame| match &frame.event {
+            SessionEvent::CheckedOut { entry_id, .. } => Some(entry_id.as_str()),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(
+        checked,
+        vec![first.as_str()],
+        "the checkout routed ahead of the close executed"
+    );
+    assert_eq!(
+        chain_users(&handle, &store),
+        vec!["one"],
+        "the rewind applied durably"
+    );
+    std::fs::remove_dir_all(store.dir()).ok();
+}
+
+/// The death door is an abort, and abort drops all pending intent
+/// (FRONTEND.md §7): a checkout parked mid-run must NOT execute its
+/// durable rewind after the frontend is gone. The wire-order anchor:
+/// a message queued after the checkout announces itself, proving the
+/// host loop routed past the checkout before the death.
+#[tokio::test]
+async fn frontend_death_drops_a_parked_checkout_instead_of_rewinding() {
+    let store = temp_store("endpoint-death-checkout");
+    let session = Factory::new(vec![
+        text_turn("first"),
+        tool_turn("c1", "slow"),
+        text_turn("never reached"),
+    ])
+    .into_builder(store.clone())
+    .dynamic_tool(slow_tool())
+    .create("C:/w")
+    .expect("session");
+    let mut handle = SessionHost::spawn(session, Vec::new(), plain_wiring(&store));
+    let id = boot_id(&handle);
+    let mut events = handle.take_events().expect("the event stream");
+
+    // One committed exchange to aim at, then a run with the slow tool
+    // in flight (the 300ms window is the parking lot).
+    handle.message(&id, "one");
+    let mut frames = Vec::new();
+    loop {
+        let frame = tokio::time::timeout(Duration::from_secs(5), events.recv())
+            .await
+            .expect("the first run must keep producing events")
+            .expect("the stream survives the first run");
+        let done = matches!(frame.event, SessionEvent::RunFinished { .. });
+        frames.push(frame);
+        if done {
+            break;
+        }
+    }
+    let target = entry_id_of(&frames, "one");
+
+    handle.message(&id, "two");
+    loop {
+        let frame = tokio::time::timeout(Duration::from_secs(5), events.recv())
+            .await
+            .expect("the second run must keep producing events")
+            .expect("the stream survives the second run's start");
+        let tool_arrived =
+            matches!(&frame.event, SessionEvent::ToolCall { name, .. } if name == "slow");
+        frames.push(frame);
+        if tool_arrived {
+            break;
+        }
+    }
+
+    // The checkout parks (the run is in flight — nothing executes
+    // yet); the trailing message's queued notice proves the host loop
+    // routed past it.
+    handle.checkout(&id, &target);
+    handle.message(&id, "three");
+    loop {
+        let frame = tokio::time::timeout(Duration::from_secs(5), events.recv())
+            .await
+            .expect("the queued notice must arrive")
+            .expect("the stream survives until the death");
+        let queued = matches!(
+            &frame.event,
+            SessionEvent::MessageQueued { text, .. } if text == "three"
+        );
+        frames.push(frame);
+        if queued {
+            break;
+        }
+    }
+    assert!(
+        !frames
+            .iter()
+            .any(|f| matches!(f.event, SessionEvent::CheckedOut { .. })),
+        "a parked checkout never executes mid-run"
+    );
+
+    // The frontend dies. The wind-down must drop the parked checkout
+    // with everything else — the durable log keeps both exchanges
+    // (executing the rewind would leave only "one").
+    drop(events);
+    tokio::time::timeout(Duration::from_secs(5), async {
+        loop {
+            if handle.closing_stats().is_some() {
+                return;
+            }
+            tokio::time::sleep(Duration::from_millis(25)).await;
+        }
+    })
+    .await
+    .expect("the worker winds down when the frontend dies");
+    assert_eq!(
+        chain_users(&handle, &store),
+        vec!["one", "two"],
+        "the death door dropped the rewind: the chain still holds both exchanges"
+    );
     std::fs::remove_dir_all(store.dir()).ok();
 }
 

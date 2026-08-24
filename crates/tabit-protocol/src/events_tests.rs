@@ -68,6 +68,14 @@ fn events_round_trip_through_json() {
         SessionEvent::RunFailed {
             message: "provider stream ended early".to_string(),
         },
+        SessionEvent::RunAborted {
+            output: "partial text".to_string(),
+        },
+        SessionEvent::InteractionRequested {
+            id: "0199".to_string(),
+            ui_type: "native:confirm".to_string(),
+            payload: serde_json::json!({"title": "Run command?"}),
+        },
         SessionEvent::error_model("default_model `gone` is not usable"),
         SessionEvent::ReplayStarted { total: 7 },
         SessionEvent::ReplayDone,

@@ -381,7 +381,7 @@ rather than skipping, reachable or not.)
   are thin re-assemblies of `assemble`, whose every path (config,
   resume, degradation) is covered in `main.rs`'s own suite.
 
-## v4 {EM} interaction generalization + backend-level events (2026-08)
+## v4 — interaction generalization + backend-level events (2026-08)
 
 - The generic shapes are round-trip and shape-pinned in
   tabit-protocol: `interaction_request { id, ui_type, payload }` /
@@ -391,7 +391,7 @@ rather than skipping, reachable or not.)
   backend-level), and every stamped-frame test now holds `Some(..)`.
 - The hub is payload-blind and directly unit-covered (routing, the
   verbatim ui_type/payload passthrough with the stream stamp, the
-  total no-op, weak-sender dismissal, terminal retraction {EM} all on
+  total no-op, weak-sender dismissal, terminal retraction — all on
   raw payloads). The permission gate's decision table runs unchanged
   over the confirm template (payload answers); `ask_user` runs over
   the ask template against the scripted capability.
@@ -401,9 +401,11 @@ rather than skipping, reachable or not.)
   backend-level catalog/creation frames.
 - GUI: connection-level fold for unstamped frames (catalog,
   creation, backend errors), template-typed cards, unknown-ui_type
-  notices; the fixtures build the honest unstamped shapes (the old
-  stamped-creation fixtures were the fiction shape the round
-  deletes).
+  notices (`unknown_and_malformed_interaction_widgets_surface_as_
+  notices_not_cards` — an `ext:*` widget and a malformed native
+  payload both surface as notices, no card opens); the fixtures build
+  the honest unstamped shapes (the old stamped-creation fixtures were
+  the fiction shape the round deletes).
 
 ## Hook surface, shipped (2026-08, round 2)
 
@@ -411,29 +413,66 @@ rather than skipping, reachable or not.)
   (`closure_records_order_by_priority_and_deny_is_absorbing`:
   stable sort by priority with registration-order tiebreak, Skip
   absorbing—the auditor-before-denier consequence asserted
-  directly). The permission actor suite (allow/deny/always-allow/
-  abort/death) now runs through the value seam end to end—which is
-  also the unified-context pin: the gate's closure asks through
-  `ctx.interaction()`, the same capability map tools read. The
-  run-context snapshot costs one ToolContext clone per run
-  (`agent_dispatch_snapshot_clones_once...` counts it).
+  directly; `turn_finished_closures_observe_in_priority_order` pins
+  the same law at the observation point). The permission actor suite
+  (allow/deny/always-allow/abort/death) now runs through the value
+  seam end to end—which is also the unified-context pin: the gate's
+  closure asks through `ctx.interaction()`, the same capability map
+  tools read. The run-context snapshot costs one ToolContext clone per
+  run (`agent_dispatch_snapshot_clones_once...` counts it). The stack
+  keeps the registration ids (its `Debug` lists them — attribution
+  and replace-by-id consume them when consumers appear).
 - `gate.rs` (ToolGate/GateHook) is deleted; the factory seam became
   `SessionBuilder::hooks(HookStack)` — a plain value.
 
-## Tool-gate seam (2026-08, the permission-leak review)
+## Review remediation (2026-08, post-checkout/hook-surface rounds)
 
-- `gate.rs` {EM} **covered end to end**: `ToolGate`/`ToolGateFactory`
-  mount through `SessionBuilder::tool_gate`, and the actor-level
-  permission suite (allow, deny with reason, always-allow session
-  memory across calls and across runs, reverse-order cards, abort and
-  frontend death with a card open) now runs entirely through the seam
-  {EM} it is the seam's coverage. The `GateHook` adapter rides every
-  one of those runs. Unit: the decision table (`gate()`), the memory's
-  sharing semantics, the prompt shape.
-- `interaction.rs` after the strip {EM} the hub's own suite (routing,
-  no-op, retraction, weak-sender dismissal) is unchanged and green;
-  the permission vocabulary tests moved to `permission.rs` with the
-  vocabulary.
+The two-subagent review round (architecture + test quality) and what
+it changed:
+
+- **Abort is one semantic at every door.** The death watcher and
+  `abort_all` previously cancelled runs without clearing the checkout
+  slot — a parked checkout could execute its durable rewind after the
+  frontend died. `Worker::abort` (slot first, then the cancel — the
+  order closes the woken-worker race) is now the only abort path;
+  pinned by `frontend_death_drops_a_parked_checkout_instead_of_
+  rewinding` (wire-order anchor: a message queued after the checkout
+  proves routing before the death; the log keeps both exchanges).
+- The permission actor suite now decides by content, not by event
+  presence: allow asserts the body's own output (`ran: x`), deny
+  asserts the in-band denial verbatim, ask_user asserts the answer
+  reached the tool. The racing answer in the abort test is sent while
+  the host still lives (it reaches the handler; no error frame).
+- The pause-seam test submits its survivor at the first run's
+  terminal — the predicate's decision point is genuinely exercised.
+- `RunAborted` and `InteractionRequested` joined the events
+  round-trip; the frame-envelope test renamed to the sample it is
+  (`sampled_event_variants_survive_the_frame_envelope`) and gained
+  the two new variants.
+- GUI reducer: catalog re-announcement preserves liveness/attention
+  (`a_catalog_reannouncement_preserves_liveness_and_attention`),
+  backend-only queued notices track by id through both resolutions,
+  native items fold as their own rows, a signal death reports
+  "killed".
+- `replay_started.total` is asserted against the pass's actual
+  length (the collapse test's re-render).
+- Deferred, deliberately: the GUI's optimistic switch transient and
+  `Facts` drift on switcher switches (ROADMAP item 7 — the per-session
+  transcript redesign); flag 11's panic arm (amended in PROTOCOL.md —
+  see the flag for the rationale); flag-8's `persist_degraded`
+  producer (the write-behind work item; the frontend side already
+  folds it).
+
+## Tool-gate seam (2026-08, the permission-leak review) — superseded
+
+`gate.rs` (ToolGate/ToolGateFactory) was deleted by the hook-surface
+round above; this section survives as history. What still holds from
+it: `interaction.rs` — the hub's own suite (routing, no-op,
+retraction, weak-sender dismissal) is unchanged and green; the
+permission vocabulary tests live in `permission.rs` with the
+vocabulary, and the actor-level permission suite (allow, deny with
+reason, always-allow memory, reverse-order cards, abort and frontend
+death with a card open) runs through the value seam.
 
 ## v3 stage 2 — checkout (2026-08)
 
@@ -456,17 +495,20 @@ rather than skipping, reachable or not.)
   back), the unknown-entry error as a total no-op (kind `checkout`,
   nothing discarded, nothing moved, conversation continues), the
   abort-then-checkout composition at the pause point, the
-  `pump_with_pause` yield directly at the session level (paused pump
-  returns after one batch, the queue survives), the wire round trip
+  `pump_with_pause` yield directly at the session level (the survivor
+  is submitted at the first run's terminal, so the queue is genuinely
+  non-empty when the predicate decides — a pump that ignored the
+  pause would run it inside the first pump), the wire round trip
   (`checked_out` with an explicit `"base_id":null`, the pass brackets,
   the post-checkout prompt branching), and the GUI fold (the pass
   rebuilds the transcript with entry ids intact — the next checkout
   target — while liveness stays settled; a failed checkout surfaces
   as a notice).
 - The worker's shutdown-arm checkout drain (`close is not a barrier`
-  for checkouts) — **covered** by the collapse test's pre-close burst:
-  the commands route before the close and the wind-down executes the
-  survivor.
+  for checkouts) — **covered directly** by
+  `a_checkout_parked_at_the_close_executes_before_wind_down`: the
+  checkout routes, the close lands, and the survivor executes before
+  the stream ends (with the rewind asserted against the log).
 - Command-path round (owner design review, ruled): the router only
   routes— resolve-and-forward into per-session handlers—and the
   behavior suite now pins the final semantics end to end: discard at

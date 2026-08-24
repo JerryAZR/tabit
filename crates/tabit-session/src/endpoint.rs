@@ -112,7 +112,7 @@ enum HostCommand {
 #[derive(Clone)]
 struct Worker {
     mailbox: MailboxHandle,
-    abort: AbortHandle,
+    abort_handle: AbortHandle,
     interaction: InteractionHub,
     /// The event channel and this session's stamp, for the handler's
     /// own emissions (checkout errors and clears) — a module talking
@@ -139,23 +139,26 @@ struct Worker {
 }
 
 impl Worker {
+    /// Abort is drop-all-pending-intent — one semantic at every door:
+    /// the command, [`SessionHost::abort_all`], and the frontend-death
+    /// watcher. The parked checkout goes first — silently (no
+    /// `checked_out` follows; the abort is the marker, FRONTEND.md §7)
+    /// and before the cancel, so a worker woken by the abort can never
+    /// reach the beat and execute a rewind the abort meant to drop.
+    /// The cancel itself (the run's abort plus its mailbox clear,
+    /// staged for the flush) lives in the handle.
+    fn abort(&self) {
+        lock(&self.checkout_slot).take();
+        self.abort_handle.abort();
+    }
+
     /// Deliver a session-scoped command — the handler at the dequeue
     /// point. Everything from here down is this module's semantics.
-    #[allow(clippy::unreachable)]
     #[allow(clippy::unreachable)]
     fn deliver(&self, command: SessionCommand) {
         match command {
             SessionCommand::Message { text, .. } => self.mailbox.submit(text),
-            SessionCommand::Abort { .. } => {
-                // Drop-all-pending-intent: the run (the abort leaf's
-                // cancel plus its message clear) and any parked
-                // checkout. What already drained is history and stays
-                // for the log to tell. A discarded pending checkout
-                // emits nothing — no `checked_out` will follow; the
-                // abort is the marker (FRONTEND.md §7).
-                self.abort.abort();
-                *lock(&self.checkout_slot) = None;
-            }
+            SessionCommand::Abort { .. } => self.abort(),
             SessionCommand::InteractionResponse { id, payload, .. } => {
                 // Total: an unknown or dead id logs and drops inside
                 // the hub; the payload is the asker's to parse.
@@ -379,12 +382,15 @@ impl SessionHost {
                     biased;
                     _ = watcher_shutdown.cancelled() => {}
                     _ = watcher_events.closed() => {
-                        // The death path's abort site: preemption
-                        // plus the one clear, inside the handle (flag
-                        // 6) — the runs' conclusions flush the discard
+                        // The death path's abort site — the same
+                        // drop-all-pending-intent as the command's: a
+                        // parked checkout must not outlive the user
+                        // (its rewind is durable). Preemption plus the
+                        // one clear live inside the handle (flag 6) —
+                        // the runs' conclusions flush the discard
                         // notices on the way out.
                         for worker in lock(&watcher_workers).values() {
-                            worker.abort.abort();
+                            worker.abort();
                         }
                     }
                 }
@@ -477,13 +483,14 @@ impl SessionHost {
             }));
     }
 
-    /// Abort every session and discard every queue — the
-    /// frontend-death door for transport edges (stdin EOF is death:
-    /// no run outlives the consumer, ruled 2026-08). Direct, not
-    /// routed: death preempts routing.
+    /// Abort every session — discard every queue and every parked
+    /// checkout — the frontend-death door for transport edges (stdin
+    /// EOF is death: no run outlives the consumer, and no rewind
+    /// executes unattended, ruled 2026-08). Direct, not routed: death
+    /// preempts routing.
     pub fn abort_all(&self) {
         for worker in lock(&self.workers).values() {
-            worker.abort.abort();
+            worker.abort();
         }
     }
 
@@ -712,7 +719,7 @@ fn spawn_worker(
     let id = session.id().to_string();
     let stream = StreamId::new(id.clone());
     let mailbox = session.mailbox_handle();
-    let abort = session.abort_handle();
+    let abort_handle = session.abort_handle();
     let interaction = InteractionHub::new(event_tx.clone(), stream.clone());
     let checkout_slot = Arc::new(Mutex::new(None::<String>));
     let replay_due = Arc::new(std::sync::atomic::AtomicBool::new(false));
@@ -824,7 +831,7 @@ fn spawn_worker(
     (
         Worker {
             mailbox,
-            abort,
+            abort_handle,
             interaction,
             events: worker_events,
             stream: worker_stream,

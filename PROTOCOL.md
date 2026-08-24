@@ -874,23 +874,28 @@ metadata error → loud error on both platforms. One nuance: use the
 helpers — those swallow the error kind (a permission failure would
 masquerade as "no sessions"). Implementation rides the v2 store touch.
 
-### 11. Empty `pump()` — RESOLVED (explained no-op, unexplained panic)
+### 11. Empty `pump()` — AMENDED (2026-08, the checkout round)
 
-Analysis: there IS exactly one legitimate way to reach an empty first
-drain — a mailbox clear landing between the worker's `is_empty()`
-check and `pump`'s `drain_all`. The abort command-time clear (flag 6)
-is unsynchronized with the worker by design, and checkout's clear (v2)
-joins it; in both cases the discarded-notice journal records what
-happened. Ruled:
+Analysis (unchanged): there IS exactly one legitimate way to reach an
+empty first drain — a mailbox clear landing between the worker's
+`is_empty()` check and `pump`'s drain. Original ruling: explained
+empty (the discard journal non-empty — a clear raced the wake) is a
+visible no-op with `pump` returning `Option<RunSummary>`; unexplained
+empty panics, per the internal-error doctrine.
 
-- **Explained empty drain** (the journal is non-empty — a clear raced
-  the wake): a visible no-op. `pump` returns `Option<RunSummary>`;
-  `None` = legitimately nothing ran.
-- **Unexplained empty drain** (nothing cleared — messages vanished
-  without cause): panic, per the internal-error doctrine. A future
-  code path that drains the mailbox without signaling through the
-  journal is a bug we want loud, not a vacuous `Completed` slipping
-  by.
+Amended, post-checkout: the checkout clear now announces its discards
+**at receive, on the wire** (the discard-at-receive ruling) instead of
+staging them in the journal, so the journal alone can no longer
+explain both clear paths — and making it race-free costs a
+clear-generation protocol threaded through the pump seam, heavy
+machinery for a panic arm that guards `Mailbox`'s three audited drain
+methods. Both clear paths are wire-visible (abort stages its pairs
+for the beat's flush; checkout emits the notice at receive), so no
+message can vanish silently either way. Shipped shape: the pump
+breaks on an empty drain — an empty drain is by construction a clear
+racing the wake, and the notices already told the frontend. If a
+future drain path appears, the invariant to pin is "every message
+yields exactly one `user_message` or one discard notice".
 
 ### 13. The protocol borrows engine types — RESOLVED (owner approved the v2 item)
 

@@ -73,7 +73,9 @@ pub struct EventFrame {
 ///
 /// Outcomes are events (`user_message` for acceptance, the run
 /// terminals for results); a command naming an unknown session yields
-/// `error { kind: session }` stamped with the id it named.
+/// an unstamped `error { kind: session }` (backend-level — the
+/// optional-stream ruling: the routing failure belongs to no session
+/// open in this backend).
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "type", rename_all = "snake_case")]
 pub enum SessionCommand {
@@ -106,9 +108,11 @@ pub enum SessionCommand {
         payload: serde_json::Value,
     },
     /// Create a fresh session in this backend. The outcome is
-    /// `session_created { id, path }` (stamped with the new id) — or
-    /// `error { kind: session }` (stamped boot) if the session cannot
-    /// be built. Nothing replays; the session is empty.
+    /// `session_created { id, path, model }` — unstamped,
+    /// backend-level (the payload carries the new id; the
+    /// optional-stream ruling) — or an equally unstamped
+    /// `error { kind: session }` if the session cannot be built.
+    /// Nothing replays; the session is empty.
     NewSession,
     /// Load a stored session (if needed) and replay it onto the event
     /// channel, stamped with its id — the pass itself is the

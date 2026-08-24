@@ -42,9 +42,10 @@ impl PermissionMemory {
     }
 }
 
-/// The gate's wire vocabulary: the option labels a frontend renders
-/// as the card's buttons (FRONTEND.md §8).
-pub mod permission_labels {
+/// The labels this gate puts in its confirm payload's options (what a
+/// frontend renders as the card's buttons) and reads back from the
+/// answer.
+mod permission_labels {
     pub const ALLOW: &str = "Allow";
     pub const ALWAYS_ALLOW: &str = "Always allow";
     pub const DENY: &str = "Deny";
@@ -115,8 +116,16 @@ async fn gate(
     let (ui_type, payload) = permission_ask(tool_name, args);
     let reply = match hub.request(ui_type, payload).await {
         rig_agent::tool::interaction::InteractionOutcome::Answered(payload) => {
-            serde_json::from_value::<tabit_protocol::templates::ConfirmAnswer>(payload)
-                .unwrap_or_default()
+            match serde_json::from_value::<tabit_protocol::templates::ConfirmAnswer>(payload) {
+                Ok(answer) => answer,
+                // A malformed answer is a frontend defect, not a user
+                // decision — fail closed, but leave the trace so the
+                // protocol break is not recast silently as a denial.
+                Err(error) => {
+                    tracing::warn!(%error, tool = tool_name, "malformed confirm answer — failing closed");
+                    tabit_protocol::templates::ConfirmAnswer::default()
+                }
+            }
         }
         // Dismissed — the gate fails closed.
         rig_agent::tool::interaction::InteractionOutcome::Dismissed => {

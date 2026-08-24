@@ -119,9 +119,9 @@ pub use hook::CompletionCall as CompletionCallEvent;
 pub use hook::{
     AgentHook, CompletionCallAction, CompletionResponse as CompletionResponseEvent, HookContext,
     HookSpec, HookStack, ModelSelection, ModelSelectionAction, ModelTurnAction, ModelTurnFinished,
-    ObservationAction, OnEvent, RequestPatch, RetryRequest, RunId, Scratchpad, StepEventKind,
-    StreamResponseFinish, TextDelta, ToolCall, ToolCallAction, ToolCallDelta, ToolCallFn,
-    ToolResultAction, ToolResultEvent, on,
+    ModelTurnFinishedFn, ObservationAction, OnEvent, RequestPatch, RetryRequest, RunId, Scratchpad,
+    StepEventKind, StreamResponseFinish, TextDelta, ToolCall, ToolCallAction, ToolCallDelta,
+    ToolCallFn, ToolResultAction, ToolResultEvent, on,
 };
 pub use model::ModelHandle;
 pub use prompt_request::streaming::{

@@ -157,7 +157,7 @@ fn checked_out_carries_its_suffix_seam_as_an_explicit_null() {
 }
 
 #[test]
-fn every_event_variant_survives_the_frame_envelope() {
+fn sampled_event_variants_survive_the_frame_envelope() {
     let frames = vec![
         EventFrame {
             stream: Some(StreamId::new("s1")),
@@ -210,6 +210,19 @@ fn every_event_variant_survives_the_frame_envelope() {
             stream: Some(StreamId::new("s1")),
             event: SessionEvent::RunFailed {
                 message: "boom".to_string(),
+            },
+        },
+        EventFrame {
+            stream: Some(StreamId::new("s1")),
+            event: SessionEvent::RunAborted {
+                output: "partial".to_string(),
+            },
+        },
+        EventFrame {
+            stream: Some(StreamId::new("s1")),
+            event: SessionEvent::CheckedOut {
+                entry_id: "0197".to_string(),
+                base_id: None,
             },
         },
         EventFrame {

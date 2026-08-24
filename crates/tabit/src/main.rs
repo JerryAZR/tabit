@@ -845,14 +845,14 @@ enum ContinueMiss {
     StartFresh,
 }
 
-/// Lock the armed-card queue (poisoning recovers — the queue is only a
-/// hint for the stdin reader).
 /// One open interaction card: its request id, widget type, and button
 /// labels, waiting for one stdin line. Several may be open at once
 /// (concurrent gates); answers apply FIFO.
 type ArmedCard = (String, String, Vec<String>);
 type ArmedSlot = std::sync::Arc<std::sync::Mutex<std::collections::VecDeque<ArmedCard>>>;
 
+/// Lock the armed-card queue (poisoning recovers — the queue is only a
+/// hint for the stdin reader).
 fn lock_armed(
     armed: &ArmedSlot,
 ) -> std::sync::MutexGuard<'_, std::collections::VecDeque<ArmedCard>> {
@@ -981,7 +981,6 @@ fn parse_answer(
     use tabit_protocol::templates;
     let line = line.trim();
     let answer = if ui_type == templates::ui::ASK {
-        templates::ConfirmAnswer::default(); // unreachable shape for ask
         templates::ConfirmAnswer {
             option: None,
             text: (!line.is_empty()).then(|| line.to_string()),

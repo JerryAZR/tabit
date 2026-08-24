@@ -25,12 +25,12 @@ fn gated_tool() -> DynamicTool {
     DynamicTool::new(
         "bash",
         "gated echo",
-        json!({"type":"object","properties":{"command":{"type":"string"}}}),
+        json!({"type":"object","properties":{"value":{"type":"string"}}}),
         |_ctx, args| {
             Box::pin(async move {
                 Ok(ToolOutput::text(format!(
                     "ran: {}",
-                    args.get("command").and_then(|v| v.as_str()).unwrap_or("?")
+                    args.get("value").and_then(|v| v.as_str()).unwrap_or("?")
                 )))
             })
         },
@@ -143,10 +143,15 @@ async fn a_permission_card_answered_allow_runs_the_tool() {
     .await;
 
     assert_eq!(interaction_count(&frames), 1, "one card for one gated call");
-    assert!(frames.iter().any(|f| matches!(
-        &f.event,
-        SessionEvent::ToolResult { name, .. } if name == "bash"
-    )));
+    let result = frames.iter().find_map(|f| match &f.event {
+        SessionEvent::ToolResult { name, content, .. } if name == "bash" => Some(content.clone()),
+        _ => None,
+    });
+    assert_eq!(
+        result.as_deref(),
+        Some("ran: x"),
+        "Allow ran the body — the result is the body's own output"
+    );
     assert_eq!(finished_outputs(&frames), vec!["after the command"]);
     std::fs::remove_dir_all(store.dir()).ok();
 }
@@ -176,14 +181,17 @@ async fn a_permission_denial_skips_the_tool_in_band() {
     .await;
 
     // The body never ran (its "ran: …" text is absent) — the model saw
-    // the in-band denial instead, and the run continued to the final turn.
-    let bodies_ran = frames.iter().any(|f| {
-        matches!(
-            &f.event,
-            SessionEvent::ToolResult { name, .. } if name == "bash"
-        )
+    // the in-band denial instead, and the run continued to the final
+    // turn.
+    let result = frames.iter().find_map(|f| match &f.event {
+        SessionEvent::ToolResult { name, content, .. } if name == "bash" => Some(content.clone()),
+        _ => None,
     });
-    assert!(bodies_ran, "the denial itself is the tool result event");
+    assert_eq!(
+        result.as_deref(),
+        Some("the user denied `bash`: never in tests — the call did not run"),
+        "Deny replaces the body's output with the in-band denial"
+    );
     assert_eq!(
         finished_outputs(&frames),
         vec!["understood, not running it"]
@@ -273,6 +281,17 @@ async fn an_ask_user_tool_body_round_trips_the_question_and_answer() {
     .await;
 
     assert_eq!(interaction_count(&frames), 1);
+    let result = frames.iter().find_map(|f| match &f.event {
+        SessionEvent::ToolResult { name, content, .. } if name == "ask_user" => {
+            Some(content.clone())
+        }
+        _ => None,
+    });
+    assert_eq!(
+        result.as_deref(),
+        Some("main.rs"),
+        "the answer routed back through the hub reached the tool body"
+    );
     assert_eq!(finished_outputs(&frames), vec!["the user said main.rs"]);
     std::fs::remove_dir_all(store.dir()).ok();
 }
@@ -386,6 +405,17 @@ async fn abort_with_a_card_open_closes_the_question_totally() {
             });
         }
         if matches!(frame.event, SessionEvent::RunAborted { .. }) {
+            // The racing answer, while the host still lives: the id is
+            // dead by the terminal, so the hub logs and drops it —
+            // nothing hangs, nothing errors. Sent before the close so
+            // it genuinely reaches the handler.
+            if let Some(id) = &stale_id {
+                link.send(SessionCommand::InteractionResponse {
+                    session: handle.info().session_id.clone(),
+                    id: id.clone(),
+                    payload: json!({"option": "Allow"}),
+                });
+            }
             handle.close_commands();
         }
         frames.push(frame);
@@ -397,14 +427,12 @@ async fn abort_with_a_card_open_closes_the_question_totally() {
             .any(|f| matches!(f.event, SessionEvent::RunAborted { .. })),
         "abort preempts the parked permission wait"
     );
-    // The racing answer is a total no-op: nothing hangs, nothing errors.
-    if let Some(id) = stale_id {
-        link.send(SessionCommand::InteractionResponse {
-            session: handle.info().session_id.clone(),
-            id,
-            payload: json!({"option": "Allow"}),
-        });
-    }
+    assert!(
+        !frames
+            .iter()
+            .any(|f| matches!(f.event, SessionEvent::Error { .. })),
+        "the racing answer is a total no-op — no error frame for it"
+    );
     std::fs::remove_dir_all(store.dir()).ok();
 }
 

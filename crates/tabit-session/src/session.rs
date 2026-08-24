@@ -195,10 +195,10 @@ impl SessionBuilder {
         self
     }
 
-    /// Mount a tool gate on every run (the assembly's
-    /// seam for dev-time/extension policy{EM} the permission gate).
-    /// The factory is called once per run with the session's hub; a
-    /// captured memory makes session-scoped state out of it.
+    /// Mount a hook stack on every run (the assembly's seam for
+    /// dev-time/extension policy — the permission gate). The stack is
+    /// a value: build it once, closures capture their own
+    /// session-scoped state, and it clones into each run.
     pub fn hooks(mut self, stack: rig_agent::agent::HookStack) -> Self {
         self.run_hooks = Some(stack);
         self
@@ -491,7 +491,7 @@ impl MailboxHandle {
     }
 
     /// The still-pending pairs, cleared (the checkout handler's
-    /// receive-time discard {EM} see [`Mailbox::clear`]); the caller
+    /// receive-time discard — see [`Mailbox::clear`]); the caller
     /// emits the `messages_discarded` notice.
     pub(crate) fn clear(&self) -> Vec<QueuedMessage> {
         self.mailbox.clear()
@@ -555,8 +555,8 @@ pub struct Session {
     tools: Vec<DynamicTool>,
     max_turns: usize,
     model_factory: ModelFactory,
-    /// The assembly's interaction-hook factory (see
-    /// [`SessionBuilder::tool_gate`]); mounted on every run.
+    /// The assembly's mounted hook stack (see
+    /// [`SessionBuilder::hooks`]); added to every run.
     run_hooks: Option<rig_agent::agent::HookStack>,
     agent: Arc<Agent>,
     recorder: Arc<SessionRecorder>,
@@ -581,7 +581,7 @@ pub struct Session {
     resumed: bool,
     /// The interaction hub, attached by the session worker when it takes
     /// ownership (the hub needs the worker's event channel, which does
-    /// exist until spawn). `None` for direct [`Session`] consumers:
+    /// not exist until spawn). `None` for direct [`Session`] consumers:
     /// the permission gate fails closed and ask-the-user tools report
     /// no frontend, in-band.
     interaction: Option<InteractionHub>,

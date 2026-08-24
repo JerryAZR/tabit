@@ -151,7 +151,7 @@ pub async fn ask_user(
     use rig_agent::tool::interaction::UserInteraction;
     let Some(interaction) = context.get::<std::sync::Arc<dyn UserInteraction>>() else {
         return Err(ToolExecutionError::other(
-            "this session has no interactive frontend — there is no user to ask; state that              and continue with what you have",
+            "this session has no interactive frontend — there is no user to ask; state that and continue with what you have",
         ));
     };
     // An ordinary template consumer: native:ask, payload opaque to the
@@ -165,9 +165,9 @@ pub async fn ask_user(
         {
             rig_agent::tool::interaction::InteractionOutcome::Answered(payload) => {
                 match serde_json::from_value::<tabit_protocol::templates::AskAnswer>(payload) {
-                    Ok(answer) => answer.text.unwrap_or_else(|| {
-                        "the user dismissed the question without answering".to_string()
-                    }),
+                    Ok(answer) => answer
+                        .text
+                        .unwrap_or_else(|| "the user submitted an empty answer".to_string()),
                     Err(_) => "the user's answer could not be read".to_string(),
                 }
             }

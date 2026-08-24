@@ -33,8 +33,8 @@
 //! roundtrip** is the boundary between a turn's tool calls and the next
 //! model call. Steering and the extension framework are future
 //! insertions at that boundary; tool-call policy (the dev-time
-//! permission gate) mounts through the tool-gate seam
-//! ([`SessionBuilder::tool_gate`]), assembled by the binary{EM} the
+//! permission gate) mounts through the hooks seam
+//! ([`SessionBuilder::hooks`]), assembled by the binary — the
 //! core carries no policy of its own.
 //!
 //! # Example
