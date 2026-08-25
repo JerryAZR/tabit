@@ -1416,7 +1416,9 @@ async fn checkout_rewinds_replays_and_branches_the_next_prompt() {
 #[tokio::test]
 async fn a_checkout_during_a_run_aborts_it_then_rewinds_at_the_beat() {
     let store = temp_store("endpoint-checkout-midrun-abort");
-    let session = Factory::new(vec![tool_turn("t1", "slow"), text_turn("branch answer")])
+    let factory = Factory::new(vec![tool_turn("t1", "slow"), text_turn("branch answer")]);
+    let session = factory
+        .clone()
         .into_builder(store.clone())
         .dynamic_tool(slow_tool())
         .create("C:/w")
@@ -1497,6 +1499,10 @@ async fn a_checkout_during_a_run_aborts_it_then_rewinds_at_the_beat() {
     frames.extend(drain(&mut handle).await);
     assert_eq!(finished_outputs(&frames), vec!["branch answer"]);
     assert_eq!(chain_users(&handle, &store), vec!["go", "branch"]);
+    // Abort reached the state machine as a drop, not a signal: the
+    // aborted run issued exactly its one model call — no "results
+    // came back, start the next turn" — and the branch run one more.
+    assert_eq!(factory.requests().len(), 2, "no model call after the abort");
     std::fs::remove_dir_all(store.dir()).ok();
 }
 

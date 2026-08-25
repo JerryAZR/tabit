@@ -28,8 +28,8 @@ stateDiagram-v2
     Draining --> Running : the batch joins the history —<br/>enter the inner loop at Preparing
     Running --> Idle : Done — emit run_finished
     Running --> Idle : Failed — emit run_failed
-    Running --> Idle : abort preempts (token race at any await)<br/>— emit run_aborted; the ABORT SITE discarded the<br/>at-abort-time queue (notice flushes at the epilogue)
-    Idle --> Idle : abort while idle — the abort site discards<br/>the queue (notice flushes at the idle beat;<br/>no-op when empty)
+    Running --> Idle : abort preempts (token race at any await)<br/>— emit run_aborted; the ABORT SITE cleared the<br/>at-abort-time queue (the discard notice is immediate)
+    Idle --> Idle : abort while idle — the abort site clears the<br/>queue (the notice is immediate; a no-op when empty)
     Idle --> Idle : checkout — the chain rewinds to entry_id;<br/>what was queued before the checkout is discarded<br/>(messages_discarded), then checked_out +<br/>a full replay pass
     Running --> Idle : checkout aborts the run mid-flight<br/>and executes at the beat — the pause point —<br/>before the next Draining
 ```
@@ -56,8 +56,18 @@ so nothing interleaves, and batching is exact.
   an internal error panics, which produces no terminal by design (the
   process dies; that is the loud failure);
 - the run never observes abort as a state — abort preempts it from
-  outside (the token races the in-flight awaits); the outer layer
-  records `Aborted` and discards the queue.
+  outside, and the mechanism matters: the machine's stream is polled
+  **only through** the outer layer's `select!`, which is biased on the
+  cancel token, so the first poll after cancellation returns the
+  cancelled branch without polling the machine again — the stream
+  future is dropped mid-step and **no further transition can fire**
+  (a token-aware tool that returns a cancelled result instead of
+  dying by drop changes nothing: its result lands in a future nobody
+  polls). Tools die by drop-safety; the interrupted roundtrip is
+  repaired by the outer layer's context re-derivation (synthesized
+  results go to the log and the next open — never back into this
+  run's model conversation). The outer layer records `Aborted` and
+  discards the queue.
 
 **Outer-layer responsibilities:** queue custody (the always-queue
 invariant — every message yields exactly one user event or steers the
