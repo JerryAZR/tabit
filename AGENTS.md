@@ -93,6 +93,17 @@ Current workspace layout:
     behavior gets new states or edges — never conditionals grown inside
     existing states, never driver-side control flow outside the
     machine.
+12. **Bugs are design questions.** Patching the symptom is step one,
+    never the deliverable: before calling a bug fixed, ask why it was
+    structurally possible — what design choice admitted it, what
+    constraint a workaround served and whether that constraint still
+    exists (constraints die quietly; verify, then delete the machinery
+    they justified), and whether one semantic is being re-assembled at
+    several sites that should share a single home. The death-door
+    checkout bug was three abort doors re-assembling
+    drop-all-pending-intent, split by a discard-staging workaround
+    built when the handler could not emit events — obsolete the day it
+    could, deleted only after the second bug.
 
 ## Environment / commands
 
