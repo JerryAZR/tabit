@@ -69,7 +69,7 @@ pub struct EventFrame {
 /// | `Message`             | starts a run           | steers (next turn boundary)          |
 /// | `Abort`               | no-op                  | aborts; discards queued messages     |
 /// | `InteractionResponse` | no-op (logged)         | routes the answer by id to the asker |
-/// | `Checkout`            | rewinds; replays       | parks; executes at the run's terminal |
+/// | `Checkout`            | rewinds; replays       | aborts the run; rewinds; replays     |
 ///
 /// Outcomes are events (`user_message` for acceptance, the run
 /// terminals for results); a command naming an unknown session yields
@@ -122,13 +122,15 @@ pub enum SessionCommand {
         id: String,
     },
     /// Move a session's active chain to an entry (any entry in the
-    /// session's file — an off-chain target is a branch switch). Idle:
-    /// executes immediately. A run in flight: **parks** and executes
-    /// at that run's terminal (the pause point) — never rejected,
-    /// never an implicit abort. Success emits `messages_discarded`
-    /// (only what was submitted before this command) then
+    /// session's file — an off-chain target is a branch switch). A run
+    /// in flight is **aborted first** (ruled 2026-08: the user
+    /// rewinding has declared the run's continuation obsolete —
+    /// checkout composes abort, it never waits on a run), then the
+    /// rewind executes at the session's pause point. Success emits
+    /// `messages_discarded` (only what was submitted before this
+    /// command), `run_aborted` (only if a run was in flight), then
     /// `checked_out` and a full replay pass; an unknown entry emits
-    /// `error { kind: checkout }` and changes nothing
+    /// `error { kind: checkout }` immediately and changes nothing
     /// (PROTOCOL.md v3 stage 2).
     Checkout {
         /// The target session id.

@@ -140,13 +140,14 @@ struct Worker {
 
 impl Worker {
     /// Abort is drop-all-pending-intent — one semantic at every door:
-    /// the command, [`SessionHost::abort_all`], and the frontend-death
-    /// watcher. The parked checkout goes first — silently (no
+    /// the command, [`SessionHost::abort_all`], the frontend-death
+    /// watcher, and checkout (which aborts its way to its own pause
+    /// point). The parked checkout goes first — silently (no
     /// `checked_out` follows; the abort is the marker, FRONTEND.md §7)
     /// and before the cancel, so a worker woken by the abort can never
     /// reach the beat and execute a rewind the abort meant to drop.
-    /// The cancel itself (the run's abort plus its mailbox clear,
-    /// staged for the flush) lives in the handle.
+    /// The cancel itself (the run's abort plus its immediate
+    /// `messages_discarded` notice) lives in the handle.
     fn abort(&self) {
         lock(&self.checkout_slot).take();
         self.abort_handle.abort();
@@ -179,29 +180,16 @@ impl Worker {
                     }
                     return;
                 }
-                // Discard-at-receive (ruled): the still-pending
-                // messages — the ones `message_queued` announced that
-                // nothing has drained — are cleared now, in wire
-                // order, so their fate is decided the moment the
-                // checkout is accepted. What already entered the
-                // conversation is history the rewind will drop.
-                let cleared = self.mailbox.clear();
-                if !cleared.is_empty()
-                    && let Some(events) = self.events.upgrade()
-                {
-                    let _ = events.send(EventFrame {
-                        stream: Some(self.stream.clone()),
-                        event: SessionEvent::MessagesDiscarded {
-                            messages: cleared
-                                .into_iter()
-                                .map(|queued| tabit_protocol::DiscardedMessage {
-                                    text: queued.text(),
-                                    id: queued.id,
-                                })
-                                .collect(),
-                        },
-                    });
-                }
+                // Checkout aborts first (ruled 2026-08: the user
+                // rewinding has declared the run's continuation
+                // obsolete — checkout composes abort, it does not wait
+                // on the run). The abort's clear IS the
+                // discard-at-receive: what was submitted before this
+                // command dies now, in wire order, its notice emitted
+                // immediately; what already entered the conversation
+                // is history the rewind drops. Messages submitted
+                // after queue normally for the rewound chain.
+                self.abort();
                 // Pending intent, not a queue: the newer checkout is
                 // the intent.
                 lock(&self.checkout_slot).replace(entry_id);
@@ -263,33 +251,6 @@ impl SessionCommandLink {
     pub fn replay(&self, session: &str) {
         let _ = self.commands.send(HostCommand::Replay(session.to_string()));
     }
-}
-
-/// Emit `messages_discarded` for pairs staged by an abort whose run
-/// conclusion never flushed them (idle aborts; aborts racing the
-/// wind-down). Mid-run aborts flush at their terminal first — the
-/// take makes double-flush harmless.
-fn flush_staged_discards(
-    mailbox: &MailboxHandle,
-    event_tx: &mpsc::UnboundedSender<EventFrame>,
-    stream: &StreamId,
-) {
-    let staged = mailbox.take_staged_discards();
-    if staged.is_empty() {
-        return;
-    }
-    let _ = event_tx.send(EventFrame {
-        stream: Some(stream.clone()),
-        event: SessionEvent::MessagesDiscarded {
-            messages: staged
-                .into_iter()
-                .map(|queued| tabit_protocol::DiscardedMessage {
-                    text: queued.text(),
-                    id: queued.id,
-                })
-                .collect(),
-        },
-    });
 }
 
 impl SessionHost {
@@ -742,10 +703,6 @@ fn spawn_worker(
         // pending thing; the beat at the loop top is the single drain
         // point.
         loop {
-            // Discards staged by an abort that no run conclusion
-            // flushed (abort while idle - there is no terminal coming;
-            // mid-run aborts flush at their run's conclusion first).
-            flush_staged_discards(&worker_mailbox, &event_tx, &stream);
             // The beat, in its ruled order: a parked pass answers
             // first (a read of the chain as it stands), then a parked
             // checkout (the rewind - the one session mutation - plus
@@ -760,22 +717,20 @@ fn spawn_worker(
                 execute_checkout(&mut session, &event_tx, &stream, entry_id);
             }
             if !worker_mailbox.is_empty() {
-                // The pause seam: a checkout parked while this pump
-                // drained a batch must rewind before a survivor starts
-                // the next batch on the old chain.
+                // The pump returns on an aborted outcome (a checkout
+                // aborts its way here), so anything parked behind a
+                // run executes at this beat before a later message
+                // starts the next batch on the old chain.
                 session
-                    .pump_with_pause(
-                        &mut |event| {
-                            // The receiver is gone only when the
-                            // frontend is; there is no one left to
-                            // tell.
-                            let _ = event_tx.send(EventFrame {
-                                stream: Some(stream.clone()),
-                                event,
-                            });
-                        },
-                        || lock(&checkout_slot).is_none(),
-                    )
+                    .pump(&mut |event| {
+                        // The receiver is gone only when the
+                        // frontend is; there is no one left to
+                        // tell.
+                        let _ = event_tx.send(EventFrame {
+                            stream: Some(stream.clone()),
+                            event,
+                        });
+                    })
                     .await;
                 continue;
             }
@@ -791,26 +746,21 @@ fn spawn_worker(
                         continue;
                     }
                     // Serve what the handler parked ahead of the
-                    // close, then wind down through the same flush the
-                    // idle beat uses - an abort's staged pairs must
-                    // not die with the worker (flag 6 - nothing
-                    // user-authored leaves silently, not even at
-                    // close).
+                    // close (the same beat order), then wind down.
                     if replay_due.swap(false, std::sync::atomic::Ordering::Acquire) {
                         emit_replay(&session, &event_tx, &stream);
                     }
                     if let Some(entry_id) = lock(&checkout_slot).take() {
                         execute_checkout(&mut session, &event_tx, &stream, entry_id);
                     }
-                    flush_staged_discards(&worker_mailbox, &event_tx, &stream);
                     break;
                 }
                 // The frontend is gone; the death watcher has already
                 // aborted any in-flight run, so the pump has returned.
                 _ = event_tx.closed() => break,
                 // The one wake: any pending thing (a message push, a
-                // parked checkout or pass, an abort) lands here and
-                // loops back to the beat.
+                // parked checkout or pass) lands here and loops back
+                // to the beat.
                 _ = worker_mailbox.work_signal().notified() => {}
             }
         }

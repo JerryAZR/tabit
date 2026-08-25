@@ -320,10 +320,6 @@ pub(crate) struct Mailbox {
     /// no use for tabit entry ids, so the pairing lives here; drain order
     /// is emission order, both FIFO).
     steered: std::sync::Arc<std::sync::Mutex<std::collections::VecDeque<String>>>,
-    /// Pairs discarded by a clear with no sink at hand (abort at command
-    /// time); the run's conclusion flushes them as one
-    /// `messages_discarded`.
-    discarded: std::sync::Arc<std::sync::Mutex<Vec<QueuedMessage>>>,
     /// True while a pump may drain at any instant (a run is live): the
     /// gate for submit-time `message_queued` notices. Idle sends never
     /// queue — they drain immediately, so `user_message` is the
@@ -421,20 +417,43 @@ impl Mailbox {
         lock(&self.queue).drain(..).collect()
     }
 
-    /// Abort semantics: discard everything queued now (nothing more may
-    /// drain), staging the pairs for a conclusion — or, when no run is
-    /// in flight, the worker's idle beat — to emit as
-    /// `messages_discarded`. The wake is what makes the idle case
-    /// visible: without a run there is no wind-down to ride.
-    pub(crate) fn abort_clear_notify(&self) {
+    /// The one clear-and-tell: discard everything queued and emit
+    /// `messages_discarded` immediately, through the same notice
+    /// channel `message_queued` rides (the abort site and the checkout
+    /// handler both — one emitter, one timing; a dead or absent channel
+    /// is a no-op, the frontend is gone or there never was one).
+    pub(crate) fn clear_noticing(&self) {
         let cleared = self.clear();
-        lock(&self.discarded).extend(cleared);
-        self.work.notify_one();
-    }
-
-    /// The staged discard pairs, taken (the run's conclusion flushes them).
-    pub(crate) fn take_staged_discards(&self) -> Vec<QueuedMessage> {
-        std::mem::take(&mut *lock(&self.discarded))
+        if cleared.is_empty() {
+            return;
+        }
+        let Some(sender) = self
+            .notices
+            .get()
+            .and_then(tokio::sync::mpsc::WeakUnboundedSender::upgrade)
+        else {
+            return;
+        };
+        // The stamp is attached with the channel; an unset stamp with a
+        // live channel is unreachable (one attach sets both).
+        #[allow(clippy::expect_used)]
+        let stream = self
+            .notice_stream
+            .get()
+            .expect("notice channel and stream attach together")
+            .clone();
+        let _ = sender.send(EventFrame {
+            stream: Some(stream),
+            event: SessionEvent::MessagesDiscarded {
+                messages: cleared
+                    .into_iter()
+                    .map(|queued| tabit_protocol::DiscardedMessage {
+                        text: queued.text(),
+                        id: queued.id,
+                    })
+                    .collect(),
+            },
+        });
     }
 
     /// Take the whole batch (idle entry: the worker's next run input).
@@ -490,19 +509,6 @@ impl MailboxHandle {
         self.mailbox.is_empty()
     }
 
-    /// The still-pending pairs, cleared (the checkout handler's
-    /// receive-time discard — see [`Mailbox::clear`]); the caller
-    /// emits the `messages_discarded` notice.
-    pub(crate) fn clear(&self) -> Vec<QueuedMessage> {
-        self.mailbox.clear()
-    }
-
-    /// The staged discard pairs, taken (a run conclusion, or the
-    /// worker's idle beat after an idle abort).
-    pub(crate) fn take_staged_discards(&self) -> Vec<QueuedMessage> {
-        self.mailbox.take_staged_discards()
-    }
-
     /// The work signal the resident worker waits on.
     pub(crate) fn work_signal(&self) -> &tokio::sync::Notify {
         self.mailbox.work_signal()
@@ -519,14 +525,13 @@ pub struct AbortHandle {
 
 impl AbortHandle {
     /// Abort the current run, if any, and discard what was queued at
-    /// abort time — one semantic, one site (PROTOCOL.md flag 6: the
-    /// pairs stage for the next conclusion or idle beat to emit
-    /// `messages_discarded`; messages arriving after this queue
-    /// normally and start the next run). Aborting while idle just
-    /// discards the queue.
+    /// abort time — one semantic, one site (PROTOCOL.md flag 6): the
+    /// discard notice is immediate, through the mailbox's notice
+    /// channel; messages arriving after this queue normally and start
+    /// the next run. Aborting while idle just discards the queue.
     pub fn abort(&self) {
         lock(&self.token).cancel();
-        self.mailbox.abort_clear_notify();
+        self.mailbox.clear_noticing();
     }
 }
 
@@ -622,23 +627,14 @@ impl Session {
     /// batch becomes one run's opening input; mid-run the engine drains
     /// the queue as steers at each turn boundary. A failed run emits
     /// [`SessionEvent::RunFailed`] and the next batch still runs; an
-    /// aborted run discards the remaining queue and stops. The drive
-    /// loop for frontends ([`crate::SessionHandle`]).
+    /// aborted run **stops the pump** — the discard already happened at
+    /// the abort site, and anything parked behind the run (a checkout)
+    /// must execute at the pause point before a later message runs, so
+    /// the pump returns and the caller's beat decides. A message that
+    /// arrives after the abort queues normally; the beat's next pump
+    /// serves it — same wire behavior, through the pause point. The
+    /// drive loop for frontends ([`crate::SessionHost`]'s workers).
     pub async fn pump(&mut self, on_event: &mut (dyn FnMut(SessionEvent) + Send)) -> RunSummary {
-        self.pump_with_pause(on_event, || true).await
-    }
-
-    /// [`Session::pump`] with a between-batches pause seam: when
-    /// `may_start_another` answers false after a batch, the pump
-    /// returns instead of draining again. The worker's use: a checkout
-    /// parked during a run must execute (and rewind the chain) before
-    /// any queued survivor starts the next batch on the old chain —
-    /// the caller re-checks its own parking lot and pumps again.
-    pub(crate) async fn pump_with_pause(
-        &mut self,
-        on_event: &mut (dyn FnMut(SessionEvent) + Send),
-        mut may_start_another: impl FnMut() -> bool,
-    ) -> RunSummary {
         // A pump may drain at any instant from here to its end: submit
         // acknowledgments switch to `message_queued` (PROTOCOL.md v2).
         self.mailbox.run_started();
@@ -660,7 +656,7 @@ impl Session {
             add_usage(&mut total.usage, &run.usage);
             total.events.extend(run.events);
             total.outcome = run.outcome;
-            if !may_start_another() {
+            if matches!(run.outcome, RunOutcome::Aborted) {
                 break;
             }
         }
@@ -933,10 +929,7 @@ impl Session {
     /// The run's epilogue: exactly one terminal (the fold already emitted
     /// `run_finished`; here `run_aborted` or `run_failed`), then the
     /// context re-derivation and durability checks that can follow a
-    /// terminal with a trailing `run_failed`, then the discard flush —
-    /// every message a clear took while the sink could not emit for it
-    /// (abort at command time, abort's own clear) comes back as one
-    /// `messages_discarded` after the terminal — then the retraction of
+    /// terminal with a trailing `run_failed`, then the retraction of
     /// any unanswered interaction — no asker survives the run (a racing
     /// response is then a total no-op).
     fn conclude(
@@ -957,11 +950,10 @@ impl Session {
                 output: output.clone(),
             });
             // The abort SITE (the command link, or the host's death
-            // watcher) already discarded the at-abort-time queue and
-            // staged the pairs — the flush below emits the notice
-            // after this terminal (PROTOCOL.md flag 6: one clear, at
-            // the abort site; messages arriving after the abort queue
-            // normally and start the next run).
+            // watcher, or a checkout) already discarded the
+            // at-abort-time queue and said so immediately (flag 6);
+            // messages arriving after the abort queue normally and
+            // start the next run.
             outcome = RunOutcome::Aborted;
         } else if let Some(failure) = failure {
             // The log stays the source of truth: re-derive the context,
@@ -991,26 +983,6 @@ impl Session {
                 message: persist_error,
             });
             outcome = RunOutcome::Failed;
-        }
-        // The discard flush: clears taken with no sink at hand (abort at
-        // command time) plus this conclusion's own abort clear, after the
-        // terminal — the discard notice rides the wind-down.
-        let discarded: Vec<tabit_protocol::DiscardedMessage> = self
-            .mailbox
-            .take_staged_discards()
-            .into_iter()
-            .map(|queued| {
-                let text = queued.text();
-                tabit_protocol::DiscardedMessage {
-                    id: queued.id,
-                    text,
-                }
-            })
-            .collect();
-        if !discarded.is_empty() {
-            sink.emit(SessionEvent::MessagesDiscarded {
-                messages: discarded,
-            });
         }
         if let Some(hub) = &self.interaction {
             hub.clear_pending();

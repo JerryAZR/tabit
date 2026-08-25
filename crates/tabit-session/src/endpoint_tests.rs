@@ -350,9 +350,10 @@ async fn abort_mid_run_discards_the_queue_and_ends_the_run() {
     }
     assert!(saw_aborted);
     assert_eq!(queued, 0, "the queued message was discarded");
-    // The discard came back as an event: the staged pair, after the
-    // terminal (the notice rides the wind-down), id matching the
-    // `message_queued` acknowledgment the submit earned mid-run.
+    // The discard came back as an event: immediately, from the abort
+    // site (before the run's terminal — the handler speaks the moment
+    // it clears), its id matching the `message_queued` acknowledgment
+    // the submit earned mid-run.
     let aborted_at = frames
         .iter()
         .position(|frame| matches!(frame.event, SessionEvent::RunAborted { .. }))
@@ -378,8 +379,8 @@ async fn abort_mid_run_discards_the_queue_and_ends_the_run() {
     );
     let (discard_at, pairs) = &discards[0];
     assert!(
-        *discard_at > aborted_at,
-        "the discard notice follows the terminal"
+        *discard_at < aborted_at,
+        "the discard notice is immediate — it precedes the terminal"
     );
     assert_eq!(pairs.len(), 1);
     assert_eq!(pairs[0].1, "queued behind");
@@ -1061,7 +1062,7 @@ async fn a_post_abort_message_survives_and_runs() {
     })
     .await;
     // Queued behind the run, then aborted — the pair is discarded at
-    // the site, the notice flushes after the terminal.
+    // the site, immediately (before the run's terminal).
     link.send(SessionCommand::Message {
         session: id.clone(),
         text: "queued behind".to_string(),
@@ -1069,20 +1070,20 @@ async fn a_post_abort_message_survives_and_runs() {
     link.send(SessionCommand::Abort {
         session: id.clone(),
     });
-    let aborted = until_event(&mut handle, |event| {
-        matches!(event, SessionEvent::RunAborted { .. })
-    })
-    .await;
-    assert_eq!(
-        aborted.stream.as_ref().map(StreamId::as_str),
-        Some(id.as_str())
-    );
     let discarded = until_event(&mut handle, |event| {
         matches!(event, SessionEvent::MessagesDiscarded { .. })
     })
     .await;
     assert_eq!(
         discarded.stream.as_ref().map(StreamId::as_str),
+        Some(id.as_str())
+    );
+    let aborted = until_event(&mut handle, |event| {
+        matches!(event, SessionEvent::RunAborted { .. })
+    })
+    .await;
+    assert_eq!(
+        aborted.stream.as_ref().map(StreamId::as_str),
         Some(id.as_str())
     );
 
@@ -1413,17 +1414,13 @@ async fn checkout_rewinds_replays_and_branches_the_next_prompt() {
 }
 
 #[tokio::test]
-async fn a_checkout_during_a_run_parks_until_the_terminal() {
-    let store = temp_store("endpoint-checkout-park");
-    let session = Factory::new(vec![
-        tool_turn("t1", "slow"),
-        text_turn("done"),
-        text_turn("branch answer"),
-    ])
-    .into_builder(store.clone())
-    .dynamic_tool(slow_tool())
-    .create("C:/w")
-    .expect("session");
+async fn a_checkout_during_a_run_aborts_it_then_rewinds_at_the_beat() {
+    let store = temp_store("endpoint-checkout-midrun-abort");
+    let session = Factory::new(vec![tool_turn("t1", "slow"), text_turn("branch answer")])
+        .into_builder(store.clone())
+        .dynamic_tool(slow_tool())
+        .create("C:/w")
+        .expect("session");
     let mut handle = SessionHost::spawn(session, Vec::new(), plain_wiring(&store));
     let id = boot_id(&handle);
 
@@ -1454,27 +1451,28 @@ async fn a_checkout_during_a_run_parks_until_the_terminal() {
         }
     }
 
-    // The run ran to its own terminal — the checkout never aborts —
-    // and the parked checkout executed at that pause point.
+    // Checkout composes abort (ruled 2026-08: the user rewinding has
+    // declared the run's continuation obsolete): the run dies, then
+    // the beat serves the parked rewind.
     let terminal_at = frames
         .iter()
         .position(|frame| terminal(&frame.event))
         .expect("the run's terminal");
-    assert!(matches!(
-        &frames[terminal_at].event,
-        SessionEvent::RunFinished { .. }
-    ));
+    assert!(
+        matches!(&frames[terminal_at].event, SessionEvent::RunAborted { .. }),
+        "the checkout aborted the run — it did not wait for it"
+    );
     let checked_at = frames
         .iter()
         .position(|frame| matches!(frame.event, SessionEvent::CheckedOut { .. }))
         .expect("the parked checkout executed");
     assert!(
         terminal_at < checked_at,
-        "the checkout waits for the terminal"
+        "the rewind executes at the beat after the abort"
     );
     // Discard-at-receive: the steer submitted before the checkout was
     // still pending when the checkout arrived, so it died there — the
-    // discard notice lands mid-run, ahead of the terminal, and it
+    // notice is immediate (before even the abort terminal), and it
     // never became history (no user_message for it, ever).
     let discard_at = frames
         .iter()
@@ -1493,10 +1491,11 @@ async fn a_checkout_during_a_run_parks_until_the_terminal() {
     assert_eq!(bracket_users(&frames, checked_at), vec!["go"]);
 
     // The session is fully alive after the pause point: the next
-    // prompt branches from the target.
+    // prompt branches from the target (the abort killed the run at
+    // its tool turn, so the script's remaining turn is the branch's).
     handle.message(&id, "branch");
     frames.extend(drain(&mut handle).await);
-    assert_eq!(finished_outputs(&frames), vec!["done", "branch answer"]);
+    assert_eq!(finished_outputs(&frames), vec!["branch answer"]);
     assert_eq!(chain_users(&handle, &store), vec!["go", "branch"]);
     std::fs::remove_dir_all(store.dir()).ok();
 }
@@ -1725,106 +1724,6 @@ async fn a_checkout_parked_at_the_close_executes_before_wind_down() {
         chain_users(&handle, &store),
         vec!["one"],
         "the rewind applied durably"
-    );
-    std::fs::remove_dir_all(store.dir()).ok();
-}
-
-/// The death door is an abort, and abort drops all pending intent
-/// (FRONTEND.md §7): a checkout parked mid-run must NOT execute its
-/// durable rewind after the frontend is gone. The wire-order anchor:
-/// a message queued after the checkout announces itself, proving the
-/// host loop routed past the checkout before the death.
-#[tokio::test]
-async fn frontend_death_drops_a_parked_checkout_instead_of_rewinding() {
-    let store = temp_store("endpoint-death-checkout");
-    let session = Factory::new(vec![
-        text_turn("first"),
-        tool_turn("c1", "slow"),
-        text_turn("never reached"),
-    ])
-    .into_builder(store.clone())
-    .dynamic_tool(slow_tool())
-    .create("C:/w")
-    .expect("session");
-    let mut handle = SessionHost::spawn(session, Vec::new(), plain_wiring(&store));
-    let id = boot_id(&handle);
-    let mut events = handle.take_events().expect("the event stream");
-
-    // One committed exchange to aim at, then a run with the slow tool
-    // in flight (the 300ms window is the parking lot).
-    handle.message(&id, "one");
-    let mut frames = Vec::new();
-    loop {
-        let frame = tokio::time::timeout(Duration::from_secs(5), events.recv())
-            .await
-            .expect("the first run must keep producing events")
-            .expect("the stream survives the first run");
-        let done = matches!(frame.event, SessionEvent::RunFinished { .. });
-        frames.push(frame);
-        if done {
-            break;
-        }
-    }
-    let target = entry_id_of(&frames, "one");
-
-    handle.message(&id, "two");
-    loop {
-        let frame = tokio::time::timeout(Duration::from_secs(5), events.recv())
-            .await
-            .expect("the second run must keep producing events")
-            .expect("the stream survives the second run's start");
-        let tool_arrived =
-            matches!(&frame.event, SessionEvent::ToolCall { name, .. } if name == "slow");
-        frames.push(frame);
-        if tool_arrived {
-            break;
-        }
-    }
-
-    // The checkout parks (the run is in flight — nothing executes
-    // yet); the trailing message's queued notice proves the host loop
-    // routed past it.
-    handle.checkout(&id, &target);
-    handle.message(&id, "three");
-    loop {
-        let frame = tokio::time::timeout(Duration::from_secs(5), events.recv())
-            .await
-            .expect("the queued notice must arrive")
-            .expect("the stream survives until the death");
-        let queued = matches!(
-            &frame.event,
-            SessionEvent::MessageQueued { text, .. } if text == "three"
-        );
-        frames.push(frame);
-        if queued {
-            break;
-        }
-    }
-    assert!(
-        !frames
-            .iter()
-            .any(|f| matches!(f.event, SessionEvent::CheckedOut { .. })),
-        "a parked checkout never executes mid-run"
-    );
-
-    // The frontend dies. The wind-down must drop the parked checkout
-    // with everything else — the durable log keeps both exchanges
-    // (executing the rewind would leave only "one").
-    drop(events);
-    tokio::time::timeout(Duration::from_secs(5), async {
-        loop {
-            if handle.closing_stats().is_some() {
-                return;
-            }
-            tokio::time::sleep(Duration::from_millis(25)).await;
-        }
-    })
-    .await
-    .expect("the worker winds down when the frontend dies");
-    assert_eq!(
-        chain_users(&handle, &store),
-        vec!["one", "two"],
-        "the death door dropped the rewind: the chain still holds both exchanges"
     );
     std::fs::remove_dir_all(store.dir()).ok();
 }

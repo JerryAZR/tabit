@@ -435,16 +435,14 @@ it changed:
   slot — a parked checkout could execute its durable rewind after the
   frontend died. `Worker::abort` (slot first, then the cancel — the
   order closes the woken-worker race) is now the only abort path;
-  pinned by `frontend_death_drops_a_parked_checkout_instead_of_
-  rewinding` (wire-order anchor: a message queued after the checkout
-  proves routing before the death; the log keeps both exchanges).
+  pinned at the command level by `an_abort_discards_a_pending_
+  checkout` and, since the abort-composition round below, end to end
+  by the mid-run checkout test.
 - The permission actor suite now decides by content, not by event
   presence: allow asserts the body's own output (`ran: x`), deny
   asserts the in-band denial verbatim, ask_user asserts the answer
   reached the tool. The racing answer in the abort test is sent while
   the host still lives (it reaches the handler; no error frame).
-- The pause-seam test submits its survivor at the first run's
-  terminal — the predicate's decision point is genuinely exercised.
 - `RunAborted` and `InteractionRequested` joined the events
   round-trip; the frame-envelope test renamed to the sample it is
   (`sampled_event_variants_survive_the_frame_envelope`) and gained
@@ -474,7 +472,18 @@ vocabulary, and the actor-level permission suite (allow, deny with
 reason, always-allow memory, reverse-order cards, abort and frontend
 death with a card open) runs through the value seam.
 
-## v3 stage 2 — checkout (2026-08)
+## v3 stage 2 — checkout (2026-08) — parking-era record, superseded in part
+
+The parking-era semantics this section pinned are superseded by the
+abort-composition round below: mid-run checkouts abort the run (the
+"executes strictly after the run's own terminal" test became the
+aborts-first test), the mailbox watermark trio was replaced by the
+before/after rule at receive, and the `pump_with_pause` seam is
+deleted. What still holds verbatim: the idle checkout, watermark-rule
+(before/after), collapse, unknown-entry, and GUI-fold coverage, and
+the command-path round's pins (discard at receive, abort drops a
+pending checkout, pass-before-batch beat order, the strong-sender
+discipline).
 
 - `execute_checkout` / `emit_replay` / the mailbox watermark trio
   (`arrival_watermark`, `discard_up_to`, the arrival `seq`) and the
@@ -528,4 +537,42 @@ death with a card open) runs through the value seam.
   the handler now holds a weak sender per the channel-lifetime
   discipline (the hub, the mailbox notices), pinned by every
   EOF-reading test hanging until it was fixed.
+
+## Abort composition (2026-08, owner ruling: checkout composes abort)
+
+The root-cause pass over the death-door bug: abort's staging
+machinery existed because the handler was once mute (no event
+channel); the checkout round gave it one and made immediate emission
+the pattern, but abort was never retrofitted. Deleted with this
+round:
+
+- **Staging is gone.** `Mailbox::clear_noticing` is the one
+  clear-and-tell (abort site and checkout handler both), emitted
+  through the same notice channel `message_queued` rides. The staged
+  vec, `take_staged_discards`, `flush_staged_discards`, and the
+  run-conclusion flush are deleted; the discard notice now precedes
+  the abort terminal on the wire (pinned by
+  `abort_mid_run_discards_the_queue_and_ends_the_run` and
+  `a_post_abort_message_survives_and_runs`).
+- **Checkout aborts first** (`a_checkout_during_a_run_aborts_it_
+  then_rewinds_at_the_beat`: discard at receive → `run_aborted` →
+  `checked_out` at the beat → the pass; the branch prompt then runs
+  on the rewound chain). The polite-parking ruling is superseded
+  (PROTOCOL.md stage 2); `pump_with_pause` and its session-level test
+  are deleted — the pump returns on an aborted outcome, so the beat
+  serves the rewind before any later batch. The pre-close survivor
+  test carries over unchanged (`a_checkout_parked_at_the_close_
+  executes_before_wind_down`).
+- **The death×checkout window is now the abort transit** — a
+  microscopic race between the beat serving the rewind and the death
+  door dropping it, both outcomes log-consistent (documented in
+  PROTOCOL.md's abort bullet). The dedicated death-door test from the
+  remediation round dissolved with the parking window it pinned; the
+  death door itself stays pinned by the card-open and multi-run
+  death tests.
+- Test hygiene: `temp_store` tags are unique per test again — a tag
+  collision (`endpoint-checkout-abort` ×2, `rewind-root` ×2
+  pre-existing) made two tests delete each other's session files
+  mid-run, surfacing as a mysterious one-off hang and a
+  file-not-found.
 

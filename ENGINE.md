@@ -31,7 +31,7 @@ stateDiagram-v2
     Running --> Idle : abort preempts (token race at any await)<br/>— emit run_aborted; the ABORT SITE discarded the<br/>at-abort-time queue (notice flushes at the epilogue)
     Idle --> Idle : abort while idle — the abort site discards<br/>the queue (notice flushes at the idle beat;<br/>no-op when empty)
     Idle --> Idle : checkout — the chain rewinds to entry_id;<br/>what was queued before the checkout is discarded<br/>(messages_discarded), then checked_out +<br/>a full replay pass
-    Running --> Idle : checkout parked mid-run executes at<br/>the terminal — this pause point — before the<br/>next Draining (no implicit abort)
+    Running --> Idle : checkout aborts the run mid-flight<br/>and executes at the beat — the pause point —<br/>before the next Draining
 ```
 
 The **Draining** step is the outer loop's single responsibility between
@@ -95,29 +95,33 @@ command path that serves this (owner-ruled through design review):
 - **Checkout, at receive:** validate the target against the
   module's own id truth (a resident set the recorder maintains— every
   id the append-only file has ever held, dropped branches included;
-  a bad target errors immediately, even mid-run) **— then clear the
-  still-pending messages** (their fate is decided the moment the
-  checkout is accepted— what `message_queued` announced and nothing
-  drained comes back as `messages_discarded` right away; what already
-  entered the conversation is history the rewind drops) **— then
-  park in the slot** (a slot, not a queue: a newer checkout replaces
-  an older— concurrently parked checkouts are one intent re-aimed,
+  a bad target errors immediately, even mid-run) **— then abort**
+  (ruled 2026-08: checkout composes abort, it does not wait on the
+  run — the clear inside the abort IS the discard-at-receive: what
+  `message_queued` announced and nothing drained comes back as
+  `messages_discarded` right away, and the cancel ends the run at
+  its next await point; what already entered the conversation is
+  history the rewind drops) **— then park in the slot**
+  (a slot, not a queue: a newer checkout replaces an older—
+  concurrently parked checkouts are one intent re-aimed,
   and the collapse is lossless since each receive-clear already took
   everything pending before it).
 - **Abort is drop-all-pending-intent:** cancel the run, clear the
-  messages, clear the checkout slot. A discarded pending checkout
-  emits nothing— no `checked_out` follows; the abort is the marker.
-- **The beat** (idle wake, loop-top after a pump, the between-batches
-  seam, the pre-close drain— one drain point in code): flush staged
-  discards, then serve a parked **pass** (a read of the chain as it
-  stands— reads and rewinds requested ahead of a message answer
-  ahead of it; a message's inclusion in a pass is decided solely by
-  whether it drained before the beat), then take the **checkout slot**
-  (rewind— an execution-time failure is a no-op plus an `error`
-  event; verification already caught the common failure at receive),
-  then batch messages. The between-batches seam (the pump yields when
-  the slot is set) keeps a post-checkout message from ever starting a
-  batch on the old chain.
+  messages (the notice is immediate, through the mailbox's notice
+  channel — one emitter with `message_queued`), clear the checkout
+  slot. A discarded pending checkout emits nothing— no `checked_out`
+  follows; the abort is the marker.
+- **The beat** (idle wake, loop-top after a pump, the pre-close
+  drain— one drain point in code): serve a parked **pass** (a read
+  of the chain as it stands— reads and rewinds requested ahead of a
+  message answer ahead of it; a message's inclusion in a pass is
+  decided solely by whether it drained before the beat), then take
+  the **checkout slot** (rewind— an execution-time failure is a
+  no-op plus an `error` event; verification already caught the
+  common failure at receive), then batch messages. The pump returns
+  on an aborted outcome, so a checkout that aborted a run always
+  executes at this beat before a later message starts a batch on the
+  old chain.
 - **Replay is a read that rides the beat only for emission
   coherence:** its pass shares the session's event stream with the
   run's frames, unmergeable without a per-session sequence number.

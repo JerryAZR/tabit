@@ -305,9 +305,10 @@ histories).
   `messages_discarded`, never both.
 - **`messages_discarded { messages: [{ id, text }] }` — clears
   salvage the queue.** Every mailbox clear emits the discarded pairs,
-  ids included — abort's single clear at command time (the discard
-  notice rides the actor's wind-down; flag 6), checkout's clear, and
-  any future clear site joins them by rule. Nothing user-authored leaves
+  ids included, immediately at the clear site — abort's clear and
+  checkout's clear ride the same notice channel as `message_queued`
+  (flag 6; one emitter, no staging), and any future clear site joins
+  them by rule. Nothing user-authored leaves
   the system silently. The frontend salvages them as drafts or
   pending input; the backend does not persist them — they were never
   part of the conversation, and undrained drafts die with the process
@@ -337,9 +338,10 @@ histories).
   *(Stage 2, 2026-08, superseded in part — see the v3 section: the
   command is session-addressed; the frontend update is full re-render
   (`base_id: null`), the suffix stream demoted to a reserved cheap
-  upgrade; mid-run checkouts park for the pause point instead of
-  erroring; and the mailbox clear is watermark-scoped — what was
-  submitted before the checkout — not everything.)*
+  upgrade; mid-run checkouts abort the run and execute at the pause
+  point instead of erroring; and the mailbox clear is
+  watermark-scoped — what was submitted before the checkout — not
+  everything.)*
   **Entry ids are born early enough to be useful.**
   Uniform rule: every context entry's id appears on the wire on the
   event that announces it, and turn-scoped events carry `turn_id` so
@@ -512,8 +514,8 @@ section above; the design they locked:
   path: full parse + repair) and streams a replay pass stamped with
   the id; idempotent (an already-open session re-replays on request).
   The pass itself is the acknowledgment. Failures (unknown id,
-  unreadable file) are `error { kind: session }` stamped with the
-  requested id.
+  unreadable file) are an unstamped, backend-level
+  `error { kind: session }` (the optional-stream ruling).
 - **The blocking matrix (ruled 2026-08: session lifecycle never waits
   on another session — different files, no pause point; only checkout
   needs one, and it is the same session's).** `new_session` and
@@ -589,15 +591,21 @@ section above; the design they locked:
   the session's file, on or off the active chain — an off-chain target
   is a branch switch; the next append branches from the target
   (`git checkout <hash>`, not "rewind n").
-- **Pause-point semantics — wait, never reject.** Idle: executes
-  immediately. A run in flight: the checkout parks in the session's
-  worker and executes at the run's terminal (the pause point), before
-  the next batch drains — no implicit abort. Abort-then-checkout
-  composes race-free for the same reason: abort acts at once, the
-  parked checkout executes at the pause point however the run ended.
-  `model` (stage 3) will join this class. This replaces the v2
-  "idle-only, frontend holds the command" convention: the backend
-  never errors on timing, so no frontend needs to time it.
+- **Pause-point semantics — abort, never wait (amended 2026-08,
+  owner ruling: checkout composes abort).** Idle: executes
+  immediately. A run in flight: the checkout **aborts it first** —
+  the user rewinding has declared the run's continuation obsolete —
+  then parks and executes at the worker's beat (the pause point),
+  before the next batch drains. Abort-then-checkout and
+  checkout-then-abort are the same composition read in opposite
+  orders. This replaces the v2 "idle-only, frontend holds the
+  command" convention: the backend never errors on timing, so no
+  frontend needs to time it. (The earlier ruling — park politely
+  until the run's terminal, never an implicit abort — is superseded
+  by this one; it was the reason the pump's between-batches pause
+  seam existed, and that seam is deleted with it: the pump returns
+  on an aborted outcome, so the beat serves the rewind before any
+  later message runs on the old chain.)
 - **The command path (ruled 2026-08, design review): the router only
   routes.** The host loop resolves a session address and forwards to
   the session's handler— module code at the dequeue point—and
@@ -610,22 +618,29 @@ section above; the design they locked:
 - **Checkout, at receive:** the handler validates the target against
   its resident id truth (the recorder's set— every id the
   append-only file has ever held; a bad target errors immediately,
-  even mid-run), **clears the still-pending messages**— exactly
-  the ones `message_queued` announced that nothing drained, handed
-  back as `messages_discarded` right away, so their fate is decided
-  the moment the checkout is accepted (what already entered the
-  conversation is history; the rewind drops it)— and parks in the
+  even mid-run), **aborts** (the abort's clear IS the
+  discard-at-receive: exactly the messages `message_queued` announced
+  that nothing drained, handed back as `messages_discarded` right
+  away, so their fate is decided the moment the checkout is accepted;
+  what already entered the conversation is history; the rewind drops
+  it)— and parks in the
   slot. A slot, not a queue: **concurrently parked checkouts collapse
   to the last** (A then B then C is one intent re-aimed at C— owner
   ruling: "why not just checkout C?"); superseded checkouts emit
   nothing. Checkouts spaced across idle beats (each finding the
   worker back in its wait) execute one by one.
-- **Abort is drop-all-pending-intent:** cancel, clear the messages,
-  and clear the checkout slot— a pending checkout dies with the
-  abort, emitting nothing (no `checked_out` follows; the abort is the
-  marker, like interaction requests dying with run terminals). The
-  composition is directional: abort-then-checkout works (the checkout
-  parks after the clear); checkout-then-abort drops the rewind.
+- **Abort is drop-all-pending-intent:** cancel, clear the messages
+  (the `messages_discarded` notice is immediate, emitted at the abort
+  site through the same channel `message_queued` rides — one
+  emitter, no staging), and clear the checkout slot— a pending
+  checkout dies with the abort, emitting nothing (no `checked_out`
+  follows; the abort is the marker, like interaction requests dying
+  with run terminals). The composition is directional:
+  abort-then-checkout works (the checkout parks after the clear);
+  checkout-then-abort drops the rewind. (Frontend death is this same
+  abort at the watcher's door; a checkout in its abort transit when
+  death lands races the beat serving it against the watcher dropping
+  it — a microscopic window, both outcomes log-consistent.)
 - **The beat** serves, in order: a parked replay pass (a read of the
   chain as it stands— reads never hold writes, messages keep
   flowing; a pass requested ahead of a message answers ahead of it,
@@ -640,13 +655,15 @@ section above; the design they locked:
   message is not in the new branch) and resolve visibly either way.
 - **Frontend update: full re-render (ruled 2026-08).** The success
   sequence is `messages_discarded` (only if anything was discarded) →
-  `checked_out { entry_id, base_id: null }` → the replay brackets
-  (`replay_started { total }` → the rewound chain as finalized events
-  → `replay_done`) — the same rebuild path as `open_session`'s switch
-  pass. `base_id` stays on the wire as the reserved suffix-upgrade
-  seam: `null` = drop everything and rebuild (today's only mode);
-  a future `Some(id)` = keep through `id`, apply the (smaller) pass —
-  the streamed-suffix optimization, adopted only if a measured
+  `run_aborted` (only if a run was in flight — the checkout aborted
+  it) → `checked_out { entry_id, base_id: null }` → the replay
+  brackets (`replay_started { total }` → the rewound chain as
+  finalized events → `replay_done`) — the same rebuild path as
+  `open_session`'s switch pass. `base_id` stays on the wire as the
+  reserved suffix-upgrade seam: `null` = drop everything and rebuild
+  (today's only mode); a future `Some(id)` = keep through `id`,
+  apply the (smaller) pass — the streamed-suffix optimization,
+  adopted only if a measured
   problem, reusing the same bracket shape.
 - **Residency note.** Verification reads a resident entry-id set —
   seeded at open from the file, inserted at every append, every id

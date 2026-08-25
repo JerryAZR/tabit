@@ -446,7 +446,7 @@ fn trailing_marker_directs_the_reopened_writer() {
 
 #[test]
 fn rewind_to_none_branches_from_the_root() {
-    let store = temp_store("rewind-root");
+    let store = temp_store("store-rewind-root");
     let mut writer = store.create("C:/work");
     writer
         .append(EntryKind::UserMessage {

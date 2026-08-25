@@ -196,18 +196,19 @@ yields `error { kind: session }` stamped with the id you named.
 |---|---|---|
 | `message { session, text }` | any time | idle: starts a run — acknowledged directly by `user_message` (milliseconds; no queued event — nothing waits); running: steers at the next turn boundary, acknowledged by `message_queued { id, text }`. |
 | `abort { session }` | any time | running: preempts (`run_aborted`); discards messages queued at abort time (`messages_discarded`, omitted when none) **and any pending checkout** (§7 — no `checked_out` follows it; reset pending-rewind UI here). Post-abort messages queue normally and start the next run. Idle: no-op. |
-| `new_session` | any time | creates a fresh session (same config, tools, and `--model`/`--max-turns` as the boot); `session_created { id, path }` follows, stamped with the new id. Nothing replays (it is empty). Never waits on any session — lifecycle writes no session's file. |
-| `open_session { id }` | any time | loads the session if needed and streams a replay pass stamped with the id — the pass is the acknowledgment. Idempotent: an open session re-replays. Unknown id or unreadable file → `error { kind: session }` stamped with the id. Creating, loading, and switching never wait on the session you are leaving; the one wait is the opened session's **own** in-flight run — its pass arrives at that run's terminal (its live streaming renders immediately; only committed history waits). |
-| `checkout { session, entry_id }` | any time | moves that session's chain to the entry (any entry in the file— an off-chain target is a branch switch); see §7. **On receipt:** the target is verified (unknown entry → immediate `error { kind: checkout }`, nothing else happens) and the still-pending messages are discarded (`messages_discarded`, handed back as drafts). The rewind itself: idle → applies immediately; running → parks and executes at the run's terminal (never aborts the run implicitly— compose abort-then-checkout to stop now). |
+| `new_session` | any time | creates a fresh session (same config, tools, and `--model`/`--max-turns` as the boot); `session_created { id, path, model }` follows, unstamped and backend-level (the payload carries the id). Nothing replays (it is empty). Never waits on any session — lifecycle writes no session's file. |
+| `open_session { id }` | any time | loads the session if needed and streams a replay pass stamped with the id — the pass is the acknowledgment. Idempotent: an open session re-replays. Unknown id or unreadable file → unstamped, backend-level `error { kind: session }`. Creating, loading, and switching never wait on the session you are leaving; the one wait is the opened session's **own** in-flight run — its pass arrives at that run's terminal (its live streaming renders immediately; only committed history waits). |
+| `checkout { session, entry_id }` | any time | moves that session's chain to the entry (any entry in the file— an off-chain target is a branch switch); see §7. **On receipt:** the target is verified (unknown entry → immediate `error { kind: checkout }`, nothing else happens) and the still-pending messages are discarded (`messages_discarded`, handed back as drafts). The rewind itself: a run in flight is aborted first (`run_aborted` — the user rewinding has declared its continuation obsolete), then the rewind applies at the session's pause point; idle → applies immediately. |
 | `model { provider, model, thinking_level? }` | idle only | the next run uses this selection; validates against the backend's config. |
-| `interaction_response { session, id, option?, text? }` | after an `interaction_request` | answers a pending request; at least one of option/text; see §8. |
+| `interaction_response { session, id, payload }` | after an `interaction_request` | answers a pending request; the payload is shaped by the asking template's convention (§8) — always an answer, never a dismissal. |
 
 `model` is idle-only by convention, not by error: a frontend derives
 idle/run state from events (§9) and holds the command until the
 terminal, or aborts first. `checkout` does not even need that care —
-the backend parks it at the pause point (§7), so sending it any time
-is safe; holding it client-side until the terminal is still polite
-(your user sees the rewind apply sooner).
+the backend aborts the run for it and applies the rewind at the pause
+point (§7), so sending it any time is safe; holding it client-side
+until the terminal is still polite (your user sees the rewind apply
+sooner).
 
 ## 6. Events
 
@@ -335,12 +336,14 @@ their own stamp — keep reading, attribute, and re-replay when you
 switch back.
 
 **Checkout.** Send `checkout { session, entry_id }` any time. Idle: it
-applies immediately. Running: it **parks** — the run finishes (or you
-`abort` it first; that composition is race-free) and the checkout
-executes at the run's terminal. The success sequence on that session's
-stream: `messages_discarded` (only if messages were pending — see the
-watermark rule below), then `checked_out { entry_id, base_id: null }`,
-then the replay brackets.
+applies immediately. Running: it **aborts the run first** (ruled
+2026-08 — the user rewinding has declared the run's continuation
+obsolete; there is no "stop now" composition to remember, the command
+is its own) and the checkout executes at the session's pause point.
+The success sequence on that session's stream: `messages_discarded`
+(only if messages were pending — see the watermark rule below), then
+`run_aborted` (only if a run was in flight), then
+`checked_out { entry_id, base_id: null }`, then the replay brackets.
 
 1. **Drop everything you hold for that session** (`base_id` is `null`
    — full re-render, the same rule as switching sessions) and apply
@@ -348,9 +351,9 @@ then the replay brackets.
    through its **tip** (the tip may sit past `entry_id` by
    repair/backfill entries, the same two honesty notes as startup
    replay).
-2. A run that was in flight streamed to you first — its events
-   preceded the terminal that released the checkout; the pass replaces
-   whatever of it entered history.
+2. The aborted run's own epilogue preceded the rewind: its terminal
+   (`run_aborted`) and synthesized interrupted tool results land
+   first, the pass replaces whatever of the run entered history.
 
 **What a checkout discards — the watermark rule.** A checkout
 discards exactly the messages **submitted before it** (each carries a

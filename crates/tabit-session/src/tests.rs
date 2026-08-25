@@ -1962,52 +1962,6 @@ async fn replay_re_emits_the_chain_with_live_ids_and_whole_texts() -> Result<(),
 }
 
 #[tokio::test]
-async fn a_paused_pump_yields_between_batches_and_keeps_the_queue() -> Result<(), SessionError> {
-    let store = temp_store("pump-pause");
-    let factory = Factory::new(vec![text_turn("a"), text_turn("b")]);
-    let mut session = factory.into_builder(store.clone()).create("C:/w")?;
-
-    // The worker's pause seam: a pump told not to start another batch
-    // returns after the current one, leaving later messages queued (a
-    // parked checkout must rewind before they run). The survivor is
-    // submitted at the first run's terminal — after the engine
-    // drained, before the predicate — so the queue is genuinely
-    // non-empty at the decision point: a pump that ignored the
-    // predicate would run it here and now.
-    let mailbox = session.mailbox_handle();
-    let mut survivor_submitted = false;
-    session.submit("one");
-    let first = session
-        .pump_with_pause(
-            &mut |event| {
-                if matches!(event, SessionEvent::RunFinished { .. }) && !survivor_submitted {
-                    survivor_submitted = true;
-                    mailbox.submit("two");
-                }
-            },
-            || false,
-        )
-        .await;
-    assert_eq!(first.output, "a", "the paused pump ran one batch only");
-    assert_eq!(
-        first
-            .events
-            .iter()
-            .filter(|event| matches!(event, SessionEvent::RunFinished { .. }))
-            .count(),
-        1,
-        "exactly one run in the paused pump's summary"
-    );
-
-    // The queued survivor still runs — the pause yields control, it
-    // does not consume the queue.
-    let second = session.pump(&mut |_| {}).await;
-    assert_eq!(second.output, "b");
-    std::fs::remove_dir_all(store.dir()).ok();
-    Ok(())
-}
-
-#[tokio::test]
 async fn resumed_sessions_probe_ids_from_earlier_processes() -> Result<(), SessionError> {
     let store = temp_store("entry-probe-resume");
     let factory = Factory::new(vec![text_turn("a"), text_turn("b"), text_turn("c")]);
