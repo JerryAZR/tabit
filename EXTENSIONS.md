@@ -211,9 +211,22 @@ Implications:
 
 - Prompt contributions hoist into the preamble at build;
   mid-conversation system messages stay unsupported by design.
-- Extensions load at process boot, like config — a mid-process
-  `new_session` does not pick up a newly installed extension;
-  reload is the one pickup path.
+- A NEW session builds from the current extension set: it has no
+  cache to miss, so picking up new tools/prompts at creation breaks
+  nothing. The seal protects BUILT sessions; creation is not a
+  change. (The new session's different preamble cold-misses the
+  shared prefix cache the boot session established — a first-turn
+  cost a cold session pays anyway.)
+- Changing an EXISTING session's prompt is the deliberate reload —
+  today the respawn path. The reserved refinement is an in-process
+  session reload (the backend rebuilds the chosen session's
+  build-time inputs at the beat; history and transcript untouched):
+  explicitly deferred until respawns actually annoy (PROTOCOL.md's
+  startup & recovery ruling). Its command-path home already exists
+  — the checkout pattern (session-addressed command, parked intent,
+  beat execution) minus the rewind, with an outcome event instead
+  of a replay pass; the mid-run question (abort-compose like
+  checkout, or idle-held like `model`) belongs to its ruling.
 - A session resumed after reload keeps its history and model (the
   log wins); only the preamble changes.
 
