@@ -43,6 +43,9 @@ tracing-futures = { workspace = true, features = ["futures-03"] }
 # `compile_error!` if the feature is requested there anyway.
 [target.'cfg(not(target_family = "wasm"))'.dependencies]
 rmcp = { workspace = true, optional = true, features = ["client"] }
+# The tool-body sidecar runtime (tool/mod.rs `tool_body_runtime`) is
+# native-only; scoping the feature keeps the wasm dependency tree honest.
+tokio = { workspace = true, features = ["rt-multi-thread"] }
 
 [dev-dependencies]
 anyhow = { workspace = true }

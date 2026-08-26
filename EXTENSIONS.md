@@ -147,6 +147,29 @@ unchanged. An extension tool that parks on an interaction is parked
 inside its own future: drop is the cancellation, exactly as for
 `bash`. Extension tools must be drop-safe under the same contract.
 
+## Tool bodies never stall the harness (2026-08)
+
+Ruled and shipped: tool bodies poll on an isolated sidecar runtime,
+never on the session's executor — harness responsiveness (abort,
+interaction routing, sibling chains) is structural and does not
+depend on tool-body behavior. Home: ENGINE.md's tool phase.
+
+Implications:
+
+- An extension tool may block or misbehave; it can leak a sidecar
+  task but cannot stall the session. Cancellation is token-and-
+  detach: the token is the ask, bounded bodies are the expectation,
+  process death is the backstop. There is no force-kill for native
+  in-process tools — write bodies that observe the token or bound
+  themselves.
+- Hooks are not isolated: hook closures are quick policy callables
+  polled on the session's executor. A blocking hook stalls the
+  session — this is contract, not oversight.
+- The substrate choice matters for the extension-format decision:
+  WASM guests are the only truly preemptible tool runtime (epoch
+  interruption gives a real grace-then-kill); native-loaded
+  extensions inherit the cooperative ceiling above.
+
 ## Background tools stay in-band (2026-08)
 
 Ruled (reserved — not in the first release): a tool that backgrounds

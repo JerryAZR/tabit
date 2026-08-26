@@ -405,6 +405,32 @@ parked gate occupies a concurrency slot; a two-pool split (gates
 exempt from the body budget) is the named refinement if card-heavy
 batches ever starve execution.
 
+**The execution substrate (ruled 2026-08; shipped).** Tool bodies
+never poll on the session's executor. Every body dispatches through
+the single `dispatch_tool` boundary onto a process-wide sidecar
+runtime, and the chain awaits the completion handle: harness
+responsiveness — abort preemption, interaction routing, sibling
+chains, event flow — is structural, never borrowed from tool-body
+behavior. A body may block (it occupies a sidecar worker) or hang
+(it leaks a sidecar task); the harness is unaffected either way.
+Cancellation follows three layers: **the token is the ask** — abort
+detaches the sidecar task (its result lands nowhere) and the body's
+token observation or timeout ends it; drop is no longer the
+mechanism, though a body dropped at task end still cleans up as a
+backstop; **bounded bodies are the expectation** — settlement
+already assumes every chain is bounded by its own timeout or the
+user; **process death is the backstop**. There is no safe
+thread-kill in Rust, so a grace period buys reporting, not
+preemption; a true outside-kill belongs to process or WASM-guest
+substrates (EXTENSIONS.md). Hooks are NOT isolated — they are quick
+policy callables polled on the session's executor by contract; the
+future guest runtime brings its own substrate. On wasm the sidecar
+does not exist and bodies poll inline, cooperatively. Neither
+reference isolates (pi awaits an uncooperative tool forever;
+opencode's interrupt waits for a blocked tool to yield) — a JS
+single thread forced their hand; Rust's real threads make the
+guarantee cheap.
+
 **The batch is a sealed unit once launched.** Launch (admission +
 the upfront model tool-call events) → run (chains) → settle (collect
 everything, surface and commit results in call order,

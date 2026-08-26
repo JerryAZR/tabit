@@ -644,21 +644,103 @@ pub(crate) async fn dispatch_tool(
     tool: Option<RegisteredTool>,
     context: &ToolContext,
 ) -> ToolDispatch {
-    let mut dispatch_context = context.for_dispatch();
-    let result = match tool {
+    let dispatch_context = context.for_dispatch();
+    let (result, context) = match tool {
         Some(tool) => {
             tracing::debug!(target: "rig", tool_name = name, "calling tool with args:\n{args}");
-            contain_tool_panic(name, tool.execute(args, &mut dispatch_context)).await
+            execute_tool_body(name, args, tool, dispatch_context).await
         }
-        None => ToolResult::failed(
-            ToolExecutionError::not_found(format!("no tool named `{name}` is registered"))
-                .with_model_feedback(format!("tool `{name}` not found")),
+        None => (
+            ToolResult::failed(
+                ToolExecutionError::not_found(format!("no tool named `{name}` is registered"))
+                    .with_model_feedback(format!("tool `{name}` not found")),
+            ),
+            dispatch_context,
         ),
     };
-    ToolDispatch {
-        result,
-        context: dispatch_context,
+    ToolDispatch { result, context }
+}
+
+/// Run one tool body to completion, returning its result and the
+/// per-dispatch context.
+///
+/// Native: the body polls on the process-wide sidecar runtime
+/// ([`tool_body_runtime`]), never on the caller's executor — harness
+/// responsiveness (abort preemption, interaction routing, sibling
+/// chains, event flow) must be structural, never borrowed from
+/// tool-body behavior. A body that blocks occupies a sidecar worker;
+/// a body that never returns leaks a sidecar task. Cancellation is
+/// token-and-detach: dropping the returned future detaches the
+/// sidecar task (its result lands nowhere), and the body's own token
+/// observation or timeout ends it — Rust has no safe thread-kill, so
+/// cooperative cleanup is the ceiling and process death the
+/// backstop. The body gets a full tokio context (timers, I/O).
+///
+/// Wasm has no threads: the body polls inline, cooperatively.
+#[cfg(not(target_family = "wasm"))]
+async fn execute_tool_body(
+    name: &str,
+    args: String,
+    tool: RegisteredTool,
+    mut context: ToolContext,
+) -> (ToolResult, ToolContext) {
+    use tracing::Instrument as _;
+
+    let body_name = name.to_owned();
+    let join = tool_body_runtime().spawn(async move {
+        let result = contain_tool_panic(&body_name, tool.execute(args, &mut context))
+            .instrument(tracing::Span::current())
+            .await;
+        (result, context)
+    });
+    match join.await {
+        Ok(pair) => pair,
+        // Unreachable by construction: `contain_tool_panic` turns body
+        // panics into error results and nothing aborts the sidecar
+        // task. A join failure means the runtime itself is going
+        // down — surface as a tool error rather than propagating.
+        Err(error) => (
+            ToolResult::failed(ToolExecutionError::other(format!(
+                "tool \"{name}\" execution task failed: {error}"
+            ))),
+            ToolContext::new(),
+        ),
     }
+}
+
+/// Wasm variant: no threads, so the body polls inline on the caller's
+/// executor (the cooperative model native had before the sidecar).
+#[cfg(target_family = "wasm")]
+async fn execute_tool_body(
+    name: &str,
+    args: String,
+    tool: RegisteredTool,
+    mut context: ToolContext,
+) -> (ToolResult, ToolContext) {
+    let result = contain_tool_panic(name, tool.execute(args, &mut context)).await;
+    (result, context)
+}
+
+/// The process-wide runtime tool bodies poll on (native only).
+/// Lazily created on the first tool dispatch; worker threads are
+/// named for crash reports. This is the harness-responsiveness
+/// guarantee's substrate: the session's own executor never polls a
+/// tool-body future, so a blocking or uncooperative body cannot
+/// stall abort, interaction routing, or sibling chains.
+#[cfg(not(target_family = "wasm"))]
+#[allow(clippy::panic)] // sanctioned crash: a process that cannot spawn its tool executor cannot run tools (AGENTS.md doctrine)
+fn tool_body_runtime() -> &'static tokio::runtime::Runtime {
+    static RUNTIME: std::sync::OnceLock<tokio::runtime::Runtime> = std::sync::OnceLock::new();
+    RUNTIME.get_or_init(|| {
+        match tokio::runtime::Builder::new_multi_thread()
+            .thread_name("rig-tool-body")
+            .enable_all()
+            .build()
+        {
+            Ok(runtime) => runtime,
+            Err(error) => panic!("the tool-body runtime must build: {error}"),
+        }
+    })
 }
 
 /// An ordered collection of tools.
@@ -1404,6 +1486,61 @@ mod tests {
                 .as_text()
                 .is_some_and(|message| message.starts_with("failed to parse tool arguments:")),
             "the parse failure should stay actionable for the model"
+        );
+    }
+
+    /// The harness-responsiveness pin (native): a body that blocks its
+    /// thread outright — no awaits, no token observation, the
+    /// worst-behaved tool the substrate must absorb — must not stall
+    /// the caller's executor. On a single-threaded runtime an inline
+    /// dispatch would freeze the heartbeat for the body's full
+    /// duration; the sidecar keeps it beating.
+    #[cfg(not(target_family = "wasm"))]
+    #[tokio::test(flavor = "current_thread")]
+    async fn a_blocking_tool_body_does_not_stall_the_callers_executor() {
+        let blocker = DynamicTool::new(
+            "blocker",
+            "blocks its thread, then answers",
+            serde_json::json!({"type": "object"}),
+            |_context, _args| {
+                Box::pin(async move {
+                    std::thread::sleep(Duration::from_millis(400));
+                    Ok(ToolOutput::text("done"))
+                })
+            },
+        );
+
+        let beats = Arc::new(AtomicUsize::new(0));
+        let heartbeat = {
+            let beats = beats.clone();
+            tokio::spawn(async move {
+                loop {
+                    tokio::time::sleep(Duration::from_millis(50)).await;
+                    beats.fetch_add(1, Ordering::SeqCst);
+                }
+            })
+        };
+
+        let dispatch = dispatch_tool(
+            "blocker",
+            "{}".to_string(),
+            Some(RegisteredTool::Static(Arc::new(blocker))),
+            &ToolContext::new(),
+        )
+        .await;
+        heartbeat.abort();
+
+        assert_eq!(
+            dispatch.result.output().as_text(),
+            Some("done"),
+            "the sidecar drove the blocking body to completion"
+        );
+        // 400ms of blocking against a heartbeat every 50ms: inline
+        // execution lands zero beats mid-flight, the sidecar lands
+        // ~8. The low bar keeps the pin robust on a slow CI.
+        assert!(
+            beats.load(Ordering::SeqCst) >= 2,
+            "the caller's executor kept running while the body blocked"
         );
     }
 

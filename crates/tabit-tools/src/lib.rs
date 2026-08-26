@@ -23,31 +23,42 @@
 //!
 //! # Cancellation contract (tool authors read this)
 //!
-//! Cancellation is cooperative and split by ownership — the engine owns
-//! *when* to stop, the tool owns *how* to stop what it started:
+//! Cancellation is cooperative and split by ownership — the engine
+//! owns *when* to stop, the tool owns *how* to stop what it started.
+//! Three layers:
 //!
-//! - **When**: the runtime cancels a per-invocation
-//!   [`CancellationToken`](tokio_util::sync::CancellationToken) on abort
-//!   (user stop, session shutdown). Tools receive it through
-//!   [`ToolContext`]; plain `#[rig_tool]` functions that never spawn OS
-//!   resources can ignore it.
-//! - **How**: a tool that starts OS-level work must make its [`Drop`]
-//!   leak nothing, *in addition to* watching the token. Cancellation is
-//!   implemented by dropping the tool's future; a drop-safe tool needs no
-//!   other abort handling. The `bash` tool is the reference
-//!   implementation: it spawns its child through `process-wrap`
-//!   (`JobObject` on Windows, a process-group leader on Unix) so an
-//!   explicit `kill()` — and the drop backstop — take down the whole
-//!   process tree, and it reads both output pipes up front so a dead
-//!   child's pipe never deadlocks the reader.
-//! - **Force, no grace**: kills go straight to force (no SIGTERM grace
-//!   period). Tool calls are user-cancellable and the model is told the
-//!   call was interrupted, so there is no cleanup contract with the
-//!   child.
-//! - **Report shape**: a cancelled call returns a clear "interrupted"
-//!   error/result (or is simply dropped mid-flight — the session layer
-//!   synthesizes the model-visible record); it never returns output that
-//!   looks like a completed run.
+//! - **The token is the ask**: the runtime cancels a per-invocation
+//!   [`CancellationToken`](tokio_util::sync::CancellationToken) on
+//!   abort (user stop, session shutdown). Tools receive it through
+//!   [`ToolContext`]; plain `#[rig_tool]` functions that never spawn
+//!   OS resources can ignore it. On native, bodies poll on an
+//!   isolated sidecar runtime (ENGINE.md's execution-substrate
+//!   ruling), so abort does not drop the body mid-poll — the token
+//!   is the mechanism, and a well-behaved body observes it. The
+//!   `bash` tool is the reference implementation: it spawns its
+//!   child through `process-wrap` (`JobObject` on Windows, a
+//!   process-group leader on Unix) so an explicit `kill()` — and
+//!   the drop backstop when the body ends — take down the whole
+//!   process tree, and it reads both output pipes up front so a
+//!   dead child's pipe never deadlocks the reader.
+//! - **Bounded bodies are the expectation**: every chain is bounded
+//!   by its own timeout or the user. A body that ignores the token
+//!   cannot be force-killed (Rust has no safe thread-kill) — it
+//!   leaks a sidecar task until it returns, never stalling the
+//!   harness; blocking the thread is safe but wasteful, so prefer
+//!   async in bodies. Bodies get a full tokio context on native.
+//! - **Process death is the backstop**: on session/process exit all
+//!   threads and children die with it.
+//! - **Force, no grace**: kills go straight to force (no SIGTERM
+//!   grace period). Tool calls are user-cancellable and the model
+//!   is told the call was interrupted, so there is no cleanup
+//!   contract with the child. Where a grace-then-kill is ever
+//!   wanted it lives at the resource-acquisition boundary (the
+//!   spawner), never in the engine.
+//! - **Report shape**: a cancelled call returns a clear
+//!   "interrupted" error/result (the session layer synthesizes the
+//!   model-visible record for calls that never answered); it never
+//!   returns output that looks like a completed run.
 
 use rig_agent::tool::{DynamicTool, ToolContext};
 use rig_core::tool::{IntoToolOutput, PortableTool, ToolExecutionError};

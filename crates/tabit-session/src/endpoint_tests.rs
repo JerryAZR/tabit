@@ -44,6 +44,23 @@ fn slow_tool() -> DynamicTool {
     )
 }
 
+/// A tool whose body blocks its thread outright — no awaits, no token
+/// observation, the worst-behaved body the execution substrate must
+/// absorb (rig-agent dispatches bodies onto a sidecar runtime).
+fn blocking_tool() -> DynamicTool {
+    DynamicTool::new(
+        "blocking",
+        "Blocks its thread for seconds",
+        json!({"type":"object","properties":{"value":{"type":"string"}}}),
+        |_ctx, _args| {
+            Box::pin(async move {
+                std::thread::sleep(Duration::from_secs(3));
+                Ok(ToolOutput::text("done"))
+            })
+        },
+    )
+}
+
 /// Whether the event ends a pump iteration (every run terminates with
 /// exactly one of these).
 fn terminal(event: &SessionEvent) -> bool {
@@ -396,6 +413,44 @@ async fn abort_mid_run_discards_the_queue_and_ends_the_run() {
         vec![(pairs[0].0.clone(), "queued behind".to_string())],
         "the discarded pair's id is the one message_queued announced"
     );
+    std::fs::remove_dir_all(store.dir()).ok();
+}
+
+/// The harness-responsiveness pin, end to end: abort must preempt
+/// promptly even while a tool body blocks its thread — the run's
+/// terminal may not wait on tool-body behavior.
+#[tokio::test]
+async fn abort_preempts_while_a_tool_body_blocks() {
+    let store = temp_store("endpoint-abort-blocking");
+    let session = Factory::new(vec![tool_turn("t1", "blocking"), text_turn("never")])
+        .into_builder(store.clone())
+        .dynamic_tool(blocking_tool())
+        .create("C:/w")
+        .expect("session");
+    let mut handle = SessionHost::spawn(session, Vec::new(), plain_wiring(&store));
+    let id = boot_id(&handle);
+
+    handle.message(&id, "run the tool");
+    let mut abort_sent_at = None;
+    let mut saw_aborted = false;
+    while let Some(frame) = handle.next_event().await {
+        if matches!(frame.event, SessionEvent::ToolCall { .. }) && abort_sent_at.is_none() {
+            // The body is provably mid-block: three seconds, no token
+            // observation.
+            abort_sent_at = Some(std::time::Instant::now());
+            handle.abort(&id);
+        }
+        if matches!(frame.event, SessionEvent::RunAborted { .. }) {
+            saw_aborted = true;
+            let elapsed = abort_sent_at.expect("abort sent").elapsed();
+            assert!(
+                elapsed < Duration::from_secs(2),
+                "abort preempted the blocking body in {elapsed:?} (the body blocks for 3s)"
+            );
+            handle.close_commands();
+        }
+    }
+    assert!(saw_aborted);
     std::fs::remove_dir_all(store.dir()).ok();
 }
 
