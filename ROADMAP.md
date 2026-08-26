@@ -139,8 +139,12 @@ The application-level conversation layer pi builds over its agent loop:
   (name, description), discovered from user-level and workspace-level
   directories, exposed as an on-demand listing (load-on-trigger, not
   always-inlined) in the same prompt module.
-- This is where mid-conversation system messages would tempt us — they are
-  unsupported by design; everything hoists into the preamble (AGENTS.md).
+- Prompt contributions from extensions (item 9) mount at session
+  build under the same byte-stability rule — changing the prompt is
+  the user's explicit reload decision, never a silent mid-run event
+  (EXTENSIONS.md). This is where mid-conversation system messages
+  would tempt us — they are unsupported by design; everything hoists
+  into the preamble (AGENTS.md).
 
 ### 4. Coding tools
 

@@ -189,6 +189,34 @@ Implications:
   invent a new frame or a late `tool_result` channel; the sealed
   batch is not negotiable.
 
+## Prompt changes are the user's cache decision (2026-08)
+
+Ruled: the system prompt stays byte-stable for a built session's
+life. An extension's prompt contribution mounts at session build —
+the same extension mount and seal as tools and hooks (ENGINE.md's
+hook-surface ruling) — and there is no per-turn rebuild. (pi
+rebuilds the prompt per turn so extension tool-appends take effect;
+tabit trades that away deliberately: a silent mid-run cache
+invalidation is a cost nobody chose.) No mid-run extension loading
+is planned.
+
+Changing the prompt is a deliberate user action with a known cost:
+install/configure the extension, let the current task finish
+(compact if wanted), then reload — the GUI respawns the backend,
+which re-reads config, auth, and sessions (PROTOCOL.md's startup &
+recovery ruling), and replay restores the transcript with the same
+ids. The cache miss lands where the user chose it.
+
+Implications:
+
+- Prompt contributions hoist into the preamble at build;
+  mid-conversation system messages stay unsupported by design.
+- Extensions load at process boot, like config — a mid-process
+  `new_session` does not pick up a newly installed extension;
+  reload is the one pickup path.
+- A session resumed after reload keeps its history and model (the
+  log wins); only the preamble changes.
+
 ## Frontends are leaf consumers (standing)
 
 Extensions target backend seams (hooks, tools, the interaction
