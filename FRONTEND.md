@@ -5,14 +5,14 @@ backend: what the backend provides, what it expects from you, and the
 invariants your UI can rely on. Read this document alone; you should
 not need the codebase to design a frontend.
 
-Wire shapes below are the **v3 contract**. v2 shipped (ids, replay);
-v3 is the multi-session host — session-addressed commands,
-`new_session`/`open_session` on the channel, the `"main"` stream alias
-retired (the stream stamp is the session id). v3 lands as one
-protocol-version bump with no compatibility period; always check the
-ack's `protocol_version`. The one-shot JSON listing edges —
-`--list --json`, `models --json` — are likewise v2-era; today `--list`
-prints a human table.
+Wire shapes below are the **v4 contract**. v3 was the multi-session
+host — session-addressed commands, `new_session`/`open_session` on the
+channel, the `"main"` stream alias retired (the stream stamp is the
+session id). v4 made backend-level frames **unstamped** (§6) and
+generalized interaction requests to `ui_type` + opaque payloads (§8).
+Each version landed as one protocol-version bump with no compatibility
+period; always check the ack's `protocol_version`. (`tabit --list`
+prints a human table — there is no JSON listing edge.)
 
 ## 1. Architecture: two processes, one pipe
 
@@ -75,31 +75,39 @@ arrive as events. Input tolerance: blank lines are skipped, a trailing
 size limit** — tool output can be large; buffer accordingly.
 
 ```
-→ {"type":"initialize","protocol_version":3,"replay":true}
-← {"type":"initialize_ack","protocol_version":3,"session_id":"019…","session_path":"…",
+→ {"type":"initialize","protocol_version":4,"replay":true}
+← {"type":"initialize_ack","protocol_version":4,"session_id":"019…","session_path":"…",
    "model":{"provider":"…","model":"…","thinking_level":null},"resumed":true}
-← {"type":"sessions_available","stream":"019…","sessions":[
+← {"type":"sessions_available","sessions":[
      {"id":"019…","created_at":"2026-08-22T…","entry_count":14}, … ]}
 ← {"type":"replay_started","stream":"019…","total":14}
 ← … the transcript as finalized events …
 ← {"type":"replay_done","stream":"019…"}
 → {"type":"message","session":"019…","text":"who are you?"}
-← {"type":"message_queued","stream":"019…","id":"019…","text":"who are you?"}
+← {"type":"user_message","stream":"019…","entry_id":"019…","text":"who are you?"}
 ← {"type":"turn_started","stream":"019…","id":"019…"}
 ← {"type":"text_delta","stream":"019…","turn_id":"019…","text":"I'm "}
 ← {"type":"text_delta","stream":"019…","turn_id":"019…","text":"tabit."}
 ← {"type":"turn_committed","stream":"019…","id":"019…"}
-← {"type":"run_finished","stream":"019…","output":"I'm tabit.","usage":{…},"durable":true}
+← {"type":"run_finished","stream":"019…","output":"I'm tabit.","usage":{…}}
 ```
+
+The example's send lands while the session is idle (after
+`replay_done`), so it is acknowledged directly by `user_message` — no
+`message_queued` exists for idle sends (§5); a send while a run is
+live is the queued case.
 
 Every event frame is **flat**: the event's `type` and payload fields
 sit next to `stream`. The `stream` stamp is the **session id** that
 produced the event (the boot session's id is in the ack) — the
 `"main"` alias is gone. Events from several open sessions interleave
-on the connection; attribute by stamp. **Route frames by stamp**
-(render the sessions you are viewing, ignore the rest) and **skip
-unknown event `type`s** — both are forward-compatibility paths
-(subagent streams and new events arrive later without a version bump).
+on the connection; attribute by stamp. A frame with **no `stream`** is
+a backend-level fact (§6 — the catalog, `session_created`, session
+errors): fold it connection-level, never session-attributed. **Route
+frames by stamp** (render the sessions you are viewing, ignore the
+rest) and **skip unknown event `type`s** — both are
+forward-compatibility paths (subagent streams and new events arrive
+later without a version bump).
 
 **On unknown events and streams: report, don't swallow.** Skipping is
 the wire rule (never fail, never render); silently *discarding* is a
@@ -165,8 +173,10 @@ value, switch on `type` when recognized) and log the rest.
 - A **run** (outer loop) starts when a message is drained while idle:
    model turn → maybe tool calls → tool results → next model turn …
    until a turn with no tool calls. `run_finished` / `run_aborted` /
-   `run_failed` end a run; **exactly one terminal per run** (the
-   durability case is folded into the terminal — §6).
+   `run_failed` end a run; **exactly one terminal per run** (the one
+   exception today: a persistence failure *after* completion adds a
+   trailing `run_failed` behind `run_finished` — §6; the ruled
+   `durable` fold removes it and is not yet on the wire).
 - A **message sent while a run is live is a steer**: acknowledged
    immediately (`message_queued`), enters the conversation at the next
    turn boundary (`user_message`). Never lost — the only exits from
@@ -174,9 +184,10 @@ value, switch on `type` when recognized) and log the rest.
    pending**: after `run_failed` the mailbox keeps draining; a queued
    message starts the next run.
 - **abort** preempts the run at the next await and discards what was
-   queued **at abort time** (order: `run_aborted`, then
-   `messages_discarded`). Messages arriving *after* the abort are not
-   killed by it — they queue normally and start the next run.
+   queued **at abort time** — the `messages_discarded` notice is
+   immediate, emitted at the abort site **ahead of the run's
+   `run_aborted` terminal**. Messages arriving *after* the abort are
+   not killed by it — they queue normally and start the next run.
 - The session is an **append-only tree** of entries. You render the
    **active chain**; `checkout` moves the leaf to any entry in the
    tree — including one on an abandoned branch — and the next append
@@ -190,7 +201,9 @@ All commands are total — there is no rejection. Outcomes are events.
 Session-scoped commands **always name their session** (the boot id is
 in the ack; sessions you learn from `sessions_available`/
 `session_created`). A command naming an unknown or unloaded session
-yields `error { kind: session }` stamped with the id you named.
+yields `error { kind: session }` — an **unstamped, backend-level**
+frame (the routing failure belongs to no session; the message names
+the id — §6).
 
 | command | when | effect |
 |---|---|---|
@@ -199,21 +212,24 @@ yields `error { kind: session }` stamped with the id you named.
 | `new_session` | any time | creates a fresh session (same config, tools, and `--model`/`--max-turns` as the boot); `session_created { id, path, model }` follows, unstamped and backend-level (the payload carries the id). Nothing replays (it is empty). Never waits on any session — lifecycle writes no session's file. |
 | `open_session { id }` | any time | loads the session if needed and streams a replay pass stamped with the id — the pass is the acknowledgment. Idempotent: an open session re-replays. Unknown id or unreadable file → unstamped, backend-level `error { kind: session }`. Creating, loading, and switching never wait on the session you are leaving; the one wait is the opened session's **own** in-flight run — its pass arrives at that run's terminal (its live streaming renders immediately; only committed history waits). |
 | `checkout { session, entry_id }` | any time | moves that session's chain to the entry (any entry in the file— an off-chain target is a branch switch); see §7. **On receipt:** the target is verified (unknown entry → immediate `error { kind: checkout }`, nothing else happens) and the still-pending messages are discarded (`messages_discarded`, handed back as drafts). The rewind itself: a run in flight is aborted first (`run_aborted` — the user rewinding has declared its continuation obsolete), then the rewind applies at the session's pause point; idle → applies immediately. |
-| `model { provider, model, thinking_level? }` | idle only | the next run uses this selection; validates against the backend's config. |
+| `model { provider, model, thinking_level? }` | reserved (stage 3) | not on the wire yet — no such command exists today. The ruled shape (PROTOCOL.md v3 stage 3): validates against config, applies from the next run, outcome `model_changed` / `error { kind: model }`. |
 | `interaction_response { session, id, payload }` | after an `interaction_request` | answers a pending request; the payload is shaped by the asking template's convention (§8) — always an answer, never a dismissal. |
 
-`model` is idle-only by convention, not by error: a frontend derives
-idle/run state from events (§9) and holds the command until the
-terminal, or aborts first. `checkout` does not even need that care —
-the backend aborts the run for it and applies the rewind at the pause
-point (§7), so sending it any time is safe; holding it client-side
-until the terminal is still polite (your user sees the rewind apply
-sooner).
+The reserved `model` command will be idle-only by convention, not by
+error: a frontend derives idle/run state from events (§9) and holds
+the command until the terminal, or aborts first. `checkout` does not
+even need that care — the backend aborts the run for it and applies
+the rewind at the pause point (§7), so sending it any time is safe;
+holding it client-side until the terminal is still polite (your user
+sees the rewind apply sooner).
 
 ## 6. Events
 
 `initialize_ack`, `initialize_rejected`, and `protocol_error` are
-unstamped control frames; everything else is a stamped event.
+unstamped control frames; everything else is an event — stamped when
+a session produced it, **unstamped when the backend did** (the
+catalog, `session_created`, and every `kind: session` error — fold
+those connection-level).
 
 **Queueing and transcript**
 
@@ -221,12 +237,12 @@ unstamped control frames; everything else is a stamped event.
 |---|---|---|
 | `message_queued` | `id`, `text` | a `message` accepted while a run is live (a steer that waits). `id` is the message's entry id, minted here. Idle sends never produce this event. |
 | `user_message` | `entry_id`, `text` | the message drains into a run (opening batch or steer boundary) and becomes history. Consecutive `user_message`s = an opening batch. |
-| `messages_discarded` | `messages: [{ id, text }]` | a clear site: abort (what was queued at abort time; the event arrives with the run's wind-down) or checkout (what was submitted before the checkout; §7, before `checked_out`). Omitted when nothing was pending. Salvage as drafts; the backend keeps no copy. |
+| `messages_discarded` | `messages: [{ id, text }]` | a clear site: abort (what was queued at abort time — the notice is immediate, at the abort site, ahead of `run_aborted`) or checkout (what was submitted before the checkout; §7, ahead of `run_aborted` and `checked_out`). Omitted when nothing was pending. Salvage as drafts; the backend keeps no copy. |
 | `turn_started` | `id` | a model turn begins; `id` is the turn's entry id, minted here and reused at commit. |
 | `text_delta` | `turn_id`, `text` | assistant text; appends within the turn. Full-text exactly once in replay. |
 | `reasoning_delta` | `turn_id`, `id`, `reasoning` | model reasoning; `id` correlates blocks within the turn (several may interleave; same-id deltas append). Full-text once per block id in replay. |
 | `tool_call` | `turn_id`, `name`, `call_id`, `internal_call_id`, `arguments` | the model issued a complete tool call, before execution. `arguments` is the raw JSON string, or `null` when unparseable. |
-| `interaction_request` | `id`, `title`, `body`, `options`, `free_text` | a tool gate (permission) or a tool body asks the user; several may be open at once. Answer with `interaction_response`; a run terminal closes the unanswered (§8). |
+| `interaction_request` | `id`, `ui_type`, `payload` | a tool gate (permission) or a tool body asks the user; `ui_type` names the widget and `payload` is its cargo (§8 templates own the shapes). Several may be open at once. Answer with `interaction_response`; a run terminal closes the unanswered (§8). |
 | `tool_result` | `turn_id`, `entry_id`, `name`, `internal_call_id`, `content`, `status` | one tool body finished; its result committed. `content` is exactly the text the model saw — already capped at the source, failure text included; render it verbatim. `status` is structure only: `success` or `failed { exit_code? }`; the detail is in `content`, not `status`. |
 | `completion_call` | `turn_id`, `input_tokens`, `output_tokens` | one model request finished; usage is final for it. |
 | `turn_truncated` | `turn_id` | the committed turn ended truncated: the provider cut generation at its output limit (`finish_reason: length`). Informational, never a failure — the run continues exactly as usual (steers drain into the next turn; the run may end normally). Show it as a note; a steer is how the user asks the model to go on. |
@@ -252,18 +268,18 @@ dead structure ahead of the data.
 
 | event | payload | meaning |
 |---|---|---|
-| `run_finished` | `output`, `usage`, `durable` | the run completed. `output` is the **final turn's** text (your accumulated deltas are authoritative for everything else); `usage` is aggregated across the whole run (the per-request figures are the `completion_call`s). `durable: false` means persistence failed after completion — the conversation continues but the tail is not on disk; surface this. |
+| `run_finished` | `output`, `usage` | the run completed. `output` is the **final turn's** text (your accumulated deltas are authoritative for everything else); `usage` is aggregated across the whole run (the per-request figures are the `completion_call`s). (A ruled `durable` field — §6's write-behind note — is not on the wire.) |
 | `run_aborted` | `output` | aborted. `output` is the final response's text **if it had arrived** — empty for a mid-stream abort. Do not rely on it: the uncommitted turn's text lives only in the deltas you accumulated. |
-| `run_failed` | `kind`, `message` | `kind` ∈ `provider` (stream/transport errors), `budget` (max turns), `stopped` (engine stopped early: hook terminate, empty conversation, malformed-tool-call retry exhaustion). Pending messages are not cleared — they drain into the next run. |
+| `run_failed` | `message` | the failure in display form. Pending messages are not cleared — they drain into the next run. (A ruled `kind` taxonomy — `provider` / `budget` / `stopped` — is not on the wire yet; branch on nothing but the message today.) |
 
 **Session navigation and configuration**
 
 | event | payload | when |
 |---|---|---|
-| `sessions_available` | `sessions: [{ id, created_at, entry_count }]` | once, right after the ack's startup notes: every stored session, newest first. Minimal by ruling — a plain object, fields grow when needed. A brand-new session has no file yet and is absent until it records. |
-| `session_created` | `id`, `path` | a `new_session` succeeded; stamped with the new id (its selection notes, if any, follow on the same stream). |
+| `sessions_available` | `sessions: [{ id, created_at, entry_count }]` | once, right after the ack's startup notes: every stored session, newest first. **Unstamped, backend-level.** Minimal by ruling — a plain object, fields grow when needed. A brand-new session has no file yet and is absent until it records. |
+| `session_created` | `id`, `path`, `model` | a `new_session` succeeded — **unstamped, backend-level** (the payload carries the id; no faked stamp). Its selection notes, if any, follow stamped with the new session's id. Nothing replays (the session is empty). |
 | `checked_out` | `entry_id`, `base_id` | checkout succeeded. `base_id` is `null` today: drop everything and rebuild from the replay pass that follows. A non-null `base_id` is the reserved suffix mode (keep through `base_id`, apply the pass) — treat any non-null value as "rebuild from the pass" and you stay correct. |
-| `model_changed` | `entry_id`, `provider`, `model`, `thinking_level` | a `model` command (or startup) set the selection for the next run; it is a chain entry and a valid anchor. |
+| `model_changed` | `provider`, `model`, `thinking_level` | replay of a model-change entry (the startup resolution records one; live changes arrive when the `model` command ships, stage 3). The event carries **no entry id today** — model-change entries are valid checkout targets in the file, but the wire gives you no id to name them with; the stage-3 work closes the gap. |
 
 **Errors: one generic carrier with a `kind`.** Anything that goes
 wrong outside a run terminal rides `error { kind, message, … }`. A
@@ -274,23 +290,22 @@ report (§3.5); you never mine it for user-facing meaning.
 
 | kind | extra fields | meaning |
 |---|---|---|
-| `model` | — | model configuration failed or degraded: a `model` command failed validation, or a startup preference (stale `default_model`, a resumed session's model gone) fell back. The fallback case is a warning — the session continues, with the fallback named in the message. |
-| `session` | — | a session command failed: `open_session` named an unknown id or an unreadable file, a command targeted an unknown session, `new_session` could not build, or the startup listing failed. Stamped with the stream it concerns (the targeted id; the boot stream for untargeted outcomes). |
-| `checkout` | — | the checkout target does not exist or is not a valid cut point (§7). |
-| `persist_degraded` | `pending` | a log flush failed (disk full?); `pending` entries are buffered in memory and retried on every commit. Nag the user about disk space. |
-| `persist_recovered` | — | the buffer drained; everything is on disk again. |
+| `model` | — | model configuration degraded: a startup preference (stale `default_model`, a resumed session's model gone) fell back. A warning — the session continues, with the fallback named in the message. (`model`-command failures join this kind when the command ships, stage 3.) |
+| `session` | — | a session command failed: `open_session` named an unknown id or an unreadable file, a command targeted an unknown session, `new_session` could not build, or the startup listing failed. **Unstamped, backend-level** — every `session`-kind error is (the failure belongs to no session; the message names the id). |
+| `checkout` | — | the checkout target does not exist in the session (§7). Stamped — it names an entry inside a real session. |
+| `persist_degraded` | `pending` | **reserved** — the write-behind producer is not shipped (see below); no `persist_*` error is emitted today. The vocabulary is on the wire contract so frontends can pre-build handling. |
+| `persist_recovered` | — | **reserved** — same. |
 
-**The prompt barrier.** A turn does not start until its opening user
-message is durable. If the flush fails at drain time, the batch is not
-held — it is discarded, `messages_discarded` returns the texts as
-drafts, and an `error { kind: persist_degraded }` explains why. No
-turn ever runs on input that exists only in memory.
-
-`run_finished { durable: false }` means the buffer was non-empty at
-the terminal. The conversation continues from memory regardless; a
-restart replays disk truth — buffered entries that never flushed are
-lost on a force stop (the accepted limit). A degraded session heals
-itself the moment the disk accepts writes again.
+**Write-behind persistence (reserved).** The ruled design
+(PROTOCOL.md flag 8) — memory-first commits with a flush-retry buffer,
+the prompt barrier (a turn never starts on input that exists only in
+memory; a failed flush at drain discards the batch back as drafts
+with a `persist_degraded` error), `run_finished { durable }`, and the
+persist kinds above — is **not on the wire**. Persistence is
+synchronous today: a write failure fails the run, and after a
+completed run it emits a trailing `run_failed` behind the
+`run_finished` terminal (§4's one exception). Surface that error;
+nothing is buffered for retry.
 
 **Replay** (brackets; content is finalized events from the catalog
 above — full-text deltas, same ids as live)
@@ -351,9 +366,12 @@ The success sequence on that session's stream: `messages_discarded`
    through its **tip** (the tip may sit past `entry_id` by
    repair/backfill entries, the same two honesty notes as startup
    replay).
-2. The aborted run's own epilogue preceded the rewind: its terminal
-   (`run_aborted`) and synthesized interrupted tool results land
-   first, the pass replaces whatever of the run entered history.
+2. The aborted run's own epilogue preceded the rewind: its
+   `run_aborted` terminal lands first. Interrupted tool calls are
+   repaired log-side (synthesized results close the dangling
+   roundtrip) — you meet them **inside the replay pass**, not as
+   events before it; the pass replaces whatever of the run entered
+   history.
 
 **What a checkout discards — the watermark rule.** A checkout
 discards exactly the messages **submitted before it** (each carries a
@@ -406,7 +424,8 @@ together — you cannot cut in-between (partial writes from crashes or
 aborts are repaired with synthesized results, never left half-open).
 Checkout targets — and `base_id` values — are therefore
 `user_message` entries, committed assistant turns, and `model_changed`
-entries.
+entries (though the wire carries no id for model-change entries yet —
+§6 — so today you can only name the first two).
 
 **Synthesized results tell the truth in their body.** A repaired tool
 result's content is the sentence "tool execution was interrupted
@@ -417,35 +436,44 @@ wire marker.
 
 ## 8. Interaction requests
 
-**Generalization ruled (2026-08; lands with the interaction
-round):** the typed card below becomes the `native:confirm`
-template—the wire moves to `interaction_request { id, ui_type,
-payload }` / `interaction_response { session, id, payload }`
-with opaque payloads, and this section is rewritten on landing
-(PROTOCOL.md's interaction-generalization ruling is the design).
-Frontends render `native:*` types; unknown `ui_type`s get the
-report-don't-swallow treatment—a notice, never a fabricated
-answer. The contract below is the shipped shape until then.
-
-The blocking pop-up shape, generic over permission prompts and
-ask-the-user tools (one primitive, two askers — permission fires at
-the tool's gate, ask-the-user tools ask from their bodies, and a tool
-may ask repeatedly). Concurrent chains may hold several open requests
-at once; answer them in any order.
+One generic ask, v4-shipped: any backend asker — a tool gate
+(permission), a tool body (ask-the-user tools), a hook — questions
+the user through one frame pair, routed by id, payloads opaque to the
+core (the core's interaction vocabulary is routing only; PROTOCOL.md's
+interaction-generalization ruling is the design record). Concurrent
+chains may hold several open requests at once; answer them in any
+order.
 
 ```
-← {"type":"interaction_request","stream":"019…","id":"019…","title":"Run command?",
-   "body":"rm -rf target","options":[{"label":"Allow"},{"label":"Always allow"},
-   {"label":"Deny"}],"free_text":true}
-→ {"type":"interaction_response","session":"019…","id":"019…","option":"Deny","text":"never delete build dirs"}
+← {"type":"interaction_request","stream":"019…","id":"019…","ui_type":"native:confirm",
+   "payload":{"title":"Run command?","body":"rm -rf target",
+     "options":[{"label":"Allow"},{"label":"Always allow"},{"label":"Deny"}],"free_text":true}}
+→ {"type":"interaction_response","session":"019…","id":"019…",
+   "payload":{"option":"Deny","text":"never delete build dirs"}}
 ```
 
-`free_text: true` invites an optional explanation; when present it is
-delivered to the model (a denial reason shapes the retry), not just
-logged. Option objects are `{ label }` (a `description` field may
-appear — display it when present). `interaction_response` carries at
-least one of `option` (a label from the request) and `text` (the
-free-text answer; an options-empty ask is answered by `text` alone).
+- `interaction_request { id, ui_type, payload }` — an event, stamped
+  with the asking session's stream. `id` is backend-minted (UUIDv7,
+  born at acknowledgment); `ui_type` names the widget; `payload` is
+  the asker's cargo.
+- `interaction_response { session, id, payload }` — a command,
+  session-addressed like every command. **Always an answer**: the
+  frontend never expresses dismissal; that is backend-derived (see
+  the closing rule).
+- **`ui_type` namespaces.** `native:*` renders in every conforming
+  frontend; `ext:<id>:*` types arrive with extensions. **Unknown
+  types: report, don't swallow** — surface a notice, never fabricate
+  an answer.
+- **Templates** (`tabit-protocol::templates` owns the names and
+  payload schemas; they are prebuilt asks, not core types):
+  `native:confirm` — request `{ title, body, options:
+  [{ label, description? }], free_text }`, answer `{ option?,
+  text? }` with at least one present; `native:ask` — request
+  `{ prompt }`, answer `{ text? }`. The permission gate's three-button
+  card and ask-the-user tools consume these exactly as an extension
+  would.
+- A `free_text` answer is delivered to the model when present (a
+  denial reason shapes the retry), not just logged.
 
 **Closing rule:** a run terminal (`run_finished` / `run_aborted` /
 `run_failed`) closes every pending request — drop the cards, no
@@ -472,8 +500,8 @@ interaction is the tool result — the answer or denial the model saw.
   transcript order; a run's terminal arrives after all of its events.
 - **Ids are backend-minted UUIDv7 strings.** You never generate ids;
   you learn them from events and replay anchors (`user_message`,
-  `turn_started`, `turn_committed`, `tool_result.entry_id`,
-  `model_changed.entry_id`).
+  `turn_started`, `turn_committed`, `tool_result.entry_id`).
+  (`model_changed` carries no wire id yet — §6.)
 - **Ordering is total per stream.** One connection, one ordered
   stream; events of one session arrive in order, a run's terminal
   after all of its events. Events of *different* sessions interleave
@@ -503,10 +531,11 @@ interaction is the tool result — the answer or denial the model saw.
   however large. Cursors are a future addition.
 - **No unload or residency limits.** Opened sessions stay loaded for
   the process's life (lazy loading bounds *startup*; LRU unload is
-  deferred). Model discovery is the one-shot `tabit models --json`
-  (§11 note); the channel catalog (`sessions_available`) is announced
-  once at startup — re-scan via `tabit --list --json` if you need a
-  refresh.
+  deferred). There is no model-discovery command and no in-band
+  catalog refresh: `sessions_available` is announced once at startup,
+  sessions created in-band announce themselves (`session_created`),
+  and sessions appearing on disk from elsewhere need a restart
+  (`tabit --list`, a human table, exists for CLI inspection).
 - **No event timestamps.** Entries carry wall-clock times in the
   session file; events carry none on the wire (§11).
 - **One consumer.** Events go to the single connected frontend; no
@@ -524,12 +553,13 @@ interaction is the tool result — the answer or denial the model saw.
 4. **Subagent streams.** Sibling `stream` ids and their event subset —
    reserved, unspecified.
 
-Settled since the review: model discovery is a one-shot
-`tabit models --json` at startup plus explicit reload (the session
-listing pattern — no notifications); bad-flag exits stay
+Settled since the review: bad-flag exits stay
 exit-1-with-stderr-no-frames while session/model startup failures
 reject with plain-reason frames (§3.1 — the death-classification
 pin); cut points follow the roundtrip-unit rule
-(§7); synthesized tool results carry no marker (§7); durability is a
-write-behind log with the prompt barrier — flag 8 fully resolved; all
+(§7); synthesized tool results carry no marker (§7); all
 non-terminal errors ride the generic `error { kind }` carrier (§6).
+Model discovery stays config-side (`--model` refs resolve at startup;
+no discovery command is shipped), and the write-behind log with its
+prompt barrier remains a ruled-but-unshipped design (§6's reserved
+note — flag 8's producer is a board item).

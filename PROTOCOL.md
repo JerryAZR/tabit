@@ -7,7 +7,9 @@ resolved flag records its decision and stays as history.
 
 ## Locked design
 
-v1 as shipped; the v2 and v3 sections below amend where noted.
+v1 as shipped; the v2, v3, and v4 sections below amend where noted
+(v4: the backend-level-frames and interaction-generalization
+sections — unstamped host facts, `ui_type` + opaque payloads).
 
 - **Commands are fire-and-forget with total semantics** — `message`
   (steers the run in flight, or starts one), `abort` (aborts the run
@@ -51,8 +53,11 @@ v1 as shipped; the v2 and v3 sections below amend where noted.
   synthesize on the next open exactly like a crash; the log stays
   durable.
 - **Interaction rides the ask pattern (ruled 2026-08, shipped with
-  the permission milestone)**: `interaction_request { id, title,
-  body, options, free_text }` (an event) answered by
+  the permission milestone; wire shapes superseded by the v4
+  generalization — `ui_type` + opaque payloads, see the
+  interaction-generalization section below; the routing rulings
+  stand)**: `interaction_request { id, title, body, options,
+  free_text }` (an event, the pre-v4 record) answered by
   `interaction_response { id, option?, text? }` (a command — total
   semantics: at least one of option/text; an unknown id or a dead
   asker logs and drops, like abort-while-idle). One hub routes
@@ -362,6 +367,10 @@ histories).
   aborted, provider-failed, discarded as a malformed-tool-call defect —
   leaves its announced id uncommitted; the frontend already discards
   provisional groups (`turn_retried`, abort), and ids are never reused.
+  (Known gap, surfaced by the 2026-08 doc audit: `model_changed`
+  violates the uniform rule — the event carries no entry id, so
+  model-change entries, though valid checkout targets in the file, are
+  unnameable on the wire. The stage-3 `model` command work closes it.)
 - **Id generation is centralized in the backend.** The log owns
   identity: every entry id is a backend-minted UUIDv7; frontends never
   generate or supply ids, they learn them from events. Shape: the
@@ -387,8 +396,8 @@ histories).
   events `model_changed` / `error { kind: model }`. Commands stay
   total: nothing is rejected without an event.
 - **Session listing stays one-shot.** Scan on startup and explicit
-  reload (`tabit --list --json` — local or over ssh); no watch, no
-  long-lived listing command.
+  reload (`tabit --list`, a human table — local or over ssh); no
+  watch, no long-lived listing command.
 - **`interaction_request` — shipped** (2026-08, with the permission
   milestone; the full ruling lives in Locked design above). The
   reserved-shape question that stayed open through v2 design — edge
@@ -680,7 +689,9 @@ section above; the design they locked:
   re-derive context (the scheduled in-memory-contract work, the same
   class as `rewind`/`stats`).
 - `checkout` joins the routing errors rule: an unknown session yields
-  `error { kind: session }` stamped with the named id. A mid-run
+  an **unstamped, backend-level** `error { kind: session }` (the v4
+  optional-stream ruling — the message names the id; see the
+  backend-level-events section). A mid-run
   `open_session` pass for the same session waits for the same pause
   point (worker single-emitter exclusivity orders pass vs live).
 
@@ -689,7 +700,7 @@ deleting the respawn interim; (2) `checkout` ✓; (3) `model`;
 (4) subagents.
 
 ## Backend-level events — the optional stream (ruled 2026-08;
-lands with the interaction round)
+shipped with the interaction round)
 
 `EventFrame.stream` becomes **optional: absent means the backend
 produced the event, not any session.** Today host-level facts fake a
@@ -720,7 +731,7 @@ distinction instead:
   `list_sessions` command rides the class directly: host-level
   command, unstamped `sessions_available` reply.
 
-## Interaction generalization (ruled 2026-08; lands with the
+## Interaction generalization (ruled 2026-08; shipped with the
 interaction round)
 
 The shipped typed shapes— `interaction_request { title, body,
@@ -766,7 +777,7 @@ constructs the request itself; the hub never inspects payloads.
   GUI's own extension story.
 
 No compat code (the pre-release versioning ruling). Supersedes the
-v2 interaction shapes above on landing.
+v2 interaction shapes above — landed with the v4 round.
 
 ## Open flags (numbering is fixed at creation; resolved numbers are
 skipped)
@@ -776,9 +787,12 @@ skipped)
 The four-block epilogue (aborted / stream-failure / reload-failure /
 persist-failure) now lives in its own named method, `conclude`, over an
 `EventSink` (one emission path: live consumer + summary in one step, no
-send-without-record). The write-behind restructure lands there alone;
-`messages_discarded` joins the abort block. A `fail(..)` helper stopped
-being worth it once `sink.emit` collapsed each block to two lines.
+send-without-record). The write-behind restructure lands there alone.
+(`messages_discarded` no longer lands here at all — the
+abort-composition round moved it to the abort site's immediate notice,
+one emitter with `message_queued`; see flag 6 and stage 2.) A `fail(..)`
+helper stopped being worth it once `sink.emit` collapsed each block to
+two lines.
 
 ### 3. `run_one` length — RESOLVED (phase decomposition)
 
@@ -802,10 +816,13 @@ existed to kill strays in the token-fire-to-wind-down window, which is
 exactly the post-abort traffic that must now survive. Before/after is
 defined by lock order (the only linearization available), and the
 frontend sees precisely which messages died via `messages_discarded`.
-Emission timing detail: the link clears on the caller's thread without
-the event channel, so the discard notice rides the actor's wind-down
-(next loop iteration) — still ordered before any subsequent
-`user_message` events.
+Emission timing detail (superseded by the 2026-08 abort-composition
+round): the link originally cleared on the caller's thread without
+the event channel, so the notice rode the actor's wind-down — the
+mute-handler era's record. The mailbox's notice channel (`message_queued`'s
+own) closed that gap: `clear_noticing` emits `messages_discarded`
+immediately at the abort site, ahead of the run's `run_aborted`
+terminal — one emitter, no staging.
 
 ### 8. Terminal events are not terminal — RESOLVED (write-behind log)
 
@@ -863,6 +880,13 @@ state.** The session keeps its resident tree and projected context
 entries (the outbox). Separate structs, one-way flow (session commits
 → writer buffers → disk), events flow back (degraded/recovered).
 
+**Status:** the ruling stands, the machinery is not shipped —
+persistence is synchronous today; a post-run failure still emits a
+trailing `run_failed` after `run_finished` (the pre-fold shape), and
+`durable` / the persist kinds are reserved wire vocabulary with no
+producer. The write-behind producer is a board item (FRONTEND.md §6
+documents today's honest shape and marks the design reserved).
+
 ### 9. Empty conversation rides `PromptCancelled` — resolved by the v2 pass
 
 The wire side is decided: the `run_failed { kind: stopped }` taxonomy
@@ -906,9 +930,12 @@ staging them in the journal, so the journal alone can no longer
 explain both clear paths — and making it race-free costs a
 clear-generation protocol threaded through the pump seam, heavy
 machinery for a panic arm that guards `Mailbox`'s three audited drain
-methods. Both clear paths are wire-visible (abort stages its pairs
-for the beat's flush; checkout emits the notice at receive), so no
-message can vanish silently either way. Shipped shape: the pump
+methods. Both clear paths are wire-visible (at amendment time: abort
+staged its pairs for the beat's flush, checkout emitted at receive;
+the abort-composition round then made abort immediate too — both
+clear sites emit through the one notice channel, and the staging this
+paragraph described was deleted with the mute-handler workaround), so
+no message can vanish silently either way. Shipped shape: the pump
 breaks on an empty drain — an empty drain is by construction a clear
 racing the wake, and the notices already told the frontend. If a
 future drain path appears, the invariant to pin is "every message
@@ -928,12 +955,16 @@ or explicitly-opaque native items), or accept rig-core as the shared
 vocabulary crate (it is ours). Recommendation: own the types — the
 protocol is the foundation; the engine is an implementation detail.
 
-### 14. `RunFailed` is stringly — RESOLVED (v2 kind taxonomy)
+### 14. `RunFailed` is stringly — RESOLVED as a design (v2 kind taxonomy); not yet on the wire
 
 Kinds: provider / budget / stopped (FRONTEND.md §6). `durability`
 moved out of run_failed entirely (flag 8 folded it into
 `run_finished.durable`); `internal` never reaches the wire — internal
 errors panic by doctrine.
+
+**Status:** the wire's `run_failed` carries `message` alone today;
+the `kind` field lands with the flag-8 write-behind producer (a board
+item — see flag 8's status note).
 
 A display string, not a kind; frontends cannot branch
 retryable-vs-fatal without string matching. Add a small kind enum

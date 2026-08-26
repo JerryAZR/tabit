@@ -674,8 +674,10 @@ impl Session {
     /// request assembly ([`Self::open_run`] — where the UUIDv7 turn-id
     /// mint is injected), the item fold ([`Self::drive`] — where announced
     /// turn ids stamp events; v2 replay reuses the same ids verbatim from
-    /// the log), and the terminal/durability epilogue ([`Self::conclude`] —
-    /// where the write-behind log and `messages_discarded` land).
+    /// the log), and the terminal/durability epilogue ([`Self::conclude`]
+    /// — where the write-behind log lands; `messages_discarded` does not
+    /// land here at all, the abort site emits it immediately through the
+    /// mailbox's notice channel).
     async fn run_one(
         &mut self,
         batch: &[QueuedMessage],
