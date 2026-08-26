@@ -214,9 +214,7 @@ Implications:
 - A NEW session builds from the current extension set: it has no
   cache to miss, so picking up new tools/prompts at creation breaks
   nothing. The seal protects BUILT sessions; creation is not a
-  change. (The new session's different preamble cold-misses the
-  shared prefix cache the boot session established — a first-turn
-  cost a cold session pays anyway.)
+  change.
 - Changing an EXISTING session's prompt is the deliberate reload —
   today the respawn path. The reserved refinement is an in-process
   session reload (the backend rebuilds the chosen session's
