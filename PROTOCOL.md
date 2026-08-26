@@ -906,6 +906,10 @@ Open discussion, not settled: per-cause variants, or one honest
 `RunStopped { reason, history }`-shaped arm with cancellation as just
 one reason, or keep the umbrella and rename only.
 
+The flow-semantics half is settled elsewhere (2026-08): ENGINE.md's
+turn-level stop ruling defines what a hook stop does to the turn, the
+batch, and the queue. This flag remains about the error typing only.
+
 ### 10. `list()` platform divergence — RESOLVED (disambiguate with metadata)
 
 Ruled: unify with a metadata check — path missing → empty list (a fresh

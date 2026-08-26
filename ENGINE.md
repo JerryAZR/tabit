@@ -171,7 +171,8 @@ stateDiagram-v2
 user sent *for the model* — extra context, or a correction when the
 user noticed the model on (or about to be on) a wrong path. A
 model-side failure does not invalidate them, so nothing except abort
-(a user action) ever discards or strands them: every outcome drains
+(a user action — and, as of the stop-semantics ruling, a hook stop)
+ever discards or strands them: every outcome drains
 the queue into history first, and a run that then fails carries that
 history forward — the messages are recorded, surfaced as events, and
 seen by the next attempt. There are **no bypass edges**.
@@ -308,7 +309,8 @@ during design review, the verdict is recorded.
 ### Behavior deltas (documented, intended)
 
 1. **One drain point** (was three), at the convergence — and it is
-   unconditional: failures drain too; only abort discards.
+   unconditional: failures drain too; only abort discards. (Second
+   discard case added: stop exits — the stop-semantics ruling below.)
 2. **Retryable provider errors** (rate-limit, transient transport)
    are retried through the normal loop, bounded, with steers riding
    along — not an immediate hard stop.
@@ -322,7 +324,9 @@ during design review, the verdict is recorded.
 6. **`max_turns` fires at Deciding** (after the drain), same observable
    outcome, one exit site instead of two.
 7. **Hook stops unify** as the `terminating` flag read at Deciding
-   (and at classification for pre-turn stops).
+   (and at classification for pre-turn stops). (Superseded in part:
+   flag-only stops, two verbs at the drain — the stop-semantics
+   ruling below.)
 8. **Internal errors panic** — the process dies loud instead of
    degrading gracefully through the machine.
 9. **Output-budget truncation is a warning, not a failure** (ruled
@@ -413,7 +417,7 @@ each; **nothing may kill a batch**:
 | need | mechanism | semantics |
 |---|---|---|
 | stop now | **abort** (the token leaf) | preempts at any await; `run_aborted`; queue discarded; unanswered calls get synthesized interrupted results. Callable by the user, frontends, and any hook constructed with the leaf. |
-| don't continue after this batch | **post-tool `Stop` → the `terminating` flag** | no effect on the current batch — unstarted chains still run; the flag is fed only after `tool_results` commits, so the tool phase is flag-blind by construction. Steers still drain; `Deciding`'s another-turn check is overridden → `run_failed(reason)`; history carries forward. |
+| don't continue after this batch | **post-tool `Stop` → the `terminating` flag** | no effect on the current batch — unstarted chains still run; the flag is fed only after `tool_results` commits, so the tool phase is flag-blind by construction. Steers still drain on every non-stop outcome; `Deciding`'s another-turn check is overridden → `run_failed(reason)`; history carries forward. (The stop exit's drain becomes a discard — amended by the stop-semantics ruling below.) |
 | don't run this call | **`Skip`** | in-band synthetic result; the model is told; siblings unaffected. |
 
 The pre-tool `Stop` action is deleted (its niches compose from
@@ -441,6 +445,100 @@ Pause points are enumerable — only context-carrying sites can ask
 (today: the tool-call gate by construction, the tool body via
 `ToolContext`); other hook points gain the capability when a
 consumer exists.
+
+## Turn-level stop semantics (ruled 2026-08; pre-implementation)
+
+The owner ruling on what a hook stop *means*, recorded after the
+pre-handover review found the agreed semantics written down nowhere —
+and the inherited trait-era behavior contradicting it in three ways.
+Amends delta 1 (a second discard case), delta 7, and the stop
+taxonomy's post-tool row. **Implementation is pending**; the driver
+still implements the superseded shape, described at the end for the
+implementor.
+
+**The ruling.** A hook stop means: the current turn **finishes
+naturally** — it streams to completion, commits, its tools execute,
+the results commit — and the run does not loop into the next turn; it
+exits `run_failed(reason)` (the `stopped` kind, PROTOCOL.md flag 9).
+On the stop exit the pending queue is **discarded with notice**
+(`messages_discarded`), never drained into history. The discard is
+what makes a stop final: the mailbox keeps draining after a run
+failure, so a stopped run with a live queue would otherwise bounce
+straight into a new run, defeating the stop. Stops join abort as the
+second discard class.
+
+**The mechanism — one flag, one check rule, two verbs.**
+
+- A stop only ever **sets the flag** (reason attached) on the run
+  context — any hook, any point. Repeated requests: last write wins.
+- The machine reads the flag **exactly where a model call would
+  begin**: at Deciding (post-turn / post-batch stops — skip the loop)
+  and at Preparing (pre-turn stops — skip issuing the request). One
+  rule: *a stop takes effect before the next model call, never
+  mid-turn, never mid-batch.* Mid-turn and mid-batch the flag is
+  invisible, so the turn finishes and the roundtrip commits.
+  Immediate preemption stays abort's exclusive row — a hook needing
+  stop-now holds the abort leaf.
+- The drain point keeps its single-convergence shape and gains **two
+  verbs**: drain (every non-stop outcome — steers join history,
+  streaks reset; unchanged) or discard (the flag is set — the queue
+  leaves with `messages_discarded`, nothing enters history). The
+  machine owns the flag, so it owns the verb; the watermark holds —
+  the discard takes the queue at that instant, later messages queue
+  for the next run.
+- The discard is an **internal, beat-time** clear, executed inside
+  the run at the decision point; `messages_discarded` rides the run's
+  normal event flow ahead of `run_failed`. It does NOT use the abort
+  site's receive-time notice channel — that channel exists for
+  external, preemptive commands acting from the caller's thread. Two
+  discard mechanisms, each matched to its trigger: receive-time clear
+  (abort; checkout composes abort and adds no clear of its own) and
+  beat-time discard (stop).
+
+**What this deletes** (rule 12 — the current shape re-assembles one
+semantic at several sites):
+
+- The six per-site stop paths in the two turn sources (blocking
+  `runner.rs`: `on_completion_response`, `on_model_turn_finished`;
+  `streaming.rs`: `on_text_delta`, `on_tool_call_delta`,
+  `on_stream_response_finish`, `on_model_turn_finished`) — each
+  yields `cancel_error` and returns today, the driver classifying it
+  into `TurnFailure::Stop` → `run.terminate`.
+- `AgentRun::terminate()`'s jump-to-DrainingSteers transition — the
+  amputation that cuts pre-commit turns and skips ExecutingTools.
+- The driver-side `Stop` arm of `classify_turn_failure`.
+- Fixed structurally, not patched: the recorder-ordering fragility (a
+  stopped post-commit turn's durability depended on hook priority
+  relative to the recorder — the turn now always commits through the
+  normal path, so the recorder always fires) and the
+  open-roundtrip-on-stop edge (a stopped tools-turn no longer strands
+  its calls).
+
+**Current-implementation deltas** (what the code does today, all
+superseded): mid-turn delta stops cut the stream pre-commit — the
+turn is discarded, never history; post-commit stops skip
+ExecutingTools, leaving the roundtrip open (and at the blocking
+`on_completion_response` site the recorder never fires, so the turn
+is not even durable); the stop exit drains the queue into history —
+the opposite of the discard ruling, though it is what delta 1's
+"only abort discards" swept stops under.
+
+**Implementation notes** (for whoever lands this):
+
+- `SteeringSource` grows the discard verb. The notice carries the
+  born-early ids, which the engine never sees — the vehicle must be
+  mailbox-side, or an engine item carrying the mailbox's pairs;
+  ordering must land the notice ahead of the run's terminal.
+- The machine's step contract gains the Preparing flag check — a new
+  edge; this document's diagram amends when the code lands.
+- Machine-generated terminal failures (defect-streak exhaustion,
+  empty conversation) are NOT stops: they keep drain-and-carry-
+  forward. Only hook stop requests set the flag. (The
+  `PromptCancelled` umbrella typing stays PROTOCOL.md flag 9's
+  question.)
+- Sequencing note: the observation actions live on the trait-era hook
+  surface the closure-record migration is still retiring — the two
+  efforts touch the same sites; order them deliberately.
 
 ## The hook surface — closure registration (ruled 2026-08;
 shipped)

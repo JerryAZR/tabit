@@ -64,6 +64,25 @@ An extension that wants "fail-closed" semantics composes from the
 table; settlement is unconditional by construction, so no extension
 can introduce the stranded-question edge the old machinery carried.
 
+## Turn-level stops never cut (2026-08)
+
+Ruled: a hook stop lets the current turn finish naturally — it
+commits, its tools execute, the results commit — and prevents the
+loop into the next turn; the pending queue is discarded with notice
+(`messages_discarded`), never drained into history. The design and
+mechanism live in ENGINE.md's stop-semantics ruling
+(pre-implementation).
+
+Implications:
+
+- A stop is turn-granular finality, never a cut: it cannot interrupt
+  a stream, a turn, or a batch. For immediate preemption an extension
+  holds the abort leaf — that remains the stop-now surface.
+- Everything pending at the decision point comes back as
+  `messages_discarded` drafts; what arrives after the decision starts
+  the next run. The verb choice is the machine's, not the
+  extension's.
+
 ## The permission system is a placeholder; extensions are its
 replacement (2026-08)
 
