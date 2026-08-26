@@ -147,6 +147,25 @@ unchanged. An extension tool that parks on an interaction is parked
 inside its own future: drop is the cancellation, exactly as for
 `bash`. Extension tools must be drop-safe under the same contract.
 
+## Background tools stay in-band (2026-08)
+
+Ruled (reserved — not in the first release): a tool that backgrounds
+work returns an id immediately as its result; the real result reaches
+the model through a query tool and/or a user-role message submitted
+to the mailbox on completion. A call never stays open past
+settlement — provider APIs require matching results on the next
+request. Home: ENGINE.md's tool phase.
+
+Implications:
+
+- The background registry is session-scoped (a `ToolContext`
+  capability or a construction-captured `Arc`); the detached task is
+  owned by the registry, not the call's future — the one sanctioned
+  exception to the drop-cancellation contract.
+- Completion injections are ordinary user-role messages. Do not
+  invent a new frame or a late `tool_result` channel; the sealed
+  batch is not negotiable.
+
 ## Frontends are leaf consumers (standing)
 
 Extensions target backend seams (hooks, tools, the interaction

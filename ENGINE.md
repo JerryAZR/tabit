@@ -441,6 +441,27 @@ terminal, structurally). Interaction requests never persist or
 replay; the durable record is the tool result (the answer or denial
 the model saw).
 
+**Background execution (ruled 2026-08; reserved — not in the first
+release).** Provider APIs model tool calls synchronously — the next
+request must carry results matching the turn's calls — so a call can
+never stay open past settlement. Backgrounding, if it lands, rides
+the sealed batch in-band: the body returns immediately with an **id
+as its result** (durable, replayable; the roundtrip closes on time);
+a **query tool** reads state/result from a session-scoped registry
+(a `ToolContext` capability); and on completion the registry submits
+a **user-role message carrying the result to the run-agnostic
+mailbox** — a steer mid-run, a new run at idle (several completions
+batch at the drain for free). The registry owns the detached task's
+lifetime — the one sanctioned exception to drop-cancellation: not
+the call's future, not the run-scoped token; process death kills the
+work, and a post-restart query answers unknown-id honestly.
+Out-of-band `tool_result`s (a call answered after its batch settled)
+are prohibited by construction: settlement stays unconditional, the
+roundtrip atomic, repair and cut points untouched. Injected
+completion messages are ordinary `UserMessage` entries — durable,
+replayable, branch-safe; a wire marker for styling is a frontend
+refinement deferred to implementation.
+
 Pause points are enumerable — only context-carrying sites can ask
 (today: the tool-call gate by construction, the tool body via
 `ToolContext`); other hook points gain the capability when a
