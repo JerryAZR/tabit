@@ -8,7 +8,7 @@ use crate::tests::{Factory, echo_tool, temp_store, text_turn, tool_turn};
 use rig_agent::tool::{DynamicTool, ToolOutput};
 use serde_json::json;
 use std::time::Duration;
-use tabit_protocol::SessionCommand;
+use tabit_protocol::{ModelSelection, SessionCommand};
 
 /// Wiring whose builders refuse (tests that never drive session
 /// lifecycle); the store stays real so the catalog is honest.
@@ -1563,6 +1563,371 @@ async fn a_checkout_during_a_run_aborts_it_then_rewinds_at_the_beat() {
     // aborted run issued exactly its one model call — no "results
     // came back, start the next turn" — and the branch run one more.
     assert_eq!(factory.requests().len(), 2, "no model call after the abort");
+    std::fs::remove_dir_all(store.dir()).ok();
+}
+
+/// The `(provider, model, thinking_level)` of every `model_changed`
+/// in the frames, in order.
+fn model_changes(frames: &[EventFrame]) -> Vec<(String, String, Option<String>)> {
+    frames
+        .iter()
+        .filter_map(|frame| match &frame.event {
+            SessionEvent::ModelChanged {
+                provider,
+                model,
+                thinking_level,
+            } => Some((provider.clone(), model.clone(), thinking_level.clone())),
+            _ => None,
+        })
+        .collect()
+}
+
+/// The file's last `model_change` — register truth.
+fn last_model(
+    handle: &SessionHost,
+    store: &SessionStore,
+) -> Option<(String, String, Option<String>)> {
+    let loaded = store
+        .open_path(std::path::PathBuf::from(&handle.info().session_path).as_path())
+        .expect("reload");
+    crate::projection::last_model_change_in_file(&loaded.entries)
+        .map(|(p, m, l)| (p.to_string(), m.to_string(), l.map(str::to_string)))
+}
+
+#[tokio::test]
+async fn a_model_switch_lands_at_the_beat_and_announces() {
+    let store = temp_store("endpoint-model-idle");
+    let factory = Factory::new(vec![text_turn("a"), text_turn("b")]);
+    let session = factory
+        .clone()
+        .into_builder(store.clone())
+        .create("C:/w")
+        .expect("session");
+    let mut handle = SessionHost::spawn(session, Vec::new(), plain_wiring(&store));
+    let id = boot_id(&handle);
+
+    // One exchange, then an idle switch: it applies at the next beat.
+    let mut frames = Vec::new();
+    handle.message(&id, "one");
+    collect_until(&mut handle, &mut frames, terminal).await;
+    handle.model(&id, ModelSelection::new("q", "m2"));
+    collect_until(&mut handle, &mut frames, |event| {
+        matches!(event, SessionEvent::ModelChanged { .. })
+    })
+    .await;
+
+    // The announcement carries the new selection, and the register is
+    // durable in the file.
+    assert_eq!(
+        model_changes(&frames),
+        vec![("q".to_string(), "m2".to_string(), None)],
+        "the switch announced itself"
+    );
+    assert_eq!(
+        last_model(&handle, &store),
+        Some(("q".to_string(), "m2".to_string(), None)),
+        "the register write is durable"
+    );
+
+    // The next run derives the new agent (the cache ledger) and the
+    // latest handed-out model — the switch's derivation — serves it.
+    // (The Factory restarts its script per derivation, so the run's
+    // output is the script's first turn again; `requests` reads the
+    // latest model, which is the proof.)
+    handle.message(&id, "two");
+    collect_until(&mut handle, &mut frames, terminal).await;
+    frames.extend(drain(&mut handle).await);
+    assert_eq!(
+        factory.built_for(),
+        vec![
+            ("p".to_string(), "m".to_string()),
+            ("q".to_string(), "m2".to_string())
+        ],
+        "assembly, then one derivation at the next run open"
+    );
+    assert_eq!(
+        factory.requests().len(),
+        1,
+        "the switch's derivation served the next run"
+    );
+    std::fs::remove_dir_all(store.dir()).ok();
+}
+
+#[tokio::test]
+async fn a_bad_model_ref_errors_at_receive_and_parks_nothing() {
+    let store = temp_store("endpoint-model-bad-ref");
+    let factory = Factory::new(vec![text_turn("a"), text_turn("b")]);
+    let session = factory
+        .clone()
+        .into_builder(store.clone())
+        .create("C:/w")
+        .expect("session");
+    let mut handle = SessionHost::spawn(session, Vec::new(), plain_wiring(&store));
+    let id = boot_id(&handle);
+
+    let mut frames = Vec::new();
+    handle.message(&id, "one");
+    collect_until(&mut handle, &mut frames, terminal).await;
+    handle.model(&id, ModelSelection::new("nope", "m9"));
+    collect_until(&mut handle, &mut frames, |event| {
+        matches!(event, SessionEvent::Error { .. })
+    })
+    .await;
+
+    // Nothing landed: no announcement, the register untouched, and the
+    // session still runs on the standing selection (no factory
+    // derivation for the rejected ref).
+    assert_eq!(model_changes(&frames), Vec::new());
+    assert_eq!(
+        last_model(&handle, &store),
+        Some(("p".to_string(), "m".to_string(), None))
+    );
+    handle.message(&id, "two");
+    collect_until(&mut handle, &mut frames, terminal).await;
+    assert_eq!(
+        factory.built_for(),
+        vec![("p".to_string(), "m".to_string())],
+        "the rejected switch never parked a derivation"
+    );
+
+    // The error itself: model-kind, naming the bad ref.
+    match frames.iter().find_map(|frame| match &frame.event {
+        SessionEvent::Error { kind, message, .. } => Some((kind, message)),
+        _ => None,
+    }) {
+        Some((kind, message)) => {
+            assert_eq!(*kind, tabit_protocol::ErrorKind::MODEL);
+            assert!(message.contains("nope"), "{message}");
+        }
+        other => panic!("expected a model-kind error, got {other:?}"),
+    }
+    std::fs::remove_dir_all(store.dir()).ok();
+}
+
+#[tokio::test]
+async fn a_mid_run_model_switch_lands_after_the_run() {
+    let store = temp_store("endpoint-model-midrun");
+    let factory = Factory::new(vec![tool_turn("t1", "slow"), text_turn("after")]);
+    let session = factory
+        .clone()
+        .into_builder(store.clone())
+        .dynamic_tool(slow_tool())
+        .create("C:/w")
+        .expect("session");
+    let mut handle = SessionHost::spawn(session, Vec::new(), plain_wiring(&store));
+    let id = boot_id(&handle);
+
+    // Provably mid-run (the slow tool is executing): the switch parks;
+    // the run is untouched — it finishes, then the beat serves the
+    // switch.
+    handle.message(&id, "go");
+    let mut frames = Vec::new();
+    let mut sent = false;
+    while let Some(frame) = handle.next_event().await {
+        if matches!(frame.event, SessionEvent::ToolCall { .. }) && !sent {
+            sent = true;
+            handle.model(&id, ModelSelection::new("q", "m2"));
+        }
+        let done = terminal(&frame.event);
+        frames.push(frame);
+        if done {
+            break;
+        }
+    }
+    collect_until(&mut handle, &mut frames, |event| {
+        matches!(event, SessionEvent::ModelChanged { .. })
+    })
+    .await;
+    frames.extend(drain(&mut handle).await);
+
+    let terminal_at = frames
+        .iter()
+        .position(|frame| terminal(&frame.event))
+        .expect("the run's terminal");
+    assert!(
+        matches!(&frames[terminal_at].event, SessionEvent::RunFinished { .. }),
+        "the switch never killed the stream"
+    );
+    let switch_at = frames
+        .iter()
+        .position(|frame| matches!(&frame.event, SessionEvent::ModelChanged { provider, .. } if provider == "q"))
+        .expect("the switch landed");
+    assert!(
+        terminal_at < switch_at,
+        "the switch applies at the beat after the run"
+    );
+    assert_eq!(
+        last_model(&handle, &store),
+        Some(("q".to_string(), "m2".to_string(), None))
+    );
+    std::fs::remove_dir_all(store.dir()).ok();
+}
+
+#[tokio::test]
+async fn a_model_switch_survives_an_abort() {
+    let store = temp_store("endpoint-model-abort");
+    let factory = Factory::new(vec![tool_turn("t1", "slow"), text_turn("after")]);
+    let session = factory
+        .clone()
+        .into_builder(store.clone())
+        .dynamic_tool(slow_tool())
+        .create("C:/w")
+        .expect("session");
+    let mut handle = SessionHost::spawn(session, Vec::new(), plain_wiring(&store));
+    let id = boot_id(&handle);
+
+    // Mid-run switch, then abort: the switch is a preference, not run
+    // intent — it must outlive the abort and land at the post-abort
+    // beat (the owner ruling).
+    handle.message(&id, "go");
+    let mut frames = Vec::new();
+    let mut sent = false;
+    while let Some(frame) = handle.next_event().await {
+        if matches!(frame.event, SessionEvent::ToolCall { .. }) && !sent {
+            sent = true;
+            handle.model(&id, ModelSelection::new("q", "m2"));
+            handle.abort(&id);
+        }
+        let done = terminal(&frame.event);
+        frames.push(frame);
+        if done {
+            break;
+        }
+    }
+    collect_until(&mut handle, &mut frames, |event| {
+        matches!(event, SessionEvent::ModelChanged { .. })
+    })
+    .await;
+    frames.extend(drain(&mut handle).await);
+
+    let terminal_at = frames
+        .iter()
+        .position(|frame| terminal(&frame.event))
+        .expect("the run's terminal");
+    assert!(matches!(
+        &frames[terminal_at].event,
+        SessionEvent::RunAborted { .. }
+    ));
+    let switch_at = frames
+        .iter()
+        .position(|frame| matches!(&frame.event, SessionEvent::ModelChanged { provider, .. } if provider == "q"))
+        .expect("the switch survived the abort");
+    assert!(
+        terminal_at < switch_at,
+        "the switch lands at the beat after the abort terminal"
+    );
+    assert_eq!(
+        last_model(&handle, &store),
+        Some(("q".to_string(), "m2".to_string(), None)),
+        "the register write is durable through the abort"
+    );
+    std::fs::remove_dir_all(store.dir()).ok();
+}
+
+#[tokio::test]
+async fn a_newer_model_switch_replaces_an_older() {
+    let store = temp_store("endpoint-model-collapse");
+    let session = Factory::new(vec![text_turn("a")])
+        .into_builder(store.clone())
+        .create("C:/w")
+        .expect("session");
+    let mut handle = SessionHost::spawn(session, Vec::new(), plain_wiring(&store));
+    let id = boot_id(&handle);
+
+    // Two switches before the beat serves either: the slot collapses —
+    // the register is last-write-wins, so the newer intent is the
+    // intent (one announcement, one register write).
+    let mut frames = Vec::new();
+    handle.message(&id, "one");
+    collect_until(&mut handle, &mut frames, terminal).await;
+    handle.model(&id, ModelSelection::new("q", "m2"));
+    handle.model(
+        &id,
+        ModelSelection {
+            provider: "p".to_string(),
+            model: "m".to_string(),
+            thinking_level: Some("high".to_string()),
+        },
+    );
+    collect_until(&mut handle, &mut frames, |event| {
+        matches!(event, SessionEvent::ModelChanged { .. })
+    })
+    .await;
+    frames.extend(drain(&mut handle).await);
+
+    assert_eq!(
+        model_changes(&frames),
+        vec![("p".to_string(), "m".to_string(), Some("high".to_string()))],
+        "only the newer switch announced"
+    );
+    assert_eq!(
+        last_model(&handle, &store),
+        Some(("p".to_string(), "m".to_string(), Some("high".to_string())))
+    );
+    std::fs::remove_dir_all(store.dir()).ok();
+}
+
+#[tokio::test]
+async fn a_model_switch_precedes_a_parked_checkout() {
+    let store = temp_store("endpoint-model-beat-order");
+    let factory = Factory::new(vec![tool_turn("t1", "slow"), text_turn("branch")]);
+    let session = factory
+        .clone()
+        .into_builder(store.clone())
+        .dynamic_tool(slow_tool())
+        .create("C:/w")
+        .expect("session");
+    let mut handle = SessionHost::spawn(session, Vec::new(), plain_wiring(&store));
+    let id = boot_id(&handle);
+
+    // Both parked mid-run: the checkout aborts its way to the pause
+    // point, the beat serves the switch FIRST — so the checkout's
+    // replay pass announces the fresh register, not a stale one.
+    handle.message(&id, "go");
+    let mut frames = Vec::new();
+    let mut sent = false;
+    let mut go_entry = None;
+    while let Some(frame) = handle.next_event().await {
+        match &frame.event {
+            SessionEvent::UserMessage { text, entry_id } if text == "go" => {
+                go_entry = Some(entry_id.clone());
+            }
+            SessionEvent::ToolCall { .. } if !sent => {
+                sent = true;
+                handle.model(&id, ModelSelection::new("q", "m2"));
+                handle.checkout(&id, go_entry.clone().expect("go's entry id"));
+            }
+            _ => {}
+        }
+        let done = matches!(frame.event, SessionEvent::ReplayDone);
+        frames.push(frame);
+        if done {
+            break;
+        }
+    }
+
+    let switch_at = frames
+        .iter()
+        .position(|frame| matches!(&frame.event, SessionEvent::ModelChanged { provider, .. } if provider == "q"))
+        .expect("the switch landed at the beat head");
+    let checked_at = frames
+        .iter()
+        .position(|frame| matches!(frame.event, SessionEvent::CheckedOut { .. }))
+        .expect("the checkout executed");
+    assert!(
+        switch_at < checked_at,
+        "the beat serves the register write before the rewind"
+    );
+    // The pass that follows the checkout announces the fresh register
+    // (its leading `model_changed` — idempotent repetition by design).
+    assert!(matches!(
+        &frames[checked_at + 1].event,
+        SessionEvent::ModelChanged { provider, .. } if provider == "q"
+    ));
+    assert_eq!(
+        last_model(&handle, &store),
+        Some(("q".to_string(), "m2".to_string(), None))
+    );
     std::fs::remove_dir_all(store.dir()).ok();
 }
 

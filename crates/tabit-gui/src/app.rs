@@ -28,6 +28,10 @@ struct Display {
     stream: String,
     /// Crash-report toggle.
     show_stderr: bool,
+    /// The model-switch test field (`provider/model` free text; the
+    /// real picker belongs to the redesign — it needs a models-list
+    /// command first).
+    model_input: String,
 }
 
 pub struct TabitApp {
@@ -147,6 +151,25 @@ impl TabitApp {
         if let Some(backend) = &self.backend {
             let session = self.state.active.clone();
             backend.checkout(&session, &entry_id);
+        }
+    }
+
+    /// Switch the active session's model — the minimal test surface for
+    /// the model command: `provider/model` free text, validated by the
+    /// backend at receive (a bad ref is an error notice, nothing
+    /// moves). No local gating: the backend parks a mid-run switch and
+    /// lands it after the run, and the run itself is untouched.
+    fn switch_model(&mut self) {
+        if self.state.phase != Phase::Live {
+            return;
+        }
+        let raw = self.display.model_input.trim().to_string();
+        let Some((provider, model)) = raw.split_once('/') else {
+            return;
+        };
+        self.display.model_input.clear();
+        if let Some(backend) = &self.backend {
+            backend.model(&self.state.active, provider, model);
         }
     }
 
@@ -402,6 +425,23 @@ impl eframe::App for TabitApp {
                             None => format!("{} / {}", facts.model.provider, facts.model.model),
                         };
                         ui.label(egui::RichText::new(selection).color(theme::MUTED));
+                    }
+                    // The model switch, minimal test surface: type
+                    // `provider/model`, Enter or the button applies. The
+                    // label above stays truth until `model_changed`
+                    // lands (the backend validates at receive).
+                    let field = ui.add(
+                        egui::TextEdit::singleline(&mut self.display.model_input)
+                            .desired_width(110.0)
+                            .hint_text("provider/model"),
+                    );
+                    let mut apply =
+                        field.lost_focus() && ui.input(|i| i.key_pressed(egui::Key::Enter));
+                    if ui.button("set model").clicked() {
+                        apply = true;
+                    }
+                    if apply {
+                        self.switch_model();
                     }
                     if pending > 0 {
                         ui.label(

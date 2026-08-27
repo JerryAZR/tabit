@@ -391,19 +391,27 @@ histories).
   is the checked-out chain's events; the tree (abandoned branches,
   markers) is backend/log truth. Branch browsing, if ever wanted, is a
   future query over the backend's resident tree — not frontend state.
-- **`model { provider, model, thinking_level? }`** — exactly
-  `ModelSelection`, validated against config, applied from the next
-  outer loop (records a `ModelChange` entry — under the
-  session-preference ruling in the v3 section, a register write, not a
-  chain-state transition). Outcome
-  events `model_changed` / `error { kind: model }`. Commands stay
-  total: nothing is rejected without an event.
+- **`model { provider, model, thinking_level? }` — shipped** (stage 3,
+  2026-08): exactly
+  `ModelSelection`, validated against config **at receive** (the
+  checkout-probe pattern — `error { kind: model }` names the bad ref
+  immediately, even mid-run), then applied at the session's pause
+  point: a register write (`ModelChange` entry, `model_changed`
+  event — the session-preference ruling in the v3 section, not a
+  chain-state transition), never an abort. A run in flight finishes
+  untouched (passes bind the agent at run open — the agent-cache
+  refactor); the next run derives the new agent at its open. The
+  pending switch is a slot (newer replaces older), sits at the **head
+  of the worker's beat** (so a following replay pass announces the
+  fresh register), **survives abort** (a preference is not run intent;
+  the post-abort beat serves it) and wind-down — only a hard process
+  death loses it, like pending messages.
   Open note (from the agent-cache refactor): validation at the command
   is config truth, so a selection can land in the register yet fail to
   construct at the next run open (the environmental class — client
   build trouble; the run says `run_failed` and the last good agent
-  keeps serving). Decide at stage 3 whether the frontend's picker
-  needs a distinct "the selection didn't take" signal (an
+  keeps serving). Still open: whether the frontend's picker needs a
+  distinct "the selection didn't take" signal (an
   `error { kind: model }` at the failure moment) or whether
   `run_failed` alone suffices.
 - **Session listing stays one-shot.** Scan on startup and explicit

@@ -146,6 +146,11 @@ pub struct SessionBuilder {
 /// themselves (and for tests).
 pub type ModelFactory = Arc<dyn Fn(&str, &str) -> Result<ModelHandle, SessionError> + Send + Sync>;
 
+/// Validates a selection against a session's config without touching
+/// the session — the `model` command's receive-time check (the
+/// checkout probe's sibling; see [`Session::model_probe`]).
+pub type ModelProbe = Arc<dyn Fn(&ModelSelection) -> Result<(), String> + Send + Sync>;
+
 impl SessionBuilder {
     /// Start building a session that will use `selection`. The selection is
     /// validated against the config immediately.
@@ -1039,6 +1044,19 @@ impl Session {
     /// time — see [`crate::recorder::EntryIdProbe`]).
     pub(crate) fn entry_id_probe(&self) -> crate::recorder::EntryIdProbe {
         self.recorder.id_probe()
+    }
+
+    /// The receive-time model validator — the checkout probe's sibling
+    /// for the `model` command: validates a selection against this
+    /// session's config without touching the session, so the worker
+    /// can reject an unusable ref at the command (a picker's
+    /// immediate feedback, even mid-run). The write itself is
+    /// [`Session::set_model`], at the beat.
+    pub(crate) fn model_probe(&self) -> ModelProbe {
+        let config = self.config.clone();
+        Arc::new(move |selection| {
+            validate_selection(selection, &config).map_err(|error| error.to_string())
+        })
     }
 
     /// A handle for aborting the current outer loop. See [`AbortHandle`].

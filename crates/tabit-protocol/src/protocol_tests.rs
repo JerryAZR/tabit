@@ -40,6 +40,18 @@ fn commands_round_trip_with_snake_case_tags() {
             session: "0195".to_string(),
             entry_id: "0197".to_string(),
         },
+        SessionCommand::Model {
+            session: "0197".to_string(),
+            provider: "p".to_string(),
+            model: "m".to_string(),
+            thinking_level: None,
+        },
+        SessionCommand::Model {
+            session: "0197".to_string(),
+            provider: "p".to_string(),
+            model: "m".to_string(),
+            thinking_level: Some("high".to_string()),
+        },
     ];
     for command in &commands {
         assert_eq!(&round_trip(command), command);
@@ -77,6 +89,29 @@ fn commands_round_trip_with_snake_case_tags() {
         })
         .expect("serialize"),
         r#"{"type":"checkout","session":"s1","entry_id":"e9"}"#
+    );
+    assert_eq!(
+        serde_json::to_string(&SessionCommand::Model {
+            session: "s1".to_string(),
+            provider: "p".to_string(),
+            model: "m".to_string(),
+            thinking_level: Some("high".to_string()),
+        })
+        .expect("serialize"),
+        r#"{"type":"model","session":"s1","provider":"p","model":"m","thinking_level":"high"}"#
+    );
+    // An absent thinking level is None (the `#[serde(default)]` door).
+    assert_eq!(
+        serde_json::from_str::<SessionCommand>(
+            r#"{"type":"model","session":"s1","provider":"p","model":"m"}"#
+        )
+        .expect("deserialize"),
+        SessionCommand::Model {
+            session: "s1".to_string(),
+            provider: "p".to_string(),
+            model: "m".to_string(),
+            thinking_level: None,
+        }
     );
     assert_eq!(
         serde_json::to_string(&SessionCommand::InteractionResponse {

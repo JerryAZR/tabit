@@ -22,11 +22,12 @@
 //! dequeue point) owns every command's semantics and the session's
 //! pending intent: the mailbox (messages — consumed mid-run by the
 //! engine as steers, at the beat by the worker as batches), the
-//! cancel token, the interaction hub, a pending-checkout slot, and a
-//! replay-request flag. The worker task owns the session itself and
-//! serves its beat — passes, then a parked checkout (the rewind, the
-//! one session mutation), then message batches — so routing never
-//! blocks on a run.
+//! cancel token, the interaction hub, a pending-checkout slot, a
+//! pending model switch, and a replay-request flag. The worker task
+//! owns the session itself and serves its beat — a parked model
+//! switch (the register write), then passes, then a parked checkout
+//! (the rewind), then message batches — so routing never blocks
+//! on a run.
 //!
 //! Termination (ruled 2026-08 — the core dies with the frontend):
 //!
@@ -133,6 +134,18 @@ struct Worker {
     /// abort clears it (drop-all-pending-intent), and the worker takes
     /// it at its beat for the rewind.
     checkout_slot: Arc<Mutex<Option<String>>>,
+    /// Pending model switch — a slot like the checkout's (newer
+    /// replaces older: the register is last-write-wins), but **never
+    /// cleared by abort**: a preference write is additive, safe to
+    /// persist unattended, and deliberately outlives the run it
+    /// interrupted (owner ruling — a switch followed by abort still
+    /// lands). Only a hard process death loses it, like pending
+    /// messages.
+    model_slot: Arc<Mutex<Option<ModelSelection>>>,
+    /// Receive-time validation against the session's config (the
+    /// checkout probe's sibling): an unusable ref is an
+    /// `error { kind: model }` at the command, even mid-run.
+    model_probe: crate::session::ModelProbe,
     /// A parked replay request (idempotent read — one flag collapses
     /// any number of requests; the beat serves it before batching).
     replay_due: Arc<std::sync::atomic::AtomicBool>,
@@ -146,6 +159,9 @@ impl Worker {
     /// `checked_out` follows; the abort is the marker, FRONTEND.md §7)
     /// and before the cancel, so a worker woken by the abort can never
     /// reach the beat and execute a rewind the abort meant to drop.
+    /// The parked model switch is the one deliberate exception: it is
+    /// a preference, not run intent, so it survives the abort and
+    /// lands at the post-abort beat.
     /// The cancel itself (the run's abort plus its immediate
     /// `messages_discarded` notice) lives in the handle.
     fn abort(&self) {
@@ -193,6 +209,38 @@ impl Worker {
                 // Pending intent, not a queue: the newer checkout is
                 // the intent.
                 lock(&self.checkout_slot).replace(entry_id);
+                self.mailbox.work_signal().notify_one();
+            }
+            SessionCommand::Model {
+                session: _,
+                provider,
+                model,
+                thinking_level,
+            } => {
+                // Validate against config here, at receive — the
+                // checkout probe's pattern: a picker gets its error
+                // immediately, even mid-run. Config is immutable per
+                // process, so the beat-time `set_model` revalidation
+                // cannot diverge (an Err at the beat is a broken
+                // invariant; see `apply_model`).
+                let selection = ModelSelection {
+                    provider,
+                    model,
+                    thinking_level,
+                };
+                if let Err(message) = (self.model_probe)(&selection) {
+                    if let Some(events) = self.events.upgrade() {
+                        let _ = events.send(EventFrame {
+                            stream: Some(self.stream.clone()),
+                            event: SessionEvent::error_model(message),
+                        });
+                    }
+                    return;
+                }
+                // Pending intent like the checkout slot: newer
+                // replaces older, applied at the beat (mid-run: after
+                // the run — the switch never kills a stream).
+                lock(&self.model_slot).replace(selection);
                 self.mailbox.work_signal().notify_one();
             }
             // Lifecycle is not session-scoped — the router forwards
@@ -444,6 +492,25 @@ impl SessionHost {
             }));
     }
 
+    /// Switch a session's model (the register write — a session
+    /// preference, never a chain move). Validated at receive
+    /// (`error { kind: model }` for a ref config cannot resolve),
+    /// applied at the session's pause point: immediately when idle,
+    /// after the in-flight run otherwise — the run itself is
+    /// untouched, and the next run derives the new agent at its open.
+    /// Survives abort and wind-down; only a hard process death loses
+    /// a pending switch (like pending messages).
+    pub fn model(&self, session: &str, selection: ModelSelection) {
+        let _ = self
+            .commands
+            .send(HostCommand::Command(SessionCommand::Model {
+                session: session.to_string(),
+                provider: selection.provider,
+                model: selection.model,
+                thinking_level: selection.thinking_level,
+            }));
+    }
+
     /// Abort every session — discard every queue and every parked
     /// checkout — the frontend-death door for transport edges (stdin
     /// EOF is death: no run outlives the consumer, and no rewind
@@ -518,7 +585,8 @@ fn session_address(command: &SessionCommand) -> &str {
         SessionCommand::Message { session, .. }
         | SessionCommand::Abort { session }
         | SessionCommand::InteractionResponse { session, .. }
-        | SessionCommand::Checkout { session, .. } => session,
+        | SessionCommand::Checkout { session, .. }
+        | SessionCommand::Model { session, .. } => session,
         // Matched before the session-scoped arm in `handle`;
         // unreachable by construction. Sanctioned crash: see the
         // error doctrine in AGENTS.md.
@@ -683,11 +751,14 @@ fn spawn_worker(
     let abort_handle = session.abort_handle();
     let interaction = InteractionHub::new(event_tx.clone(), stream.clone());
     let checkout_slot = Arc::new(Mutex::new(None::<String>));
+    let model_slot = Arc::new(Mutex::new(None::<ModelSelection>));
     let replay_due = Arc::new(std::sync::atomic::AtomicBool::new(false));
     let worker_events = event_tx.downgrade();
     let worker_stream = stream.clone();
     let entry_probe = session.entry_id_probe();
+    let model_probe = session.model_probe();
     let worker_slot = checkout_slot.clone();
+    let worker_model_slot = model_slot.clone();
     let worker_replay_due = replay_due.clone();
     let worker_mailbox = mailbox.clone();
     let task_interaction = interaction.clone();
@@ -703,13 +774,19 @@ fn spawn_worker(
         // pending thing; the beat at the loop top is the single drain
         // point.
         loop {
-            // The beat, in its ruled order: a parked pass answers
-            // first (a read of the chain as it stands), then a parked
-            // checkout (the rewind - the one session mutation - plus
-            // its re-render), then the empties check batches messages.
-            // Reads and rewinds requested ahead of a message answer
-            // ahead of it; a message's inclusion in a pass is decided
-            // solely by whether it drained before the beat.
+            // The beat, in its ruled order: a parked model switch
+            // first (the register write - state, not chain, so it
+            // precedes anything that could announce it), then a
+            // parked pass (a read of the chain as it stands), then a
+            // parked checkout (the rewind plus its re-render, whose
+            // replay then announces the fresh register), then the
+            // empties check batches messages. Reads, writes, and
+            // rewinds requested ahead of a message answer ahead of
+            // it; a message's inclusion in a pass is decided solely
+            // by whether it drained before the beat.
+            if let Some(selection) = lock(&worker_model_slot).take() {
+                apply_model(&mut session, &event_tx, &stream, selection);
+            }
             if replay_due.swap(false, std::sync::atomic::Ordering::Acquire) {
                 emit_replay(&session, &event_tx, &stream);
             }
@@ -746,7 +823,12 @@ fn spawn_worker(
                         continue;
                     }
                     // Serve what the handler parked ahead of the
-                    // close (the same beat order), then wind down.
+                    // close (the same beat order — the model switch
+                    // included: it persists through wind-down), then
+                    // wind down.
+                    if let Some(selection) = lock(&worker_model_slot).take() {
+                        apply_model(&mut session, &event_tx, &stream, selection);
+                    }
                     if replay_due.swap(false, std::sync::atomic::Ordering::Acquire) {
                         emit_replay(&session, &event_tx, &stream);
                     }
@@ -787,10 +869,52 @@ fn spawn_worker(
             stream: worker_stream,
             entry_probe,
             checkout_slot: worker_slot,
+            model_slot,
+            model_probe,
             replay_due: worker_replay_due,
         },
         join,
     )
+}
+
+/// Apply a parked model switch at the pause point: the register write
+/// (`set_model` records the entry; the agent derives at the next run
+/// open), then the announcement.
+#[allow(clippy::expect_used)] // sanctioned crash: the receive-time probe
+// validated this exact selection against this session's immutable
+// config, and set_model's only failure is that same validation — an
+// Err here is a broken invariant, not an external condition
+// (AGENTS.md's error doctrine). Construction failures are a run-open
+// concern (the agent-cache refactor), not a switch concern.
+fn apply_model(
+    session: &mut Session,
+    event_tx: &mpsc::UnboundedSender<EventFrame>,
+    stream: &StreamId,
+    selection: ModelSelection,
+) {
+    session
+        .set_model(selection)
+        .expect("receive-validated model switch revalidating differently against the same config");
+    announce_model(session, event_tx, stream);
+}
+
+/// The register announcement: a `model_changed` carrying the active
+/// selection — before every replay pass (a session becoming visible
+/// always tells its model) and after every applied switch. The one
+/// emission site's extracted heart.
+fn announce_model(
+    session: &Session,
+    event_tx: &mpsc::UnboundedSender<EventFrame>,
+    stream: &StreamId,
+) {
+    let _ = event_tx.send(EventFrame {
+        stream: Some(stream.clone()),
+        event: SessionEvent::ModelChanged {
+            provider: session.selection().provider.clone(),
+            model: session.selection().model.clone(),
+            thinking_level: session.selection().thinking_level.clone(),
+        },
+    });
 }
 
 /// Execute the parked checkout at a pause point: rewind the chain,
@@ -826,22 +950,15 @@ fn execute_checkout(
 /// The replay pass (PROTOCOL.md v2): the resident chain projected
 /// into finalized live events, bracketed. One emission path for its
 /// askers — the transport's replay request, checkout's re-render, and
-/// the open_session boot pass — and therefore also the one place the
-/// session-preference register is announced: a `model_changed` precedes
-/// every pass, so a session becoming visible (boot, open, re-replay,
-/// checkout) always tells the frontend its active selection. Idempotent
-/// by construction — a pass never moves the register, so the value
+/// the open_session boot pass — each led by the register announcement
+/// ([`announce_model`], shared with the applied model switch): a
+/// session becoming visible (boot, open, re-replay, checkout) always
+/// tells the frontend its active selection. Idempotent by
+/// construction — a pass never moves the register, so the value
 /// repeats; replayed history itself never carries `model_changed` (the
 /// register ruling: state is announced live, not reconstructed).
 fn emit_replay(session: &Session, event_tx: &mpsc::UnboundedSender<EventFrame>, stream: &StreamId) {
-    let _ = event_tx.send(EventFrame {
-        stream: Some(stream.clone()),
-        event: SessionEvent::ModelChanged {
-            provider: session.selection().provider.clone(),
-            model: session.selection().model.clone(),
-            thinking_level: session.selection().thinking_level.clone(),
-        },
-    });
+    announce_model(session, event_tx, stream);
     let events = session.replay_events();
     let total = events.len() as u64;
     let _ = event_tx.send(EventFrame {

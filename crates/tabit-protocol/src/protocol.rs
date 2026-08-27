@@ -138,6 +138,30 @@ pub enum SessionCommand {
         /// The entry the chain will end at (inclusive).
         entry_id: String,
     },
+    /// Switch a session's model: exactly a [`ModelSelection`], applied
+    /// from the next outer loop on. Validated against config **at
+    /// receive** (an unusable ref is an immediate
+    /// `error { kind: model }` — even mid-run, where a picker wants
+    /// the feedback), then applied at the session's pause point: the
+    /// register write (`model_change` entry, `model_changed` event)
+    /// lands at the worker's beat, so a run in flight finishes
+    /// untouched on the old model and the next run derives the new
+    /// agent at its open (PROTOCOL.md stage 3). The command never
+    /// aborts, never discards, and survives one (the pending switch
+    /// persists through abort and wind-down — only a hard process
+    /// death loses it, like pending messages).
+    Model {
+        /// The target session id.
+        session: String,
+        /// Provider id from tabit config.
+        provider: String,
+        /// Model id within the provider.
+        model: String,
+        /// Active thinking level name, when the model defines levels
+        /// (`None` clears — absent on the wire means the same).
+        #[serde(default)]
+        thinking_level: Option<String>,
+    },
 }
 
 /// One line from the client. The first line must be

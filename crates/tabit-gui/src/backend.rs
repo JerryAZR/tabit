@@ -248,6 +248,21 @@ impl Backend {
         }));
     }
 
+    /// Switch a session's model (the register write; stage 3). Validated
+    /// at receive — a ref the backend's config cannot resolve is an
+    /// immediate `error { kind: model }` — and applied at the session's
+    /// pause point: a run in flight finishes untouched on the old
+    /// model, `model_changed` lands after it, and the next run derives
+    /// the new agent.
+    pub fn model(&self, session: &str, provider: &str, model: &str) {
+        let _ = self.writer.send(to_wire_line(&SessionCommand::Model {
+            session: session.to_string(),
+            provider: provider.to_string(),
+            model: model.to_string(),
+            thinking_level: None,
+        }));
+    }
+
     /// Answer an interaction request of a session. The payload is the
     /// answer shaped by the asking template; a stale id is a backend
     /// no-op.
