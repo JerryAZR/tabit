@@ -157,8 +157,9 @@ impl TabitApp {
     /// Switch the active session's model — the minimal test surface for
     /// the model command: `provider/model` free text, validated by the
     /// backend at receive (a bad ref is an error notice, nothing
-    /// moves). No local gating: the backend parks a mid-run switch and
-    /// lands it after the run, and the run itself is untouched.
+    /// moves). No local gating: the write lands at receive (a run in
+    /// flight is untouched — it bound its model at run open; the next
+    /// run uses the new one).
     fn switch_model(&mut self) {
         if self.state.phase != Phase::Live {
             return;

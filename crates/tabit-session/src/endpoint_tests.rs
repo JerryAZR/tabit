@@ -1595,7 +1595,7 @@ fn last_model(
 }
 
 #[tokio::test]
-async fn a_model_switch_lands_at_the_beat_and_announces() {
+async fn a_model_switch_lands_at_receive_and_announces() {
     let store = temp_store("endpoint-model-idle");
     let factory = Factory::new(vec![text_turn("a"), text_turn("b")]);
     let session = factory
@@ -1606,7 +1606,8 @@ async fn a_model_switch_lands_at_the_beat_and_announces() {
     let mut handle = SessionHost::spawn(session, Vec::new(), plain_wiring(&store));
     let id = boot_id(&handle);
 
-    // One exchange, then an idle switch: it applies at the next beat.
+    // One exchange, then an idle switch: it lands at receive — entry,
+    // live cell, announcement, all at once.
     let mut frames = Vec::new();
     handle.message(&id, "one");
     collect_until(&mut handle, &mut frames, terminal).await;
@@ -1617,7 +1618,7 @@ async fn a_model_switch_lands_at_the_beat_and_announces() {
     .await;
 
     // The announcement carries the new selection, and the register is
-    // durable in the file.
+    // durable the moment the event is seen (the write precedes it).
     assert_eq!(
         model_changes(&frames),
         vec![("q".to_string(), "m2".to_string(), None)],
@@ -1705,7 +1706,7 @@ async fn a_bad_model_ref_errors_at_receive_and_parks_nothing() {
 }
 
 #[tokio::test]
-async fn a_mid_run_model_switch_lands_after_the_run() {
+async fn a_mid_run_model_switch_lands_at_receive_under_the_run() {
     let store = temp_store("endpoint-model-midrun");
     let factory = Factory::new(vec![tool_turn("t1", "slow"), text_turn("after")]);
     let session = factory
@@ -1717,9 +1718,10 @@ async fn a_mid_run_model_switch_lands_after_the_run() {
     let mut handle = SessionHost::spawn(session, Vec::new(), plain_wiring(&store));
     let id = boot_id(&handle);
 
-    // Provably mid-run (the slow tool is executing): the switch parks;
-    // the run is untouched — it finishes, then the beat serves the
-    // switch.
+    // Provably mid-run (the slow tool is executing): the switch lands
+    // at receive — the announcement precedes the run's terminal — and
+    // the run itself is untouched (it finishes on the model it bound
+    // at open; the next run derives the new one).
     handle.message(&id, "go");
     let mut frames = Vec::new();
     let mut sent = false;
@@ -1734,10 +1736,6 @@ async fn a_mid_run_model_switch_lands_after_the_run() {
             break;
         }
     }
-    collect_until(&mut handle, &mut frames, |event| {
-        matches!(event, SessionEvent::ModelChanged { .. })
-    })
-    .await;
     frames.extend(drain(&mut handle).await);
 
     let terminal_at = frames
@@ -1753,12 +1751,13 @@ async fn a_mid_run_model_switch_lands_after_the_run() {
         .position(|frame| matches!(&frame.event, SessionEvent::ModelChanged { provider, .. } if provider == "q"))
         .expect("the switch landed");
     assert!(
-        terminal_at < switch_at,
-        "the switch applies at the beat after the run"
+        switch_at < terminal_at,
+        "the switch lands at receive, under the run"
     );
     assert_eq!(
         last_model(&handle, &store),
-        Some(("q".to_string(), "m2".to_string(), None))
+        Some(("q".to_string(), "m2".to_string(), None)),
+        "durable at receive — before the run even finished"
     );
     std::fs::remove_dir_all(store.dir()).ok();
 }
@@ -1776,9 +1775,9 @@ async fn a_model_switch_survives_an_abort() {
     let mut handle = SessionHost::spawn(session, Vec::new(), plain_wiring(&store));
     let id = boot_id(&handle);
 
-    // Mid-run switch, then abort: the switch is a preference, not run
-    // intent — it must outlive the abort and land at the post-abort
-    // beat (the owner ruling).
+    // Mid-run switch, then abort: the switch is a state write, not run
+    // intent — it landed at receive (before the abort was even routed),
+    // so the abort has nothing to say about it and nothing to lose.
     handle.message(&id, "go");
     let mut frames = Vec::new();
     let mut sent = false;
@@ -1794,10 +1793,6 @@ async fn a_model_switch_survives_an_abort() {
             break;
         }
     }
-    collect_until(&mut handle, &mut frames, |event| {
-        matches!(event, SessionEvent::ModelChanged { .. })
-    })
-    .await;
     frames.extend(drain(&mut handle).await);
 
     let terminal_at = frames
@@ -1811,21 +1806,21 @@ async fn a_model_switch_survives_an_abort() {
     let switch_at = frames
         .iter()
         .position(|frame| matches!(&frame.event, SessionEvent::ModelChanged { provider, .. } if provider == "q"))
-        .expect("the switch survived the abort");
+        .expect("the switch announced");
     assert!(
-        terminal_at < switch_at,
-        "the switch lands at the beat after the abort terminal"
+        switch_at < terminal_at,
+        "the switch landed at receive — ahead of the abort it outlived"
     );
     assert_eq!(
         last_model(&handle, &store),
         Some(("q".to_string(), "m2".to_string(), None)),
-        "the register write is durable through the abort"
+        "the register write is durable regardless of the abort"
     );
     std::fs::remove_dir_all(store.dir()).ok();
 }
 
 #[tokio::test]
-async fn a_newer_model_switch_replaces_an_older() {
+async fn rapid_model_switches_each_land_and_the_last_wins() {
     let store = temp_store("endpoint-model-collapse");
     let session = Factory::new(vec![text_turn("a")])
         .into_builder(store.clone())
@@ -1834,9 +1829,9 @@ async fn a_newer_model_switch_replaces_an_older() {
     let mut handle = SessionHost::spawn(session, Vec::new(), plain_wiring(&store));
     let id = boot_id(&handle);
 
-    // Two switches before the beat serves either: the slot collapses —
-    // the register is last-write-wins, so the newer intent is the
-    // intent (one announcement, one register write).
+    // Two switches back-to-back: both land (each command is its own
+    // write and its own announcement — the log records that both
+    // happened), and the register, last-write-wins, keeps the newer.
     let mut frames = Vec::new();
     handle.message(&id, "one");
     collect_until(&mut handle, &mut frames, terminal).await;
@@ -1849,20 +1844,30 @@ async fn a_newer_model_switch_replaces_an_older() {
             thinking_level: Some("high".to_string()),
         },
     );
-    collect_until(&mut handle, &mut frames, |event| {
-        matches!(event, SessionEvent::ModelChanged { .. })
-    })
-    .await;
+    let mut announced = 0;
+    while let Some(frame) = handle.next_event().await {
+        if matches!(frame.event, SessionEvent::ModelChanged { .. }) {
+            announced += 1;
+        }
+        frames.push(frame);
+        if announced == 2 {
+            break;
+        }
+    }
     frames.extend(drain(&mut handle).await);
 
     assert_eq!(
         model_changes(&frames),
-        vec![("p".to_string(), "m".to_string(), Some("high".to_string()))],
-        "only the newer switch announced"
+        vec![
+            ("q".to_string(), "m2".to_string(), None),
+            ("p".to_string(), "m".to_string(), Some("high".to_string()))
+        ],
+        "each switch announced, in wire order"
     );
     assert_eq!(
         last_model(&handle, &store),
-        Some(("p".to_string(), "m".to_string(), Some("high".to_string())))
+        Some(("p".to_string(), "m".to_string(), Some("high".to_string()))),
+        "the register keeps the last write"
     );
     std::fs::remove_dir_all(store.dir()).ok();
 }
@@ -1880,9 +1885,10 @@ async fn a_model_switch_precedes_a_parked_checkout() {
     let mut handle = SessionHost::spawn(session, Vec::new(), plain_wiring(&store));
     let id = boot_id(&handle);
 
-    // Both parked mid-run: the checkout aborts its way to the pause
-    // point, the beat serves the switch FIRST — so the checkout's
-    // replay pass announces the fresh register, not a stale one.
+    // Switch then checkout, both mid-run: the switch lands at receive
+    // (state, unconditionally); the checkout aborts its way to the
+    // pause point, and its replay pass announces the live cell — the
+    // fresh register, with no beat-ordering needed to arrange it.
     handle.message(&id, "go");
     let mut frames = Vec::new();
     let mut sent = false;
@@ -1909,14 +1915,14 @@ async fn a_model_switch_precedes_a_parked_checkout() {
     let switch_at = frames
         .iter()
         .position(|frame| matches!(&frame.event, SessionEvent::ModelChanged { provider, .. } if provider == "q"))
-        .expect("the switch landed at the beat head");
+        .expect("the switch landed at receive");
     let checked_at = frames
         .iter()
         .position(|frame| matches!(frame.event, SessionEvent::CheckedOut { .. }))
         .expect("the checkout executed");
     assert!(
         switch_at < checked_at,
-        "the beat serves the register write before the rewind"
+        "the state write landed ahead of the conversation mutation"
     );
     // The pass that follows the checkout announces the fresh register
     // (its leading `model_changed` — idempotent repetition by design).

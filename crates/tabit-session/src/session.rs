@@ -33,7 +33,7 @@ use rig_agent::completion::{Message, Usage};
 use rig_agent::streaming::{StreamedUserContent, StreamingChat};
 use rig_agent::tool::DynamicTool;
 use std::path::{Path, PathBuf};
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
 use tabit_config::{AuthConfig, TabitConfig};
 use tabit_protocol::{EventFrame, ModelSelection, SessionEvent, StreamId};
 use tokio_util::sync::CancellationToken;
@@ -270,22 +270,20 @@ impl SessionBuilder {
         session
             .recorder
             .seed_ids(loaded.entries.iter().map(|entry| entry.id.clone()));
+        let selection = session.selection();
         let same_model = matches!(
             last,
             Some((provider, model, level))
-                if provider == session.selection.provider
-                    && model == session.selection.model
-                    && level == session.selection.thinking_level.as_deref()
+                if provider == selection.provider
+                    && model == selection.model
+                    && level == selection.thinking_level.as_deref()
         );
         if !same_model {
             // Either a caller-directed switch at resume time, or a log
             // without any model_change yet — either way the session's
-            // opening state is durable from here on.
-            session.recorder.record(EntryKind::ModelChange {
-                provider: session.selection.provider.clone(),
-                model: session.selection.model.clone(),
-                thinking_level: session.selection.thinking_level.clone(),
-            });
+            // opening state is durable from here on, through the one
+            // register-write site like every other switch.
+            session.model_register().write(selection);
         }
         // One repair path for everyone: reload_context synthesizes results
         // for a dangling trailing roundtrip (and fails loudly if they
@@ -559,7 +557,14 @@ impl rig_agent::SteeringSource for SessionSteers {
 pub struct Session {
     store: SessionStore,
     config: Arc<TabitConfig>,
-    selection: ModelSelection,
+    /// The active model selection — a **shared cell, not worker
+    /// state**: the endpoint writes it at receive through the
+    /// [`ModelRegister`] (record + swap, one operation, any thread),
+    /// and every reader derives — run open's agent derivation
+    /// ([`Self::ensure_agent`]), announcements. The lazy-agent rule
+    /// makes any-writer safe: the reader checks freshness, it does not
+    /// trust writers to rebuild.
+    selection: Arc<Mutex<ModelSelection>>,
     preamble: Option<String>,
     tools: Vec<DynamicTool>,
     max_turns: usize,
@@ -1186,35 +1191,43 @@ impl Session {
     }
 
     /// Switch the provider/model/thinking level from the next outer loop
-    /// on. Recorded as a `model_change` entry. No agent is built here:
-    /// the selection is the truth, and the next run open derives the
-    /// agent from it — a selection that validates against config but
-    /// fails to construct surfaces as that run's `run_failed`.
+    /// on: validate, then one register write (the `model_change` entry
+    /// and the live cell, atomically — see [`ModelRegister::write`]).
+    /// No agent is built here — the next run open derives it, and a
+    /// selection that validates against config but fails to construct
+    /// surfaces as that run's `run_failed`.
     pub fn set_model(&mut self, selection: ModelSelection) -> Result<(), SessionError> {
         validate_selection(&selection, &self.config)?;
-        self.recorder.record(EntryKind::ModelChange {
-            provider: selection.provider.clone(),
-            model: selection.model.clone(),
-            thinking_level: selection.thinking_level.clone(),
-        });
-        self.selection = selection;
+        self.model_register().write(selection);
         Ok(())
     }
 
     /// Change the thinking level without changing provider/model. `None`
     /// clears it.
     pub fn set_thinking_level(&mut self, level: Option<&str>) -> Result<(), SessionError> {
+        let current = self.selection();
         let selection = ModelSelection {
-            provider: self.selection.provider.clone(),
-            model: self.selection.model.clone(),
+            provider: current.provider,
+            model: current.model,
             thinking_level: level.map(str::to_string),
         };
         self.set_model(selection)
     }
 
-    /// The active model selection.
-    pub fn selection(&self) -> &ModelSelection {
-        &self.selection
+    /// The active model selection (an owned clone — three strings; the
+    /// cell is shared with the endpoint's receive-time writes).
+    pub fn selection(&self) -> ModelSelection {
+        lock(&self.selection).clone()
+    }
+
+    /// The shared register handle — the `model` command's write path at
+    /// receive (validate with [`Self::model_probe`] first; the write
+    /// itself cannot fail).
+    pub(crate) fn model_register(&self) -> ModelRegister {
+        ModelRegister {
+            selection: self.selection.clone(),
+            recorder: self.recorder.clone(),
+        }
     }
 
     /// The session id.
@@ -1355,17 +1368,18 @@ impl Session {
     /// say) cannot leave a stale agent serving requests, because the
     /// one reader derives rather than trusts.
     fn ensure_agent(&mut self) -> Result<(), SessionError> {
-        if self.agent_built_for == self.selection {
+        let selection = self.selection();
+        if self.agent_built_for == selection {
             return Ok(());
         }
         self.agent = Arc::new(build_agent(
             &self.model_factory,
             &self.config,
-            &self.selection,
+            &selection,
             self.preamble.as_deref(),
             &self.tools,
         )?);
-        self.agent_built_for = self.selection.clone();
+        self.agent_built_for = selection;
         Ok(())
     }
 
@@ -1391,7 +1405,7 @@ impl Session {
         let session = Self {
             store: builder.store,
             config: builder.config,
-            selection: builder.selection.clone(),
+            selection: Arc::new(Mutex::new(builder.selection.clone())),
             preamble: builder.preamble,
             tools: builder.tools,
             max_turns: builder.max_turns,
@@ -1410,6 +1424,42 @@ impl Session {
             interaction: None,
         };
         Ok(session)
+    }
+}
+
+/// The shared model-selection register: the live cell plus the
+/// recorder's append. [`ModelRegister::write`] records the
+/// `model_change` entry and swaps the cell **in one operation, from
+/// any thread** (owner ruling 2026-08: a state write happens at
+/// receive; the worker derives, it does not gate) — the register's
+/// one durable-write site, shared by the endpoint's `model` command,
+/// `Session::set_model`, and resume's reconciliation. The recorder's
+/// append is internally locked today; the planned write-behind log
+/// turns it into a queue enqueue with a flush attempt per write
+/// (disk-full degrades through the same sticky-error contract every
+/// record already carries).
+#[derive(Clone)]
+pub(crate) struct ModelRegister {
+    selection: Arc<Mutex<ModelSelection>>,
+    recorder: Arc<SessionRecorder>,
+}
+
+impl ModelRegister {
+    /// Record + swap, atomic under the cell lock — the entry and the
+    /// live state can never disagree about who won a race. Every write
+    /// is an entry: the log records that the switch happened (the
+    /// register is last-write-wins, so repeat values are harmless
+    /// noise). A record that cannot reach the disk surfaces through
+    /// the recorder's sticky error at the next durability check, the
+    /// same contract every entry write has.
+    pub(crate) fn write(&self, selection: ModelSelection) {
+        let mut cell = lock(&self.selection);
+        self.recorder.record(EntryKind::ModelChange {
+            provider: selection.provider.clone(),
+            model: selection.model.clone(),
+            thinking_level: selection.thinking_level.clone(),
+        });
+        *cell = selection;
     }
 }
 

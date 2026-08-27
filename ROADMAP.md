@@ -234,20 +234,23 @@ The known deviation from pi's subprocess model:
   flag 21, recorded with the outer-loop diagram).
 - **Model command shipped** (stage 3, 2026-08): `model { session,
   provider, model, thinking_level? }` switches a session's selection —
-  the register write under the session-preference ruling. The checkout
-  pattern end to end: validate at receive against config (the
-  `ModelProbe` handle — immediate `error { kind: model }` for a bad
-  ref), park in a slot (newer replaces older) at the **head of the
-  worker's beat**, apply with `set_model` (the agent derives at the
-  next run open — the agent-cache refactor), announce `model_changed`
-  (one emission site shared with the replay passes). The switch never
-  aborts a run, survives abort and wind-down, and dies only with the
-  process (like pending messages). The GUI grows a minimal test field
-  (`provider/model` free text); the real picker waits for a
-  models-list command (deferred with the redesign). Deferred with it:
-  the global implicit preference (`~/.tabit/` last-selected file +
-  registry rung below `default_model`) and the "selection didn't
-  land" picker signal (open note in PROTOCOL.md).
+  the register write under the session-preference ruling, and **a
+  state write, not conversation intent**: the whole command happens
+  at receive. Validate against config (the `ModelProbe` handle —
+  immediate `error { kind: model }` for a bad ref), then one shared
+  register write (`ModelRegister`: the `model_change` entry and the
+  live selection cell, atomically, from any thread — the recorder's
+  append is internally locked, and the planned write-behind log turns
+  it into a queue enqueue with a flush attempt per write), then
+  `model_changed` (one construction site shared with the replay
+  passes). The worker is uninvolved — no park, no wake, no beat
+  ordering, and abort has nothing to say about it: the next run open
+  derives the agent, every pass announces the cell. The GUI grows a
+  minimal test field (`provider/model` free text); the real picker
+  waits for a models-list command (deferred with the redesign).
+  Deferred with it: the global implicit preference (`~/.tabit/`
+  last-selected file + registry rung below `default_model`) and the
+  "selection didn't land" picker signal (open note in PROTOCOL.md).
 - **GUI: egui, the primary frontend (decided; supersedes the TUI plan).**
   The TUI milestone (the claurst harvest, ~19K LOC) is dead/low priority —
   only reconsidered if everything else lands and a terminal frontend is

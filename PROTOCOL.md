@@ -393,19 +393,22 @@ histories).
   future query over the backend's resident tree — not frontend state.
 - **`model { provider, model, thinking_level? }` — shipped** (stage 3,
   2026-08): exactly
-  `ModelSelection`, validated against config **at receive** (the
-  checkout-probe pattern — `error { kind: model }` names the bad ref
-  immediately, even mid-run), then applied at the session's pause
-  point: a register write (`ModelChange` entry, `model_changed`
-  event — the session-preference ruling in the v3 section, not a
-  chain-state transition), never an abort. A run in flight finishes
-  untouched (passes bind the agent at run open — the agent-cache
-  refactor); the next run derives the new agent at its open. The
-  pending switch is a slot (newer replaces older), sits at the **head
-  of the worker's beat** (so a following replay pass announces the
-  fresh register), **survives abort** (a preference is not run intent;
-  the post-abort beat serves it) and wind-down — only a hard process
-  death loses it, like pending messages.
+  `ModelSelection`, and a **state write, not conversation intent** —
+  the whole command happens at receive. Validated against config (the
+  `ModelProbe` handle — `error { kind: model }` names the bad ref
+  immediately, even mid-run), then one shared register write
+  (`ModelRegister::write`: the `model_change` entry and the live
+  selection cell, atomically under the cell lock, from any thread —
+  the recorder's append is internally locked; the planned write-behind
+  log turns it into a queue enqueue with a flush attempt per write),
+  then `model_changed`. The worker is uninvolved — no park, no wake,
+  no beat ordering: the next run open derives the agent from the cell
+  (passes bind at run open, so a run in flight finishes untouched on
+  its old model), every replay pass announces the cell live, and abort
+  has nothing to say about it (state writes are not intent — the rule
+  every future session-state command follows). Rapid switches each
+  write (the log records that each command happened); the register is
+  last-write-wins.
   Open note (from the agent-cache refactor): validation at the command
   is config truth, so a selection can land in the register yet fail to
   construct at the next run open (the environmental class — client

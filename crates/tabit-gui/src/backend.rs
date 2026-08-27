@@ -248,12 +248,13 @@ impl Backend {
         }));
     }
 
-    /// Switch a session's model (the register write; stage 3). Validated
-    /// at receive — a ref the backend's config cannot resolve is an
-    /// immediate `error { kind: model }` — and applied at the session's
-    /// pause point: a run in flight finishes untouched on the old
-    /// model, `model_changed` lands after it, and the next run derives
-    /// the new agent.
+    /// Switch a session's model (the register write; stage 3) — a
+    /// state write that happens entirely at receive: a ref the
+    /// backend's config cannot resolve is an immediate
+    /// `error { kind: model }`; otherwise the entry and the live
+    /// selection land at once and `model_changed` follows immediately
+    /// (a run in flight finishes untouched; the next run derives the
+    /// new agent).
     pub fn model(&self, session: &str, provider: &str, model: &str) {
         let _ = self.writer.send(to_wire_line(&SessionCommand::Model {
             session: session.to_string(),
