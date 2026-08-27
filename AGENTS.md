@@ -64,10 +64,17 @@ Current workspace layout:
    others. One purpose per function/module; if a description needs "and",
    split it. No duplicated logic for the same concern — extract a shared,
    well-named abstraction that is genuinely simpler than the repetition.
-   Prefer battle-tested algorithms/crates over hand-rolled ones; if you must
-   hand-roll, document why. Internal errors fail hard and loud; external
-   errors fail gracefully and clearly; never swallow an error or substitute
-   a default that masks the real cause.
+   Concern identity is the *output artifact*, not the input shape: two
+   folds that consume different inputs (engine stream items vs. log
+   records) but produce the same artifact (the model-facing context) are
+   one concern — extract or extend, never write a sibling. Before adding
+   any fold, builder, projection, or accumulator, enumerate the existing
+   implementations of the same output anywhere in the workspace,
+   dependencies and vendored code included, and say why this isn't the
+   Nth. Prefer battle-tested algorithms/crates over hand-rolled ones; if
+   you must hand-roll, document why. Internal errors fail hard and loud;
+   external errors fail gracefully and clearly; never swallow an error
+   or substitute a default that masks the real cause.
 8. **Canonical surfaces.** Tabit tools implement `PortableTool`
    (`#[rig_tool]`); the contextual `Tool`/`ToolContext` is the runtime-side
    consumption contract reached via the blanket bridge. OpenAI code targets
@@ -104,7 +111,26 @@ Current workspace layout:
     checkout bug was three abort doors re-assembling
     drop-all-pending-intent, split by a discard-staging workaround
     built when the handler could not emit events — obsolete the day it
-    could, deleted only after the second bug.
+    could, deleted only after the second bug. The same audit applies
+    *proactively*: when a change removes or alters a mechanism's
+    justification (sync → write-behind, eager → lazy, one writer →
+    queue), the machinery that justification built is re-derived in
+    the same change. Elaborating machinery to preserve it — adding a
+    buffer, flag, or second pass so an existing mechanism keeps
+    working under a new regime — is the stop signal: the mechanism is
+    usually dead weight the regime change just exposed.
+
+## Reporting
+
+Status summaries state the **reason** each mechanism exists, not just
+what it did. "The session re-derives context from the log after every
+run because persistence was synchronous" dies in one read; "the
+session keeps its resident chain" launders implementation into
+architecture-sounding nouns and breaks the owner's review — the
+summary is the owner's review surface. A mechanism you cannot give a
+reason for appears in the summary as reason-less: that is the
+finding, not a phrasing problem. Gate results report internal
+consistency, never design fit (see the gate bullet below).
 
 ## Environment / commands
 
@@ -115,7 +141,14 @@ Current workspace layout:
   `cargo test --workspace --no-fail-fast`. The suite runs fully offline
   (see rule 5); some tests carry upstream-marked `#[ignore]`s
   (live-network scenarios). Don't record pass counts here — they change
-  constantly; run the suite for current numbers.
+  constantly; run the suite for current numbers. The gate proves
+  **internal consistency** — code, tests, and docs agree with each
+  other — and nothing more; artifacts written in one sitting are
+  mutually consistent even when the design is wrong. Never report gate
+  results as evidence that a design is right.
+- Scripted or regex mass-edits of source files are a last resort, and
+  the result is read back before the next build. The compiler is not a
+  reviewer.
 - In shell commands, avoid `;` chaining — it runs the next step regardless
   of the previous one's failure. Prefer `&&` (proceed only on success) or
   `||` (fallback), so a failed step can never be talked past.
