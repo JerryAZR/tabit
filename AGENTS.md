@@ -73,9 +73,10 @@ Current workspace layout:
    consumption contract reached via the blanket bridge. OpenAI code targets
    the Responses API; chat completions is the compat-gateway wire format.
    Tool-call arguments parse strictly — truncated JSON is an error, never a
-   silent partial call. Tool cancellation follows the contract documented
-   in `tabit-tools`'s crate docs (engine owns *when*, tool owns *how*;
-   drop-safety required; `bash` is the reference implementation).
+   silent partial call. Tool cancellation is token-and-detach (ENGINE.md's
+   execution substrate): bodies poll on the sidecar runtime, abort detaches
+   the task and the token is the ask — drop is no longer the mechanism;
+   `bash` is the reference implementation.
 9. **Fighting the architecture is a stop signal.** If the work feels like
    fighting the design — wrestling the borrow checker, reaching for an
    unintuitive workaround for a recurring error, or ping-ponging between
