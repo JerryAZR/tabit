@@ -407,8 +407,7 @@ histories).
   its old model), every replay pass announces the cell live, and abort
   has nothing to say about it (state writes are not intent — the rule
   every future session-state command follows). Rapid switches each
-  write (the log records that each command happened); the register is
-  last-write-wins.
+  write; the register is last-write-wins.
   Open note (from the agent-cache refactor): validation at the command
   is config truth, so a selection can land in the register yet fail to
   construct at the next run open (the environmental class — client

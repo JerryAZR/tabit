@@ -1445,13 +1445,12 @@ pub(crate) struct ModelRegister {
 }
 
 impl ModelRegister {
-    /// Record + swap, atomic under the cell lock — the entry and the
-    /// live state can never disagree about who won a race. Every write
-    /// is an entry: the log records that the switch happened (the
-    /// register is last-write-wins, so repeat values are harmless
-    /// noise). A record that cannot reach the disk surfaces through
-    /// the recorder's sticky error at the next durability check, the
-    /// same contract every entry write has.
+    /// Record + swap, atomic under the cell lock. Unconditional — a
+    /// dedup guard would be machinery without a failure it prevents
+    /// (repeat values are harmless under last-write-wins). A record
+    /// that cannot reach the disk surfaces through the recorder's
+    /// sticky error at the next durability check, the same contract
+    /// every entry write has.
     pub(crate) fn write(&self, selection: ModelSelection) {
         let mut cell = lock(&self.selection);
         self.recorder.record(EntryKind::ModelChange {
