@@ -475,7 +475,7 @@ fn marker_targeting_an_unknown_entry_is_corrupt() {
 }
 
 #[test]
-fn last_model_follows_the_active_chain_not_the_file() {
+fn last_model_reads_the_files_last_model_change() {
     let store = temp_store("rewind-model-hint");
     let mut writer = store.create("C:/work");
     writer
@@ -518,14 +518,17 @@ fn last_model_follows_the_active_chain_not_the_file() {
         Some("m2".to_string())
     );
 
-    // Branch from before the switch: the hint rolls back with the chain.
+    // Branch from before the switch: the hint does NOT roll back — the
+    // register is the user's latest model choice in time, whichever
+    // branch it was recorded on (owner ruling 2026-08).
     writer.rewind_to(Some(&turn_two.id)).expect("rewind");
     assert_eq!(
         store
             .last_model(writer.path())
             .expect("hint")
             .map(|s| s.model),
-        Some("m".to_string())
+        Some("m2".to_string()),
+        "the rewind left the session preference register alone"
     );
     // Turn one's entry is still reachable as an earlier chain node.
     let loaded = store.open_path(writer.path()).expect("open");

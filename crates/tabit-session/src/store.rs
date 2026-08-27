@@ -158,20 +158,20 @@ impl SessionStore {
     }
 
     /// The model a session file last used, for default-selection hints
-    /// (see [`crate::ModelRegistry::default_selection`]). Follows the
-    /// active chain, so a rewind past a model switch rolls the hint back
-    /// with it. `None` when the chain records no model change.
+    /// (see [`crate::ModelRegistry::default_selection`]). Reads the
+    /// file's last `model_change` in append order — the session
+    /// preference register — so a rewind does not roll the hint back:
+    /// the user's latest model choice is the hint, whichever branch it
+    /// was recorded on. `None` when the file records no model change.
     pub fn last_model(&self, path: &Path) -> Result<Option<ModelSelection>, SessionError> {
         let loaded = self.open_path(path)?;
-        Ok(
-            projection::last_model_change(&loaded.chain).map(|(provider, model, level)| {
-                ModelSelection {
-                    provider: provider.to_string(),
-                    model: model.to_string(),
-                    thinking_level: level.map(str::to_string),
-                }
-            }),
-        )
+        Ok(projection::last_model_change_in_file(&loaded.entries).map(
+            |(provider, model, level)| ModelSelection {
+                provider: provider.to_string(),
+                model: model.to_string(),
+                thinking_level: level.map(str::to_string),
+            },
+        ))
     }
 
     /// Every stored session, newest first (by creation timestamp in the

@@ -851,7 +851,7 @@ async fn resume_uses_the_builder_selection_and_records_the_switch() -> Result<()
     );
     // The switch is durable: the log records p/m as the model in effect.
     let loaded = store.open_path(&path).expect("reload");
-    let last = crate::projection::last_model_change(&loaded.entries).expect("recorded");
+    let last = crate::projection::last_model_change_in_file(&loaded.entries).expect("recorded");
     assert_eq!(last, ("p", "m", None));
     std::fs::remove_dir_all(store.dir()).ok();
     Ok(())
@@ -1415,7 +1415,7 @@ async fn rewind_rejects_zero_and_more_than_the_chain_holds() -> Result<(), Sessi
 }
 
 #[tokio::test]
-async fn rewind_past_a_model_switch_adopts_the_chains_model() -> Result<(), SessionError> {
+async fn a_rewind_never_moves_the_model_register() -> Result<(), SessionError> {
     let store = temp_store("rewind-model");
     let factory = Factory::new(vec![text_turn("answer one"), text_turn("answer two")]);
     let mut session = factory.clone().into_builder(store.clone()).create("C:/w")?;
@@ -1428,18 +1428,21 @@ async fn rewind_past_a_model_switch_adopts_the_chains_model() -> Result<(), Sess
         .expect("switch");
     assert_eq!(session.selection().model, "m2");
 
-    // The chain's model is p/m again; the session adopts it without
-    // recording a duplicate change — the chain already says it.
+    // The register is a session preference (owner ruling 2026-08): the
+    // rewind moves the chain — dropping the switch's entry with the
+    // turn — but never the model. No rebuild, no re-adoption, no new
+    // entry: the file's last model_change (now on the abandoned side of
+    // the branch) is still the register.
     session.rewind(1).expect("rewind");
-    assert_eq!(session.selection().model, "m");
+    assert_eq!(session.selection().model, "m2");
     let requested = factory.requested.lock().expect("requested").clone();
     assert_eq!(
         requested,
         vec![
             ("p".to_string(), "m".to_string()),
             ("q".to_string(), "m2".to_string()),
-            ("p".to_string(), "m".to_string()), // the rewind rebuild
-        ]
+        ],
+        "the rewind rebuilt nothing"
     );
     let loaded = store.open_path(session.path()).expect("reload");
     let model_changes = loaded
@@ -1448,6 +1451,27 @@ async fn rewind_past_a_model_switch_adopts_the_chains_model() -> Result<(), Sess
         .filter(|entry| matches!(entry.kind, EntryKind::ModelChange { .. }))
         .count();
     assert_eq!(model_changes, 1, "the switch left the chain with the turn");
+    // And the register is what resume READS: the report's resumed_model
+    // is the file's last model_change — the switch the rewind dropped
+    // from the chain — while the builder's explicit selection (the
+    // caller's answer) continues and, differing from the register, is
+    // recorded as the newest turn of the knob.
+    let path = session.path().to_path_buf();
+    drop(session);
+    let (session, report) = Factory::new(vec![text_turn("answer three")])
+        .into_builder(store.clone())
+        .resume(&path)
+        .expect("resume");
+    let resumed = report.resumed_model.expect("the register was read");
+    assert_eq!(
+        (resumed.provider.as_str(), resumed.model.as_str()),
+        ("q", "m2"),
+        "resume consulted the file's last model_change, not the rewound chain's"
+    );
+    assert_eq!(session.selection().model, "m");
+    let loaded = store.open_path(&path).expect("reload");
+    let last = crate::projection::last_model_change_in_file(&loaded.entries).expect("recorded");
+    assert_eq!(last, ("p", "m", None));
     std::fs::remove_dir_all(store.dir()).ok();
     Ok(())
 }
@@ -1651,7 +1675,7 @@ async fn rewinding_to_an_unknown_entry_changes_nothing() -> Result<(), SessionEr
 }
 
 #[tokio::test]
-async fn rewind_to_the_root_records_the_current_model() -> Result<(), SessionError> {
+async fn rewind_to_the_root_leaves_the_register_untouched() -> Result<(), SessionError> {
     let store = temp_store("rewind-root");
     // Hand-written log whose first entry is a user message with no
     // parent (create always records a model change first, so only a
@@ -1678,17 +1702,30 @@ async fn rewind_to_the_root_records_the_current_model() -> Result<(), SessionErr
         .expect("resume")
         .0;
 
-    // Branch from the root: the chain empties, so the current selection
-    // becomes durable at the new tip, exactly like resume on a bare log.
+    // Branch from the root: the chain empties. The register is a
+    // session preference — the rewind records its marker and nothing
+    // else; no model change is materialized at the tip. (The MC the
+    // reload sees is resume's own reconciliation: a bare log meets the
+    // builder's explicit selection and records it — resume's path,
+    // unchanged by the ruling.)
     let rewind = session.rewind(1).expect("rewind");
     assert_eq!(rewind.to_entry, "");
     assert!(session.context().is_empty());
+    assert_eq!(session.selection().model, "m");
     let loaded = store.open_path(&path).expect("reload");
-    assert!(matches!(
-        loaded.entries.last().map(|e| &e.kind),
-        Some(EntryKind::ModelChange { model, .. }) if model == "m"
-    ));
-    assert_eq!(loaded.chain.len(), 1);
+    assert!(
+        matches!(
+            loaded.entries.last().map(|e| &e.kind),
+            Some(EntryKind::Rewound { .. })
+        ),
+        "the marker is the only thing the rewind wrote"
+    );
+    assert_eq!(
+        loaded.entries.len(),
+        4,
+        "user, assistant, resume's model_change, marker"
+    );
+    assert!(loaded.chain.is_empty());
 
     // The session is usable from the emptied chain.
     session.prompt("fresh start").await;
@@ -1698,10 +1735,13 @@ async fn rewind_to_the_root_records_the_current_model() -> Result<(), SessionErr
 }
 
 #[tokio::test]
-async fn rewind_fails_loudly_when_the_chains_model_left_the_config() -> Result<(), SessionError> {
+async fn a_ghost_model_in_history_does_not_block_a_rewind() -> Result<(), SessionError> {
     let store = temp_store("rewind-ghost-model");
     // The chain's only model change names a provider the config no longer
-    // carries; adopting it must fail before anything is written.
+    // carries. Under the register ruling the rewind never adopts it —
+    // history's stale selections are inert records, and the session's
+    // current (valid) selection keeps answering — so the rewind
+    // succeeds where it once failed loudly.
     let mut writer = store.create("C:/w");
     writer
         .append(EntryKind::ModelChange {
@@ -1725,18 +1765,17 @@ async fn rewind_fails_loudly_when_the_chains_model_left_the_config() -> Result<(
         })
         .expect("assistant");
     let path = writer.path().to_path_buf();
-    let entries_before = store.open_path(&path).expect("reload").entries.len();
 
-    let (mut session, _report) = Factory::new(vec![text_turn("ok")])
+    let (mut session, _report) = Factory::new(vec![text_turn("ok"), text_turn("after")])
         .into_builder(store.clone())
         .resume(&path)
         .expect("resume");
-    let error = session.rewind(1).expect_err("ghost model");
-    assert!(error.to_string().contains("ghost"), "{error}");
-    let loaded = store.open_path(&path).expect("reload");
-    // Resume itself appended its model change; the failed rewind added
-    // nothing on top.
-    assert_eq!(loaded.entries.len(), entries_before + 1);
+
+    session.rewind(1).expect("the ghost is inert history");
+    assert_eq!(session.selection().model, "m");
+    assert!(session.context().is_empty());
+    session.prompt("still here").await;
+    assert_eq!(user_messages(session.context()), vec!["still here"]);
     std::fs::remove_dir_all(store.dir()).ok();
     Ok(())
 }
@@ -1943,11 +1982,13 @@ async fn replay_re_emits_the_chain_with_live_ids_and_whole_texts() -> Result<(),
     assert_eq!(replay_texts, vec![live_text.as_str()]);
 
     // The bracket structure: every announced turn commits, and the pass
-    // opens with the session's model change.
-    assert!(matches!(
-        replayed.first(),
-        Some(SessionEvent::ModelChanged { .. })
-    ));
+    // carries no model_changed at all — the register is announced live
+    // at visibility, never reconstructed from history (owner ruling).
+    assert!(
+        replayed
+            .iter()
+            .all(|e| { !matches!(e, SessionEvent::ModelChanged { .. }) })
+    );
     let commits: Vec<String> = replayed
         .iter()
         .filter_map(|e| match e {

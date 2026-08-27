@@ -100,14 +100,15 @@ fn a_chain_projects_to_bracketed_whole_text_events() {
 
     let events = project_events(&chain);
 
-    // One sequence, exact: the model change, the user message with its
-    // entry id, then each turn bracketed by its entry id around
-    // whole-text deltas, its call, its usage — the tool result stamped
-    // with its turn — and the final turn.
+    // One sequence, exact: the user message with its entry id, then each
+    // turn bracketed by its entry id around whole-text deltas, its call,
+    // its usage — the tool result stamped with its turn — and the final
+    // turn. The chain's leading `model_change` produces nothing: state
+    // is announced live at visibility, never reconstructed from history
+    // (the register ruling) — its absence here is the pin.
     let labels: Vec<String> = events
         .iter()
         .map(|event| match event {
-            SessionEvent::ModelChanged { model, .. } => format!("model:{model}"),
             SessionEvent::UserMessage { entry_id, .. } => format!("user:{entry_id}"),
             SessionEvent::TurnStarted { id } => format!("start:{id}"),
             SessionEvent::ReasoningDelta { id, .. } => format!("think:{id}"),
@@ -122,12 +123,11 @@ fn a_chain_projects_to_bracketed_whole_text_events() {
     assert_eq!(
         labels,
         vec![
-            "model:m",
             "user:u1",
             "start:t1",
             // Reasoning block id synthesized from the turn (the block
             // carried none; live deltas arrived without one too).
-            "think:t1-reasoning-3",
+            "think:t1-reasoning-2",
             "text:let me look",
             "call:ls",
             "usage:10",
@@ -142,12 +142,12 @@ fn a_chain_projects_to_bracketed_whole_text_events() {
 
     // The shapes behind the labels: whole texts, stamps, structure.
     assert!(matches!(
-        &events[3],
+        &events[2],
         SessionEvent::ReasoningDelta { turn_id, reasoning, .. }
             if turn_id == "t1" && reasoning == "thinking about it"
     ));
     assert!(matches!(
-        &events[8],
+        &events[7],
         SessionEvent::ToolResult {
             turn_id, entry_id, name, internal_call_id, content, ..
         } if turn_id == "t1"

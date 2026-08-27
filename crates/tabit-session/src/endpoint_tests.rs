@@ -666,8 +666,10 @@ async fn open_session_loads_a_stored_session_and_replays_it() {
         "the unmaterialized boot session is not"
     );
 
-    // open_session loads it and answers with the pass — stamped with
-    // the opened id, carrying the stored history whole.
+    // open_session loads it and answers with the register announcement
+    // and the pass — stamped with the opened id, carrying the stored
+    // history whole (the model_changed the loop sees is the
+    // announcement; history itself carries none).
     handle.command_link().send(SessionCommand::OpenSession {
         id: stored_id.clone(),
     });
@@ -819,12 +821,15 @@ async fn a_replay_request_streams_the_pass_onto_the_event_channel() {
             event => pass.push(kind_of(&event)),
         }
     }
-    // model change, user message, a bracketed turn with whole text.
+    // The register announcement precedes the bracket (the pass itself
+    // carries no model_changed — state is announced live, never
+    // reconstructed); then the user message and a bracketed turn with
+    // whole text.
     assert_eq!(
         pass,
         vec![
-            "started",
             "model_changed",
+            "started",
             "user_message",
             "turn_started",
             "text_delta",
@@ -1675,13 +1680,14 @@ async fn parked_checkouts_collapse_to_the_last_and_spaced_ones_execute() {
         .rposition(|frame| matches!(frame.event, SessionEvent::CheckedOut { .. }))
         .expect("the survivor");
     assert_eq!(bracket_users(&frames, survivor_at), vec!["one", "two"]);
-    // The pass's progress denominator is its own length (the frame
-    // right after the announce opens it; the slice starts past the
+    // The pass's progress denominator is its own length (the register
+    // announcement — idempotent, the rewind never moved it — sits
+    // between checked_out and the bracket; the slice starts past the
     // opener so only pass events count).
-    let SessionEvent::ReplayStarted { total } = &frames[survivor_at + 1].event else {
-        panic!("the re-render pass opens right after checked_out");
+    let SessionEvent::ReplayStarted { total } = &frames[survivor_at + 2].event else {
+        panic!("the register announcement, then the re-render pass opens");
     };
-    let pass_len = frames[survivor_at + 2..]
+    let pass_len = frames[survivor_at + 3..]
         .iter()
         .position(|frame| matches!(frame.event, SessionEvent::ReplayDone))
         .expect("the pass closes");

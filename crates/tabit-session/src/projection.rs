@@ -2,8 +2,10 @@
 //!
 //! Projection is pure: a function from the active chain of entries to
 //! messages. `label`, `custom`, `aborted`, `rewound`, and `model_change`
-//! entries are state, not context, and are skipped here; `model_change`
-//! state is folded separately by the session on resume.
+//! entries are state, not context, and are skipped here; the model
+//! selection is a session preference — a register read over the whole
+//! file, not the chain ([`last_model_change_in_file`]) — folded by the
+//! session on resume and never moved by a rewind.
 
 use crate::entry::{EntryKind, SessionEntry};
 use rig_core::OneOrMany;
@@ -112,9 +114,14 @@ fn is_answered(call: &ToolCall, answered: &HashSet<String>) -> bool {
             .is_some_and(|call_id| answered.contains(call_id))
 }
 
-/// The last `model_change` entry in the chain, if any — the provider/model
-/// a resumed session should continue with.
-pub fn last_model_change(entries: &[SessionEntry]) -> Option<(&str, &str, Option<&str>)> {
+/// The file's last `model_change` entry, read backwards in file (append)
+/// order and stopping at the first encounter — the **session preference
+/// register** (owner ruling 2026-08): model selection is present-tense
+/// state, so the latest choice in time wins regardless of which branch it
+/// was recorded on, and a rewind (a chain-pointer move) never rolls it
+/// back. Parent links are deliberately ignored — the file's append order
+/// is the time order. `None` when the file records no model change.
+pub fn last_model_change_in_file(entries: &[SessionEntry]) -> Option<(&str, &str, Option<&str>)> {
     entries.iter().rev().find_map(|entry| match &entry.kind {
         EntryKind::ModelChange {
             provider,

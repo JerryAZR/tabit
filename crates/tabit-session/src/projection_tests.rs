@@ -154,7 +154,7 @@ fn interrupted_results_answer_every_call_explicitly() {
 }
 
 #[test]
-fn last_model_change_wins() {
+fn the_register_reads_the_files_last_model_change_backwards() {
     let entries = vec![
         entry(EntryKind::ModelChange {
             provider: "p".to_string(),
@@ -168,9 +168,10 @@ fn last_model_change_wins() {
             thinking_level: Some("high".to_string()),
         }),
     ];
-    let (provider, model, level) = last_model_change(&entries).expect("a model change exists");
+    let (provider, model, level) =
+        last_model_change_in_file(&entries).expect("a model change exists");
     assert_eq!((provider, model, level), ("p", "second", Some("high")));
-    assert!(last_model_change(&[entry(user("no changes"))]).is_none());
+    assert!(last_model_change_in_file(&[entry(user("no changes"))]).is_none());
 }
 
 #[test]

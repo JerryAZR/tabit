@@ -16,7 +16,10 @@
 //! full-text `text_delta` per assistant message, one full-text
 //! `reasoning_delta` per reasoning block. Bookkeeping entries (`aborted`,
 //! `rewound`, labels, extension data) are not part of what a frontend
-//! renders from history and are skipped; branch siblings never reach
+//! renders from history and are skipped; `model_change` entries are
+//! state, not content — the active selection is a session preference
+//! announced live when the session becomes visible, never reconstructed
+//! from history (owner ruling 2026-08); branch siblings never reach
 //! this module (the chain walk already excluded them).
 
 use crate::entry::{EntryKind, SessionEntry};
@@ -64,19 +67,11 @@ impl Projection {
             EntryKind::ToolResult { result } => {
                 self.tool_result(entry, result, events);
             }
-            EntryKind::ModelChange {
-                provider,
-                model,
-                thinking_level,
-            } => {
-                events.push(SessionEvent::ModelChanged {
-                    provider: provider.clone(),
-                    model: model.clone(),
-                    thinking_level: thinking_level.clone(),
-                });
-            }
             // Bookkeeping: not what a frontend renders from history.
-            EntryKind::Aborted
+            // `model_change` included — state, not content: the register
+            // is announced live at visibility, never replayed.
+            EntryKind::ModelChange { .. }
+            | EntryKind::Aborted
             | EntryKind::Rewound { .. }
             | EntryKind::Label { .. }
             | EntryKind::Custom { .. } => {}

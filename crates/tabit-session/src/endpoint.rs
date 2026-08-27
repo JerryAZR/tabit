@@ -825,9 +825,23 @@ fn execute_checkout(
 
 /// The replay pass (PROTOCOL.md v2): the resident chain projected
 /// into finalized live events, bracketed. One emission path for its
-/// two askers — the transport's replay request and checkout's
-/// re-render.
+/// askers — the transport's replay request, checkout's re-render, and
+/// the open_session boot pass — and therefore also the one place the
+/// session-preference register is announced: a `model_changed` precedes
+/// every pass, so a session becoming visible (boot, open, re-replay,
+/// checkout) always tells the frontend its active selection. Idempotent
+/// by construction — a pass never moves the register, so the value
+/// repeats; replayed history itself never carries `model_changed` (the
+/// register ruling: state is announced live, not reconstructed).
 fn emit_replay(session: &Session, event_tx: &mpsc::UnboundedSender<EventFrame>, stream: &StreamId) {
+    let _ = event_tx.send(EventFrame {
+        stream: Some(stream.clone()),
+        event: SessionEvent::ModelChanged {
+            provider: session.selection().provider.clone(),
+            model: session.selection().model.clone(),
+            thinking_level: session.selection().thinking_level.clone(),
+        },
+    });
     let events = session.replay_events();
     let total = events.len() as u64;
     let _ = event_tx.send(EventFrame {

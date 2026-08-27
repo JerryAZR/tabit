@@ -1090,8 +1090,11 @@ id = "m"
             types,
             vec![
                 "sessions_available",
-                "replay_started",
+                // The register announcement precedes the bracket (the
+                // pass itself carries no model_changed — state is
+                // announced live, never reconstructed from history).
                 "model_changed",
+                "replay_started",
                 "user_message",
                 "turn_started",
                 "text_delta",

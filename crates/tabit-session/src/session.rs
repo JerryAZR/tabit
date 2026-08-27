@@ -234,7 +234,10 @@ impl SessionBuilder {
     /// builder's selection. Callers resolve that selection through
     /// [`ModelRegistry::default_selection`] (explicit choice > the log's
     /// last model > configured preference); when it differs from the
-    /// log's last model the switch is recorded as a `model_change` entry.
+    /// file's last recorded model the switch is recorded as a
+    /// `model_change` entry. The register is file-scoped (the owner
+    /// ruling): the last model_change in append order wins, whichever
+    /// branch it was recorded on.
     pub fn resume(self, path: &Path) -> Result<(Session, ResumeReport), SessionError> {
         let loaded = self.store.open_path(path)?;
         let mut report = ResumeReport {
@@ -245,7 +248,7 @@ impl SessionBuilder {
         let (context, _dangling) = projection::project(&loaded.chain);
         let writer = SessionWriter::open_existing(&loaded.path)?;
 
-        let last = projection::last_model_change(&loaded.chain);
+        let last = projection::last_model_change_in_file(&loaded.entries);
         if let Some((provider, model, thinking_level)) = last {
             report.resumed_model = Some(ModelSelection {
                 provider: provider.to_string(),
@@ -1080,7 +1083,7 @@ impl Session {
             None => Vec::new(),
         };
         let dropped = boundaries.len() - projection::user_message_boundaries(&new_chain).len();
-        self.apply_rewind(target.parent_id.as_deref(), new_chain, dropped)
+        self.apply_rewind(target.parent_id.as_deref(), dropped)
     }
 
     /// Rewind to an exact entry: the active chain will end at that entry.
@@ -1100,31 +1103,21 @@ impl Session {
         let dropped = projection::user_message_boundaries(&loaded.chain)
             .len()
             .saturating_sub(projection::user_message_boundaries(&new_chain).len());
-        self.apply_rewind(Some(entry_id), new_chain, dropped)
+        self.apply_rewind(Some(entry_id), dropped)
     }
 
-    /// Shared rewind mechanics: validate the new chain's model against the
-    /// config first (nothing is written when it does not resolve), then
-    /// record the marker, reload the context onto the new chain, and
-    /// re-align selection and agent with the chain's model history.
+    /// Shared rewind mechanics: record the marker and reload the context
+    /// onto the new chain (repairs for a dangling tail land at the new
+    /// leaf; the chain itself is re-read from the log). The selection is
+    /// a session preference (owner ruling 2026-08): a rewind moves the
+    /// chain, never the register — the model that answers next is the
+    /// file's last `model_change`, unchanged by this move, so there is
+    /// nothing to re-derive or validate here.
     fn apply_rewind(
         &mut self,
         branch_point: Option<&str>,
-        new_chain: Vec<SessionEntry>,
         dropped: usize,
     ) -> Result<RewindSummary, SessionError> {
-        let chain_model =
-            projection::last_model_change(&new_chain).map(|(provider, model, thinking_level)| {
-                ModelSelection {
-                    provider: provider.to_string(),
-                    model: model.to_string(),
-                    thinking_level: thinking_level.map(str::to_string),
-                }
-            });
-        if let Some(selection) = &chain_model {
-            validate_selection(selection, &self.config)?;
-        }
-
         self.recorder.rewind_to(branch_point);
         if let Some(error) = self.recorder.first_error() {
             return Err(SessionError::Persist(error));
@@ -1132,25 +1125,6 @@ impl Session {
         // Repairs for a dangling tail land on the new chain, at the new
         // leaf.
         self.reload_context()?;
-        match chain_model {
-            // The chain carries its own model history: adopt it. No new
-            // entry — the chain's last model_change already says it.
-            Some(selection) => {
-                if selection != self.selection {
-                    self.rebuild_agent(&selection)?;
-                    self.selection = selection;
-                }
-            }
-            // A chain older than any model_change: make the current
-            // selection durable at the new tip, exactly like resume.
-            None => {
-                self.recorder.record(EntryKind::ModelChange {
-                    provider: self.selection.provider.clone(),
-                    model: self.selection.model.clone(),
-                    thinking_level: self.selection.thinking_level.clone(),
-                });
-            }
-        }
         Ok(RewindSummary {
             dropped,
             to_entry: branch_point.unwrap_or_default().to_string(),

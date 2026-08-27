@@ -80,6 +80,7 @@ size limit** — tool output can be large; buffer accordingly.
    "model":{"provider":"…","model":"…","thinking_level":null},"resumed":true}
 ← {"type":"sessions_available","sessions":[
      {"id":"019…","created_at":"2026-08-22T…","entry_count":14}, … ]}
+← {"type":"model_changed","stream":"019…","provider":"…","model":"…","thinking_level":null}
 ← {"type":"replay_started","stream":"019…","total":14}
 ← … the transcript as finalized events …
 ← {"type":"replay_done","stream":"019…"}
@@ -279,7 +280,7 @@ dead structure ahead of the data.
 | `sessions_available` | `sessions: [{ id, created_at, entry_count }]` | once, right after the ack's startup notes: every stored session, newest first. **Unstamped, backend-level.** Minimal by ruling — a plain object, fields grow when needed. A brand-new session has no file yet and is absent until it records. |
 | `session_created` | `id`, `path`, `model` | a `new_session` succeeded — **unstamped, backend-level** (the payload carries the id; no faked stamp). Its selection notes, if any, follow stamped with the new session's id. Nothing replays (the session is empty). |
 | `checked_out` | `entry_id`, `base_id` | checkout succeeded. `base_id` is `null` today: drop everything and rebuild from the replay pass that follows. A non-null `base_id` is the reserved suffix mode (keep through `base_id`, apply the pass) — treat any non-null value as "rebuild from the pass" and you stay correct. |
-| `model_changed` | `provider`, `model`, `thinking_level` | replay of a model-change entry (the startup resolution records one; live changes arrive when the `model` command ships, stage 3). The event carries **no entry id today** — model-change entries are valid checkout targets in the file, but the wire gives you no id to name them with; the stage-3 work closes the gap. |
+| `model_changed` | `provider`, `model`, `thinking_level` | the session's **active model** — a session preference: the file's last `model_change`, latest in time wins (a rewind never moves it). Announced live whenever the session becomes visible: ahead of every replay pass (boot, `open_session`, re-replay, after `checked_out`) — idempotent, the value repeats. **Never inside a pass** (state is announced, not reconstructed); live switches arrive when the `model` command ships (stage 3). The ack's `model` is the boot session's register. |
 
 **Errors: one generic carrier with a `kind`.** Anything that goes
 wrong outside a run terminal rides `error { kind, message, … }`. A
@@ -325,17 +326,19 @@ per-TTL splits); they stay engine-internal and never reach the wire.
 ## 7. Replay and checkout: how transcript state moves
 
 **Startup replay.** Send `initialize { protocol_version, replay: true
-}`. After the ack: `replay_started { total }` → the active chain's
+}`. After the ack: the session's `model_changed` announcement (§6),
+then `replay_started { total }` → the active chain's
 entries as finalized events in chain order (`user_message` per user
 entry; per assistant entry: `turn_started`, full-text deltas, its
-`tool_call`s and `tool_result`s, `completion_call`, `turn_committed`;
-`model_changed` for model-change entries) → `replay_done`. Branch
+`tool_call`s and `tool_result`s, `completion_call`, `turn_committed`)
+→ `replay_done`. Branch
 siblings are excluded by construction; ids are the log's ids, identical
-to what a live consumer of the same history saw. Two honesty notes:
+to what a live consumer of the same history saw; no `model_changed`
+ever appears inside the brackets (state is announced live, not
+reconstructed). One honesty note:
 the chain may contain **synthesized tool results** (the backend repairs
 a tool batch interrupted by a crash or abort — the model context needs
-the roundtrip closed), and a replayed chain with no model entry gets a
-leading `model_changed` backfill.
+the roundtrip closed).
 
 **Switching sessions.** Send `open_session { id }`. The full-re-render
 rule (ruled; pi-proven): clear your view of the target session
@@ -358,14 +361,15 @@ is its own) and the checkout executes at the session's pause point.
 The success sequence on that session's stream: `messages_discarded`
 (only if messages were pending — see the watermark rule below), then
 `run_aborted` (only if a run was in flight), then
-`checked_out { entry_id, base_id: null }`, then the replay brackets.
+`checked_out { entry_id, base_id: null }`, then the `model_changed`
+announcement (idempotent — the rewind never moved the register; same
+code path as every pass), then the replay brackets.
 
 1. **Drop everything you hold for that session** (`base_id` is `null`
    — full re-render, the same rule as switching sessions) and apply
    the `replay_started` … `replay_done` pass: the rewound chain
    through its **tip** (the tip may sit past `entry_id` by
-   repair/backfill entries, the same two honesty notes as startup
-   replay).
+   repair entries — the honesty note from startup replay).
 2. The aborted run's own epilogue preceded the rewind: its
    `run_aborted` terminal lands first. Interrupted tool calls are
    repaired log-side (synthesized results close the dangling
@@ -423,9 +427,11 @@ an assistant turn and its complete result batch commit and rewind
 together — you cannot cut in-between (partial writes from crashes or
 aborts are repaired with synthesized results, never left half-open).
 Checkout targets — and `base_id` values — are therefore
-`user_message` entries, committed assistant turns, and `model_changed`
-entries (though the wire carries no id for model-change entries yet —
-§6 — so today you can only name the first two).
+`user_message` entries and committed assistant turns. `model_change`
+entries exist in the file and remain acceptable targets by totality,
+but they are inert anchors: the active model is a session preference
+(§6) no longer derived from the chain, so targeting one is
+conversation-identical to targeting its neighbor.
 
 **Synthesized results tell the truth in their body.** A repaired tool
 result's content is the sentence "tool execution was interrupted
@@ -517,9 +523,10 @@ interaction is the tool result — the answer or denial the model saw.
   file materializes only at its **first user message** — if the
   backend died before any message drained, there is nothing on disk;
   restart falls back to a fresh session (a new id). Restarting with
-  `--session`/`--continue` preserves the session's model (the log's
-  last selection wins over config defaults) — no need to re-pass
-  `--model`.
+  `--session`/`--continue` preserves the session's model (the file's
+  last `model_change` wins over config defaults — your latest choice,
+  even one recorded on a branch you later rewound away) — no need to
+  re-pass `--model`.
 
 ## 10. Limits and non-features (honest list)
 

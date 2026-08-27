@@ -281,8 +281,9 @@ histories).
   `turn_started`/`turn_committed` brackets with the turn's id around
   one full-text `text_delta` per assistant message; reasoning as one
   full-text `reasoning_delta` per block id; `tool_call`/`tool_result`
-  pairs stamped with the turn id; `completion_call` per assistant turn;
-  `model_changed` for `ModelChange` entries) → `replay_done`. Branch
+  pairs stamped with the turn id; `completion_call` per assistant turn)
+  → `replay_done`. (`model_changed` was originally listed here; the
+  session-preference ruling removed it — see the v3 section.) Branch
   siblings are excluded
   by the chain walk; deltas are never persisted, so replay emits whole
   texts. Risk noted: yaca's implementation has never run in production —
@@ -367,10 +368,10 @@ histories).
   aborted, provider-failed, discarded as a malformed-tool-call defect —
   leaves its announced id uncommitted; the frontend already discards
   provisional groups (`turn_retried`, abort), and ids are never reused.
-  (Known gap, surfaced by the 2026-08 doc audit: `model_changed`
-  violates the uniform rule — the event carries no entry id, so
-  model-change entries, though valid checkout targets in the file, are
-  unnameable on the wire. The stage-3 `model` command work closes it.)
+  (The doc audit once flagged `model_changed` here as a uniform-rule
+  gap — no entry id on the event. The session-preference ruling made
+  it moot: announcements are not anchors, model-change entries are
+  inert as checkout targets, and the event needs no id.)
 - **Id generation is centralized in the backend.** The log owns
   identity: every entry id is a backend-minted UUIDv7; frontends never
   generate or supply ids, they learn them from events. Shape: the
@@ -392,7 +393,9 @@ histories).
   future query over the backend's resident tree — not frontend state.
 - **`model { provider, model, thinking_level? }`** — exactly
   `ModelSelection`, validated against config, applied from the next
-  outer loop (mirrors the existing `ModelChange` entry kind). Outcome
+  outer loop (records a `ModelChange` entry — under the
+  session-preference ruling in the v3 section, a register write, not a
+  chain-state transition). Outcome
   events `model_changed` / `error { kind: model }`. Commands stay
   total: nothing is rejected without an event.
 - **Session listing stays one-shot.** Scan on startup and explicit
@@ -694,6 +697,54 @@ section above; the design they locked:
   backend-level-events section). A mid-run
   `open_session` pass for the same session waits for the same pause
   point (worker single-emitter exclusivity orders pass vs live).
+
+### Model selection is a session preference (ruled 2026-08; shipped)
+
+Precedes stage 3 (the `model` command) because it defines what that
+command writes. The ruling, after surveying pi and opencode:
+
+- **The register.** The active model is present-tense session state:
+  the **file's last `model_change` in append order wins** — a backward
+  scan over file order, ignoring parent links, stopping at the first
+  encounter (`projection::last_model_change_in_file`). A rewind moves
+  the chain, never the register: the latest model choice in time is
+  the model that answers next, whichever branch it was recorded on.
+  The scan is the same shape the active-position register
+  (`effective_leaf`) already had — present-tense state is
+  file-scoped latest-wins; conversation truth is the chain, folded
+  forwards. The backward *parent-following* lookup this replaces had
+  exactly one consumer (the chain's last model change) and is deleted.
+- **Kept as records, not state.** `model_change` entries keep being
+  written (`set_model`, resume reconciliation, session
+  materialization); `fold_stats` still walks the chain attributing
+  turns to the models that produced them — history stays honest,
+  the knob stays present-tense. The deliberate asymmetry is the
+  contract.
+- **Resume.** The register is what resume *reads*
+  (`report.resumed_model`, and the store's default-selection hint);
+  the caller's explicit resolution still outranks it, and a differing
+  explicit choice is recorded as the newest register write.
+- **Wire.** `model_changed` is announced **live whenever a session
+  becomes visible** — one emission path (`emit_replay`) puts it ahead
+  of every pass: the boot replay, `open_session` (an in-flight opened
+  session's announcement rides its beat-served pass), the idempotent
+  re-replay, and after `checked_out` (unneeded there — the register
+  did not move — but same code path, idempotent, owner's call). The
+  handshake's `model` field is the boot session's register. Replay
+  passes carry **no** `model_changed`: state is announced, never
+  reconstructed from history (the interaction-request precedent,
+  generalized).
+- **Checkout targets.** `model_change` entries remain valid targets
+  by totality but are inert anchors — conversation-identical to their
+  neighbors, since nothing derives from the chain's model history
+  anymore.
+- References: pi v3 ships the same load-time derivation (path walk —
+  and its live rewind forgot to re-sync, the two-truths drift this
+  design avoids by construction: live and reload read the same
+  file-order fold); opencode is preference-first (session row wins,
+  markers bolted back for history); pi's v4 spec moves config to
+  lane registers entirely. The file-scoped fold is the middle path:
+  one writer, no second truth, no drift.
 
 Staging: (1) this section — host + vocabulary + GUI command swap,
 deleting the respawn interim; (2) `checkout` ✓; (3) `model`;
