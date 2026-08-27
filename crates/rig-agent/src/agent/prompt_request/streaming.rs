@@ -9,11 +9,12 @@ use crate::{
     },
     agent::prompt_request::{assistant_text_from_choice, is_empty_assistant_turn},
     agent::run::{
-        AgentRun, PendingToolCall,
+        AcceptOutcome, AgentRun, PendingToolCall,
         streamed::{StreamedTurnAssembler, StreamedTurnEvent},
     },
     agent::runner::{
-        AgentRunner, ModelTurnDecision, build_chat_span, observe_action, resolve_model_turn_action,
+        AgentRunner, ModelTurnResolution, build_chat_span, observe_action,
+        resolve_model_turn_action,
     },
     streaming::{StreamedAssistantContent, StreamedUserContent, ToolCallDeltaContent},
     tool::{ToolContext, server::ToolRegistrySnapshot},
@@ -128,15 +129,32 @@ pub enum MultiTurnStreamItem {
     /// }
     /// ```
     CompletionCall(CompletionCall),
-    /// The completed model turn was rejected by a hook for retry.
+    /// The completed model turn was rejected — by a hook veto or a typed
+    /// defect (malformed tool calls) — and is retried.
     ///
     /// Text and reasoning deltas emitted for this turn were provisional. A
-    /// consumer should discard or visually reset output associated with `turn`.
-    /// A subsequent attempt is made only if the run's total model-call budget
+    /// consumer should discard or visually reset output associated with `turn`,
+    /// and bill the attempt (its completion call already reported usage). A
+    /// subsequent attempt is made only if the run's total model-call budget
     /// permits it.
     ModelTurnRetried {
         /// One-based model-call index of the rejected turn.
         turn: usize,
+    },
+    /// The durable roundtrip closed: the assistant turn and its complete
+    /// tool batch are committed as one unit (all-or-none) — the cue a
+    /// session layer commits its pending roundtrip through its one door.
+    /// For a final turn, this follows
+    /// [`TurnCommitted`](Self::TurnCommitted) directly; for a tools turn,
+    /// it follows the batch's results at settlement. `feedback` carries
+    /// the engine-authored closing message (an output-mode re-prompt)
+    /// when the roundtrip closed with one instead of executed results.
+    RoundtripClosed {
+        /// The announced id of the turn the roundtrip belongs to.
+        turn_id: String,
+        /// The engine-authored closing message, when one closed the
+        /// roundtrip (the model saw it; it belongs to the roundtrip).
+        feedback: Option<Message>,
     },
     /// The final result from the stream: the unified [`PromptResponse`] shared
     /// with the blocking surface.
@@ -654,17 +672,21 @@ impl TurnSource for StreamingTurnSource {
             // The canonical assistant content: `finish` normalizes
             // reasoning/text/tool ordering, so this can differ from the raw
             // `stream.choice` aggregate. `ModelTurnFinished` — the normalized
-            // per-turn event — carries this, matching what is recorded into run
-            // history; the raw `stream.choice` is kept in `last_final_choice` for
+            // per-turn event — carries this, matching what the turn will
+            // record into run history once accepted; the raw
+            // `stream.choice` is kept in `last_final_choice` for
             // the raw/final streaming behavior.
             let canonical_choice = streamed_turn.choice.clone();
-            if let Err(err) = run.turn_committed_streamed(streamed_turn) {
+            // Park first, hooks second (the pre-commit veto reorder,
+            // ENGINE.md delta 11): the turn is classified and held,
+            // folded nowhere, until the hooks' verdict arrives.
+            if let Err(err) = run.turn_completed_streamed(streamed_turn) {
                 yield Err(Box::new(err).into());
                 return;
             }
-            // Normalized per-turn event, fired once the turn is parked for
-            // acceptance on the streaming surface — including tool-only /
-            // reasoning-only turns that fire no `StreamResponseFinish`.
+            // Normalized per-turn event over the parked turn — including
+            // tool-only / reasoning-only turns that fire no
+            // `StreamResponseFinish`.
             {
                 let action = AgentHook::on_model_turn_finished(
                     &runner.hooks,
@@ -677,23 +699,33 @@ impl TurnSource for StreamingTurnSource {
                     )
                     .await;
                 match resolve_model_turn_action(run, action) {
-                    Ok(ModelTurnDecision::Advance) => {
+                    Ok(ModelTurnResolution::Advance(outcome)) => {
                         // The closing bracket of the announced turn: the
                         // content is final and recorded (delta 10). The
                         // other arms never commit — the discard signal
                         // (`ModelTurnRetried`, the terminal error) already
                         // tells the consumer the announced id is dead.
                         if let Some(id) = hook_ctx.turn_id() {
-                            yield Ok(MultiTurnStreamItem::TurnCommitted { id });
+                            yield Ok(MultiTurnStreamItem::TurnCommitted { id: id.clone() });
+                            // A final turn's roundtrip closes here and now
+                            // (ENGINE.md, the durable roundtrip); a tools
+                            // turn closes at settlement, driven by
+                            // `drive_tool_calls`.
+                            if let AcceptOutcome::Final { feedback } = outcome {
+                                yield Ok(MultiTurnStreamItem::RoundtripClosed {
+                                    turn_id: id,
+                                    feedback,
+                                });
+                            }
                         }
                     }
-                    Ok(ModelTurnDecision::Retried) => {
+                    Ok(ModelTurnResolution::Retried) => {
                         yield Ok(MultiTurnStreamItem::ModelTurnRetried {
                             turn: hook_ctx.turn(),
                         });
                         return;
                     }
-                    Ok(ModelTurnDecision::Terminate(reason)) => {
+                    Ok(ModelTurnResolution::Terminate(reason)) => {
                         // Before model-turn steering was added, Stop observed
                         // this already completed provider turn: its buffered
                         // final and content telemetry were visible before the

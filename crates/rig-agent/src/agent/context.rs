@@ -17,10 +17,11 @@
 //!
 //! [`Context`] does not validate the sequence, does not inspect tool
 //! calls, does not group, reorder, or synthesize — it receives valid
-//! history and keeps it. When this lands in the running code, the
-//! engine holds a run-scoped instance and the session layer holds the
-//! durable one; two instances of one implementation, never two
-//! builders.
+//! history and keeps it. The engine holds a run-scoped instance
+//! (seeded at run open, folded at turn acceptance) and the session
+//! layer holds the durable one (folded at load and at every commit
+//! through its one door); two instances of one implementation, never
+//! two builders.
 
 use crate::completion::Message;
 use serde::{Deserialize, Serialize};

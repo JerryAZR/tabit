@@ -9,17 +9,17 @@
 //! a message submitted at any instant is never lost; only the clear
 //! sites discard queued messages (abort, checkout — each only what was
 //! submitted before it). Each pump iteration is one outer loop: the user
-//! message is recorded, the rig-agent engine runs the turns (with a
-//! recorder hook persisting every completed assistant turn and tool
-//! result as it happens), and the item stream is folded into the
-//! serializable event list a frontend consumes. The recorder's resident
-//! state — the conversation tree, the head, the incrementally folded
-//! context — is the in-session truth; the file is its write-behind
-//! mirror and the handoff between processes, parsed once at load and
-//! never re-read mid-session. Permissions and extensions later plug
-//! into this same seam.
+//! message commits through the prompt barrier, the rig-agent engine runs
+//! the turns (a recorder hook stages each completed turn; the roundtrip
+//! commits atomically when the item stream closes it), and the item
+//! stream is folded into the serializable event list a frontend
+//! consumes. The recorder's resident state — the conversation tree, the
+//! head, the incrementally folded context — is the in-session truth; the
+//! file is its write-behind mirror and the handoff between processes,
+//! parsed once at load and never re-read mid-session. Permissions and
+//! extensions later plug into this same seam.
 
-use crate::entry::{EntryKind, FileRecord, SessionEntry, SideKind};
+use crate::entry::{EntryKind, SideKind};
 use crate::error::SessionError;
 use crate::interaction::InteractionHub;
 use crate::lock::lock;
@@ -27,7 +27,9 @@ use crate::model::validate_selection;
 use crate::projection;
 use crate::recorder::{RecorderHook, SessionRecorder};
 use crate::registry::ModelRegistry;
-use crate::store::{Repair, SessionStore, SessionWriter};
+use crate::stats::{UsageLedger, add_usage};
+use crate::store::SessionStore;
+use crate::writer::SessionWriter;
 use futures::StreamExt;
 use rig_agent::agent::{Agent, AgentBuilder, ModelHandle};
 use rig_agent::agent::{MultiTurnStreamItem, StreamingError};
@@ -88,12 +90,8 @@ pub struct RewindSummary {
 /// What happened while resuming a session.
 #[derive(Debug, Clone, Default, PartialEq)]
 pub struct ResumeReport {
-    /// Repairs applied to the session file itself.
-    pub file_repairs: Vec<Repair>,
-    /// How many interrupted tool calls had synthetic results appended.
-    pub repaired_tool_calls: usize,
     /// The model selection the session resumed with (from the last
-    /// `model_change` entry, if any).
+    /// `model_change` record, if any).
     pub resumed_model: Option<ModelSelection>,
 }
 
@@ -240,10 +238,10 @@ impl SessionBuilder {
         Ok(session)
     }
 
-    /// Resume the session stored at `path`: fold the file into the
-    /// resident state (tree, head, selection register), repair a
-    /// dangling tool-use roundtrip, and continue with the builder's
-    /// selection. Callers resolve that selection through
+    /// Resume the session stored at `path`: parse it once (the tree, the
+    /// head, the selection register, the context, the cumulative stats),
+    /// adopt the result as the resident state, and continue with the
+    /// builder's selection. Callers resolve that selection through
     /// [`ModelRegistry::default_selection`] (explicit choice > the log's
     /// last model > configured preference); when it differs from the
     /// file's last recorded model the switch is recorded as a
@@ -251,42 +249,23 @@ impl SessionBuilder {
     /// owner ruling): the last model_change in append order wins,
     /// whichever branch the conversation is on.
     pub fn resume(self, path: &Path) -> Result<(Session, ResumeReport), SessionError> {
-        let loaded = self.store.open_path(path)?;
-        let mut report = ResumeReport {
-            file_repairs: loaded.repairs.clone(),
-            ..ResumeReport::default()
+        let parsed = self.store.open_path(path)?;
+        let report = ResumeReport {
+            resumed_model: parsed.register.clone(),
         };
-        let last = projection::last_model_change_in_file(&loaded.records).map(
-            |(provider, model, thinking_level)| {
-                (
-                    provider.to_string(),
-                    model.to_string(),
-                    thinking_level.map(str::to_string),
-                )
-            },
-        );
-        if let Some((provider, model, thinking_level)) = &last {
-            report.resumed_model = Some(ModelSelection {
-                provider: provider.clone(),
-                model: model.clone(),
-                thinking_level: thinking_level.clone(),
-            });
-        }
         validate_selection(&self.selection, &self.config)?;
-        let writer = SessionWriter::open_existing(&loaded.path)?;
-        let mut session = Session::assemble(self, writer, true)?;
-        // The one-pass load fold: tree, head, register, context, and
-        // the crash-equivalent repairs — from here on memory is
-        // authoritative and the file is the write-behind mirror.
-        let outcome = session.recorder.load(loaded)?;
-        report.repaired_tool_calls = outcome.repaired_tool_calls;
+        let id = parsed.header.id.clone();
+        let writer = SessionWriter::append_to(&parsed.path, id, parsed.file_len)?;
+        let session = Session::assemble(self, writer, true)?;
+        // From here on memory is authoritative and the file is the
+        // write-behind mirror (the one pass — no second parse).
+        session.recorder.adopt(parsed);
         let selection = session.selection();
         let same_model = matches!(
-            &last,
-            Some((provider, model, level))
-                if provider == &selection.provider
-                    && model == &selection.model
-                    && level == &selection.thinking_level
+            &report.resumed_model,
+            Some(last) if last.provider == selection.provider
+                && last.model == selection.model
+                && last.thinking_level == selection.thinking_level
         );
         if !same_model {
             // Either a caller-directed switch at resume time, or a log
@@ -561,7 +540,6 @@ impl rig_agent::SteeringSource for SessionSteers {
 
 /// A persistent, resumable conversation.
 pub struct Session {
-    store: SessionStore,
     config: Arc<TabitConfig>,
     /// The active model selection — a **shared cell, not worker
     /// state**: the endpoint writes it at receive through the
@@ -844,9 +822,9 @@ impl Session {
     /// Drive the engine stream to its end, folding every item into events
     /// and the durable log. Aborting the run token preempts the stream;
     /// returning drops it, which cancels in-flight tool futures (their drop
-    /// guards kill process trees) — completed turns and results are already
-    /// recorded, anything dangling repairs on next open, exactly like a
-    /// crash.
+    /// guards kill process trees) — every closed roundtrip is already
+    /// committed, and the interrupted one never lands (roundtrips are
+    /// atomic): there is nothing dangling to repair.
     async fn drive(
         &mut self,
         mut stream: rig_agent::agent::StreamingResult,
@@ -867,6 +845,9 @@ impl Session {
         // `TurnStarted`, stamps every turn-scoped event, and outlives the
         // turn's commit (its tool results arrive after `TurnCommitted`).
         let mut current_turn: Option<String> = None;
+        // The current turn's completion-call usage — what a discarded
+        // attempt bills (flag 22): the tokens were spent either way.
+        let mut turn_usage = Usage::default();
         loop {
             let item = tokio::select! {
                 biased;
@@ -893,10 +874,24 @@ impl Session {
             match item {
                 Ok(MultiTurnStreamItem::TurnStarted { id }) => {
                     current_turn = Some(id.clone());
+                    turn_usage = Usage::default();
                     sink.emit(SessionEvent::TurnStarted { id });
                 }
                 Ok(MultiTurnStreamItem::TurnCommitted { id }) => {
                     sink.emit(SessionEvent::TurnCommitted { id });
+                }
+                Ok(MultiTurnStreamItem::RoundtripClosed { turn_id, feedback }) => {
+                    // The atomic commit (ENGINE.md, the durable
+                    // roundtrip): the assistant and its batch — or the
+                    // engine-authored feedback close — land as one unit.
+                    self.recorder.close_roundtrip(&turn_id, feedback);
+                }
+                Ok(MultiTurnStreamItem::ModelTurnRetried { .. }) => {
+                    let turn_id = announce(&current_turn);
+                    // A vetoed or defect-discarded attempt: bill it
+                    // (flag 22) and drop anything staged for it.
+                    self.recorder.discard_roundtrip(&turn_id, turn_usage);
+                    sink.emit(SessionEvent::TurnRetried { turn_id });
                 }
                 Ok(MultiTurnStreamItem::StreamUserItem(StreamedUserContent::ToolResult {
                     tool_result,
@@ -925,6 +920,7 @@ impl Session {
                 }
                 Ok(MultiTurnStreamItem::CompletionCall(call)) => {
                     let turn_id = announce(&current_turn);
+                    turn_usage = call.usage;
                     sink.emit(SessionEvent::CompletionCall {
                         turn_id: turn_id.clone(),
                         input_tokens: call.usage.input_tokens,
@@ -957,8 +953,9 @@ impl Session {
         driven
     }
 
-    /// One executed tool call's result: the durable record (whose entry id
-    /// rides the event), and the event naming the tool through the
+    /// One executed tool call's result: staged into the open roundtrip
+    /// (whose entry id rides the event — it commits, durably, when the
+    /// roundtrip closes), and the event naming the tool through the
     /// correlation map its call populated. `content` is exactly the text
     /// the model saw; `status` is the execution's structured outcome.
     fn note_tool_result(
@@ -971,9 +968,7 @@ impl Session {
     ) {
         let content = result_text(&tool_result);
         let status = wire_status(&tool_result.status);
-        let entry_id = self.recorder.record(EntryKind::ToolResult {
-            result: tool_result,
-        });
+        let entry_id = self.recorder.stage_result(&turn_id, tool_result);
         sink.emit(SessionEvent::ToolResult {
             turn_id,
             entry_id,
@@ -987,8 +982,8 @@ impl Session {
         });
     }
 
-    /// A steer drained into history mid-run: one user_message entry under
-    /// the message's born-early id (the id its `message_queued` announced,
+    /// A steer drained into history mid-run: one user node under the
+    /// message's born-early id (the id its `message_queued` announced,
     /// parked by the drain in FIFO order), 1:1 with what the model saw.
     fn note_steer(&self, text: String, sink: &mut EventSink<'_>) {
         // The engine drains a steer before emitting its `Steer` item and
@@ -1000,12 +995,8 @@ impl Session {
             .mailbox
             .next_steer_id()
             .expect("a Steer item must follow the drain that parked its id");
-        self.recorder.record_as(
-            &entry_id,
-            EntryKind::UserMessage {
-                message: Message::user(text.clone()),
-            },
-        );
+        self.recorder
+            .commit_steer(&entry_id, Message::user(text.clone()));
         sink.emit(SessionEvent::UserMessage { text, entry_id });
     }
 
@@ -1026,17 +1017,18 @@ impl Session {
             aborted,
             failure,
         } = driven;
+        // Whatever roundtrip is still open dies here: the abort
+        // interrupted it, a failure stranded it (a Stop hook after the
+        // turn staged, a stream error mid-batch), or a completed run
+        // already closed it (dropping an empty slot is a no-op). Nothing
+        // half-open ever carries across runs.
+        self.recorder.drop_open_roundtrip();
         let mut outcome = RunOutcome::Completed;
         if aborted {
             self.recorder.record_side(SideKind::Aborted);
             sink.emit(SessionEvent::RunAborted {
                 output: output.clone(),
             });
-            // An aborted run is crash-shaped: calls it interrupted are
-            // dangling, and the repair synthesizes their results at the
-            // current head so the branch replays cleanly (the same fix
-            // load applies).
-            self.recorder.repair_dangling(&self.path);
             // The abort SITE (the command link, or the host's death
             // watcher, or a checkout) already discarded the
             // at-abort-time queue and said so immediately (flag 6);
@@ -1145,19 +1137,19 @@ impl Session {
     }
 
     /// Rewind to an exact entry: the active branch will end at that
-    /// entry. Any node in the tree is a valid target, on or off the
-    /// active branch (this is also how a branch switch happens); a
-    /// target that leaves a partially answered tool batch gets the same
-    /// interrupted-result repair a crash gets. The library primitive
-    /// for tree-picking frontends — [`Session::rewind`] is the
+    /// entry. Any **roundtrip-closed** node in the tree is a valid
+    /// target, on or off the active branch (this is also how a branch
+    /// switch happens); a target inside an open tool roundtrip panics
+    /// (the flag-23 ruling: unsupported, revisited later). The library
+    /// primitive for tree-picking frontends — [`Session::rewind`] is the
     /// user-facing form.
     pub fn rewind_to_entry(&mut self, entry_id: &str) -> Result<RewindSummary, SessionError> {
         self.apply_checkout(Some(entry_id))
     }
 
-    /// Shared checkout mechanics: move the recorder's head, re-project
-    /// the context from the new branch, and repair a mid-batch landing
-    /// point. The selection is a session preference (owner ruling
+    /// Shared checkout mechanics: move the recorder's head (closed-path
+    /// rule enforced at the door) and re-project the context from the new
+    /// branch. The selection is a session preference (owner ruling
     /// 2026-08): a checkout moves the head, never the register — the
     /// model that answers next is unchanged by this move. The
     /// `checkout` side record rides the outbox like any record (flag 8
@@ -1255,13 +1247,34 @@ impl Session {
         self.recorder.context()
     }
 
-    /// Usage and cost totals, folded from the resident record sequence
-    /// over the active branch — consistent with what this process knows
-    /// (the file may lag it under degrade, like everything else).
+    /// Usage and cost totals — the recorder's cumulative ledger (every
+    /// branch, discarded attempts included) with costs derived from the
+    /// config's rates.
     pub fn stats(&self) -> SessionStats {
-        let records = self.recorder.records();
-        let branch = self.recorder.active_branch();
-        self.fold_stats(&records, &branch)
+        let ledger: UsageLedger = self.recorder.stats();
+        let mut stats = SessionStats::default();
+        for model_usage in ledger.per_model() {
+            let mut model_stats = ModelStats {
+                provider: model_usage.provider.clone(),
+                model: model_usage.model.clone(),
+                thinking_level: model_usage.thinking_level.clone(),
+                usage: model_usage.usage,
+                cost: None,
+            };
+            if let Some(cost) = self
+                .config
+                .provider(&model_stats.provider)
+                .and_then(|p| p.model(&model_stats.model))
+                .and_then(|m| m.cost)
+            {
+                let dollars = cost_of(&model_stats.usage, &cost);
+                stats.total_cost += dollars;
+                model_stats.cost = Some(dollars);
+            }
+            stats.per_model.push(model_stats);
+        }
+        stats.total_usage = ledger.total_usage();
+        stats
     }
 
     /// The replay pass (PROTOCOL.md v2): the active branch (the
@@ -1285,70 +1298,6 @@ impl Session {
             cached_input_tokens: usage.cached_input_tokens,
             cache_creation_input_tokens: usage.cache_creation_input_tokens,
         }
-    }
-
-    fn fold_stats(&self, records: &[FileRecord], branch: &[SessionEntry]) -> SessionStats {
-        let mut stats = SessionStats::default();
-        // Attributed by the record stream's own `model_change` side
-        // records; assistant turns before any change record attribute
-        // to empty ids (uncosted). Only nodes on the active branch
-        // count — an abandoned branch's spend is not this
-        // conversation's.
-        let on_branch: std::collections::HashSet<&str> =
-            branch.iter().map(|entry| entry.id.as_str()).collect();
-        let mut current = (String::new(), String::new(), None);
-        let mut per_model: Vec<ModelStats> = Vec::new();
-        for record in records {
-            match record {
-                FileRecord::Side(crate::entry::SideRecord {
-                    kind:
-                        SideKind::ModelChange {
-                            provider,
-                            model,
-                            thinking_level,
-                        },
-                    ..
-                }) => {
-                    current = (provider.clone(), model.clone(), thinking_level.clone());
-                }
-                FileRecord::Node(entry) if on_branch.contains(entry.id.as_str()) => {
-                    let EntryKind::AssistantMessage { usage, .. } = &entry.kind else {
-                        continue;
-                    };
-                    let (provider, model, level) = &current;
-                    match per_model
-                        .iter_mut()
-                        .find(|s| &s.provider == provider && &s.model == model)
-                    {
-                        Some(slot) => add_usage(&mut slot.usage, usage),
-                        None => per_model.push(ModelStats {
-                            provider: provider.clone(),
-                            model: model.clone(),
-                            thinking_level: level.clone(),
-                            usage: *usage,
-                            cost: None,
-                        }),
-                    }
-                    add_usage(&mut stats.total_usage, usage);
-                }
-                FileRecord::Node(_) => {}
-                FileRecord::Side(_) => {}
-            }
-        }
-        for model_stats in &mut per_model {
-            if let Some(cost) = self
-                .config
-                .provider(&model_stats.provider)
-                .and_then(|p| p.model(&model_stats.model))
-                .and_then(|m| m.cost)
-            {
-                let dollars = cost_of(&model_stats.usage, &cost);
-                stats.total_cost += dollars;
-                model_stats.cost = Some(dollars);
-            }
-        }
-        stats.per_model = per_model;
-        stats
     }
 
     /// The agent-cache freshness check — the point-of-use half of the
@@ -1393,7 +1342,6 @@ impl Session {
             &builder.tools,
         )?);
         let session = Self {
-            store: builder.store,
             config: builder.config,
             selection: Arc::new(Mutex::new(builder.selection.clone())),
             preamble: builder.preamble,
@@ -1525,11 +1473,14 @@ fn stream_item_event(
         // `TurnStarted`/`TurnCommitted` are handled by explicit arms in
         // `drive` — they set and read the current-turn state.
         MultiTurnStreamItem::TurnStarted { .. } | MultiTurnStreamItem::TurnCommitted { .. } => None,
-        // `CompletionCall` is handled by an explicit arm in `run_one` — it
-        // can carry a second, truncation-warning event beside the usage one.
-        MultiTurnStreamItem::CompletionCall(_) => None,
-        MultiTurnStreamItem::ModelTurnRetried { .. } => Some(SessionEvent::TurnRetried { turn_id }),
-        MultiTurnStreamItem::FinalResponse(_) => None, // handled by the caller
+        // `CompletionCall` and `ModelTurnRetried` are handled by
+        // explicit arms in `drive` — the usage tracking feeds the
+        // discard record (flag 22).
+        MultiTurnStreamItem::CompletionCall(_) | MultiTurnStreamItem::ModelTurnRetried { .. } => {
+            None
+        }
+        MultiTurnStreamItem::RoundtripClosed { .. } => None, // the durable commit, handled in `drive`
+        MultiTurnStreamItem::FinalResponse(_) => None,       // handled by the caller
         _ => None,
     }
 }
@@ -1584,14 +1535,6 @@ pub(crate) fn wire_status(
         }
         None => panic!("wire_status: a tool result reached the wire without a status"),
     }
-}
-
-fn add_usage(target: &mut Usage, source: &Usage) {
-    target.input_tokens += source.input_tokens;
-    target.output_tokens += source.output_tokens;
-    target.total_tokens += source.total_tokens;
-    target.cached_input_tokens += source.cached_input_tokens;
-    target.cache_creation_input_tokens += source.cache_creation_input_tokens;
 }
 
 fn cost_of(usage: &Usage, cost: &tabit_config::Cost) -> f64 {

@@ -31,7 +31,11 @@ Defensive ("unreachable") arms follow a stricter rule:
 - The whole suite runs offline (cassette replay + test doubles). Doctests
   are NOT included in these numbers (`llvm-cov` was run without
   `--doctests`); they are gated by the same CI run.
-- Current state: **93.38% lines / 94.14% regions** (4,202 of 63,493
+- Current state: **93.45% lines / 94.21% regions** (4,184 of 63,846
+  lines; re-measured after the durable-layer sweep -- atomic
+  roundtrips through the one commit door, the one-pass parser, and
+  the two-phase turn acceptance; see the dedicated section below.
+  Before that: **93.38% lines / 94.14% regions** (4,202 of 63,493
   lines; re-measured after the pre-GUI-redesign review pass, which
   covered the write-behind and model-command rounds and fixed what
   the review found — see the dedicated section below:
@@ -691,3 +695,64 @@ despite the format break, with `recorder.rs` at 96.8%, `entry.rs`
   constructors cannot fail post-validation), and the
   `Projector::finish` whole-chain path is load/checkout-shaped (the
   incremental folds are the covered production path).
+
+## The durable-layer sweep (2026-08): atomic roundtrips, the one door
+
+The owner-ruled redesign that closed the recorded sweep: the engine
+accepts turns in two phases (park -> hooks -> accept/veto -- vetoes
+precede the fold, `pop_last_assistant` is deleted), the session
+commits each tool-use roundtrip **atomically** through one commit door
+(validate -> write -> grow), `Conversation`/`DanglingToolCalls`/
+`interrupted_results` and both repair passes are deleted (a file
+written only at commit boundaries cannot hold a half-open roundtrip --
+a torn or dangling tail fails the open loud), the parser is one pass
+producing the whole resident state (tree+head, context, register,
+cumulative stats -- raw records are not retained), and the tree/writer
+are extracted to their own files. Re-measured: **93.45% lines /
+94.21% regions** -- at the pre-sweep level despite the format-work,
+with the new modules at `parser.rs` 95.6%, `tree.rs` 94.1%,
+`stats.rs` 100%, `recorder.rs` 96.0%, `session.rs` 98.2%.
+
+- **Tree suite (new file)**: appends attach at the head and advance
+  it, the stale-parent sanctioned crash, branch switching with the
+  abandoned branch retained, the load-time head invariant and
+  duplicate-id rejection, the broken-walk fault.
+- **Writer suite (new file)**: the no-orphan gate (creation and
+  pre-population touch nothing; the first drain materializes
+  header+init+batch in order), the clean-prefix/durable-offset
+  accounting, the two verbs' failure policies (write-behind keeps its
+  lines, gated pops the batch whole), `append_to` resuming at the
+  file's end.
+- **Parser suite (new file)**: the produced state (tree, head,
+  context with merged batches, register, cumulative stats over all
+  branches and discards), the feedback close, and every rejection --
+  torn tail (with its line number), trailing open batch, orphan
+  result, mid-batch user message, side record inside a batch, broken
+  parent link, mid-batch checkout target, unknown checkout target,
+  future version, empty file.
+- **Recorder suite rewritten around the door**: staging and the
+  atomic close (file == memory == reloaded parse), the feedback
+  close, the pairing validation's sanctioned crash, the
+  single-occupancy slot mismatches (staging, results, close, discard
+  -- all caught and named), the discard record (billed, nothing
+  landed), the abort drop (no trace, unbilled -- not a ruled
+  discard), the deferred register riding the first barrier, checkout
+  as a pointer move, the mid-roundtrip checkout panic (flag 23), the
+  gated barrier's validate-then-commit, and the trailing-checkout
+  reload through adopt.
+- **Session suite**: the defect-exhaustion run now bills its two
+  discarded attempts (flag 22: `model, user, discarded, discarded`),
+  the dangling-tail resume fails loud, the mid-batch rewind panics
+  and writes nothing, and the interaction suite's abort-death test
+  pins the new shape (the `aborted` marker is the whole durable tail
+  -- the interrupted roundtrip never landed).
+- **Justified residue, new classes**: `writer.rs` (73.0%) keeps the
+  write-failure arms beyond materialization -- the mid-write truncate
+  rollback, the serialize-failure arm, `append_to`'s open failure --
+  the unstaged-fault class the old store section carried (a portable
+  test can block directory creation but not a mid-`write_all`
+  failure); `parser.rs`'s one uncovered region is the final-head
+  closed-path defense (unreachable while every in-order check
+  passes -- defense in depth, exercised through the checkout arm);
+  `recorder.rs` keeps the dead-channel no-ops and the fault arms
+  behind a dead disk inside the door's write-behind core.

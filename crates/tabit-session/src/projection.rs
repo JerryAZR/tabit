@@ -1,75 +1,157 @@
-//! Replaying session records into model-visible context.
+//! Projecting conversation nodes into model-visible context, and the
+//! structural checks over projected branches.
 //!
 //! The context builder itself is shared with the engine
-//! ([`rig_agent::agent::conversation`]) — one implementation
-//! everywhere. What lives here is the node side of it: unwrapping the
-//! log's records into the builder's doors (`fold_node`), the
-//! whole-branch fold for load and checkout (`project`), the valid
-//! checkout targets (`user_message_boundaries`), and the session
-//! preference register (`last_model_change_in_file`). Side records
-//! (`model_change`, `checkout`, `aborted`, …) are session state, not
-//! context, and never fold.
+//! ([`rig_agent::agent::context::Context`]) — one implementation
+//! everywhere. What lives here is the node side of it: how a branch's
+//! records fold into that builder (a tool batch's consecutive
+//! `tool_result` nodes merge into the single user message the engine
+//! folds for the same batch), the valid checkout targets, and the
+//! closed-path rule (a branch ending mid-roundtrip). Side records
+//! (`model_change`, `checkout`, `aborted`, `discarded`, …) are session
+//! state, not context, and never fold.
 
-use crate::entry::{EntryKind, FileRecord, SessionEntry};
-use rig_agent::agent::conversation::Conversation;
+use crate::entry::{EntryKind, SessionEntry};
+use rig_agent::agent::context::Context;
+use rig_core::OneOrMany;
+use rig_core::completion::Message;
+use rig_core::message::{ToolCall, UserContent};
 
-/// Fold one conversation node into the builder.
-pub fn fold_node(conversation: &mut Conversation, entry: &SessionEntry) {
-    match &entry.kind {
-        EntryKind::UserMessage { message } => conversation.user(message.clone()),
-        EntryKind::AssistantMessage { message, .. } => conversation.assistant(message.clone()),
-        EntryKind::ToolResult { result } => conversation.tool_result(result.clone()),
+/// Fold a whole branch (root → head) into a fresh context. Consecutive
+/// `tool_result` nodes merge into one user message per batch — the same
+/// shape the engine folds when a batch settles, so a loaded context and
+/// a live one are the same list.
+pub fn fold_branch(entries: &[SessionEntry]) -> Context {
+    let mut context = Context::new();
+    let mut pending_results: Vec<UserContent> = Vec::new();
+    for entry in entries {
+        match &entry.kind {
+            EntryKind::UserMessage { message } => {
+                flush_results(&mut context, &mut pending_results);
+                context.fold(message.clone());
+            }
+            EntryKind::AssistantMessage { message, .. } => {
+                flush_results(&mut context, &mut pending_results);
+                context.fold(message.clone());
+            }
+            EntryKind::ToolResult { result } => {
+                pending_results.push(UserContent::ToolResult(result.clone()));
+            }
+        }
+    }
+    flush_results(&mut context, &mut pending_results);
+    context
+}
+
+/// Fold one accumulated tool batch into place (no-op when empty).
+fn flush_results(context: &mut Context, pending: &mut Vec<UserContent>) {
+    if pending.is_empty() {
+        return;
+    }
+    let results = std::mem::take(pending);
+    if let Some(content) = OneOrMany::from_iter_optional(results) {
+        context.fold(Message::User { content });
     }
 }
 
-/// Fold a whole branch (root → head) into a fresh builder and return
-/// the flushed message list plus the dangling report — the load and
-/// checkout rebuild shape.
-pub fn project(
-    entries: &[SessionEntry],
-) -> (
-    Vec<rig_core::completion::Message>,
-    Option<rig_agent::agent::conversation::DanglingToolCalls>,
-) {
-    let mut conversation = Conversation::new();
+/// The tool calls an assistant message carries.
+pub fn calls_of(message: &Message) -> Vec<&ToolCall> {
+    let Message::Assistant { content, .. } = message else {
+        return Vec::new();
+    };
+    content
+        .iter()
+        .filter_map(|part| match part {
+            rig_core::message::AssistantContent::ToolCall(call) => Some(call),
+            _ => None,
+        })
+        .collect()
+}
+
+/// The tool results a user message carries (an engine-authored feedback
+/// close), when it is made of them.
+pub fn results_of(message: &Message) -> Vec<&rig_core::message::ToolResult> {
+    let Message::User { content } = message else {
+        return Vec::new();
+    };
+    content
+        .iter()
+        .filter_map(|part| match part {
+            UserContent::ToolResult(result) => Some(result),
+            _ => None,
+        })
+        .collect()
+}
+
+/// Validate that a branch is **roundtrip-closed**: every assistant turn
+/// on it that called tools is fully answered by the tool results that
+/// follow it on the branch (as batch nodes, or a feedback user message
+/// closing the roundtrip). `Err` names the violation — the checkout
+/// rule (a mid-roundtrip target panics at the door) and the parser's
+/// final-head check both route through here.
+pub fn path_is_closed(entries: &[SessionEntry]) -> Result<(), String> {
+    let mut pending: Vec<String> = Vec::new();
     for entry in entries {
-        fold_node(&mut conversation, entry);
+        match &entry.kind {
+            EntryKind::UserMessage { message } => {
+                if pending.is_empty() {
+                    continue;
+                }
+                // A user message with an open batch is legal only as the
+                // engine-authored feedback close: its results answer the
+                // batch's calls.
+                let answered = results_of(message);
+                for call in &pending {
+                    if !answered.iter().any(|result| result.id == *call) {
+                        return Err(format!(
+                            "user message interrupts the open tool batch of entry `{}` \
+                             (call `{call}` unanswered)",
+                            entry.id
+                        ));
+                    }
+                }
+                pending.clear();
+            }
+            EntryKind::AssistantMessage { message, .. } => {
+                if !pending.is_empty() {
+                    return Err(format!(
+                        "branch ends the batch of a previous turn open at entry `{}`",
+                        entry.id
+                    ));
+                }
+                pending = calls_of(message)
+                    .iter()
+                    .map(|call| call.id.clone())
+                    .collect();
+            }
+            EntryKind::ToolResult { result } => {
+                let Some(index) = pending.iter().position(|id| *id == result.id) else {
+                    return Err(format!(
+                        "tool result `{}` answers no open call at entry `{}`",
+                        result.id, entry.id
+                    ));
+                };
+                pending.swap_remove(index);
+            }
+        }
     }
-    let dangling = conversation.dangling();
-    (conversation.messages_vec(), dangling)
+    if pending.is_empty() {
+        Ok(())
+    } else {
+        Err(format!(
+            "branch ends mid-roundtrip: {} call(s) unanswered",
+            pending.len()
+        ))
+    }
 }
 
 /// The branch's `user_message` nodes in root→head order — the valid
-/// user-facing checkout targets. A branch before any of them leaves the
-/// branch replayable: it ends on a completed turn, a closed tool batch,
-/// never mid-batch.
+/// user-facing checkout targets (`rewind(n)` resolves through these).
 pub fn user_message_boundaries(entries: &[SessionEntry]) -> Vec<&SessionEntry> {
     entries
         .iter()
         .filter(|entry| matches!(entry.kind, EntryKind::UserMessage { .. }))
         .collect()
-}
-
-/// The file's last `model_change` side record, read backwards in file
-/// (append) order and stopping at the first encounter — the **session
-/// preference register** (owner ruling 2026-08): model selection is
-/// present-tense state, so the latest choice in time wins regardless of
-/// which branch the conversation is on, and a checkout (a head-pointer
-/// move) never rolls it back. `None` when the file records no model
-/// change.
-pub fn last_model_change_in_file(records: &[FileRecord]) -> Option<(&str, &str, Option<&str>)> {
-    records.iter().rev().find_map(|record| match record {
-        FileRecord::Side(crate::entry::SideRecord {
-            kind:
-                crate::entry::SideKind::ModelChange {
-                    provider,
-                    model,
-                    thinking_level,
-                },
-            ..
-        }) => Some((provider.as_str(), model.as_str(), thinking_level.as_deref())),
-        _ => None,
-    })
 }
 
 #[cfg(test)]

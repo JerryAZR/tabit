@@ -174,10 +174,18 @@ pub enum SideKind {
         to: Option<String>,
     },
     /// The user aborted the outer loop mid-run. Bookkeeping only: the
-    /// turns that completed before the abort are already recorded; calls
-    /// the abort interrupted are repaired like a crash. Not part of
+    /// roundtrip the abort interrupted never landed (roundtrips commit
+    /// atomically — there is nothing dangling to repair). Not part of
     /// model context.
     Aborted,
+    /// An attempt the engine discarded — a hook veto or a malformed
+    /// tool-call defect retried. The tokens were spent, so the usage is
+    /// recorded here (PROTOCOL.md flag 22): stats count it, the log stays
+    /// the cost source of truth. Not part of model context.
+    Discarded {
+        /// The provider-reported usage of the discarded attempt.
+        usage: Usage,
+    },
     /// A human-facing bookmark. Reserved; not part of model context.
     Label {
         /// Bookmark name.

@@ -442,6 +442,13 @@ where
                                     "model turn carried a malformed tool call; \
                                      discarding the turn and retrying the request"
                                 );
+                                // The discard is surfaced (ENGINE.md delta 13):
+                                // consumers rewind the provisional output and
+                                // bill the attempt, instead of the turn
+                                // vanishing silently.
+                                yield Ok(DriveItem::Item(MultiTurnStreamItem::ModelTurnRetried {
+                                    turn,
+                                }));
                                 run.broken(reason.clone())
                             }
                             TurnFailure::Provider(class) => {
@@ -834,6 +841,18 @@ where
         if let Err(err) = run.tool_results(committed) {
             yield Err(Box::new(err).into());
             return;
+        }
+
+        // The roundtrip closed: the assistant turn and its complete batch
+        // committed together (ENGINE.md, the durable roundtrip) — the cue a
+        // session layer commits its pending roundtrip atomically.
+        if forward_items
+            && let Some(turn_id) = hook_ctx.turn_id()
+        {
+            surface_items.push(MultiTurnStreamItem::RoundtripClosed {
+                turn_id,
+                feedback: None,
+            });
         }
 
         // The batch is committed; now — and only now — the machine learns a

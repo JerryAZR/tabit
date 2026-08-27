@@ -328,6 +328,14 @@ cache fields are accounting breakdowns aligned with the backend's
 cost model). The engine tracks richer fields (reasoning, tool-use,
 per-TTL splits); they stay engine-internal and never reach the wire.
 
+Session stats (whatever surface carries them — today the session
+summary surface, later a `stats` command) are **cumulative over the
+whole session file**: every committed assistant turn on every branch
+(abandoned spend is still spend) plus every `discarded` attempt (a
+hook-vetoed or defective turn retried — the tokens were spent, so the
+log bills them; flag 22). Stats never roll back on a checkout or
+rewind; the register, not the branch, owns attribution.
+
 ## 7. Replay and checkout: how transcript state moves
 
 **Startup replay.** Send `initialize { protocol_version, replay: true

@@ -50,7 +50,9 @@ use super::{
         streaming::{MultiTurnStreamItem, StreamingError, StreamingResult, StreamingTurnSource},
         tool_result_output,
     },
-    run::{AgentRun, DEFAULT_OUTPUT_RETRIES, ModelTurn, OutputMode, PendingToolCall},
+    run::{
+        AcceptOutcome, AgentRun, DEFAULT_OUTPUT_RETRIES, ModelTurn, OutputMode, PendingToolCall,
+    },
 };
 use rig_core::{
     memory::ConversationMemory,
@@ -106,30 +108,37 @@ pub(crate) fn observe_action(action: ObservationAction) -> Option<String> {
 }
 
 /// Resolved outcome of the shared, medium-neutral model-turn hook.
-pub(crate) enum ModelTurnDecision {
-    /// Accept the turn and advance normally.
-    Advance,
+// `AcceptOutcome` carries an optional `Message`; transient per-turn.
+#[allow(clippy::large_enum_variant)]
+pub(crate) enum ModelTurnResolution {
+    /// Accept the turn and advance normally, carrying what the driver
+    /// needs for the durable roundtrip close.
+    Advance(AcceptOutcome),
     /// The turn was rejected and the run is ready to issue another model call.
     Retried,
     /// Stop the run with the supplied reason.
     Terminate(String),
 }
 
-/// Apply a model-turn hook action to the sans-IO run.
+/// Apply a model-turn hook action to the parked turn. `Continue` accepts
+/// — the turn folds, and the [`AcceptOutcome`] tells the driver what
+/// closed for the durable roundtrip; `Retry` vetoes (nothing folds, or
+/// the turn folds with corrective feedback); `Stop` terminates with the
+/// turn unfolded.
 ///
-/// Both blocking and streaming sources use this resolver so retry history,
-/// tool-turn rejection, and state transitions cannot diverge by medium.
+/// Both blocking and streaming sources use this resolver so acceptance,
+/// veto history, and state transitions cannot diverge by medium.
 pub(crate) fn resolve_model_turn_action(
     run: &mut AgentRun,
     action: ModelTurnAction,
-) -> Result<ModelTurnDecision, PromptError> {
+) -> Result<ModelTurnResolution, PromptError> {
     match action {
-        ModelTurnAction::Continue => Ok(ModelTurnDecision::Advance),
+        ModelTurnAction::Continue => Ok(ModelTurnResolution::Advance(run.accept_turn()?)),
         ModelTurnAction::Retry(request) => {
-            run.reject_final_turn(request)?;
-            Ok(ModelTurnDecision::Retried)
+            run.veto_turn(request)?;
+            Ok(ModelTurnResolution::Retried)
         }
-        ModelTurnAction::Stop(reason) => Ok(ModelTurnDecision::Terminate(reason)),
+        ModelTurnAction::Stop(reason) => Ok(ModelTurnResolution::Terminate(reason)),
     }
 }
 
@@ -1046,7 +1055,10 @@ impl TurnSource for UnaryTurnSource {
             };
 
             let finish_reason = resp.finish_reason();
-            if let Err(err) = run.turn_committed(ModelTurn::new(
+            // Park first, hooks second (the pre-commit veto reorder,
+            // ENGINE.md delta 11): the model-turn hooks observe the parked
+            // turn and their verdict decides whether it ever folds.
+            if let Err(err) = run.turn_completed(ModelTurn::new(
                 resp.message_id.clone(),
                 resp.choice.clone(),
                 resp.usage,
@@ -1060,7 +1072,7 @@ impl TurnSource for UnaryTurnSource {
 
             // The response-finish event fires first, then the normalized
             // per-turn event. The first observes; the second can accept,
-            // retry, or stop the canonical turn.
+            // retry, or stop the parked turn.
             if let Some(reason) = observe_action(
                 runner
                     .hooks
@@ -1089,9 +1101,9 @@ impl TurnSource for UnaryTurnSource {
                 )
                 .await;
             match resolve_model_turn_action(run, action) {
-                Ok(ModelTurnDecision::Advance) => {}
-                Ok(ModelTurnDecision::Retried) => return,
-                Ok(ModelTurnDecision::Terminate(reason)) => {
+                Ok(ModelTurnResolution::Advance(_)) => {}
+                Ok(ModelTurnResolution::Retried) => return,
+                Ok(ModelTurnResolution::Terminate(reason)) => {
                     // The stop observed this already completed provider turn:
                     // record its content telemetry before the cancellation
                     // surfaces (matching the streaming surface).

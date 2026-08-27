@@ -17,11 +17,12 @@
 //! caller-chosen directory — project-local by default, because a path
 //! relative to the project survives renames and moves. The session layer
 //! is the *policy owner* around the rig-agent engine: it selects the model
-//! for each outer loop (from `tabit-config`), replays the log into model
-//! context, persists every completed record as it happens (assistant
-//! turns, tool results, model switches), and folds the engine's item
-//! stream into the serializable [`SessionEvent`] list a frontend
-//! consumes.
+//! for each outer loop (from `tabit-config`), adopts the parsed log as
+//! its resident state at open, commits each tool-use roundtrip atomically
+//! as the item stream closes it (plus steers, model switches, and
+//! discard markers through the same one commit door), and folds the
+//! engine's item stream into the serializable [`SessionEvent`] list a
+//! frontend consumes.
 //!
 //! Native targets only: sessions are filesystem-backed (and UUIDv7 ids
 //! need OS entropy), so this crate deliberately does not build for
@@ -71,6 +72,7 @@ mod ids;
 mod interaction;
 mod lock;
 mod model;
+mod parser;
 mod permission;
 mod projection;
 mod prompt;
@@ -78,7 +80,10 @@ mod recorder;
 mod registry;
 pub(crate) mod replay;
 mod session;
+mod stats;
 mod store;
+mod tree;
+mod writer;
 
 pub use endpoint::{
     OpenSessionSource, SessionCommandLink, SessionHost, SessionHostWiring, SessionInfo,
@@ -88,6 +93,7 @@ pub use entry::{EntryKind, SESSION_FORMAT_VERSION, SessionEntry, SessionHeader};
 pub use error::SessionError;
 pub use interaction::InteractionHub;
 pub use model::validate_selection;
+pub use parser::Parsed;
 pub use permission::{PERMISSION_ASK_TOOLS, PermissionMemory, permission_gate};
 pub use prompt::build_system_prompt;
 pub use registry::ModelRegistry;
@@ -95,11 +101,14 @@ pub use session::{
     AbortHandle, DEFAULT_MAX_TURNS, MailboxHandle, ModelStats, RewindSummary, RunOutcome,
     RunSummary, Session, SessionBuilder, SessionStats, TOOL_CONCURRENCY,
 };
-pub use store::{LoadedSession, Repair, SessionStore, SessionSummary, SessionWriter};
+pub use stats::{ModelUsage, UsageLedger};
+pub use store::{SessionStore, SessionSummary};
 pub use tabit_protocol::{
     ClientFrame, EventFrame, ModelSelection, PROTOCOL_VERSION, ServerControlFrame, ServerFrame,
     SessionCommand, SessionEvent, StreamId,
 };
+pub use tree::{SessionTree, TreeFault};
+pub use writer::SessionWriter;
 
 #[cfg(test)]
 mod tests;

@@ -1,5 +1,7 @@
+//! Node→context projection and the structural checks over branches.
+
 use super::*;
-use crate::entry::{EntryKind, SessionEntry, SideKind, SideRecord};
+use crate::entry::{EntryKind, SessionEntry};
 use rig_core::OneOrMany;
 use rig_core::completion::Message;
 use rig_core::message::{
@@ -19,16 +21,12 @@ fn user(text: &str) -> EntryKind {
     }
 }
 
-fn assistant_tool_call(id: &str) -> EntryKind {
-    assistant_tool_calls(&[id.to_string()])
-}
-
-fn assistant_tool_calls(ids: &[String]) -> EntryKind {
+fn assistant_tool_calls(ids: &[&str]) -> EntryKind {
     let content = OneOrMany::many(
         ids.iter()
             .map(|id| {
                 AssistantContent::ToolCall(ToolCall::new(
-                    id.clone(),
+                    id.to_string(),
                     ToolFunction::new("echo".to_string(), json!({})),
                 ))
             })
@@ -62,168 +60,149 @@ fn tool_result(id: &str) -> EntryKind {
     }
 }
 
+/// A feedback close: a user message made of the calls' results.
+fn feedback(calls: &[&str]) -> EntryKind {
+    let content: Vec<UserContent> = calls
+        .iter()
+        .map(|call| {
+            UserContent::ToolResult(ToolResult {
+                id: call.to_string(),
+                call_id: None,
+                content: OneOrMany::one(ToolResultContent::text("retry")),
+                status: None,
+            })
+        })
+        .collect();
+    EntryKind::UserMessage {
+        message: Message::User {
+            content: OneOrMany::many(content).expect("non-empty"),
+        },
+    }
+}
+
 #[test]
-fn projects_entries_in_order_and_merges_result_batches() {
+fn fold_branch_merges_result_batches_into_one_user_message() {
     let entries = vec![
         entry(user("question")),
-        entry(assistant_tool_calls(&["c1".to_string(), "c2".to_string()])),
+        entry(assistant_tool_calls(&["c1", "c2"])),
         entry(tool_result("c1")),
         entry(tool_result("c2")),
         entry(assistant_text("done")),
     ];
-    let (messages, dangling) = project(&entries);
-    assert!(dangling.is_none());
+    let context = fold_branch(&entries);
+    let messages = context.messages();
     assert_eq!(messages.len(), 4, "user, assistant, merged results, final");
     assert!(matches!(&messages[2], Message::User { content } if content.len() == 2));
     assert!(matches!(&messages[3], Message::Assistant { .. }));
 }
 
 #[test]
-fn only_nodes_reach_the_projector() {
-    // Format v3 made the old skip-arms unconstructible: state lives in
-    // side records, which are not entries at all. Every entry kind the
-    // projector can see contributes to the context.
+fn fold_branch_folds_user_and_assistant_messages_verbatim() {
     let entries = vec![entry(user("q")), entry(assistant_text("a"))];
-    let (messages, _) = project(&entries);
+    let context = fold_branch(&entries);
+    let messages = context.messages();
     assert_eq!(messages.len(), 2);
+    assert!(matches!(&messages[0], Message::User { .. }));
+    assert!(matches!(&messages[1], Message::Assistant { .. }));
 }
 
 #[test]
-fn dangling_tool_roundtrip_is_detected() {
-    let entries = vec![entry(user("do it")), entry(assistant_tool_call("c1"))];
-    let (messages, dangling) = project(&entries);
-    let dangling = dangling.expect("trailing tool calls with no results dangle");
-    assert_eq!(dangling.calls.len(), 1);
-    assert_eq!(dangling.calls[0].id, "c1");
-    assert_eq!(messages.len(), 2, "the assistant turn is still projected");
-}
-
-#[test]
-fn completed_roundtrip_is_not_dangling() {
+fn fold_branch_folds_a_feedback_user_node_verbatim() {
     let entries = vec![
-        entry(user("do it")),
-        entry(assistant_tool_call("c1")),
+        entry(user("q")),
+        entry(assistant_tool_calls(&["c1"])),
+        entry(feedback(&["c1"])),
+    ];
+    let context = fold_branch(&entries);
+    let messages = context.messages();
+    assert_eq!(messages.len(), 3);
+    let Message::User { content } = &messages[2] else {
+        panic!("the feedback node folds as its own user message");
+    };
+    assert_eq!(content.len(), 1, "its tool-result content kept verbatim");
+}
+
+#[test]
+fn a_closed_branch_passes() {
+    let entries = vec![
+        entry(user("q")),
+        entry(assistant_tool_calls(&["c1", "c2"])),
         entry(tool_result("c1")),
-        entry(assistant_text("done")),
+        entry(tool_result("c2")),
+        entry(user("again")),
     ];
-    let (_, dangling) = project(&entries);
-    assert!(dangling.is_none());
+    assert!(path_is_closed(&entries).is_ok());
 }
 
 #[test]
-fn text_only_tail_is_not_dangling() {
-    let entries = vec![entry(user("q")), entry(assistant_text("a"))];
-    let (_, dangling) = project(&entries);
-    assert!(dangling.is_none());
-}
-
-#[test]
-fn the_register_reads_the_files_last_model_change_backwards() {
-    let records = vec![
-        side(SideKind::ModelChange {
-            provider: "p".to_string(),
-            model: "first".to_string(),
-            thinking_level: None,
-        }),
-        FileRecord::Node(entry(user("q"))),
-        side(SideKind::ModelChange {
-            provider: "p".to_string(),
-            model: "second".to_string(),
-            thinking_level: Some("high".to_string()),
-        }),
+fn a_branch_ending_mid_batch_is_open() {
+    let entries = vec![
+        entry(user("q")),
+        entry(assistant_tool_calls(&["c1", "c2"])),
+        entry(tool_result("c1")),
     ];
-    let (provider, model, level) =
-        last_model_change_in_file(&records).expect("a model change exists");
-    assert_eq!((provider, model, level), ("p", "second", Some("high")));
-    assert!(
-        last_model_change_in_file(&[FileRecord::Node(entry(user("no changes")))]).is_none(),
-        "nodes never carry the register"
-    );
-}
-
-fn side(kind: SideKind) -> FileRecord {
-    FileRecord::Side(SideRecord {
-        timestamp: "t".to_string(),
-        kind,
-    })
+    let fault = path_is_closed(&entries).expect_err("c2 unanswered");
+    assert!(fault.contains("unanswered"), "{fault}");
 }
 
 #[test]
-fn assistant_entry_holding_a_non_assistant_message_is_not_dangling() {
+fn a_branch_ending_on_a_calls_assistant_is_open() {
+    let entries = vec![entry(user("q")), entry(assistant_tool_calls(&["c1"]))];
+    let fault = path_is_closed(&entries).expect_err("calls never answered");
+    assert!(fault.contains("mid-roundtrip"), "{fault}");
+}
+
+#[test]
+fn a_feedback_close_closes_the_branch() {
+    let entries = vec![
+        entry(user("q")),
+        entry(assistant_tool_calls(&["c1", "c2"])),
+        entry(feedback(&["c1", "c2"])),
+    ];
+    assert!(path_is_closed(&entries).is_ok());
+}
+
+#[test]
+fn a_plain_user_message_after_an_open_batch_is_open() {
+    let entries = vec![
+        entry(user("q")),
+        entry(assistant_tool_calls(&["c1"])),
+        entry(user("interrupts")),
+    ];
+    let fault = path_is_closed(&entries).expect_err("mid-batch user message");
+    assert!(fault.contains("interrupts"), "{fault}");
+}
+
+#[test]
+fn a_result_answering_no_open_call_is_open() {
+    let entries = vec![entry(user("q")), entry(tool_result("ghost"))];
+    let fault = path_is_closed(&entries).expect_err("orphan result");
+    assert!(fault.contains("no open call"), "{fault}");
+}
+
+#[test]
+fn an_assistant_after_an_open_batch_is_open() {
+    let entries = vec![
+        entry(user("q")),
+        entry(assistant_tool_calls(&["c1"])),
+        entry(assistant_text("too early")),
+    ];
+    let fault = path_is_closed(&entries).expect_err("batch left open");
+    assert!(fault.contains("open"), "{fault}");
+}
+
+#[test]
+fn a_non_assistant_message_carries_no_calls() {
     // The entry schema permits any Message inside AssistantMessage; only a
-    // genuine assistant message can dangle tool calls.
+    // genuine assistant message can carry tool calls.
     let entries = vec![entry(EntryKind::AssistantMessage {
         message: Message::User {
             content: OneOrMany::one(UserContent::Text(Text::new("odd but legal"))),
         },
         usage: rig_core::completion::Usage::default(),
     })];
-    let (messages, dangling) = project(&entries);
-    assert_eq!(messages.len(), 1);
-    assert!(dangling.is_none());
-}
-
-#[test]
-fn partially_answered_batch_dangles_only_the_unanswered_call() {
-    // A branch point can land mid-batch: some results arrived, one call
-    // was never answered. Only the unanswered call dangles.
-    let entries = vec![
-        entry(user("q")),
-        entry(assistant_tool_calls(&["c1".to_string(), "c2".to_string()])),
-        entry(tool_result("c1")),
-    ];
-    let (messages, dangling) = project(&entries);
-    let dangling = dangling.expect("c2 was never answered");
-    assert_eq!(dangling.calls.len(), 1);
-    assert_eq!(dangling.calls[0].id, "c2");
-    assert_eq!(messages.len(), 3, "user, assistant, the one result");
-}
-
-#[test]
-fn results_answer_calls_by_provider_call_id_too() {
-    // Providers that correlate by call_id (OpenAI-style) answer calls
-    // whose canonical id never appears in any result.
-    let mut call = ToolCall::new(
-        "internal-1".to_string(),
-        ToolFunction::new("echo".to_string(), json!({})),
-    );
-    call.call_id = Some("call-abc".to_string());
-    let entries = vec![
-        entry(user("q")),
-        entry(EntryKind::AssistantMessage {
-            message: Message::Assistant {
-                id: None,
-                content: OneOrMany::one(AssistantContent::ToolCall(call)),
-            },
-            usage: rig_core::completion::Usage::default(),
-        }),
-        entry(EntryKind::ToolResult {
-            result: ToolResult {
-                id: "unrelated".to_string(),
-                call_id: Some("call-abc".to_string()),
-                content: OneOrMany::one(ToolResultContent::text("ok")),
-                status: None,
-            },
-        }),
-    ];
-    let (_, dangling) = project(&entries);
-    assert!(dangling.is_none(), "the call_id answered the call");
-}
-
-#[test]
-fn a_projected_branch_is_all_context() {
-    // v3: the projector sees the active branch's nodes only; the
-    // checkout that selected the branch is a side record that never
-    // reaches this function.
-    let entries = vec![
-        entry(user("q")),
-        entry(assistant_text("a")),
-        entry(user("again")),
-        entry(assistant_text("b")),
-    ];
-    let (messages, dangling) = project(&entries);
-    assert!(dangling.is_none());
-    assert_eq!(messages.len(), 4);
+    assert!(path_is_closed(&entries).is_ok());
+    assert_eq!(calls_of(&Message::user("x")).len(), 0);
 }
 
 #[test]
@@ -234,7 +213,7 @@ fn user_message_boundaries_list_every_user_message_in_order() {
         entry(user("first")),
         entry(assistant_text("a")),
         entry(user("second")),
-        entry(assistant_tool_calls(&["c1".to_string()])),
+        entry(assistant_tool_calls(&["c1"])),
         entry(tool_result("c1")),
         entry(user("a steer mid-run")),
         entry(assistant_text("b")),

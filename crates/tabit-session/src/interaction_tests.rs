@@ -5,7 +5,6 @@
 
 use super::*;
 use crate::SessionEvent;
-use crate::entry::EntryKind;
 use crate::tests::{Factory, temp_store, text_turn, tool_turn};
 use rig_agent::test_utils::MockStreamEvent;
 use rig_agent::tool::{DynamicTool, ToolOutput};
@@ -349,40 +348,34 @@ async fn frontend_death_with_a_card_open_winds_the_worker_down() {
     .expect("the worker must wind down when the frontend dies");
 
     // The durability half of the ruling: the log survives the death, the
-    // interrupted call's result was synthesized AT ABORT TIME (durably —
-    // an `aborted` side record with the interrupted-result node after
-    // it), and the next open finds nothing dangling.
+    // interrupted roundtrip NEVER landed (roundtrips commit atomically —
+    // the assistant and its results exist together or not at all), and
+    // the `aborted` side record is the whole trace.
     let path = handle.info().session_path.clone();
-    let loaded = store
-        .open_path(std::path::Path::new(&path))
-        .expect("reopen");
-    use crate::entry::{FileRecord, SideKind};
-    assert!(loaded.records.iter().any(|record| matches!(
+    let records = crate::tests::load_records(std::path::Path::new(&path));
+    use crate::entry::SideKind;
+    assert!(records.iter().any(|record| matches!(
         record,
-        FileRecord::Side(crate::entry::SideRecord {
+        crate::entry::FileRecord::Side(crate::entry::SideRecord {
             kind: SideKind::Aborted,
             ..
         })
     )));
     assert!(
         matches!(
-            loaded.records.last(),
-            Some(FileRecord::Node(crate::entry::SessionEntry {
-                kind: EntryKind::ToolResult { .. },
+            records.last(),
+            Some(crate::entry::FileRecord::Side(crate::entry::SideRecord {
+                kind: SideKind::Aborted,
                 ..
             }))
         ),
-        "the interrupted call's synthesized result is the durable tail"
+        "the aborted marker is the durable tail — nothing partial landed"
     );
-    let (resumed, report) = Factory::new(vec![text_turn("recovered")])
+    let (resumed, _report) = Factory::new(vec![text_turn("recovered")])
         .into_builder(store.clone())
         .resume(std::path::Path::new(&path))
         .expect("the log reopens after the death");
     let _ = resumed;
-    assert_eq!(
-        report.repaired_tool_calls, 0,
-        "abort-time synthesis left nothing dangling to repair"
-    );
     std::fs::remove_dir_all(store.dir()).ok();
 }
 

@@ -9,8 +9,11 @@
 //!
 //! - [`AgentRunStep::CallModel`]: send `history` to the model (as-is —
 //!   no prompt/context split) and feed the outcome back via
-//!   [`AgentRun::turn_committed`] (or [`AgentRun::broken`] /
-//!   [`AgentRun::provider_error`] / [`AgentRun::terminate`]).
+//!   [`AgentRun::turn_completed`] or
+//!   [`AgentRun::turn_completed_streamed`] (or [`AgentRun::broken`] /
+//!   [`AgentRun::provider_error`] / [`AgentRun::terminate`]), then the
+//!   model-turn hooks' verdict through [`AgentRun::accept_turn`] /
+//!   [`AgentRun::veto_turn`].
 //! - [`AgentRunStep::CallTools`]: execute the listed tool calls and feed
 //!   the results back via [`AgentRun::tool_results`].
 //! - [`AgentRunStep::DrainSteers`]: fetch every queued steering message
@@ -82,7 +85,7 @@ use rig_core::{
 };
 
 use crate::{
-    agent::conversation::Conversation,
+    agent::context::Context,
     agent::hook::RetryRequest,
     agent::prompt_request::{
         CompletionCall, PromptResponse, assistant_text_from_choice,
@@ -213,8 +216,11 @@ enum RunState {
     Preparing,
     /// A model turn is in flight; waiting for its outcome feed.
     ModelTurn,
-    /// A committed final (tool-free) turn, awaiting the drain — and the
-    /// host for final-turn rejection (the model-turn-finished Retry hook).
+    /// The completed turn, classified and parked — folded nowhere. The
+    /// model-turn hooks observe it here; their verdict (accept or veto)
+    /// decides whether it ever folds (ENGINE.md, TurnParked).
+    TurnParked(Box<ParkedTurn>),
+    /// A committed final (tool-free) turn, awaiting the drain.
     FinalTurn,
     /// A discarded defective turn (never entered history), awaiting the
     /// drain.
@@ -229,6 +235,42 @@ enum RunState {
     Done(Box<PromptResponse>),
     /// Terminal: the run failed.
     Failed,
+}
+
+/// A completed turn held between completion and hook acceptance. The
+/// classification is computed at park time so the veto can reject a
+/// tools turn without re-deriving anything.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+struct ParkedTurn {
+    message_id: Option<String>,
+    choice: OneOrMany<AssistantContent>,
+    executable_tool_names: BTreeSet<String>,
+    allowed_tool_names: BTreeSet<String>,
+    internal_call_ids: Vec<(String, String)>,
+    /// Whether the turn carries (non-output) tool calls: `Tools` turns
+    /// are not vetoable (rejecting them would strand unanswered calls —
+    /// the hook contract); everything else is final-shaped.
+    carries_tools: bool,
+}
+
+/// What accepting a parked turn produced — the driver's cue for the
+/// durable roundtrip close (ENGINE.md, the durable roundtrip).
+// `Message` is large (~288 bytes) and rides the `Final` arm; the enum is
+// a transient per-turn value, so boxing it would be noise.
+#[allow(clippy::large_enum_variant)]
+#[derive(Debug, Clone)]
+pub enum AcceptOutcome {
+    /// The accepted turn was final. `feedback` is the engine-authored
+    /// closing message when the turn closed with a re-prompt (the
+    /// output-mode policies): the model saw it, so it belongs to the
+    /// roundtrip.
+    Final {
+        /// The engine-authored closing message, when one was folded.
+        feedback: Option<Message>,
+    },
+    /// The accepted turn launched a tool batch; the roundtrip closes at
+    /// settlement.
+    Tools,
 }
 
 /// The sans-IO agent loop state machine. See the [module docs](self) for
@@ -256,12 +298,12 @@ pub struct AgentRun {
     output_retries: usize,
     /// The whole conversation, joined at entry and appended by the machine
     /// (committed turns, tool results, steers, corrective feedback). The
-    /// request is this conversation, as-is — the run holds a
-    /// run-scoped instance of the one shared context builder (the same
-    /// fold the session layer persists from).
-    conversation: Conversation,
+    /// request is this conversation, as-is — the run holds a run-scoped
+    /// instance of the one shared context builder (the same fold the
+    /// session layer persists from).
+    context: Context,
     /// Where the run's own messages begin: `messages()` is
-    /// `conversation[entry_len..]` (the memory append at Done).
+    /// `context[entry_len..]` (the memory append at Done).
     entry_len: usize,
     current_turn: usize,
     usage: Usage,
@@ -322,8 +364,10 @@ impl AgentRun {
         // the input *context*: the final entry — the message being
         // answered — is the run's opening message, not context.
         let entry_len = history.len() - 1;
+        let mut context = Context::new();
+        context.fold_all(history);
         Self {
-            conversation: Conversation::from_messages(history),
+            context,
             max_turns: 1,
             output_tool_name: None,
             output_schema: None,
@@ -454,7 +498,7 @@ impl AgentRun {
                 self.current_turn += 1;
                 self.state = RunState::ModelTurn;
                 Ok(AgentRunStep::CallModel {
-                    history: self.conversation.committed().to_vec(),
+                    history: self.context.messages().to_vec(),
                     turn: self.current_turn,
                 })
             }
@@ -482,11 +526,15 @@ impl AgentRun {
                 self.state = RunState::Done(response);
                 Ok(step)
             }
-            state @ (RunState::ModelTurn | RunState::Failed) => {
+            state @ (RunState::ModelTurn | RunState::TurnParked(_) | RunState::Failed) => {
                 let reason = match &state {
                     RunState::ModelTurn => {
                         "next_step called while a model turn is pending; feed its outcome first \
-                         (turn_committed / broken / provider_error / terminate)"
+                         (turn_completed / broken / provider_error / terminate)"
+                    }
+                    RunState::TurnParked(_) => {
+                        "next_step called while a turn is parked; feed the model-turn hooks' \
+                         verdict first (accept_turn / veto_turn)"
                     }
                     _ => "next_step called after the run already failed or was misdriven",
                 };
@@ -496,17 +544,18 @@ impl AgentRun {
         }
     }
 
-    /// Feed a completed model turn (the blocking surface). The machine
-    /// classifies it: final, output-mode finalization, or a tool batch
-    /// (with the admission scan).
-    pub fn turn_committed(&mut self, turn: ModelTurn) -> Result<(), PromptError> {
+    /// Feed a completed model turn (the blocking surface): classify and
+    /// park it — folded nowhere. The model-turn hooks observe the parked
+    /// turn; [`AgentRun::accept_turn`] / [`AgentRun::veto_turn`] feed
+    /// their verdict.
+    pub fn turn_completed(&mut self, turn: ModelTurn) -> Result<(), PromptError> {
         if !matches!(self.state, RunState::ModelTurn) {
             return Err(
-                self.protocol_violation("turn_committed called without a pending CallModel step")
+                self.protocol_violation("turn_completed called without a pending CallModel step")
             );
         }
         self.record_completion_call(turn.usage, turn.finish_reason);
-        self.commit_turn(
+        self.park(
             turn.message_id,
             turn.choice,
             turn.executable_tool_names,
@@ -515,21 +564,20 @@ impl AgentRun {
         )
     }
 
-    /// Feed a completed streamed model turn. Same classification as
-    /// [`AgentRun::turn_committed`]; usage was recorded during streaming
-    /// (with a zero-usage fallback here, so exactly one completion call
-    /// exists per model call).
-    pub fn turn_committed_streamed(&mut self, turn: StreamedTurn) -> Result<(), PromptError> {
+    /// Feed a completed streamed model turn: classify and park it. Usage
+    /// was recorded during streaming (with a zero-usage fallback here, so
+    /// exactly one completion call exists per model call).
+    pub fn turn_completed_streamed(&mut self, turn: StreamedTurn) -> Result<(), PromptError> {
         if !matches!(self.state, RunState::ModelTurn) {
-            return Err(
-                self.protocol_violation("streamed_turn called without a pending CallModel step")
-            );
+            return Err(self.protocol_violation(
+                "turn_completed_streamed called without a pending CallModel step",
+            ));
         }
         if !self.streamed_completion_call_recorded {
             self.record_completion_call(Usage::new(), None);
             self.streamed_completion_call_recorded = true;
         }
-        self.commit_turn(
+        self.park(
             turn.message_id,
             turn.choice,
             turn.executable_tool_names,
@@ -538,10 +586,10 @@ impl AgentRun {
         )
     }
 
-    /// The classification and paths shared by both surfaces
-    /// (ENGINE.md's diamond): final → FinalTurn; output-mode finalization
-    /// → FinalTurn's policy; tools → admission scan → ExecutingTools.
-    fn commit_turn(
+    /// The park (shared by both surfaces): classify the completed turn,
+    /// reset the failure streaks (a completed turn reset them before the
+    /// reorder too, veto or not), and hold everything the accept needs.
+    fn park(
         &mut self,
         message_id: Option<String>,
         choice: OneOrMany<AssistantContent>,
@@ -549,15 +597,63 @@ impl AgentRun {
         allowed_tool_names: BTreeSet<String>,
         internal_call_ids: Vec<(String, String)>,
     ) -> Result<(), PromptError> {
+        let carries_tools = match &self.output_tool_name {
+            // An output-tool call finalizes the run (Tool output mode), so
+            // it does not make the turn a tools turn — it is final-shaped
+            // and vetoable like any other.
+            Some(output_tool_name) => choice.iter().any(|item| match item {
+                AssistantContent::ToolCall(call) => call.function.name != *output_tool_name,
+                _ => false,
+            }),
+            None => choice
+                .iter()
+                .any(|item| matches!(item, AssistantContent::ToolCall(_))),
+        };
+        self.defect_streak = 0;
+        self.provider_retry_streak = 0;
+        self.pending_error = None;
+        self.state = RunState::TurnParked(Box::new(ParkedTurn {
+            message_id,
+            choice,
+            executable_tool_names,
+            allowed_tool_names,
+            internal_call_ids,
+            carries_tools,
+        }));
+        Ok(())
+    }
+
+    /// Take the parked turn out of the state machine, leaving `Failed`
+    /// parked as the placeholder until the caller sets the real next
+    /// state. A state that is not TurnParked is a protocol violation.
+    fn take_parked(&mut self, caller: &str) -> Result<Box<ParkedTurn>, PromptError> {
+        match std::mem::replace(&mut self.state, RunState::Failed) {
+            RunState::TurnParked(parked) => Ok(parked),
+            other => {
+                self.state = other;
+                Err(self
+                    .protocol_violation(&format!("{caller} called without a parked model turn")))
+            }
+        }
+    }
+
+    /// Accept the parked turn — the model-turn hooks approved it. Folds
+    /// and transitions per the parked classification; returns what the
+    /// driver needs for the durable roundtrip close.
+    pub fn accept_turn(&mut self) -> Result<AcceptOutcome, PromptError> {
+        let parked = self.take_parked("accept_turn")?;
+        let ParkedTurn {
+            message_id,
+            choice,
+            executable_tool_names,
+            allowed_tool_names,
+            internal_call_ids,
+            carries_tools,
+        } = *parked;
         let items: Vec<AssistantContent> = choice.iter().cloned().collect();
         let has_tool_calls = items
             .iter()
             .any(|item| matches!(item, AssistantContent::ToolCall(_)));
-
-        // A committed turn resets every retry streak and pending failure.
-        self.defect_streak = 0;
-        self.provider_retry_streak = 0;
-        self.pending_error = None;
 
         // Tool output mode: a call to the synthetic output tool finalizes
         // the run with the call's arguments as the response (#1928).
@@ -571,7 +667,7 @@ impl AgentRun {
             return self.finalize_output_turn(message_id, choice, tool_call.clone());
         }
 
-        if !has_tool_calls {
+        if !carries_tools {
             // Final turn. In Tool output mode, text that is not valid
             // structured output re-prompts with feedback while budget
             // remains; everything else commits as the Done candidate.
@@ -581,21 +677,24 @@ impl AgentRun {
                 && !self.text_satisfies_output_schema(&assistant_text_from_choice(&choice))
             {
                 self.output_retries += 1;
-                self.conversation.assistant(Message::Assistant {
+                self.context.fold(Message::Assistant {
                     id: message_id,
                     content: choice.clone(),
                 });
-                self.conversation.user(Message::user(format!(
+                let feedback = Message::user(format!(
                     "Provide your final answer by calling the `{output_tool_name}` tool with \
                      the structured result as its arguments, not as plain text."
-                )));
+                ));
+                self.context.fold(feedback.clone());
                 self.retry_requested = true;
                 self.state = RunState::FinalTurn;
-                return Ok(());
+                return Ok(AcceptOutcome::Final {
+                    feedback: Some(feedback),
+                });
             }
 
             if !is_empty_assistant_turn(&choice) {
-                self.conversation.assistant(Message::Assistant {
+                self.context.fold(Message::Assistant {
                     id: message_id,
                     content: choice.clone(),
                 });
@@ -607,15 +706,15 @@ impl AgentRun {
             self.pending_response = Some(response);
             self.pending_final = true;
             self.state = RunState::FinalTurn;
-            return Ok(());
+            return Ok(AcceptOutcome::Final { feedback: None });
         }
 
-        // Tools: commit the assistant turn, then the admission scan. A name
+        // Tools: fold the assistant turn, then the admission scan. A name
         // the model was not offered is a model-side mistake — the call
         // returns a synthetic in-band result naming the problem, the model
         // is told, and the run continues. Never a failure, never a pause.
         self.output_retries = 0;
-        self.conversation.assistant(Message::Assistant {
+        self.context.fold(Message::Assistant {
             id: message_id,
             content: choice.clone(),
         });
@@ -646,6 +745,49 @@ impl AgentRun {
             })
             .collect();
         self.state = RunState::ExecutingTools(calls);
+        Ok(AcceptOutcome::Tools)
+    }
+
+    /// Veto the parked turn — a model-turn hook rejected it. `Repeat`
+    /// discards the turn (it never folds); `Feedback` folds it followed
+    /// by corrective feedback. Either way the run re-prompts through the
+    /// drain. Rejecting a turn that carries tool calls is a protocol
+    /// violation — the calls would strand unanswered (the hook
+    /// contract).
+    pub fn veto_turn(&mut self, request: RetryRequest) -> Result<(), PromptError> {
+        let carries_tools = match &self.state {
+            RunState::TurnParked(parked) => parked.carries_tools,
+            _ => {
+                return Err(self.protocol_violation("veto_turn called without a parked model turn"));
+            }
+        };
+        if carries_tools {
+            self.state = RunState::Failed;
+            return Err(self.protocol_violation(
+                "a model-turn hook vetoed a turn carrying tool calls; retry tool-free turns \
+                 only (steer tool turns through the tool-call hooks)",
+            ));
+        }
+        let parked = self.take_parked("veto_turn")?;
+        let ParkedTurn {
+            message_id, choice, ..
+        } = *parked;
+        if let RetryRequest::Feedback(feedback) = request {
+            // An empty assistant turn stays out of history (the accept
+            // path skips it too): there is nothing to preserve, and the
+            // feedback alone carries the correction.
+            if !is_empty_assistant_turn(&choice) {
+                self.context.fold(Message::Assistant {
+                    id: message_id,
+                    content: choice,
+                });
+            }
+            self.context.fold(Message::user(feedback));
+        }
+        self.pending_final = false;
+        self.pending_response = None;
+        self.retry_requested = true;
+        self.state = RunState::FinalTurn;
         Ok(())
     }
 
@@ -681,7 +823,7 @@ impl AgentRun {
         message_id: Option<String>,
         choice: OneOrMany<AssistantContent>,
         tool_call: ToolCall,
-    ) -> Result<(), PromptError> {
+    ) -> Result<AcceptOutcome, PromptError> {
         let output_tool_name = self
             .output_tool_name
             .clone()
@@ -694,7 +836,7 @@ impl AgentRun {
             // The rejected turn commits in full, answered by tool results:
             // the feedback rides the output call's result, siblings report
             // not-executed — replayable history, no dangling tool_use.
-            self.conversation.assistant(Message::Assistant {
+            self.context.fold(Message::Assistant {
                 id: message_id,
                 content: choice.clone(),
             });
@@ -703,14 +845,18 @@ impl AgentRun {
                  `{output_tool_name}` again with every required field.",
                 missing.join(", ")
             );
-            if let Some(user_message) =
-                invalid_tool_retry_user_message(&choice, &tool_call.id, feedback)
-            {
-                self.conversation.user(user_message);
-            }
+            // The output-tool call is in `choice`, so the message always
+            // builds; an empty one would strand the turn's calls
+            // unanswerable — an internal invariant, failed loud.
+            #[allow(clippy::expect_used)]
+            let user_message = invalid_tool_retry_user_message(&choice, &tool_call.id, feedback)
+                .expect("output-tool retry feedback answers every call in the turn");
+            self.context.fold(user_message.clone());
             self.retry_requested = true;
             self.state = RunState::FinalTurn;
-            return Ok(());
+            return Ok(AcceptOutcome::Final {
+                feedback: Some(user_message),
+            });
         }
 
         // Finalize. The turn is persisted as text (see the method doc).
@@ -732,7 +878,7 @@ impl AgentRun {
         final_items.push(AssistantContent::text(output.clone()));
         let content = OneOrMany::from_iter_optional(final_items);
         if let Some(content) = content.clone() {
-            self.conversation.assistant(Message::Assistant {
+            self.context.fold(Message::Assistant {
                 id: message_id,
                 content,
             });
@@ -747,7 +893,7 @@ impl AgentRun {
         self.pending_response = Some(response);
         self.pending_final = true;
         self.state = RunState::FinalTurn;
-        Ok(())
+        Ok(AcceptOutcome::Final { feedback: None })
     }
 
     /// Feed a model-side defect (a typed malformed-tool-call error): the
@@ -804,7 +950,7 @@ impl AgentRun {
             return Err(self.protocol_violation("steered called outside the drain point"));
         }
         if !messages.is_empty() {
-            self.conversation.extend_users(messages);
+            self.context.fold_all(messages);
             self.steers_drained = true;
             self.defect_streak = 0;
             self.provider_retry_streak = 0;
@@ -882,14 +1028,14 @@ impl AgentRun {
         if self.current_turn >= self.max_turns {
             self.state = RunState::Failed;
             let prompt = self
-                .conversation
-                .committed()
+                .context
+                .messages()
                 .last()
                 .cloned()
                 .unwrap_or_else(|| Message::user(String::new()));
             return Err(PromptError::MaxTurnsError {
                 max_turns: self.max_turns,
-                chat_history: Box::new(self.conversation.committed().to_vec()),
+                chat_history: Box::new(self.context.messages().to_vec()),
                 prompt: Box::new(prompt),
             });
         }
@@ -915,7 +1061,7 @@ impl AgentRun {
         if results.is_empty() {
             self.state = RunState::Failed;
             return Err(PromptError::prompt_cancelled(
-                self.conversation.committed().to_vec(),
+                self.context.messages().to_vec(),
                 "tool execution produced no tool results",
             ));
         }
@@ -946,35 +1092,8 @@ impl AgentRun {
             );
         };
 
-        self.conversation.user(Message::User { content });
+        self.context.fold(Message::User { content });
         self.state = RunState::DrainingSteers;
-        Ok(())
-    }
-
-    /// Reject the committed final turn and prepare another model call —
-    /// the model-turn-finished Retry hook's feed. [`RetryRequest::Repeat`]
-    /// discards the rejected response; [`RetryRequest::Feedback`] records
-    /// it followed by corrective feedback. Completion-call and usage
-    /// accounting is preserved; the retry consumes the model-call budget.
-    pub fn reject_final_turn(&mut self, request: RetryRequest) -> Result<(), PromptError> {
-        if !matches!(self.state, RunState::FinalTurn) {
-            return Err(
-                self.protocol_violation("reject_final_turn called without a committed final turn")
-            );
-        }
-        match request {
-            RetryRequest::Repeat => {
-                // Drop the rejected assistant turn; history returns to the
-                // state before it.
-                self.conversation.pop_last_assistant();
-            }
-            RetryRequest::Feedback(feedback) => {
-                self.conversation.user(Message::user(feedback));
-            }
-        }
-        self.pending_final = false;
-        self.pending_response = None;
-        self.retry_requested = true;
         Ok(())
     }
 
@@ -1023,13 +1142,13 @@ impl AgentRun {
     /// history) — the memory append at Done. `entry_len` never exceeds
     /// `history.len()`: the machine only appends.
     pub fn messages(&self) -> &[Message] {
-        let messages = self.conversation.committed();
+        let messages = self.context.messages();
         &messages[self.entry_len.min(messages.len())..]
     }
 
     /// The full conversation: entry history followed by the run's messages.
     pub fn full_history(&self) -> Vec<Message> {
-        self.conversation.committed().to_vec()
+        self.context.messages().to_vec()
     }
 
     /// Whether the run reached [`RunState::Done`].
@@ -1064,12 +1183,12 @@ impl AgentRun {
     /// Build the cancellation error a driver should return when the run
     /// stops early, carrying the current full history.
     pub fn cancel_error(&self, reason: impl Into<String>) -> PromptError {
-        PromptError::prompt_cancelled(self.conversation.committed().to_vec(), reason)
+        PromptError::prompt_cancelled(self.context.messages().to_vec(), reason)
     }
 
     fn protocol_violation(&self, reason: &str) -> PromptError {
         PromptError::prompt_cancelled(
-            self.conversation.committed().to_vec(),
+            self.context.messages().to_vec(),
             format!("agent run driver protocol violation: {reason}"),
         )
     }

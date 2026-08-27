@@ -25,11 +25,34 @@ pub(crate) fn temp_store(tag: &str) -> SessionStore {
     SessionStore::new(&dir)
 }
 
+/// The file's records, raw, in file order — a test-only read (the
+/// resident state keeps none by design). Shared with the sibling test
+/// modules (`endpoint_tests`, `interaction_tests`).
+pub(crate) fn load_records(path: &Path) -> Vec<crate::entry::FileRecord> {
+    std::fs::read_to_string(path)
+        .expect("read session file")
+        .lines()
+        .skip(1)
+        .filter(|line| !line.is_empty())
+        .map(|line| serde_json::from_str(line).expect("a valid record line"))
+        .collect()
+}
+
+/// The message a caught panic carries, whatever box it landed in.
+pub(crate) fn panic_message(payload: &Box<dyn std::any::Any + Send>) -> String {
+    if let Some(text) = payload.downcast_ref::<String>() {
+        return text.clone();
+    }
+    if let Some(text) = payload.downcast_ref::<&str>() {
+        return (*text).to_string();
+    }
+    String::new()
+}
+
 /// The file's records as kind tags (side records prefixed) — the shape
 /// most log-ordering assertions want.
-fn record_kinds(loaded: &crate::store::LoadedSession) -> Vec<&'static str> {
-    loaded
-        .records
+fn record_kinds(path: &Path) -> Vec<&'static str> {
+    load_records(path)
         .iter()
         .map(|record| match record {
             crate::entry::FileRecord::Side(crate::entry::SideRecord {
@@ -55,10 +78,9 @@ fn record_kinds(loaded: &crate::store::LoadedSession) -> Vec<&'static str> {
 }
 
 /// The file's node entries, in file order (side records skipped).
-fn file_nodes(loaded: &crate::store::LoadedSession) -> Vec<&crate::entry::SessionEntry> {
-    loaded
-        .records
-        .iter()
+fn file_nodes(path: &Path) -> Vec<crate::entry::SessionEntry> {
+    load_records(path)
+        .into_iter()
         .filter_map(|record| match record {
             crate::entry::FileRecord::Node(entry) => Some(entry),
             crate::entry::FileRecord::Side(_) => None,
@@ -269,10 +291,10 @@ async fn a_fresh_session_materializes_at_the_first_user_message() -> Result<(), 
     // The first run materializes the file: header, the opening model
     // selection, then the conversation.
     session.prompt("hi").await;
-    let loaded = store.open_path(&path)?;
-    let kinds = record_kinds(&loaded);
+    let kinds = record_kinds(&path);
     assert_eq!(kinds, vec!["model", "user", "assistant"]);
-    assert_eq!(loaded.header.id, session.id());
+    let parsed = store.open_path(&path)?;
+    assert_eq!(parsed.header.id, session.id());
     std::fs::remove_dir_all(store.dir()).ok();
     Ok(())
 }
@@ -291,9 +313,9 @@ async fn single_turn_prompt_persists_and_projects() -> Result<(), SessionError> 
     );
 
     // Log: initial model change, user message, assistant turn with usage.
-    let loaded = store.open_path(session.path()).expect("reload");
-    assert_eq!(loaded.records.len(), 3);
-    let nodes = file_nodes(&loaded);
+    let records = load_records(session.path());
+    assert_eq!(records.len(), 3);
+    let nodes = file_nodes(session.path());
     assert_eq!(nodes.len(), 2);
     assert!(matches!(&nodes[0].kind, EntryKind::UserMessage { .. }));
     assert!(matches!(
@@ -327,8 +349,7 @@ async fn tool_roundtrip_is_recorded_and_events_name_the_tool() -> Result<(), Ses
     let run = session.prompt("echo x").await;
     assert_eq!(run.output, "did it");
 
-    let loaded = store.open_path(session.path()).expect("reload");
-    let kinds = record_kinds(&loaded);
+    let kinds = record_kinds(session.path());
     assert_eq!(
         kinds,
         vec!["model", "user", "assistant", "tool_result", "assistant"]
@@ -376,10 +397,12 @@ async fn tool_roundtrip_is_recorded_and_events_name_the_tool() -> Result<(), Ses
         })
         .expect("a tool result event");
     assert_eq!(status, tabit_protocol::ToolResultStatus::Success);
-    let logged = file_nodes(&loaded).into_iter().find_map(|e| match &e.kind {
-        EntryKind::ToolResult { result } => Some(crate::session::result_text(result)),
-        _ => None,
-    });
+    let logged = file_nodes(session.path())
+        .into_iter()
+        .find_map(|e| match &e.kind {
+            EntryKind::ToolResult { result } => Some(crate::session::result_text(result)),
+            _ => None,
+        });
     assert_eq!(
         Some(content.as_str()),
         logged.as_deref(),
@@ -438,11 +461,12 @@ async fn failing_tool_results_carry_status_and_content() -> Result<(), SessionEr
         "the numeric error code rides structure as the exit code"
     );
     assert!(!content.is_empty(), "the failure detail is the content");
-    let loaded = store.open_path(session.path())?;
-    let logged = file_nodes(&loaded).into_iter().find_map(|e| match &e.kind {
-        EntryKind::ToolResult { result } => Some(crate::session::result_text(result)),
-        _ => None,
-    });
+    let logged = file_nodes(session.path())
+        .into_iter()
+        .find_map(|e| match &e.kind {
+            EntryKind::ToolResult { result } => Some(crate::session::result_text(result)),
+            _ => None,
+        });
     assert_eq!(
         Some(content.as_str()),
         logged.as_deref(),
@@ -498,8 +522,7 @@ async fn announced_turn_ids_are_the_log_entry_ids() -> Result<(), SessionError> 
     );
 
     // The announced ids are exactly the committed assistant entries' ids.
-    let loaded = store.open_path(session.path()).expect("reload");
-    let assistant_ids: Vec<String> = file_nodes(&loaded)
+    let assistant_ids: Vec<String> = file_nodes(session.path())
         .into_iter()
         .filter_map(|e| match &e.kind {
             EntryKind::AssistantMessage { .. } => Some(e.id.clone()),
@@ -535,7 +558,7 @@ async fn announced_turn_ids_are_the_log_entry_ids() -> Result<(), SessionError> 
         })
         .expect("one tool result event");
     assert_eq!(&result_turn, first, "the result belongs to the call's turn");
-    let log_result_ids: Vec<String> = file_nodes(&loaded)
+    let log_result_ids: Vec<String> = file_nodes(session.path())
         .into_iter()
         .filter_map(|e| match &e.kind {
             EntryKind::ToolResult { .. } => Some(e.id.clone()),
@@ -637,7 +660,6 @@ async fn resume_continues_the_log_and_reports_the_model() -> Result<(), SessionE
         .into_builder(store.clone())
         .resume(&path)
         .expect("resume");
-    assert_eq!(report.repaired_tool_calls, 0);
     assert_eq!(
         report
             .resumed_model
@@ -656,9 +678,8 @@ async fn resume_continues_the_log_and_reports_the_model() -> Result<(), SessionE
     let run = second.prompt("second question").await;
     assert_eq!(run.output, "two");
 
-    let loaded = store.open_path(&path).expect("reload");
     assert_eq!(
-        loaded.records.len(),
+        load_records(&path).len(),
         5,
         "initial model change + two runs of (user, assistant)"
     );
@@ -667,10 +688,13 @@ async fn resume_continues_the_log_and_reports_the_model() -> Result<(), SessionE
 }
 
 #[tokio::test]
-async fn dangling_tool_roundtrip_is_repaired_on_resume() -> Result<(), SessionError> {
+async fn a_dangling_tool_roundtrip_fails_the_resume_loudly() -> Result<(), SessionError> {
     let store = temp_store("dangling");
     // Hand-write a log that ends mid tool-use roundtrip: the process died
-    // after the assistant called a tool, before any result existed.
+    // after the assistant called a tool, before any result existed. A
+    // file written only at roundtrip boundaries cannot look like this —
+    // the open is a loud corruption error, never a repair (the repair
+    // pass is deleted: it hid real bugs).
     let mut writer = store.create("C:/w");
     let user = crate::entry::SessionEntry::with_id(
         "u1".to_string(),
@@ -682,7 +706,7 @@ async fn dangling_tool_roundtrip_is_repaired_on_resume() -> Result<(), SessionEr
             },
         },
     );
-    let error = writer.append_record(&crate::entry::FileRecord::Node(user));
+    let error = writer.write_behind(&[crate::entry::FileRecord::Node(user)]);
     assert!(error.is_none(), "write user: {error:?}");
     let assistant = crate::entry::SessionEntry::with_id(
         "a1".to_string(),
@@ -701,45 +725,22 @@ async fn dangling_tool_roundtrip_is_repaired_on_resume() -> Result<(), SessionEr
             usage: Usage::default(),
         },
     );
-    let error = writer.append_record(&crate::entry::FileRecord::Node(assistant));
+    let error = writer.write_behind(&[crate::entry::FileRecord::Node(assistant)]);
     assert!(error.is_none(), "write assistant: {error:?}");
     let path = writer.path().to_path_buf();
 
-    let (session, report) = Factory::new(vec![text_turn("recovered")])
+    let resumed = Factory::new(vec![text_turn("never runs")])
         .into_builder(store.clone())
-        .resume(&path)
-        .expect("resume");
-    assert_eq!(report.repaired_tool_calls, 1);
-    assert_eq!(
-        session.context().len(),
-        3,
-        "user, dangling assistant, synthesized results"
-    );
-
-    // The repair is durable: the file carries the synthesized result,
-    // followed by resume's register reconciliation (the hand-written
-    // log recorded no model_change, so the builder's selection lands
-    // as the newest register entry).
-    let loaded = store.open_path(&path).expect("reload");
-    let tail = loaded.records.len().saturating_sub(2);
-    assert!(matches!(
-        &loaded.records[tail],
-        crate::entry::FileRecord::Node(crate::entry::SessionEntry {
-            kind: EntryKind::ToolResult { .. },
-            ..
-        })
-    ));
-    assert!(matches!(
-        loaded.records.last(),
-        Some(crate::entry::FileRecord::Side(crate::entry::SideRecord {
-            kind: crate::entry::SideKind::ModelChange { .. },
-            ..
-        }))
-    ));
-
-    let mut session = session;
-    let run = session.prompt("continue").await;
-    assert_eq!(run.output, "recovered");
+        .resume(&path);
+    match resumed {
+        Err(SessionError::Corrupt { message, .. }) => {
+            assert!(
+                message.contains("open tool batch"),
+                "the failure names the dangling shape: {message}"
+            );
+        }
+        other => panic!("expected a loud corruption error, got {:?}", other.err()),
+    }
     std::fs::remove_dir_all(store.dir()).ok();
     Ok(())
 }
@@ -762,16 +763,16 @@ async fn failed_run_still_records_the_user_message() -> Result<(), SessionError>
         run.events
     );
 
-    let loaded = store.open_path(session.path()).expect("reload");
+    let records = load_records(session.path());
     assert!(matches!(
-        loaded.records.get(1),
+        records.get(1),
         Some(crate::entry::FileRecord::Node(crate::entry::SessionEntry {
             kind: EntryKind::UserMessage { .. },
             ..
         }))
     ));
     assert_eq!(
-        loaded.records.len(),
+        records.len(),
         2,
         "initial model change + the user message; no assistant record for a failed run"
     );
@@ -808,13 +809,13 @@ async fn malformed_tool_call_exhaustion_fails_the_run_and_leaves_the_session_ali
         run.events
     );
 
-    // The defective turns never entered history: only the user message and
-    // the initial model change are on disk, and the next message runs.
-    let loaded = store.open_path(session.path()).expect("reload");
+    // The defective turns never entered history — but their tokens were
+    // spent, so each discard is billed as a side record (flag 22): the
+    // log holds the model change, the user message, and two discards.
     assert_eq!(
-        loaded.records.len(),
-        2,
-        "model change + the user message; the discarded turns recorded nothing"
+        load_records(session.path()).len(),
+        4,
+        "model change + the user message + two discarded attempts"
     );
     let run = session.prompt("try again").await;
     assert_eq!(run.output, "recovered");
@@ -836,10 +837,8 @@ async fn set_model_records_the_change_and_splits_stats() -> Result<(), SessionEr
 
     assert_eq!(session.selection().provider, "q");
 
-    let loaded = store.open_path(session.path()).expect("reload");
-    let changes: Vec<_> = loaded
-        .records
-        .iter()
+    let changes = load_records(session.path())
+        .into_iter()
         .filter(|r| {
             matches!(
                 r,
@@ -849,8 +848,8 @@ async fn set_model_records_the_change_and_splits_stats() -> Result<(), SessionEr
                 })
             )
         })
-        .collect();
-    assert_eq!(changes.len(), 2, "initial selection + the switch");
+        .count();
+    assert_eq!(changes, 2, "initial selection + the switch");
 
     let stats = session.stats();
     assert_eq!(stats.per_model.len(), 2, "usage splits per model");
@@ -1091,9 +1090,16 @@ async fn resume_uses_the_builder_selection_and_records_the_switch() -> Result<()
         [("p".to_string(), "m".to_string())]
     );
     // The switch is durable: the log records p/m as the model in effect.
-    let loaded = store.open_path(&path).expect("reload");
-    let last = crate::projection::last_model_change_in_file(&loaded.records).expect("recorded");
-    assert_eq!(last, ("p", "m", None));
+    let parsed = store.open_path(&path).expect("reload");
+    let last = parsed.register.expect("recorded");
+    assert_eq!(
+        (
+            last.provider.as_str(),
+            last.model.as_str(),
+            last.thinking_level.as_deref()
+        ),
+        ("p", "m", None)
+    );
     std::fs::remove_dir_all(store.dir()).ok();
     Ok(())
 }
@@ -1281,10 +1287,8 @@ async fn thinking_level_changes_are_validated_and_recorded() -> Result<(), Sessi
     // log — and the superseded opening register (still pending, the
     // session never ran) rode no barrier, so it never landed: the
     // first durable register is the first explicit switch.
-    let loaded = store.open_path(session.path())?;
-    let changes = loaded
-        .records
-        .iter()
+    let changes = load_records(session.path())
+        .into_iter()
         .filter(|r| {
             matches!(
                 r,
@@ -1324,10 +1328,12 @@ async fn abort_mid_run_records_marker_and_stays_resumable() -> Result<(), Sessio
     assert_eq!(summary.outcome, crate::session::RunOutcome::Aborted);
 
     // The log carries the prompt, the abort marker, and nothing partial.
-    let loaded = store.open_path(session.path())?;
     // `create` records the opening model_change; the aborted run adds the
     // prompt and the marker, nothing partial.
-    assert_eq!(record_kinds(&loaded), vec!["model", "user", "aborted"]);
+    assert_eq!(
+        record_kinds(session.path()),
+        vec!["model", "user", "aborted"]
+    );
 
     // A fresh token lets the next run proceed normally.
     let run = session.prompt("again").await;
@@ -1368,8 +1374,7 @@ async fn steering_during_a_run_is_recorded_one_to_one() -> Result<(), SessionErr
             .count(),
         1
     );
-    let loaded = store.open_path(session.path())?;
-    let steers: Vec<&crate::SessionEntry> = file_nodes(&loaded)
+    let steers: Vec<crate::SessionEntry> = file_nodes(session.path())
         .into_iter()
         .filter(|e| matches!(&e.kind, EntryKind::UserMessage { message } if message.user_text().as_deref() == Some("also this")))
         .collect();
@@ -1479,11 +1484,10 @@ async fn messages_queued_before_pump_all_join_the_first_run() -> Result<(), Sess
         })
         .collect();
     assert_eq!(event_ids.len(), 2);
-    let loaded = store.open_path(session.path())?;
-    let log_ids: Vec<&str> = file_nodes(&loaded)
+    let log_ids: Vec<String> = file_nodes(session.path())
         .into_iter()
         .filter(|e| matches!(&e.kind, EntryKind::UserMessage { .. }))
-        .map(|e| e.id.as_str())
+        .map(|e| e.id.clone())
         .collect();
     assert_eq!(
         log_ids, event_ids,
@@ -1511,8 +1515,11 @@ async fn messages_queued_before_pump_all_join_the_first_run() -> Result<(), Sess
         "one run carries the whole batch"
     );
     // One entry per message: the log keeps 1:1 fidelity.
-    let loaded = store.open_path(session.path())?;
-    assert_eq!(loaded.records.len(), 4, "model + two users + assistant");
+    assert_eq!(
+        load_records(session.path()).len(),
+        4,
+        "model + two users + assistant"
+    );
     std::fs::remove_dir_all(store.dir()).ok();
     Ok(())
 }
@@ -1541,8 +1548,7 @@ async fn a_message_landing_after_the_last_drain_runs_as_the_next_prompt() -> Res
         })
         .await;
     assert_eq!(finished, 2, "the late message ran as the next prompt");
-    let loaded = store.open_path(session.path())?;
-    let late: Vec<&crate::SessionEntry> = file_nodes(&loaded)
+    let late: Vec<crate::SessionEntry> = file_nodes(session.path())
         .into_iter()
         .filter(|e| {
             matches!(&e.kind, EntryKind::UserMessage { message } if message.user_text().as_deref() == Some("arrived too late to steer"))
@@ -1656,25 +1662,22 @@ async fn rewind_drops_the_last_turn_and_branches_the_next_prompt() -> Result<(),
 
     // The checkout record is the last line; the dropped nodes stay in
     // the file, off-branch but present.
-    let loaded = store.open_path(session.path()).expect("reload");
+    let records = load_records(session.path());
     assert!(matches!(
-        loaded.records.last(),
+        records.last(),
         Some(crate::entry::FileRecord::Side(crate::entry::SideRecord {
             kind: crate::entry::SideKind::Checkout { .. },
             ..
         }))
     ));
-    assert_eq!(loaded.records.len(), 6, "nothing was deleted");
-    let nodes = file_nodes(&loaded);
+    assert_eq!(records.len(), 6, "nothing was deleted");
+    let nodes = file_nodes(session.path());
     assert_eq!(nodes.len(), 4, "two full turns stay in the file");
     let first_answer_id = nodes[1].id.clone();
 
     // The next prompt branches from the branch point.
     session.prompt("question two, revised").await;
-    let loaded = store
-        .open_path(session.path())
-        .expect("reload after branch");
-    let branched = file_nodes(&loaded)
+    let branched = file_nodes(session.path())
         .into_iter()
         .rev()
         .find(|entry| matches!(entry.kind, EntryKind::UserMessage { .. }))
@@ -1709,9 +1712,8 @@ async fn rewind_rejects_zero_and_more_than_the_chain_holds() -> Result<(), Sessi
     assert!(too_far.to_string().contains("holds 1"), "{too_far}");
 
     // Nothing was written by the failed attempts.
-    let loaded = store.open_path(session.path()).expect("reload");
     assert!(matches!(
-        loaded.records.last(),
+        load_records(session.path()).last(),
         Some(crate::entry::FileRecord::Node(crate::entry::SessionEntry {
             kind: EntryKind::AssistantMessage { .. },
             ..
@@ -1770,9 +1772,16 @@ async fn a_rewind_never_moves_the_model_register() -> Result<(), SessionError> {
         "resume consulted the file's last model_change, not the rewound chain's"
     );
     assert_eq!(session.selection().model, "m");
-    let loaded = store.open_path(&path).expect("reload");
-    let last = crate::projection::last_model_change_in_file(&loaded.records).expect("recorded");
-    assert_eq!(last, ("p", "m", None));
+    let parsed = store.open_path(&path).expect("reload");
+    let last = parsed.register.expect("recorded");
+    assert_eq!(
+        (
+            last.provider.as_str(),
+            last.model.as_str(),
+            last.thinking_level.as_deref()
+        ),
+        ("p", "m", None)
+    );
     std::fs::remove_dir_all(store.dir()).ok();
     Ok(())
 }
@@ -1801,10 +1810,8 @@ async fn promptless_rewind_survives_reopen() -> Result<(), SessionError> {
 
     let mut session = session;
     session.prompt("question two, again").await;
-    let loaded = store.open_path(&path).expect("reload");
-    // Fold the branch the way the load does (nodes chain off the running
-    // head; the checkout record moves it).
-    let chain = fold_branch(&loaded);
+    let parsed = store.open_path(&path).expect("reload");
+    let chain = parsed.tree.path_to_head();
     let chain_texts = user_messages_from_entries(&chain);
     assert_eq!(chain_texts, vec!["question one", "question two, again"]);
     std::fs::remove_dir_all(store.dir()).ok();
@@ -1831,45 +1838,14 @@ fn user_messages_from_entries(entries: &[crate::entry::SessionEntry]) -> Vec<Str
         .collect()
 }
 
-/// Fold the file's active branch the way the load does (test-side
-/// twin): nodes chain off the running head, checkout records move it.
-fn fold_branch(loaded: &crate::store::LoadedSession) -> Vec<crate::entry::SessionEntry> {
-    use crate::entry::{FileRecord, SideKind};
-    use std::collections::HashMap;
-    let mut by_id: HashMap<String, crate::entry::SessionEntry> = HashMap::new();
-    let mut head = None;
-    for record in &loaded.records {
-        match record {
-            FileRecord::Node(entry) => {
-                by_id.insert(entry.id.clone(), entry.clone());
-                head = Some(entry.id.clone());
-            }
-            FileRecord::Side(crate::entry::SideRecord {
-                kind: SideKind::Checkout { to },
-                ..
-            }) => head = to.clone(),
-            FileRecord::Side(_) => {}
-        }
-    }
-    let mut branch = Vec::new();
-    let mut current = head;
-    while let Some(id) = current {
-        let entry = by_id.get(&id).expect("parent resolves");
-        current = entry.parent_id.clone();
-        branch.push(entry.clone());
-    }
-    branch.reverse();
-    branch
-}
-
 /// Append a node to a hand-written log, chaining off the previous one.
 fn write_node(
-    writer: &mut crate::store::SessionWriter,
+    writer: &mut crate::writer::SessionWriter,
     parent: Option<&str>,
     kind: EntryKind,
 ) -> crate::entry::SessionEntry {
     let entry = crate::entry::SessionEntry::new(parent.map(str::to_string), "t".to_string(), kind);
-    let error = writer.append_record(&crate::entry::FileRecord::Node(entry.clone()));
+    let error = writer.write_behind(&[crate::entry::FileRecord::Node(entry.clone())]);
     assert!(error.is_none(), "write node: {error:?}");
     entry
 }
@@ -1923,11 +1899,12 @@ async fn rewind_targets_steers_like_prompts() -> Result<(), SessionError> {
 }
 
 #[tokio::test]
-async fn rewinding_mid_batch_repairs_only_the_unanswered_call() -> Result<(), SessionError> {
+async fn rewinding_into_an_open_roundtrip_panics() -> Result<(), SessionError> {
     let store = temp_store("rewind-midbatch");
     // Hand-written log with a complete two-call roundtrip; rewinding to
-    // the FIRST result entry branches mid-batch — the second call dangles
-    // and must be repaired on the new chain.
+    // the FIRST result entry targets a branch that ends mid-roundtrip —
+    // flag 23's resolution: unsupported, panics loud ("revisit later"),
+    // never repaired (the repair machinery is deleted).
     let mut writer = store.create("C:/w");
     let user = write_node(
         &mut writer,
@@ -1988,30 +1965,30 @@ async fn rewinding_mid_batch_repairs_only_the_unanswered_call() -> Result<(), Se
         .resume(&path)
         .expect("resume");
 
-    let rewind = session
-        .rewind_to_entry(&first_result.id)
-        .expect("rewind to the first result");
-    assert_eq!(rewind.to_entry, first_result.id);
-
-    // The new chain: user, assistant, one user message carrying the real
-    // c1 result plus the synthesized c2 result — balanced again.
-    let context = session.context();
-    assert_eq!(context.len(), 3);
-    let Message::User { content } = &context[2] else {
-        panic!("the trailing batch is one user message");
-    };
-    assert_eq!(content.len(), 2, "the real result and the repair");
-
-    let loaded = store.open_path(&path).expect("reload");
-    let repair = file_nodes(&loaded)
-        .into_iter()
-        .rev()
-        .find(|entry| matches!(&entry.kind, EntryKind::ToolResult { result } if result.id == "c2"))
-        .expect("the synthesized repair");
+    let outcome = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+        session.rewind_to_entry(&first_result.id)
+    }));
+    let fault = outcome.expect_err("a mid-roundtrip target panics loud");
+    let fault = panic_message(&fault);
+    assert!(
+        fault.contains("open tool roundtrip"),
+        "the panic names the ruled shape: {fault}"
+    );
+    // Nothing moved and nothing was written by the failed checkout.
     assert_eq!(
-        repair.parent_id.as_deref(),
-        Some(first_result.id.as_str()),
-        "the repair lands on the new branch"
+        session.context().len(),
+        3,
+        "user, assistant, one merged batch"
+    );
+    assert!(
+        !load_records(&path).iter().any(|record| matches!(
+            record,
+            crate::entry::FileRecord::Side(crate::entry::SideRecord {
+                kind: crate::entry::SideKind::Checkout { .. },
+                ..
+            })
+        )),
+        "no checkout record landed"
     );
     std::fs::remove_dir_all(store.dir()).ok();
     Ok(())
@@ -2028,8 +2005,7 @@ async fn rewinding_to_an_unknown_entry_changes_nothing() -> Result<(), SessionEr
         .rewind_to_entry("no-such-entry")
         .expect_err("unknown");
     assert!(error.to_string().contains("not in this session"), "{error}");
-    let loaded = store.open_path(session.path()).expect("reload");
-    assert_eq!(loaded.records.len(), 3, "nothing was written");
+    assert_eq!(load_records(session.path()).len(), 3, "nothing was written");
     std::fs::remove_dir_all(store.dir()).ok();
     Ok(())
 }
@@ -2076,10 +2052,10 @@ async fn rewind_to_the_root_leaves_the_register_untouched() -> Result<(), Sessio
     assert_eq!(rewind.to_entry, "");
     assert!(session.context().is_empty());
     assert_eq!(session.selection().model, "m");
-    let loaded = store.open_path(&path).expect("reload");
+    let records = load_records(&path);
     assert!(
         matches!(
-            loaded.records.last(),
+            records.last(),
             Some(crate::entry::FileRecord::Side(crate::entry::SideRecord {
                 kind: crate::entry::SideKind::Checkout { .. },
                 ..
@@ -2088,11 +2064,12 @@ async fn rewind_to_the_root_leaves_the_register_untouched() -> Result<(), Sessio
         "the checkout record is the only thing the rewind wrote"
     );
     assert_eq!(
-        loaded.records.len(),
+        records.len(),
         4,
         "user, assistant, resume's model_change, checkout"
     );
-    assert!(fold_branch(&loaded).is_empty());
+    let parsed = store.open_path(&path).expect("reload");
+    assert!(parsed.tree.path_to_head().is_empty());
 
     // The session is usable from the emptied chain.
     session.prompt("fresh start").await;
@@ -2110,14 +2087,14 @@ async fn a_ghost_model_in_history_does_not_block_a_rewind() -> Result<(), Sessio
     // current (valid) selection keeps answering — so the rewind
     // succeeds where it once failed loudly.
     let mut writer = store.create("C:/w");
-    let error = writer.append_record(&crate::entry::FileRecord::Side(crate::entry::SideRecord {
+    let error = writer.write_behind(&[crate::entry::FileRecord::Side(crate::entry::SideRecord {
         timestamp: "t".to_string(),
         kind: crate::entry::SideKind::ModelChange {
             provider: "ghost".to_string(),
             model: "gone".to_string(),
             thinking_level: None,
         },
-    }));
+    })]);
     assert!(error.is_none(), "write ghost model change: {error:?}");
     let user = write_node(
         &mut writer,
@@ -2383,8 +2360,7 @@ async fn resumed_sessions_probe_ids_from_earlier_processes() -> Result<(), Sessi
     session.prompt("one").await;
     session.prompt("two").await;
     // The second exchange's user node — about to go off-branch.
-    let loaded = store.open_path(session.path())?;
-    let off_chain = file_nodes(&loaded)
+    let off_chain = file_nodes(session.path())
         .into_iter()
         .find_map(|entry| match &entry.kind {
             EntryKind::UserMessage { message } if crate::session::user_text(message) == "two" => {

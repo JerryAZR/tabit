@@ -44,6 +44,14 @@ fn drain(run: &mut AgentRun) -> Result<(), PromptError> {
     run.steered(Vec::new())
 }
 
+/// Park a completed turn and accept it — the test stand-in for the
+/// model-turn hooks' approval (the two-phase acceptance, ENGINE.md
+/// delta 11).
+fn park_and_accept(run: &mut AgentRun, turn: ModelTurn) {
+    run.turn_completed(turn).expect("park");
+    run.accept_turn().expect("accept");
+}
+
 /// Entry: the machine is entered with one joined history and sends it
 /// as-is — no prompt/context split anywhere.
 #[test]
@@ -76,7 +84,7 @@ fn final_turn_commits_and_done_on_silent_queue() {
         run.next_step(),
         Ok(AgentRunStep::CallModel { .. })
     ));
-    run.turn_committed(text_turn("hello")).expect("commit");
+    park_and_accept(&mut run, text_turn("hello"));
     assert!(matches!(run.next_step(), Ok(AgentRunStep::DrainSteers)));
     drain(&mut run).expect("decide");
     let AgentRunStep::Done(response) = run.next_step().expect("step") else {
@@ -96,8 +104,7 @@ fn tool_turn_admits_executes_and_loops() {
         run.next_step(),
         Ok(AgentRunStep::CallModel { .. })
     ));
-    run.turn_committed(tool_turn("add", &["add", "sub"]))
-        .expect("commit");
+    park_and_accept(&mut run, tool_turn("add", &["add", "sub"]));
     let AgentRunStep::CallTools { calls } = run.next_step().expect("step") else {
         panic!("tools are issued");
     };
@@ -130,8 +137,7 @@ fn unknown_tool_name_gets_an_inband_synthetic_result() {
         run.next_step(),
         Ok(AgentRunStep::CallModel { .. })
     ));
-    run.turn_committed(tool_turn("nonexistent", &["add", "sub"]))
-        .expect("commit");
+    park_and_accept(&mut run, tool_turn("nonexistent", &["add", "sub"]));
     let AgentRunStep::CallTools { calls } = run.next_step().expect("step") else {
         panic!("tools are issued");
     };
@@ -221,8 +227,7 @@ fn a_steer_after_the_final_turn_reopens_the_run() {
         run.next_step(),
         Ok(AgentRunStep::CallModel { .. })
     ));
-    run.turn_committed(text_turn("first answer"))
-        .expect("commit");
+    park_and_accept(&mut run, text_turn("first answer"));
     assert!(matches!(run.next_step(), Ok(AgentRunStep::DrainSteers)));
     run.steered(vec![user("and then?")]).expect("reopen");
     assert!(matches!(
@@ -245,8 +250,7 @@ fn budget_fails_the_loop_not_the_first_turn() {
         run.next_step(),
         Ok(AgentRunStep::CallModel { .. })
     ));
-    run.turn_committed(tool_turn("add", &["add"]))
-        .expect("commit");
+    park_and_accept(&mut run, tool_turn("add", &["add"]));
     assert!(matches!(
         run.next_step(),
         Ok(AgentRunStep::CallTools { .. })
@@ -329,31 +333,32 @@ fn provider_errors_drain_then_retry_or_fail() {
     );
 }
 
-/// Final-turn rejection (the model-turn-finished Retry hook): Repeat drops
-/// the rejected response; Feedback records it with corrective text.
+/// Turn veto (the model-turn-finished Retry hook, fed before the fold):
+/// Repeat discards the parked turn; Feedback folds it with corrective
+/// text.
 #[test]
-fn reject_final_turn_repeat_and_feedback() {
+fn veto_turn_repeat_and_feedback() {
     let mut run = AgentRun::new(vec![user("go")]).max_turns(3);
     assert!(matches!(
         run.next_step(),
         Ok(AgentRunStep::CallModel { .. })
     ));
-    run.turn_committed(text_turn("weak")).expect("commit");
-    run.reject_final_turn(crate::agent::hook::RetryRequest::Repeat)
-        .expect("reject");
+    run.turn_completed(text_turn("weak")).expect("park");
+    run.veto_turn(crate::agent::hook::RetryRequest::Repeat)
+        .expect("veto");
     assert!(matches!(run.next_step(), Ok(AgentRunStep::DrainSteers)));
     drain(&mut run).expect("rejection loops");
     assert!(matches!(
         run.next_step(),
         Ok(AgentRunStep::CallModel { .. })
     ));
-    assert_eq!(run.messages().len(), 1, "the rejected turn was dropped");
+    assert_eq!(run.messages().len(), 1, "the rejected turn never folded");
 
-    run.turn_committed(text_turn("still weak")).expect("commit");
-    run.reject_final_turn(crate::agent::hook::RetryRequest::Feedback(
+    run.turn_completed(text_turn("still weak")).expect("park");
+    run.veto_turn(crate::agent::hook::RetryRequest::Feedback(
         "be more specific".to_string(),
     ))
-    .expect("reject");
+    .expect("veto");
     assert!(matches!(run.next_step(), Ok(AgentRunStep::DrainSteers)));
     drain(&mut run).expect("rejection loops");
     let texts: Vec<String> = run
@@ -363,6 +368,27 @@ fn reject_final_turn_repeat_and_feedback() {
         .collect();
     assert_eq!(texts, ["go", "be more specific"]);
     assert_eq!(run.messages().len(), 3, "prompt + kept turn + feedback");
+}
+
+/// A hook vetoing a turn that carries tool calls is a protocol
+/// violation: the calls would strand unanswered (the hook contract).
+#[test]
+fn vetoing_a_tools_turn_is_a_protocol_violation() {
+    let mut run = AgentRun::new(vec![user("go")]).max_turns(3);
+    assert!(matches!(
+        run.next_step(),
+        Ok(AgentRunStep::CallModel { .. })
+    ));
+    run.turn_completed(tool_turn("add", &["add"]))
+        .expect("park");
+    let err = run
+        .veto_turn(crate::agent::hook::RetryRequest::Repeat)
+        .expect_err("tools turns are not vetoable");
+    assert!(
+        err.to_string()
+            .contains("vetoed a turn carrying tool calls"),
+        "got: {err}"
+    );
 }
 
 /// Steering is structural: the feed exists only at the drain.
@@ -394,15 +420,17 @@ fn usage_records_on_commit() {
     ));
     let mut usage = Usage::new();
     usage.total_tokens = 7;
-    run.turn_committed(ModelTurn::new(
-        None,
-        OneOrMany::one(AssistantContent::text("done")),
-        usage,
-        None,
-        tools(&[]),
-        tools(&[]),
-    ))
-    .expect("commit");
+    park_and_accept(
+        &mut run,
+        ModelTurn::new(
+            None,
+            OneOrMany::one(AssistantContent::text("done")),
+            usage,
+            None,
+            tools(&[]),
+            tools(&[]),
+        ),
+    );
     assert_eq!(run.usage().total_tokens, 7);
     assert_eq!(run.completion_calls().len(), 1);
 }

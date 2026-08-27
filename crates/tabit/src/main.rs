@@ -411,20 +411,7 @@ fn assemble_session(
     }
 
     if let Some(path) = &resume_target {
-        let (session, report) = builder.resume(path).map_err(|e| e.to_string())?;
-        for repair in &report.file_repairs {
-            eprintln!(
-                "repaired session file {path:?}: {repair:?} \
-                 (dropped the torn trailing record)"
-            );
-        }
-        if report.repaired_tool_calls > 0 {
-            eprintln!(
-                "repaired {} interrupted tool call(s) with synthetic \
-                 results before continuing",
-                report.repaired_tool_calls
-            );
-        }
+        let (session, _report) = builder.resume(path).map_err(|e| e.to_string())?;
         Ok(session)
     } else {
         let cwd = cwd.display().to_string();
@@ -1100,7 +1087,7 @@ fn assemble(
         (None, false) => None,
     };
     let resumed = match &resume_target {
-        Some(path) => store.last_model(path).map_err(|e| e.to_string())?,
+        Some(path) => store.open_path(path).map_err(|e| e.to_string())?.register,
         None => None,
     };
     let explicit = args

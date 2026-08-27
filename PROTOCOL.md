@@ -969,11 +969,11 @@ a head pointer (git-style: appends attach as children of the head, a
 checkout moves the pointer to an existing node), the incrementally
 folded context (the live projection of the active branch — the path
 array exists only as a temporary container inside load and checkout),
-and the file-order record sequence. Records commit memory-first
-through the writer's FIFO outbox; nothing re-reads the file
-mid-session — the loader's one-pass fold (tree, head, register,
-repairs) runs at process start and `open_session` only. Checkout is a
-pointer move plus a `checkout` side record; the model register is a
+and the cumulative stats ledger. Records commit memory-first through
+the writer's FIFO outbox; nothing re-reads the file mid-session — the
+parser's one-pass fold (tree, head, register, context, stats) runs at
+process start and `open_session` only. Checkout is a pointer move plus a
+`checkout` side record; the model register is a
 side record through the same one write site; the opening
 `model_change` rides the first barrier's drain (deferred creation: a
 session that never runs materializes nothing, and an explicit switch
@@ -981,24 +981,30 @@ supersedes the pending opening). A log deleted under a live run no
 longer fails the run — memory is authoritative; the loss is the
 force-stop class, realized at the next open.
 
-**Status: shipped (2026-08).** The writer is the write-behind sink:
-records arrive pre-constructed (the recorder owns structure, the
-writer owns bytes), the outbox drains as **one write** (roll back to
-the durable offset or clear it — no loop; the offset only advances on
-a full drain, so a failed barrier leaves nothing of itself anywhere,
-and the truncation rides a separate write handle because an
-append-mode handle cannot `set_len` on Windows), retries on every
-subsequent commit plus one at each clean exit, the prompt barrier
-with the discard twist (validate-then-commit: the batch enters the
-resident state only after the flush proves out — no turn, no
+**Status: shipped (2026-08; amended by the durable-layer sweep).** The
+writer is the write-behind sink: records arrive pre-constructed (the
+recorder owns structure, the writer owns bytes), the outbox drains as
+**one write** (roll back to the durable offset or clear it — no loop;
+the offset only advances on a full drain, so a failed barrier leaves
+nothing of itself anywhere, and the truncation rides a separate write
+handle because an append-mode handle cannot `set_len` on Windows),
+retries on every subsequent commit plus one at each clean exit, the
+prompt barrier with the discard twist (validate-then-commit: the batch
+enters the resident state only after the flush proves out — no turn, no
 terminal, drafts back), `run_finished.durable`, and the
 `persist_degraded`/`persist_recovered` transitions on the recorder's
 notice channel. The classification is above (the prompt is the only
 barrier-class record). One documented limit: steer records ride the
 buffer like turn output — a force-stop can lose a consumed steer's
 *record* (its effect steered the live run; the input itself was never
-lost). A hard crash *inside* the barrier's single write can still
-tear the final line — repaired as a torn tail at load.
+lost). The sweep's amendment: **the roundtrip is atomic** — an
+assistant turn commits with its complete tool batch (or the engine's
+authored feedback close) through the one commit door, all-or-none, so
+a crash mid-write can only tear a line or leave a batch wholly absent,
+and a torn or dangling tail **fails the next open loud** (the
+torn-tail repair is deleted — a file written only at commit boundaries
+cannot honestly contain a half-open roundtrip, and a repair that
+survives its regime hides real bugs).
 
 ### 9. Empty conversation rides `PromptCancelled` — resolved by the v2 pass
 
@@ -1192,48 +1198,43 @@ a resample, and the two must not be conflated.
   costs one retry. Fine either way — a persistent network error
   resurfaces on the retry; a transient one didn't matter.
 
-### 22. Discarded-attempt usage never reaches the session log — RESOLVED (discarded entry kind)
+### 22. Discarded-attempt usage never reaches the session log — RESOLVED (shipped: `discarded` side record)
 
 The engine keeps a discarded turn's completion-call usage (the tokens
-were spent; telemetry sees them), but the log records nothing —
-`RecorderHook` fires only at `on_model_turn_finished`, which a
-discarded turn never reaches — so `fold_stats` undercounts real spend
+were spent; telemetry sees them), but the log recorded nothing —
+`RecorderHook` fired only at `on_model_turn_finished`, which a
+discarded turn never reaches — so `fold_stats` undercounted real spend
 whenever a retry happened. Live providers bill the defective turn.
 
-Options: (a) a `discarded` entry kind carrying usage — projection
-skips it, stats count it, the log stays the cost source of truth;
-(b) accept — session stats price committed turns only, engine
-telemetry carries the full picture. Ruled: (a). A `discarded` entry kind
-carrying the attempt's usage — projection skips it (not model context),
-stats count it, the log stays the cost source of truth. Implementation
-rides the v2 session work.
+Ruled and shipped (2026-08, the durable-layer sweep): a `discarded
+{ usage }` side record, committed at discard time. The discard surface
+is the `model_turn_retried` item — a hook veto or a malformed-tool-call
+defect, both retried — carrying the attempt's completion-call usage;
+the engine surfaces defect retries too now (ENGINE.md delta 13), so
+nothing discards silently. Projection skips the record (not model
+context); cumulative stats count it; the log stays the cost source of
+truth.
 
-### 23. Mid-roundtrip checkout targets — OPEN (deferred; owner)
+### 23. Mid-roundtrip checkout targets — RESOLVED (ruled: panic, revisit later)
 
 What a checkout to a target inside a tool roundtrip should mean: the
-turn's id, or a single `tool_result` in a batch. The machinery today
-cuts as requested and synthesizes interrupted results for whatever
-calls the cut strands (the resume/crash repair, applied at the new
-leaf— `rewinding_mid_batch_repairs_only_the_unanswered_call` pins
-it), so no target can ever leave a half-open roundtrip. The contract
-declares user messages, committed turns, and model changes as the
-intended cut points, but the backend is total over file entries— a
-tension worth resolving. Alternatives (owner):
+turn's id, or a single `tool_result` in a batch. The old machinery cut
+as requested and synthesized interrupted results for whatever the cut
+stranded — the resume/crash repair, applied at the new leaf.
 
-1. **Cut as requested + synthesize** (current) — total, honest in
-   the bracket (the synthesized bodies say what happened); a mid-batch
-   target yields a history of real + synthesized siblings.
-2. **Reject as invalid cut points** — the enforced contract;
-   verification thickens from id-existence to id-kind (the resident
-   set grows a kind, still a snapshot); costs totality over file
-   entries.
-3. **Auto-extend to include the real results** — the cut lands
-   past the requested target (the `checked_out` echo must say where);
-   "extend" still needs (1)'s repair for calls that never ran.
+Ruled (2026-08, the durable-layer sweep): **a mid-roundtrip target
+panics loud.** The branch ending at a checkout target must be
+roundtrip-closed (a user message, a call-free assistant turn, or the
+last result of a complete batch); a target inside an open roundtrip is
+unsupported — not synthesized, not repaired, revisited later. The
+repair it relied on is deleted (flag 8's amendment): under atomic
+roundtrips the shape it papered over is unrepresentable in an honest
+file, and the parser rejects its file-order counterpart as corruption.
+`rewind(n)` targets user messages and never trips this.
 
-Deferred (owner ruling): no alternative touches the command-path
-architecture— all three are policy inside the rewind layer, between
-verification and execution.
+The historical alternatives considered (cut-and-synthesize, reject at
+verification, auto-extend past the batch) remain the design space if
+this is ever revisited; the panic is the ruled resting point.
 
 ## Resolved
 

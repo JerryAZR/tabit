@@ -969,8 +969,8 @@ async fn execution_commit_items_are_not_emitted_when_run_commit_fails() {
         advertised.clone(),
         advertised,
     );
-    run.turn_committed(turn)
-        .expect("tool turn should be accepted");
+    run.turn_completed(turn).expect("park");
+    run.accept_turn().expect("accept");
 
     let mut calls = match run.next_step().expect("tool step") {
         AgentRunStep::CallTools { calls } => calls,
@@ -3959,6 +3959,7 @@ async fn a_retried_attempt_announces_a_fresh_id() {
         let label = match &item {
             MultiTurnStreamItem::TurnStarted { id } => format!("announce:{id}"),
             MultiTurnStreamItem::TurnCommitted { id } => format!("committed:{id}"),
+            MultiTurnStreamItem::RoundtripClosed { turn_id, .. } => format!("closed:{turn_id}"),
             MultiTurnStreamItem::ModelTurnRetried { .. } => "retried".to_string(),
             MultiTurnStreamItem::StreamAssistantItem(StreamedAssistantContent::Text(text)) => {
                 format!("text:{}", text.text)
@@ -3986,6 +3987,9 @@ async fn a_retried_attempt_announces_a_fresh_id() {
             "text:second try",
             "completion",
             "committed:attempt-1",
+            // The accepted final turn's durable roundtrip closes right
+            // after its commit (the durable roundtrip, ENGINE.md delta 12).
+            "closed:attempt-1",
             "final-item",
             "final",
         ],

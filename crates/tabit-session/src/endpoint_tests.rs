@@ -1259,7 +1259,7 @@ async fn frontend_death_aborts_every_sessions_run() {
     // records the abort marker.
     let boot_path = handle.info().session_path.clone();
     assert!(
-        file_has_abort(&store, &boot_path),
+        file_has_abort(&boot_path),
         "the boot session recorded the abort"
     );
     // The created session's file materialized (its run started) and
@@ -1272,7 +1272,7 @@ async fn frontend_death_aborts_every_sessions_run() {
         .expect("the created session materialized")
         .path;
     assert!(
-        file_has_abort(&store, created_path.to_str().unwrap_or_default()),
+        file_has_abort(created_path.to_str().unwrap_or_default()),
         "the created session recorded the abort too"
     );
     std::fs::remove_dir_all(store.dir()).ok();
@@ -1407,50 +1407,29 @@ fn chain_users(handle: &SessionHost, store: &SessionStore) -> Vec<String> {
         .collect()
 }
 
-/// The active branch's node entries, from the file (test-side twin of
-/// the load fold).
+/// The active branch's node entries, from the resident tree the parser
+/// built (the same branch the load adopts).
 fn file_branch(store: &SessionStore, path: &str) -> Vec<crate::entry::SessionEntry> {
-    let loaded = store.open_path(std::path::Path::new(path)).expect("reload");
-    use crate::entry::{FileRecord, SideKind};
-    use std::collections::HashMap;
-    let mut by_id: HashMap<String, crate::entry::SessionEntry> = HashMap::new();
-    let mut head = None;
-    for record in &loaded.records {
-        match record {
-            FileRecord::Node(entry) => {
-                by_id.insert(entry.id.clone(), entry.clone());
-                head = Some(entry.id.clone());
-            }
-            FileRecord::Side(crate::entry::SideRecord {
-                kind: SideKind::Checkout { to },
-                ..
-            }) => head = to.clone(),
-            FileRecord::Side(_) => {}
-        }
-    }
-    let mut branch = Vec::new();
-    let mut current = head;
-    while let Some(id) = current {
-        let entry = by_id.get(&id).expect("the parent resolves");
-        current = entry.parent_id.clone();
-        branch.push(entry.clone());
-    }
-    branch.reverse();
-    branch
+    store
+        .open_path(std::path::Path::new(path))
+        .expect("reload")
+        .tree
+        .path_to_head()
 }
 
 /// Whether the file records an abort marker.
-fn file_has_abort(store: &SessionStore, path: &str) -> bool {
-    let loaded = store.open_path(std::path::Path::new(path)).expect("reload");
-    loaded.records.iter().any(|record| {
-        matches!(
-            record,
-            crate::entry::FileRecord::Side(crate::entry::SideRecord {
-                kind: crate::entry::SideKind::Aborted,
-                ..
-            })
-        )
-    })
+fn file_has_abort(path: &str) -> bool {
+    crate::tests::load_records(std::path::Path::new(path))
+        .iter()
+        .any(|record| {
+            matches!(
+                record,
+                crate::entry::FileRecord::Side(crate::entry::SideRecord {
+                    kind: crate::entry::SideKind::Aborted,
+                    ..
+                })
+            )
+        })
 }
 
 #[tokio::test]
@@ -1619,11 +1598,17 @@ fn last_model(
     handle: &SessionHost,
     store: &SessionStore,
 ) -> Option<(String, String, Option<String>)> {
-    let loaded = store
+    store
         .open_path(std::path::PathBuf::from(&handle.info().session_path).as_path())
-        .expect("reload");
-    crate::projection::last_model_change_in_file(&loaded.records)
-        .map(|(p, m, l)| (p.to_string(), m.to_string(), l.map(str::to_string)))
+        .expect("reload")
+        .register
+        .map(|selection| {
+            (
+                selection.provider,
+                selection.model,
+                selection.thinking_level,
+            )
+        })
 }
 
 #[tokio::test]

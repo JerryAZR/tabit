@@ -71,11 +71,12 @@ output.
   future is dropped mid-step and **no further transition can fire**
   (a token-aware tool that returns a cancelled result instead of
   dying by drop changes nothing: its result lands in a future nobody
-  polls). Tools die by drop-safety; the interrupted roundtrip is
-  repaired by the outer layer's context re-derivation (synthesized
-  results go to the log and the next open — never back into this
-  run's model conversation). The outer layer records `Aborted` and
-  discards the queue.
+  polls). Tools die by drop-safety; the interrupted roundtrip
+  **never lands** (the durable roundtrip, below: an assistant turn
+  commits with its complete tool batch or not at all, so abort
+  simply discards the open roundtrip — there is nothing to repair,
+  and the repair machinery is deleted). The outer layer records
+  `Aborted` and discards the queue.
 
 **Outer-layer responsibilities:** queue custody (the always-queue
 invariant — every message yields exactly one user event or steers the
@@ -157,20 +158,22 @@ failure — converges at the same drain, because steering is
 independent of everything the model does.
 
 The run's history container is the **one context builder**
-(`agent::conversation::Conversation`): the same fold a session layer
-persists its durable context from. A run holds a run-scoped instance
-seeded at entry; there is no second history-assembly logic anywhere.
+(`agent::context::Context`): the same fold a session layer persists
+its durable context from. A run holds a run-scoped instance seeded at
+entry; there is no second history-assembly logic anywhere.
 
 ```mermaid
 stateDiagram-v2
     [*] --> Preparing : enter — one history,<br/>drained and joined by the outer loop
     Preparing --> ModelTurn : request issued
-    ModelTurn --> FinalTurn : committed, no tool calls
+    ModelTurn --> TurnParked : turn completed — parked,<br/>nothing folded (hooks observe)
     ModelTurn --> BrokenTurn : typed defect — never committed
-    ModelTurn --> ExecutingTools : committed, calls<br/>(admission scan at entry)
     ModelTurn --> DrainingSteers : provider/transport error (flagged)<br/>the queue still drains
-    FinalTurn --> DrainingSteers
+    TurnParked --> FinalTurn : accept — no tool calls
+    TurnParked --> ExecutingTools : accept — calls<br/>(admission scan at entry)
+    TurnParked --> DrainingSteers : veto (the Retry hook) — the turn<br/>never folds (Repeat) or folds with<br/>corrective feedback (Feedback)
     BrokenTurn --> DrainingSteers
+    FinalTurn --> DrainingSteers
     ExecutingTools --> DrainingSteers : results appended
     DrainingSteers --> Deciding
     Deciding --> Preparing : loop — another turn<br/>(steers/tools/retry budget left)
@@ -211,8 +214,9 @@ bound unattended loops. Retry budgets are small named constants.
 
 | input | meaning | destination |
 |---|---|---|
-| `Final { turn }` | committed turn, no tool calls | FinalTurn |
-| `Tools { turn }` | committed turn with tool calls | ExecutingTools (admission at entry) |
+| `turn_completed { turn }` | a provider turn finished streaming; park it (classify, fold nothing) | TurnParked |
+| `accept` | the model-turn hooks approved the parked turn; fold it and proceed | FinalTurn / ExecutingTools (the parked classification decides) |
+| `veto { request }` | a model-turn hook rejected the parked turn (`Repeat` folds nothing; `Feedback` folds the turn plus corrective feedback) | DrainingSteers, with the retry flag set |
 | `Broken { defect }` | typed malformed-tool-call defect; nothing committed | BrokenTurn |
 | `error { class, reason }` | a provider/transport failure, classified per the taxonomy | flagged → DrainingSteers |
 | `terminate { reason }` | a hook stopped the run | flag, read at Deciding |
@@ -255,7 +259,15 @@ during design review, the verdict is recorded.
 - **ModelTurn** — the provider turn is in flight; the driver drives it
   (request, stream, spans). The machine waits for one input of the
   five above.
-- **FinalTurn** — commit the tool-free turn to history; in Tool output
+- **TurnParked** — the completed turn, classified and held, **nothing
+  folded**. This is where the model-turn hooks observe: acceptance and
+  rejection both happen before the fold (the pre-commit veto reorder,
+  delta 11), so a rejected turn never needs un-folding and there is no
+  undo API on the context. The parked classification (final /
+  output-finalize / tools) was computed at park time, so the veto
+  knows a tools turn when it sees one — rejecting a turn with tool
+  calls stays a loud contract violation, exactly as before.
+- **FinalTurn** — the accepted tool-free turn folded; in Tool output
   mode, apply the finalization policy (accept schema-valid text,
   re-prompt with feedback while budget remains, finalize best-effort).
   *Self-review: the output-mode conditional stays here deliberately —
@@ -294,7 +306,7 @@ during design review, the verdict is recorded.
 | machine (control) | driver (data) |
 |---|---|
 | classification of the turn result | issuing requests, spans, telemetry |
-| stage transitions | forwarding stream items to the consumer |
+| stage transitions (park → accept/veto) | firing the model-turn hooks between the phases |
 | steering points (when) | fetching from the `SteeringSource` (what), feeding `steer()` |
 | budget, streak, terminating flags | tool dispatch: concurrency, drop guards |
 | loop-or-exit decision | hook invocation, memory append at Done |
@@ -309,6 +321,13 @@ during design review, the verdict is recorded.
 - The driver's three inline drains and its streak counter.
 - `AwaitingAdvance`'s five-way conditional arm.
 - `discard_turn` as a public transition (BrokenTurn's entry action).
+- **`pop_last_assistant` / the post-commit veto** (superseded by the
+  TurnParked reorder, delta 11): the hooks ran after the fold and the
+  undo followed; both halves are gone.
+- **The dangling-tail repair pass** (superseded by the atomic durable
+  roundtrip, delta 12): crash- and abort-shaped files cannot hold a
+  half-open roundtrip, and the synthesized "interrupted" results with
+  it.
 - **The `InvalidToolCall` hook and its pause machinery** — the
   choices (`Fail`/`Retry`/`Repair`/`Skip`/`Stop`), the
   `ResolvingToolCalls` pause state, and `max_invalid_tool_call_retries`.
@@ -374,6 +393,28 @@ during design review, the verdict is recorded.
    so live and replay bracket a turn with the same shapes — a turn
    discarded by a retry hook, a stop, a provider failure, or an abort
    never commits, and its announced id stays uncommitted.
+11. **Turn acceptance is two-phase; vetoes precede the fold** (ruled
+   2026-08, the durable-layer sweep). A completed turn parks first
+   (TurnParked — classified, folded nowhere); the model-turn hooks
+   observe the parked turn; only their approval folds it
+   (`accept`), and a `Retry` veto (`veto`) discards or
+   feedback-amends it before anything lands. The superseded shape —
+   fold, then hooks, then un-fold (`pop_last_assistant`) — is deleted;
+   the context has no undo because no caller ever needs one.
+12. **The durable roundtrip is atomic** (ruled 2026-08, the durable-layer
+   sweep; see the section below). An assistant turn and its complete
+   tool batch commit to the session through one door as one unit —
+   all-or-none — announced by the `RoundtripClosed { turn_id, feedback }`
+   stream item. Abort discards the open roundtrip (it never landed), a
+   hook veto or defect discard records the attempt's usage as a
+   `discarded` side record (PROTOCOL.md flag 22), and the
+   dangling-tail repair machinery is deleted: a file written only at
+   roundtrip boundaries cannot contain a half-open roundtrip, so a
+   torn or dangling tail is corruption and fails loud at open.
+13. **Defect retries are surfaced** — the BrokenTurn path (a discarded
+   malformed-tool-call attempt) emits `ModelTurnRetried` like a hook
+   veto does, so consumers (and the durable discard record) learn the
+   attempt was discarded, not silent.
 
 ## Implementation judgments (refactor landing)
 
@@ -505,6 +546,65 @@ Pause points are enumerable — only context-carrying sites can ask
 (today: the tool-call gate by construction, the tool body via
 `ToolContext`); other hook points gain the capability when a
 consumer exists.
+
+## The durable roundtrip (ruled 2026-08; the durable-layer sweep)
+
+Everything the model saw lands in the session log, one roundtrip at a
+time, through **one commit door** (the session recorder's door,
+composing the write queue, the tree, the context, and the stats
+ledger). A **roundtrip** is an assistant turn plus its complete tool
+batch — either all of it lands in the file or none of it does. The
+batch's buffering-until-complete lives at the commit site (the
+recorder's pending slot), never inside the context builder: the
+context receives only committed history.
+
+**The door's law:** validate before any state-modifying action
+(parent linking against the head, paired tool calls — an unpaired
+batch is an engine contract violation and panics loud), then write
+(the queue drains as one blob; the verdict rides home as a flag),
+then grow (tree, context, stats — one step, under one lock).
+
+**Commit sites:**
+
+- **the prompt barrier** (gated — the outer loop's Draining edge): the
+  opening user batch commits and flushes through before the turn
+  starts; a failed flush rejects the batch (it exists nowhere) and the
+  texts go back as drafts;
+- **the roundtrip** (atomic): `RoundtripClosed` commits the parked
+  assistant plus its results — or, when the engine closed the
+  roundtrip with an authored feedback message instead of executed
+  results (an output-mode re-prompt), the assistant plus that message
+  as a user node. Write-behind: a refusing disk degrades (the persist
+  notices), it never blocks the conversation;
+- **the steer drain** (write-behind): each drained steer commits as
+  its own user node, in drain order;
+- **side records** (write-behind): `model_change`, `checkout`,
+  `aborted`, `discarded { usage }`, and the reserved kinds — session
+  facts outside the tree, order-significant.
+
+**Discards are billed** (PROTOCOL.md flag 22): a hook-vetoed or
+defect-discarded attempt commits a `discarded { usage }` side record
+at discard time; cumulative stats count it. The log stays the cost
+source of truth.
+
+**The load pass is one fold.** Opening a session parses the file once
+— header, tree (with head), context (the active branch, consecutive
+tool results merged into the batch's single user message), selection
+register, and the computed cumulative stats (all branches; abandoned
+spend is still spend). Raw records are not retained. A torn tail or
+any structural violation (a dangling roundtrip, a checkout to a
+mid-roundtrip node, a broken parent link) fails loud at open — the
+repair pass is deleted because atomic roundtrips made the shapes it
+papered over unrepresentable, and a repair that survives its regime
+hides real bugs.
+
+**Checkout targets must be closed paths.** A checkout moves the head
+to a node; the branch ending there must be roundtrip-closed (a user
+message, a call-free assistant turn, or the last result of a complete
+batch). A target inside an open roundtrip — an assistant whose calls
+were never answered on that branch, a batch's interior result —
+panics ("revisit later"; owner ruling, flag 23). `rewind(n)` targets
+user messages and is unaffected.
 
 ## Turn-level stop semantics (ruled 2026-08; pre-implementation)
 

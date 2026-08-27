@@ -1327,7 +1327,7 @@ where
             "fresh AgentRun did not request a model turn",
         ));
     }
-    run.turn_committed(ModelTurn::new(
+    run.turn_completed(ModelTurn::new(
         None,
         OneOrMany::one(AssistantContent::ToolCall(
             rig_core::message::ToolCall::new(
@@ -1343,6 +1343,7 @@ where
         offered.clone(),
         offered,
     ))?;
+    run.accept_turn()?;
     let AgentRunStep::CallTools { calls } = run.next_step()? else {
         return Err(ScenarioError::contract(
             SCENARIO,
@@ -1656,6 +1657,7 @@ where
             | MultiTurnStreamItem::TurnCommitted { .. }
             | MultiTurnStreamItem::ToolExecutionCommitted { .. }
             | MultiTurnStreamItem::ModelTurnRetried { .. }
+            | MultiTurnStreamItem::RoundtripClosed { .. }
             | MultiTurnStreamItem::Steer { .. } => {}
         }
     }
