@@ -36,14 +36,14 @@ fn create_writes_header_and_appends_chain_parents() {
             message: user_message("one"),
         })
         .expect("append");
-    assert_eq!(first.parent_id, None);
+    assert_eq!(first.entry.parent_id, None);
     let second = writer
         .append(EntryKind::UserMessage {
             message: user_message("two"),
         })
         .expect("append");
-    assert_eq!(second.parent_id, Some(first.id.clone()));
-    assert_eq!(writer.leaf(), Some(second.id.as_str()));
+    assert_eq!(second.entry.parent_id, Some(first.entry.id.clone()));
+    assert_eq!(writer.leaf(), Some(second.entry.id.as_str()));
 
     let loaded = store.open_path(writer.path()).expect("open");
     assert_eq!(loaded.entries.len(), 2);
@@ -350,8 +350,8 @@ fn rewind_moves_the_leaf_and_branches_the_next_append() {
             message: user_message("two"),
         })
         .expect("append");
-    writer.rewind_to(Some(&first.id)).expect("rewind");
-    assert_eq!(writer.leaf(), Some(first.id.as_str()));
+    writer.rewind_to(Some(&first.entry.id)).expect("rewind");
+    assert_eq!(writer.leaf(), Some(first.entry.id.as_str()));
 
     let third = writer
         .append(EntryKind::UserMessage {
@@ -359,8 +359,8 @@ fn rewind_moves_the_leaf_and_branches_the_next_append() {
         })
         .expect("append");
     assert_eq!(
-        third.parent_id,
-        Some(first.id.clone()),
+        third.entry.parent_id,
+        Some(first.entry.id.clone()),
         "branches from the target"
     );
 
@@ -374,11 +374,11 @@ fn rewind_moves_the_leaf_and_branches_the_next_append() {
     );
     assert!(matches!(
         &loaded.entries[2].kind,
-        EntryKind::Rewound { to: Some(target) } if target == &first.id
+        EntryKind::Rewound { to: Some(target) } if target == &first.entry.id
     ));
     assert_eq!(
         loaded.entries[2].parent_id,
-        Some(second.id.clone()),
+        Some(second.entry.id.clone()),
         "the marker parents to the abandoned tip"
     );
     let chain_texts: Vec<&str> = loaded
@@ -414,7 +414,7 @@ fn trailing_marker_directs_the_reopened_writer() {
             message: user_message("dropped"),
         })
         .expect("append");
-    writer.rewind_to(Some(&first.id)).expect("rewind");
+    writer.rewind_to(Some(&first.entry.id)).expect("rewind");
     let path = writer.path().to_path_buf();
     drop(writer);
 
@@ -427,7 +427,7 @@ fn trailing_marker_directs_the_reopened_writer() {
             message: user_message("after reopen"),
         })
         .expect("append");
-    assert_eq!(next.parent_id, Some(first.id));
+    assert_eq!(next.entry.parent_id, Some(first.entry.id));
     fs::remove_dir_all(store.dir()).ok();
 }
 
@@ -521,7 +521,7 @@ fn last_model_reads_the_files_last_model_change() {
     // Branch from before the switch: the hint does NOT roll back — the
     // register is the user's latest model choice in time, whichever
     // branch it was recorded on (owner ruling 2026-08).
-    writer.rewind_to(Some(&turn_two.id)).expect("rewind");
+    writer.rewind_to(Some(&turn_two.entry.id)).expect("rewind");
     assert_eq!(
         store
             .last_model(writer.path())
@@ -532,6 +532,44 @@ fn last_model_reads_the_files_last_model_change() {
     );
     // Turn one's entry is still reachable as an earlier chain node.
     let loaded = store.open_path(writer.path()).expect("open");
-    assert!(loaded.chain.iter().any(|entry| entry.id == turn_one.id));
+    assert!(loaded.chain.iter().any(|entry| entry.id == turn_one.entry.id));
+    fs::remove_dir_all(store.dir()).ok();
+}
+
+#[test]
+fn the_outbox_drains_fully_and_the_file_is_the_clean_prefix() {
+    let store = temp_store("outbox");
+    let mut writer = store.create("C:/work");
+    let first = writer
+        .append(EntryKind::UserMessage {
+            message: user_message("one"),
+        })
+        .expect("append");
+    writer
+        .append(EntryKind::ModelChange {
+            provider: "q".to_string(),
+            model: "m2".to_string(),
+            thinking_level: None,
+        })
+        .expect("append");
+    writer
+        .rewind_to(Some(&first.entry.id))
+        .expect("rewind");
+
+    // Every commit attempts the drain, so a healthy disk leaves
+    // nothing buffered — and the durable offset is exactly the file's
+    // length: the clean-prefix accounting the torn-write rollback
+    // depends on (rollback truncates to this offset, so its honesty
+    // is the file never holding more than the prefix).
+    assert!(writer.outbox.is_empty(), "the outbox drained");
+    let len = fs::metadata(writer.path()).expect("file").len();
+    assert_eq!(
+        writer.durable_offset, len,
+        "the durable offset is the file's length"
+    );
+
+    // And the leaf moved with the rewind, at buffer time (the commit
+    // order the file mirrors).
+    assert_eq!(writer.leaf(), Some(first.entry.id.as_str()));
     fs::remove_dir_all(store.dir()).ok();
 }

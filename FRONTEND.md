@@ -213,7 +213,7 @@ the id — §6).
 | `new_session` | any time | creates a fresh session (same config, tools, and `--model`/`--max-turns` as the boot); `session_created { id, path, model }` follows, unstamped and backend-level (the payload carries the id). Nothing replays (it is empty). Never waits on any session — lifecycle writes no session's file. |
 | `open_session { id }` | any time | loads the session if needed and streams a replay pass stamped with the id — the pass is the acknowledgment. Idempotent: an open session re-replays. Unknown id or unreadable file → unstamped, backend-level `error { kind: session }`. Creating, loading, and switching never wait on the session you are leaving; the one wait is the opened session's **own** in-flight run — its pass arrives at that run's terminal (its live streaming renders immediately; only committed history waits). |
 | `checkout { session, entry_id }` | any time | moves that session's chain to the entry (any entry in the file— an off-chain target is a branch switch); see §7. **On receipt:** the target is verified (unknown entry → immediate `error { kind: checkout }`, nothing else happens) and the still-pending messages are discarded (`messages_discarded`, handed back as drafts). The rewind itself: a run in flight is aborted first (`run_aborted` — the user rewinding has declared its continuation obsolete), then the rewind applies at the session's pause point; idle → applies immediately. |
-| `model { session, provider, model, thinking_level? }` | any time | switches that session's model — the **register write**, never a chain move (§7). A **state write at receive**: the ref is validated against config (unknown provider/model → immediate `error { kind: model }`, nothing moves), then the entry and the live selection land at once and `model_changed` follows immediately — even mid-run (a run in flight finishes untouched on the model it bound at run open; the next run uses the new one). Not intent: abort never touches it, rapid switches each land (last wins), and there is no pending state to lose — what you saw announced is already durable. |
+| `model { session, provider, model, thinking_level? }` | any time | switches that session's model — the **register write**, never a chain move (§7). A **state write at receive**: the ref is validated against config (unknown provider/model → immediate `error { kind: model }`, nothing moves), then the entry and the live selection land at once and `model_changed` follows immediately — even mid-run (a run in flight finishes untouched on the model it bound at run open; the next run uses the new one). Not intent: abort never touches it, rapid switches each land (last wins). Durability: no later than the next turn (the write-behind log's prompt barrier flushes the buffer — this switch included — before any turn starts); a hard death in the window loses the switch, and resume announces the register that survived. |
 | `interaction_response { session, id, payload }` | after an `interaction_request` | answers a pending request; the payload is shaped by the asking template's convention (§8) — always an answer, never a dismissal. |
 
 `checkout` needs no idle-care — the backend aborts the run for it and
@@ -523,9 +523,10 @@ interaction is the tool result — the answer or denial the model saw.
 - **Recovery is replay.** After a backend crash or restart, the same
   initialize-with-replay gives you the active chain with the same ids.
   Only pending messages are lost (they were never history — salvage as
-  drafts before restarting if you want them); model switches are
-  durable the moment their `model_changed` reached you, so the
-  register survives any death. Caveat: a fresh session's
+  drafts before restarting if you want them); committed-but-unflushed
+  entries can be lost to a force-stop (the write-behind window — model
+  output, never user input; see §6's durability notes). Caveat: a
+  fresh session's
   file materializes only at its **first user message** — if the
   backend died before any message drained, there is nothing on disk;
   restart falls back to a fresh session (a new id). Restarting with

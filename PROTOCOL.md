@@ -943,6 +943,20 @@ texts back as drafts, the existing salvage path) and an
 input that exists only in memory; force-stop buffer loss costs model
 output, never user input.
 
+**Marker classification (ruled 2026-08): the prompt is the only
+barrier-class entry.** `aborted` and `rewound` markers ride the buffer
+like conversational entries: abort's load-bearing part is the stop,
+not the entry (an abort that could not log still stopped the run —
+and an abort "rejected" so the turn completes has no marker to write);
+a lost rewind is cheap to redo by hand, the FIFO already forces its
+flush before any post-rewind turn can commit (the marker precedes
+that turn's prompt in the buffer), and write failure is too rare to
+buy complexity for. `model_change` rides the buffer for the same
+reasons (hand-redoable, FIFO-protected by the next prompt, and
+resume's announce-before-every-pass shows whichever register
+survived), so `model_changed` means "landed in the session," durable
+no later than the next turn's prompt.
+
 Implementation shape addition: **the buffer is not the runtime
 state.** The session keeps its resident tree and projected context
 (the conversation truth); the writer owns a linear FIFO of unflushed

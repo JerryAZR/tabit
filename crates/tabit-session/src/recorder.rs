@@ -4,9 +4,11 @@
 //! Tool results are recorded from the engine's item stream by the session
 //! (they arrive there as message-level results); this hook covers the one
 //! record the stream does not itemize per turn - the canonical assistant
-//! message with its usage. Hook methods cannot propagate errors, so the
-//! first persistence failure is captured and the session surfaces it
-//! loudly when the run returns.
+//! message with its usage. Commits are memory-first (flag 8): entries
+//! chain and take their ids at buffer time, the writer's outbox drains on
+//! every commit, and a flush failure leaves the entry buffered for retry
+//! while the first failure is captured for the session to surface loudly
+//! when the run returns.
 
 use crate::entry::EntryKind;
 use crate::store::SessionWriter;
@@ -17,13 +19,13 @@ use std::collections::HashSet;
 use std::future::Future;
 use std::sync::{Arc, Mutex};
 
-/// Read-only probe over every entry id the file has ever held — the
-/// append-only log never removes ids, so the set only grows. This is
-/// what checkout **verification** reads at route time (host-side,
-/// synchronous, loop-independent — the same class as the lifecycle
-/// builders): a read-only id lookup, never a file re-parse and never
-/// a wait on the worker. Insertion happens in the recorder's append
-/// path; the seed at open covers ids written by earlier processes.
+/// Read-only probe over every entry id the session holds — buffered
+/// and flushed alike (ids are real at buffer time), plus everything
+/// earlier processes wrote (the seed at open). This is what checkout
+/// **verification** reads at route time (host-side, synchronous,
+/// loop-independent — the same class as the lifecycle builders): a
+/// read-only id lookup, never a file re-parse and never a wait on the
+/// worker. Insertion happens in the recorder's append path.
 #[derive(Clone)]
 pub(crate) struct EntryIdProbe {
     ids: Arc<Mutex<HashSet<String>>>,
@@ -77,10 +79,14 @@ impl SessionRecorder {
     }
 
     /// Append one record to the session log and return its entry id.
-    /// Persistence failures are captured (first one wins) and surfaced by
-    /// the session after the run - see
-    /// [`SessionRecorder::first_error`]; a failed append has no id to
-    /// return, so the empty string stands in for it there.
+    /// The commit is memory-first (flag 8): the entry chains and its
+    /// id is real the moment this returns, whether or not the line
+    /// reached the disk — a failed flush leaves it buffered, retried
+    /// on every subsequent write and at clean exit, and captured for
+    /// the session to surface (see [`SessionRecorder::first_error`]).
+    /// Only a failure to even open/bootstrap the file loses the
+    /// record (no entry exists to keep); the empty string stands in
+    /// for its absent id.
     pub fn record(&self, kind: EntryKind) -> String {
         self.append(None, kind)
     }
@@ -92,11 +98,14 @@ impl SessionRecorder {
     }
 
     fn append(&self, id: Option<String>, kind: EntryKind) -> String {
-        let appended = crate::lock::lock(&self.writer).append_with_id(id, kind);
-        match appended {
-            Ok(entry) => {
-                crate::lock::lock(&self.ids).insert(entry.id.clone());
-                entry.id
+        let committed = crate::lock::lock(&self.writer).append_with_id(id, kind);
+        match committed {
+            Ok(committed) => {
+                crate::lock::lock(&self.ids).insert(committed.entry.id.clone());
+                if let Some(error) = committed.flush_error {
+                    self.note_error(error);
+                }
+                committed.entry.id
             }
             Err(error) => {
                 self.note_error(error);
@@ -105,16 +114,30 @@ impl SessionRecorder {
         }
     }
 
-    /// Record a rewind: a `rewound` marker plus the leaf move, under the
-    /// same single writer. Persistence failures are captured like
-    /// [`Self::record`]. The marker's id joins the set — the probe
-    /// answers for every id the file holds, exactly like the file.
+    /// Record a rewind: a `rewound` marker plus the leaf move, under
+    /// the same single writer. The marker commits to memory like any
+    /// entry (its id joins the set — the probe answers for every id
+    /// the session holds); a failed flush is captured like
+    /// [`Self::record`]'s.
     pub fn rewind_to(&self, to: Option<&str>) {
         match crate::lock::lock(&self.writer).rewind_to(to) {
-            Ok(marker_id) => {
-                crate::lock::lock(&self.ids).insert(marker_id);
+            Ok(committed) => {
+                crate::lock::lock(&self.ids).insert(committed.entry.id.clone());
+                if let Some(error) = committed.flush_error {
+                    self.note_error(error);
+                }
             }
             Err(error) => self.note_error(error),
+        }
+    }
+
+    /// The clean-exit flush attempt (flag 8): drain whatever the
+    /// outbox still holds. A failure is captured like a record's —
+    /// nothing is left to surface it in-process, but the state is not
+    /// silently swallowed either.
+    pub fn flush(&self) {
+        if let Err(error) = crate::lock::lock(&self.writer).flush() {
+            self.note_error(error);
         }
     }
 

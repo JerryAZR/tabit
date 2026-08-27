@@ -1230,6 +1230,13 @@ impl Session {
         }
     }
 
+    /// The clean-exit flush attempt (flag 8): drain the writer's outbox
+    /// one last time — every commit already retries, so this only
+    /// matters when the last write failed and nothing followed.
+    pub(crate) fn flush_log(&self) {
+        self.recorder.flush();
+    }
+
     /// The session id.
     pub fn id(&self) -> &str {
         &self.id

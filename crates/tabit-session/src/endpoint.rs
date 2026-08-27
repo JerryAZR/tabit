@@ -826,11 +826,20 @@ fn spawn_worker(
                     if let Some(entry_id) = lock(&checkout_slot).take() {
                         execute_checkout(&mut session, &event_tx, &stream, entry_id);
                     }
+                    // The clean-exit flush attempt (flag 8): one more
+                    // drain before the stream ends.
+                    session.flush_log();
                     break;
                 }
                 // The frontend is gone; the death watcher has already
                 // aborted any in-flight run, so the pump has returned.
-                _ = event_tx.closed() => break,
+                // The process may outlive this wind-down (an
+                // in-process consumer dropped the host), so the same
+                // clean-exit drain applies.
+                _ = event_tx.closed() => {
+                    session.flush_log();
+                    break;
+                }
                 // The one wake: any pending thing (a message push, a
                 // parked checkout or pass) lands here and loops back
                 // to the beat.

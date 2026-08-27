@@ -1775,9 +1775,9 @@ async fn rewinding_mid_batch_repairs_only_the_unanswered_call() -> Result<(), Se
         .expect("resume");
 
     let rewind = session
-        .rewind_to_entry(&first_result.id)
+        .rewind_to_entry(&first_result.entry.id)
         .expect("rewind to the first result");
-    assert_eq!(rewind.to_entry, first_result.id);
+    assert_eq!(rewind.to_entry, first_result.entry.id);
 
     // The new chain: user, assistant, one user message carrying the real
     // c1 result plus the synthesized c2 result — balanced again.
@@ -1797,7 +1797,7 @@ async fn rewinding_mid_batch_repairs_only_the_unanswered_call() -> Result<(), Se
         .expect("the synthesized repair");
     assert_eq!(
         repair.parent_id.as_deref(),
-        Some(first_result.id.as_str()),
+        Some(first_result.entry.id.as_str()),
         "the repair lands on the new chain"
     );
     std::fs::remove_dir_all(store.dir()).ok();
