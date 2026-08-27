@@ -105,9 +105,11 @@ The application-level conversation layer pi builds over its agent loop:
   branches from any entry (`Session::rewind_to_entry`) with the dangling
   repair covering mid-batch points; the user surface
   (`Session::rewind(n)`, CLI `--rewind <n>`) targets user-message
-  boundaries (prompts and steers alike). Projection, model hints, and
-  stats all follow the active chain; rewinding past a model switch
-  re-adopts the chain's model. Interactive branch browsing is a GUI
+  boundaries (prompts and steers alike). Projection and stats follow
+  the active chain; model selection is a session preference — the
+  file's last `model_change` in append order (the register ruling,
+  PROTOCOL.md v3) — so a rewind never moves it. Interactive branch
+  browsing is a GUI
   feature. The CLI is print-shaped: `-p <PROMPT>` selects print mode,
   `--rewind` too, bare `tabit` errors loudly until the GUI exists.
 - **Model registry shipped** (`tabit-session::ModelRegistry`): the single
@@ -286,9 +288,11 @@ The known deviation from pi's subprocess model:
   optimistic clear waits for the replay pass, which correctly parks
   behind the run — the parked-replay ruling), and `Facts` follows
   only `session_created` — a switcher switch leaves the status strip
-  naming the previous session's model until a replayed
-  `model_changed` happens to arrive. Both die with the per-session
-  projection.
+  naming the previous session's model until the opened session's
+  register announcement arrives with its pass (deterministic since
+  the register ruling; for an in-flight session the pass still parks
+  behind the run's terminal — the same window as the transcript).
+  Both die with the per-session projection.
 - **Framework: egui (ruled 2026-08, after evaluation).** Runner-up
   iced (its Elm architecture matches our reducer split natively) loses
   on ecosystem for our exact surfaces — no markdown widget, no list
