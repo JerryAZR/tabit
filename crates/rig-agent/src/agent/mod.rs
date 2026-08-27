@@ -101,6 +101,11 @@
 //! ```
 mod builder;
 mod completion;
+/// The committed conversation state visible to models — the one
+/// context, grown only through its doors. Not yet wired into the
+/// running code (the engine and session still hold their current
+/// containers until the glue lands).
+pub mod context;
 /// The one context builder: the fold the engine and the session layer
 /// share, so there is exactly one implementation of "what the
 /// conversation looks like" anywhere in the system.
