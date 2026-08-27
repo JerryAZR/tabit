@@ -31,8 +31,15 @@ Defensive ("unreachable") arms follow a stricter rule:
 - The whole suite runs offline (cassette replay + test doubles). Doctests
   are NOT included in these numbers (`llvm-cov` was run without
   `--doctests`); they are gated by the same CI run.
-- Current state: **93.53% lines / 94.24% regions** (4,057 of 62,724
-  lines; re-measured after v3 stage 2 — checkout: the pause-point
+- Current state: **93.41% lines / 94.14% regions** (4,155 of 63,042
+  lines; re-measured after the agent-cache refactor — selection is the
+  truth, the agent a stamped cache derived at run open:
+  `Session::ensure_agent` (both arms), the module-level `build_agent`,
+  and the run-open construction-failure arm (`run_failed` after the
+  accepted message) all arrive covered, session.rs at 96.71% lines, and
+  the placeholder model's never-callable arms left the ledger entirely;
+  before that: 93.53% lines / 94.24% regions re-measured after v3
+  stage 2 — checkout: the pause-point
   machinery, the mailbox watermark clear, and the full-re-render pass
   arrive fully covered per function, endpoint.rs at 97.61% lines;
   before that: re-measured after the v3 multi-session host — the endpoint
@@ -152,10 +159,9 @@ named, the classification applies to its current lcov-uncovered ranges.
      persist-failure test); staging a write fault that spares the load
      read but breaks the marker append is not portable.
    - Placeholder arms documented as unreachable by construction:
-     `UnreachableModel` (every assembled session rebuilds its real agent
-     immediately; its bodies error loudly as internal-invariant guards) and
      `user_placeholder` (guarded by an `is_empty` check; `OneOrMany` has no
-     empty constructor).
+     empty constructor). (`UnreachableModel` was deleted with the
+     agent-cache refactor — the placeholder it satisfied no longer exists.)
    - Platform-absent arms in `tabit-tools`: the PowerShell interpreter
      fallback (this machine has Git Bash), interpreter spawn failure, the
      `try_wait` OS-error arm, and the abnormal-signal exit description.

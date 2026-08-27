@@ -3,7 +3,7 @@
 
 use crate::SessionError;
 use crate::entry::EntryKind;
-use crate::session::{RunSummary, SessionBuilder};
+use crate::session::{RunOutcome, RunSummary, SessionBuilder};
 use crate::store::SessionStore;
 use rig_agent::agent::ModelHandle;
 use rig_agent::test_utils::{MockCompletionModel, MockStreamEvent};
@@ -167,6 +167,13 @@ impl Factory {
             .and_then(|guard| guard.last().cloned())
             .map(|model| model.requests())
             .unwrap_or_default()
+    }
+
+    /// The selections the factory was asked to build, in order — the
+    /// agent-cache ledger (assembly, and one derivation per selection
+    /// change, and nothing else).
+    pub(crate) fn built_for(&self) -> Vec<(String, String)> {
+        self.requested.lock().expect("factory lock").clone()
     }
 }
 
@@ -772,7 +779,7 @@ async fn malformed_tool_call_exhaustion_fails_the_run_and_leaves_the_session_ali
 async fn set_model_records_the_change_and_splits_stats() -> Result<(), SessionError> {
     let store = temp_store("switch");
     let factory = Factory::new(vec![text_turn("a"), text_turn("b")]);
-    let mut session = factory.into_builder(store.clone()).create("C:/w")?;
+    let mut session = factory.clone().into_builder(store.clone()).create("C:/w")?;
     session.prompt("one").await;
 
     session
@@ -801,7 +808,150 @@ async fn set_model_records_the_change_and_splits_stats() -> Result<(), SessionEr
     assert!((stats.total_cost - 0.00035).abs() < 1e-12);
     assert_eq!(stats.total_usage.input_tokens, 200);
 
-    // The factory saw both selections.
+    // The cache ledger: the opening build, then one derivation for the
+    // switch at its first run open — nothing per run.
+    assert_eq!(
+        factory.built_for(),
+        vec![
+            ("p".to_string(), "m".to_string()),
+            ("q".to_string(), "m2".to_string())
+        ]
+    );
+    std::fs::remove_dir_all(store.dir()).ok();
+    Ok(())
+}
+
+#[tokio::test]
+async fn the_agent_builds_once_per_selection() -> Result<(), SessionError> {
+    let store = temp_store("agent-cache");
+    let factory = Factory::new(vec![
+        text_turn("a"),
+        text_turn("b"),
+        text_turn("c"),
+        text_turn("d"),
+    ]);
+    let mut session = factory.clone().into_builder(store.clone()).create("C:/w")?;
+    assert_eq!(
+        factory.built_for(),
+        vec![("p".to_string(), "m".to_string())],
+        "assembly derives the opening agent"
+    );
+
+    session.prompt("one").await;
+    session.prompt("two").await;
+    assert_eq!(
+        factory.built_for(),
+        vec![("p".to_string(), "m".to_string())],
+        "runs reuse the standing agent"
+    );
+
+    session
+        .set_model(ModelSelection::new("q", "m2"))
+        .expect("switch");
+    assert_eq!(
+        factory.built_for(),
+        vec![("p".to_string(), "m".to_string())],
+        "the switch itself builds nothing"
+    );
+
+    session.prompt("three").await;
+    assert_eq!(
+        factory.built_for(),
+        vec![
+            ("p".to_string(), "m".to_string()),
+            ("q".to_string(), "m2".to_string())
+        ],
+        "the next run open derives the new agent, once"
+    );
+
+    session.prompt("four").await;
+    assert_eq!(
+        factory.built_for(),
+        vec![
+            ("p".to_string(), "m".to_string()),
+            ("q".to_string(), "m2".to_string())
+        ],
+        "and later runs reuse it"
+    );
+
+    std::fs::remove_dir_all(store.dir()).ok();
+    Ok(())
+}
+
+#[tokio::test]
+async fn a_selection_that_cannot_construct_fails_the_run_at_open() -> Result<(), SessionError> {
+    let store = temp_store("late-build-failure");
+    // One factory call ever succeeds (assembly); its mock carries both
+    // runs the session will make on it.
+    let turns = Mutex::new(vec![text_turn("ok"), text_turn("recovered")]);
+    let built = Arc::new(Mutex::new(Vec::<(String, String)>::new()));
+    let ledger = built.clone();
+    let builder = SessionBuilder::new(
+        store.clone(),
+        test_config(),
+        test_auth(),
+        ModelSelection::new("p", "m"),
+    )
+    .expect("builder")
+    .model_factory(Arc::new(move |provider, model| {
+        if let Ok(mut guard) = ledger.lock() {
+            guard.push((provider.to_string(), model.to_string()));
+        }
+        if provider == "q" {
+            return Err(SessionError::ClientBuild {
+                provider: provider.to_string(),
+                message: "no tls".to_string(),
+            });
+        }
+        let turns = std::mem::take(&mut *turns.lock().expect("turns lock"));
+        Ok(ModelHandle::new(MockCompletionModel::from_stream_turns(
+            turns,
+        )))
+    }));
+    let mut session = builder.create("C:/w")?;
+    let run = session.prompt("one").await;
+    assert!(matches!(run.outcome, RunOutcome::Completed));
+
+    // Config-valid (set_model accepts it), environment-hostile: the
+    // switch succeeds, and the failure surfaces at the send that hit
+    // it — after the accepted message is recorded.
+    session
+        .set_model(ModelSelection::new("q", "m2"))
+        .expect("switch validates against config");
+    let run = session.prompt("two").await;
+    assert!(matches!(run.outcome, RunOutcome::Failed));
+    assert!(
+        run.events.iter().any(|event| matches!(
+            event,
+            SessionEvent::RunFailed { message } if message.contains("no tls")
+        )),
+        "events: {:?}",
+        run.events
+    );
+
+    // A failed derivation keeps the last good agent (stamp untouched),
+    // so switching back reuses it — no rebuild, no third factory call —
+    // and the run completes.
+    session
+        .set_model(ModelSelection::new("p", "m"))
+        .expect("switch back");
+    let run = session.prompt("three").await;
+    assert!(
+        matches!(run.outcome, RunOutcome::Completed),
+        "events: {:?}",
+        run.events
+    );
+    assert_eq!(run.output, "recovered");
+    assert_eq!(
+        built.lock().expect("built").clone(),
+        vec![
+            ("p".to_string(), "m".to_string()),
+            ("q".to_string(), "m2".to_string())
+        ],
+        "assembly, the failed q derivation, and nothing after: the standing \
+         agent was reused, not rebuilt"
+    );
+
     std::fs::remove_dir_all(store.dir()).ok();
     Ok(())
 }
@@ -1435,14 +1585,11 @@ async fn a_rewind_never_moves_the_model_register() -> Result<(), SessionError> {
     // the branch) is still the register.
     session.rewind(1).expect("rewind");
     assert_eq!(session.selection().model, "m2");
-    let requested = factory.requested.lock().expect("requested").clone();
     assert_eq!(
-        requested,
-        vec![
-            ("p".to_string(), "m".to_string()),
-            ("q".to_string(), "m2".to_string()),
-        ],
-        "the rewind rebuilt nothing"
+        factory.built_for(),
+        vec![("p".to_string(), "m".to_string())],
+        "neither the switch nor the rewind built anything — the agent \
+         derives at the next run open, from the register"
     );
     let loaded = store.open_path(session.path()).expect("reload");
     let model_changes = loaded

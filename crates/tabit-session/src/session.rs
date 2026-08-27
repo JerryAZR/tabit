@@ -562,7 +562,13 @@ pub struct Session {
     /// The assembly's mounted hook stack (see
     /// [`SessionBuilder::hooks`]); added to every run.
     run_hooks: Option<rig_agent::agent::HookStack>,
+    /// The built agent — a derived cache of `selection`, not a second
+    /// truth. Run open rebuilds it whenever it no longer matches the
+    /// selection (owner ruling 2026-08: check at the single point of
+    /// use, so a stale agent cannot serve a request no matter who
+    /// wrote the selection or how). `agent_built_for` is the cache key.
     agent: Arc<Agent>,
+    agent_built_for: ModelSelection,
     recorder: Arc<SessionRecorder>,
     /// Per-run cancellation token, refreshed by every outer loop; the
     /// abort handle cancels whatever run is current.
@@ -670,13 +676,15 @@ impl Session {
     ///
     /// The phases are named methods so each concern changes in one place:
     /// input staging (the v2 prompt barrier lands in [`Self::stage_input`]),
-    /// request assembly ([`Self::open_run`] — where the UUIDv7 turn-id
-    /// mint is injected), the item fold ([`Self::drive`] — where announced
-    /// turn ids stamp events; v2 replay reuses the same ids verbatim from
-    /// the log), and the terminal/durability epilogue ([`Self::conclude`]
-    /// — where the write-behind log lands; `messages_discarded` does not
-    /// land here at all, the abort site emits it immediately through the
-    /// mailbox's notice channel).
+    /// the agent-cache check ([`Self::ensure_agent`] — the point-of-use
+    /// freshness rule; a selection that cannot construct fails the run
+    /// here), request assembly ([`Self::open_run`] — where the UUIDv7
+    /// turn-id mint is injected), the item fold ([`Self::drive`] — where
+    /// announced turn ids stamp events; v2 replay reuses the same ids
+    /// verbatim from the log), and the terminal/durability epilogue
+    /// ([`Self::conclude`] — where the write-behind log lands;
+    /// `messages_discarded` does not land here at all, the abort site
+    /// emits it immediately through the mailbox's notice channel).
     async fn run_one(
         &mut self,
         batch: &[QueuedMessage],
@@ -691,6 +699,34 @@ impl Session {
         };
         let mut sink = EventSink::new(on_event);
         let history = self.stage_input(batch, &mut sink);
+        // The agent-cache check at run open — the single point of use.
+        // A selection that validates against config but cannot be
+        // constructed in this environment (client build trouble, the
+        // only residual class: config is immutable per process) fails
+        // here, before any turn: the accepted message is already
+        // recorded, so the frontend sees `user_message` then
+        // `run_failed`, the same shape a provider stream error takes.
+        if let Err(error) = self.ensure_agent() {
+            let message = error.to_string();
+            sink.emit(SessionEvent::RunFailed { message });
+            // The same durability rule conclude enforces: a record that
+            // never reached the disk fails the run even when nothing
+            // else ran (a trailing `run_failed`, like conclude's).
+            if let Some(persist_error) = self.recorder.first_error() {
+                sink.emit(SessionEvent::RunFailed {
+                    message: persist_error,
+                });
+            }
+            if let Some(hub) = &self.interaction {
+                hub.clear_pending();
+            }
+            return RunSummary {
+                outcome: RunOutcome::Failed,
+                output: String::new(),
+                usage: Usage::default(),
+                events: sink.events,
+            };
+        }
         let stream = self.open_run(history, &run_token).await;
         let driven = self.drive(stream, &run_token, &mut sink).await;
         let (outcome, output, usage) = self.conclude(driven, &mut sink);
@@ -1132,10 +1168,12 @@ impl Session {
     }
 
     /// Switch the provider/model/thinking level from the next outer loop
-    /// on. Recorded as a `model_change` entry.
+    /// on. Recorded as a `model_change` entry. No agent is built here:
+    /// the selection is the truth, and the next run open derives the
+    /// agent from it — a selection that validates against config but
+    /// fails to construct surfaces as that run's `run_failed`.
     pub fn set_model(&mut self, selection: ModelSelection) -> Result<(), SessionError> {
         validate_selection(&selection, &self.config)?;
-        self.rebuild_agent(&selection)?;
         self.recorder.record(EntryKind::ModelChange {
             provider: selection.provider.clone(),
             model: selection.model.clone(),
@@ -1293,42 +1331,23 @@ impl Session {
         stats
     }
 
-    fn rebuild_agent(&mut self, selection: &ModelSelection) -> Result<(), SessionError> {
-        let handle = (self.model_factory)(&selection.provider, &selection.model)?;
-        let params = crate::registry::request_params(&self.config, selection);
-        // `dynamic_tools` (even with an empty vec) moves the builder to
-        // its tool-configured state, keeping one concrete type through
-        // the preamble/build chain.
-        let mut builder = AgentBuilder::new(handle).dynamic_tools(self.tools.clone());
-        if let Some(preamble) = &self.preamble {
-            builder = builder.preamble(preamble.as_str());
+    /// The agent-cache freshness check — the point-of-use half of the
+    /// selection-is-truth rule ([`Session::set_model`] is the write
+    /// half). Any future writer that swaps `selection` (config reload,
+    /// say) cannot leave a stale agent serving requests, because the
+    /// one reader derives rather than trusts.
+    fn ensure_agent(&mut self) -> Result<(), SessionError> {
+        if self.agent_built_for == self.selection {
+            return Ok(());
         }
-        // Configured request parameters are pure forwarding (reviewed
-        // 2026-08): the model's knobs, nothing interpreted.
-        if let Some(max_tokens) = params.max_tokens {
-            builder = builder.max_tokens(max_tokens);
-        }
-        if let Some(temperature) = params.temperature {
-            builder = builder.temperature(temperature);
-        }
-        // `top_p`/`top_k` have no dedicated field on the completion
-        // request — they ride the same flattened `additional_params` map
-        // as `extra_body`, which is the compat escape hatch and therefore
-        // gets the last word over the named knobs.
-        let mut additional = serde_json::Map::new();
-        if let Some(top_p) = params.top_p {
-            additional.insert("top_p".to_string(), serde_json::json!(top_p));
-        }
-        if let Some(top_k) = params.top_k {
-            additional.insert("top_k".to_string(), serde_json::json!(top_k));
-        }
-        if let Some(extra) = params.extra_body {
-            additional.extend(extra);
-        }
-        if !additional.is_empty() {
-            builder = builder.additional_params(serde_json::Value::Object(additional));
-        }
-        self.agent = Arc::new(builder.build());
+        self.agent = Arc::new(build_agent(
+            &self.model_factory,
+            &self.config,
+            &self.selection,
+            self.preamble.as_deref(),
+            &self.tools,
+        )?);
+        self.agent_built_for = self.selection.clone();
         Ok(())
     }
 
@@ -1341,16 +1360,27 @@ impl Session {
         let path = writer.path().to_path_buf();
         let id = writer.session_id().to_string();
         let recorder = Arc::new(SessionRecorder::new(writer));
-        let mut session = Self {
+        // The opening agent is derived from the resolved selection before
+        // the struct exists (the placeholder this replaces existed only
+        // to satisfy the field initializer).
+        let agent = Arc::new(build_agent(
+            &builder.model_factory,
+            &builder.config,
+            &builder.selection,
+            builder.preamble.as_deref(),
+            &builder.tools,
+        )?);
+        let session = Self {
             store: builder.store,
             config: builder.config,
-            selection: builder.selection,
+            selection: builder.selection.clone(),
             preamble: builder.preamble,
             tools: builder.tools,
             max_turns: builder.max_turns,
             model_factory: builder.model_factory,
             run_hooks: builder.run_hooks,
-            agent: Arc::new(AgentBuilder::new(ModelHandle::new(placeholder_model())).build()),
+            agent,
+            agent_built_for: builder.selection,
             recorder,
             abort: std::sync::Arc::new(std::sync::Mutex::new(CancellationToken::new())),
             mailbox: Mailbox::default(),
@@ -1361,8 +1391,6 @@ impl Session {
             resumed,
             interaction: None,
         };
-        let selection = session.selection.clone();
-        session.rebuild_agent(&selection)?;
         Ok(session)
     }
 }
@@ -1517,44 +1545,51 @@ fn cost_of(usage: &Usage, cost: &tabit_config::Cost) -> f64 {
         + (usage.cache_creation_input_tokens as f64 / 1_000_000.0) * cost.cache_write
 }
 
-/// A model that is never called: every assembled session rebuilds its real
-/// agent from config immediately after construction, so this exists only
-/// to satisfy the field initializer.
-fn placeholder_model() -> impl rig_core::completion::CompletionModel {
-    UnreachableModel
-}
-
-/// See [`placeholder_model`].
-struct UnreachableModel;
-
-impl rig_core::completion::CompletionModel for UnreachableModel {
-    fn completion(
-        &self,
-        _request: rig_core::completion::CompletionRequest,
-    ) -> impl std::future::Future<
-        Output = Result<
-            rig_core::completion::CompletionResponse,
-            rig_core::completion::CompletionError,
-        >,
-    > + rig_core::wasm_compat::WasmCompatSend {
-        std::future::ready(Err(internal_placeholder_error()))
+/// Build the agent a selection resolves to. Everything except the
+/// selection is fixed at assembly (factory, config, preamble, tools),
+/// so this is a pure function of its arguments — the derivation the
+/// cache check in [`Session::ensure_agent`] and the one-shot build in
+/// [`Session::assemble`] share.
+fn build_agent(
+    model_factory: &ModelFactory,
+    config: &TabitConfig,
+    selection: &ModelSelection,
+    preamble: Option<&str>,
+    tools: &[DynamicTool],
+) -> Result<Agent, SessionError> {
+    let handle = (model_factory)(&selection.provider, &selection.model)?;
+    let params = crate::registry::request_params(config, selection);
+    // `dynamic_tools` (even with an empty vec) moves the builder to
+    // its tool-configured state, keeping one concrete type through
+    // the preamble/build chain.
+    let mut builder = AgentBuilder::new(handle).dynamic_tools(tools.to_vec());
+    if let Some(preamble) = preamble {
+        builder = builder.preamble(preamble);
     }
-
-    fn stream(
-        &self,
-        _request: rig_core::completion::CompletionRequest,
-    ) -> impl std::future::Future<
-        Output = Result<
-            rig_core::streaming::StreamingCompletionResponse,
-            rig_core::completion::CompletionError,
-        >,
-    > + rig_core::wasm_compat::WasmCompatSend {
-        std::future::ready(Err(internal_placeholder_error()))
+    // Configured request parameters are pure forwarding (reviewed
+    // 2026-08): the model's knobs, nothing interpreted.
+    if let Some(max_tokens) = params.max_tokens {
+        builder = builder.max_tokens(max_tokens);
     }
-}
-
-fn internal_placeholder_error() -> rig_core::completion::CompletionError {
-    rig_core::completion::CompletionError::ProviderError(
-        "internal invariant violated: placeholder model was called".to_string(),
-    )
+    if let Some(temperature) = params.temperature {
+        builder = builder.temperature(temperature);
+    }
+    // `top_p`/`top_k` have no dedicated field on the completion
+    // request — they ride the same flattened `additional_params` map
+    // as `extra_body`, which is the compat escape hatch and therefore
+    // gets the last word over the named knobs.
+    let mut additional = serde_json::Map::new();
+    if let Some(top_p) = params.top_p {
+        additional.insert("top_p".to_string(), serde_json::json!(top_p));
+    }
+    if let Some(top_k) = params.top_k {
+        additional.insert("top_k".to_string(), serde_json::json!(top_k));
+    }
+    if let Some(extra) = params.extra_body {
+        additional.extend(extra);
+    }
+    if !additional.is_empty() {
+        builder = builder.additional_params(serde_json::Value::Object(additional));
+    }
+    Ok(builder.build())
 }
