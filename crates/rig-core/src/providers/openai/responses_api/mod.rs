@@ -1423,6 +1423,9 @@ pub struct GenericResponsesCompletionModel<Ext = super::OpenAIResponsesExt, H = 
     /// the Chat Completions API; enable with [`Self::with_strict_tools`].
     pub strict_tools: bool,
     system_instructions_placement: SystemInstructionsPlacement,
+    /// Stable prompt-cache routing key (the `prompt_cache_key` request
+    /// field). `None` leaves routing to the API.
+    pub cache_key: Option<String>,
 }
 
 /// The completion model struct for OpenAI's Responses API.
@@ -1447,6 +1450,7 @@ where
             tools: Vec::new(),
             strict_tools: false,
             system_instructions_placement,
+            cache_key: None,
         }
     }
 
@@ -1490,6 +1494,21 @@ where
         self.with_system_instructions_placement(SystemInstructionsPlacement::InputSystemMessages)
     }
 
+    /// Set a stable prompt-cache routing key, sent as `prompt_cache_key`
+    /// on every request.
+    ///
+    /// OpenAI's prompt caching is automatic; the key only steers routing
+    /// so a conversation's requests land on the same cache shard (codex
+    /// and pi both pin it to the conversation id). An explicit
+    /// `additional_params.prompt_cache_key` on a request wins over this
+    /// model-level default. Keys longer than 64 code points are
+    /// truncated — long ids carry no routing value and risk
+    /// server-side rejection.
+    pub fn with_cache_key(mut self, key: impl Into<String>) -> Self {
+        self.cache_key = Some(key.into().chars().take(64).collect());
+        self
+    }
+
     /// Adds a default tool to all requests from this model.
     pub fn with_tool(mut self, tool: impl Into<ResponsesToolDefinition>) -> Self {
         self.tools.push(tool.into());
@@ -1517,6 +1536,15 @@ where
             system_instructions_placement: self.system_instructions_placement,
         })?;
         req.tools.extend(self.tools.clone());
+
+        // The model-level routing key fills only where the request itself
+        // did not set one (config `extra_body` reaches here as parsed
+        // additional params and keeps the last word).
+        if req.additional_parameters.prompt_cache_key.is_none()
+            && let Some(cache_key) = &self.cache_key
+        {
+            req.additional_parameters.prompt_cache_key = Some(cache_key.clone());
+        }
 
         if self.strict_tools {
             req.tools = req

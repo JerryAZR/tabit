@@ -740,6 +740,54 @@ fn responses_client_can_fallback_to_system_messages_in_input() {
 }
 
 #[test]
+fn with_cache_key_pins_the_wire_prompt_cache_key() {
+    let client = crate::providers::openai::Client::new("dummy-key").expect("client");
+    let model = ResponsesCompletionModel::new(client, "gpt-4o-mini").with_cache_key("session-42");
+
+    let req = model
+        .create_completion_request(request_with_preamble("You are concise."))
+        .expect("request should convert");
+    let serialized = serde_json::to_value(&req).expect("request should serialize");
+
+    assert_eq!(serialized["prompt_cache_key"], json!("session-42"));
+}
+
+#[test]
+fn a_long_cache_key_is_clamped_to_sixty_four_code_points() {
+    let client = crate::providers::openai::Client::new("dummy-key").expect("client");
+    let model =
+        ResponsesCompletionModel::new(client, "gpt-4o-mini").with_cache_key("x".repeat(100));
+
+    let req = model
+        .create_completion_request(request_with_preamble("You are concise."))
+        .expect("request should convert");
+
+    assert_eq!(
+        req.additional_parameters.prompt_cache_key,
+        Some("x".repeat(64))
+    );
+}
+
+#[test]
+fn an_explicit_request_cache_key_wins_over_the_model_default() {
+    let client = crate::providers::openai::Client::new("dummy-key").expect("client");
+    let model = ResponsesCompletionModel::new(client, "gpt-4o-mini").with_cache_key("model-key");
+
+    let request = CompletionRequestBuilder::new(MockCompletionModel::default(), "again")
+        .additional_params(json!({"prompt_cache_key": "request-key"}))
+        .build();
+
+    let req = model
+        .create_completion_request(request)
+        .expect("request should convert");
+
+    assert_eq!(
+        req.additional_parameters.prompt_cache_key,
+        Some("request-key".to_string())
+    );
+}
+
+#[test]
 fn responses_model_can_lift_all_system_messages_via_placement() {
     let client = crate::providers::openai::Client::new("dummy-key").expect("client");
     let model = ResponsesCompletionModel::new(client, "gpt-4o-mini")

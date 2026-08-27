@@ -374,12 +374,29 @@ The known deviation from pi's subprocess model:
 
 ### 10. Prompt caching (required before release)
 
-- Activate provider prompt caching on the session's static prefix (tool
-  definitions + preamble — re-sent every turn today): Anthropic
-  `cache_control` breakpoints with per-breakpoint TTL (1h prefix / 5m
-  tail). Reference pi's caching approach and rig upstream's per-breakpoint
-  TTL work (`4be867de`, post-0.42) when we get here. Usage-side parsing
-  (cache read/creation tokens, TTL breakdown) already ships in rig-core.
+- **Shipped (2026-08) — all-1h, one policy site** (owner ruling: keep it
+  simple now; a modeled policy is a contained edit later). The full
+  policy lives in `ModelRegistry::build` (`tabit-session/registry.rs`),
+  nothing else needs touching to change it:
+  - Anthropic: `with_automatic_caching_1h()` — the API owns breakpoint
+    placement and moves it forward every turn (rig-core's automatic mode
+    was already vendored; the 0.41 code carried per-breakpoint TTL, so
+    the old note about upstream `4be867de` is moot). 1h over 5m: the 2x
+    write premium buys survival across interactive gaps and >5m tool
+    turns; reads are 0.1x and refresh free under either TTL.
+  - OpenAI Responses: caching is server-side automatic; we only pin
+    routing — `prompt_cache_key` = the session's stable id (the
+    codex/pi/opencode pattern; subagents will share the parent's key).
+    Per-model `with_cache_key` in rig-core, clamped to 64 code points,
+    explicit request-level `additional_params` wins.
+  - Chat-completions gateway: no key (third parties vary in what they
+    accept).
+- Deferred until a felt need: a modeled breakpoint/TTL policy (mixed
+  1h-prefix/5m-tail only protects the static prefix — after a 5m lapse
+  the whole message history re-writes), the completions-gateway key,
+  OpenAI's `prompt_cache_retention` (Responses-only, unused by codex/
+  opencode/pi). Usage-side parsing (cache read/creation tokens, TTL
+  breakdown) already ships in rig-core.
 - Falls out of the v2 backend slices (write-behind log + prompt barrier)
   where the static prefix becomes an explicit unit.
 

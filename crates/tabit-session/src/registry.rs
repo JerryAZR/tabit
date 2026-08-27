@@ -94,7 +94,7 @@ impl ModelRegistry {
     /// registry, so model switches reuse the cached provider client.
     pub fn factory(&self) -> ModelFactory {
         let registry = self.clone();
-        Arc::new(move |provider, model| registry.build(provider, model))
+        Arc::new(move |provider, model, cache_key| registry.build(provider, model, cache_key))
     }
 
     /// Resolve the default selection for a new outer loop.
@@ -157,8 +157,14 @@ impl ModelRegistry {
     }
 
     /// Build a model handle for `(provider, model)` through the cached
-    /// provider client.
-    fn build(&self, provider_id: &str, model_id: &str) -> Result<ModelHandle, SessionError> {
+    /// provider client. `cache_key` is the session's stable id — the
+    /// prompt-cache routing hint where the wire API has one.
+    fn build(
+        &self,
+        provider_id: &str,
+        model_id: &str,
+        cache_key: &str,
+    ) -> Result<ModelHandle, SessionError> {
         let provider =
             self.inner
                 .config
@@ -182,13 +188,34 @@ impl ModelRegistry {
             .resolve_api_key(provider_id, &self.inner.auth)
             .unwrap_or_default();
         let label = format!("{provider_id}/{}", model.id);
+        // Tabit's prompt-cache policy, in full (owner ruling 2026-08: keep
+        // it simple, all 1h; a modeled policy — breakpoint cadence, mixed
+        // TTLs — lands here as a contained edit).
+        //
+        // Anthropic: automatic caching with the 1h TTL. The API owns
+        // breakpoint placement; we pay the 2x write premium so entries
+        // survive interactive gaps and >5m tool turns (5m entries lapse;
+        // hits refresh free and read at 0.1x under either TTL). Sent on
+        // the wire protocol as-is — an anthropic-compatible server that
+        // rejects the field fails loudly at the first request, per the
+        // external-error doctrine.
+        //
+        // OpenAI Responses: caching itself is automatic; we only pin
+        // routing with the session's key so a conversation's requests
+        // land on one cache shard (the codex/pi pattern). The chat
+        // completions gateway sends no key — third parties vary in what
+        // they accept.
         let handle = match self.client_for(provider_id, provider, &api_key)? {
-            ProviderClient::Anthropic(client) => {
-                ModelHandle::named(label, client.completion_model(&model.id))
-            }
-            ProviderClient::Responses(client) => {
-                ModelHandle::named(label, client.completion_model(&model.id))
-            }
+            ProviderClient::Anthropic(client) => ModelHandle::named(
+                label,
+                client
+                    .completion_model(&model.id)
+                    .with_automatic_caching_1h(),
+            ),
+            ProviderClient::Responses(client) => ModelHandle::named(
+                label,
+                client.completion_model(&model.id).with_cache_key(cache_key),
+            ),
             ProviderClient::Completions(client) => {
                 ModelHandle::named(label, client.completion_model(&model.id))
             }

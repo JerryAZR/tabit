@@ -145,7 +145,7 @@ impl Factory {
     ) -> SessionBuilder {
         SessionBuilder::new(store, config, test_auth(), selection)
             .expect("builder")
-            .model_factory(std::sync::Arc::new(move |provider, model| {
+            .model_factory(std::sync::Arc::new(move |provider, model, _cache_key| {
                 if let Ok(mut guard) = self.requested.lock() {
                     guard.push((provider.to_string(), model.to_string()));
                 }
@@ -822,6 +822,42 @@ async fn set_model_records_the_change_and_splits_stats() -> Result<(), SessionEr
 }
 
 #[tokio::test]
+async fn the_session_threads_its_id_as_the_factory_cache_key() -> Result<(), SessionError> {
+    let store = temp_store("cache-key");
+    let keys = Arc::new(Mutex::new(Vec::<String>::new()));
+    let sink = keys.clone();
+    let builder = SessionBuilder::new(
+        store.clone(),
+        test_config(),
+        test_auth(),
+        ModelSelection::new("p", "m"),
+    )
+    .expect("builder")
+    .model_factory(Arc::new(move |_provider, _model, cache_key| {
+        if let Ok(mut guard) = sink.lock() {
+            guard.push(cache_key.to_string());
+        }
+        Ok(ModelHandle::new(MockCompletionModel::from_stream_turns(
+            vec![text_turn("a"), text_turn("b")],
+        )))
+    }));
+    let mut session = builder.create("C:/w")?;
+    session.prompt("one").await;
+    // A model switch derives a new agent — same session, same key.
+    session
+        .set_model(ModelSelection::new("q", "m2"))
+        .expect("switch");
+    session.prompt("two").await;
+    assert_eq!(
+        keys.lock().expect("keys").as_slice(),
+        [session.id().to_string(), session.id().to_string()],
+        "assembly and the switch's derivation both carry the session id"
+    );
+    std::fs::remove_dir_all(store.dir()).ok();
+    Ok(())
+}
+
+#[tokio::test]
 async fn the_agent_builds_once_per_selection() -> Result<(), SessionError> {
     let store = temp_store("agent-cache");
     let factory = Factory::new(vec![
@@ -893,7 +929,7 @@ async fn a_selection_that_cannot_construct_fails_the_run_at_open() -> Result<(),
         ModelSelection::new("p", "m"),
     )
     .expect("builder")
-    .model_factory(Arc::new(move |provider, model| {
+    .model_factory(Arc::new(move |provider, model, _cache_key| {
         if let Ok(mut guard) = ledger.lock() {
             guard.push((provider.to_string(), model.to_string()));
         }
@@ -977,7 +1013,7 @@ async fn resume_uses_the_builder_selection_and_records_the_switch() -> Result<()
         ModelSelection::new("p", "m"),
     )
     .expect("builder")
-    .model_factory(std::sync::Arc::new(move |provider, model| {
+    .model_factory(std::sync::Arc::new(move |provider, model, _cache_key| {
         if let Ok(mut guard) = sink.lock() {
             guard.push((provider.to_string(), model.to_string()));
         }

@@ -170,7 +170,7 @@ id = "m"
 api_key = "dummy"
 "#,
         );
-        let handle = registry.build("p", "m").expect("model builds");
+        let handle = registry.build("p", "m", "key").expect("model builds");
         assert!(!format!("{handle:?}").is_empty());
         assert_eq!(registry.cached_provider_count(), 1);
     }
@@ -179,8 +179,8 @@ api_key = "dummy"
 #[test]
 fn build_reuses_the_cached_client_across_models() {
     let registry = default_registry();
-    registry.build("local", "m").expect("first build");
-    registry.build("local", "m2").expect("second build");
+    registry.build("local", "m", "key").expect("first build");
+    registry.build("local", "m2", "key").expect("second build");
     assert_eq!(
         registry.cached_provider_count(),
         1,
@@ -192,7 +192,7 @@ fn build_reuses_the_cached_client_across_models() {
 fn factory_builds_through_the_registry() {
     let registry = default_registry();
     let factory = registry.factory();
-    let handle = factory("local", "m").expect("factory build");
+    let handle = factory("local", "m", "key").expect("factory build");
     assert!(!format!("{handle:?}").is_empty());
     assert_eq!(registry.cached_provider_count(), 1);
 }
@@ -200,13 +200,13 @@ fn factory_builds_through_the_registry() {
 #[test]
 fn build_errors_name_the_missing_pieces() {
     let config_only = registry_with(TWO_MODELS, "");
-    match config_only.build("nope", "m") {
+    match config_only.build("nope", "m", "key") {
         Err(SessionError::Config { message }) => {
             assert!(message.contains("provider `nope`"), "{message}")
         }
         other => panic!("expected config error, got {other:?}"),
     }
-    match config_only.build("local", "nope") {
+    match config_only.build("local", "nope", "key") {
         Err(SessionError::Config { message }) => {
             assert!(message.contains("model `nope`"), "{message}")
         }
@@ -215,7 +215,7 @@ fn build_errors_name_the_missing_pieces() {
     // Keyless builds succeed now (local endpoints run keyless;
     // auth-requiring providers answer 401 at send time).
     config_only
-        .build("local", "m")
+        .build("local", "m", "key")
         .expect("keyless provider builds");
 }
 

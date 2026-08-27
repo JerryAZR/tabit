@@ -267,7 +267,7 @@ id = "m"
             ModelSelection::new("p", "m"),
         )
         .expect("builder")
-        .model_factory(std::sync::Arc::new(move |_, _| {
+        .model_factory(std::sync::Arc::new(move |_, _, _| {
             Ok(ModelHandle::new(MockCompletionModel::from_stream_turns(
                 turns.clone(),
             )))
@@ -313,7 +313,7 @@ id = "m"
             ModelSelection::new("p", "m"),
         )
         .expect("builder")
-        .model_factory(std::sync::Arc::new(move |_, _| {
+        .model_factory(std::sync::Arc::new(move |_, _, _| {
             Ok(ModelHandle::new(MockCompletionModel::from_stream_turns(
                 turns.clone(),
             )))
@@ -992,7 +992,7 @@ id = "m"
                 ModelSelection::new("p", "m"),
             )
             .expect("builder")
-            .model_factory(Arc::new(move |_, _| {
+            .model_factory(Arc::new(move |_, _, _| {
                 Ok(ModelHandle::new(MockCompletionModel::from_stream_turns([
                     [
                         MockStreamEvent::text(answer),
@@ -1193,7 +1193,7 @@ id = "m"
                 ModelSelection::new("p", "m"),
             )
             .expect("builder")
-            .model_factory(Arc::new(move |_, _| {
+            .model_factory(Arc::new(move |_, _, _| {
                 Ok(ModelHandle::new(MockCompletionModel::from_stream_turns([
                     [
                         MockStreamEvent::text("reopened answer"),

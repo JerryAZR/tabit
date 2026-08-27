@@ -141,10 +141,13 @@ pub struct SessionBuilder {
     run_hooks: Option<rig_agent::agent::HookStack>,
 }
 
-/// Builds the model behind a selection: `(provider, model)` ids to a
-/// type-erased handle. Overridable for callers that construct models
+/// Builds the model behind a selection: `(provider, model, cache_key)`
+/// to a type-erased handle. The cache key is the session's stable id —
+/// a provider-neutral prompt-cache routing hint; providers with no
+/// such knob ignore it. Overridable for callers that construct models
 /// themselves (and for tests).
-pub type ModelFactory = Arc<dyn Fn(&str, &str) -> Result<ModelHandle, SessionError> + Send + Sync>;
+pub type ModelFactory =
+    Arc<dyn Fn(&str, &str, &str) -> Result<ModelHandle, SessionError> + Send + Sync>;
 
 /// Validates a selection against a session's config without touching
 /// the session — the `model` command's receive-time check (the
@@ -210,7 +213,7 @@ impl SessionBuilder {
     }
 
     /// Supply models yourself instead of through tabit config. The factory
-    /// receives `(provider, model)` ids; it is consulted on session
+    /// receives `(provider, model, cache_key)`; it is consulted on session
     /// creation, on resume, and on every model switch. Takes the named
     /// [`ModelFactory`] handle (cheaply clonable, shareable across
     /// builders) so callers like `ModelRegistry::factory` pass through
@@ -1422,6 +1425,7 @@ impl Session {
             &self.model_factory,
             &self.config,
             &selection,
+            &self.id,
             self.preamble.as_deref(),
             &self.tools,
         )?);
@@ -1445,6 +1449,7 @@ impl Session {
             &builder.model_factory,
             &builder.config,
             &builder.selection,
+            &id,
             builder.preamble.as_deref(),
             &builder.tools,
         )?);
@@ -1667,10 +1672,11 @@ fn build_agent(
     model_factory: &ModelFactory,
     config: &TabitConfig,
     selection: &ModelSelection,
+    cache_key: &str,
     preamble: Option<&str>,
     tools: &[DynamicTool],
 ) -> Result<Agent, SessionError> {
-    let handle = (model_factory)(&selection.provider, &selection.model)?;
+    let handle = (model_factory)(&selection.provider, &selection.model, cache_key)?;
     let params = crate::registry::request_params(config, selection);
     // `dynamic_tools` (even with an empty vec) moves the builder to
     // its tool-configured state, keeping one concrete type through
