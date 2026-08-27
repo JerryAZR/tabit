@@ -101,6 +101,10 @@
 //! ```
 mod builder;
 mod completion;
+/// The one context builder: the fold the engine and the session layer
+/// share, so there is exactly one implementation of "what the
+/// conversation looks like" anywhere in the system.
+pub mod conversation;
 pub(crate) mod drive;
 pub mod hook;
 pub mod model;

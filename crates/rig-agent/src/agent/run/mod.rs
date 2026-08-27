@@ -82,6 +82,7 @@ use rig_core::{
 };
 
 use crate::{
+    agent::conversation::Conversation,
     agent::hook::RetryRequest,
     agent::prompt_request::{
         CompletionCall, PromptResponse, assistant_text_from_choice,
@@ -255,10 +256,12 @@ pub struct AgentRun {
     output_retries: usize,
     /// The whole conversation, joined at entry and appended by the machine
     /// (committed turns, tool results, steers, corrective feedback). The
-    /// request is this history, as-is.
-    history: Vec<Message>,
+    /// request is this conversation, as-is — the run holds a
+    /// run-scoped instance of the one shared context builder (the same
+    /// fold the session layer persists from).
+    conversation: Conversation,
     /// Where the run's own messages begin: `messages()` is
-    /// `history[entry_len..]` (the memory append at Done).
+    /// `conversation[entry_len..]` (the memory append at Done).
     entry_len: usize,
     current_turn: usize,
     usage: Usage,
@@ -320,12 +323,12 @@ impl AgentRun {
         // answered — is the run's opening message, not context.
         let entry_len = history.len() - 1;
         Self {
+            conversation: Conversation::from_messages(history),
             max_turns: 1,
             output_tool_name: None,
             output_schema: None,
             max_output_retries: 0,
             output_retries: 0,
-            history,
             entry_len,
             current_turn: 0,
             usage: Usage::new(),
@@ -451,7 +454,7 @@ impl AgentRun {
                 self.current_turn += 1;
                 self.state = RunState::ModelTurn;
                 Ok(AgentRunStep::CallModel {
-                    history: self.history.clone(),
+                    history: self.conversation.committed().to_vec(),
                     turn: self.current_turn,
                 })
             }
@@ -578,11 +581,11 @@ impl AgentRun {
                 && !self.text_satisfies_output_schema(&assistant_text_from_choice(&choice))
             {
                 self.output_retries += 1;
-                self.history.push(Message::Assistant {
+                self.conversation.assistant(Message::Assistant {
                     id: message_id,
                     content: choice.clone(),
                 });
-                self.history.push(Message::user(format!(
+                self.conversation.user(Message::user(format!(
                     "Provide your final answer by calling the `{output_tool_name}` tool with \
                      the structured result as its arguments, not as plain text."
                 )));
@@ -592,7 +595,7 @@ impl AgentRun {
             }
 
             if !is_empty_assistant_turn(&choice) {
-                self.history.push(Message::Assistant {
+                self.conversation.assistant(Message::Assistant {
                     id: message_id,
                     content: choice.clone(),
                 });
@@ -612,7 +615,7 @@ impl AgentRun {
         // returns a synthetic in-band result naming the problem, the model
         // is told, and the run continues. Never a failure, never a pause.
         self.output_retries = 0;
-        self.history.push(Message::Assistant {
+        self.conversation.assistant(Message::Assistant {
             id: message_id,
             content: choice.clone(),
         });
@@ -691,7 +694,7 @@ impl AgentRun {
             // The rejected turn commits in full, answered by tool results:
             // the feedback rides the output call's result, siblings report
             // not-executed — replayable history, no dangling tool_use.
-            self.history.push(Message::Assistant {
+            self.conversation.assistant(Message::Assistant {
                 id: message_id,
                 content: choice.clone(),
             });
@@ -703,7 +706,7 @@ impl AgentRun {
             if let Some(user_message) =
                 invalid_tool_retry_user_message(&choice, &tool_call.id, feedback)
             {
-                self.history.push(user_message);
+                self.conversation.user(user_message);
             }
             self.retry_requested = true;
             self.state = RunState::FinalTurn;
@@ -729,7 +732,7 @@ impl AgentRun {
         final_items.push(AssistantContent::text(output.clone()));
         let content = OneOrMany::from_iter_optional(final_items);
         if let Some(content) = content.clone() {
-            self.history.push(Message::Assistant {
+            self.conversation.assistant(Message::Assistant {
                 id: message_id,
                 content,
             });
@@ -801,7 +804,7 @@ impl AgentRun {
             return Err(self.protocol_violation("steered called outside the drain point"));
         }
         if !messages.is_empty() {
-            self.history.extend(messages);
+            self.conversation.extend_users(messages);
             self.steers_drained = true;
             self.defect_streak = 0;
             self.provider_retry_streak = 0;
@@ -879,13 +882,14 @@ impl AgentRun {
         if self.current_turn >= self.max_turns {
             self.state = RunState::Failed;
             let prompt = self
-                .history
+                .conversation
+                .committed()
                 .last()
                 .cloned()
                 .unwrap_or_else(|| Message::user(String::new()));
             return Err(PromptError::MaxTurnsError {
                 max_turns: self.max_turns,
-                chat_history: Box::new(self.history.clone()),
+                chat_history: Box::new(self.conversation.committed().to_vec()),
                 prompt: Box::new(prompt),
             });
         }
@@ -911,7 +915,7 @@ impl AgentRun {
         if results.is_empty() {
             self.state = RunState::Failed;
             return Err(PromptError::prompt_cancelled(
-                self.history.clone(),
+                self.conversation.committed().to_vec(),
                 "tool execution produced no tool results",
             ));
         }
@@ -942,7 +946,7 @@ impl AgentRun {
             );
         };
 
-        self.history.push(Message::User { content });
+        self.conversation.user(Message::User { content });
         self.state = RunState::DrainingSteers;
         Ok(())
     }
@@ -962,12 +966,10 @@ impl AgentRun {
             RetryRequest::Repeat => {
                 // Drop the rejected assistant turn; history returns to the
                 // state before it.
-                if matches!(self.history.last(), Some(Message::Assistant { .. })) {
-                    self.history.pop();
-                }
+                self.conversation.pop_last_assistant();
             }
             RetryRequest::Feedback(feedback) => {
-                self.history.push(Message::user(feedback));
+                self.conversation.user(Message::user(feedback));
             }
         }
         self.pending_final = false;
@@ -1021,12 +1023,13 @@ impl AgentRun {
     /// history) — the memory append at Done. `entry_len` never exceeds
     /// `history.len()`: the machine only appends.
     pub fn messages(&self) -> &[Message] {
-        self.history.split_at(self.entry_len).1
+        let messages = self.conversation.committed();
+        &messages[self.entry_len.min(messages.len())..]
     }
 
     /// The full conversation: entry history followed by the run's messages.
     pub fn full_history(&self) -> Vec<Message> {
-        self.history.clone()
+        self.conversation.committed().to_vec()
     }
 
     /// Whether the run reached [`RunState::Done`].
@@ -1061,12 +1064,12 @@ impl AgentRun {
     /// Build the cancellation error a driver should return when the run
     /// stops early, carrying the current full history.
     pub fn cancel_error(&self, reason: impl Into<String>) -> PromptError {
-        PromptError::prompt_cancelled(self.history.clone(), reason)
+        PromptError::prompt_cancelled(self.conversation.committed().to_vec(), reason)
     }
 
     fn protocol_violation(&self, reason: &str) -> PromptError {
         PromptError::prompt_cancelled(
-            self.history.clone(),
+            self.conversation.committed().to_vec(),
             format!("agent run driver protocol violation: {reason}"),
         )
     }

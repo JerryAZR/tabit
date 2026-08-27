@@ -156,6 +156,11 @@ and one decision. **Every** turn outcome — final, broken, tools, and
 failure — converges at the same drain, because steering is
 independent of everything the model does.
 
+The run's history container is the **one context builder**
+(`agent::conversation::Conversation`): the same fold a session layer
+persists its durable context from. A run holds a run-scoped instance
+seeded at entry; there is no second history-assembly logic anywhere.
+
 ```mermaid
 stateDiagram-v2
     [*] --> Preparing : enter — one history,<br/>drained and joined by the outer loop

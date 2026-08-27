@@ -1389,6 +1389,64 @@ async fn steering_during_a_run_is_recorded_one_to_one() -> Result<(), SessionErr
 }
 
 #[tokio::test]
+async fn one_context_builder_spans_the_run_boundary() -> Result<(), SessionError> {
+    // The engine's run-scoped conversation and the recorder's durable
+    // fold are one implementation (`rig_agent::agent::conversation`),
+    // fed by the same events. This pins that structurally: the request
+    // the model actually receives for the next run's first turn is
+    // exactly the durable projection plus the new prompt — every
+    // field, turn ids included. A reintroduced second fold anywhere on
+    // the path fails here.
+    let store = temp_store("one-builder");
+    let factory = Factory::new(vec![
+        tool_turn("c1", "echo"),
+        text_turn("done after steer"),
+        text_turn("second run"),
+    ]);
+    let mut session = factory
+        .clone()
+        .into_builder(store.clone())
+        .dynamic_tool(echo_tool())
+        .create("C:/w")?;
+    let mailbox = session.mailbox_handle();
+
+    // Run one: a tool roundtrip with a steer landing mid-run — the
+    // trickiest shape both feed paths must reproduce identically.
+    let mut seen_call = false;
+    let run_one = session
+        .prompt_with("run the tool", &mut |event| {
+            if matches!(event, SessionEvent::ToolCall { .. }) && !seen_call {
+                seen_call = true;
+                mailbox.submit("also this");
+            }
+        })
+        .await;
+    assert_eq!(run_one.outcome, crate::session::RunOutcome::Completed);
+
+    let projected = session.context();
+
+    session.prompt("next").await;
+
+    let requests = factory.requests();
+    let served = requests.last().expect("run two's request");
+    let served_history: Vec<&Message> = served.chat_history.iter().collect();
+    assert_eq!(
+        served_history.len(),
+        projected.len() + 1,
+        "the next run sends the projection plus its prompt, nothing reshaped"
+    );
+    for (served_message, projected_message) in served_history[..served_history.len() - 1]
+        .iter()
+        .zip(&projected)
+    {
+        assert_eq!(*served_message, projected_message);
+    }
+    assert_eq!(served_history.last(), Some(&&Message::user("next")));
+    std::fs::remove_dir_all(store.dir()).ok();
+    Ok(())
+}
+
+#[tokio::test]
 async fn messages_queued_before_pump_all_join_the_first_run() -> Result<(), SessionError> {
     // Drain-all at idle entry: both messages become the run's opening
     // input — one entry each, before any deltas — so the run is a single

@@ -118,31 +118,6 @@ fn text_only_tail_is_not_dangling() {
 }
 
 #[test]
-fn interrupted_results_answer_every_call_explicitly() {
-    let entries = vec![
-        entry(user("go")),
-        entry(assistant_tool_calls(&["c1".to_string(), "c2".to_string()])),
-    ];
-    let (_, dangling) = project(&entries);
-    let dangling = dangling.expect("dangles");
-    let results = interrupted_results(&dangling);
-    assert_eq!(results.len(), 2);
-    assert_eq!(results[0].id, "c1");
-    assert_eq!(results[1].id, "c2");
-    for result in &results {
-        let text = result
-            .content
-            .iter()
-            .filter_map(ToolResultContent::as_text)
-            .collect::<String>();
-        assert!(
-            text.to_lowercase().contains("interrupted"),
-            "synthetic result must say it was interrupted: {text}"
-        );
-    }
-}
-
-#[test]
 fn the_register_reads_the_files_last_model_change_backwards() {
     let records = vec![
         side(SideKind::ModelChange {

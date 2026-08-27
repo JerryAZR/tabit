@@ -25,8 +25,9 @@
 use crate::entry::{EntryKind, FileRecord, SessionEntry, SideKind, SideRecord};
 use crate::error::SessionError;
 use crate::ids;
-use crate::projection::{self, Projector};
+use crate::projection::fold_node;
 use crate::store::{LoadedSession, SessionWriter};
+use rig_agent::agent::conversation::{Conversation, interrupted_results};
 use rig_agent::agent::hook::{AgentHook, HookContext, ModelTurnAction, ModelTurnFinished};
 use rig_core::completion::Message;
 use rig_core::wasm_compat::WasmCompatSend;
@@ -52,9 +53,11 @@ struct Resident {
     /// grown. `None` is the root (an empty conversation). Appends
     /// attach as children of the head; checkout moves the pointer.
     head: Option<String>,
-    /// The live projection of the active branch: context grows one
-    /// node at a time here, so no run ever re-derives it.
-    projector: Projector,
+    /// The live projection of the active branch — the **one context
+    /// builder** (`rig_agent::agent::conversation::Conversation`), the
+    /// same fold the engine holds per-run. Context grows one node at a
+    /// time here, so no run ever re-derives it.
+    conversation: Conversation,
     /// The file-order sequence of every record (nodes and side
     /// records alike) — what the file will hold once drained; stats
     /// attribution walks it.
@@ -115,7 +118,7 @@ impl SessionRecorder {
                 tree: HashMap::new(),
                 pending_register: None,
                 head: None,
-                projector: Projector::default(),
+                conversation: Conversation::new(),
                 records: Vec::new(),
             })),
             writer: Mutex::new(writer),
@@ -211,10 +214,10 @@ impl SessionRecorder {
         resident.records = loaded.records;
         let branch = walk(&resident, resident.head.clone(), &loaded.path)?;
         for entry in &branch {
-            resident.projector.fold(entry);
+            fold_node(&mut resident.conversation, entry);
         }
         let repaired = self.repair_dangling_locked(&mut resident, &loaded.path);
-        let context = resident.projector.snapshot();
+        let context = resident.conversation.messages_vec();
         Ok(Loaded {
             selection,
             context,
@@ -319,7 +322,7 @@ impl SessionRecorder {
                 for (entry, record) in entries.iter().zip(records) {
                     resident.tree.insert(entry.id.clone(), entry.clone());
                     resident.head = Some(entry.id.clone());
-                    resident.projector.fold(entry);
+                    fold_node(&mut resident.conversation, entry);
                     resident.records.push(record);
                 }
                 Ok(ids)
@@ -355,9 +358,9 @@ impl SessionRecorder {
             });
         }
         let branch = walk(&resident, to.map(str::to_string), path)?;
-        let mut projector = Projector::default();
+        let mut conversation = Conversation::new();
         for entry in &branch {
-            projector.fold(entry);
+            fold_node(&mut conversation, entry);
         }
         let record = FileRecord::Side(SideRecord {
             timestamp: ids::now_rfc3339(),
@@ -371,7 +374,7 @@ impl SessionRecorder {
             self.observe(&mut writer, error.map(|error| error.to_string()));
         }
         resident.head = to.map(str::to_string);
-        resident.projector = projector;
+        resident.conversation = conversation;
         resident.records.push(record);
         self.repair_dangling_locked(&mut resident, path);
         Ok(branch.len())
@@ -387,10 +390,10 @@ impl SessionRecorder {
     }
 
     fn repair_dangling_locked(&self, resident: &mut Resident, path: &std::path::Path) -> usize {
-        let Some(dangling) = resident.projector.dangling() else {
+        let Some(dangling) = resident.conversation.dangling() else {
             return 0;
         };
-        let results = projection::interrupted_results(&dangling);
+        let results = interrupted_results(&dangling);
         let repaired = results.len();
         for result in results {
             let entry = SessionEntry::new(
@@ -406,7 +409,7 @@ impl SessionRecorder {
             }
             resident.tree.insert(entry.id.clone(), entry.clone());
             resident.head = Some(entry.id.clone());
-            resident.projector.fold(&entry);
+            fold_node(&mut resident.conversation, &entry);
             resident.records.push(record);
         }
         let _ = path;
@@ -416,7 +419,9 @@ impl SessionRecorder {
     /// The projected model-visible context (what the next outer loop
     /// sees) — a snapshot of the live projection.
     pub fn context(&self) -> Vec<Message> {
-        crate::lock::lock(&self.resident).projector.snapshot()
+        crate::lock::lock(&self.resident)
+            .conversation
+            .messages_vec()
     }
 
     /// The active branch, root → head — the temporary path container,
@@ -458,7 +463,7 @@ impl SessionRecorder {
         }
         resident.tree.insert(entry.id.clone(), entry.clone());
         resident.head = Some(entry.id.clone());
-        resident.projector.fold(&entry);
+        fold_node(&mut resident.conversation, &entry);
         resident.records.push(record);
         entry.id
     }
@@ -584,8 +589,12 @@ impl AgentHook for RecorderHook {
         self.0.record_as(
             &turn_id,
             EntryKind::AssistantMessage {
+                // The announced turn id rides the message — the same
+                // shape the engine's conversation carries, so the
+                // durable fold and the in-run builder agree on every
+                // field.
                 message: Message::Assistant {
-                    id: None,
+                    id: Some(turn_id.clone()),
                     content: event.content.clone(),
                 },
                 usage: event.usage,
