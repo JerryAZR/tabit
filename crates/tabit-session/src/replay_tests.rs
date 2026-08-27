@@ -46,14 +46,6 @@ fn tool_call(id: &str, call_id: Option<&str>, name: &str) -> AssistantContent {
 fn a_chain_projects_to_bracketed_whole_text_events() {
     let chain = vec![
         entry(
-            "m0",
-            EntryKind::ModelChange {
-                provider: "p".to_string(),
-                model: "m".to_string(),
-                thinking_level: None,
-            },
-        ),
-        entry(
             "u1",
             EntryKind::UserMessage {
                 message: Message::user("list the files"),
@@ -201,24 +193,10 @@ fn multiple_text_items_and_reasoning_blocks_project_to_one_text_and_per_block_de
 }
 
 #[test]
-fn bookkeeping_entries_project_to_nothing() {
-    let chain = vec![
-        entry("a", EntryKind::Aborted),
-        entry("w", EntryKind::Rewound { to: None }),
-        entry(
-            "l",
-            EntryKind::Label {
-                name: "bookmark".to_string(),
-            },
-        ),
-        entry(
-            "c",
-            EntryKind::Custom {
-                data: serde_json::json!({}),
-            },
-        ),
-    ];
-    assert!(project_events(&chain).is_empty());
+fn an_empty_branch_projects_to_nothing() {
+    // v3: bookkeeping lives in side records that never enter a branch,
+    // so there is nothing to skip — an empty branch is simply empty.
+    assert!(project_events(&[]).is_empty());
 }
 
 #[test]

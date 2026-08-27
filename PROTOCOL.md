@@ -944,44 +944,61 @@ input that exists only in memory; force-stop buffer loss costs model
 output, never user input.
 
 **Marker classification (ruled 2026-08): the prompt is the only
-barrier-class entry.** `aborted` and `rewound` markers ride the buffer
-like conversational entries: abort's load-bearing part is the stop,
-not the entry (an abort that could not log still stopped the run —
-and an abort "rejected" so the turn completes has no marker to write);
-a lost rewind is cheap to redo by hand, the FIFO already forces its
-flush before any post-rewind turn can commit (the marker precedes
-that turn's prompt in the buffer), and write failure is too rare to
-buy complexity for. `model_change` rides the buffer for the same
-reasons (hand-redoable, FIFO-protected by the next prompt, and
+barrier-class record.** The `aborted` and `checkout` side records ride
+the buffer like conversational nodes: abort's load-bearing part is the
+stop, not the record (an abort that could not log still stopped the
+run — and an abort "rejected" so the turn completes has no marker to
+write); a lost checkout is cheap to redo by hand, the FIFO already
+forces its flush before any post-checkout turn can commit (the record
+precedes that turn's prompt in the buffer), and write failure is too
+rare to buy complexity for. `model_change` rides the buffer for the
+same reasons (hand-redoable, FIFO-protected by the next prompt, and
 resume's announce-before-every-pass shows whichever register
 survived), so `model_changed` means "landed in the session," durable
 no later than the next turn's prompt.
 
-Implementation shape addition: **the buffer is not the runtime
-state.** The session keeps its resident tree and projected context
-(the conversation truth); the writer owns a linear FIFO of unflushed
-entries (the outbox). Separate structs, one-way flow (session commits
-→ writer buffers → disk), events flow back (degraded/recovered).
+Implementation shape (rewritten for format v3, the resident-state
+ruling 2026-08): **memory is the runtime state; the file is the
+write-behind mirror and the inter-process handoff.** The session file
+splits into two planes — conversation **nodes** (`user_message`,
+`assistant_message`, `tool_result`; id + parent, forming the tree) and
+parentless **side records** (`model_change`, `checkout`, `aborted`,
+`label`, `custom`; no id, no parent — the tree is conversation only).
+The recorder owns the resident state: the whole tree (every branch),
+a head pointer (git-style: appends attach as children of the head, a
+checkout moves the pointer to an existing node), the incrementally
+folded context (the live projection of the active branch — the path
+array exists only as a temporary container inside load and checkout),
+and the file-order record sequence. Records commit memory-first
+through the writer's FIFO outbox; nothing re-reads the file
+mid-session — the loader's one-pass fold (tree, head, register,
+repairs) runs at process start and `open_session` only. Checkout is a
+pointer move plus a `checkout` side record; the model register is a
+side record through the same one write site; the opening
+`model_change` rides the first barrier's drain (deferred creation: a
+session that never runs materializes nothing, and an explicit switch
+supersedes the pending opening). A log deleted under a live run no
+longer fails the run — memory is authoritative; the loss is the
+force-stop class, realized at the next open.
 
-**Status: shipped (2026-08).** The writer is the write-queue manager:
-memory-first commit (entries chain and id at buffer time), a FIFO
-outbox the file always mirrors as a clean prefix, torn-write rollback
-to the durable offset (through a separate write handle — an
-append-mode handle cannot truncate on Windows), retries on every
+**Status: shipped (2026-08).** The writer is the write-behind sink:
+records arrive pre-constructed (the recorder owns structure, the
+writer owns bytes), the outbox drains as **one write** (roll back to
+the durable offset or clear it — no loop; the offset only advances on
+a full drain, so a failed barrier leaves nothing of itself anywhere,
+and the truncation rides a separate write handle because an
+append-mode handle cannot `set_len` on Windows), retries on every
 subsequent commit plus one at each clean exit, the prompt barrier
-with the discard twist (a failed barrier un-records the batch — no
-turn, no terminal, drafts back — **disk-atomically**: the batch is
-buffered whole and flushed once, and a partial flush is truncated
-back to the pre-barrier offset, so a discarded batch cannot
-resurface as history at reload), `run_finished.durable`, and the
+with the discard twist (validate-then-commit: the batch enters the
+resident state only after the flush proves out — no turn, no
+terminal, drafts back), `run_finished.durable`, and the
 `persist_degraded`/`persist_recovered` transitions on the recorder's
-notice channel. The marker classification is above (the prompt is
-the only barrier-class entry). One documented limit: steer records
-ride the buffer like turn output — a force-stop can lose a consumed
-steer's *record* (its effect steered the live run; the input itself
-was never lost). A hard crash *inside* the barrier's single flush
-can still leave a partial batch on disk — the force-stop class,
-narrowed to the instant between two flushed lines.
+notice channel. The classification is above (the prompt is the only
+barrier-class record). One documented limit: steer records ride the
+buffer like turn output — a force-stop can lose a consumed steer's
+*record* (its effect steered the live run; the input itself was never
+lost). A hard crash *inside* the barrier's single write can still
+tear the final line — repaired as a torn tail at load.
 
 ### 9. Empty conversation rides `PromptCancelled` — resolved by the v2 pass
 

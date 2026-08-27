@@ -302,12 +302,13 @@ report (§3.5); you never mine it for user-facing meaning.
 | `persist_recovered` | — | the pending entries reached the disk. |
 
 **Write-behind persistence (shipped, PROTOCOL.md flag 8).** Commits are
-memory-first: entries chain at buffer time and the file is always a
+memory-first: the resident state (tree, head, context) is the
+in-session truth and the file is its write-behind mirror — always a
 clean prefix of commit order. The prompt barrier guards every run's
 opening input — a turn never starts on a message that exists only in
 memory; if the flush fails at drain, the batch comes back as drafts
 (`messages_discarded` + `persist_degraded`), never held. `model_change`
-and the `rewound`/`aborted` markers ride the buffer (the marker
+and the `checkout`/`aborted` side records ride the buffer (the marker
 classification ruling): durable no later than the next turn's prompt,
 and a hard death in the window loses them — hand-redoable, and resume
 announces whichever register survived.
@@ -331,9 +332,9 @@ per-TTL splits); they stay engine-internal and never reach the wire.
 
 **Startup replay.** Send `initialize { protocol_version, replay: true
 }`. After the ack: the session's `model_changed` announcement (§6),
-then `replay_started { total }` → the active chain's
-entries as finalized events in chain order (`user_message` per user
-entry; per assistant entry: `turn_started`, full-text deltas, its
+then `replay_started { total }` → the active branch's
+nodes as finalized events in branch order (`user_message` per user
+node; per assistant node: `turn_started`, full-text deltas, its
 `tool_call`s and `tool_result`s, `completion_call`, `turn_committed`)
 → `replay_done`. Branch
 siblings are excluded by construction; ids are the log's ids, identical

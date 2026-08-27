@@ -357,11 +357,8 @@ fn print_event(event: &SessionEvent) {
 /// The human startup banner (stderr — stdout is the answer channel in
 /// print mode and the protocol channel in JSON mode).
 fn print_banner(session: &Session) {
-    let stats = session.stats().ok();
-    if stats
-        .as_ref()
-        .is_some_and(|s| s.total_usage.total_tokens > 0)
-    {
+    let stats = session.stats();
+    if stats.total_usage.total_tokens > 0 {
         eprintln!(
             "resuming {} ({} prior turns of context)",
             session

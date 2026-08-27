@@ -12,12 +12,14 @@
 //! message is recorded, the rig-agent engine runs the turns (with a
 //! recorder hook persisting every completed assistant turn and tool
 //! result as it happens), and the item stream is folded into the
-//! serializable event list a frontend consumes. After every run — success
-//! or failure — the in-memory context is re-derived from the log, which
-//! stays the single source of truth. Permissions and extensions later
-//! plug into this same seam.
+//! serializable event list a frontend consumes. The recorder's resident
+//! state — the conversation tree, the head, the incrementally folded
+//! context — is the in-session truth; the file is its write-behind
+//! mirror and the handoff between processes, parsed once at load and
+//! never re-read mid-session. Permissions and extensions later plug
+//! into this same seam.
 
-use crate::entry::{EntryKind, SessionEntry};
+use crate::entry::{EntryKind, FileRecord, SessionEntry, SideKind};
 use crate::error::SessionError;
 use crate::interaction::InteractionHub;
 use crate::lock::lock;
@@ -25,7 +27,7 @@ use crate::model::validate_selection;
 use crate::projection;
 use crate::recorder::{RecorderHook, SessionRecorder};
 use crate::registry::ModelRegistry;
-use crate::store::{Repair, SessionStore, SessionWriter, chain_from};
+use crate::store::{Repair, SessionStore, SessionWriter};
 use futures::StreamExt;
 use rig_agent::agent::{Agent, AgentBuilder, ModelHandle};
 use rig_agent::agent::{MultiTurnStreamItem, StreamingError};
@@ -228,58 +230,63 @@ impl SessionBuilder {
     /// materializes at the first user message, so a session that never
     /// runs leaves nothing behind — not a header-only orphan.
     pub fn create(self, cwd: &str) -> Result<Session, SessionError> {
-        let mut writer = self.store.create(cwd);
-        writer.set_opening_entry(EntryKind::ModelChange {
-            provider: self.selection.provider.clone(),
-            model: self.selection.model.clone(),
-            thinking_level: self.selection.thinking_level.clone(),
-        });
-        Session::assemble(self, writer, Vec::new(), false)
+        let writer = self.store.create(cwd);
+        let selection = self.selection.clone();
+        let session = Session::assemble(self, writer, false)?;
+        // The opening model_change rides the first barrier's drain —
+        // the deferred-creation contract (a session that never runs
+        // materializes nothing), superseded by any register write.
+        session.recorder.defer_register(selection);
+        Ok(session)
     }
 
-    /// Resume the session stored at `path`: replay entries into context,
-    /// repair a dangling tool-use roundtrip, and continue with the
-    /// builder's selection. Callers resolve that selection through
+    /// Resume the session stored at `path`: fold the file into the
+    /// resident state (tree, head, selection register), repair a
+    /// dangling tool-use roundtrip, and continue with the builder's
+    /// selection. Callers resolve that selection through
     /// [`ModelRegistry::default_selection`] (explicit choice > the log's
     /// last model > configured preference); when it differs from the
     /// file's last recorded model the switch is recorded as a
-    /// `model_change` entry. The register is file-scoped (the owner
-    /// ruling): the last model_change in append order wins, whichever
-    /// branch it was recorded on.
+    /// `model_change` side record. The register is file-scoped (the
+    /// owner ruling): the last model_change in append order wins,
+    /// whichever branch the conversation is on.
     pub fn resume(self, path: &Path) -> Result<(Session, ResumeReport), SessionError> {
         let loaded = self.store.open_path(path)?;
         let mut report = ResumeReport {
-            file_repairs: loaded.repairs,
+            file_repairs: loaded.repairs.clone(),
             ..ResumeReport::default()
         };
-
-        let (context, _dangling) = projection::project(&loaded.chain);
-        let writer = SessionWriter::open_existing(&loaded.path)?;
-
-        let last = projection::last_model_change_in_file(&loaded.entries);
-        if let Some((provider, model, thinking_level)) = last {
+        let last = projection::last_model_change_in_file(&loaded.records).map(
+            |(provider, model, thinking_level)| {
+                (
+                    provider.to_string(),
+                    model.to_string(),
+                    thinking_level.map(str::to_string),
+                )
+            },
+        );
+        if let Some((provider, model, thinking_level)) = &last {
             report.resumed_model = Some(ModelSelection {
-                provider: provider.to_string(),
-                model: model.to_string(),
-                thinking_level: thinking_level.map(str::to_string),
+                provider: provider.clone(),
+                model: model.clone(),
+                thinking_level: thinking_level.clone(),
             });
         }
         validate_selection(&self.selection, &self.config)?;
-        let mut session = Session::assemble(self, writer, context, true)?;
-        // The id set must answer for entries earlier processes wrote
-        // (dropped branches included — off-chain ids are checkout
-        // targets, the branch-switch case); this process's records
-        // insert themselves as they append.
-        session
-            .recorder
-            .seed_ids(loaded.entries.iter().map(|entry| entry.id.clone()));
+        let writer = SessionWriter::open_existing(&loaded.path)?;
+        let mut session = Session::assemble(self, writer, true)?;
+        // The one-pass load fold: tree, head, register, context, and
+        // the crash-equivalent repairs — from here on memory is
+        // authoritative and the file is the write-behind mirror.
+        let outcome = session.recorder.load(loaded)?;
+        report.repaired_tool_calls = outcome.repaired_tool_calls;
         let selection = session.selection();
         let same_model = matches!(
-            last,
+            &last,
             Some((provider, model, level))
-                if provider == selection.provider
-                    && model == selection.model
-                    && level == selection.thinking_level.as_deref()
+                if provider == &selection.provider
+                    && model == &selection.model
+                    && level == &selection.thinking_level
         );
         if !same_model {
             // Either a caller-directed switch at resume time, or a log
@@ -288,10 +295,6 @@ impl SessionBuilder {
             // register-write site like every other switch.
             session.model_register().write(selection);
         }
-        // One repair path for everyone: reload_context synthesizes results
-        // for a dangling trailing roundtrip (and fails loudly if they
-        // cannot be persisted) and re-derives the context from the log.
-        report.repaired_tool_calls = session.reload_context()?;
         Ok((session, report))
     }
 }
@@ -590,12 +593,6 @@ pub struct Session {
     /// (see [`Session::submit`]); drained by [`Session::pump`] and by the
     /// engine's turn-boundary steering.
     mailbox: Mailbox,
-    context: Vec<Message>,
-    /// The active chain, resident (the ruled in-memory contract: parse
-    /// once per open, refresh at each context re-derivation — replay
-    /// and the coming checkout read memory, nothing re-parses
-    /// mid-session).
-    chain: Vec<crate::entry::SessionEntry>,
     path: PathBuf,
     id: String,
     /// Whether this session continues an existing chain (`resume`) or
@@ -795,13 +792,16 @@ impl Session {
             });
             return None;
         }
-        let mut history = self.context.clone();
+        // The barrier folded the batch into the resident projection —
+        // the history the run sees is exactly the context, batch
+        // included. Acknowledge each message (1:1 with what the model
+        // is about to see).
+        let history = self.recorder.context();
         for queued in batch {
             sink.emit(SessionEvent::UserMessage {
                 text: queued.text(),
                 entry_id: queued.id.clone(),
             });
-            history.push(queued.message.clone());
         }
         Some(history)
     }
@@ -1028,10 +1028,15 @@ impl Session {
         } = driven;
         let mut outcome = RunOutcome::Completed;
         if aborted {
-            self.recorder.record(EntryKind::Aborted);
+            self.recorder.record_side(SideKind::Aborted);
             sink.emit(SessionEvent::RunAborted {
                 output: output.clone(),
             });
+            // An aborted run is crash-shaped: calls it interrupted are
+            // dangling, and the repair synthesizes their results at the
+            // current head so the branch replays cleanly (the same fix
+            // load applies).
+            self.recorder.repair_dangling(&self.path);
             // The abort SITE (the command link, or the host's death
             // watcher, or a checkout) already discarded the
             // at-abort-time queue and said so immediately (flag 6);
@@ -1039,28 +1044,11 @@ impl Session {
             // start the next run.
             outcome = RunOutcome::Aborted;
         } else if let Some(failure) = failure {
-            // The log stays the source of truth: re-derive the context,
-            // and a failing reload outranks the provider error (the same
-            // precedence the pre-event failure path had).
-            let message = self
-                .reload_context()
-                .err()
-                .map(|error| error.to_string())
-                .unwrap_or_else(|| failure.to_string());
-            sink.emit(SessionEvent::RunFailed { message });
-            outcome = RunOutcome::Failed;
-        }
-        if !matches!(outcome, RunOutcome::Failed)
-            && let Err(error) = self.reload_context()
-        {
             sink.emit(SessionEvent::RunFailed {
-                message: error.to_string(),
+                message: failure.to_string(),
             });
             outcome = RunOutcome::Failed;
         }
-        // Persist degrade is not a run failure (flag 8): the terminal
-        // already carried the `durable` verdict, and the degraded /
-        // recovered notices ride the recorder's channel.
         if let Some(hub) = &self.interaction {
             hub.clear_pending();
         }
@@ -1132,8 +1120,8 @@ impl Session {
     /// durable on its own: a `rewound` marker lands in the log even if no
     /// prompt follows.
     pub fn rewind(&mut self, turns: usize) -> Result<RewindSummary, SessionError> {
-        let loaded = self.store.open_path(&self.path)?;
-        let boundaries = projection::user_message_boundaries(&loaded.chain);
+        let branch = self.recorder.active_branch();
+        let boundaries = projection::user_message_boundaries(&branch);
         if turns == 0 {
             return Err(SessionError::Config {
                 message: "rewind needs at least 1 user message to drop".to_string(),
@@ -1146,76 +1134,42 @@ impl Session {
         else {
             return Err(SessionError::Config {
                 message: format!(
-                    "cannot rewind {turns} user message(s): the active chain holds {}",
+                    "cannot rewind {turns} user message(s): the active branch holds {}",
                     boundaries.len()
                 ),
             });
         };
-        // The branch point is the boundary's parent; the new chain is the
-        // current chain truncated right after it.
-        let new_chain = match &target.parent_id {
-            Some(branch_point) => {
-                let Some(end) = loaded.chain.iter().position(|e| &e.id == branch_point) else {
-                    // Unreachable: the boundary sits on the chain, so its
-                    // parent does too — but a hand-crafted log is not
-                    // trusted to keep that promise.
-                    return Err(SessionError::Corrupt {
-                        path: self.path.clone(),
-                        message: format!(
-                            "boundary `{}` has parent `{branch_point}` outside the active chain",
-                            target.id
-                        ),
-                    });
-                };
-                loaded.chain.iter().take(end + 1).cloned().collect()
-            }
-            None => Vec::new(),
-        };
-        let dropped = boundaries.len() - projection::user_message_boundaries(&new_chain).len();
-        self.apply_rewind(target.parent_id.as_deref(), dropped)
+        // The branch point is the boundary's parent; the conversation
+        // continues from there.
+        self.apply_checkout(target.parent_id.as_deref())
     }
 
-    /// Rewind to an exact entry: the active chain will end at that entry.
-    /// Any entry in the file is a valid target, on or off the active chain
-    /// (this is also how a branch switch happens); a target that leaves a
-    /// partially answered tool batch gets the same interrupted-result
-    /// repair a crash gets. The library primitive for tree-picking
-    /// frontends — [`Session::rewind`] is the user-facing form.
+    /// Rewind to an exact entry: the active branch will end at that
+    /// entry. Any node in the tree is a valid target, on or off the
+    /// active branch (this is also how a branch switch happens); a
+    /// target that leaves a partially answered tool batch gets the same
+    /// interrupted-result repair a crash gets. The library primitive
+    /// for tree-picking frontends — [`Session::rewind`] is the
+    /// user-facing form.
     pub fn rewind_to_entry(&mut self, entry_id: &str) -> Result<RewindSummary, SessionError> {
-        let loaded = self.store.open_path(&self.path)?;
-        if !loaded.entries.iter().any(|entry| entry.id == entry_id) {
-            return Err(SessionError::Config {
-                message: format!("no entry `{entry_id}` in this session"),
-            });
-        }
-        let new_chain = chain_from(&loaded.entries, Some(entry_id), &loaded.path)?;
-        let dropped = projection::user_message_boundaries(&loaded.chain)
-            .len()
-            .saturating_sub(projection::user_message_boundaries(&new_chain).len());
-        self.apply_rewind(Some(entry_id), dropped)
+        self.apply_checkout(Some(entry_id))
     }
 
-    /// Shared rewind mechanics: record the marker and reload the context
-    /// onto the new chain (repairs for a dangling tail land at the new
-    /// leaf; the chain itself is re-read from the log). The selection is
-    /// a session preference (owner ruling 2026-08): a rewind moves the
-    /// chain, never the register — the model that answers next is the
-    /// file's last `model_change`, unchanged by this move, so there is
-    /// nothing to re-derive or validate here. A marker whose flush
-    /// fails rides the outbox like any entry (flag 8 — degraded
-    /// notices announce it; the ruling keeps markers non-barrier).
-    fn apply_rewind(
-        &mut self,
-        branch_point: Option<&str>,
-        dropped: usize,
-    ) -> Result<RewindSummary, SessionError> {
-        self.recorder.rewind_to(branch_point);
-        // Repairs for a dangling tail land on the new chain, at the new
-        // leaf.
-        self.reload_context()?;
+    /// Shared checkout mechanics: move the recorder's head, re-project
+    /// the context from the new branch, and repair a mid-batch landing
+    /// point. The selection is a session preference (owner ruling
+    /// 2026-08): a checkout moves the head, never the register — the
+    /// model that answers next is unchanged by this move. The
+    /// `checkout` side record rides the outbox like any record (flag 8
+    /// — degraded notices announce a failed flush; the ruling keeps it
+    /// non-barrier).
+    fn apply_checkout(&mut self, to: Option<&str>) -> Result<RewindSummary, SessionError> {
+        let before = projection::user_message_boundaries(&self.recorder.active_branch()).len();
+        self.recorder.checkout(to, &self.path)?;
+        let after = projection::user_message_boundaries(&self.recorder.active_branch()).len();
         Ok(RewindSummary {
-            dropped,
-            to_entry: branch_point.unwrap_or_default().to_string(),
+            dropped: before.saturating_sub(after),
+            to_entry: to.unwrap_or_default().to_string(),
         })
     }
 
@@ -1295,56 +1249,29 @@ impl Session {
         self.resumed
     }
 
-    /// The projected model-visible context (what the next outer loop sees).
-    pub fn context(&self) -> &[Message] {
-        &self.context
+    /// The projected model-visible context (what the next outer loop sees)
+    /// — a snapshot of the resident projection.
+    pub fn context(&self) -> Vec<Message> {
+        self.recorder.context()
     }
 
-    /// Usage and cost totals, folded from the active chain. Re-reads the
-    /// session file so the answer is always consistent with what is on
-    /// disk.
-    pub fn stats(&self) -> Result<SessionStats, SessionError> {
-        let loaded = self.store.open_path(&self.path)?;
-        Ok(self.fold_stats(&loaded.chain))
+    /// Usage and cost totals, folded from the resident record sequence
+    /// over the active branch — consistent with what this process knows
+    /// (the file may lag it under degrade, like everything else).
+    pub fn stats(&self) -> SessionStats {
+        let records = self.recorder.records();
+        let branch = self.recorder.active_branch();
+        self.fold_stats(&records, &branch)
     }
 
-    /// The replay pass (PROTOCOL.md v2): the resident chain projected
-    /// into finalized live events — the same shapes a live run produces,
-    /// ids verbatim from the log, so a frontend renders history and live
-    /// turns with one set of arms. Slice 3's cross-branch checkout
-    /// reuses this over a different chain.
+    /// The replay pass (PROTOCOL.md v2): the active branch (the
+    /// temporary path container, materialized on demand) projected into
+    /// finalized live events — the same shapes a live run produces,
+    /// ids verbatim from the tree, so a frontend renders history and
+    /// live turns with one set of arms. A checkout re-renders over a
+    /// different branch through the same door.
     pub fn replay_events(&self) -> Vec<SessionEvent> {
-        crate::replay::project_events(&self.chain)
-    }
-
-    /// Re-derive the in-memory context from the log's active chain. If the
-    /// chain ends on a dangling tool-use roundtrip (an interrupted run or
-    /// a mid-batch branch point), repair it with synthesized results — the
-    /// same fix resume applies — so the context stays replayable. The
-    /// read spans the resident view (file + outbox — flag 8: under
-    /// degrade, buffered entries are conversation truth too); a repair
-    /// whose flush fails rides the outbox with the rest (degraded
-    /// notices announce it; the reopen net re-repairs if the buffer is
-    /// ever lost).
-    fn reload_context(&mut self) -> Result<usize, SessionError> {
-        let loaded = self.store.open_path(&self.path)?;
-        let (_, chain) = self.recorder.load_resident(loaded)?;
-        let (_, dangling) = projection::project(&chain);
-        let mut repaired = 0;
-        if let Some(dangling) = &dangling {
-            for result in projection::interrupted_results(dangling) {
-                self.recorder.record(EntryKind::ToolResult { result });
-            }
-            repaired = dangling.calls.len();
-        }
-        let loaded = self.store.open_path(&self.path)?;
-        let (_, chain) = self.recorder.load_resident(loaded)?;
-        let (context, _) = projection::project(&chain);
-        self.context = context;
-        // The chain stays resident: replay (and the coming checkout)
-        // reads this, not the file.
-        self.chain = chain;
-        Ok(repaired)
+        crate::replay::project_events(&self.recorder.active_branch())
     }
 
     /// Convert the engine's usage record to the protocol's wire shape
@@ -1360,22 +1287,34 @@ impl Session {
         }
     }
 
-    fn fold_stats(&self, entries: &[SessionEntry]) -> SessionStats {
+    fn fold_stats(&self, records: &[FileRecord], branch: &[SessionEntry]) -> SessionStats {
         let mut stats = SessionStats::default();
-        // Attributed by the log's own model_change entries; assistant turns
-        // before any change entry attribute to empty ids (uncosted).
+        // Attributed by the record stream's own `model_change` side
+        // records; assistant turns before any change record attribute
+        // to empty ids (uncosted). Only nodes on the active branch
+        // count — an abandoned branch's spend is not this
+        // conversation's.
+        let on_branch: std::collections::HashSet<&str> =
+            branch.iter().map(|entry| entry.id.as_str()).collect();
         let mut current = (String::new(), String::new(), None);
         let mut per_model: Vec<ModelStats> = Vec::new();
-        for entry in entries {
-            match &entry.kind {
-                EntryKind::ModelChange {
-                    provider,
-                    model,
-                    thinking_level,
-                } => {
+        for record in records {
+            match record {
+                FileRecord::Side(crate::entry::SideRecord {
+                    kind:
+                        SideKind::ModelChange {
+                            provider,
+                            model,
+                            thinking_level,
+                        },
+                    ..
+                }) => {
                     current = (provider.clone(), model.clone(), thinking_level.clone());
                 }
-                EntryKind::AssistantMessage { usage, .. } => {
+                FileRecord::Node(entry) if on_branch.contains(entry.id.as_str()) => {
+                    let EntryKind::AssistantMessage { usage, .. } = &entry.kind else {
+                        continue;
+                    };
                     let (provider, model, level) = &current;
                     match per_model
                         .iter_mut()
@@ -1392,7 +1331,8 @@ impl Session {
                     }
                     add_usage(&mut stats.total_usage, usage);
                 }
-                _ => continue,
+                FileRecord::Node(_) => {}
+                FileRecord::Side(_) => {}
             }
         }
         for model_stats in &mut per_model {
@@ -1436,7 +1376,6 @@ impl Session {
     fn assemble(
         builder: SessionBuilder,
         writer: SessionWriter,
-        context: Vec<Message>,
         resumed: bool,
     ) -> Result<Self, SessionError> {
         let path = writer.path().to_path_buf();
@@ -1467,8 +1406,6 @@ impl Session {
             recorder,
             abort: std::sync::Arc::new(std::sync::Mutex::new(CancellationToken::new())),
             mailbox: Mailbox::default(),
-            context,
-            chain: Vec::new(),
             path,
             id,
             resumed,
@@ -1505,7 +1442,7 @@ impl ModelRegister {
     /// every entry write has.
     pub(crate) fn write(&self, selection: ModelSelection) {
         let mut cell = lock(&self.selection);
-        self.recorder.record(EntryKind::ModelChange {
+        self.recorder.record_side(SideKind::ModelChange {
             provider: selection.provider.clone(),
             model: selection.model.clone(),
             thinking_level: selection.thinking_level.clone(),

@@ -99,17 +99,21 @@ The application-level conversation layer pi builds over its agent loop:
 - Persistence: session log format (JSONL event log first — replayable,
   diff-friendly; sqlite backend later if needed).
 - Session listing/resume across runs.
-- **Rewind/branch shipped**: the JSONL log is a parent-linked tree; a
-  rewind appends a `rewound` marker (durable even with no follow-up
-  append) and moves the leaf, so the next prompt branches. Library level
-  branches from any entry (`Session::rewind_to_entry`) with the dangling
-  repair covering mid-batch points; the user surface
-  (`Session::rewind(n)`, CLI `--rewind <n>`) targets user-message
-  boundaries (prompts and steers alike). Projection and stats follow
-  the active chain; model selection is a session preference — the
-  file's last `model_change` in append order (the register ruling,
-  PROTOCOL.md v3) — so a rewind never moves it. Interactive branch
-  browsing is a GUI
+- **Rewind/branch shipped (format v3: the resident-state ruling)**:
+  the JSONL log is a parent-linked tree of conversation nodes plus
+  parentless side records; a checkout moves the in-memory head to an
+  existing node (git-style — the pointer moves, nothing is copied)
+  and records a `checkout` side record (durable even with no follow-up
+  append), so the next prompt branches. Library level branches from
+  any node (`Session::rewind_to_entry`) with the dangling repair
+  covering mid-batch points; the user surface (`Session::rewind(n)`,
+  CLI `--rewind <n>`) targets user-message boundaries (prompts and
+  steers alike). The resident tree, head, and incrementally folded
+  context are the in-session truth — nothing re-reads the file
+  mid-session; projection and stats follow the active branch. Model
+  selection is a session preference — the file's last `model_change`
+  side record in append order (the register ruling, PROTOCOL.md v3) —
+  so a checkout never moves it. Interactive branch browsing is a GUI
   feature. The CLI is print-shaped: `-p <PROMPT>` selects print mode,
   `--rewind` too, bare `tabit` errors loudly until the GUI exists.
 - **Model registry shipped** (`tabit-session::ModelRegistry`): the single

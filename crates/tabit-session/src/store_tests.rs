@@ -1,17 +1,9 @@
 use super::*;
-use crate::entry::EntryKind;
+use crate::entry::{EntryKind, FileRecord, SessionEntry, SideKind, SideRecord};
 use rig_core::OneOrMany;
 use rig_core::completion::Message;
 use rig_core::message::{Text, UserContent};
 use std::fs;
-
-/// One entry of the least-consequential kind: enough to materialize a
-/// deferred session file without coloring what the test inspects.
-fn seed_entry() -> EntryKind {
-    EntryKind::Label {
-        name: "seed".to_string(),
-    }
-}
 
 fn temp_store(tag: &str) -> SessionStore {
     let dir = std::env::temp_dir()
@@ -27,28 +19,109 @@ fn user_message(text: &str) -> Message {
     }
 }
 
+fn user_node(text: &str) -> EntryKind {
+    EntryKind::UserMessage {
+        message: user_message(text),
+    }
+}
+
+/// The writer's flush verdict: `None` is success (write-behind: a
+/// `Some` is the buffered-and-degraded outcome, an error to name).
+fn assert_flushed(outcome: Option<SessionError>) {
+    assert!(outcome.is_none(), "the flush failed: {outcome:?}");
+}
+
+/// A minimal head-tracking builder for store-level fixtures: constructs
+/// records the way the recorder does (each node a child of the running
+/// head; checkouts move it). The store itself is structure-blind —
+/// these tests pin its parsing and write mechanics, the recorder tests
+/// pin the tree.
+#[derive(Default)]
+struct Nodes {
+    head: Option<String>,
+}
+
+impl Nodes {
+    fn node(&mut self, kind: EntryKind) -> FileRecord {
+        let entry = SessionEntry::new(self.head.clone(), "t".to_string(), kind);
+        self.head = Some(entry.id.clone());
+        FileRecord::Node(entry)
+    }
+
+    fn side(kind: SideKind) -> FileRecord {
+        FileRecord::Side(SideRecord {
+            timestamp: "t".to_string(),
+            kind,
+        })
+    }
+
+    fn checkout(&mut self, to: Option<&str>) -> FileRecord {
+        self.head = to.map(str::to_string);
+        Self::side(SideKind::Checkout {
+            to: to.map(str::to_string),
+        })
+    }
+}
+
 #[test]
 fn create_writes_header_and_appends_chain_parents() {
     let store = temp_store("create");
     let mut writer = store.create("C:/work");
-    let first = writer
-        .append(EntryKind::UserMessage {
-            message: user_message("one"),
-        })
-        .expect("append");
-    assert_eq!(first.entry.parent_id, None);
-    let second = writer
-        .append(EntryKind::UserMessage {
-            message: user_message("two"),
-        })
-        .expect("append");
-    assert_eq!(second.entry.parent_id, Some(first.entry.id.clone()));
-    assert_eq!(writer.leaf(), Some(second.entry.id.as_str()));
+    let mut nodes = Nodes::default();
+    let first = nodes.node(user_node("one"));
+    let second = nodes.node(user_node("two"));
+    assert_flushed(writer.append_record(&first));
+    assert_flushed(writer.append_record(&second));
 
     let loaded = store.open_path(writer.path()).expect("open");
-    assert_eq!(loaded.entries.len(), 2);
+    let FileRecord::Node(first_entry) = &first else {
+        panic!("fixture builds nodes");
+    };
+    let FileRecord::Node(second_entry) = &second else {
+        panic!("fixture builds nodes");
+    };
+    assert_eq!(first_entry.parent_id, None);
+    assert_eq!(
+        second_entry.parent_id,
+        Some(first_entry.id.clone()),
+        "the fixture chains the way the recorder does"
+    );
+    assert_eq!(loaded.records.len(), 2);
     assert_eq!(loaded.header.cwd, "C:/work");
     assert!(loaded.repairs.is_empty());
+    fs::remove_dir_all(store.dir()).ok();
+}
+
+#[test]
+fn the_first_record_materializes_the_file_with_the_header() {
+    // The opening model_change is written by the session through the
+    // register (the recorder and session suites pin that); what the
+    // store pins is that the first record through a deferred writer
+    // materializes header-then-records in order.
+    let store = temp_store("opening");
+    let mut writer = store.create("C:/work");
+    assert_flushed(writer.append_record(&Nodes::side(SideKind::ModelChange {
+        provider: "p".to_string(),
+        model: "m".to_string(),
+        thinking_level: None,
+    })));
+    let node = Nodes::default().node(user_node("one"));
+    assert_flushed(writer.append_record(&node));
+
+    let raw = fs::read_to_string(writer.path()).expect("read");
+    let mut lines = raw.lines();
+    let _header = lines.next();
+    let opening = lines.next().expect("the opening side record");
+    assert!(opening.contains("\"kind\":\"model_change\""), "{opening}");
+    assert!(
+        !opening.contains("\"id\""),
+        "side records carry no id: {opening}"
+    );
+    let node_line = lines.next().expect("the node follows");
+    assert!(
+        node_line.contains("\"kind\":\"user_message\""),
+        "{node_line}"
+    );
     fs::remove_dir_all(store.dir()).ok();
 }
 
@@ -56,7 +129,7 @@ fn create_writes_header_and_appends_chain_parents() {
 fn open_by_session_id_finds_the_file() {
     let store = temp_store("by-id");
     let mut writer = store.create("C:/work");
-    writer.append(seed_entry()).expect("materialize");
+    assert_flushed(writer.append_record(&Nodes::default().node(user_node("x"))));
     let id = writer.session_id().to_string();
     let loaded = store.open(&id).expect("open by id");
     assert_eq!(loaded.header.id, id);
@@ -65,24 +138,21 @@ fn open_by_session_id_finds_the_file() {
 }
 
 #[test]
-fn list_orders_newest_first_and_counts_entries() {
+fn list_orders_newest_first_and_counts_records() {
     let store = temp_store("list");
     let mut older = store.create("C:/a");
-    older.append(seed_entry()).expect("materialize");
+    let err = older.append_record(&Nodes::default().node(user_node("x")));
+    assert!(err.is_none(), "list older append: {err:?}");
     std::thread::sleep(std::time::Duration::from_millis(1100));
     let mut newer = store.create("C:/b");
-    newer
-        .append(EntryKind::UserMessage {
-            message: user_message("x"),
-        })
-        .expect("append");
+    let err = newer.append_record(&Nodes::default().node(user_node("y")));
+    assert!(err.is_none(), "list newer append: {err:?}");
 
     let summaries = store.list().expect("list");
     assert_eq!(summaries.len(), 2);
     assert_eq!(summaries[0].id, newer.session_id());
     assert_eq!(summaries[0].entry_count, 1);
-    // Deferred creation means header-only sessions do not exist; the
-    // older file carries its materializing entry.
+    // Deferred creation means header-only sessions do not exist.
     assert_eq!(summaries[1].entry_count, 1);
     assert_eq!(summaries[1].id, older.session_id());
     fs::remove_dir_all(store.dir()).ok();
@@ -92,11 +162,8 @@ fn list_orders_newest_first_and_counts_entries() {
 fn torn_tail_is_repaired_with_report() {
     let store = temp_store("torn");
     let mut writer = store.create("C:/work");
-    writer
-        .append(EntryKind::UserMessage {
-            message: user_message("kept"),
-        })
-        .expect("append");
+    let err = writer.append_record(&Nodes::default().node(user_node("kept")));
+    assert!(err.is_none(), "torn first append: {err:?}");
     let path = writer.path().to_path_buf();
 
     // Simulate a crash mid-append: partial JSON without a trailing newline.
@@ -107,7 +174,7 @@ fn torn_tail_is_repaired_with_report() {
     write!(file, r#"{{"id":"torn","timestamp":"t","kind":"lab"#).expect("tear");
 
     let loaded = store.open_path(&path).expect("open with repair");
-    assert_eq!(loaded.entries.len(), 1, "the complete record survives");
+    assert_eq!(loaded.records.len(), 1, "the complete record survives");
     assert_eq!(loaded.repairs.len(), 1);
     assert!(matches!(
         &loaded.repairs[0],
@@ -124,23 +191,14 @@ fn torn_tail_is_repaired_with_report() {
 fn malformed_middle_line_fails_loudly_with_line_number() {
     let store = temp_store("middle");
     let mut writer = store.create("C:/work");
-    writer
-        .append(EntryKind::UserMessage {
-            message: user_message("one"),
-        })
-        .expect("append");
+    assert_flushed(writer.append_record(&Nodes::default().node(user_node("one"))));
     let path = writer.path().to_path_buf();
     let mut lines = fs::read_to_string(&path).expect("read");
     lines.push_str("this is not json at all\n");
     lines.push_str(
-        &serde_json::to_string(&EntryKind::UserMessage {
-            message: user_message("three"),
-        })
-        .map(|kind| format!("{{\"id\":\"z\",\"parent_id\":null,\"timestamp\":\"t\",\"{kind}\"}}\n"))
-        .expect("serialize"),
+        &serde_json::to_string(&Nodes::default().node(user_node("three"))).expect("serialize node"),
     );
-    // Replace the middle line's wrapper to keep it malformed but positioned
-    // mid-file (the trailing record stays valid).
+    lines.push('\n');
     fs::write(&path, lines).expect("write");
 
     match store.open_path(&path) {
@@ -154,27 +212,20 @@ fn malformed_middle_line_fails_loudly_with_line_number() {
 fn duplicate_entry_id_is_corruption() {
     let store = temp_store("dup");
     let mut writer = store.create("C:/work");
-    writer.append(seed_entry()).expect("materialize");
+    assert_flushed(writer.append_record(&Nodes::default().node(user_node("seed"))));
     let path = writer.path().to_path_buf();
     let header = fs::read_to_string(&path).expect("read header");
-    let entry = serde_json::to_string(&SessionEntry::new(
-        None,
-        "t".to_string(),
-        EntryKind::Label {
-            name: "a".to_string(),
-        },
-    ))
-    .expect("entry");
-    let same = serde_json::to_string(&SessionEntry {
-        id: entry_id_of(&entry),
+    let first = serde_json::to_string(&SessionEntry::new(None, "t".to_string(), user_node("a")))
+        .expect("entry");
+    // Same id, different payload — the duplication is the corruption.
+    let clone = serde_json::to_string(&SessionEntry {
+        id: entry_id_of(&first),
         parent_id: None,
         timestamp: "t".to_string(),
-        kind: EntryKind::Label {
-            name: "b".to_string(),
-        },
+        kind: user_node("b"),
     })
     .expect("entry");
-    fs::write(&path, format!("{header}{entry}\n{same}\n")).expect("write");
+    fs::write(&path, format!("{header}{first}\n{clone}\n")).expect("write");
     match store.open_path(&path) {
         Err(SessionError::Corrupt { message, .. }) => {
             assert!(message.contains("duplicate entry id"), "{message}")
@@ -194,16 +245,14 @@ fn entry_id_of(line: &str) -> String {
 fn unknown_parent_is_corruption() {
     let store = temp_store("orphan");
     let mut writer = store.create("C:/work");
-    writer.append(seed_entry()).expect("materialize");
+    assert_flushed(writer.append_record(&Nodes::default().node(user_node("seed"))));
     let path = writer.path().to_path_buf();
     let header = fs::read_to_string(&path).expect("read header");
     let orphan = serde_json::to_string(&SessionEntry {
         id: "fresh".to_string(),
         parent_id: Some("ghost".to_string()),
         timestamp: "t".to_string(),
-        kind: EntryKind::Label {
-            name: "x".to_string(),
-        },
+        kind: user_node("x"),
     })
     .expect("entry");
     fs::write(&path, format!("{header}{orphan}\n")).expect("write");
@@ -220,12 +269,13 @@ fn unknown_parent_is_corruption() {
 fn future_format_version_is_rejected_loudly() {
     let store = temp_store("version");
     let mut writer = store.create("C:/work");
-    writer.append(seed_entry()).expect("materialize");
+    let err = writer.append_record(&Nodes::default().node(user_node("seed")));
+    assert!(err.is_none(), "version append: {err:?}");
     let path = writer.path().to_path_buf();
     let raw = fs::read_to_string(&path).expect("read");
     let mut header: serde_json::Value =
         serde_json::from_str(raw.lines().next().unwrap_or("")).expect("header json");
-    header["version"] = json_from_u32(99);
+    header["version"] = serde_json::Value::Number(99u32.into());
     let rest = raw.split_once('\n').map(|(_, r)| r).unwrap_or("");
     fs::write(&path, format!("{}\n{}", header, rest)).expect("write");
     match store.open_path(&path) {
@@ -235,10 +285,6 @@ fn future_format_version_is_rejected_loudly() {
         other => panic!("expected version error, got {other:?}"),
     }
     fs::remove_dir_all(store.dir()).ok();
-}
-
-fn json_from_u32(v: u32) -> serde_json::Value {
-    serde_json::Value::Number(v.into())
 }
 
 #[test]
@@ -260,19 +306,22 @@ fn project_default_roots_at_the_start_dir_without_discovery() {
 }
 
 #[test]
-fn fs_failures_are_loud_io_errors() {
+fn fs_failures_buffer_and_surface_loudly() {
     let store = temp_store("io");
-    // create under a path occupied by a file -> create_dir_all fails.
+    // create under a path occupied by a file -> materialization fails.
     let blocker = store.dir().with_extension("blocker");
     fs::write(&blocker, "i am a file").expect("blocker");
     let nested = SessionStore::new(blocker.join("sessions"));
-    // Creation is deferred: the io failure surfaces on the first append,
-    // when the file would materialize under the blocked path.
+    // Creation is deferred: the io failure surfaces on the first
+    // append's drain — and the record stays buffered (memory-first),
+    // waiting for the retry.
     let mut writer = nested.create("C:/w");
-    match writer.append(EntryKind::Aborted) {
-        Err(SessionError::Io { .. }) => {}
+    let record = Nodes::default().node(user_node("x"));
+    match writer.append_record(&record) {
+        Some(SessionError::Io { .. }) => {}
         other => panic!("expected Io, got {other:?}"),
     }
+    assert_eq!(writer.pending(), 1, "the record waits in the outbox");
 
     // open of a missing file.
     match store.open_path(&store.dir().join("missing.jsonl")) {
@@ -337,179 +386,97 @@ fn project_default_resolves_under_the_current_directory() {
 }
 
 #[test]
-fn rewind_moves_the_leaf_and_branches_the_next_append() {
-    let store = temp_store("rewind-writer");
+fn the_outbox_drains_fully_and_the_file_is_the_clean_prefix() {
+    let store = temp_store("outbox");
     let mut writer = store.create("C:/work");
-    let first = writer
-        .append(EntryKind::UserMessage {
-            message: user_message("one"),
-        })
-        .expect("append");
-    let second = writer
-        .append(EntryKind::UserMessage {
-            message: user_message("two"),
-        })
-        .expect("append");
-    writer.rewind_to(Some(&first.entry.id)).expect("rewind");
-    assert_eq!(writer.leaf(), Some(first.entry.id.as_str()));
+    let mut nodes = Nodes::default();
+    let first = nodes.node(user_node("one"));
+    let second = nodes.node(user_node("two"));
+    assert_flushed(writer.append_record(&first));
+    assert_flushed(writer.append_record(&second));
+    let checkout = nodes.checkout(match &first {
+        FileRecord::Node(entry) => Some(entry.id.as_str()),
+        _ => None,
+    });
+    assert_flushed(writer.append_record(&checkout));
 
-    let third = writer
-        .append(EntryKind::UserMessage {
-            message: user_message("branched"),
-        })
-        .expect("append");
+    // Every commit attempts the drain, so a healthy disk leaves
+    // nothing buffered — and the durable offset is exactly the file's
+    // length: the clean-prefix accounting the torn-write rollback
+    // depends on (rollback truncates to this offset, so its honesty is
+    // the file never holding more than the prefix).
+    assert!(writer.outbox.is_empty(), "the outbox drained");
+    let len = fs::metadata(writer.path()).expect("file").len();
     assert_eq!(
-        third.entry.parent_id,
-        Some(first.entry.id.clone()),
-        "branches from the target"
+        writer.durable_offset, len,
+        "the durable offset is the file's length"
     );
-
-    // The marker recorded the abandoned tip honestly, and load follows
-    // the branch: the chain skips `second`, the file keeps everything.
-    let loaded = store.open_path(writer.path()).expect("open");
-    assert_eq!(
-        loaded.entries.len(),
-        4,
-        "nothing was deleted, one marker added"
-    );
-    assert!(matches!(
-        &loaded.entries[2].kind,
-        EntryKind::Rewound { to: Some(target) } if target == &first.entry.id
-    ));
-    assert_eq!(
-        loaded.entries[2].parent_id,
-        Some(second.entry.id.clone()),
-        "the marker parents to the abandoned tip"
-    );
-    let chain_texts: Vec<&str> = loaded
-        .chain
-        .iter()
-        .filter_map(|entry| match &entry.kind {
-            EntryKind::UserMessage {
-                message: Message::User { content },
-            } => content.iter().find_map(|part| match part {
-                UserContent::Text(text) => Some(text.text.as_str()),
-                _ => None,
-            }),
-            _ => None,
-        })
-        .collect();
-    assert_eq!(chain_texts, vec!["one", "branched"]);
     fs::remove_dir_all(store.dir()).ok();
 }
 
 #[test]
-fn trailing_marker_directs_the_reopened_writer() {
-    // A rewind as the final write must survive reopen: nothing was
-    // appended to carry the new parent implicitly.
-    let store = temp_store("rewind-durable");
+fn a_dead_flush_leaves_records_buffered_for_retry() {
+    // The store's directory is a regular file: materialization cannot
+    // succeed, so the drain refuses — the invariant stand-in for any
+    // dead flush, staged portably. The commit is still memory-first:
+    // the record stays buffered for the next attempt.
+    let base = temp_store("dead-flush");
+    fs::create_dir_all(base.dir()).expect("base dir");
+    let blocked = base.dir().join("blocker");
+    fs::write(&blocked, b"not a directory").expect("blocker");
+    let store = SessionStore::new(&blocked);
     let mut writer = store.create("C:/work");
-    let first = writer
-        .append(EntryKind::UserMessage {
-            message: user_message("one"),
-        })
-        .expect("append");
-    writer
-        .append(EntryKind::UserMessage {
-            message: user_message("dropped"),
-        })
-        .expect("append");
-    writer.rewind_to(Some(&first.entry.id)).expect("rewind");
-    let path = writer.path().to_path_buf();
-    drop(writer);
-
-    let loaded = store.open_path(&path).expect("open");
-    assert_eq!(loaded.chain.len(), 1, "the abandoned tail is off-chain");
-
-    let mut reopened = SessionWriter::open_existing(&path).expect("reopen");
-    let next = reopened
-        .append(EntryKind::UserMessage {
-            message: user_message("after reopen"),
-        })
-        .expect("append");
-    assert_eq!(next.entry.parent_id, Some(first.entry.id));
-    fs::remove_dir_all(store.dir()).ok();
+    let record = Nodes::default().node(user_node("one"));
+    let error = writer.append_record(&record);
+    assert!(error.is_some(), "the flush reported failure");
+    assert_eq!(writer.pending(), 1, "the record stayed buffered");
+    fs::remove_dir_all(base.dir()).ok();
 }
 
 #[test]
-fn rewind_to_none_branches_from_the_root() {
-    let store = temp_store("store-rewind-root");
+fn a_barrier_failure_un_buffers_the_whole_batch() {
+    // Same staging: the drain cannot materialize the file, so the
+    // barrier refuses — and the batch is popped back out whole.
+    let base = temp_store("barrier-rollback");
+    fs::create_dir_all(base.dir()).expect("base dir");
+    let blocked = base.dir().join("blocker");
+    fs::write(&blocked, b"not a directory").expect("blocker");
+    let store = SessionStore::new(&blocked);
     let mut writer = store.create("C:/work");
-    writer
-        .append(EntryKind::UserMessage {
-            message: user_message("only"),
-        })
-        .expect("append");
-    writer.rewind_to(None).expect("rewind to root");
-    assert_eq!(writer.leaf(), None);
-
-    let loaded = store.open_path(writer.path()).expect("open");
-    assert!(loaded.chain.is_empty(), "the root chain is empty");
-    fs::remove_dir_all(store.dir()).ok();
-}
-
-#[test]
-fn marker_targeting_an_unknown_entry_is_corrupt() {
-    let store = temp_store("rewind-corrupt");
-    let mut writer = store.create("C:/work");
-    writer.append(seed_entry()).expect("materialize");
-    let path = writer.path().to_path_buf();
-    let header = fs::read_to_string(&path).expect("read header");
-    let marker = serde_json::to_string(&SessionEntry {
-        id: "rw".to_string(),
-        parent_id: None,
-        timestamp: "t".to_string(),
-        kind: EntryKind::Rewound {
-            to: Some("ghost".to_string()),
-        },
-    })
-    .expect("marker");
-    fs::write(&path, format!("{header}{marker}\n")).expect("write");
-    match store.open_path(&path) {
-        Err(SessionError::Corrupt { message, .. }) => {
-            assert!(message.contains("unknown or later"), "{message}")
-        }
-        other => panic!("expected corruption error, got {other:?}"),
-    }
-    fs::remove_dir_all(store.dir()).ok();
+    let mut nodes = Nodes::default();
+    let batch = vec![
+        nodes.node(user_node("b1")),
+        nodes.node(user_node("b2")),
+        nodes.node(user_node("b3")),
+    ];
+    assert!(writer.commit_records(&batch).is_err());
+    assert_eq!(writer.pending(), 0, "the batch left nothing behind");
+    fs::remove_dir_all(base.dir()).ok();
 }
 
 #[test]
 fn last_model_reads_the_files_last_model_change() {
-    let store = temp_store("rewind-model-hint");
+    let store = temp_store("model-hint");
     let mut writer = store.create("C:/work");
-    writer
-        .append(EntryKind::ModelChange {
-            provider: "p".to_string(),
-            model: "m".to_string(),
-            thinking_level: None,
-        })
-        .expect("append");
-    let turn_one = writer
-        .append(EntryKind::UserMessage {
-            message: user_message("one"),
-        })
-        .expect("append");
-    let turn_two = writer
-        .append(EntryKind::UserMessage {
-            message: user_message("two"),
-        })
-        .expect("append");
+    let mut nodes = Nodes::default();
+    assert_flushed(writer.append_record(&Nodes::side(SideKind::ModelChange {
+        provider: "p".to_string(),
+        model: "m".to_string(),
+        thinking_level: None,
+    })));
+    let turn_one = nodes.node(user_node("one"));
+    assert_flushed(writer.append_record(&turn_one));
+    let turn_two = nodes.node(user_node("two"));
+    assert_flushed(writer.append_record(&turn_two));
     // A switch recorded between the two turns.
-    writer
-        .append(EntryKind::ModelChange {
-            provider: "q".to_string(),
-            model: "m2".to_string(),
-            thinking_level: None,
-        })
-        .expect("append");
-    writer
-        .append(EntryKind::UserMessage {
-            message: user_message("after switch"),
-        })
-        .expect("append");
+    assert_flushed(writer.append_record(&Nodes::side(SideKind::ModelChange {
+        provider: "q".to_string(),
+        model: "m2".to_string(),
+        thinking_level: None,
+    })));
+    let after = nodes.node(user_node("after switch"));
+    assert_flushed(writer.append_record(&after));
 
-    // Before rewinding: the file's last model_change is q/m2.
     assert_eq!(
         store
             .last_model(writer.path())
@@ -520,256 +487,19 @@ fn last_model_reads_the_files_last_model_change() {
 
     // Branch from before the switch: the hint does NOT roll back — the
     // register is the user's latest model choice in time, whichever
-    // branch it was recorded on (owner ruling 2026-08).
-    writer.rewind_to(Some(&turn_two.entry.id)).expect("rewind");
+    // branch the conversation is on (owner ruling 2026-08).
+    let FileRecord::Node(turn_two_entry) = &turn_two else {
+        panic!("fixture builds nodes");
+    };
+    let checkout = nodes.checkout(Some(turn_two_entry.id.as_str()));
+    assert_flushed(writer.append_record(&checkout));
     assert_eq!(
         store
             .last_model(writer.path())
             .expect("hint")
             .map(|s| s.model),
         Some("m2".to_string()),
-        "the rewind left the session preference register alone"
-    );
-    // Turn one's entry is still reachable as an earlier chain node.
-    let loaded = store.open_path(writer.path()).expect("open");
-    assert!(
-        loaded
-            .chain
-            .iter()
-            .any(|entry| entry.id == turn_one.entry.id)
+        "the checkout left the session preference register alone"
     );
     fs::remove_dir_all(store.dir()).ok();
-}
-
-#[test]
-fn the_outbox_drains_fully_and_the_file_is_the_clean_prefix() {
-    let store = temp_store("outbox");
-    let mut writer = store.create("C:/work");
-    let first = writer
-        .append(EntryKind::UserMessage {
-            message: user_message("one"),
-        })
-        .expect("append");
-    writer
-        .append(EntryKind::ModelChange {
-            provider: "q".to_string(),
-            model: "m2".to_string(),
-            thinking_level: None,
-        })
-        .expect("append");
-    writer.rewind_to(Some(&first.entry.id)).expect("rewind");
-
-    // Every commit attempts the drain, so a healthy disk leaves
-    // nothing buffered — and the durable offset is exactly the file's
-    // length: the clean-prefix accounting the torn-write rollback
-    // depends on (rollback truncates to this offset, so its honesty
-    // is the file never holding more than the prefix).
-    assert!(writer.outbox.is_empty(), "the outbox drained");
-    let len = fs::metadata(writer.path()).expect("file").len();
-    assert_eq!(
-        writer.durable_offset, len,
-        "the durable offset is the file's length"
-    );
-
-    // And the leaf moved with the rewind, at buffer time (the commit
-    // order the file mirrors).
-    assert_eq!(writer.leaf(), Some(first.entry.id.as_str()));
-    fs::remove_dir_all(store.dir()).ok();
-}
-
-#[test]
-fn a_dead_flush_leaves_entries_buffered_and_rollback_restores_the_mark() {
-    let store = temp_store("barrier-rollback");
-    let mut writer = store.create("C:/work");
-    let first = writer
-        .append(EntryKind::UserMessage {
-            message: user_message("one"),
-        })
-        .expect("append (healthy)");
-    assert!(writer.outbox.is_empty(), "the healthy path drains");
-
-    // Kill the flush (the invariant stand-in for any IO failure: a
-    // writer whose file cannot be written). Commits still succeed —
-    // memory-first — and the entries stay buffered.
-    writer.file = None;
-    let buffered = writer
-        .append_entry(
-            Some("0197-buffered".to_string()),
-            EntryKind::UserMessage {
-                message: user_message("two"),
-            },
-        )
-        .expect("commit is memory-first");
-    assert!(buffered.flush_error.is_some(), "the flush reported failure");
-    assert_eq!(writer.outbox.len(), 1, "the entry stayed buffered");
-    assert_eq!(
-        writer.leaf(),
-        Some("0197-buffered"),
-        "the chain advanced at buffer time"
-    );
-
-    // The barrier's rollback half: everything beyond the mark is
-    // un-committed, chain cursor restored — the batch exists nowhere.
-    // (The file is dead, so the offset fast path applies: nothing the
-    // rollback could truncate ever reached the disk.)
-    writer.rollback_barrier(0, Some(first.entry.id.clone()), writer.durable_offset);
-    assert!(writer.outbox.is_empty(), "the batch left nothing behind");
-    assert_eq!(writer.leaf(), Some(first.entry.id.as_str()));
-
-    // And the file agrees: only the healthy entry ever reached it.
-    let loaded = store.open_path(writer.path()).expect("open");
-    assert_eq!(loaded.entries.len(), 1, "the durable prefix is untouched");
-    fs::remove_dir_all(store.dir()).ok();
-}
-
-#[test]
-fn a_barrier_rollback_removes_batch_entries_that_reached_the_disk() {
-    let store = temp_store("barrier-file-rollback");
-    let mut writer = store.create("C:/work");
-    writer
-        .append(EntryKind::UserMessage {
-            message: user_message("one"),
-        })
-        .expect("append (pre-barrier)");
-    let prefix_len = writer.durable_offset;
-    let leaf_before = writer.leaf().map(str::to_string);
-
-    // The discriminating state for the disk-atomic rollback: batch
-    // entries that DID flush — the mid-batch fault, where the drain
-    // died on a later entry after these were already durable. Staged
-    // by committing entries and running the rollback the failure path
-    // runs (the mechanics do not care how the bytes arrived).
-    writer
-        .append(EntryKind::UserMessage {
-            message: user_message("b1"),
-        })
-        .expect("batch entry one (flushed)");
-    writer
-        .append(EntryKind::UserMessage {
-            message: user_message("b2"),
-        })
-        .expect("batch entry two (flushed)");
-    assert_eq!(
-        fs::metadata(writer.path()).expect("file").len(),
-        writer.durable_offset,
-        "the batch is on the disk"
-    );
-
-    writer.rollback_barrier(0, leaf_before.clone(), prefix_len);
-
-    // The batch left the FILE too — without this, the load leaf (the
-    // last entry in file order) would resurrect the discarded batch
-    // as history.
-    assert_eq!(
-        fs::metadata(writer.path()).expect("file").len(),
-        prefix_len,
-        "the file is the pre-barrier prefix again"
-    );
-    assert_eq!(writer.durable_offset, prefix_len);
-    assert_eq!(writer.leaf().map(str::to_string), leaf_before);
-
-    // The writer continues cleanly on the restored prefix: a fresh
-    // entry chains from the pre-barrier leaf and the file holds
-    // exactly the prefix plus it.
-    writer
-        .append(EntryKind::UserMessage {
-            message: user_message("after"),
-        })
-        .expect("append after the rollback");
-    let loaded = store.open_path(writer.path()).expect("open");
-    let texts: Vec<String> = loaded
-        .chain
-        .iter()
-        .filter_map(|entry| match &entry.kind {
-            EntryKind::UserMessage {
-                message: Message::User { content },
-            } => content
-                .iter()
-                .filter_map(|c| match c {
-                    UserContent::Text(t) => Some(t.text.clone()),
-                    _ => None,
-                })
-                .next(),
-            _ => None,
-        })
-        .collect();
-    assert_eq!(texts, vec!["one".to_string(), "after".to_string()]);
-    fs::remove_dir_all(store.dir()).ok();
-}
-
-#[test]
-fn the_resident_view_spans_the_file_and_the_buffer_under_degrade() {
-    let store = temp_store("resident-view");
-    let mut writer = store.create("C:/work");
-    let durable = writer
-        .append(EntryKind::UserMessage {
-            message: user_message("one"),
-        })
-        .expect("append (durable)");
-    let path = writer.path().to_path_buf();
-
-    // Stage the degrade the way a dead drain leaves it: a buffered
-    // tail that cannot be placed (the dead-flush stand-in), chained at
-    // buffer time.
-    writer.file = None;
-    writer
-        .buffer_entry(
-            Some("0197-resident".to_string()),
-            EntryKind::UserMessage {
-                message: user_message("two"),
-            },
-        )
-        .expect("buffer");
-    let recorder = crate::recorder::SessionRecorder::new(writer);
-    assert!(!recorder.is_clean(), "the tail is pending");
-
-    // The resident view the session re-derives context from: the
-    // durable file plus the buffered tail, chained through the
-    // buffer-time leaf.
-    let loaded = store.open_path(&path).expect("open");
-    let (entries, chain) = recorder.load_resident(loaded).expect("resident view");
-    assert_eq!(entries.len(), 2);
-    assert_eq!(chain.len(), 2);
-    assert_eq!(chain[0].id, durable.entry.id);
-    assert_eq!(chain[1].id, "0197-resident");
-    fs::remove_dir_all(store.dir()).ok();
-}
-
-#[test]
-fn a_bootstrap_failure_loses_the_record_and_announces_the_degrade() {
-    let base = temp_store("recorder-blocked");
-    fs::create_dir_all(base.dir()).expect("base dir");
-    let blocked = base.dir().join("blocker");
-    fs::write(&blocked, b"not a directory").expect("blocker");
-    let store = SessionStore::new(&blocked);
-    let mut writer = store.create("C:/w");
-    writer.set_opening_entry(EntryKind::ModelChange {
-        provider: "p".to_string(),
-        model: "m".to_string(),
-        thinking_level: None,
-    });
-    let recorder = crate::recorder::SessionRecorder::new(writer);
-    let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
-    recorder.attach_notices(tx.downgrade(), tabit_protocol::StreamId::new("s"));
-
-    // The record cannot even bootstrap the file, so no entry exists
-    // to keep: the id is empty (the lost-record contract).
-    let id = recorder.record(EntryKind::UserMessage {
-        message: user_message("gone"),
-    });
-    assert_eq!(id, "");
-    // The rewind marker shares the contract.
-    recorder.rewind_to(None);
-
-    // One degrade transition — not two; the state machine holds —
-    // with zero pending (lost is not buffered).
-    let frame = rx.try_recv().expect("the degrade was announced");
-    match frame.event {
-        tabit_protocol::SessionEvent::Error { kind, .. }
-            if kind == tabit_protocol::ErrorKind::PERSIST_DEGRADED => {}
-        other => panic!("expected a persist-degraded error, got {other:?}"),
-    }
-    assert!(rx.try_recv().is_err(), "one transition, not per failure");
-    assert!(recorder.is_clean(), "lost is not pending");
-    fs::remove_dir_all(base.dir()).ok();
 }

@@ -847,17 +847,7 @@ fn spawn_worker(
                 _ = worker_mailbox.work_signal().notified() => {}
             }
         }
-        match session.stats() {
-            Ok(session_stats) => {
-                lock(&stats).insert(id, session_stats);
-            }
-            // Nobody is left to tell at wind-down - but silence is not
-            // the doctrine: trace it (the closing summary's absence is
-            // the user-visible symptom).
-            Err(error) => {
-                tracing::warn!(session = %id, %error, "closing stats unreadable at wind-down");
-            }
-        }
+        lock(&stats).insert(id, session.stats());
         // The worker's `event_tx` drops here; the stream ends when the
         // host's does too.
     });

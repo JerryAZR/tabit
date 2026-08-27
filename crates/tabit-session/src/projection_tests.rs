@@ -1,5 +1,5 @@
 use super::*;
-use crate::entry::{EntryKind, SessionEntry};
+use crate::entry::{EntryKind, SessionEntry, SideKind, SideRecord};
 use rig_core::OneOrMany;
 use rig_core::completion::Message;
 use rig_core::message::{
@@ -79,22 +79,11 @@ fn projects_entries_in_order_and_merges_result_batches() {
 }
 
 #[test]
-fn state_entries_do_not_reach_the_context() {
-    let entries = vec![
-        entry(user("q")),
-        entry(EntryKind::ModelChange {
-            provider: "p".to_string(),
-            model: "m".to_string(),
-            thinking_level: None,
-        }),
-        entry(EntryKind::Label {
-            name: "bookmark".to_string(),
-        }),
-        entry(EntryKind::Custom {
-            data: json!({"x": 1}),
-        }),
-        entry(assistant_text("a")),
-    ];
+fn only_nodes_reach_the_projector() {
+    // Format v3 made the old skip-arms unconstructible: state lives in
+    // side records, which are not entries at all. Every entry kind the
+    // projector can see contributes to the context.
+    let entries = vec![entry(user("q")), entry(assistant_text("a"))];
     let (messages, _) = project(&entries);
     assert_eq!(messages.len(), 2);
 }
@@ -155,23 +144,33 @@ fn interrupted_results_answer_every_call_explicitly() {
 
 #[test]
 fn the_register_reads_the_files_last_model_change_backwards() {
-    let entries = vec![
-        entry(EntryKind::ModelChange {
+    let records = vec![
+        side(SideKind::ModelChange {
             provider: "p".to_string(),
             model: "first".to_string(),
             thinking_level: None,
         }),
-        entry(user("q")),
-        entry(EntryKind::ModelChange {
+        FileRecord::Node(entry(user("q"))),
+        side(SideKind::ModelChange {
             provider: "p".to_string(),
             model: "second".to_string(),
             thinking_level: Some("high".to_string()),
         }),
     ];
     let (provider, model, level) =
-        last_model_change_in_file(&entries).expect("a model change exists");
+        last_model_change_in_file(&records).expect("a model change exists");
     assert_eq!((provider, model, level), ("p", "second", Some("high")));
-    assert!(last_model_change_in_file(&[entry(user("no changes"))]).is_none());
+    assert!(
+        last_model_change_in_file(&[FileRecord::Node(entry(user("no changes")))]).is_none(),
+        "nodes never carry the register"
+    );
+}
+
+fn side(kind: SideKind) -> FileRecord {
+    FileRecord::Side(SideRecord {
+        timestamp: "t".to_string(),
+        kind,
+    })
 }
 
 #[test]
@@ -237,17 +236,19 @@ fn results_answer_calls_by_provider_call_id_too() {
 }
 
 #[test]
-fn rewound_markers_are_state_not_context() {
+fn a_projected_branch_is_all_context() {
+    // v3: the projector sees the active branch's nodes only; the
+    // checkout that selected the branch is a side record that never
+    // reaches this function.
     let entries = vec![
         entry(user("q")),
         entry(assistant_text("a")),
-        entry(EntryKind::Rewound { to: None }),
         entry(user("again")),
         entry(assistant_text("b")),
     ];
     let (messages, dangling) = project(&entries);
     assert!(dangling.is_none());
-    assert_eq!(messages.len(), 4, "the marker projects to nothing");
+    assert_eq!(messages.len(), 4);
 }
 
 #[test]
@@ -255,11 +256,6 @@ fn user_message_boundaries_list_every_user_message_in_order() {
     // Prompts and steers are both UserMessage entries — both are valid
     // rewind targets.
     let entries = vec![
-        entry(EntryKind::ModelChange {
-            provider: "p".to_string(),
-            model: "m".to_string(),
-            thinking_level: None,
-        }),
         entry(user("first")),
         entry(assistant_text("a")),
         entry(user("second")),

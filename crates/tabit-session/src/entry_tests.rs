@@ -34,58 +34,102 @@ fn assistant_entry_with_tool_call() -> EntryKind {
     }
 }
 
+fn tool_result_entry() -> EntryKind {
+    EntryKind::ToolResult {
+        result: ToolResult {
+            id: "call-1".to_string(),
+            call_id: None,
+            content: OneOrMany::one(ToolResultContent::text("ok")),
+            status: None,
+        },
+    }
+}
+
 #[test]
-fn entry_round_trips_every_kind() {
-    let kinds = vec![
+fn node_kinds_round_trip() {
+    for kind in [
         user_entry(),
         assistant_entry_with_tool_call(),
-        EntryKind::ToolResult {
-            result: ToolResult {
-                id: "call-1".to_string(),
-                call_id: None,
-                content: OneOrMany::one(ToolResultContent::text("ok")),
-                status: None,
-            },
-        },
-        EntryKind::ModelChange {
-            provider: "p".to_string(),
-            model: "m".to_string(),
-            thinking_level: Some("high".to_string()),
-        },
-        EntryKind::Label {
-            name: "before-refactor".to_string(),
-        },
-        EntryKind::Custom {
-            data: json!({"any": true}),
-        },
-    ];
-    for kind in kinds {
+        tool_result_entry(),
+    ] {
         let entry = SessionEntry::new(
             Some("parent".to_string()),
             "2026-08-15T00:00:00Z".into(),
             kind,
         );
         let line = serde_json::to_string(&entry).expect("entry serializes");
-        let back: SessionEntry = serde_json::from_str(&line).expect("entry parses back");
-        // Compare serialized forms: rig's `Text` flatten round-trips an
-        // absent `additional_params` as `Some({})`, which serializes
-        // identically but compares unequal as a struct.
-        let back_line = serde_json::to_string(&back).expect("back serializes");
+        // A node line parses back as a node record.
+        let back: FileRecord = serde_json::from_str(&line).expect("record parses back");
+        let FileRecord::Node(back_entry) = back else {
+            panic!("node kinds stay nodes: {line}");
+        };
+        let back_line = serde_json::to_string(&back_entry).expect("back serializes");
         assert_eq!(back_line, line);
     }
 }
 
 #[test]
-fn unknown_kind_fails_loudly() {
+fn side_kinds_round_trip_without_ids_or_parents() {
+    let kinds = vec![
+        SideKind::ModelChange {
+            provider: "p".to_string(),
+            model: "m".to_string(),
+            thinking_level: Some("high".to_string()),
+        },
+        SideKind::Checkout {
+            to: Some("0197-node".to_string()),
+        },
+        SideKind::Checkout { to: None },
+        SideKind::Aborted,
+        SideKind::Label {
+            name: "before-refactor".to_string(),
+        },
+        SideKind::Custom {
+            data: json!({"any": true}),
+        },
+    ];
+    for kind in kinds {
+        let record = SideRecord {
+            timestamp: "2026-08-15T00:00:00Z".to_string(),
+            kind,
+        };
+        let line = serde_json::to_string(&record).expect("record serializes");
+        assert!(!line.contains("\"id\""), "side records carry no id: {line}");
+        assert!(
+            !line.contains("\"parent_id\""),
+            "side records carry no parent: {line}"
+        );
+        let back: FileRecord = serde_json::from_str(&line).expect("record parses back");
+        let FileRecord::Side(side) = back else {
+            panic!("side kinds stay side records: {line}");
+        };
+        let back_line = serde_json::to_string(&side).expect("back serializes");
+        assert_eq!(back_line, line);
+    }
+}
+
+#[test]
+fn unknown_node_kind_fails_loudly() {
     let raw = r#"{"id":"a","parent_id":null,"timestamp":"t","kind":"from_the_future":{"x":1}}"#;
     let result = serde_json::from_str::<SessionEntry>(raw);
+    assert!(result.is_err());
+    // And through the untagged record shape: no variant fits.
+    assert!(serde_json::from_str::<FileRecord>(raw).is_err());
+}
+
+#[test]
+fn unknown_side_kind_fails_loudly() {
+    let raw = r#"{"timestamp":"t","kind":"from_the_future":{"x":1}}"#;
+    let result = serde_json::from_str::<SideRecord>(raw);
     assert!(result.is_err());
 }
 
 #[test]
 fn unknown_entry_fields_are_rejected() {
-    let raw = r#"{"id":"a","parent_id":null,"timestamp":"t","kind":"label","name":"x","extra":1}"#;
+    let raw = r#"{"id":"a","parent_id":null,"timestamp":"t","kind":"user_message","message":{"role":"user","content":"x"},"extra":1}"#;
     assert!(serde_json::from_str::<SessionEntry>(raw).is_err());
+    let raw = r#"{"timestamp":"t","kind":"aborted","extra":1}"#;
+    assert!(serde_json::from_str::<SideRecord>(raw).is_err());
 }
 
 #[test]
@@ -97,42 +141,14 @@ fn header_round_trips_and_rejects_unknown_fields() {
         cwd: "C:/work".to_string(),
         parent_session: None,
     };
+    assert_eq!(SESSION_FORMAT_VERSION, 3);
     let line = serde_json::to_string(&header).expect("header serializes");
     let back: SessionHeader = serde_json::from_str(&line).expect("header parses back");
     assert_eq!(back, header);
     assert!(
         serde_json::from_str::<SessionHeader>(
-            r#"{"version":1,"id":"x","created_at":"t","cwd":"c","bogus":true}"#
+            r#"{"version":3,"id":"x","created_at":"t","cwd":"c","bogus":true}"#
         )
         .is_err()
-    );
-}
-
-#[test]
-fn context_entry_classification() {
-    assert!(user_entry().is_context_entry());
-    assert!(assistant_entry_with_tool_call().is_context_entry());
-    let result_kind = EntryKind::ToolResult {
-        result: ToolResult {
-            id: "c".to_string(),
-            call_id: None,
-            content: OneOrMany::one(ToolResultContent::text("")),
-            status: None,
-        },
-    };
-    assert!(result_kind.is_context_entry());
-    assert!(
-        !EntryKind::Label {
-            name: "n".to_string()
-        }
-        .is_context_entry()
-    );
-    assert!(
-        !EntryKind::ModelChange {
-            provider: "p".to_string(),
-            model: "m".to_string(),
-            thinking_level: None,
-        }
-        .is_context_entry()
     );
 }

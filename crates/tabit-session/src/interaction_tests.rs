@@ -350,22 +350,27 @@ async fn frontend_death_with_a_card_open_winds_the_worker_down() {
 
     // The durability half of the ruling: the log survives the death, the
     // interrupted call's result was synthesized AT ABORT TIME (durably —
-    // an `Aborted` marker followed by the interrupted-result entry), and
-    // the next open finds nothing dangling.
+    // an `aborted` side record with the interrupted-result node after
+    // it), and the next open finds nothing dangling.
     let path = handle.info().session_path.clone();
     let loaded = store
         .open_path(std::path::Path::new(&path))
         .expect("reopen");
-    assert!(
-        loaded
-            .entries
-            .iter()
-            .any(|e| matches!(e.kind, EntryKind::Aborted))
-    );
+    use crate::entry::{FileRecord, SideKind};
+    assert!(loaded.records.iter().any(|record| matches!(
+        record,
+        FileRecord::Side(crate::entry::SideRecord {
+            kind: SideKind::Aborted,
+            ..
+        })
+    )));
     assert!(
         matches!(
-            loaded.entries.last().map(|e| &e.kind),
-            Some(EntryKind::ToolResult { .. })
+            loaded.records.last(),
+            Some(FileRecord::Node(crate::entry::SessionEntry {
+                kind: EntryKind::ToolResult { .. },
+                ..
+            }))
         ),
         "the interrupted call's synthesized result is the durable tail"
     );

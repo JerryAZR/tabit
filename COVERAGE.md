@@ -649,3 +649,45 @@ write-behind, and prompt-caching commits. Re-measured: 93.38% lines /
   fail-loud doctrine. Closing it means a policy for propagating join
   errors (abort the process, or synthesize a terminal), a host-level
   flow change that should be ruled rather than slipped in.
+
+## Format v3 — the resident-state refactor (2026-08)
+
+The owner-ruled redesign (the "fix it properly" pass): the file splits
+into conversation nodes (id + parent, the tree) and parentless side
+records; the recorder owns the resident state (whole tree, head
+pointer, incrementally folded context, record sequence); nothing
+re-reads the file mid-session (the post-run reload, `load_resident`,
+`effective_leaf`, `chain_from`, and the `EntryKind` bookkeeping
+variants are all deleted); checkout is a head-pointer move; the drain
+is one blob write (rollback = truncate to the durable offset or clear
+— no loop, no offset bookkeeping in the barrier). Re-measured:
+**93.42% lines / 94.16% regions** — above the pre-refactor state
+despite the format break, with `recorder.rs` at 96.8%, `entry.rs`
+100%, `session.rs` 98.1%.
+
+- **Recorder suite (new file)**: tree/head/context growth at record
+  time, checkout as a pointer move with re-projection and branching,
+  the trailing-checkout reload, the one-pass load fold (tree, head,
+  register, order-sensitive repairs), the head-invariant corruption
+  check, and the barrier's validate-then-commit (a refused batch
+  touches nothing resident).
+- **Store suite rewritten to the sink contract**: the writer is
+  structure-blind (records arrive pre-constructed); pinned are
+  materialization order (header, first record), the single-write
+  drain and clean-prefix accounting, the failed barrier popping the
+  batch whole, and fault staging via the blocked-store trick (the
+  old `file = None` sabotage is defeated by design now — materialize
+  retries and would recreate the file).
+- **Session suite**: contract updates pinned rather than papered
+  over — a log deleted under a live run no longer fails the run
+  (memory is authoritative; the loss is realized at the next open),
+  the opening register rides the first barrier and an explicit
+  switch supersedes it while pending, and resume's reconciliation
+  record follows the synthesized repair in file order.
+- **Justified residue, unchanged classes**: `store.rs` (85.0%) keeps
+  the unstaged-fault arms (open/serialize/write failures a portable
+  test cannot create), `recorder.rs` keeps the dead-channel no-ops
+  and poison arms, `registry.rs` keeps `build_error` (client
+  constructors cannot fail post-validation), and the
+  `Projector::finish` whole-chain path is load/checkout-shaped (the
+  incremental folds are the covered production path).

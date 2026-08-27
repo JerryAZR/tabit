@@ -1,91 +1,129 @@
 //! Replaying session entries into model-visible context.
 //!
-//! Projection is pure: a function from the active chain of entries to
-//! messages. `label`, `custom`, `aborted`, `rewound`, and `model_change`
-//! entries are state, not context, and are skipped here; the model
-//! selection is a session preference — a register read over the whole
-//! file, not the chain ([`last_model_change_in_file`]) — folded by the
-//! session on resume and never moved by a rewind.
+//! Projection is pure: a function from the active branch of the
+//! conversation tree to messages. Only the three node kinds reach here
+//! — side records (`model_change`, `checkout`, `aborted`, …) are
+//! session state, not context, and never enter the tree (format v3).
+//! The model selection is a session preference — a register read over
+//! the record stream ([`last_model_change_in_file`]) — folded at load
+//! and never moved by a checkout.
 
-use crate::entry::{EntryKind, SessionEntry};
+use crate::entry::{EntryKind, FileRecord, SessionEntry};
 use rig_core::OneOrMany;
 use rig_core::completion::Message;
 use rig_core::message::{ToolCall, ToolResult, ToolResultContent};
 use std::collections::HashSet;
 
 /// A dangling assistant turn found during projection: the assistant called
-/// tools, and the chain ends before every call received a result — a crash
+/// tools, and the branch ends before every call received a result — a crash
 /// or abort mid tool-use roundtrip, or a branch point landing mid-batch.
 /// Carries everything needed to synthesize honest "interrupted" results so
-/// the chain replays cleanly.
+/// the branch replays cleanly.
 #[derive(Debug, Clone, PartialEq)]
 pub struct DanglingToolCalls {
     /// The tool calls that never received results.
     pub calls: Vec<ToolCall>,
 }
 
-/// Project the active chain of a session log into the message list the
-/// next outer loop should see, and report the trailing assistant turn's
-/// unanswered tool calls, if any.
+/// The incremental context fold — the live projection of the active
+/// branch. One implementation serves both users: the whole-branch
+/// [`project`] (load, checkout rebuild) and the record-time fold (the
+/// resident context grows one node at a time, so nothing re-derives
+/// mid-session).
+#[derive(Default)]
+pub struct Projector {
+    messages: Vec<Message>,
+    pending_results: Vec<ToolResult>,
+    // The trailing assistant turn's calls and the call ids its results
+    // have answered so far. A branch point can land mid-batch, so
+    // "some results arrived" no longer implies "all calls answered".
+    trailing_calls: Vec<ToolCall>,
+    answered: HashSet<String>,
+}
+
+impl Projector {
+    /// Fold one conversation node into the projection.
+    pub fn fold(&mut self, entry: &SessionEntry) {
+        match &entry.kind {
+            EntryKind::UserMessage { message } => {
+                self.flush_results();
+                self.trailing_calls.clear();
+                self.answered.clear();
+                self.messages.push(message.clone());
+            }
+            EntryKind::AssistantMessage { message, .. } => {
+                self.flush_results();
+                self.trailing_calls = calls_of(message);
+                self.answered.clear();
+                self.messages.push(message.clone());
+            }
+            EntryKind::ToolResult { result } => {
+                self.answered.insert(result.id.clone());
+                if let Some(call_id) = &result.call_id {
+                    self.answered.insert(call_id.clone());
+                }
+                self.pending_results.push(result.clone());
+            }
+        }
+    }
+
+    /// The folded messages so far (pending tool results held back
+    /// until flushed by the next turn or `finish`).
+    pub fn messages(&self) -> &[Message] {
+        &self.messages
+    }
+
+    /// The context snapshot: the folded messages with any pending tool
+    /// batch flushed into place. Reads happen at run boundaries — turn
+    /// boundaries by construction — so closing the batch here cannot
+    /// merge batches that a turn kept apart. The fold keeps its state;
+    /// a snapshot never consumes it.
+    pub fn snapshot(&mut self) -> Vec<Message> {
+        self.flush_results();
+        self.messages.clone()
+    }
+
+    /// The trailing turn's unanswered calls, when any — the dangling
+    /// detection the repair paths peek at, without consuming the fold.
+    pub fn dangling(&self) -> Option<DanglingToolCalls> {
+        unanswered_calls(&self.trailing_calls, &self.answered)
+    }
+
+    /// The folded messages, flushing any pending tool batch, and the
+    /// final dangling report.
+    pub fn finish(mut self) -> (Vec<Message>, Option<DanglingToolCalls>) {
+        self.flush_results();
+        let dangling = unanswered_calls(&self.trailing_calls, &self.answered);
+        (self.messages, dangling)
+    }
+
+    fn flush_results(&mut self) {
+        if self.pending_results.is_empty() {
+            return;
+        }
+        let results = std::mem::take(&mut self.pending_results);
+        self.messages.push(tool_results_message(results));
+    }
+}
+
+/// Project the active branch of the conversation tree into the message
+/// list the next outer loop should see, and report the trailing
+/// assistant turn's unanswered tool calls, if any.
 ///
 /// Consecutive `tool_result` entries merge into one user message — the
 /// shape providers expect for a tool batch.
 pub fn project(entries: &[SessionEntry]) -> (Vec<Message>, Option<DanglingToolCalls>) {
-    let mut messages = Vec::new();
-    let mut pending_results: Vec<ToolResult> = Vec::new();
-    // The trailing assistant turn's calls and the call ids its results
-    // have answered so far. A rewind can branch mid-batch, so "some
-    // results arrived" no longer implies "all calls answered".
-    let mut trailing_calls: Vec<ToolCall> = Vec::new();
-    let mut answered: HashSet<String> = HashSet::new();
-
-    let flush_results = |pending: &mut Vec<ToolResult>, messages: &mut Vec<Message>| {
-        if pending.is_empty() {
-            return;
-        }
-        messages.push(tool_results_message(std::mem::take(pending)));
-    };
-
+    let mut projector = Projector::default();
     for entry in entries {
-        match &entry.kind {
-            EntryKind::UserMessage { message } => {
-                flush_results(&mut pending_results, &mut messages);
-                trailing_calls.clear();
-                answered.clear();
-                messages.push(message.clone());
-            }
-            EntryKind::AssistantMessage { message, .. } => {
-                flush_results(&mut pending_results, &mut messages);
-                trailing_calls = calls_of(message);
-                answered.clear();
-                messages.push(message.clone());
-            }
-            EntryKind::ToolResult { result } => {
-                answered.insert(result.id.clone());
-                if let Some(call_id) = &result.call_id {
-                    answered.insert(call_id.clone());
-                }
-                pending_results.push(result.clone());
-            }
-            EntryKind::ModelChange { .. }
-            | EntryKind::Aborted
-            | EntryKind::Rewound { .. }
-            | EntryKind::Label { .. }
-            | EntryKind::Custom { .. } => {
-                continue;
-            }
-        }
+        projector.fold(entry);
     }
-    flush_results(&mut pending_results, &mut messages);
-    let dangling = unanswered_calls(&trailing_calls, &answered);
-
-    (messages, dangling)
+    projector.finish()
 }
 
-/// The chain's `user_message` entries in root→leaf order — the valid
-/// user-facing rewind targets. A branch before any of them leaves the
-/// chain replayable: it ends on a completed turn, a closed tool batch, or
-/// bookkeeping, never mid-batch.
+/// The branch's `user_message` entries in root→head order — the valid
+/// user-facing checkout targets. A branch before any of them leaves the
+/// branch replayable: it ends on a completed turn, a closed tool batch,
+/// never mid-batch.
 pub fn user_message_boundaries(entries: &[SessionEntry]) -> Vec<&SessionEntry> {
     entries
         .iter()
@@ -93,7 +131,7 @@ pub fn user_message_boundaries(entries: &[SessionEntry]) -> Vec<&SessionEntry> {
         .collect()
 }
 
-/// The calls of `calls` that no result on the chain answered, as a
+/// The calls of `calls` that no result on the branch answered, as a
 /// [`DanglingToolCalls`] when any remain.
 fn unanswered_calls(calls: &[ToolCall], answered: &HashSet<String>) -> Option<DanglingToolCalls> {
     let dangling: Vec<ToolCall> = calls
@@ -114,20 +152,24 @@ fn is_answered(call: &ToolCall, answered: &HashSet<String>) -> bool {
             .is_some_and(|call_id| answered.contains(call_id))
 }
 
-/// The file's last `model_change` entry, read backwards in file (append)
-/// order and stopping at the first encounter — the **session preference
-/// register** (owner ruling 2026-08): model selection is present-tense
-/// state, so the latest choice in time wins regardless of which branch it
-/// was recorded on, and a rewind (a chain-pointer move) never rolls it
-/// back. Parent links are deliberately ignored — the file's append order
-/// is the time order. `None` when the file records no model change.
-pub fn last_model_change_in_file(entries: &[SessionEntry]) -> Option<(&str, &str, Option<&str>)> {
-    entries.iter().rev().find_map(|entry| match &entry.kind {
-        EntryKind::ModelChange {
-            provider,
-            model,
-            thinking_level,
-        } => Some((provider.as_str(), model.as_str(), thinking_level.as_deref())),
+/// The file's last `model_change` side record, read backwards in file
+/// (append) order and stopping at the first encounter — the **session
+/// preference register** (owner ruling 2026-08): model selection is
+/// present-tense state, so the latest choice in time wins regardless of
+/// which branch the conversation is on, and a checkout (a head-pointer
+/// move) never rolls it back. `None` when the file records no model
+/// change.
+pub fn last_model_change_in_file(records: &[FileRecord]) -> Option<(&str, &str, Option<&str>)> {
+    records.iter().rev().find_map(|record| match record {
+        FileRecord::Side(crate::entry::SideRecord {
+            kind:
+                crate::entry::SideKind::ModelChange {
+                    provider,
+                    model,
+                    thinking_level,
+                },
+            ..
+        }) => Some((provider.as_str(), model.as_str(), thinking_level.as_deref())),
         _ => None,
     })
 }

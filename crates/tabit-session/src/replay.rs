@@ -67,14 +67,6 @@ impl Projection {
             EntryKind::ToolResult { result } => {
                 self.tool_result(entry, result, events);
             }
-            // Bookkeeping: not what a frontend renders from history.
-            // `model_change` included — state, not content: the register
-            // is announced live at visibility, never replayed.
-            EntryKind::ModelChange { .. }
-            | EntryKind::Aborted
-            | EntryKind::Rewound { .. }
-            | EntryKind::Label { .. }
-            | EntryKind::Custom { .. } => {}
         }
     }
 

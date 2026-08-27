@@ -8,10 +8,9 @@
 //! the absolute cwd. The directory is always a constructor argument, so a
 //! future config option can point it anywhere without touching this module.
 
-use crate::entry::{EntryKind, SESSION_FORMAT_VERSION, SessionEntry, SessionHeader};
+use crate::entry::{FileRecord, SESSION_FORMAT_VERSION, SessionHeader};
 use crate::error::SessionError;
 use crate::ids;
-use crate::projection;
 use std::collections::VecDeque;
 use std::fs::{self, OpenOptions};
 use std::io::Write as _;
@@ -28,6 +27,12 @@ pub struct SessionStore {
 /// from [`SessionStore::create`] holds its header in memory and the file
 /// materializes on the first append — a session that never records a
 /// user message leaves nothing on disk.
+///
+/// The writer is the write-behind sink (flag 8): records are
+/// constructed by the recorder (which owns the resident tree and head)
+/// and handed over already shaped, so this struct knows nothing about
+/// the conversation — it serializes lines into a FIFO outbox and drains
+/// it as one write.
 #[derive(Debug)]
 pub struct SessionWriter {
     path: PathBuf,
@@ -35,37 +40,17 @@ pub struct SessionWriter {
     file: Option<fs::File>,
     /// The header, written when the file materializes.
     header: SessionHeader,
-    /// An entry written immediately after the header on materialization
-    /// (the opening `model_change`).
-    opening: Option<EntryKind>,
-    /// The parent-chain cursor, advanced at **buffer time** — entries
-    /// chain in commit order the moment they are committed to memory,
-    /// so the disk can lag without forking the chain (flag 8's two
-    /// cursors: this one, and the durable offset below).
-    leaf: Option<String>,
-    /// The outbox: committed-in-memory entries whose lines have not
+    /// The outbox: committed-in-memory records whose lines have not
     /// reached the disk yet, in commit order. FIFO — the file is
-    /// always a clean prefix of commit order, so an unflushed entry
+    /// always a clean prefix of commit order, so an unflushed record
     /// can never be skipped past (the prompt barrier relies on this).
     outbox: VecDeque<String>,
     /// The file offset just past the last flushed byte — the rollback
     /// point when a write tears, and the boundary of the clean
-    /// prefix.
+    /// prefix. It only ever advances on a fully successful drain, so
+    /// a failed batch cannot leave part of itself durable.
     durable_offset: u64,
     id: String,
-}
-
-/// One committed entry: it exists in the session's memory (chained,
-/// id-minted, probe-visible) regardless of the flush outcome.
-/// `flush_error` set means the line is still in the outbox — retried
-/// on every subsequent write and at clean exit (flag 8's memory-first
-/// commit).
-#[derive(Debug)]
-pub struct Committed {
-    /// The entry as committed.
-    pub entry: SessionEntry,
-    /// The flush attempt's failure, if the outbox could not drain.
-    pub flush_error: Option<SessionError>,
 }
 
 /// A session file loaded from disk.
@@ -73,13 +58,11 @@ pub struct Committed {
 pub struct LoadedSession {
     /// The header line.
     pub header: SessionHeader,
-    /// Every parseable entry, in file order (all branches, plus
-    /// bookkeeping markers).
-    pub entries: Vec<SessionEntry>,
-    /// The active chain: root → effective leaf, the entries the next
-    /// outer loop sees. Diverges from file order once the log holds
-    /// branches.
-    pub chain: Vec<SessionEntry>,
+    /// Every parseable record, in file order: conversation nodes of
+    /// every branch interleaved with side records. Deriving the tree,
+    /// the active head, and the selection register from this sequence
+    /// is the loader's one-pass fold (the recorder's load).
+    pub records: Vec<FileRecord>,
     /// The file the session was loaded from.
     pub path: PathBuf,
     /// Repairs applied while loading (e.g. a torn tail line dropped).
@@ -157,8 +140,6 @@ impl SessionStore {
             path: self.dir.join(file_name),
             file: None,
             header,
-            opening: None,
-            leaf: None,
             outbox: VecDeque::new(),
             durable_offset: 0,
             id,
@@ -194,13 +175,15 @@ impl SessionStore {
     /// was recorded on. `None` when the file records no model change.
     pub fn last_model(&self, path: &Path) -> Result<Option<ModelSelection>, SessionError> {
         let loaded = self.open_path(path)?;
-        Ok(projection::last_model_change_in_file(&loaded.entries).map(
-            |(provider, model, level)| ModelSelection {
-                provider: provider.to_string(),
-                model: model.to_string(),
-                thinking_level: level.map(str::to_string),
-            },
-        ))
+        Ok(
+            crate::projection::last_model_change_in_file(&loaded.records).map(
+                |(provider, model, level)| ModelSelection {
+                    provider: provider.to_string(),
+                    model: model.to_string(),
+                    thinking_level: level.map(str::to_string),
+                },
+            ),
+        )
     }
 
     /// Every stored session, newest first (by creation timestamp in the
@@ -272,7 +255,7 @@ impl SessionStore {
             });
         }
 
-        let mut entries = Vec::new();
+        let mut records = Vec::new();
         let mut seen_ids = std::collections::BTreeSet::new();
         let mut repairs = Vec::new();
         // Byte offset of the start of the current line, for tail truncation.
@@ -285,9 +268,9 @@ impl SessionStore {
             if trimmed.is_empty() {
                 continue;
             }
-            let attempt = serde_json::from_str::<SessionEntry>(trimmed);
+            let attempt = serde_json::from_str::<FileRecord>(trimmed);
             match attempt {
-                Ok(entry) => {
+                Ok(FileRecord::Node(entry)) => {
                     if !seen_ids.insert(entry.id.clone()) {
                         return Err(SessionError::Corrupt {
                             path: path.to_path_buf(),
@@ -305,7 +288,10 @@ impl SessionStore {
                             ),
                         });
                     }
-                    entries.push(entry);
+                    records.push(FileRecord::Node(entry));
+                }
+                Ok(record @ FileRecord::Side(_)) => {
+                    records.push(record);
                 }
                 Err(source) => {
                     // A torn write can only ever be the final line (an
@@ -326,13 +312,9 @@ impl SessionStore {
             }
         }
 
-        let leaf = effective_leaf(&entries, path)?;
-        let chain = chain_from(&entries, leaf.as_deref(), path)?;
-
         Ok(LoadedSession {
             header,
-            entries,
-            chain,
+            records,
             path: path.to_path_buf(),
             repairs,
         })
@@ -340,12 +322,13 @@ impl SessionStore {
 }
 
 impl SessionWriter {
-    /// Re-open an existing session file for appending, resuming the parent
-    /// chain from the entry the log's rewind state points at.
+    /// Re-open an existing session file for appending. The resident
+    /// state (tree, head, selection) is rebuilt by the recorder's load
+    /// fold over the parsed records, not here — the writer only owns
+    /// the file handle and the outbox.
     pub fn open_existing(path: &Path) -> Result<SessionWriter, SessionError> {
         let loaded = SessionStore::new(path.parent().unwrap_or(Path::new("."))).open_path(path)?;
         let header = loaded.header;
-        let leaf = effective_leaf(&loaded.entries, path)?;
         let file = OpenOptions::new()
             .append(true)
             .open(path)
@@ -365,24 +348,122 @@ impl SessionWriter {
             path: path.to_path_buf(),
             file: Some(file),
             header,
-            opening: None,
-            leaf,
             outbox: VecDeque::new(),
             durable_offset,
             id,
         })
     }
 
-    /// An entry written immediately after the header when a deferred
-    /// session materializes (the opening `model_change`); meaningless on
-    /// a writer that is already on disk.
-    pub fn set_opening_entry(&mut self, kind: EntryKind) {
-        self.opening = Some(kind);
+    /// Append one record: buffer its line, then attempt the drain. The
+    /// commit is memory-first — the caller's resident state has already
+    /// accepted the record, and a flush failure (including a file that
+    /// cannot materialize yet) leaves the line buffered, not lost:
+    /// retried on every subsequent write and at clean exit.
+    pub fn append_record(&mut self, record: &FileRecord) -> Option<SessionError> {
+        if let Some(error) = self.buffer_line(record) {
+            return Some(error);
+        }
+        self.drain().err()
     }
 
-    /// Materialize the file: create the directory, write the header, and
-    /// flush the opening entry. Idempotent.
-    fn ensure_open(&mut self) -> Result<(), SessionError> {
+    /// The prompt barrier's atomic core (flag 8): buffer every record's
+    /// line, then drain the outbox as **one write** — all under this
+    /// one call, so nothing interleaves. `Ok` = every line is durable;
+    /// the turn may start. `Err` = a failure anywhere un-commits the
+    /// batch in the file sense: the drain's failure path already
+    /// truncated the torn bytes back to the durable offset (which only
+    /// advances on a fully successful write), and this pops the batch
+    /// back out of the outbox — the batch exists nowhere, and the
+    /// caller (who constructed the records but held off accepting them
+    /// into resident state) discards them and hands the texts back as
+    /// drafts.
+    pub fn commit_records(&mut self, records: &[FileRecord]) -> Result<(), SessionError> {
+        let mark = self.outbox.len();
+        for record in records {
+            if let Some(error) = self.buffer_line(record) {
+                self.rollback_to_mark(mark);
+                return Err(error);
+            }
+        }
+        if let Err(error) = self.drain() {
+            self.rollback_to_mark(mark);
+            return Err(error);
+        }
+        Ok(())
+    }
+
+    /// Serialize one record into the outbox — the memory half of every
+    /// commit. No open-check; callers have run `ensure_open`.
+    fn buffer_line(&mut self, record: &FileRecord) -> Option<SessionError> {
+        match serde_json::to_string(record) {
+            Ok(line) => {
+                self.outbox.push_back(line);
+                None
+            }
+            Err(source) => Some(SessionError::Io {
+                path: self.path.clone(),
+                source: source.into(),
+            }),
+        }
+    }
+
+    /// Un-commit a failed barrier: everything the batch buffered is
+    /// popped back out. The file needs no separate rollback — the
+    /// drain's failure path already truncated to the durable offset,
+    /// which only advances on a fully successful write.
+    fn rollback_to_mark(&mut self, mark: usize) {
+        while self.outbox.len() > mark {
+            self.outbox.pop_back();
+        }
+    }
+
+    /// Drain the outbox: materialize the file if this is the first
+    /// attempt, then **one write** for everything buffered; the offset
+    /// advances past it. A failure rolls the file back to the durable
+    /// offset — whatever bytes a partial write left are a torn tail,
+    /// gone — so the file is always a clean prefix of commit order and
+    /// a retried write can never splice into torn bytes. Buffered
+    /// records stay for the next attempt (every subsequent commit
+    /// retries, plus one at clean exit).
+    fn drain(&mut self) -> Result<(), SessionError> {
+        if self.outbox.is_empty() {
+            return Ok(());
+        }
+        self.materialize()?;
+        let file = self.file.as_mut().ok_or_else(|| SessionError::Io {
+            path: self.path.clone(),
+            source: std::io::Error::other("internal invariant violated: drain without a file"),
+        })?;
+        let mut blob = String::new();
+        for line in &self.outbox {
+            blob.push_str(line);
+            blob.push('\n');
+        }
+        // A plain `File` is unbuffered — `write_all` (which retries
+        // short writes itself) is the whole flush.
+        if let Err(source) = file.write_all(blob.as_bytes()) {
+            // Roll back to the clean prefix. The truncation goes
+            // through a separate write handle — an append-mode handle
+            // cannot set_len on Windows — and the append handle's next
+            // write lands at the new end regardless.
+            let _ = truncate_to(&self.path, self.durable_offset);
+            return Err(SessionError::Io {
+                path: self.path.clone(),
+                source,
+            });
+        }
+        self.durable_offset += blob.len() as u64;
+        self.outbox.clear();
+        Ok(())
+    }
+
+    /// Materialize the file (idempotent): create the directory, create
+    /// the file, write the header, and queue the opening record at the
+    /// front of the outbox so it drains as the first line after the
+    /// header. Called from [`Self::drain`] — a record committed before
+    /// the disk would accept the file simply waits in the outbox with
+    /// everything else.
+    fn materialize(&mut self) -> Result<(), SessionError> {
         if self.file.is_some() {
             return Ok(());
         }
@@ -395,166 +476,40 @@ impl SessionWriter {
         let file = OpenOptions::new()
             .create_new(true)
             .append(true)
-            .open(&self.path)
-            .map_err(|source| SessionError::Io {
-                path: self.path.clone(),
-                source,
-            })?;
+            .open(&self.path);
+        let file = match file {
+            Ok(file) => file,
+            Err(source) => {
+                // A previous materialize may have died mid-header,
+                // leaving a partial file `create_new` now refuses to
+                // replace. Remove the orphan so this attempt (and the
+                // next) can proceed — the outbox still holds every
+                // record, so nothing is lost.
+                let _ = fs::remove_file(&self.path);
+                return Err(SessionError::Io {
+                    path: self.path.clone(),
+                    source,
+                });
+            }
+        };
         let line = serde_json::to_string(&self.header).map_err(|source| SessionError::Io {
             path: self.path.clone(),
             source: source.into(),
         })?;
         let mut file = file;
-        writeln!(file, "{line}").map_err(|source| SessionError::Io {
-            path: self.path.clone(),
-            source,
-        })?;
-        file.flush().map_err(|source| SessionError::Io {
-            path: self.path.clone(),
-            source,
-        })?;
+        let wrote = file.write_all(format!("{line}\n").as_bytes());
+        if let Err(source) = wrote {
+            self.file = None;
+            let _ = fs::remove_file(&self.path);
+            return Err(SessionError::Io {
+                path: self.path.clone(),
+                source,
+            });
+        }
         self.file = Some(file);
         // The header is the durable prefix's first byte range.
-        self.durable_offset = self
-            .file
-            .as_ref()
-            .map(|file| file.metadata().map(|meta| meta.len()).unwrap_or(0))
-            .unwrap_or(0);
-        if let Some(opening) = self.opening.take() {
-            // Already inside `ensure_open` — commit through the normal
-            // path (enqueue + drain), not through `append_with_id`
-            // (which re-runs this setup). A flush failure here is an
-            // open failure: the file is not usable yet.
-            let committed = self.append_entry(None, opening)?;
-            if let Some(error) = committed.flush_error {
-                return Err(error);
-            }
-        }
+        self.durable_offset = line.len() as u64 + 1;
         Ok(())
-    }
-
-    /// Append one record and return the committed entry.
-    pub fn append(&mut self, kind: EntryKind) -> Result<Committed, SessionError> {
-        self.append_with_id(None, kind)
-    }
-
-    /// Append one record under a caller-provided entry id — for records
-    /// whose id was announced before the record existed (turns, born-early
-    /// messages). The id is trusted unique; it becomes the entry's own id
-    /// verbatim, so announced ids and log ids are the same value.
-    pub fn append_as(&mut self, id: &str, kind: EntryKind) -> Result<Committed, SessionError> {
-        self.append_with_id(Some(id.to_string()), kind)
-    }
-
-    pub(crate) fn append_with_id(
-        &mut self,
-        id: Option<String>,
-        kind: EntryKind,
-    ) -> Result<Committed, SessionError> {
-        self.ensure_open()?;
-        self.append_entry(id, kind)
-    }
-
-    /// Commit one entry — no open-check; callers must have opened the
-    /// file (`append_with_id` and `ensure_open`'s opening write).
-    /// The commit is memory-first: the entry chains (leaf advances)
-    /// and its line joins the outbox, then the flush is *attempted* —
-    /// a failure leaves the entry buffered, not lost.
-    fn append_entry(
-        &mut self,
-        id: Option<String>,
-        kind: EntryKind,
-    ) -> Result<Committed, SessionError> {
-        let entry = self.buffer_entry(id, kind)?;
-        let flush_error = self.drain().err();
-        Ok(Committed { entry, flush_error })
-    }
-
-    /// Buffer one entry without touching the disk: serialize, advance
-    /// the chain, queue the line. The memory half of every commit —
-    /// the barrier buffers a whole batch this way and flushes once, so
-    /// the batch occupies one contiguous region of the outbox (and,
-    /// once flushed, of the file) that a failure can roll back over.
-    fn buffer_entry(
-        &mut self,
-        id: Option<String>,
-        kind: EntryKind,
-    ) -> Result<SessionEntry, SessionError> {
-        let entry = SessionEntry::with_id(
-            id.unwrap_or_else(ids::new_entry_id),
-            self.leaf.clone(),
-            ids::now_rfc3339(),
-            kind,
-        );
-        let line = serde_json::to_string(&entry).map_err(|source| SessionError::Io {
-            path: self.path.clone(),
-            source: source.into(),
-        })?;
-        // Memory-first commit: the chain advances here, at buffer
-        // time, so commit order and chain order can never disagree
-        // no matter how the disk lags.
-        self.leaf = Some(entry.id.clone());
-        self.outbox.push_back(line);
-        Ok(entry)
-    }
-
-    /// Drain the outbox: write every buffered line, in order, and
-    /// flush. A torn or failed write rolls the file back to the
-    /// durable offset (`set_len` + seek), so a retried entry can
-    /// never splice a torn line — the file is a clean prefix of
-    /// commit order at every instant. Buffered entries stay for the
-    /// next attempt (every subsequent commit retries, plus one at
-    /// clean exit).
-    fn drain(&mut self) -> Result<(), SessionError> {
-        while let Some(line) = self.outbox.front() {
-            let file = self.file.as_mut().ok_or_else(|| SessionError::Io {
-                path: self.path.clone(),
-                source: std::io::Error::other(
-                    "internal invariant violated: drain before ensure_open",
-                ),
-            })?;
-            let written = writeln!(file, "{line}").and_then(|()| file.flush());
-            match written {
-                Ok(()) => {
-                    self.durable_offset += (line.len() + 1) as u64;
-                    self.outbox.pop_front();
-                }
-                Err(source) => {
-                    // Roll back to the clean prefix: whatever bytes the
-                    // torn write left are gone, and the buffered line
-                    // will be rewritten whole on the next attempt. The
-                    // truncation goes through a separate write handle —
-                    // an append-only handle cannot set_len on Windows —
-                    // and the append handle's next write lands at the
-                    // new end regardless.
-                    let _ = truncate_to(&self.path, self.durable_offset);
-                    return Err(SessionError::Io {
-                        path: self.path.clone(),
-                        source,
-                    });
-                }
-            }
-        }
-        Ok(())
-    }
-
-    /// The id of the last appended entry.
-    pub fn leaf(&self) -> Option<&str> {
-        self.leaf.as_deref()
-    }
-
-    /// Record a rewind: append a `rewound` marker — parented to the
-    /// current leaf, the honest record of where the abandoned chain
-    /// ended — then move the leaf to `to`, so the next append branches
-    /// from there (`None` branches from the root). The caller proves `to`
-    /// names an entry in this log; the marker alone makes the move durable
-    /// even if nothing follows. Returns the marker's own committed entry.
-    pub fn rewind_to(&mut self, to: Option<&str>) -> Result<Committed, SessionError> {
-        let committed = self.append(EntryKind::Rewound {
-            to: to.map(str::to_string),
-        })?;
-        self.leaf = to.map(str::to_string);
-        Ok(committed)
     }
 
     /// One flush attempt over the outbox — the clean-exit retry (the
@@ -564,83 +519,11 @@ impl SessionWriter {
         self.drain()
     }
 
-    /// The prompt barrier's atomic core (flag 8): buffer every entry,
-    /// then drain the outbox through them — all under this one call,
-    /// so nothing interleaves and the batch is one contiguous region
-    /// of the outbox and the file. `Ok` = every entry is durable; the
-    /// turn may start. `Err` = a failure anywhere un-commits the whole
-    /// batch — outbox, chain cursor, **and the file** (the region is
-    /// truncated back to the pre-barrier offset; without that, a
-    /// partially flushed batch would resurrect as history at reload,
-    /// because the load leaf is the last entry in file order). The
-    /// batch exists nowhere — the force-stop equivalent — and the
-    /// caller hands the texts back as drafts and runs nothing.
-    pub fn commit_barrier(
-        &mut self,
-        entries: Vec<(Option<String>, EntryKind)>,
-    ) -> Result<Vec<SessionEntry>, SessionError> {
-        self.ensure_open()?;
-        let mark = self.outbox.len();
-        let leaf_mark = self.leaf.clone();
-        let offset_mark = self.durable_offset;
-        let mut committed = Vec::with_capacity(entries.len());
-        for (id, kind) in entries {
-            match self.buffer_entry(id, kind) {
-                Ok(entry) => committed.push(entry),
-                // Unreachable through ensure_open's success (the
-                // kinds always serialize), but the rollback
-                // discipline is the same: leave nothing half-committed.
-                Err(error) => {
-                    self.rollback_barrier(mark, leaf_mark, offset_mark);
-                    return Err(error);
-                }
-            }
-        }
-        if let Err(error) = self.drain() {
-            self.rollback_barrier(mark, leaf_mark, offset_mark);
-            return Err(error);
-        }
-        Ok(committed)
-    }
-
-    /// Un-commit a failed barrier: restore the outbox mark, the chain
-    /// cursor, and the file prefix. `drain` already truncated any torn
-    /// write; this also removes batch entries that made it to the disk
-    /// before the failure — the truncation rides a separate write
-    /// handle (`truncate_to`), because an append-only handle cannot
-    /// `set_len` on Windows. Best-effort by necessity: if the
-    /// truncation itself fails, the file keeps orphaned lines — a dead
-    /// branch nothing chains through once a later entry appends — and
-    /// the offset is left untouched so later writes never splice into
-    /// them. (A hard crash between the failed drain and this rollback
-    /// is the one window where a partial batch can still surface at
-    /// reload; that window is the force-stop class, narrowed to the
-    /// instant between two flushes by the single-drain barrier.)
-    fn rollback_barrier(&mut self, mark: usize, leaf: Option<String>, offset: u64) {
-        while self.outbox.len() > mark {
-            self.outbox.pop_back();
-        }
-        self.leaf = leaf;
-        if self.durable_offset <= offset {
-            return;
-        }
-        if truncate_to(&self.path, offset).is_ok() {
-            self.durable_offset = offset;
-        }
-    }
-
-    /// How many entries sit in the outbox (the persist-degraded
+    /// How many records sit in the outbox (the persist-degraded
     /// `pending` count, and the `durable` verdict: zero means every
     /// commit reached the disk).
     pub fn pending(&self) -> usize {
         self.outbox.len()
-    }
-
-    /// The outbox's lines, in commit order — the resident view's
-    /// buffered tail (flag 8: a reload spans file + buffer when the
-    /// disk is degraded).
-    pub fn buffered_lines(&self) -> Vec<String> {
-        self.outbox.iter().cloned().collect()
     }
 
     /// The session file path.
@@ -651,66 +534,6 @@ impl SessionWriter {
     /// The session id from the header.
     pub fn session_id(&self) -> &str {
         &self.id
-    }
-}
-
-/// The entry the log's active chain ends at: normally the last entry in
-/// file order, but a `rewound` marker moves it to the entry the marker
-/// names. A marker pointing at an entry that does not precede it is
-/// corruption (rewind targets can only be entries that already existed).
-fn effective_leaf(entries: &[SessionEntry], path: &Path) -> Result<Option<String>, SessionError> {
-    let mut leaf = None;
-    let mut seen = std::collections::BTreeSet::new();
-    for entry in entries {
-        if let EntryKind::Rewound { to } = &entry.kind {
-            if let Some(target) = to
-                && !seen.contains(target)
-            {
-                return Err(SessionError::Corrupt {
-                    path: path.to_path_buf(),
-                    message: format!(
-                        "rewound marker `{}` targets unknown or later entry `{target}`",
-                        entry.id
-                    ),
-                });
-            }
-            leaf = to.clone();
-        } else {
-            leaf = Some(entry.id.clone());
-        }
-        seen.insert(entry.id.clone());
-    }
-    Ok(leaf)
-}
-
-/// The active chain of `entries`: `leaf` walked to the root via parent
-/// links, reversed into root→leaf order. Parent validation during parsing
-/// guarantees every link resolves; a miss is unreachable corruption and
-/// still fails loudly rather than producing a partial chain.
-pub(crate) fn chain_from(
-    entries: &[SessionEntry],
-    leaf: Option<&str>,
-    path: &Path,
-) -> Result<Vec<SessionEntry>, SessionError> {
-    let Some(leaf) = leaf else {
-        return Ok(Vec::new());
-    };
-    let by_id: std::collections::HashMap<&str, &SessionEntry> = entries
-        .iter()
-        .map(|entry| (entry.id.as_str(), entry))
-        .collect();
-    let mut chain = Vec::new();
-    let mut current = leaf;
-    loop {
-        let entry = by_id.get(current).ok_or_else(|| SessionError::Corrupt {
-            path: path.to_path_buf(),
-            message: format!("chain walks through missing entry `{current}`"),
-        })?;
-        chain.push((*entry).clone());
-        match &entry.parent_id {
-            Some(parent) => current = parent.as_str(),
-            None => return Ok(chain.into_iter().rev().collect()),
-        }
     }
 }
 
