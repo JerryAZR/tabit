@@ -90,7 +90,7 @@ size limit** — tool output can be large; buffer accordingly.
 ← {"type":"text_delta","stream":"019…","turn_id":"019…","text":"I'm "}
 ← {"type":"text_delta","stream":"019…","turn_id":"019…","text":"tabit."}
 ← {"type":"turn_committed","stream":"019…","id":"019…"}
-← {"type":"run_finished","stream":"019…","output":"I'm tabit.","usage":{…}}
+← {"type":"run_finished","stream":"019…","output":"I'm tabit.","usage":{…},"durable":true}
 ```
 
 The example's send lands while the session is idle (after
@@ -174,10 +174,10 @@ value, switch on `type` when recognized) and log the rest.
 - A **run** (outer loop) starts when a message is drained while idle:
    model turn → maybe tool calls → tool results → next model turn …
    until a turn with no tool calls. `run_finished` / `run_aborted` /
-   `run_failed` end a run; **exactly one terminal per run** (the one
-   exception today: a persistence failure *after* completion adds a
-   trailing `run_failed` behind `run_finished` — §6; the ruled
-   `durable` fold removes it and is not yet on the wire).
+   `run_failed` end a run; **exactly one terminal per run** — persist
+   degrade is not a second terminal, it rides `run_finished.durable`
+   and the `persist_*` kinds (§6). A prompt that cannot be made
+   durable never starts a run at all: the batch comes back as drafts.
 - A **message sent while a run is live is a steer**: acknowledged
    immediately (`message_queued`), enters the conversation at the next
    turn boundary (`user_message`). Never lost — the only exits from
@@ -273,9 +273,9 @@ dead structure ahead of the data.
 
 | event | payload | meaning |
 |---|---|---|
-| `run_finished` | `output`, `usage` | the run completed. `output` is the **final turn's** text (your accumulated deltas are authoritative for everything else); `usage` is aggregated across the whole run (the per-request figures are the `completion_call`s). (A ruled `durable` field — §6's write-behind note — is not on the wire.) |
+| `run_finished` | `output`, `usage`, `durable` | the run completed. `output` is the **final turn's** text (your accumulated deltas are authoritative for everything else); `usage` is aggregated across the whole run (the per-request figures are the `completion_call`s). `durable: false` means the write-behind log still holds entries (a `persist_degraded` error explains; they flush on later commits — nag about disk space, don't fail). |
 | `run_aborted` | `output` | aborted. `output` is the final response's text **if it had arrived** — empty for a mid-stream abort. Do not rely on it: the uncommitted turn's text lives only in the deltas you accumulated. |
-| `run_failed` | `message` | the failure in display form. Pending messages are not cleared — they drain into the next run. (A ruled `kind` taxonomy — `provider` / `budget` / `stopped` — is not on the wire yet; branch on nothing but the message today.) |
+| `run_failed` | `message` | the failure in display form (a provider/repair/reload failure — persist degrade is *not* this; it rides the persist kinds and `durable`). Pending messages are not cleared — they drain into the next run. (A ruled `kind` taxonomy — `provider` / `budget` / `stopped` — is not on the wire yet; branch on nothing but the message today.) |
 
 **Session navigation and configuration**
 
@@ -284,7 +284,7 @@ dead structure ahead of the data.
 | `sessions_available` | `sessions: [{ id, created_at, entry_count }]` | once, right after the ack's startup notes: every stored session, newest first. **Unstamped, backend-level.** Minimal by ruling — a plain object, fields grow when needed. A brand-new session has no file yet and is absent until it records. |
 | `session_created` | `id`, `path`, `model` | a `new_session` succeeded — **unstamped, backend-level** (the payload carries the id; no faked stamp). Its selection notes, if any, follow stamped with the new session's id. Nothing replays (the session is empty). |
 | `checked_out` | `entry_id`, `base_id` | checkout succeeded. `base_id` is `null` today: drop everything and rebuild from the replay pass that follows. A non-null `base_id` is the reserved suffix mode (keep through `base_id`, apply the pass) — treat any non-null value as "rebuild from the pass" and you stay correct. |
-| `model_changed` | `provider`, `model`, `thinking_level` | the session's **active model** — a session preference: the file's last `model_change`, latest in time wins (a rewind never moves it). Announced live whenever the session becomes visible: ahead of every replay pass (boot, `open_session`, re-replay, after `checked_out`) — idempotent, the value repeats. **Never inside a pass** (state is announced, not reconstructed); live switches arrive when the `model` command ships (stage 3). The ack's `model` is the boot session's register. |
+| `model_changed` | `provider`, `model`, `thinking_level` | the session's **active model** — a session preference: the file's last `model_change`, latest in time wins (a rewind never moves it). Announced live whenever the session becomes visible: ahead of every replay pass (boot, `open_session`, re-replay, after `checked_out`) — idempotent, the value repeats — and at every `model` command (a state write at receive; §5). **Never inside a pass** (state is announced, not reconstructed). The ack's `model` is the boot session's register. |
 
 **Errors: one generic carrier with a `kind`.** Anything that goes
 wrong outside a run terminal rides `error { kind, message, … }`. A
@@ -298,19 +298,19 @@ report (§3.5); you never mine it for user-facing meaning.
 | `model` | — | model configuration degraded: a startup preference (stale `default_model`, a resumed session's model gone) fell back. A warning — the session continues, with the fallback named in the message. (`model`-command failures join this kind when the command ships, stage 3.) |
 | `session` | — | a session command failed: `open_session` named an unknown id or an unreadable file, a command targeted an unknown session, `new_session` could not build, or the startup listing failed. **Unstamped, backend-level** — every `session`-kind error is (the failure belongs to no session; the message names the id). |
 | `checkout` | — | the checkout target does not exist in the session (§7). Stamped — it names an entry inside a real session. |
-| `persist_degraded` | `pending` | **reserved** — the write-behind producer is not shipped (see below); no `persist_*` error is emitted today. The vocabulary is on the wire contract so frontends can pre-build handling. |
-| `persist_recovered` | — | **reserved** — same. |
+| `persist_degraded` | `pending` | the write-behind log could not flush: `pending` entries are committed in memory but not on disk (disk full is the usual cause). Every later commit retries; nothing is lost unless the process is force-stopped while degraded (then the pending entries go — model output and steer records, never a prompt: the barrier refuses to run a turn on memory-only input and hands the batch back as drafts). Nag about disk space. |
+| `persist_recovered` | — | the pending entries reached the disk. |
 
-**Write-behind persistence (reserved).** The ruled design
-(PROTOCOL.md flag 8) — memory-first commits with a flush-retry buffer,
-the prompt barrier (a turn never starts on input that exists only in
-memory; a failed flush at drain discards the batch back as drafts
-with a `persist_degraded` error), `run_finished { durable }`, and the
-persist kinds above — is **not on the wire**. Persistence is
-synchronous today: a write failure fails the run, and after a
-completed run it emits a trailing `run_failed` behind the
-`run_finished` terminal (§4's one exception). Surface that error;
-nothing is buffered for retry.
+**Write-behind persistence (shipped, PROTOCOL.md flag 8).** Commits are
+memory-first: entries chain at buffer time and the file is always a
+clean prefix of commit order. The prompt barrier guards every run's
+opening input — a turn never starts on a message that exists only in
+memory; if the flush fails at drain, the batch comes back as drafts
+(`messages_discarded` + `persist_degraded`), never held. `model_change`
+and the `rewound`/`aborted` markers ride the buffer (the marker
+classification ruling): durable no later than the next turn's prompt,
+and a hard death in the window loses them — hand-redoable, and resume
+announces whichever register survived.
 
 **Replay** (brackets; content is finalized events from the catalog
 above — full-text deltas, same ids as live)

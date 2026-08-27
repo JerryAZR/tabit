@@ -532,7 +532,12 @@ fn last_model_reads_the_files_last_model_change() {
     );
     // Turn one's entry is still reachable as an earlier chain node.
     let loaded = store.open_path(writer.path()).expect("open");
-    assert!(loaded.chain.iter().any(|entry| entry.id == turn_one.entry.id));
+    assert!(
+        loaded
+            .chain
+            .iter()
+            .any(|entry| entry.id == turn_one.entry.id)
+    );
     fs::remove_dir_all(store.dir()).ok();
 }
 
@@ -552,9 +557,7 @@ fn the_outbox_drains_fully_and_the_file_is_the_clean_prefix() {
             thinking_level: None,
         })
         .expect("append");
-    writer
-        .rewind_to(Some(&first.entry.id))
-        .expect("rewind");
+    writer.rewind_to(Some(&first.entry.id)).expect("rewind");
 
     // Every commit attempts the drain, so a healthy disk leaves
     // nothing buffered — and the durable offset is exactly the file's
@@ -571,5 +574,48 @@ fn the_outbox_drains_fully_and_the_file_is_the_clean_prefix() {
     // And the leaf moved with the rewind, at buffer time (the commit
     // order the file mirrors).
     assert_eq!(writer.leaf(), Some(first.entry.id.as_str()));
+    fs::remove_dir_all(store.dir()).ok();
+}
+
+#[test]
+fn a_dead_flush_leaves_entries_buffered_and_rollback_restores_the_mark() {
+    let store = temp_store("barrier-rollback");
+    let mut writer = store.create("C:/work");
+    let first = writer
+        .append(EntryKind::UserMessage {
+            message: user_message("one"),
+        })
+        .expect("append (healthy)");
+    assert!(writer.outbox.is_empty(), "the healthy path drains");
+
+    // Kill the flush (the invariant stand-in for any IO failure: a
+    // writer whose file cannot be written). Commits still succeed —
+    // memory-first — and the entries stay buffered.
+    writer.file = None;
+    let buffered = writer
+        .append_entry(
+            Some("0197-buffered".to_string()),
+            EntryKind::UserMessage {
+                message: user_message("two"),
+            },
+        )
+        .expect("commit is memory-first");
+    assert!(buffered.flush_error.is_some(), "the flush reported failure");
+    assert_eq!(writer.outbox.len(), 1, "the entry stayed buffered");
+    assert_eq!(
+        writer.leaf(),
+        Some("0197-buffered"),
+        "the chain advanced at buffer time"
+    );
+
+    // The barrier's rollback half: everything beyond the mark is
+    // un-committed, chain cursor restored — the batch exists nowhere.
+    writer.rollback_tail(0, Some(first.entry.id.clone()));
+    assert!(writer.outbox.is_empty(), "the batch left nothing behind");
+    assert_eq!(writer.leaf(), Some(first.entry.id.as_str()));
+
+    // And the file agrees: only the healthy entry ever reached it.
+    let loaded = store.open_path(writer.path()).expect("open");
+    assert_eq!(loaded.entries.len(), 1, "the durable prefix is untouched");
     fs::remove_dir_all(store.dir()).ok();
 }

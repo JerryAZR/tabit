@@ -325,6 +325,9 @@ fn print_event(event: &SessionEvent) {
         SessionEvent::TurnTruncated { .. } => {
             let _ = writeln!(out, "[model output was truncated (output token limit)]");
         }
+        SessionEvent::RunFinished { durable: false, .. } => {
+            let _ = writeln!(out, "[output pending on disk — persist degraded]");
+        }
         SessionEvent::RunFinished { .. } => {
             let _ = writeln!(out);
         }

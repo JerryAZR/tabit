@@ -708,7 +708,20 @@ impl Session {
             slot.clone()
         };
         let mut sink = EventSink::new(on_event);
-        let history = self.stage_input(batch, &mut sink);
+        // The prompt barrier sits inside staging (flag 8): a batch that
+        // cannot be made durable is discarded back as drafts — no run
+        // happens, no terminal fires (ENGINE.md's Draining edge).
+        let history = match self.stage_input(batch, &mut sink) {
+            Some(history) => history,
+            None => {
+                return RunSummary {
+                    outcome: RunOutcome::Completed,
+                    output: String::new(),
+                    usage: Usage::default(),
+                    events: sink.events,
+                };
+            }
+        };
         // The agent-cache check at run open — the single point of use.
         // A selection that validates against config but cannot be
         // constructed in this environment (client build trouble, the
@@ -719,14 +732,6 @@ impl Session {
         if let Err(error) = self.ensure_agent() {
             let message = error.to_string();
             sink.emit(SessionEvent::RunFailed { message });
-            // The same durability rule conclude enforces: a record that
-            // never reached the disk fails the run even when nothing
-            // else ran (a trailing `run_failed`, like conclude's).
-            if let Some(persist_error) = self.recorder.first_error() {
-                sink.emit(SessionEvent::RunFailed {
-                    message: persist_error,
-                });
-            }
             if let Some(hub) = &self.interaction {
                 hub.clear_pending();
             }
@@ -749,26 +754,53 @@ impl Session {
     }
 
     /// Drain-all at idle entry: the whole batch becomes this run's opening
-    /// user input — one entry each, 1:1 with what the model saw — recorded
-    /// first (under each message's born-early id), then handed to the
-    /// engine as one conversation whose final message is the turn being
-    /// sent.
-    fn stage_input(&mut self, batch: &[QueuedMessage], sink: &mut EventSink<'_>) -> Vec<Message> {
+    /// user input — one entry each, 1:1 with what the model saw. The
+    /// **prompt barrier** (flag 8) comes first: the batch commits and
+    /// flushes through under one writer lock, so a turn never starts on
+    /// input that exists only in memory. A failed barrier un-records the
+    /// batch (it exists nowhere) and hands the texts back as drafts —
+    /// `None`, no run. On success the entries are durable and the
+    /// `user_message` acknowledgments follow.
+    fn stage_input(
+        &mut self,
+        batch: &[QueuedMessage],
+        sink: &mut EventSink<'_>,
+    ) -> Option<Vec<Message>> {
+        let entries = batch
+            .iter()
+            .map(|queued| {
+                (
+                    Some(queued.id.clone()),
+                    EntryKind::UserMessage {
+                        message: queued.message.clone(),
+                    },
+                )
+            })
+            .collect();
+        if self.recorder.commit_barrier(entries).is_err() {
+            // The degraded notice already rode the recorder's channel;
+            // the discard is ours (drafts — the abort-site shape: no
+            // user_message ever fired for these).
+            sink.emit(SessionEvent::MessagesDiscarded {
+                messages: batch
+                    .iter()
+                    .map(|queued| tabit_protocol::DiscardedMessage {
+                        text: queued.text(),
+                        id: queued.id.clone(),
+                    })
+                    .collect(),
+            });
+            return None;
+        }
         let mut history = self.context.clone();
         for queued in batch {
-            self.recorder.record_as(
-                &queued.id,
-                EntryKind::UserMessage {
-                    message: queued.message.clone(),
-                },
-            );
             sink.emit(SessionEvent::UserMessage {
                 text: queued.text(),
                 entry_id: queued.id.clone(),
             });
             history.push(queued.message.clone());
         }
-        history
+        Some(history)
     }
 
     /// Assemble the engine request for one run: the abort token and
@@ -882,6 +914,7 @@ impl Session {
                     sink.emit(SessionEvent::RunFinished {
                         output: driven.output.clone(),
                         usage: Self::wire_usage(&driven.usage),
+                        durable: self.recorder.is_clean(),
                     });
                 }
                 Ok(MultiTurnStreamItem::Steer { text }) => {
@@ -1022,15 +1055,9 @@ impl Session {
             });
             outcome = RunOutcome::Failed;
         }
-        // Durability: a record that never reached the disk fails the run
-        // even when the model answered (this `run_failed` follows the
-        // terminal event — documented on the event).
-        if let Some(persist_error) = self.recorder.first_error() {
-            sink.emit(SessionEvent::RunFailed {
-                message: persist_error,
-            });
-            outcome = RunOutcome::Failed;
-        }
+        // Persist degrade is not a run failure (flag 8): the terminal
+        // already carried the `durable` verdict, and the degraded /
+        // recovered notices ride the recorder's channel.
         if let Some(hub) = &self.interaction {
             hub.clear_pending();
         }
@@ -1171,16 +1198,15 @@ impl Session {
     /// a session preference (owner ruling 2026-08): a rewind moves the
     /// chain, never the register — the model that answers next is the
     /// file's last `model_change`, unchanged by this move, so there is
-    /// nothing to re-derive or validate here.
+    /// nothing to re-derive or validate here. A marker whose flush
+    /// fails rides the outbox like any entry (flag 8 — degraded
+    /// notices announce it; the ruling keeps markers non-barrier).
     fn apply_rewind(
         &mut self,
         branch_point: Option<&str>,
         dropped: usize,
     ) -> Result<RewindSummary, SessionError> {
         self.recorder.rewind_to(branch_point);
-        if let Some(error) = self.recorder.first_error() {
-            return Err(SessionError::Persist(error));
-        }
         // Repairs for a dangling tail land on the new chain, at the new
         // leaf.
         self.reload_context()?;
@@ -1237,6 +1263,17 @@ impl Session {
         self.recorder.flush();
     }
 
+    /// Attach the persist-state notice channel (flag 8's degraded /
+    /// recovered events), the mailbox-notices pattern: the worker
+    /// attaches at spawn with its event sender and stream stamp.
+    pub(crate) fn attach_persist_notices(
+        &self,
+        sender: tokio::sync::mpsc::WeakUnboundedSender<tabit_protocol::EventFrame>,
+        stream: tabit_protocol::StreamId,
+    ) {
+        self.recorder.attach_notices(sender, stream);
+    }
+
     /// The session id.
     pub fn id(&self) -> &str {
         &self.id
@@ -1280,28 +1317,30 @@ impl Session {
     /// Re-derive the in-memory context from the log's active chain. If the
     /// chain ends on a dangling tool-use roundtrip (an interrupted run or
     /// a mid-batch branch point), repair it with synthesized results — the
-    /// same fix resume applies — so the context stays replayable.
+    /// same fix resume applies — so the context stays replayable. The
+    /// read spans the resident view (file + outbox — flag 8: under
+    /// degrade, buffered entries are conversation truth too); a repair
+    /// whose flush fails rides the outbox with the rest (degraded
+    /// notices announce it; the reopen net re-repairs if the buffer is
+    /// ever lost).
     fn reload_context(&mut self) -> Result<usize, SessionError> {
         let loaded = self.store.open_path(&self.path)?;
-        let (_, dangling) = projection::project(&loaded.chain);
+        let (_, chain) = self.recorder.load_resident(loaded)?;
+        let (_, dangling) = projection::project(&chain);
         let mut repaired = 0;
         if let Some(dangling) = &dangling {
             for result in projection::interrupted_results(dangling) {
                 self.recorder.record(EntryKind::ToolResult { result });
             }
             repaired = dangling.calls.len();
-            // A repair that cannot reach the disk leaves the log
-            // unreplayable; surface it instead of projecting around it.
-            if let Some(error) = self.recorder.first_error() {
-                return Err(SessionError::Persist(error));
-            }
         }
-        let reloaded = self.store.open_path(&self.path)?;
-        let (context, _) = projection::project(&reloaded.chain);
+        let loaded = self.store.open_path(&self.path)?;
+        let (_, chain) = self.recorder.load_resident(loaded)?;
+        let (context, _) = projection::project(&chain);
         self.context = context;
         // The chain stays resident: replay (and the coming checkout)
         // reads this, not the file.
-        self.chain = reloaded.chain;
+        self.chain = chain;
         Ok(repaired)
     }
 

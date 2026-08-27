@@ -6,18 +6,20 @@
 //! record the stream does not itemize per turn - the canonical assistant
 //! message with its usage. Commits are memory-first (flag 8): entries
 //! chain and take their ids at buffer time, the writer's outbox drains on
-//! every commit, and a flush failure leaves the entry buffered for retry
-//! while the first failure is captured for the session to surface loudly
-//! when the run returns.
+//! every commit, and a flush failure flips the persist state to degraded
+//! (announced on the notice channel; `run_finished.durable` carries the
+//! verdict per run) until the buffer drains again.
 
-use crate::entry::EntryKind;
+use crate::entry::{EntryKind, SessionEntry};
+use crate::error::SessionError;
 use crate::store::SessionWriter;
 use rig_agent::agent::hook::{AgentHook, HookContext, ModelTurnAction, ModelTurnFinished};
 use rig_core::completion::Message;
 use rig_core::wasm_compat::WasmCompatSend;
 use std::collections::HashSet;
 use std::future::Future;
-use std::sync::{Arc, Mutex};
+use std::sync::{Arc, Mutex, OnceLock};
+use tabit_protocol::{EventFrame, SessionEvent, StreamId};
 
 /// Read-only probe over every entry id the session holds — buffered
 /// and flushed alike (ids are real at buffer time), plus everything
@@ -41,11 +43,18 @@ impl EntryIdProbe {
 /// Appends records to the session log.
 pub struct SessionRecorder {
     writer: Mutex<SessionWriter>,
-    /// The first persistence failure, if any; checked by the session when
-    /// the run returns.
-    first_error: Mutex<Option<String>>,
-    /// Every entry id this file has ever held (see [`EntryIdProbe`]).
+    /// Every entry id this session holds (see [`EntryIdProbe`]).
     ids: Arc<Mutex<HashSet<String>>>,
+    /// The persist-degraded state (flag 8): set while the outbox holds
+    /// entries a flush could not place, cleared when it drains. The
+    /// transitions ride the notice channel so a frontend can nag about
+    /// disk space instead of string-matching run failures.
+    degraded: Mutex<bool>,
+    /// The persist-state notice channel, attached by the session
+    /// worker at spawn (the mailbox-notices pattern: weak, so the
+    /// stream ends with the frontend).
+    notices: OnceLock<tokio::sync::mpsc::WeakUnboundedSender<EventFrame>>,
+    notice_stream: OnceLock<StreamId>,
 }
 
 impl SessionRecorder {
@@ -53,9 +62,23 @@ impl SessionRecorder {
     pub fn new(writer: SessionWriter) -> Self {
         Self {
             writer: Mutex::new(writer),
-            first_error: Mutex::new(None),
             ids: Arc::new(Mutex::new(HashSet::new())),
+            degraded: Mutex::new(false),
+            notices: OnceLock::new(),
+            notice_stream: OnceLock::new(),
         }
+    }
+
+    /// Attach the persist-state notice channel (the worker, at spawn).
+    /// Late or repeated attachment is ignored — one channel per
+    /// recorder, the first wins.
+    pub fn attach_notices(
+        &self,
+        sender: tokio::sync::mpsc::WeakUnboundedSender<EventFrame>,
+        stream: StreamId,
+    ) {
+        let _ = self.notices.set(sender);
+        let _ = self.notice_stream.set(stream);
     }
 
     /// Seed the id set with entries already in the file (the resume
@@ -72,21 +95,19 @@ impl SessionRecorder {
         }
     }
 
-    /// The first persistence failure, if one occurred. `None` means every
-    /// record reached the log.
-    pub fn first_error(&self) -> Option<String> {
-        crate::lock::lock(&self.first_error).clone()
+    /// Whether every commit reached the disk — the `durable` verdict.
+    pub fn is_clean(&self) -> bool {
+        crate::lock::lock(&self.writer).pending() == 0
     }
 
     /// Append one record to the session log and return its entry id.
     /// The commit is memory-first (flag 8): the entry chains and its
     /// id is real the moment this returns, whether or not the line
     /// reached the disk — a failed flush leaves it buffered, retried
-    /// on every subsequent write and at clean exit, and captured for
-    /// the session to surface (see [`SessionRecorder::first_error`]).
-    /// Only a failure to even open/bootstrap the file loses the
-    /// record (no entry exists to keep); the empty string stands in
-    /// for its absent id.
+    /// on every subsequent write and at clean exit, and announced
+    /// through the degraded notice. Only a failure to even
+    /// open/bootstrap the file loses the record (no entry exists to
+    /// keep); the empty string stands in for its absent id.
     pub fn record(&self, kind: EntryKind) -> String {
         self.append(None, kind)
     }
@@ -98,18 +119,43 @@ impl SessionRecorder {
     }
 
     fn append(&self, id: Option<String>, kind: EntryKind) -> String {
-        let committed = crate::lock::lock(&self.writer).append_with_id(id, kind);
-        match committed {
+        let mut writer = crate::lock::lock(&self.writer);
+        match writer.append_with_id(id, kind) {
             Ok(committed) => {
                 crate::lock::lock(&self.ids).insert(committed.entry.id.clone());
-                if let Some(error) = committed.flush_error {
-                    self.note_error(error);
-                }
+                self.observe(&mut writer, committed.flush_error);
                 committed.entry.id
             }
             Err(error) => {
-                self.note_error(error);
+                self.observe(&mut writer, Some(error));
                 String::new()
+            }
+        }
+    }
+
+    /// The prompt barrier (flag 8): record the batch and flush through
+    /// it, under one writer lock — nothing interleaves, the batch is
+    /// the outbox tail. `Ok` (the ids, already probe-visible) means
+    /// every entry is durable and the turn may start; `Err` means the
+    /// flush failed and the batch was un-committed (it exists nowhere,
+    /// the force-stop equivalent) — the caller hands the texts back as
+    /// drafts and runs nothing.
+    pub fn commit_barrier(
+        &self,
+        entries: Vec<(Option<String>, EntryKind)>,
+    ) -> Result<Vec<String>, String> {
+        let mut writer = crate::lock::lock(&self.writer);
+        match writer.commit_barrier(entries) {
+            Ok(committed) => {
+                let ids: Vec<String> = committed.iter().map(|entry| entry.id.clone()).collect();
+                crate::lock::lock(&self.ids).extend(ids.iter().cloned());
+                self.observe(&mut writer, None);
+                Ok(ids)
+            }
+            Err(error) => {
+                let message = error.to_string();
+                self.observe(&mut writer, Some(error));
+                Err(message)
             }
         }
     }
@@ -117,37 +163,103 @@ impl SessionRecorder {
     /// Record a rewind: a `rewound` marker plus the leaf move, under
     /// the same single writer. The marker commits to memory like any
     /// entry (its id joins the set — the probe answers for every id
-    /// the session holds); a failed flush is captured like
-    /// [`Self::record`]'s.
+    /// the session holds); a failed flush is announced through the
+    /// degraded notice like any other.
     pub fn rewind_to(&self, to: Option<&str>) {
-        match crate::lock::lock(&self.writer).rewind_to(to) {
+        let mut writer = crate::lock::lock(&self.writer);
+        let outcome = writer.rewind_to(to);
+        let flush_error = match outcome {
             Ok(committed) => {
                 crate::lock::lock(&self.ids).insert(committed.entry.id.clone());
-                if let Some(error) = committed.flush_error {
-                    self.note_error(error);
-                }
+                committed.flush_error
             }
-            Err(error) => self.note_error(error),
-        }
+            Err(error) => Some(error),
+        };
+        self.observe(&mut writer, flush_error);
     }
 
     /// The clean-exit flush attempt (flag 8): drain whatever the
-    /// outbox still holds. A failure is captured like a record's —
-    /// nothing is left to surface it in-process, but the state is not
-    /// silently swallowed either.
+    /// outbox still holds. A failure keeps the buffer and the
+    /// degraded state (nothing is left in-process to surface it, but
+    /// the state is not silently swallowed either).
     pub fn flush(&self) {
-        if let Err(error) = crate::lock::lock(&self.writer).flush() {
-            self.note_error(error);
-        }
+        let mut writer = crate::lock::lock(&self.writer);
+        let result = writer.flush();
+        self.observe(&mut writer, result.err());
     }
 
-    /// Remember the first persistence failure for the session to surface.
-    fn note_error(&self, error: crate::error::SessionError) {
-        let message = error.to_string();
-        let mut slot = crate::lock::lock(&self.first_error);
-        if slot.is_none() {
-            *slot = Some(message);
+    /// The resident view for context re-derivation: the durable file
+    /// plus the buffered tail (flag 8: under degrade, buffered entries
+    /// are conversation truth too). The chain is recomputed from the
+    /// writer's buffer-time leaf over the merged entries — appended
+    /// tails can branch (a buffered rewind), so file order alone is
+    /// not the chain. Repairs belong to the file load alone.
+    pub fn load_resident(
+        &self,
+        durable: crate::store::LoadedSession,
+    ) -> Result<(Vec<SessionEntry>, Vec<SessionEntry>), SessionError> {
+        let writer = crate::lock::lock(&self.writer);
+        if writer.pending() == 0 {
+            return Ok((durable.entries, durable.chain));
         }
+        let mut entries = durable.entries;
+        for line in writer.buffered_lines() {
+            // Our own serialization round-tripped through the outbox;
+            // a line that cannot parse back is an internal invariant
+            // break. Sanctioned crash: see the error doctrine in
+            // AGENTS.md.
+            #[allow(clippy::expect_used)]
+            let entry = serde_json::from_str::<SessionEntry>(&line)
+                .expect("outbox lines are entries this process serialized");
+            entries.push(entry);
+        }
+        let path = durable.path.clone();
+        let leaf = writer.leaf().map(str::to_string);
+        let chain = crate::store::chain_from(&entries, leaf.as_deref(), &path)?;
+        Ok((entries, chain))
+    }
+
+    /// Fold a flush outcome into the degraded state machine and
+    /// announce the transitions. Called with the writer lock held
+    /// (the pending count is the writer's).
+    fn observe(&self, writer: &mut SessionWriter, error: Option<SessionError>) {
+        let pending = writer.pending() as u64;
+        let degraded_now = error.is_some() || pending > 0;
+        let mut state = crate::lock::lock(&self.degraded);
+        if *state == degraded_now {
+            return;
+        }
+        *state = degraded_now;
+        drop(state);
+        let event = if degraded_now {
+            let message = error.map(|error| error.to_string()).unwrap_or_else(|| {
+                "records are committed in memory but pending on disk".to_string()
+            });
+            SessionEvent::error_persist_degraded(pending, message)
+        } else {
+            SessionEvent::error_persist_recovered()
+        };
+        self.send_notice(event);
+    }
+
+    /// One emission path for the persist-state transitions. A dead or
+    /// absent channel is a no-op — the frontend is gone or was never
+    /// attached (direct [`Session`] consumers).
+    fn send_notice(&self, event: SessionEvent) {
+        let Some(sender) = self
+            .notices
+            .get()
+            .and_then(tokio::sync::mpsc::WeakUnboundedSender::upgrade)
+        else {
+            return;
+        };
+        let Some(stream) = self.notice_stream.get() else {
+            return;
+        };
+        let _ = sender.send(EventFrame {
+            stream: Some(stream.clone()),
+            event,
+        });
     }
 }
 

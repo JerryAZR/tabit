@@ -25,8 +25,9 @@ loop; the session actor implements the outer layer.)
 ```mermaid
 stateDiagram-v2
     Idle --> Draining : work signal — queue non-empty
-    Draining --> Running : the batch joins the history —<br/>enter the inner loop at Preparing
-    Running --> Idle : Done — emit run_finished
+    Draining --> Running : the batch joins the history —<br/>the prompt barrier flushed through it<br/>(flag 8: durable before the turn) —<br/>enter the inner loop at Preparing
+    Draining --> Idle : the prompt barrier fails — the batch is<br/>un-recorded and handed back as drafts<br/>(messages_discarded + persist_degraded;<br/>never held, never run on memory-only input)
+    Running --> Idle : Done — emit run_finished<br/>(durable: whether the outbox is empty)
     Running --> Idle : Failed — emit run_failed
     Running --> Idle : abort preempts (token race at any await)<br/>— emit run_aborted; the ABORT SITE cleared the<br/>at-abort-time queue (the discard notice is immediate)
     Idle --> Idle : abort while idle — the abort site clears the<br/>queue (the notice is immediate; a no-op when empty)
@@ -38,7 +39,14 @@ The **Draining** step is the outer loop's single responsibility between
 idle and running: take the whole queue, join it into the history, and
 yield each message's `user_message` event (the 1:1 invariant). It is
 synchronous — no await between the take and entering the inner loop —
-so nothing interleaves, and batching is exact.
+so nothing interleaves, and batching is exact. Its gate is the **prompt
+barrier** (flag 8, ruled with the discard twist): the batch is
+committed and flushed through as one writer-locked sequence before the
+turn starts; a flush failure un-records the batch (it exists nowhere)
+and returns it as drafts — a run is never held for the disk and never
+runs on memory-only input. Steers join mid-run instead (the inner
+drain) and their records ride the write-behind buffer like turn
+output.
 
 **Entry contract** (what the outer layer hands the black box):
 

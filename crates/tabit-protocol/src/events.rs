@@ -137,17 +137,24 @@ pub enum SessionEvent {
         /// The turn that ended truncated.
         turn_id: String,
     },
-    /// The outer loop finished successfully.
+    /// The outer loop finished successfully. `durable` is flag 8's
+    /// verdict: false means the write-behind log still holds this
+    /// session's entries (a `persist_degraded` error explains; they
+    /// flush and recover on later commits) — the run's output exists
+    /// in memory and the log's clean prefix, not yet fully on disk.
     RunFinished {
         /// The final assistant text.
         output: String,
         /// Aggregated usage across the whole run.
         usage: Usage,
+        /// Whether every commit reached the disk at terminal time.
+        durable: bool,
     },
-    /// An outer loop failed: provider stream errors, or a persistence
-    /// failure after a completed run — in which case this follows
-    /// `RunFinished`. Not a command outcome (commands cannot fail); the
-    /// mailbox keeps draining, so later messages still run.
+    /// An outer loop failed: a provider stream error, or a repair/reload
+    /// failure. Not a command outcome (commands cannot fail); the
+    /// mailbox keeps draining, so later messages still run. (Persist
+    /// degrade is not this: it rides `persist_degraded`/`persist_recovered`
+    /// errors and `run_finished.durable` — flag 8.)
     RunFailed {
         /// The failure, in display form.
         message: String,
@@ -330,6 +337,17 @@ impl SessionEvent {
             kind: ErrorKind::PERSIST_DEGRADED.to_string(),
             message: message.into(),
             pending: Some(pending),
+        }
+    }
+
+    /// A `persist_recovered`-kind error: the pending records reached
+    /// the disk (the ride on the generic error carrier is historical —
+    /// the kind is the signal, not the word "error").
+    pub fn error_persist_recovered() -> Self {
+        Self::Error {
+            kind: ErrorKind::PERSIST_RECOVERED.to_string(),
+            message: "pending records reached the disk".to_string(),
+            pending: None,
         }
     }
 

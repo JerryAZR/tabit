@@ -963,12 +963,18 @@ state.** The session keeps its resident tree and projected context
 entries (the outbox). Separate structs, one-way flow (session commits
 → writer buffers → disk), events flow back (degraded/recovered).
 
-**Status:** the ruling stands, the machinery is not shipped —
-persistence is synchronous today; a post-run failure still emits a
-trailing `run_failed` after `run_finished` (the pre-fold shape), and
-`durable` / the persist kinds are reserved wire vocabulary with no
-producer. The write-behind producer is a board item (FRONTEND.md §6
-documents today's honest shape and marks the design reserved).
+**Status: shipped (2026-08).** The writer is the write-queue manager:
+memory-first commit (entries chain and id at buffer time), a FIFO
+outbox the file always mirrors as a clean prefix, torn-write rollback
+to the durable offset, retries on every subsequent commit plus one at
+each clean exit, the prompt barrier with the discard twist (a failed
+barrier un-records the batch — no turn, no terminal, drafts back),
+`run_finished.durable`, and the `persist_degraded`/`persist_recovered`
+transitions on the recorder's notice channel. The marker
+classification is above (the prompt is the only barrier-class entry).
+One documented limit: steer records ride the buffer like turn output —
+a force-stop can lose a consumed steer's *record* (its effect steered
+the live run; the input itself was never lost).
 
 ### 9. Empty conversation rides `PromptCancelled` — resolved by the v2 pass
 

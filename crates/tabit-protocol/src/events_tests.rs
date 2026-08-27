@@ -63,6 +63,7 @@ fn events_round_trip_through_json() {
         SessionEvent::RunFinished {
             output: "done".to_string(),
             usage: Usage::default(),
+            durable: true,
         },
         SessionEvent::RunFailed {
             message: "provider stream ended early".to_string(),

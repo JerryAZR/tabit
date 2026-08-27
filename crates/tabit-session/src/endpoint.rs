@@ -766,6 +766,7 @@ fn spawn_worker(
         // the first pump can run.
         session.attach_interaction(task_interaction);
         session.attach_mailbox_notices(event_tx.clone(), stream.clone());
+        session.attach_persist_notices(event_tx.downgrade(), stream.clone());
         // The resident worker. Ownership never moves: idle is the wait
         // below, running is the pump call - two positions of one loop,
         // not two tasks. One wake (the work signal) serves every

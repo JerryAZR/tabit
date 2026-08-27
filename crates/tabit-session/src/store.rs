@@ -549,6 +549,66 @@ impl SessionWriter {
         self.drain()
     }
 
+    /// The prompt barrier's atomic core (flag 8): commit every entry,
+    /// then drain the outbox through them — all under this one call,
+    /// so nothing interleaves and the batch is the outbox tail.
+    /// `Ok` = every entry is durable; the turn may start. `Err` = the
+    /// flush failed and the whole batch was **un-committed** (rolled
+    /// back out of the outbox, chain cursor restored — it exists
+    /// nowhere, the force-stop equivalent), and the caller hands the
+    /// texts back as drafts.
+    pub fn commit_barrier(
+        &mut self,
+        entries: Vec<(Option<String>, EntryKind)>,
+    ) -> Result<Vec<SessionEntry>, SessionError> {
+        self.ensure_open()?;
+        let mark = self.outbox.len();
+        let leaf_mark = self.leaf.clone();
+        let mut committed = Vec::with_capacity(entries.len());
+        for (id, kind) in entries {
+            match self.append_entry(id, kind) {
+                Ok(one) => committed.push(one.entry),
+                // Unreachable through ensure_open's success, but the
+                // rollback discipline is the same: leave nothing
+                // half-committed.
+                Err(error) => {
+                    self.rollback_tail(mark, leaf_mark);
+                    return Err(error);
+                }
+            }
+        }
+        if let Err(error) = self.drain() {
+            self.rollback_tail(mark, leaf_mark);
+            return Err(error);
+        }
+        Ok(committed)
+    }
+
+    /// Un-commit everything beyond an outbox mark, restoring the chain
+    /// cursor — the rollback half of a failed barrier. Any partially
+    /// written line was already truncated by [`Self::drain`]'s
+    /// set_len, so the file agrees.
+    fn rollback_tail(&mut self, mark: usize, leaf: Option<String>) {
+        while self.outbox.len() > mark {
+            self.outbox.pop_back();
+        }
+        self.leaf = leaf;
+    }
+
+    /// How many entries sit in the outbox (the persist-degraded
+    /// `pending` count, and the `durable` verdict: zero means every
+    /// commit reached the disk).
+    pub fn pending(&self) -> usize {
+        self.outbox.len()
+    }
+
+    /// The outbox's lines, in commit order — the resident view's
+    /// buffered tail (flag 8: a reload spans file + buffer when the
+    /// disk is degraded).
+    pub fn buffered_lines(&self) -> Vec<String> {
+        self.outbox.iter().cloned().collect()
+    }
+
     /// The session file path.
     pub fn path(&self) -> &Path {
         &self.path

@@ -239,6 +239,7 @@ fn sampled_event_variants_survive_the_frame_envelope() {
             event: SessionEvent::RunFinished {
                 output: "done".to_string(),
                 usage: Usage::default(),
+                durable: true,
             },
         },
         EventFrame {

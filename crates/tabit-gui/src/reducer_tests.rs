@@ -101,6 +101,7 @@ fn a_run_lifecycle_from_message_to_terminal() {
             total_tokens: 14,
             ..Usage::default()
         },
+        durable: true,
     }));
     assert!(!state.running);
     assert_eq!(state.usage.total_tokens, 14);
@@ -203,6 +204,7 @@ fn a_second_turn_opens_a_new_group() {
     state.reduce(event(SessionEvent::RunFinished {
         output: String::new(),
         usage: Usage::default(),
+        durable: true,
     }));
     // The next run's first delta opens a fresh turn.
     state.reduce(user("b"));
@@ -453,6 +455,7 @@ fn every_run_terminal_closes_all_open_cards() {
         SessionEvent::RunFinished {
             output: String::new(),
             usage: Usage::default(),
+            durable: true,
         },
         SessionEvent::RunAborted {
             output: String::new(),
@@ -709,6 +712,7 @@ fn background_events_update_liveness_but_never_the_transcript() {
         SessionEvent::RunFinished {
             output: String::new(),
             usage: Usage::default(),
+            durable: true,
         },
     ));
     assert!(
@@ -900,6 +904,7 @@ fn a_new_session_lands_even_while_the_current_one_runs() {
         SessionEvent::RunFinished {
             output: "done later".to_string(),
             usage: Usage::default(),
+            durable: true,
         },
     ));
     assert!(
@@ -1006,6 +1011,7 @@ fn a_replay_pass_never_marks_the_session_running() {
         SessionEvent::RunFinished {
             output: String::new(),
             usage: Usage::default(),
+            durable: true,
         },
     ));
     assert!(!state.running);
@@ -1154,12 +1160,14 @@ fn a_checkout_pass_rebuilds_the_transcript_and_liveness_stays_settled() {
     state.reduce(event(SessionEvent::RunFinished {
         output: "first answer".to_string(),
         usage: Usage::default(),
+        durable: true,
     }));
     state.reduce(user("two"));
     state.reduce(delta("second answer"));
     state.reduce(event(SessionEvent::RunFinished {
         output: "second answer".to_string(),
         usage: Usage::default(),
+        durable: true,
     }));
     assert_eq!(state.transcript.len(), 4);
 
@@ -1209,6 +1217,7 @@ fn a_failed_checkout_surfaces_as_an_error_notice() {
     state.reduce(event(SessionEvent::RunFinished {
         output: String::new(),
         usage: Usage::default(),
+        durable: true,
     }));
     state.reduce(event(SessionEvent::Error {
         kind: "checkout".to_string(),
