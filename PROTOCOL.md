@@ -398,6 +398,14 @@ histories).
   chain-state transition). Outcome
   events `model_changed` / `error { kind: model }`. Commands stay
   total: nothing is rejected without an event.
+  Open note (from the agent-cache refactor): validation at the command
+  is config truth, so a selection can land in the register yet fail to
+  construct at the next run open (the environmental class — client
+  build trouble; the run says `run_failed` and the last good agent
+  keeps serving). Decide at stage 3 whether the frontend's picker
+  needs a distinct "the selection didn't take" signal (an
+  `error { kind: model }` at the failure moment) or whether
+  `run_failed` alone suffices.
 - **Session listing stays one-shot.** Scan on startup and explicit
   reload (`tabit --list`, a human table — local or over ssh); no
   watch, no long-lived listing command.
