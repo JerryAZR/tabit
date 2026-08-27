@@ -51,7 +51,6 @@ fn events_round_trip_through_json() {
         },
         SessionEvent::TurnRetried {
             turn_id: TURN.to_string(),
-            turn: 2,
         },
         SessionEvent::CompletionCall {
             turn_id: TURN.to_string(),

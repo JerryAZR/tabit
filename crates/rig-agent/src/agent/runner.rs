@@ -179,16 +179,13 @@ pub(crate) fn completion_call_decision(action: CompletionCallAction) -> Completi
 }
 
 /// Where the driver drains queued steering messages: user input that joins
-/// the run at a tool-use roundtrip or after a final model turn (see
-/// [`AgentRun::steer`](crate::agent::run::AgentRun::steer)).
+/// the run at a tool-use roundtrip or after a final model turn.
 ///
-/// The driver polls `has_pending` at each steering point and only then calls
-/// `drain` (all-or-nothing: messages either enter the next model call or stay
-/// queued). The contract is single-consumer — one driver per source — so the
-/// two calls cannot race.
+/// The drain is unconditional: the machine offers exactly one drain point
+/// (ENGINE.md), the driver always takes the whole queue there, and an
+/// empty take is a valid feed. The contract is single-consumer — one
+/// driver per source.
 pub trait SteeringSource: WasmCompatSend + WasmCompatSync {
-    /// Whether any steering message is queued.
-    fn has_pending(&self) -> bool;
     /// Take every queued steering message, in the order they arrived.
     fn drain(&self) -> Vec<Message>;
 }
@@ -502,10 +499,6 @@ impl AgentRunner {
         self
     }
 
-    /// Ignore invalid tool calls when every registered hook declines to act.
-    ///
-    /// This is an internal compatibility policy for extractors, whose legacy
-    /// transport treated every non-`submit` call as irrelevant response
     /// Opt in or out of recording sensitive request, response, and tool content
     /// on GenAI telemetry spans for this run.
     ///

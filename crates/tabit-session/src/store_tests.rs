@@ -242,7 +242,7 @@ fn json_from_u32(v: u32) -> serde_json::Value {
 }
 
 #[test]
-fn project_root_discovery_prefers_git_ancestor() {
+fn project_default_roots_at_the_start_dir_without_discovery() {
     let base = std::env::temp_dir().join("tabit-session-tests/root-discovery");
     let _ = fs::remove_dir_all(&base);
     let project = base.join("project");
@@ -253,21 +253,8 @@ fn project_root_discovery_prefers_git_ancestor() {
     let store = SessionStore::project_default_from(&nested);
     assert_eq!(
         store.dir(),
-        project.join(".tabit").join("sessions"),
-        "discovery walks up to the git root"
-    );
-
-    let no_git = SessionStore::project_default_from(&nested);
-    fs::remove_dir_all(project.join(".git")).expect("remove git");
-    let fallback = SessionStore::project_default_from(&nested);
-    assert_eq!(
-        fallback.dir(),
         nested.join(".tabit").join("sessions"),
-        "without .git the start dir is the project root; store {}/{} vs {}/{}",
-        no_git.dir().display(),
-        fallback.dir().display(),
-        nested.display(),
-        nested.display()
+        "cwd is the root — a `.git` ancestor is not consulted (no walking)"
     );
     fs::remove_dir_all(&base).ok();
 }

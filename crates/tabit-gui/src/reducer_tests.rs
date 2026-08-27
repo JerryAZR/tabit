@@ -245,7 +245,6 @@ fn turn_retried_drops_the_provisional_turn() {
     state.reduce(delta("poisoned"));
     state.reduce(event(SessionEvent::TurnRetried {
         turn_id: "t1".to_string(),
-        turn: 1,
     }));
     assert!(matches!(state.transcript.last(), Some(Group::User { .. })));
     state.reduce(delta("fixed"));

@@ -1,4 +1,5 @@
-//! The tabit GUI: one window, one session, one `tabit --json` child.
+//! The tabit GUI: one window, many sessions, one active view — one
+//! `tabit --json` child (the multi-session host).
 //!
 //! Users do not run this binary directly — the `tabit` launcher
 //! spawns it detached (`tabit [path]`, ROADMAP item 7). The optional

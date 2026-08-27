@@ -119,8 +119,6 @@ pub enum SessionEvent {
     TurnRetried {
         /// The announced id of the discarded turn.
         turn_id: String,
-        /// One-based model-call index of the rejected turn.
-        turn: usize,
     },
     /// A completion request finished; its usage is final for that request.
     CompletionCall {

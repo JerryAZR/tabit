@@ -33,10 +33,10 @@ tabit --json [--continue | --session <path>] [--model <ref>]
   handshake. Creating, listing, opening, and switching sessions are
   channel commands (`new_session`, `open_session`; §5) — never process
   tricks. One connection per backend process (ruled scope).
-- **Spawn environment.** Sessions live at `<project-root>/.tabit/
-  sessions`, where project root is the nearest ancestor directory
-  containing `.git`, else the cwd. Spawn the backend in the project
-  directory. `--model <ref>` is `provider/model` or a bare model id
+- **Spawn environment.** Sessions live at `<cwd>/.tabit/sessions`
+  — the directory the backend was started in; there is no
+  project-root discovery (do not assume a git repo). Spawn the
+  backend in the project directory. `--model <ref>` is `provider/model` or a bare model id
   when unambiguous; `--max-turns <n>` also exists (and applies to
   sessions created later in the same process). The `tabit` launcher
   hands the GUI its exact executable via `--tabit <path>` — "can't

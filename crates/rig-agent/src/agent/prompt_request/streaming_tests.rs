@@ -168,10 +168,6 @@ impl ScriptedSteers {
 }
 
 impl crate::agent::runner::SteeringSource for ScriptedSteers {
-    fn has_pending(&self) -> bool {
-        !self.queue.lock().expect("steer queue").is_empty()
-    }
-
     fn drain(&self) -> Vec<Message> {
         self.queue.lock().expect("steer queue").drain(..).collect()
     }
@@ -201,10 +197,6 @@ struct OneSteerAtATime {
 }
 
 impl crate::agent::runner::SteeringSource for OneSteerAtATime {
-    fn has_pending(&self) -> bool {
-        *self.remaining.lock().expect("steer remaining") > 0
-    }
-
     fn drain(&self) -> Vec<Message> {
         let mut remaining = self.remaining.lock().expect("steer remaining");
         if *remaining == 0 {
@@ -3684,11 +3676,6 @@ impl ArmedSteers {
 }
 
 impl crate::agent::SteeringSource for ArmedSteers {
-    fn has_pending(&self) -> bool {
-        self.armed.load(std::sync::atomic::Ordering::SeqCst)
-            && !self.pending.lock().expect("steer lock").is_empty()
-    }
-
     fn drain(&self) -> Vec<Message> {
         std::mem::take(&mut self.pending.lock().expect("steer lock"))
     }

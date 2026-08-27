@@ -94,9 +94,9 @@ impl SessionStore {
         Self { dir: dir.into() }
     }
 
-    /// The store at `<project-root>/.tabit/sessions`, where the project
-    /// root is discovered from the current working directory: the nearest
-    /// ancestor containing `.git`, else the working directory itself.
+    /// The store at `<cwd>/.tabit/sessions` — the working directory
+    /// the backend was started in. There is no project-root
+    /// discovery: do not assume a git repo (owner ruling).
     pub fn project_default() -> Self {
         Self::project_default_from(&std::env::current_dir().unwrap_or_else(|_| PathBuf::from(".")))
     }
@@ -104,7 +104,7 @@ impl SessionStore {
     /// [`SessionStore::project_default`] with an explicit starting
     /// directory (testable variant).
     pub fn project_default_from(start: &Path) -> Self {
-        Self::new(project_root_from(start).join(".tabit").join("sessions"))
+        Self::new(start.join(".tabit").join("sessions"))
     }
 
     /// The sessions directory this store manages.
@@ -538,18 +538,6 @@ pub(crate) fn chain_from(
             None => return Ok(chain.into_iter().rev().collect()),
         }
     }
-}
-
-/// The nearest ancestor of `start` containing a `.git` entry, else `start`.
-fn project_root_from(start: &Path) -> PathBuf {
-    let mut current = Some(start);
-    while let Some(dir) = current {
-        if dir.join(".git").exists() {
-            return dir.to_path_buf();
-        }
-        current = dir.parent();
-    }
-    start.to_path_buf()
 }
 
 /// Read the header and count entries without full validation (listing fast

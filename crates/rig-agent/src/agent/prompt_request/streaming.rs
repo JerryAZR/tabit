@@ -444,13 +444,8 @@ impl TurnSource for StreamingTurnSource {
                 prepared.allowed_tool_names.clone(),
             );
             let mut completion_call_emitted = false;
-            let turn_abandoned = false;
             let mut provider_final_seen = false;
             let mut pending_final = None;
-            // Mirrors the blocking driver's `response_hook_suppressed`: a turn
-            // whose invalid tool call was repaired is a recovered turn, so its
-            // response-finish hook is suppressed.
-            let turn_recovered = false;
 
             // Emit the turn's single `CompletionCall` exactly once, recording its
             // usage onto the chat span and into the run. Defined here (not a free
@@ -601,10 +596,6 @@ impl TurnSource for StreamingTurnSource {
                 }
             }
 
-            if turn_abandoned {
-                return;
-            }
-
             // The provider stream ended without its terminal record. Per the
             // emission contract (`rig_core::streaming`), that absence means
             // truncation and must never be treated as a successful zero-usage
@@ -641,7 +632,6 @@ impl TurnSource for StreamingTurnSource {
             let final_turn_content = stream.choice.clone();
             let streamed_turn = assembler.finish(stream.message_id.clone(), &final_turn_content);
             if pending_final.is_some()
-                && !turn_recovered
                 && let Some(reason) = observe_action(
                     runner
                         .hooks
@@ -675,9 +665,7 @@ impl TurnSource for StreamingTurnSource {
             // Normalized per-turn event, fired once the turn is parked for
             // acceptance on the streaming surface — including tool-only /
             // reasoning-only turns that fire no `StreamResponseFinish`.
-            // Suppressed for recovered turns, mirroring the blocking surface's
-            // `Continue` arm.
-            if !turn_recovered {
+            {
                 let action = AgentHook::on_model_turn_finished(
                     &runner.hooks,
                         hook_ctx,

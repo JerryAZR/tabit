@@ -542,10 +542,6 @@ struct SessionSteers {
 }
 
 impl rig_agent::SteeringSource for SessionSteers {
-    fn has_pending(&self) -> bool {
-        !self.mailbox.is_empty()
-    }
-
     fn drain(&self) -> Vec<Message> {
         self.mailbox.take_steers()
     }
@@ -1474,9 +1470,7 @@ fn stream_item_event(
         // `CompletionCall` is handled by an explicit arm in `run_one` — it
         // can carry a second, truncation-warning event beside the usage one.
         MultiTurnStreamItem::CompletionCall(_) => None,
-        MultiTurnStreamItem::ModelTurnRetried { turn } => {
-            Some(SessionEvent::TurnRetried { turn_id, turn })
-        }
+        MultiTurnStreamItem::ModelTurnRetried { .. } => Some(SessionEvent::TurnRetried { turn_id }),
         MultiTurnStreamItem::FinalResponse(_) => None, // handled by the caller
         _ => None,
     }
@@ -1508,11 +1502,16 @@ pub(crate) fn result_text(result: &rig_core::message::ToolResult) -> String {
 }
 
 /// Translate the rig-level structured status into the protocol's wire
-/// shape. `exit_code` means exit code: the structured code passes
-/// through exactly when numeric (a shell tool's exit status); other
-/// codes are not exit codes and their detail already lives in the
-/// content. Shared by the live fold and the replay projection — one
+/// shape. Live results always carry one — the engine stamps every
+/// execution outcome (`with_execution_status`) and the session's own
+/// synthesized results set one — so `None` is a producer breaking the
+/// contract, never a successful call: fail loud rather than bless it.
+/// `exit_code` means exit code: the structured code passes through
+/// exactly when numeric (a shell tool's exit status); other codes are
+/// not exit codes and their detail already lives in the content.
+/// Shared by the live fold and the replay projection — one
 /// translation, one truth.
+#[allow(clippy::panic)] // sanctioned crash: a status-less result is a broken producer invariant (AGENTS.md doctrine)
 pub(crate) fn wire_status(
     status: &Option<rig_core::completion::ToolResultStatus>,
 ) -> tabit_protocol::ToolResultStatus {
@@ -1525,7 +1524,7 @@ pub(crate) fn wire_status(
                 exit_code: code.as_deref().and_then(|code| code.parse().ok()),
             }
         }
-        None => tabit_protocol::ToolResultStatus::Success,
+        None => panic!("wire_status: a tool result reached the wire without a status"),
     }
 }
 

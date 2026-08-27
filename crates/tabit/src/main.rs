@@ -313,8 +313,8 @@ fn print_event(event: &SessionEvent) {
         SessionEvent::ToolResult { name, .. } => {
             let _ = writeln!(out, "← {name} done");
         }
-        SessionEvent::TurnRetried { turn, .. } => {
-            let _ = writeln!(out, "[turn {turn} rejected by a hook; retrying]");
+        SessionEvent::TurnRetried { .. } => {
+            let _ = writeln!(out, "[turn rejected by a hook; retrying]");
         }
         SessionEvent::CompletionCall { .. } => {}
         // Turn brackets are attribution machinery (the GUI's grouping);
@@ -1244,7 +1244,7 @@ mod tests {
             &["--json", "--rewind", "1"],
             &["--list", "-p", "hi"], // list is exclusive (was a silent win)
             &["--list", "--continue"],
-            &["--session", "s"], // session alone selects GUI mode
+            &["--session", "s"], // session alone is modeless
         ];
         for case in cases {
             let error = args(case).expect_err("foreign flags must not parse");
