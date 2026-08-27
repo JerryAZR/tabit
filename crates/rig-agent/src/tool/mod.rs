@@ -687,9 +687,14 @@ async fn execute_tool_body(
     use tracing::Instrument as _;
 
     let body_name = name.to_owned();
+    // Capture before the spawn: `Span::current()` inside the spawned
+    // block would read the sidecar thread's empty scope, silently
+    // detaching the body from the request trace. The handle crosses
+    // the boundary and re-enters around the body's polls.
+    let span = tracing::Span::current();
     let join = tool_body_runtime().spawn(async move {
         let result = contain_tool_panic(&body_name, tool.execute(args, &mut context))
-            .instrument(tracing::Span::current())
+            .instrument(span)
             .await;
         (result, context)
     });
@@ -1541,6 +1546,60 @@ mod tests {
         assert!(
             beats.load(Ordering::SeqCst) >= 2,
             "the caller's executor kept running while the body blocked"
+        );
+    }
+
+    /// The dispatch span crosses the sidecar spawn: the body polls on
+    /// another thread, so the span must be captured at the dispatch site
+    /// (where it is current) and carried into the spawned block — reading
+    /// `Span::current()` inside that block would observe the sidecar
+    /// thread's empty scope instead, silently detaching tool bodies from
+    /// the request trace.
+    #[cfg(not(target_family = "wasm"))]
+    #[tokio::test]
+    async fn a_tool_body_runs_inside_the_dispatch_span() {
+        use tracing::Instrument as _;
+
+        // Span scope is tracked per-dispatcher, and the body polls on the
+        // sidecar thread, whose dispatcher is the process-wide default —
+        // a `set_default` here would never reach it. Install the one
+        // global Registry instead (the production shape: one subscriber
+        // process-wide), still under the guard per the callsite-interest
+        // hazard. This is the test binary's only global install.
+        let _isolation = crate::test_utils::scoped_tracing_subscriber_guard().await;
+        tracing::subscriber::set_global_default(tracing_subscriber::Registry::default())
+            .expect("the span-probe test owns the process's only global subscriber install");
+
+        let probe = DynamicTool::new(
+            "span_probe",
+            "reports the span it runs in",
+            serde_json::json!({"type": "object"}),
+            |_context, _args| {
+                Box::pin(async move {
+                    let name = tracing::Span::current()
+                        .metadata()
+                        .map(|metadata| metadata.name().to_string())
+                        .unwrap_or_else(|| "<no span>".to_string());
+                    Ok(ToolOutput::text(name))
+                })
+            },
+        );
+
+        let context = ToolContext::new();
+        let dispatch = dispatch_tool(
+            "span_probe",
+            "{}".to_string(),
+            Some(RegisteredTool::Static(Arc::new(probe))),
+            &context,
+        );
+        let dispatch = dispatch
+            .instrument(tracing::info_span!("tool_dispatch_span"))
+            .await;
+
+        assert_eq!(
+            dispatch.result.output().as_text(),
+            Some("tool_dispatch_span"),
+            "the body saw the dispatch site's span, not the sidecar thread's empty scope"
         );
     }
 
