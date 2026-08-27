@@ -301,6 +301,8 @@ api_key = "dummy"
     // Unknown ids contribute nothing; the model factory is the loud check.
     let params = request_params(registry.config(), &ModelSelection::new("nope", "m"));
     assert_eq!(params, ModelRequestParams::default());
+    let params = request_params(registry.config(), &ModelSelection::new("local", "missing"));
+    assert_eq!(params, ModelRequestParams::default());
 }
 
 #[test]

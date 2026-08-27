@@ -610,7 +610,9 @@ fn a_dead_flush_leaves_entries_buffered_and_rollback_restores_the_mark() {
 
     // The barrier's rollback half: everything beyond the mark is
     // un-committed, chain cursor restored — the batch exists nowhere.
-    writer.rollback_tail(0, Some(first.entry.id.clone()));
+    // (The file is dead, so the offset fast path applies: nothing the
+    // rollback could truncate ever reached the disk.)
+    writer.rollback_barrier(0, Some(first.entry.id.clone()), writer.durable_offset);
     assert!(writer.outbox.is_empty(), "the batch left nothing behind");
     assert_eq!(writer.leaf(), Some(first.entry.id.as_str()));
 
@@ -618,4 +620,156 @@ fn a_dead_flush_leaves_entries_buffered_and_rollback_restores_the_mark() {
     let loaded = store.open_path(writer.path()).expect("open");
     assert_eq!(loaded.entries.len(), 1, "the durable prefix is untouched");
     fs::remove_dir_all(store.dir()).ok();
+}
+
+#[test]
+fn a_barrier_rollback_removes_batch_entries_that_reached_the_disk() {
+    let store = temp_store("barrier-file-rollback");
+    let mut writer = store.create("C:/work");
+    writer
+        .append(EntryKind::UserMessage {
+            message: user_message("one"),
+        })
+        .expect("append (pre-barrier)");
+    let prefix_len = writer.durable_offset;
+    let leaf_before = writer.leaf().map(str::to_string);
+
+    // The discriminating state for the disk-atomic rollback: batch
+    // entries that DID flush — the mid-batch fault, where the drain
+    // died on a later entry after these were already durable. Staged
+    // by committing entries and running the rollback the failure path
+    // runs (the mechanics do not care how the bytes arrived).
+    writer
+        .append(EntryKind::UserMessage {
+            message: user_message("b1"),
+        })
+        .expect("batch entry one (flushed)");
+    writer
+        .append(EntryKind::UserMessage {
+            message: user_message("b2"),
+        })
+        .expect("batch entry two (flushed)");
+    assert_eq!(
+        fs::metadata(writer.path()).expect("file").len(),
+        writer.durable_offset,
+        "the batch is on the disk"
+    );
+
+    writer.rollback_barrier(0, leaf_before.clone(), prefix_len);
+
+    // The batch left the FILE too — without this, the load leaf (the
+    // last entry in file order) would resurrect the discarded batch
+    // as history.
+    assert_eq!(
+        fs::metadata(writer.path()).expect("file").len(),
+        prefix_len,
+        "the file is the pre-barrier prefix again"
+    );
+    assert_eq!(writer.durable_offset, prefix_len);
+    assert_eq!(writer.leaf().map(str::to_string), leaf_before);
+
+    // The writer continues cleanly on the restored prefix: a fresh
+    // entry chains from the pre-barrier leaf and the file holds
+    // exactly the prefix plus it.
+    writer
+        .append(EntryKind::UserMessage {
+            message: user_message("after"),
+        })
+        .expect("append after the rollback");
+    let loaded = store.open_path(writer.path()).expect("open");
+    let texts: Vec<String> = loaded
+        .chain
+        .iter()
+        .filter_map(|entry| match &entry.kind {
+            EntryKind::UserMessage {
+                message: Message::User { content },
+            } => content
+                .iter()
+                .filter_map(|c| match c {
+                    UserContent::Text(t) => Some(t.text.clone()),
+                    _ => None,
+                })
+                .next(),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(texts, vec!["one".to_string(), "after".to_string()]);
+    fs::remove_dir_all(store.dir()).ok();
+}
+
+#[test]
+fn the_resident_view_spans_the_file_and_the_buffer_under_degrade() {
+    let store = temp_store("resident-view");
+    let mut writer = store.create("C:/work");
+    let durable = writer
+        .append(EntryKind::UserMessage {
+            message: user_message("one"),
+        })
+        .expect("append (durable)");
+    let path = writer.path().to_path_buf();
+
+    // Stage the degrade the way a dead drain leaves it: a buffered
+    // tail that cannot be placed (the dead-flush stand-in), chained at
+    // buffer time.
+    writer.file = None;
+    writer
+        .buffer_entry(
+            Some("0197-resident".to_string()),
+            EntryKind::UserMessage {
+                message: user_message("two"),
+            },
+        )
+        .expect("buffer");
+    let recorder = crate::recorder::SessionRecorder::new(writer);
+    assert!(!recorder.is_clean(), "the tail is pending");
+
+    // The resident view the session re-derives context from: the
+    // durable file plus the buffered tail, chained through the
+    // buffer-time leaf.
+    let loaded = store.open_path(&path).expect("open");
+    let (entries, chain) = recorder.load_resident(loaded).expect("resident view");
+    assert_eq!(entries.len(), 2);
+    assert_eq!(chain.len(), 2);
+    assert_eq!(chain[0].id, durable.entry.id);
+    assert_eq!(chain[1].id, "0197-resident");
+    fs::remove_dir_all(store.dir()).ok();
+}
+
+#[test]
+fn a_bootstrap_failure_loses_the_record_and_announces_the_degrade() {
+    let base = temp_store("recorder-blocked");
+    fs::create_dir_all(base.dir()).expect("base dir");
+    let blocked = base.dir().join("blocker");
+    fs::write(&blocked, b"not a directory").expect("blocker");
+    let store = SessionStore::new(&blocked);
+    let mut writer = store.create("C:/w");
+    writer.set_opening_entry(EntryKind::ModelChange {
+        provider: "p".to_string(),
+        model: "m".to_string(),
+        thinking_level: None,
+    });
+    let recorder = crate::recorder::SessionRecorder::new(writer);
+    let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
+    recorder.attach_notices(tx.downgrade(), tabit_protocol::StreamId::new("s"));
+
+    // The record cannot even bootstrap the file, so no entry exists
+    // to keep: the id is empty (the lost-record contract).
+    let id = recorder.record(EntryKind::UserMessage {
+        message: user_message("gone"),
+    });
+    assert_eq!(id, "");
+    // The rewind marker shares the contract.
+    recorder.rewind_to(None);
+
+    // One degrade transition — not two; the state machine holds —
+    // with zero pending (lost is not buffered).
+    let frame = rx.try_recv().expect("the degrade was announced");
+    match frame.event {
+        tabit_protocol::SessionEvent::Error { kind, .. }
+            if kind == tabit_protocol::ErrorKind::PERSIST_DEGRADED => {}
+        other => panic!("expected a persist-degraded error, got {other:?}"),
+    }
+    assert!(rx.try_recv().is_err(), "one transition, not per failure");
+    assert!(recorder.is_clean(), "lost is not pending");
+    fs::remove_dir_all(base.dir()).ok();
 }

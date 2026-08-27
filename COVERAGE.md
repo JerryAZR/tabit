@@ -31,8 +31,16 @@ Defensive ("unreachable") arms follow a stricter rule:
 - The whole suite runs offline (cassette replay + test doubles). Doctests
   are NOT included in these numbers (`llvm-cov` was run without
   `--doctests`); they are gated by the same CI run.
-- Current state: **93.41% lines / 94.14% regions** (4,155 of 63,042
-  lines; re-measured after the agent-cache refactor — selection is the
+- Current state: **93.38% lines / 94.14% regions** (4,202 of 63,493
+  lines; re-measured after the pre-GUI-redesign review pass, which
+  covered the write-behind and model-command rounds and fixed what
+  the review found — see the dedicated section below:
+  `recorder.rs` at 98.61% (was 82.22% — the lost-record arms, the
+  rewind arm, and the resident-view merge gained direct tests; the
+  residue is the dead-channel no-ops), `store.rs` at 85.21% (the
+  residue is the unstaged-fault class plus the barrier's mid-drain
+  fault arms). Before that: 93.41% lines / 94.14% regions
+  re-measured after the agent-cache refactor — selection is the
   truth, the agent a stamped cache derived at run open:
   `Session::ensure_agent` (both arms), the module-level `build_agent`,
   and the run-open construction-failure arm (`run_failed` after the
@@ -154,10 +162,11 @@ named, the classification applies to its current lcov-uncovered ranges.
      disk-full / uuid-collision / `create_new` races cannot be staged.
    - Poisoned-`Mutex` arms in `recorder.rs` — reachable only after a panic
      inside the lock, which the workspace lint policy forbids in shipped
-     code. `rewind_to`'s persist-failure arm shares `record()`'s
-     capture-and-surface path (`note_error`, covered for `record` by the
-     persist-failure test); staging a write fault that spares the load
-     read but breaks the marker append is not portable.
+     code. `rewind_to`'s failure leg rides the same
+     record-then-`observe` path as `record`'s (both covered by the
+     blocked-store bootstrap test: the lost-record contract, one
+     degrade announcement, `pending: 0`); staging a write fault that
+     spares the load read but breaks the marker append is not portable.
    - Placeholder arms documented as unreachable by construction:
      `user_placeholder` (guarded by an `is_empty` check; `OneOrMany` has no
      empty constructor). (`UnreachableModel` was deleted with the
@@ -203,11 +212,12 @@ named, the classification applies to its current lcov-uncovered ranges.
      unstaged-fault class as item 9's first bullet), and
      `append_entry`'s let-else guard (provably dead — `append` runs
      `ensure_open` first; loud rather than silently dropping records).
-   - The post-run persist check in `run_one` (`first_error` →
-     `RunFailed`): platform-contingent — on Windows an unlinked writer
-     keeps succeeding, so the same test exercises the reload-error arm
-     instead; the failing-run outcome is asserted either way by
-     `persistence_failure_fails_the_run_loudly`.
+   - The post-run re-derivation check in `run_one` (`reload_context`
+     error → trailing `RunFailed`): covered via the reload-error arm
+     (`persistence_failure_fails_the_run_loudly`); a persist-*write*
+     failure is no longer a run failure at all under flag 8 — the
+     terminal carries `run_finished.durable` and the degrade rides the
+     notice channel.
 
 ## Deferred (explicit)
 
@@ -463,9 +473,7 @@ it changed:
 - Deferred, deliberately: the GUI's optimistic switch transient and
   `Facts` drift on switcher switches (ROADMAP item 7 — the per-session
   transcript redesign); flag 11's panic arm (amended in PROTOCOL.md —
-  see the flag for the rationale); flag-8's `persist_degraded`
-  producer (the write-behind work item; the frontend side already
-  folds it).
+  see the flag for the rationale).
 
 ## Tool-gate seam (2026-08, the permission-leak review) — superseded
 
@@ -582,3 +590,62 @@ round:
   mid-run, surfacing as a mysterious one-off hang and a
   file-not-found.
 
+## Pre-GUI-redesign review pass (2026-08)
+
+The quality + coverage round over the agent-cache, model-command,
+write-behind, and prompt-caching commits. Re-measured: 93.38% lines /
+94.14% regions. What the review found and did:
+
+- **The barrier was not disk-atomic** (fixed). `commit_barrier` reused
+  `append_entry`, which drains per entry — a mid-batch flush failure
+  left earlier batch entries durable while the batch was un-committed
+  in memory, and the reload leaf (the last entry in file order) would
+  resurrect the discarded messages as history. The barrier now buffers
+  the whole batch and flushes once (`buffer_entry` split out of
+  `append_entry`), and the rollback truncates the file back to the
+  pre-barrier offset (`rollback_barrier`). Pinned by
+  `a_barrier_rollback_removes_batch_entries_that_reached_the_disk`
+  (file length, offset, leaf, next-append cleanliness, reload chain).
+- **The torn-write rollback was silently dead on Windows** (fixed,
+  found by the test above). `set_len` on an append-mode handle fails
+  with access-denied (Rust maps `append(true)` to `FILE_APPEND_DATA`
+  only; the `write` flag is ignored in that position). Both rollback
+  sites — `drain`'s torn-line truncation and the barrier's — now ride
+  `truncate_to`'s separate write handle (the same pattern the repair
+  path already used).
+- **A provably dead arm was deleted, not documented**: the
+  degrade-without-error message in `observe` (a drain that reports no
+  error has emptied the outbox, so `pending > 0` always rides an
+  error — the error alone decides the state now).
+- **Filled**: the lost-record contract (blocked store: empty id, one
+  degrade announcement, `pending: 0`, `is_clean` stays true — lost is
+  not pending); the resident view's file+buffer merge under degrade
+  (durable entry + buffered tail, chain recomputed through the
+  buffer-time leaf); the unknown-model arm of `request_params`; the
+  anthropic automatic-caching wire shape (`automatic_caching_pins_
+  one_top_level_directive_on_the_wire` — top-level `ephemeral`/`1h`,
+  no per-block markers; the flag is tabit's default policy, so the
+  wire contract is pinned); the session threads its id as the
+  factory cache key (assembly and model-switch derivations).
+- **Newly justified residue**: `commit_barrier`'s mid-drain fault arm
+  needs an open-but-failing write, which no portable test can stage
+  (an unlinked handle keeps succeeding on Windows) — the rollback
+  mechanics are unit-covered directly, and the bootstrap-failure leg
+  (blocked store) is endpoint-covered. `recorder.rs`'s remaining three
+  lines are `send_notice`'s dead-channel no-ops (weak-upgrade failure,
+  absent stream) — the established frontend-gone pattern, a no-op by
+  design. `store.rs`'s `ensure_open` fault arms and the
+  serialize-failure arms join the existing unstaged-fault class.
+- **Pre-existing, re-confirmed** (uncovered lines in the re-measure,
+  unchanged classes): `Session::rewind`'s boundary-parent-off-chain
+  Corrupt arm, the `stream_item_event` Unknown/catch arms,
+  `wire_status`'s sanctioned panic, the endpoint's `unreachable!`
+  routing guards and the parked-replay-at-close arm, `registry.rs`'s
+  `build_error` arm (client constructors cannot fail post-validation),
+  and the model-note emission at worker spawn.
+- **Reported to the owner, not fixed (design call)**: a worker-task
+  panic is swallowed — the stream ends without a terminal and the
+  clean-exit flush is skipped, but the process survives, against the
+  fail-loud doctrine. Closing it means a policy for propagating join
+  errors (abort the process, or synthesize a terminal), a host-level
+  flow change that should be ruled rather than slipped in.

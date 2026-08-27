@@ -31,6 +31,40 @@ fn missing_max_tokens_defaults_to_64k() {
 }
 
 #[test]
+fn automatic_caching_pins_one_top_level_directive_on_the_wire() {
+    let request = CompletionRequest {
+        model: None,
+        preamble: None,
+        chat_history: OneOrMany::one("hi".into()),
+        documents: vec![],
+        tools: vec![],
+        temperature: None,
+        max_tokens: None,
+        tool_choice: None,
+        additional_params: None,
+        output_schema: None,
+        record_telemetry_content: false,
+    };
+
+    let converted = AnthropicCompletionRequest::try_from(AnthropicRequestParams {
+        model: "claude-sonnet-4-6",
+        request,
+        prompt_caching: false,
+        automatic_caching: true,
+        automatic_caching_ttl: Some(CacheTtl::OneHour),
+    })
+    .expect("automatic caching converts");
+
+    // One top-level directive; the API owns breakpoint placement.
+    let serialized = serde_json::to_value(&converted).expect("serialize");
+    assert_eq!(serialized["cache_control"]["type"], "ephemeral");
+    assert_eq!(serialized["cache_control"]["ttl"], "1h");
+    // Automatic mode adds no per-block markers of its own.
+    assert!(!serialized["system"].to_string().contains("cache_control"));
+    assert!(!serialized["messages"].to_string().contains("cache_control"));
+}
+
+#[test]
 fn system_role_message_deserializes_and_round_trips() {
     let message: Message = serde_json::from_str(
         r#"

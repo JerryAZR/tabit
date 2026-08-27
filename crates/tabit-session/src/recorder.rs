@@ -96,6 +96,13 @@ impl SessionRecorder {
     }
 
     /// Whether every commit reached the disk — the `durable` verdict.
+    /// Sound once the file is open (and a finishing run implies that:
+    /// its prompt went through the barrier): every post-open failure
+    /// leaves its entry buffered, so zero pending means the disk holds
+    /// everything. Before the file first opens, a failed bootstrap can
+    /// lose a record without buffering one — that state announces
+    /// `persist_degraded` with `pending: 0` and never coincides with a
+    /// `run_finished`.
     pub fn is_clean(&self) -> bool {
         crate::lock::lock(&self.writer).pending() == 0
     }
@@ -221,23 +228,22 @@ impl SessionRecorder {
 
     /// Fold a flush outcome into the degraded state machine and
     /// announce the transitions. Called with the writer lock held
-    /// (the pending count is the writer's).
+    /// (the pending count is the writer's). A drain that reports no
+    /// error has emptied the outbox, so the error alone decides the
+    /// state — a nonzero `pending` always rides an error, and the
+    /// degraded message always names its cause.
     fn observe(&self, writer: &mut SessionWriter, error: Option<SessionError>) {
         let pending = writer.pending() as u64;
-        let degraded_now = error.is_some() || pending > 0;
+        let degraded_now = error.is_some();
         let mut state = crate::lock::lock(&self.degraded);
         if *state == degraded_now {
             return;
         }
         *state = degraded_now;
         drop(state);
-        let event = if degraded_now {
-            let message = error.map(|error| error.to_string()).unwrap_or_else(|| {
-                "records are committed in memory but pending on disk".to_string()
-            });
-            SessionEvent::error_persist_degraded(pending, message)
-        } else {
-            SessionEvent::error_persist_recovered()
+        let event = match error {
+            Some(error) => SessionEvent::error_persist_degraded(pending, error.to_string()),
+            None => SessionEvent::error_persist_recovered(),
         };
         self.send_notice(event);
     }

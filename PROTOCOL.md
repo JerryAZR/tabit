@@ -966,15 +966,22 @@ entries (the outbox). Separate structs, one-way flow (session commits
 **Status: shipped (2026-08).** The writer is the write-queue manager:
 memory-first commit (entries chain and id at buffer time), a FIFO
 outbox the file always mirrors as a clean prefix, torn-write rollback
-to the durable offset, retries on every subsequent commit plus one at
-each clean exit, the prompt barrier with the discard twist (a failed
-barrier un-records the batch — no turn, no terminal, drafts back),
-`run_finished.durable`, and the `persist_degraded`/`persist_recovered`
-transitions on the recorder's notice channel. The marker
-classification is above (the prompt is the only barrier-class entry).
-One documented limit: steer records ride the buffer like turn output —
-a force-stop can lose a consumed steer's *record* (its effect steered
-the live run; the input itself was never lost).
+to the durable offset (through a separate write handle — an
+append-mode handle cannot truncate on Windows), retries on every
+subsequent commit plus one at each clean exit, the prompt barrier
+with the discard twist (a failed barrier un-records the batch — no
+turn, no terminal, drafts back — **disk-atomically**: the batch is
+buffered whole and flushed once, and a partial flush is truncated
+back to the pre-barrier offset, so a discarded batch cannot
+resurface as history at reload), `run_finished.durable`, and the
+`persist_degraded`/`persist_recovered` transitions on the recorder's
+notice channel. The marker classification is above (the prompt is
+the only barrier-class entry). One documented limit: steer records
+ride the buffer like turn output — a force-stop can lose a consumed
+steer's *record* (its effect steered the live run; the input itself
+was never lost). A hard crash *inside* the barrier's single flush
+can still leave a partial batch on disk — the force-stop class,
+narrowed to the instant between two flushed lines.
 
 ### 9. Empty conversation rides `PromptCancelled` — resolved by the v2 pass
 

@@ -14,7 +14,7 @@ use crate::ids;
 use crate::projection;
 use std::collections::VecDeque;
 use std::fs::{self, OpenOptions};
-use std::io::{Seek as _, SeekFrom, Write as _};
+use std::io::Write as _;
 use std::path::{Path, PathBuf};
 use tabit_protocol::ModelSelection;
 
@@ -465,6 +465,21 @@ impl SessionWriter {
         id: Option<String>,
         kind: EntryKind,
     ) -> Result<Committed, SessionError> {
+        let entry = self.buffer_entry(id, kind)?;
+        let flush_error = self.drain().err();
+        Ok(Committed { entry, flush_error })
+    }
+
+    /// Buffer one entry without touching the disk: serialize, advance
+    /// the chain, queue the line. The memory half of every commit —
+    /// the barrier buffers a whole batch this way and flushes once, so
+    /// the batch occupies one contiguous region of the outbox (and,
+    /// once flushed, of the file) that a failure can roll back over.
+    fn buffer_entry(
+        &mut self,
+        id: Option<String>,
+        kind: EntryKind,
+    ) -> Result<SessionEntry, SessionError> {
         let entry = SessionEntry::with_id(
             id.unwrap_or_else(ids::new_entry_id),
             self.leaf.clone(),
@@ -480,8 +495,7 @@ impl SessionWriter {
         // no matter how the disk lags.
         self.leaf = Some(entry.id.clone());
         self.outbox.push_back(line);
-        let flush_error = self.drain().err();
-        Ok(Committed { entry, flush_error })
+        Ok(entry)
     }
 
     /// Drain the outbox: write every buffered line, in order, and
@@ -508,11 +522,12 @@ impl SessionWriter {
                 Err(source) => {
                     // Roll back to the clean prefix: whatever bytes the
                     // torn write left are gone, and the buffered line
-                    // will be rewritten whole on the next attempt.
-                    if let Some(file) = self.file.as_mut() {
-                        let _ = file.set_len(self.durable_offset);
-                        let _ = file.seek(SeekFrom::Start(self.durable_offset));
-                    }
+                    // will be rewritten whole on the next attempt. The
+                    // truncation goes through a separate write handle —
+                    // an append-only handle cannot set_len on Windows —
+                    // and the append handle's next write lands at the
+                    // new end regardless.
+                    let _ = truncate_to(&self.path, self.durable_offset);
                     return Err(SessionError::Io {
                         path: self.path.clone(),
                         source,
@@ -549,14 +564,17 @@ impl SessionWriter {
         self.drain()
     }
 
-    /// The prompt barrier's atomic core (flag 8): commit every entry,
+    /// The prompt barrier's atomic core (flag 8): buffer every entry,
     /// then drain the outbox through them — all under this one call,
-    /// so nothing interleaves and the batch is the outbox tail.
-    /// `Ok` = every entry is durable; the turn may start. `Err` = the
-    /// flush failed and the whole batch was **un-committed** (rolled
-    /// back out of the outbox, chain cursor restored — it exists
-    /// nowhere, the force-stop equivalent), and the caller hands the
-    /// texts back as drafts.
+    /// so nothing interleaves and the batch is one contiguous region
+    /// of the outbox and the file. `Ok` = every entry is durable; the
+    /// turn may start. `Err` = a failure anywhere un-commits the whole
+    /// batch — outbox, chain cursor, **and the file** (the region is
+    /// truncated back to the pre-barrier offset; without that, a
+    /// partially flushed batch would resurrect as history at reload,
+    /// because the load leaf is the last entry in file order). The
+    /// batch exists nowhere — the force-stop equivalent — and the
+    /// caller hands the texts back as drafts and runs nothing.
     pub fn commit_barrier(
         &mut self,
         entries: Vec<(Option<String>, EntryKind)>,
@@ -564,35 +582,51 @@ impl SessionWriter {
         self.ensure_open()?;
         let mark = self.outbox.len();
         let leaf_mark = self.leaf.clone();
+        let offset_mark = self.durable_offset;
         let mut committed = Vec::with_capacity(entries.len());
         for (id, kind) in entries {
-            match self.append_entry(id, kind) {
-                Ok(one) => committed.push(one.entry),
-                // Unreachable through ensure_open's success, but the
-                // rollback discipline is the same: leave nothing
-                // half-committed.
+            match self.buffer_entry(id, kind) {
+                Ok(entry) => committed.push(entry),
+                // Unreachable through ensure_open's success (the
+                // kinds always serialize), but the rollback
+                // discipline is the same: leave nothing half-committed.
                 Err(error) => {
-                    self.rollback_tail(mark, leaf_mark);
+                    self.rollback_barrier(mark, leaf_mark, offset_mark);
                     return Err(error);
                 }
             }
         }
         if let Err(error) = self.drain() {
-            self.rollback_tail(mark, leaf_mark);
+            self.rollback_barrier(mark, leaf_mark, offset_mark);
             return Err(error);
         }
         Ok(committed)
     }
 
-    /// Un-commit everything beyond an outbox mark, restoring the chain
-    /// cursor — the rollback half of a failed barrier. Any partially
-    /// written line was already truncated by [`Self::drain`]'s
-    /// set_len, so the file agrees.
-    fn rollback_tail(&mut self, mark: usize, leaf: Option<String>) {
+    /// Un-commit a failed barrier: restore the outbox mark, the chain
+    /// cursor, and the file prefix. `drain` already truncated any torn
+    /// write; this also removes batch entries that made it to the disk
+    /// before the failure — the truncation rides a separate write
+    /// handle (`truncate_to`), because an append-only handle cannot
+    /// `set_len` on Windows. Best-effort by necessity: if the
+    /// truncation itself fails, the file keeps orphaned lines — a dead
+    /// branch nothing chains through once a later entry appends — and
+    /// the offset is left untouched so later writes never splice into
+    /// them. (A hard crash between the failed drain and this rollback
+    /// is the one window where a partial batch can still surface at
+    /// reload; that window is the force-stop class, narrowed to the
+    /// instant between two flushes by the single-drain barrier.)
+    fn rollback_barrier(&mut self, mark: usize, leaf: Option<String>, offset: u64) {
         while self.outbox.len() > mark {
             self.outbox.pop_back();
         }
         self.leaf = leaf;
+        if self.durable_offset <= offset {
+            return;
+        }
+        if truncate_to(&self.path, offset).is_ok() {
+            self.durable_offset = offset;
+        }
     }
 
     /// How many entries sit in the outbox (the persist-degraded

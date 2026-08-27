@@ -1484,11 +1484,12 @@ impl Session {
 /// any thread** (owner ruling 2026-08: a state write happens at
 /// receive; the worker derives, it does not gate) — the register's
 /// one durable-write site, shared by the endpoint's `model` command,
-/// `Session::set_model`, and resume's reconciliation. The recorder's
-/// append is internally locked today; the planned write-behind log
-/// turns it into a queue enqueue with a flush attempt per write
-/// (disk-full degrades through the same sticky-error contract every
-/// record already carries).
+/// `Session::set_model`, and resume's reconciliation. The append is
+/// the write-behind commit: a queue enqueue with a flush attempt per
+/// write (a disk that refuses degrades through the persist-state
+/// machine — the degraded notice, retried on every later write — and
+/// the change is durable no later than the next turn's prompt
+/// barrier).
 #[derive(Clone)]
 pub(crate) struct ModelRegister {
     selection: Arc<Mutex<ModelSelection>>,
