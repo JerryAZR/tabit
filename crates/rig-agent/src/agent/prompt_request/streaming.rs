@@ -56,15 +56,27 @@ pub enum MultiTurnStreamItem {
         /// The announced turn id, stable for the whole attempt.
         id: String,
     },
-    /// The announced turn committed — its content is final and part of the
-    /// run's history (the durable recording hook has fired and model-turn
-    /// hooks accepted the turn). The closing bracket of the turn the
-    /// matching [`TurnStarted`](Self::TurnStarted) opened: a turn discarded
-    /// by a retry hook, a stop, a provider failure, or an abort never
-    /// commits, and its announced id stays uncommitted.
+    /// The announced turn committed — its content is final and part of
+    /// the run's history. The closing bracket of the turn the matching
+    /// [`TurnStarted`](Self::TurnStarted) opened: a turn discarded by a
+    /// defect retry, a provider failure, or an abort never commits, and
+    /// its announced id stays uncommitted. Carries the committed
+    /// content — the fold payload the durable layer commits through
+    /// `fold` (a final turn) or as the head of `fold_all` (a tools
+    /// turn).
     TurnCommitted {
         /// The announced id of the committed turn.
         id: String,
+        /// The committed assistant content.
+        content: Box<rig_core::OneOrMany<rig_core::message::AssistantContent>>,
+    },
+    /// The complete settled tool batch — the results the roundtrip
+    /// commits through `fold_all` (call order, every call answered).
+    /// Emitted after the batch's [`ToolExecutionCommitted`](Self::ToolExecutionCommitted)
+    /// and result items; a tools turn's fold payload.
+    BatchResults {
+        /// The settled results, in call order.
+        results: Vec<rig_core::message::UserContent>,
     },
     /// A streamed assistant content item — the content the **model emitted**:
     /// text/reasoning deltas, tool-call deltas, and, when the model turn is

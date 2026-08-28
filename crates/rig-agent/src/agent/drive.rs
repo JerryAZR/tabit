@@ -591,6 +591,7 @@ where
                 if let Some(id) = hook_ctx.turn_id() {
                     yield Ok(DriveItem::Item(MultiTurnStreamItem::TurnCommitted {
                         id: id.clone(),
+                        content: Box::new(turn.choice.clone()),
                     }));
                 }
                 turns_used += 1;
@@ -695,6 +696,7 @@ where
             // batch, verified and enqueued as one unit (ENGINE.md, the
             // durable conversation). Results are non-empty for a tools
             // turn; the construction cannot fail.
+            let results_vec = results.clone();
             let results_content = match OneOrMany::from_iter_optional(results) {
                 Some(content) => content,
                 None => {
@@ -715,9 +717,13 @@ where
                     content: results_content,
                 },
             ]);
+            yield Ok(DriveItem::Item(MultiTurnStreamItem::BatchResults {
+                results: results_vec,
+            }));
             if let Some(id) = hook_ctx.turn_id() {
                 yield Ok(DriveItem::Item(MultiTurnStreamItem::TurnCommitted {
                     id: id.clone(),
+                    content: Box::new(turn.choice.clone()),
                 }));
             }
             turns_used += 1;

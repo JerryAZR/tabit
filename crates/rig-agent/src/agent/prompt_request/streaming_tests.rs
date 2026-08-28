@@ -3700,13 +3700,13 @@ async fn each_model_call_attempt_is_announced_before_its_content() {
     // next turn's announcement (turn 1) / the terminal (turn 2).
     assert!(
         between.iter().any(
-            |item| matches!(item, MultiTurnStreamItem::TurnCommitted { id } if id == "attempt-0")
+            |item| matches!(item, MultiTurnStreamItem::TurnCommitted { id, .. } if id == "attempt-0")
         ),
         "the first turn's commit precedes the second announcement"
     );
     assert!(
         items[second + 1..].iter().any(
-            |item| matches!(item, MultiTurnStreamItem::TurnCommitted { id } if id == "attempt-1")
+            |item| matches!(item, MultiTurnStreamItem::TurnCommitted { id, .. } if id == "attempt-1")
         ),
         "the second turn commits before the run ends"
     );

@@ -62,6 +62,14 @@ pub struct ContextManager {
     buffer: SharedBuffer,
 }
 
+impl std::fmt::Debug for ContextManager {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("ContextManager")
+            .field("tree", &self.tree)
+            .finish_non_exhaustive()
+    }
+}
+
 impl ContextManager {
     /// A fresh conversation over a shared buffer. The writer's `create`
     /// pre-queues the header; nothing is written until a drain.
@@ -94,8 +102,8 @@ impl ContextManager {
                 if content.iter().any(|part| matches!(part, AssistantContent::ToolCall(_))));
             if opens_roundtrip || !batch.is_empty() {
                 batch.push(message);
-                let roundtrip_ready = !batch.is_empty()
-                    && matches!(batch.last(), Some(Message::User { .. }));
+                let roundtrip_ready =
+                    !batch.is_empty() && matches!(batch.last(), Some(Message::User { .. }));
                 if roundtrip_ready {
                     let batch = std::mem::take(&mut batch);
                     seeded.fold_all(batch);
