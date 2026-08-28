@@ -1,11 +1,11 @@
 pub mod streaming;
 
-use super::{Agent, hook::AgentHook, run::OutputMode, runner::AgentRunner};
+use super::{Agent, hook::AgentHook, runner::AgentRunner};
 use rig_core::{
     OneOrMany,
     completion::ToolResultStatus,
     message::{AssistantContent, ToolResultContent, UserContent},
-    wasm_compat::{WasmBoxedFuture, WasmCompatSend},
+    wasm_compat::WasmBoxedFuture,
 };
 
 use crate::{
@@ -409,10 +409,6 @@ pub struct PromptResponse {
     /// Where [`output`](Self::output) is the concatenated text, this preserves
     /// the individual content parts (text, reasoning, images, …).
     pub content: OneOrMany<AssistantContent>,
-    /// Number of synthetic output-tool calls in the turn that finalized this
-    /// response. Kept crate-private because it is runner bookkeeping rather
-    /// than provider-facing response content.
-    output_tool_calls: usize,
 }
 
 /// Serde shadow for [`PromptResponse`]. `content` is an `Option` here so runs
@@ -431,8 +427,6 @@ struct PromptResponseRepr {
     messages: Option<Vec<Message>>,
     #[serde(default)]
     content: Option<OneOrMany<AssistantContent>>,
-    #[serde(skip)]
-    output_tool_calls: usize,
 }
 
 impl From<PromptResponseRepr> for PromptResponse {
@@ -446,7 +440,6 @@ impl From<PromptResponseRepr> for PromptResponse {
             completion_calls: repr.completion_calls,
             messages: repr.messages,
             content,
-            output_tool_calls: repr.output_tool_calls,
         }
     }
 }
@@ -459,7 +452,6 @@ impl From<PromptResponse> for PromptResponseRepr {
             completion_calls: response.completion_calls,
             messages: response.messages,
             content: Some(response.content),
-            output_tool_calls: response.output_tool_calls,
         }
     }
 }
@@ -479,7 +471,6 @@ impl PromptResponse {
             usage,
             completion_calls: Vec::new(),
             messages: None,
-            output_tool_calls: 0,
         }
     }
 
@@ -503,15 +494,6 @@ impl PromptResponse {
     pub fn with_content(mut self, content: OneOrMany<AssistantContent>) -> Self {
         self.content = content;
         self
-    }
-
-    pub(crate) fn with_output_tool_calls(mut self, count: usize) -> Self {
-        self.output_tool_calls = count;
-        self
-    }
-
-    pub(crate) fn output_tool_calls(&self) -> usize {
-        self.output_tool_calls
     }
 
     /// The concatenated assistant text for the final turn.
@@ -548,49 +530,6 @@ impl PromptResponse {
     }
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
-#[non_exhaustive]
-pub struct TypedPromptResponse<T> {
-    pub output: T,
-    pub usage: Usage,
-    /// Successfully completed completion requests made by this agent run.
-    ///
-    /// `usage` remains the aggregate across the whole run. Use the last
-    /// entry's usage to inspect the final completion request's prompt/context
-    /// length. Zero-valued entry usage means the provider reported no usage
-    /// metrics for that request.
-    #[serde(default, skip_serializing_if = "Vec::is_empty")]
-    pub completion_calls: Vec<CompletionCall>,
-}
-
-impl<T> TypedPromptResponse<T> {
-    pub fn new(output: T, usage: Usage) -> Self {
-        Self {
-            output,
-            usage,
-            completion_calls: Vec::new(),
-        }
-    }
-
-    /// Attach completion call details to this response.
-    pub fn with_completion_calls(mut self, completion_calls: Vec<CompletionCall>) -> Self {
-        self.completion_calls = completion_calls;
-        self
-    }
-
-    /// Returns successfully completed completion requests made by this agent run.
-    ///
-    /// Zero-valued entry usage means the provider reported no usage metrics
-    /// for that request.
-    pub fn completion_calls(&self) -> &[CompletionCall] {
-        &self.completion_calls
-    }
-
-    /// Number of completion requests this agent run made.
-    pub fn requests(&self) -> usize {
-        self.completion_calls.len()
-    }
-}
 /// Wrap already-shaped tool-result content for the model (see
 /// [`tool_result_output`] / [`tool_result_message`]).
 fn tool_result_with(
@@ -638,41 +577,6 @@ pub(crate) fn tool_result_message(
     }
 }
 
-/// Synthetic result reported for validated sibling calls when a turn is
-/// re-prompted after an invalid call: they did not run, through no fault of
-/// their own.
-pub(crate) const TOOL_NOT_EXECUTED_DUE_TO_INVALID_PEER: &str =
-    "This tool call was not executed because a sibling tool call in the same turn was invalid";
-
-pub(crate) fn invalid_tool_retry_user_message(
-    assistant_content: &OneOrMany<AssistantContent>,
-    invalid_tool_call_id: &str,
-    feedback: String,
-) -> Option<Message> {
-    let retry_results = assistant_content
-        .iter()
-        .filter_map(|content| match content {
-            AssistantContent::ToolCall(tool_call) if tool_call.id == invalid_tool_call_id => {
-                Some(tool_result_message(
-                    tool_call.id.clone(),
-                    tool_call.call_id.clone(),
-                    feedback.clone(),
-                ))
-            }
-            AssistantContent::ToolCall(tool_call) => Some(tool_result_message(
-                tool_call.id.clone(),
-                tool_call.call_id.clone(),
-                TOOL_NOT_EXECUTED_DUE_TO_INVALID_PEER.to_string(),
-            )),
-            _ => None,
-        })
-        .collect::<Vec<_>>();
-
-    Some(Message::User {
-        content: OneOrMany::from_iter_optional(retry_results)?,
-    })
-}
-
 pub(crate) fn is_empty_assistant_turn(choice: &OneOrMany<AssistantContent>) -> bool {
     choice.len() == 1
         && matches!(
@@ -694,192 +598,6 @@ pub(crate) fn assistant_text_from_choice(choice: &OneOrMany<AssistantContent>) -
 impl PromptRequest<Extended> {
     async fn send(self) -> Result<PromptResponse, PromptError> {
         self.runner.run().await
-    }
-}
-
-// ================================================================
-// TypedPromptRequest - for structured output with automatic deserialization
-// ================================================================
-
-use crate::completion::StructuredOutputError;
-use schemars::{JsonSchema, schema_for};
-use serde::de::DeserializeOwned;
-
-/// A builder for creating typed prompt requests that return deserialized structured output.
-///
-/// This struct wraps a standard `PromptRequest` and adds:
-/// - Automatic JSON schema generation from the target type `T`
-/// - Automatic deserialization of the response into `T`
-///
-/// The type parameter `S` represents the state of the request (Standard or Extended).
-/// Use `.extended_details()` to transition to Extended state for usage tracking.
-///
-/// # Example
-/// ```rust,ignore
-/// let forecast: WeatherForecast = agent
-///     .prompt_typed("What's the weather in NYC?")
-///     .max_turns(3)
-///     .await?;
-/// ```
-pub struct TypedPromptRequest<T, S>
-where
-    T: JsonSchema + DeserializeOwned + WasmCompatSend,
-    S: PromptType,
-{
-    inner: PromptRequest<S>,
-    _phantom: std::marker::PhantomData<T>,
-}
-
-impl<T> TypedPromptRequest<T, Standard>
-where
-    T: JsonSchema + DeserializeOwned + WasmCompatSend,
-{
-    /// Create a new TypedPromptRequest from an agent.
-    ///
-    /// This automatically sets the output schema based on the type parameter `T`.
-    pub fn from_agent(agent: &Agent, prompt: impl Into<Message>) -> Self {
-        let mut inner = PromptRequest::from_agent(agent, prompt);
-        // Override the output schema with the schema for T
-        inner.runner.output_schema = Some(schema_for!(T));
-        // Typed prompts deserialize the model's final string, so they pin
-        // `Native` structured output to keep the typed API's behavior unchanged
-        // across all providers (#1928). Routing the typed path through `Tool`
-        // output mode for tool-using agents on non-composing providers is a
-        // follow-up; use the untyped `output_schema`/`output_mode` API for
-        // tool-composing structured output today.
-        inner.runner.output_mode = OutputMode::Native;
-        Self {
-            inner,
-            _phantom: std::marker::PhantomData,
-        }
-    }
-}
-
-impl<T, S> TypedPromptRequest<T, S>
-where
-    T: JsonSchema + DeserializeOwned + WasmCompatSend,
-    S: PromptType,
-{
-    /// Enable returning extended details for responses (includes aggregated token usage).
-    ///
-    /// Note: This changes the type of the response from `.send()` to return a `TypedPromptResponse<T>` struct
-    /// instead of just `T`. This is useful for tracking token usage across multiple turns
-    /// of conversation.
-    pub fn extended_details(self) -> TypedPromptRequest<T, Extended> {
-        TypedPromptRequest {
-            inner: self.inner.extended_details(),
-            _phantom: std::marker::PhantomData,
-        }
-    }
-
-    /// Set the total model-call budget, including the initial call and every
-    /// retry or continuation. Zero emits no model calls; one permits only the
-    /// initial call. Exceeding the budget returns a
-    /// [`StructuredOutputError::PromptError`] wrapping a `MaxTurnsError`.
-    pub fn max_turns(mut self, max_turns: usize) -> Self {
-        self.inner = self.inner.max_turns(max_turns);
-        self
-    }
-
-    /// Append a hook to this request's hook stack (on top of any the agent
-    /// already carries).
-    pub fn add_hook<H>(mut self, hook: H) -> Self
-    where
-        H: AgentHook + 'static,
-    {
-        self.inner = self.inner.add_hook(hook);
-        self
-    }
-
-    /// Set the source of announced turn ids — see
-    /// [`AgentRunner::turn_id_source`](crate::agent::runner::AgentRunner::turn_id_source).
-    pub fn turn_id_source(mut self, source: crate::agent::runner::TurnIdSource) -> Self {
-        self.inner = self.inner.turn_id_source(source);
-        self
-    }
-
-    forward_prompt_setters!(inner);
-    forward_tool_concurrency!(inner);
-}
-
-/// Deserialize a typed structured response from the model's final text.
-///
-/// Tries a direct parse first (the common path — native and tool-call output is
-/// already clean JSON), then falls back to the first balanced JSON value in the
-/// text so prose or markdown code fences around the JSON don't break weaker
-/// `Prompted`/best-effort output (#1928).
-fn deserialize_structured_output<T: DeserializeOwned>(text: &str) -> Result<T, serde_json::Error> {
-    let trimmed = text.trim();
-    match serde_json::from_str::<T>(trimmed) {
-        Ok(value) => Ok(value),
-        Err(direct_err) => {
-            let Some(start) = trimmed.find(['{', '[']) else {
-                return Err(direct_err);
-            };
-            serde_json::Deserializer::from_str(&trimmed[start..])
-                .into_iter::<T>()
-                .next()
-                .unwrap_or(Err(direct_err))
-        }
-    }
-}
-
-impl<T> TypedPromptRequest<T, Standard>
-where
-    T: JsonSchema + DeserializeOwned + WasmCompatSend,
-{
-    /// Send the typed prompt request and deserialize the response.
-    async fn send(self) -> Result<T, StructuredOutputError> {
-        let response = self.inner.send().await.map_err(Box::new)?;
-
-        if response.is_empty() {
-            return Err(StructuredOutputError::EmptyResponse);
-        }
-
-        let parsed: T = deserialize_structured_output(&response)?;
-        Ok(parsed)
-    }
-}
-
-impl<T> TypedPromptRequest<T, Extended>
-where
-    T: JsonSchema + DeserializeOwned + WasmCompatSend,
-{
-    /// Send the typed prompt request with extended details and deserialize the response.
-    async fn send(self) -> Result<TypedPromptResponse<T>, StructuredOutputError> {
-        let response = self.inner.send().await.map_err(Box::new)?;
-
-        if response.output.is_empty() {
-            return Err(StructuredOutputError::EmptyResponse);
-        }
-
-        let parsed: T = deserialize_structured_output(&response.output)?;
-        Ok(TypedPromptResponse::new(parsed, response.usage)
-            .with_completion_calls(response.completion_calls))
-    }
-}
-
-impl<T> IntoFuture for TypedPromptRequest<T, Standard>
-where
-    T: JsonSchema + DeserializeOwned + WasmCompatSend + 'static,
-{
-    type Output = Result<T, StructuredOutputError>;
-    type IntoFuture = WasmBoxedFuture<'static, Self::Output>;
-
-    fn into_future(self) -> Self::IntoFuture {
-        Box::pin(self.send())
-    }
-}
-
-impl<T> IntoFuture for TypedPromptRequest<T, Extended>
-where
-    T: JsonSchema + DeserializeOwned + WasmCompatSend + 'static,
-{
-    type Output = Result<TypedPromptResponse<T>, StructuredOutputError>;
-    type IntoFuture = WasmBoxedFuture<'static, Self::Output>;
-
-    fn into_future(self) -> Self::IntoFuture {
-        Box::pin(self.send())
     }
 }
 

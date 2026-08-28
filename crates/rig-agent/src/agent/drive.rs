@@ -331,9 +331,8 @@ where
                     };
 
                     // Record this turn's base system prompt — the patched-or-baseline
-                    // preamble, before any output-mode augmentation the request builder
-                    // appends. Borrow rather than clone since it only needs to outlive
-                    // span creation.
+                    // preamble. Borrow rather than clone since it only needs to
+                    // outlive span creation.
                     let effective_preamble = request_patch
                         .as_ref()
                         .and_then(|o| o.preamble.as_deref())
@@ -341,9 +340,6 @@ where
 
                     let chat_span = source.open_chat_span(&runner, effective_preamble);
 
-                    // Pin Tool output mode once committed so later turns stay
-                    // consistent even if the per-turn tool set changes (#1928).
-                    let committed_output_tool = run.output_tool_name().map(str::to_owned);
                     let mut prepared = match build_prepared_completion_request(
                         &selected_model,
                         &history,
@@ -356,10 +352,6 @@ where
                         runner.tool_choice.as_ref(),
                         &runner.tool_server_handle,
                         runner.output_schema.as_ref(),
-                        &runner.output_mode,
-                        committed_output_tool.as_deref(),
-                        runner.output_tool_description.as_deref(),
-                        runner.augment_output_preamble,
                         request_patch.as_ref(),
                     )
                     .await
@@ -382,7 +374,6 @@ where
                             continue 'outer;
                         }
                     };
-                    run.set_output_tool_name(prepared.output_tool_name.clone());
                     let turn_tool_snapshot = prepared.tool_snapshot.clone();
                     if runner.record_telemetry_content {
                         let input_messages = prepared.builder.messages_for_telemetry();
@@ -849,10 +840,7 @@ where
         if forward_items
             && let Some(turn_id) = hook_ctx.turn_id()
         {
-            surface_items.push(MultiTurnStreamItem::RoundtripClosed {
-                turn_id,
-                feedback: None,
-            });
+            surface_items.push(MultiTurnStreamItem::RoundtripClosed { turn_id });
         }
 
         // The batch is committed; now — and only now — the machine learns a

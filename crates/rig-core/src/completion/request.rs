@@ -600,31 +600,12 @@ impl AddAssign for Usage {
 /// implementations compiling when new capabilities are added.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 #[non_exhaustive]
-pub struct ProviderCapabilities {
-    /// Whether this provider's native structured output (`output_schema` ->
-    /// `format`/`response_format`) composes with tool calls in the same
-    /// multi-turn request without suppressing them.
-    ///
-    /// `false` is the safe assumption: the native constraint may make the model
-    /// emit schema JSON instead of calling its tools — see issue #1928.
-    /// Providers that enforce structured output *and* tool use together (e.g.
-    /// OpenAI, Anthropic) set this to `true`, which lets runtimes keep
-    /// guaranteed native structured output active when tools are present.
-    pub composes_native_output_with_tools: bool,
-}
+pub struct ProviderCapabilities {}
 
 impl ProviderCapabilities {
     /// Create the conservative capability set used by default.
     pub const fn new() -> Self {
-        Self {
-            composes_native_output_with_tools: false,
-        }
-    }
-
-    /// Declare whether native structured output composes with tool calls.
-    pub const fn with_native_output_tool_composition(mut self, supported: bool) -> Self {
-        self.composes_native_output_with_tools = supported;
-        self
+        Self {}
     }
 }
 
@@ -1336,16 +1317,6 @@ mod tests {
         .with_finish_reason(FinishReason::Stop);
 
         assert_eq!(response.finish_reason, Some(FinishReason::Stop));
-    }
-
-    #[test]
-    fn provider_capabilities_are_externally_configurable_from_default() {
-        let capabilities =
-            ProviderCapabilities::default().with_native_output_tool_composition(true);
-
-        assert!(capabilities.composes_native_output_with_tools);
-        assert!(!ProviderCapabilities::new().composes_native_output_with_tools);
-        assert_eq!(ProviderCapabilities::new(), ProviderCapabilities::default());
     }
 
     #[test]

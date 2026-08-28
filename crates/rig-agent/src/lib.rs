@@ -68,7 +68,6 @@ pub mod core {
 pub mod agent;
 pub mod client;
 pub mod completion;
-pub mod extractor;
 // Shared JSON helpers live in rig-core; re-export so call sites stay
 // `json_utils::merge` / `json_utils::serialize_json_value`.
 pub(crate) use rig_core::json_utils;
@@ -83,7 +82,6 @@ pub use agent::{
     Agent, AgentBuilder, AgentHook, AgentRun, AgentRunner, HookContext, ModelHandle,
     ModelSelection, ModelSelectionAction, SteeringSource, TurnIdSource,
 };
-pub use extractor::ExtractionResponse;
 
 #[cfg(feature = "derive")]
 #[cfg_attr(docsrs, doc(cfg(feature = "derive")))]

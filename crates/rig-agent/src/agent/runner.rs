@@ -50,9 +50,7 @@ use super::{
         streaming::{MultiTurnStreamItem, StreamingError, StreamingResult, StreamingTurnSource},
         tool_result_output,
     },
-    run::{
-        AcceptOutcome, AgentRun, DEFAULT_OUTPUT_RETRIES, ModelTurn, OutputMode, PendingToolCall,
-    },
+    run::{AcceptOutcome, AgentRun, ModelTurn, PendingToolCall},
 };
 use rig_core::{
     memory::ConversationMemory,
@@ -254,11 +252,9 @@ pub struct AgentRunner {
     /// Typed context cloned freshly for every tool dispatch.
     pub(crate) tool_context: ToolContext,
     pub(crate) tool_choice: Option<ToolChoice>,
+    /// Caller-supplied structured-output schema — pure pass-through to the
+    /// provider's native structured output (the engine has no policy).
     pub(crate) output_schema: Option<schemars::Schema>,
-    pub(crate) output_mode: OutputMode,
-    pub(crate) output_tool_name: Option<String>,
-    pub(crate) output_tool_description: Option<String>,
-    pub(crate) augment_output_preamble: bool,
     pub(crate) concurrency: usize,
     pub(crate) memory: Option<Arc<dyn ConversationMemory>>,
     pub(crate) conversation_id: Option<String>,
@@ -310,10 +306,6 @@ impl AgentRunner {
             tool_context: ToolContext::new(),
             tool_choice: agent.tool_choice.clone(),
             output_schema: agent.output_schema.clone(),
-            output_mode: agent.output_mode.clone(),
-            output_tool_name: None,
-            output_tool_description: None,
-            augment_output_preamble: true,
             concurrency: 1,
             memory: agent.memory.clone(),
             conversation_id: agent.default_conversation_id.clone(),
@@ -495,19 +487,6 @@ impl AgentRunner {
         self
     }
 
-    /// Configure the synthetic tool used by an internal Tool-output flow.
-    pub(crate) fn output_tool(
-        mut self,
-        name: impl Into<String>,
-        description: impl Into<String>,
-        augment_preamble: bool,
-    ) -> Self {
-        self.output_tool_name = Some(name.into());
-        self.output_tool_description = Some(description.into());
-        self.augment_output_preamble = augment_preamble;
-        self
-    }
-
     /// Opt in or out of recording sensitive request, response, and tool content
     /// on GenAI telemetry spans for this run.
     ///
@@ -601,12 +580,7 @@ impl AgentRunner {
                 "max_turns must be at least 1 — a run always executes one turn",
             ));
         }
-        let run = build_agent_run(history, self.max_turns, self.output_schema.as_ref());
-        let run = match &self.output_tool_name {
-            Some(name) => run.with_output_tool_name(name.clone()),
-            None => run,
-        };
-        Ok(run)
+        Ok(AgentRun::new(history).max_turns(self.max_turns))
     }
 
     /// The run's input history for prompt mode: an override (memory) or
@@ -620,22 +594,6 @@ impl AgentRunner {
     pub(crate) fn has_explicit_history(&self) -> bool {
         self.chat_history.is_some() || matches!(self.input, RunInput::Conversation(_))
     }
-}
-
-/// Construct an [`AgentRun`] from explicit run configuration. The single place a
-/// run is built, so the blocking and streaming drivers configure runs
-/// identically.
-pub(crate) fn build_agent_run(
-    history: Vec<Message>,
-    max_turns: usize,
-    output_schema: Option<&schemars::Schema>,
-) -> AgentRun {
-    AgentRun::new(history)
-        .max_turns(max_turns)
-        .with_output_validation(
-            output_schema.map(|schema| schema.as_value().clone()),
-            DEFAULT_OUTPUT_RETRIES,
-        )
 }
 
 /// Build (or adopt) the top-level `invoke_agent` span for a run, shared by the
@@ -1179,19 +1137,6 @@ impl TurnSource for UnaryTurnSource {
 }
 
 impl AgentRunner {
-    pub(crate) async fn run_with_error_usage(
-        mut self,
-    ) -> (Result<PromptResponse, PromptError>, Usage) {
-        let usage = Arc::new(Mutex::new(Usage::new()));
-        self.error_usage = Some(usage.clone());
-        let result = self.run().await;
-        let observed = result.as_ref().map_or_else(
-            |_| *usage.lock().unwrap_or_else(|error| error.into_inner()),
-            |response| response.usage,
-        );
-        (result, observed)
-    }
-
     /// Drive the agent loop to completion, returning the aggregated
     /// [`PromptResponse`]. Hooks fire at every observable point; the first hook
     /// to terminate cancels the run.

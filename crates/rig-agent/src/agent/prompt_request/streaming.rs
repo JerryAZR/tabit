@@ -146,15 +146,10 @@ pub enum MultiTurnStreamItem {
     /// session layer commits its pending roundtrip through its one door.
     /// For a final turn, this follows
     /// [`TurnCommitted`](Self::TurnCommitted) directly; for a tools turn,
-    /// it follows the batch's results at settlement. `feedback` carries
-    /// the engine-authored closing message (an output-mode re-prompt)
-    /// when the roundtrip closed with one instead of executed results.
+    /// it follows the batch's results at settlement.
     RoundtripClosed {
         /// The announced id of the turn the roundtrip belongs to.
         turn_id: String,
-        /// The engine-authored closing message, when one closed the
-        /// roundtrip (the model saw it; it belongs to the roundtrip).
-        feedback: Option<Message>,
     },
     /// The final result from the stream: the unified [`PromptResponse`] shared
     /// with the blocking surface.
@@ -229,46 +224,6 @@ impl MultiTurnStreamItem {
         ))
     }
 }
-/// Build the final streamed content for a finished run (#1928).
-///
-/// When the finishing turn carries a tool call it is a Tool-mode output-tool
-/// call (a real tool call would have routed to `CallTools`, not `Done`). In that
-/// case the tool call AND the model's prose are dropped, any reasoning/image
-/// content is kept, and `output` is appended as the final text — so the streamed
-/// [`PromptResponse::output`] string is the structured output rather than the
-/// prose, with no unanswered tool_use, matching the non-streaming `output`. Note
-/// this shapes only the surfaced [`PromptResponse::content`]; the persisted
-/// message history is built by the state machine (which keeps the prose, like the
-/// blocking driver), so `content` and `messages` intentionally differ on prose in
-/// this case.
-/// Otherwise returns `None` and the caller surfaces the turn's content unchanged.
-fn finalize_streamed_choice(
-    last_final_choice: &OneOrMany<AssistantContent>,
-    output: &str,
-) -> Option<OneOrMany<AssistantContent>> {
-    let finalized_via_output_tool = last_final_choice
-        .iter()
-        .any(|item| matches!(item, AssistantContent::ToolCall(_)));
-    if !finalized_via_output_tool {
-        return None;
-    }
-    let mut items: Vec<AssistantContent> = last_final_choice
-        .iter()
-        .filter(|item| {
-            !matches!(
-                item,
-                AssistantContent::ToolCall(_) | AssistantContent::Text(_)
-            )
-        })
-        .cloned()
-        .collect();
-    items.push(AssistantContent::text(output.to_string()));
-    Some(
-        OneOrMany::from_iter_optional(items)
-            .unwrap_or_else(|| OneOrMany::one(AssistantContent::text(output.to_string()))),
-    )
-}
-
 #[derive(Debug, thiserror::Error)]
 pub enum StreamingError {
     #[error("CompletionError: {0}")]
@@ -325,7 +280,6 @@ impl StreamingPromptRequest {
     ///
     /// Named to match the blocking
     /// [`PromptRequest::max_turns`](super::PromptRequest::max_turns) and
-    /// [`TypedPromptRequest::max_turns`](super::TypedPromptRequest::max_turns)
     /// builders so the same call reads identically on either surface.
     pub fn max_turns(mut self, turns: usize) -> Self {
         self.runner = self.runner.max_turns(turns);
@@ -711,11 +665,8 @@ impl TurnSource for StreamingTurnSource {
                             // (ENGINE.md, the durable roundtrip); a tools
                             // turn closes at settlement, driven by
                             // `drive_tool_calls`.
-                            if let AcceptOutcome::Final { feedback } = outcome {
-                                yield Ok(MultiTurnStreamItem::RoundtripClosed {
-                                    turn_id: id,
-                                    feedback,
-                                });
+                            if matches!(outcome, AcceptOutcome::Final) {
+                                yield Ok(MultiTurnStreamItem::RoundtripClosed { turn_id: id });
                             }
                         }
                     }
@@ -809,25 +760,19 @@ impl TurnSource for StreamingTurnSource {
     }
 
     fn final_item(&self, response: &PromptResponse) -> Option<MultiTurnStreamItem> {
-        // Tool output mode (#1928): when the finishing turn made the output-tool
-        // call, surface the run's structured output as the final content.
-        let final_choice = finalize_streamed_choice(&self.last_final_choice, &response.output)
-            .unwrap_or_else(|| {
-                if is_empty_assistant_turn(&self.last_final_choice) {
-                    tracing::warn!(
-                        agent_name = self.agent_name.as_str(),
-                        message_id = ?self.last_message_id,
-                        "Streaming turn completed without assistant text; final response will be empty"
-                    );
-                }
-                self.last_final_choice.clone()
-            });
+        if is_empty_assistant_turn(&self.last_final_choice) {
+            tracing::warn!(
+                agent_name = self.agent_name.as_str(),
+                message_id = ?self.last_message_id,
+                "Streaming turn completed without assistant text; final response will be empty"
+            );
+        }
         // Always surface the accumulated messages (parity with the blocking
         // `run()`), regardless of whether the caller supplied input history.
         let final_messages: Option<Vec<Message>> =
             Some(response.messages.clone().unwrap_or_default());
         Some(MultiTurnStreamItem::final_response_with_completion_calls(
-            final_choice,
+            self.last_final_choice.clone(),
             response.usage,
             response.completion_calls.clone(),
             final_messages,

@@ -68,12 +68,9 @@
 //! # }
 //! ```
 
-pub mod output_mode;
 pub mod streamed;
 #[cfg(test)]
 mod tests;
-
-pub use output_mode::OutputMode;
 
 use std::collections::BTreeSet;
 
@@ -88,19 +85,13 @@ use crate::{
     agent::context::Context,
     agent::hook::RetryRequest,
     agent::prompt_request::{
-        CompletionCall, PromptResponse, assistant_text_from_choice,
-        invalid_tool_retry_user_message, is_empty_assistant_turn, tool_result_message,
+        CompletionCall, PromptResponse, assistant_text_from_choice, is_empty_assistant_turn,
+        tool_result_message,
     },
     completion::{Message, PromptError, Usage},
-    json_utils,
 };
 
 pub use streamed::{StreamedTurn, StreamedTurnAssembler, StreamedTurnEvent};
-
-/// Default number of times Tool output mode re-prompts the model for valid
-/// structured output before finalizing best-effort (see #1928). Mirrors
-/// pydantic-ai's default output-retry budget of 1.
-pub(crate) const DEFAULT_OUTPUT_RETRIES: usize = 1;
 
 /// How many consecutive failed turns the machine retries per retryable
 /// failure class (model-side defects, retryable provider errors) before
@@ -247,7 +238,7 @@ struct ParkedTurn {
     executable_tool_names: BTreeSet<String>,
     allowed_tool_names: BTreeSet<String>,
     internal_call_ids: Vec<(String, String)>,
-    /// Whether the turn carries (non-output) tool calls: `Tools` turns
+    /// Whether the turn carries tool calls: `Tools` turns
     /// are not vetoable (rejecting them would strand unanswered calls —
     /// the hook contract); everything else is final-shaped.
     carries_tools: bool,
@@ -255,19 +246,11 @@ struct ParkedTurn {
 
 /// What accepting a parked turn produced — the driver's cue for the
 /// durable roundtrip close (ENGINE.md, the durable roundtrip).
-// `Message` is large (~288 bytes) and rides the `Final` arm; the enum is
-// a transient per-turn value, so boxing it would be noise.
-#[allow(clippy::large_enum_variant)]
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum AcceptOutcome {
-    /// The accepted turn was final. `feedback` is the engine-authored
-    /// closing message when the turn closed with a re-prompt (the
-    /// output-mode policies): the model saw it, so it belongs to the
-    /// roundtrip.
-    Final {
-        /// The engine-authored closing message, when one was folded.
-        feedback: Option<Message>,
-    },
+    /// The accepted turn was final: its roundtrip is the assistant
+    /// alone, closed here and now.
+    Final,
     /// The accepted turn launched a tool batch; the roundtrip closes at
     /// settlement.
     Tools,
@@ -278,24 +261,6 @@ pub enum AcceptOutcome {
 #[derive(Debug, Serialize, Deserialize)]
 pub struct AgentRun {
     max_turns: usize,
-    /// Name of the synthetic output tool when the agent uses Tool output
-    /// mode (see #1928). A model turn calling this tool finalizes the run
-    /// with the call's arguments as the response, instead of executing it
-    /// as a tool.
-    #[serde(default)]
-    output_tool_name: Option<String>,
-    /// JSON schema the Tool-mode output must satisfy, used to re-prompt on
-    /// missing required fields before finalizing best-effort (#1928).
-    #[serde(default)]
-    output_schema: Option<serde_json::Value>,
-    /// Budget for re-prompting the model in Tool output mode when it
-    /// finalizes without calling the output tool, or calls it with
-    /// arguments missing required fields. Exhausting it finalizes
-    /// best-effort.
-    #[serde(default)]
-    max_output_retries: usize,
-    #[serde(default)]
-    output_retries: usize,
     /// The whole conversation, joined at entry and appended by the machine
     /// (committed turns, tool results, steers, corrective feedback). The
     /// request is this conversation, as-is — the run holds a run-scoped
@@ -331,8 +296,8 @@ pub struct AgentRun {
     /// drain re-opens the run.
     #[serde(default)]
     pending_final: bool,
-    /// Loop unconditionally on the next decision (output-mode feedback,
-    /// final-turn rejection).
+    /// Loop unconditionally on the next decision (a vetoed turn's
+    /// retry).
     #[serde(default)]
     retry_requested: bool,
     /// The response built for the pending final turn, finalized at Done.
@@ -369,10 +334,6 @@ impl AgentRun {
         Self {
             context,
             max_turns: 1,
-            output_tool_name: None,
-            output_schema: None,
-            max_output_retries: 0,
-            output_retries: 0,
             entry_len,
             current_turn: 0,
             usage: Usage::new(),
@@ -398,86 +359,6 @@ impl AgentRun {
     pub fn max_turns(mut self, max_turns: usize) -> Self {
         self.max_turns = max_turns;
         self
-    }
-
-    /// Configure Tool output-mode validation (#1928): the JSON schema the
-    /// output-tool arguments should satisfy, and how many times to
-    /// re-prompt the model — when it finalizes without calling the output
-    /// tool, or calls it with arguments missing required fields — before
-    /// finalizing best-effort.
-    pub fn with_output_validation(
-        mut self,
-        output_schema: Option<serde_json::Value>,
-        max_output_retries: usize,
-    ) -> Self {
-        self.output_schema = output_schema;
-        self.max_output_retries = max_output_retries;
-        self
-    }
-
-    /// Set the synthetic output-tool name for Tool output mode (see #1928).
-    /// When a model turn calls this tool, the run finalizes with the call's
-    /// arguments (serialized JSON) as the response.
-    pub fn with_output_tool_name(mut self, name: impl Into<String>) -> Self {
-        self.output_tool_name = Some(name.into());
-        self
-    }
-
-    /// Set (or clear) the output-tool name in place. The driver resolves
-    /// the name from the prepared request inside the run loop, where the
-    /// agent's tool set (and thus the resolved output mode) is known.
-    pub(crate) fn set_output_tool_name(&mut self, name: Option<String>) {
-        // The name is committed once and pinned for the whole run, so the
-        // request the driver builds each turn stays consistent with the
-        // intercept (and a tool set that shifts mid-run cannot flip the mode).
-        if self.output_tool_name.is_none() {
-            self.output_tool_name = name;
-        }
-    }
-
-    /// The synthetic output-tool name committed for this run, if any.
-    pub(crate) fn output_tool_name(&self) -> Option<&str> {
-        self.output_tool_name.as_deref()
-    }
-
-    /// Top-level `required` schema fields absent from the output-tool
-    /// arguments. A lightweight structural check (not full JSON Schema
-    /// validation): empty when there is no schema, no `required` array, or
-    /// every required field is present. Non-object arguments (e.g. `null`)
-    /// count every required field as missing.
-    fn missing_required_output_fields(&self, args: &serde_json::Value) -> Vec<String> {
-        let Some(required) = self
-            .output_schema
-            .as_ref()
-            .and_then(|schema| schema.get("required"))
-            .and_then(|required| required.as_array())
-        else {
-            return Vec::new();
-        };
-        let object = args.as_object();
-        required
-            .iter()
-            .filter_map(|field| field.as_str())
-            .filter(|field| object.is_none_or(|object| !object.contains_key(*field)))
-            .map(str::to_owned)
-            .collect()
-    }
-
-    /// Whether `text` already parses as a JSON object satisfying the output
-    /// schema's required fields — i.e. it is acceptable structured output
-    /// even though the model returned it as plain text instead of an
-    /// output-tool call.
-    fn text_satisfies_output_schema(&self, text: &str) -> bool {
-        serde_json::from_str::<serde_json::Value>(text.trim())
-            .ok()
-            .is_some_and(|value| self.missing_required_output_fields(&value).is_empty())
-    }
-
-    /// Whether the run may re-prompt for valid Tool-mode output: both the
-    /// output-retry budget and the total model-call budget must remain.
-    /// Otherwise, finalize best-effort rather than surface a max-turns error.
-    fn can_reprompt_for_output(&self) -> bool {
-        self.output_retries < self.max_output_retries && self.current_turn < self.max_turns
     }
 
     // === Outcomes and steps ==============================================
@@ -597,18 +478,9 @@ impl AgentRun {
         allowed_tool_names: BTreeSet<String>,
         internal_call_ids: Vec<(String, String)>,
     ) -> Result<(), PromptError> {
-        let carries_tools = match &self.output_tool_name {
-            // An output-tool call finalizes the run (Tool output mode), so
-            // it does not make the turn a tools turn — it is final-shaped
-            // and vetoable like any other.
-            Some(output_tool_name) => choice.iter().any(|item| match item {
-                AssistantContent::ToolCall(call) => call.function.name != *output_tool_name,
-                _ => false,
-            }),
-            None => choice
-                .iter()
-                .any(|item| matches!(item, AssistantContent::ToolCall(_))),
-        };
+        let carries_tools = choice
+            .iter()
+            .any(|item| matches!(item, AssistantContent::ToolCall(_)));
         self.defect_streak = 0;
         self.provider_retry_streak = 0;
         self.pending_error = None;
@@ -651,48 +523,10 @@ impl AgentRun {
             carries_tools,
         } = *parked;
         let items: Vec<AssistantContent> = choice.iter().cloned().collect();
-        let has_tool_calls = items
-            .iter()
-            .any(|item| matches!(item, AssistantContent::ToolCall(_)));
-
-        // Tool output mode: a call to the synthetic output tool finalizes
-        // the run with the call's arguments as the response (#1928).
-        if has_tool_calls
-            && let Some(output_tool_name) = self.output_tool_name.clone()
-            && let Some(tool_call) = items.iter().find_map(|item| match item {
-                AssistantContent::ToolCall(tc) if tc.function.name == output_tool_name => Some(tc),
-                _ => None,
-            })
-        {
-            return self.finalize_output_turn(message_id, choice, tool_call.clone());
-        }
 
         if !carries_tools {
-            // Final turn. In Tool output mode, text that is not valid
-            // structured output re-prompts with feedback while budget
-            // remains; everything else commits as the Done candidate.
-            if let Some(output_tool_name) = self.output_tool_name.clone()
-                && !is_empty_assistant_turn(&choice)
-                && self.can_reprompt_for_output()
-                && !self.text_satisfies_output_schema(&assistant_text_from_choice(&choice))
-            {
-                self.output_retries += 1;
-                self.context.fold(Message::Assistant {
-                    id: message_id,
-                    content: choice.clone(),
-                });
-                let feedback = Message::user(format!(
-                    "Provide your final answer by calling the `{output_tool_name}` tool with \
-                     the structured result as its arguments, not as plain text."
-                ));
-                self.context.fold(feedback.clone());
-                self.retry_requested = true;
-                self.state = RunState::FinalTurn;
-                return Ok(AcceptOutcome::Final {
-                    feedback: Some(feedback),
-                });
-            }
-
+            // Final turn. An empty one folds nothing — there is no
+            // message to keep.
             if !is_empty_assistant_turn(&choice) {
                 self.context.fold(Message::Assistant {
                     id: message_id,
@@ -706,14 +540,13 @@ impl AgentRun {
             self.pending_response = Some(response);
             self.pending_final = true;
             self.state = RunState::FinalTurn;
-            return Ok(AcceptOutcome::Final { feedback: None });
+            return Ok(AcceptOutcome::Final);
         }
 
         // Tools: fold the assistant turn, then the admission scan. A name
         // the model was not offered is a model-side mistake — the call
         // returns a synthetic in-band result naming the problem, the model
         // is told, and the run continues. Never a failure, never a pause.
-        self.output_retries = 0;
         self.context.fold(Message::Assistant {
             id: message_id,
             content: choice.clone(),
@@ -811,89 +644,6 @@ impl AgentRun {
             tool_call.function.name,
             available.join(", ")
         ))
-    }
-
-    /// Tool output mode's finalization policy (#1928): validate the
-    /// output-tool arguments against the schema; re-prompt with feedback
-    /// while budget remains, otherwise finalize — persisting the turn as
-    /// the assistant's final *text* (keeping any reasoning, dropping every
-    /// tool call) so replayed history carries no unanswered tool_use.
-    fn finalize_output_turn(
-        &mut self,
-        message_id: Option<String>,
-        choice: OneOrMany<AssistantContent>,
-        tool_call: ToolCall,
-    ) -> Result<AcceptOutcome, PromptError> {
-        let output_tool_name = self
-            .output_tool_name
-            .clone()
-            .unwrap_or_else(|| tool_call.function.name.clone());
-        let args = tool_call.function.arguments.clone();
-        let missing = self.missing_required_output_fields(&args);
-
-        if !missing.is_empty() && self.can_reprompt_for_output() {
-            self.output_retries += 1;
-            // The rejected turn commits in full, answered by tool results:
-            // the feedback rides the output call's result, siblings report
-            // not-executed — replayable history, no dangling tool_use.
-            self.context.fold(Message::Assistant {
-                id: message_id,
-                content: choice.clone(),
-            });
-            let feedback = format!(
-                "The `{output_tool_name}` arguments were missing required field(s): {}. Call \
-                 `{output_tool_name}` again with every required field.",
-                missing.join(", ")
-            );
-            // The output-tool call is in `choice`, so the message always
-            // builds; an empty one would strand the turn's calls
-            // unanswerable — an internal invariant, failed loud.
-            #[allow(clippy::expect_used)]
-            let user_message = invalid_tool_retry_user_message(&choice, &tool_call.id, feedback)
-                .expect("output-tool retry feedback answers every call in the turn");
-            self.context.fold(user_message.clone());
-            self.retry_requested = true;
-            self.state = RunState::FinalTurn;
-            return Ok(AcceptOutcome::Final {
-                feedback: Some(user_message),
-            });
-        }
-
-        // Finalize. The turn is persisted as text (see the method doc).
-        let output = json_utils::serialize_json_value(&args);
-        let output_tool_calls = choice
-            .iter()
-            .filter(|item| {
-                matches!(
-                    item,
-                    AssistantContent::ToolCall(tc) if tc.function.name == output_tool_name
-                )
-            })
-            .count();
-        let mut final_items: Vec<AssistantContent> = choice
-            .iter()
-            .filter(|item| !matches!(item, AssistantContent::ToolCall(_)))
-            .cloned()
-            .collect();
-        final_items.push(AssistantContent::text(output.clone()));
-        let content = OneOrMany::from_iter_optional(final_items);
-        if let Some(content) = content.clone() {
-            self.context.fold(Message::Assistant {
-                id: message_id,
-                content,
-            });
-        }
-        let mut response = PromptResponse::new(output, self.usage)
-            .with_messages(self.messages().to_vec())
-            .with_completion_calls(self.completion_calls.clone())
-            .with_output_tool_calls(output_tool_calls);
-        if let Some(content) = content {
-            response = response.with_content(content);
-        }
-        self.pending_response = Some(response);
-        self.pending_final = true;
-        self.state = RunState::FinalTurn;
-        Ok(AcceptOutcome::Final { feedback: None })
     }
 
     /// Feed a model-side defect (a typed malformed-tool-call error): the

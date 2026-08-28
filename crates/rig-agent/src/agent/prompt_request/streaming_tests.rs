@@ -484,52 +484,6 @@ async fn tool_call_stream_without_terminal_record_dispatches_no_tools() {
 }
 
 #[test]
-fn finalize_streamed_choice_surfaces_output_over_tool_call_and_prose() {
-    use rig_core::message::{ToolCall, ToolFunction};
-
-    let output_call = AssistantContent::ToolCall(ToolCall::new(
-        "c1".to_string(),
-        ToolFunction::new(
-            "final_result".to_string(),
-            serde_json::json!({"city": "Tokyo"}),
-        ),
-    ));
-
-    // Prose + output-tool call (#1928): the streamed response text must be
-    // the structured output, not the prose, with no orphan tool_use.
-    let with_prose = OneOrMany::many(vec![
-        AssistantContent::text("Sure, here is the weather:"),
-        output_call.clone(),
-    ])
-    .expect("two items");
-    let final_choice = finalize_streamed_choice(&with_prose, r#"{"city":"Tokyo"}"#)
-        .expect("a turn with the output-tool call is finalized via it");
-    assert_eq!(
-        assistant_text_from_choice(&final_choice),
-        r#"{"city":"Tokyo"}"#
-    );
-    assert!(
-        !final_choice
-            .iter()
-            .any(|item| matches!(item, AssistantContent::ToolCall(_))),
-        "no unanswered tool_use should remain in the final content"
-    );
-
-    // Output-tool call only.
-    let only_call = OneOrMany::one(output_call);
-    let final_choice = finalize_streamed_choice(&only_call, r#"{"city":"Tokyo"}"#)
-        .expect("finalized via output tool");
-    assert_eq!(
-        assistant_text_from_choice(&final_choice),
-        r#"{"city":"Tokyo"}"#
-    );
-
-    // A plain-text finalize (no tool call) is left to the caller.
-    let text_only = OneOrMany::one(AssistantContent::text(r#"{"city":"Tokyo"}"#));
-    assert!(finalize_streamed_choice(&text_only, r#"{"city":"Tokyo"}"#).is_none());
-}
-
-#[test]
 fn merge_reasoning_blocks_preserves_order_and_signatures() {
     let mut accumulated = Vec::new();
     let first = reasoning(

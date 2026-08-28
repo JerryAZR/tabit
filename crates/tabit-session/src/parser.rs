@@ -179,30 +179,21 @@ pub fn parse(raw: &str, path: &Path) -> Result<Parsed, SessionError> {
 }
 
 /// The file-order pairing law: an assistant's calls are answered by the
-/// immediately following `tool_result` nodes, or by one user message
-/// carrying their results (an engine-authored feedback close) — nothing
-/// else may intervene.
+/// immediately following `tool_result` nodes — nothing else may
+/// intervene.
 fn validate_node_order(
     entry: &SessionEntry,
     pending_calls: &mut Vec<String>,
 ) -> Result<(), String> {
     match &entry.kind {
-        EntryKind::UserMessage { message } => {
+        EntryKind::UserMessage { .. } => {
             if pending_calls.is_empty() {
                 return Ok(());
             }
-            let answered = projection::results_of(message);
-            for call in pending_calls.iter() {
-                if !answered.iter().any(|result| result.id == *call) {
-                    return Err(format!(
-                        "user entry `{}` interrupts the open tool batch (call `{call}` \
-                         unanswered)",
-                        entry.id
-                    ));
-                }
-            }
-            pending_calls.clear();
-            Ok(())
+            Err(format!(
+                "user entry `{}` interrupts the open tool batch",
+                entry.id
+            ))
         }
         EntryKind::AssistantMessage { message, .. } => {
             if !pending_calls.is_empty() {

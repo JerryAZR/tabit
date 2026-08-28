@@ -2518,13 +2518,6 @@ where
         + 'static,
     H: Clone + Default + std::fmt::Debug + WasmCompatSend + WasmCompatSync + 'static,
 {
-    fn capabilities(&self) -> completion::ProviderCapabilities {
-        // The OpenAI Responses API constrains only the final assistant message via
-        // `text.format`; tools are still called across turns, so native structured
-        // output composes with tool calls. See issue #1928.
-        completion::ProviderCapabilities::default().with_native_output_tool_composition(true)
-    }
-
     async fn completion(
         &self,
         completion_request: crate::completion::CompletionRequest,

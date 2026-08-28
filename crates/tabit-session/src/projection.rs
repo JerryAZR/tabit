@@ -68,49 +68,23 @@ pub fn calls_of(message: &Message) -> Vec<&ToolCall> {
         .collect()
 }
 
-/// The tool results a user message carries (an engine-authored feedback
-/// close), when it is made of them.
-pub fn results_of(message: &Message) -> Vec<&rig_core::message::ToolResult> {
-    let Message::User { content } = message else {
-        return Vec::new();
-    };
-    content
-        .iter()
-        .filter_map(|part| match part {
-            UserContent::ToolResult(result) => Some(result),
-            _ => None,
-        })
-        .collect()
-}
-
 /// Validate that a branch is **roundtrip-closed**: every assistant turn
 /// on it that called tools is fully answered by the tool results that
-/// follow it on the branch (as batch nodes, or a feedback user message
-/// closing the roundtrip). `Err` names the violation — the checkout
+/// follow it on the branch. `Err` names the violation — the checkout
 /// rule (a mid-roundtrip target panics at the door) and the parser's
 /// final-head check both route through here.
 pub fn path_is_closed(entries: &[SessionEntry]) -> Result<(), String> {
     let mut pending: Vec<String> = Vec::new();
     for entry in entries {
         match &entry.kind {
-            EntryKind::UserMessage { message } => {
+            EntryKind::UserMessage { .. } => {
                 if pending.is_empty() {
                     continue;
                 }
-                // A user message with an open batch is legal only as the
-                // engine-authored feedback close: its results answer the
-                // batch's calls.
-                let answered = results_of(message);
-                for call in &pending {
-                    if !answered.iter().any(|result| result.id == *call) {
-                        return Err(format!(
-                            "user message interrupts the open tool batch of entry `{}` \
-                             (call `{call}` unanswered)",
-                            entry.id
-                        ));
-                    }
-                }
-                pending.clear();
+                return Err(format!(
+                    "user message interrupts the open tool batch of entry `{}`",
+                    entry.id
+                ));
             }
             EntryKind::AssistantMessage { message, .. } => {
                 if !pending.is_empty() {

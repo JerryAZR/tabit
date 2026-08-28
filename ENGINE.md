@@ -267,12 +267,8 @@ during design review, the verdict is recorded.
   output-finalize / tools) was computed at park time, so the veto
   knows a tools turn when it sees one — rejecting a turn with tool
   calls stays a loud contract violation, exactly as before.
-- **FinalTurn** — the accepted tool-free turn folded; in Tool output
-  mode, apply the finalization policy (accept schema-valid text,
-  re-prompt with feedback while budget remains, finalize best-effort).
-  *Self-review: the output-mode conditional stays here deliberately —
-  it is one policy ("what makes this turn final"), not two
-  responsibilities.*
+- **FinalTurn** — the accepted tool-free turn, folded; awaiting the
+  drain. One shape, no policy.
 - **BrokenTurn** — discard the defective turn (it never entered
   history, on any provider), bump the defect streak. Simple path.
 - **ExecutingTools** — admit the batch, hold it, receive paired
@@ -404,7 +400,7 @@ during design review, the verdict is recorded.
 12. **The durable roundtrip is atomic** (ruled 2026-08, the durable-layer
    sweep; see the section below). An assistant turn and its complete
    tool batch commit to the session through one door as one unit —
-   all-or-none — announced by the `RoundtripClosed { turn_id, feedback }`
+   all-or-none — announced by the `RoundtripClosed { turn_id }`
    stream item. Abort discards the open roundtrip (it never landed), a
    hook veto or defect discard records the attempt's usage as a
    `discarded` side record (PROTOCOL.md flag 22), and the
@@ -415,6 +411,15 @@ during design review, the verdict is recorded.
    malformed-tool-call attempt) emits `ModelTurnRetried` like a hook
    veto does, so consumers (and the durable discard record) learn the
    attempt was discarded, not silent.
+14. **Structured-output enforcement is not the engine's** (ruled
+   2026-08). Output modes, the synthetic output tool, both re-prompt
+   policies, the typed-prompt/extractor surface, and the
+   provider-composition capability are deleted: the problem they
+   served (schema-validated finals on providers whose structured
+   output fought tool use) is gone on the providers tabit keeps, and
+   no tabit run ever set a schema. A schema, if ever wanted, is the
+   caller's concern one layer above — at most a pass-through to the
+   provider's native structured output.
 
 ## Implementation judgments (refactor landing)
 
@@ -571,11 +576,8 @@ then grow (tree, context, stats — one step, under one lock).
   starts; a failed flush rejects the batch (it exists nowhere) and the
   texts go back as drafts;
 - **the roundtrip** (atomic): `RoundtripClosed` commits the parked
-  assistant plus its results — or, when the engine closed the
-  roundtrip with an authored feedback message instead of executed
-  results (an output-mode re-prompt), the assistant plus that message
-  as a user node. Write-behind: a refusing disk degrades (the persist
-  notices), it never blocks the conversation;
+  assistant plus its results. Write-behind: a refusing disk degrades
+  (the persist notices), it never blocks the conversation;
 - **the steer drain** (write-behind): each drained steer commits as
   its own user node, in drain order;
 - **side records** (write-behind): `model_change`, `checkout`,
@@ -776,7 +778,7 @@ scratchpad stays engine-internal.
 | `max_invalid_tool_call_retries` | deleted (no interactive recovery) |
 | `AwaitingAdvance` (no-tool arm) | FinalTurn |
 | `AwaitingAdvance` (tools arm) | ExecutingTools entry (admission scan) |
-| `AwaitingAdvance` (output-tool arm) | FinalTurn's finalization policy |
+| `AwaitingAdvance` (output-tool arm) | deleted — structured-output enforcement left the engine (delta 14) |
 | `ExecutingTools` + `tool_results` | ExecutingTools (+ closing transition) |
 | `Done` / `Failed` | Done / Failed |
 | driver defect path + `discard_turn` | BrokenTurn |

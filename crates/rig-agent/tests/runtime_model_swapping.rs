@@ -22,9 +22,8 @@ use rig_agent::{
     },
     completion::{
         CompletionError, CompletionModel, CompletionRequest, CompletionResponse, Message, Prompt,
-        PromptError, ProviderCapabilities, TypedPrompt, Usage,
+        PromptError, Usage,
     },
-    extractor::{Extractor, ExtractorBuilder},
     streaming::{
         RawStreamingChoice, StreamFinal, StreamedAssistantContent, StreamingCompletionResponse,
         StreamingPrompt,
@@ -35,8 +34,6 @@ use rig_core::{
     OneOrMany,
     message::{AssistantContent, ReasoningContent, ToolCall, ToolFunction, UserContent},
 };
-use schemars::JsonSchema;
-use serde::{Deserialize, Serialize};
 use tokio::sync::Notify;
 
 async fn wait_for_notification(notify: &Notify) {
@@ -185,11 +182,13 @@ impl Turn {
 
 struct Script {
     provider: &'static str,
+    /// Never read by design: it exists to prove the handle's Debug output
+    /// never leaks it (the assert below).
+    #[allow(dead_code)]
     secret: String,
     turns: Mutex<VecDeque<Turn>>,
     fallback: Turn,
     requests: Mutex<Vec<CompletionRequest>>,
-    composes_native_output_with_tools: bool,
 }
 
 impl Script {
@@ -204,25 +203,7 @@ impl Script {
             turns: Mutex::new(turns.into_iter().collect()),
             fallback,
             requests: Mutex::new(Vec::new()),
-            composes_native_output_with_tools: false,
         })
-    }
-
-    fn composing(
-        provider: &'static str,
-        turns: impl IntoIterator<Item = Turn>,
-        fallback: Turn,
-    ) -> Arc<Self> {
-        let mut script = Self {
-            provider,
-            secret: format!("{provider}-credential-must-not-leak"),
-            turns: Mutex::new(turns.into_iter().collect()),
-            fallback,
-            requests: Mutex::new(Vec::new()),
-            composes_native_output_with_tools: true,
-        };
-        script.secret.shrink_to_fit();
-        Arc::new(script)
     }
 
     fn next_turn(&self) -> Turn {
@@ -348,11 +329,6 @@ macro_rules! impl_test_model {
             ) -> Result<StreamingCompletionResponse, CompletionError> {
                 stream_from_script(&self.0, request)
             }
-
-            fn capabilities(&self) -> ProviderCapabilities {
-                ProviderCapabilities::new()
-                    .with_native_output_tool_composition(self.0.composes_native_output_with_tools)
-            }
         }
     };
 }
@@ -388,15 +364,9 @@ fn request(prompt: &str) -> CompletionRequest {
     }
 }
 
-#[derive(Debug, Deserialize, Serialize, JsonSchema)]
-struct ExtractedValue {
-    value: String,
-}
-
 fn assert_agent(_: Agent) {}
 fn assert_builder(_: AgentBuilder<NoToolConfig>) {}
 fn assert_prompt_request(_: PromptRequest<Standard>) {}
-fn assert_extractor(_: Extractor<ExtractedValue>) {}
 fn assert_agent_stream(_: StreamingResult) {}
 
 #[tokio::test]
@@ -412,7 +382,6 @@ async fn downstream_models_keep_typed_low_level_apis_and_share_a_concrete_agent_
     assert_agent(alpha_agent.clone());
     assert_builder(AgentBuilder::new(alpha.clone()));
     assert_prompt_request(alpha_agent.prompt("typed request"));
-    assert_extractor(ExtractorBuilder::<ExtractedValue>::new(alpha.clone()).build());
     assert_agent_stream(alpha_agent.stream_prompt("stream type").await);
 
     let unary = alpha
@@ -436,24 +405,6 @@ async fn downstream_models_keep_typed_low_level_apis_and_share_a_concrete_agent_
         "beta",
         "direct model streams report their provider on the terminal record"
     );
-
-    let extraction_turn = Turn::Tool {
-        id: "submit-call".to_owned(),
-        name: "submit".to_owned(),
-        arguments: serde_json::json!({"value": "external model extraction"}),
-        usage: usage(3),
-        message_id: "extract-message".to_owned(),
-    };
-    let extracted = ExtractorBuilder::<ExtractedValue>::new(AlphaModel(Script::new(
-        "extractor",
-        [extraction_turn.clone()],
-        extraction_turn,
-    )))
-    .build()
-    .extract("extract a value")
-    .await
-    .expect("custom model extraction");
-    assert_eq!(extracted.value, "external model extraction");
 
     let handle = ModelHandle::named("diagnostic-alpha", alpha);
     let debug = format!("{handle:?}");
@@ -508,13 +459,6 @@ async fn replacement_and_override_scopes_have_value_semantics() {
         original.prompt("default remains").await.expect("default"),
         "alpha"
     );
-
-    let typed: ExtractedValue = original
-        .prompt_typed("typed one-run override")
-        .using_model(ModelHandle::new(beta_static(r#"{"value":"typed beta"}"#)))
-        .await
-        .expect("typed override");
-    assert_eq!(typed.value, "typed beta");
 
     let observed_candidates = Arc::new(Mutex::new(Vec::new()));
     let observed_for_hook = observed_candidates.clone();
@@ -636,126 +580,6 @@ async fn model_selection_stop_cancels_before_provider_execution() {
     ));
     assert!(streaming_script.requests().is_empty());
     assert_eq!(streaming_completion_calls.load(Ordering::SeqCst), 1);
-}
-
-#[tokio::test]
-async fn extraction_override_is_run_local_and_sets_each_retry_default() {
-    let default_turn = Turn::Tool {
-        id: "default-submit".to_owned(),
-        name: "submit".to_owned(),
-        arguments: serde_json::json!({"value": "default"}),
-        usage: usage(1),
-        message_id: "default-extraction".to_owned(),
-    };
-    let specialist_turn = Turn::Tool {
-        id: "specialist-submit".to_owned(),
-        name: "submit".to_owned(),
-        arguments: serde_json::json!({"value": "specialist"}),
-        usage: usage(2),
-        message_id: "specialist-extraction".to_owned(),
-    };
-    let typed_turn = Turn::Tool {
-        id: "typed-submit".to_owned(),
-        name: "submit".to_owned(),
-        arguments: serde_json::json!({"value": "typed specialist"}),
-        usage: usage(3),
-        message_id: "typed-extraction".to_owned(),
-    };
-
-    let default_script = Script::new("default", [], default_turn);
-    let specialist_script = Script::new(
-        "specialist",
-        [
-            Turn::text("retry without submit", 1, "specialist-retry"),
-            specialist_turn.clone(),
-        ],
-        specialist_turn,
-    );
-    let extractor = ExtractorBuilder::<ExtractedValue>::new(AlphaModel(default_script.clone()))
-        .retries(1)
-        .build();
-
-    let specialist = extractor
-        .using_model(ModelHandle::new(BetaModel(specialist_script.clone())))
-        .extract("use the specialist")
-        .await
-        .expect("run-local extraction override");
-    assert_eq!(specialist.value, "specialist");
-    assert_eq!(specialist_script.requests().len(), 2);
-    assert!(default_script.requests().is_empty());
-
-    let typed = extractor
-        .using_model_value(BetaModel(Script::new("typed", [], typed_turn)))
-        .extract_with_usage("use a typed model value")
-        .await
-        .expect("typed extraction override");
-    assert_eq!(typed.data.value, "typed specialist");
-    assert_eq!(typed.usage, usage(3));
-
-    let default = extractor
-        .extract("use the default again")
-        .await
-        .expect("default extraction remains unchanged");
-    assert_eq!(default.value, "default");
-    assert_eq!(default_script.requests().len(), 1);
-}
-
-#[tokio::test]
-async fn extraction_retries_reenter_model_selection_hooks() {
-    let default = alpha_static("default must not execute");
-    let default_script = default.0.clone();
-    let first = alpha_static("retry without submit");
-    let first_script = first.0.clone();
-    let submit_turn = Turn::Tool {
-        id: "routed-submit".to_owned(),
-        name: "submit".to_owned(),
-        arguments: serde_json::json!({"value": "hook selected"}),
-        usage: usage(2),
-        message_id: "routed-extraction".to_owned(),
-    };
-    let second = BetaModel(Script::new("second", [submit_turn.clone()], submit_turn));
-    let second_script = second.0.clone();
-    let first = ModelHandle::named("first", first);
-    let second = ModelHandle::named("second", second);
-    let selections = Arc::new(Mutex::new(Vec::new()));
-    let selections_for_hook = selections.clone();
-    let attempts = Arc::new(AtomicUsize::new(0));
-    let attempts_for_hook = attempts.clone();
-    let extractor = ExtractorBuilder::<ExtractedValue>::new(default)
-        .add_hook(SelectWith(
-            move |context: &HookContext, event: ModelSelection<'_>| {
-                selections_for_hook.lock().expect("selection log").push((
-                    context.turn(),
-                    event
-                        .previous_model
-                        .and_then(ModelHandle::label)
-                        .map(str::to_owned),
-                ));
-                let attempt = attempts_for_hook.fetch_add(1, Ordering::SeqCst);
-                ModelSelectionAction::select(if attempt == 0 {
-                    first.clone()
-                } else {
-                    second.clone()
-                })
-            },
-        ))
-        .retries(1)
-        .build();
-
-    let extracted = extractor
-        .extract("repair the structured output")
-        .await
-        .expect("hook-routed extraction retry");
-
-    assert_eq!(extracted.value, "hook selected");
-    assert_eq!(attempts.load(Ordering::SeqCst), 2);
-    assert_eq!(first_script.requests().len(), 1);
-    assert_eq!(second_script.requests().len(), 1);
-    assert!(default_script.requests().is_empty());
-    assert_eq!(
-        selections.lock().expect("selection log").as_slice(),
-        &[(1, None), (1, None)]
-    );
 }
 
 #[derive(Clone)]
@@ -1196,74 +1020,6 @@ async fn normalized_stream_preserves_events_message_id_and_usage() {
             matches!(message, Message::Assistant { id: Some(id), .. } if id == "rich-message-id")
         })
     }));
-}
-
-#[tokio::test]
-async fn selected_model_capability_is_used_for_each_prepared_attempt() {
-    let composing_turn = Turn::text("retry me", 1, "compose-message");
-    let composing = BetaModel(Script::composing(
-        "composing",
-        [composing_turn.clone()],
-        composing_turn,
-    ));
-    let composing_script = composing.0.clone();
-    let noncomposing_turn = Turn::text("accepted", 1, "noncompose-message");
-    let noncomposing = AlphaModel(Script::new(
-        "noncomposing",
-        [noncomposing_turn.clone()],
-        noncomposing_turn,
-    ));
-    let noncomposing_script = noncomposing.0.clone();
-    let composing_handle = ModelHandle::new(composing);
-    let noncomposing_handle = ModelHandle::new(noncomposing);
-
-    let _response = AgentBuilder::from_model_handle(composing_handle.clone())
-        .output_schema::<ExtractedValue>()
-        .output_mode(rig_agent::agent::OutputMode::Auto)
-        .tool(LookupTool {
-            calls: Arc::new(AtomicUsize::new(0)),
-        })
-        .add_hook(RetryFirst(Arc::new(AtomicUsize::new(0))))
-        .build()
-        .prompt("capability routing")
-        .max_turns(2)
-        .add_hook(SelectWith(
-            move |context: &HookContext, _event: ModelSelection<'_>| {
-                ModelSelectionAction::select(if context.turn() == 1 {
-                    composing_handle.clone()
-                } else {
-                    noncomposing_handle.clone()
-                })
-            },
-        ))
-        .await
-        .expect("capability run");
-
-    let composing_request = composing_script
-        .requests()
-        .into_iter()
-        .next()
-        .expect("composing request");
-    assert!(composing_request.output_schema.is_some());
-    assert!(
-        !composing_request
-            .tools
-            .iter()
-            .any(|tool| tool.name.starts_with("final_result"))
-    );
-
-    let noncomposing_request = noncomposing_script
-        .requests()
-        .into_iter()
-        .next()
-        .expect("noncomposing request");
-    assert!(noncomposing_request.output_schema.is_none());
-    assert!(
-        noncomposing_request
-            .tools
-            .iter()
-            .any(|tool| tool.name.starts_with("final_result"))
-    );
 }
 
 #[derive(Clone)]

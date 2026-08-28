@@ -7,8 +7,8 @@
 //! The [Agent] struct is highly configurable, allowing the user to define anything from
 //! a simple bot with a specific system prompt to a complex RAG system.
 //!
-//! The [Agent] struct implements the runner-backed [crate::completion::Prompt],
-//! [crate::completion::TypedPrompt], and [crate::completion::Chat] traits. All
+//! The [Agent] struct implements the runner-backed [crate::completion::Prompt]
+//! and [crate::completion::Chat] traits. All
 //! agent execution goes through [AgentRunner], so hooks and lifecycle policies
 //! cannot be bypassed through a raw agent request builder.
 //!
@@ -134,8 +134,7 @@ pub use prompt_request::streaming::{
 };
 pub use prompt_request::{
     CompletionCall, Extended, PromptRequest, PromptResponse, PromptType, Standard,
-    TypedPromptRequest, TypedPromptResponse,
 };
 pub use rig_core::message::Text;
-pub use run::{AcceptOutcome, AgentRun, AgentRunStep, ModelTurn, OutputMode, PendingToolCall};
+pub use run::{AcceptOutcome, AgentRun, AgentRunStep, ModelTurn, PendingToolCall};
 pub use runner::{AgentRunner, SteeringSource, TurnIdSource};

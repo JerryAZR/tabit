@@ -1,13 +1,12 @@
 use super::hook::{HookStack, RequestPatch};
 use super::model::ModelHandle;
 use super::prompt_request::{self, PromptRequest};
-use super::run::OutputMode;
 use super::runner::AgentRunner;
 use crate::{
     agent::prompt_request::streaming::StreamingPromptRequest,
     completion::{
         Chat, CompletionError, CompletionModel, CompletionRequestBuilder, Document, Message,
-        Prompt, PromptError, ToolDefinition, TypedPrompt,
+        Prompt, PromptError, ToolDefinition,
     },
     json_utils,
     streaming::{StreamingChat, StreamingPrompt},
@@ -29,105 +28,18 @@ pub(crate) struct PreparedCompletionRequest {
     pub(crate) tool_snapshot: Arc<ToolRegistrySnapshot>,
     pub(crate) executable_tool_names: BTreeSet<String>,
     pub(crate) allowed_tool_names: BTreeSet<String>,
-    /// When Tool output mode is active, the name of the synthetic output tool
-    /// advertised to the model (allowed but not executable). See #1928.
-    pub(crate) output_tool_name: Option<String>,
-}
-
-/// Base name of the synthetic output tool used by [`OutputMode::Tool`].
-const DEFAULT_OUTPUT_TOOL_NAME: &str = "final_result";
-
-/// Whether the active [`ToolChoice`] lets the model call the synthetic output
-/// tool. Tool output mode finalizes via that call, so when the choice forbids it
-/// (`None`, or a `Specific` allow-list that lists only the caller's real tools)
-/// Tool mode cannot work and must fall back to native structured output.
-fn tool_choice_permits_output_tool(tool_choice: Option<&ToolChoice>) -> bool {
-    matches!(
-        tool_choice,
-        None | Some(ToolChoice::Auto | ToolChoice::Required)
-    )
-}
-
-/// Whether the active [`ToolChoice`] can call the *named* synthetic output tool.
-///
-/// Unlike [`tool_choice_permits_output_tool`] — which runs during output-mode
-/// resolution, before the output-tool name is known, and so conservatively
-/// treats every `Specific` set as forbidding the call — this knows the committed
-/// output-tool name, so a `Specific` set that names it counts as callable. That
-/// matches [`allowed_tool_names_for_choice`], which advertises the output tool
-/// for exactly that choice. Only a `None` choice or a `Specific` set that omits
-/// the output tool genuinely cannot finalize a pinned Tool-mode turn.
-fn output_tool_callable(tool_choice: Option<&ToolChoice>, output_tool_name: &str) -> bool {
-    match tool_choice {
-        Some(ToolChoice::Specific { function_names }) => function_names
-            .iter()
-            .any(|name| name.as_str() == output_tool_name),
-        other => tool_choice_permits_output_tool(other),
-    }
-}
-
-/// Resolve the caller-facing [`OutputMode`] to a concrete mode for one request.
-///
-/// With no schema there is nothing to enforce, so the result is always `Native`
-/// (the synthetic tool and prompt injection only make sense with a schema).
-/// `Auto` becomes `Tool` only when a real executable tool is present, the tool
-/// choice permits the output-tool call, AND the provider does *not* compose
-/// native structured output with tools — i.e. only where the native constraint
-/// would actually suppress tool calls (#1928). On providers that compose them
-/// (OpenAI, Anthropic), `Auto` keeps guaranteed native structured output.
-/// `Tool` (explicit or via `Auto`) requires that the active [`ToolChoice`]
-/// permit the output-tool call; when it does not, it degrades to `Native` so
-/// structured output is still enforced rather than silently dropped. Explicit
-/// `Prompted`/`Native` are honored when a schema is present. The returned mode is
-/// never `Auto`.
-fn resolve_output_mode(
-    has_schema: bool,
-    has_executable_tools: bool,
-    output_tool_callable: bool,
-    provider_composes_native: bool,
-    requested: &OutputMode,
-) -> OutputMode {
-    if !has_schema {
-        return OutputMode::Native;
-    }
-    match requested {
-        OutputMode::Native => OutputMode::Native,
-        OutputMode::Prompted => OutputMode::Prompted,
-        OutputMode::Tool if output_tool_callable => OutputMode::Tool,
-        OutputMode::Tool => OutputMode::Native,
-        OutputMode::Auto
-            if has_executable_tools && output_tool_callable && !provider_composes_native =>
-        {
-            OutputMode::Tool
-        }
-        OutputMode::Auto => OutputMode::Native,
-    }
-}
-
-/// Pick a collision-safe name for the synthetic output tool, never shadowing a
-/// real executable tool (which would make the model's output call dispatchable).
-fn pick_output_tool_name(executable_tool_names: &BTreeSet<String>) -> String {
-    let mut name = DEFAULT_OUTPUT_TOOL_NAME.to_string();
-    let mut suffix = 1u32;
-    while executable_tool_names.contains(&name) {
-        name = format!("{DEFAULT_OUTPUT_TOOL_NAME}_{suffix}");
-        suffix += 1;
-    }
-    name
 }
 
 /// Compute the allowed tool names for a `tool_choice` **and** validate the
 /// effective request locally (no provider round-trip).
 ///
 /// The effective advertised tool set for a turn is the executable tools (after
-/// any per-turn `active_tools` filtering) plus the synthetic output tool
-/// (`output_tool_name`) when structured output runs in Tool mode. Validation:
+/// any per-turn `active_tools` filtering). Validation:
 ///
-/// - [`ToolChoice::Required`] with **no** advertised tool (no executable tool and
-///   no output tool) is a local error — the model is forced to call a tool but
-///   none is advertised.
-/// - [`ToolChoice::Specific`] must name only advertised tools (executable tools
-///   or the output tool); an empty specific set is also an error.
+/// - [`ToolChoice::Required`] with **no** advertised tool is a local error —
+///   the model is forced to call a tool but none is advertised.
+/// - [`ToolChoice::Specific`] must name only advertised tools; an empty
+///   specific set is also an error.
 ///
 /// `pre_filter_tool_names` is the full executable tool set *before* any per-turn
 /// `active_tools` filtering — `Some` only when an `active_tools` allow-list was
@@ -138,10 +50,9 @@ fn pick_output_tool_name(executable_tool_names: &BTreeSet<String>) -> String {
 pub(crate) fn allowed_tool_names_for_choice(
     executable_tool_names: &BTreeSet<String>,
     tool_choice: Option<&ToolChoice>,
-    output_tool_name: Option<&str>,
     pre_filter_tool_names: Option<&BTreeSet<String>>,
 ) -> Result<BTreeSet<String>, CompletionError> {
-    let has_advertised_tool = !executable_tool_names.is_empty() || output_tool_name.is_some();
+    let has_advertised_tool = !executable_tool_names.is_empty();
     let hint = |active_tools_caused: bool| {
         if active_tools_caused {
             " A per-turn `active_tools` allow-list narrowed the advertised tools this turn; \
@@ -150,12 +61,11 @@ pub(crate) fn allowed_tool_names_for_choice(
             ""
         }
     };
-    // The advertised tools the model may call: executable tools + the output tool.
+    // The advertised tools the model may call.
     let advertised = || {
         executable_tool_names
             .iter()
             .map(String::as_str)
-            .chain(output_tool_name)
             .collect::<Vec<_>>()
     };
 
@@ -188,9 +98,7 @@ pub(crate) fn allowed_tool_names_for_choice(
             let missing = function_names
                 .iter()
                 .map(String::as_str)
-                .filter(|name| {
-                    !executable_tool_names.contains(*name) && Some(*name) != output_tool_name
-                })
+                .filter(|name| !executable_tool_names.contains(*name))
                 .collect::<Vec<_>>();
 
             if !missing.is_empty() {
@@ -231,10 +139,6 @@ pub(crate) async fn build_prepared_completion_request(
     tool_choice: Option<&ToolChoice>,
     tool_server_handle: &ToolServerHandle,
     output_schema: Option<&schemars::Schema>,
-    output_mode: &OutputMode,
-    committed_output_tool: Option<&str>,
-    output_tool_description: Option<&str>,
-    augment_output_preamble: bool,
     request_patch: Option<&RequestPatch>,
 ) -> Result<PreparedCompletionRequest, CompletionError> {
     // Apply a per-turn request patch (the merged patch from every `CompletionCall`
@@ -278,14 +182,11 @@ pub(crate) async fn build_prepared_completion_request(
         .await
         .map_err(|_| CompletionError::RequestError("Failed to get tool definitions".into()))?;
 
-    // When a per-turn `active_tools` allow-list is present, capture the full tool
-    // set BEFORE filtering: the synthetic output-tool name must avoid colliding
-    // with ANY advertised tool, not just this turn's narrowed set — a tool
-    // filtered out this turn can be advertised again on a later turn, while the
-    // output-tool name is pinned for the whole run, so picking against only the
-    // narrowed set could commit a name that collides once the filter lifts.
-    // Without a filter the full set equals `executable_tool_names` below, so we
-    // skip the extra allocation and reuse that.
+    // When a per-turn `active_tools` allow-list is present, capture the full
+    // tool set BEFORE filtering — `allowed_tool_names_for_choice` blames the
+    // filter for a dropped name only if that name existed pre-filter.
+    // Without a filter the full set equals `executable_tool_names` below, so
+    // we skip the extra allocation and reuse that.
     let pre_filter_tool_names: Option<BTreeSet<String>> = active_tools.map(|_| {
         tool_snapshot
             .definitions()
@@ -294,13 +195,12 @@ pub(crate) async fn build_prepared_completion_request(
             .collect()
     });
 
-    // Apply a per-turn `active_tools` allow-list (from a `CompletionCall` hook):
-    // narrow the advertised tool set to the named tools BEFORE computing the
-    // executable set, so tool-choice resolution and invalid-tool-call validation
-    // all operate on the narrowed set. The synthetic output tool is appended
-    // later and is unaffected, so structured output still works under an empty
-    // allow-list. A name that isn't available this turn is a hook bug, surfaced
-    // as a request error (mirroring `ToolChoice::Specific`'s contract).
+    // Apply a per-turn `active_tools` allow-list (from a `CompletionCall`
+    // hook): narrow the advertised tool set to the named tools BEFORE
+    // computing the executable set, so tool-choice resolution and
+    // invalid-tool-call validation all operate on the narrowed set. A name
+    // that isn't available this turn is a hook bug, surfaced as a request
+    // error (mirroring `ToolChoice::Specific`'s contract).
     if let Some(allow) = active_tools {
         if let Some(missing) = allow.iter().find(|name| {
             !tool_snapshot
@@ -319,119 +219,14 @@ pub(crate) async fn build_prepared_completion_request(
         tool_snapshot.retain_names(&allowed);
     }
 
-    let mut tooldefs = tool_snapshot.definitions().to_vec();
+    let tooldefs = tool_snapshot.definitions().to_vec();
 
-    // Executable tools are the real tool-server tools, computed BEFORE any
-    // synthetic output tool is appended.
+    // Executable tools are the real tool-server tools.
     let executable_tool_names: BTreeSet<String> =
         tooldefs.iter().map(|tool| tool.name.clone()).collect();
 
-    // Resolve the effective output mode (#1928). Once the run has committed to a
-    // Tool-mode output tool on an earlier turn (signaled by `committed_output_
-    // tool`, which is persisted on the run via `output_tool_name`), stay in Tool
-    // mode and reuse that name — so a later turn whose tool set differs (e.g. RAG
-    // retrieved no tools) can't flip Tool -> Native and re-apply the native
-    // constraint that suppressed tools in the first place. Only Tool mode is
-    // pinned; Native/Prompted re-resolve, so a tool-less first turn can still
-    // become Tool once tools appear. Otherwise resolve from the request, the
-    // schema, the tool set, whether the tool choice permits the output-tool call,
-    // and whether the provider composes native structured output with tools.
-    let resolved_mode = if committed_output_tool.is_some() && output_schema.is_some() {
-        OutputMode::Tool
-    } else {
-        resolve_output_mode(
-            output_schema.is_some(),
-            !executable_tool_names.is_empty(),
-            tool_choice_permits_output_tool(tool_choice),
-            model.capabilities().composes_native_output_with_tools,
-            output_mode,
-        )
-    };
-
-    // In Tool mode, reuse the run's committed name or pick a collision-safe one
-    // against the full pre-filter set (or the executable set when unfiltered).
-    let output_tool_name = matches!(resolved_mode, OutputMode::Tool).then(|| {
-        committed_output_tool.map(str::to_owned).unwrap_or_else(|| {
-            pick_output_tool_name(
-                pre_filter_tool_names
-                    .as_ref()
-                    .unwrap_or(&executable_tool_names),
-            )
-        })
-    });
-
-    // A freshly picked name never collides, but a name pinned on turn 1 can if a
-    // real tool with that name becomes effective later (for example through a
-    // shared tool server, retrieval, or an MCP refresh). The output-tool
-    // intercept matches by name, so fail before provider I/O: advertising both
-    // definitions would make a call to the real tool finalize the run instead
-    // of reaching normal dispatch.
-    if let Some(name) = &output_tool_name
-        && executable_tool_names.contains(name)
-    {
-        return Err(CompletionError::RequestError(
-            format!(
-                "real tool `{name}` conflicts with the structured-output tool reserved for this \
-                 run; rename or remove the real tool, exclude it with `active_tools`, or make it \
-                 visible before starting a new run so Rig can reserve a different output-tool name"
-            )
-            .into(),
-        ));
-    }
-
-    // In committed Tool mode the run can only finalize by calling the synthetic
-    // output tool, and the mode is pinned (it cannot degrade to Native mid-run,
-    // see #1928). A `tool_choice` that forbids the output-tool call — `None`, or
-    // a `Specific` set that excludes it, e.g. from a per-turn `RequestPatch` —
-    // therefore produces a turn that cannot emit the structured result. The
-    // non-committed path degrades to Native via `resolve_output_mode`, so this
-    // only fires once a turn has committed Tool mode; warn rather than silently
-    // stall the run. Use the name-aware check so a `Specific` set that *names*
-    // the output tool (which `allowed_tool_names_for_choice` accepts) is not
-    // falsely flagged as unable to finalize.
-    if let Some(name) = &output_tool_name
-        && !output_tool_callable(tool_choice, name)
-    {
-        tracing::warn!(
-            "the active tool_choice forbids calling the structured-output tool while the \
-             run is pinned to Tool output mode; this turn cannot emit the structured \
-             result (check for a `RequestPatch` setting `tool_choice` to None or a \
-             Specific set that excludes the output tool)"
-        );
-    }
-
-    // Augment the preamble for Tool/Prompted modes, then prepend it as a system
-    // message (deferred from the original position so it can reference the tool).
-    let effective_preamble: Option<String> = {
-        let base = preamble.map(str::to_owned);
-        let instruction = match &resolved_mode {
-            OutputMode::Tool if augment_output_preamble => {
-                output_tool_name.as_deref().map(|name| {
-                    format!(
-                        "When you have gathered enough information to answer, call the `{name}` \
-                     tool exactly once with your final answer. Its arguments are the structured \
-                     result and must satisfy the required schema. Do not return the final answer \
-                     as plain text."
-                    )
-                })
-            }
-            OutputMode::Tool => None,
-            OutputMode::Prompted => output_schema.map(|schema| {
-                let schema_json = serde_json::to_string(schema.as_value()).unwrap_or_default();
-                format!(
-                    "Respond with ONLY a single JSON object that conforms to this JSON Schema. \
-                     Do not include any prose, explanation, or markdown code fences.\n{schema_json}"
-                )
-            }),
-            OutputMode::Native | OutputMode::Auto => None,
-        };
-        match (base, instruction) {
-            (Some(b), Some(i)) => Some(format!("{b}\n\n{i}")),
-            (Some(b), None) => Some(b),
-            (None, Some(i)) => Some(i),
-            (None, None) => None,
-        }
-    };
+    // The preamble rides as a leading system message.
+    let effective_preamble: Option<String> = preamble.map(str::to_owned);
 
     // The message being answered is the ORIGINAL history's last entry — a
     // derived view, not a field (ENGINE.md: no prompt/context split). A
@@ -463,24 +258,6 @@ pub(crate) async fn build_prepared_completion_request(
         preceding
     };
 
-    // In Tool mode, advertise the synthetic output tool to the provider (its name
-    // is added to `allowed_tool_names` below but never to `executable_tool_names`,
-    // so it is never dispatched to the tool server).
-    // `output_tool_name` is only `Some` when `output_schema` is `Some` (Tool mode
-    // requires a schema), so this match always fires in Tool mode.
-    if let (Some(name), Some(schema)) = (&output_tool_name, output_schema) {
-        tooldefs.push(crate::completion::ToolDefinition {
-            name: name.clone(),
-            description: output_tool_description
-                .unwrap_or(
-                    "Call this tool exactly once with your final answer when you are done. \
-                     Its arguments are the structured result and must satisfy the output schema.",
-                )
-                .to_string(),
-            parameters: schema.clone().to_value(),
-        });
-    }
-
     let mut completion_request = model
         .completion_request(prompt)
         .messages(chat_history)
@@ -500,10 +277,10 @@ pub(crate) async fn build_prepared_completion_request(
         completion_request = completion_request.documents(patch.extra_context.clone());
     }
 
-    // Only Native mode sets the provider's native structured-output constraint.
-    if matches!(resolved_mode, OutputMode::Native) {
-        completion_request = completion_request.output_schema_opt(output_schema.cloned());
-    }
+    // A caller-supplied schema is pure pass-through: the provider's native
+    // structured output enforces it (ENGINE.md delta 14 — the engine has no
+    // structured-output policy of its own).
+    completion_request = completion_request.output_schema_opt(output_schema.cloned());
 
     let completion_request = if let Some(tool_choice) = tool_choice {
         completion_request.tool_choice(tool_choice.clone())
@@ -511,28 +288,21 @@ pub(crate) async fn build_prepared_completion_request(
         completion_request
     };
 
-    // Validate the effective request locally (Required/Specific vs the effective
-    // advertised tool set, incl. the output tool) *before* building the send —
-    // so an impossible tool_choice/tool-set combination fails here with no
-    // provider round-trip, and names the `active_tools` filter when it caused it.
-    let mut allowed_tool_names = allowed_tool_names_for_choice(
+    // Validate the effective request locally (Required/Specific vs the
+    // advertised tool set) *before* building the send — so an impossible
+    // tool_choice/tool-set combination fails here with no provider
+    // round-trip, and names the `active_tools` filter when it caused it.
+    let allowed_tool_names = allowed_tool_names_for_choice(
         &executable_tool_names,
         tool_choice,
-        output_tool_name.as_deref(),
         pre_filter_tool_names.as_ref(),
     )?;
-    // The output tool must be allowed (so it isn't flagged as an invalid tool
-    // call) even though it is not executable.
-    if let Some(name) = &output_tool_name {
-        allowed_tool_names.insert(name.clone());
-    }
 
     Ok(PreparedCompletionRequest {
         builder: completion_request,
         tool_snapshot: Arc::new(tool_snapshot),
         executable_tool_names,
         allowed_tool_names,
-        output_tool_name,
     })
 }
 
@@ -596,12 +366,9 @@ pub struct Agent {
     /// Default hook stack applied to every prompt request and runner created
     /// from this agent. Empty by default.
     pub(crate) hooks: HookStack,
-    /// Optional JSON Schema for structured output. When set, providers that support
-    /// native structured outputs will constrain the model's response to match this schema.
+    /// Optional JSON Schema for structured output — pure pass-through to
+    /// the provider's native structured output; the engine has no policy.
     pub(crate) output_schema: Option<schemars::Schema>,
-    /// How `output_schema` is enforced — tool call, native structured output, or
-    /// prompt injection (see [`OutputMode`] and issue #1928).
-    pub(crate) output_mode: OutputMode,
     /// Optional conversation memory backend that loads/saves history per conversation id.
     pub(crate) memory: Option<Arc<dyn rig_core::memory::ConversationMemory>>,
     /// Optional default conversation id used when none is set per-request.
@@ -749,78 +516,6 @@ impl StreamingChat for Agent {
     }
 }
 
-use crate::agent::prompt_request::TypedPromptRequest;
-use schemars::JsonSchema;
-use serde::de::DeserializeOwned;
-
-#[allow(refining_impl_trait)]
-impl TypedPrompt for Agent {
-    type TypedRequest<T>
-        = TypedPromptRequest<T, prompt_request::Standard>
-    where
-        T: JsonSchema + DeserializeOwned + WasmCompatSend + 'static;
-
-    /// Send a prompt and receive a typed structured response.
-    ///
-    /// The JSON schema for `T` is automatically generated and sent to the provider.
-    /// Providers that support native structured outputs will constrain the model's
-    /// response to match this schema.
-    ///
-    /// # Example
-    /// ```rust,ignore
-    /// use rig_core::prelude::*;
-    /// use schemars::JsonSchema;
-    /// use serde::Deserialize;
-    ///
-    /// #[derive(Debug, Deserialize, JsonSchema)]
-    /// struct WeatherForecast {
-    ///     city: String,
-    ///     temperature_f: f64,
-    ///     conditions: String,
-    /// }
-    ///
-    /// let agent = client.agent("gpt-4o").build();
-    ///
-    /// // Type inferred from variable
-    /// let forecast: WeatherForecast = agent
-    ///     .prompt_typed("What's the weather in NYC?")
-    ///     .await?;
-    ///
-    /// // Or explicit turbofish syntax
-    /// let forecast = agent
-    ///     .prompt_typed::<WeatherForecast>("What's the weather in NYC?")
-    ///     .max_turns(3)
-    ///     .await?;
-    /// ```
-    fn prompt_typed<T>(
-        &self,
-        prompt: impl Into<Message> + WasmCompatSend,
-    ) -> TypedPromptRequest<T, prompt_request::Standard>
-    where
-        T: JsonSchema + DeserializeOwned + WasmCompatSend,
-    {
-        TypedPromptRequest::from_agent(self, prompt)
-    }
-}
-
-#[allow(refining_impl_trait)]
-impl TypedPrompt for &Agent {
-    type TypedRequest<T>
-        = TypedPromptRequest<T, prompt_request::Standard>
-    where
-        T: JsonSchema + DeserializeOwned + WasmCompatSend + 'static;
-
-    fn prompt_typed<T>(
-        &self,
-        prompt: impl Into<Message> + WasmCompatSend,
-    ) -> TypedPromptRequest<T, prompt_request::Standard>
-    where
-        T: JsonSchema + DeserializeOwned + WasmCompatSend,
-    {
-        TypedPromptRequest::from_agent(self, prompt)
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -834,7 +529,7 @@ mod tests {
         let executable = tool_names(&["add", "subtract"]);
 
         assert_eq!(
-            allowed_tool_names_for_choice(&executable, None, None, None).unwrap(),
+            allowed_tool_names_for_choice(&executable, None, None).unwrap(),
             executable
         );
     }
@@ -844,13 +539,11 @@ mod tests {
         let executable = tool_names(&["add", "subtract"]);
 
         assert_eq!(
-            allowed_tool_names_for_choice(&executable, Some(&ToolChoice::Auto), None, None)
-                .unwrap(),
+            allowed_tool_names_for_choice(&executable, Some(&ToolChoice::Auto), None).unwrap(),
             executable
         );
         assert_eq!(
-            allowed_tool_names_for_choice(&executable, Some(&ToolChoice::Required), None, None)
-                .unwrap(),
+            allowed_tool_names_for_choice(&executable, Some(&ToolChoice::Required), None).unwrap(),
             executable
         );
     }
@@ -860,7 +553,7 @@ mod tests {
         let executable = tool_names(&["add", "subtract"]);
 
         assert!(
-            allowed_tool_names_for_choice(&executable, Some(&ToolChoice::None), None, None)
+            allowed_tool_names_for_choice(&executable, Some(&ToolChoice::None), None)
                 .unwrap()
                 .is_empty()
         );
@@ -874,7 +567,7 @@ mod tests {
         };
 
         assert_eq!(
-            allowed_tool_names_for_choice(&executable, Some(&choice), None, None).unwrap(),
+            allowed_tool_names_for_choice(&executable, Some(&choice), None).unwrap(),
             tool_names(&["add"])
         );
     }
@@ -886,7 +579,7 @@ mod tests {
             function_names: vec!["missing".to_string()],
         };
 
-        let err = allowed_tool_names_for_choice(&executable, Some(&choice), None, None)
+        let err = allowed_tool_names_for_choice(&executable, Some(&choice), None)
             .expect_err("missing specific tool should fail before provider request");
 
         assert!(matches!(
@@ -904,7 +597,7 @@ mod tests {
             function_names: vec![],
         };
 
-        let err = allowed_tool_names_for_choice(&executable, Some(&choice), None, None)
+        let err = allowed_tool_names_for_choice(&executable, Some(&choice), None)
             .expect_err("empty specific tool choice should fail before provider request");
 
         assert!(matches!(
@@ -915,44 +608,9 @@ mod tests {
     }
 
     #[test]
-    fn output_tool_callable_honors_specific_naming_the_output_tool() {
-        // Auto / Required / no explicit choice all permit the output-tool call.
-        assert!(output_tool_callable(None, "final_result"));
-        assert!(output_tool_callable(
-            Some(&ToolChoice::Auto),
-            "final_result"
-        ));
-        assert!(output_tool_callable(
-            Some(&ToolChoice::Required),
-            "final_result"
-        ));
-        // A `Specific` set that NAMES the output tool can call it — the case the
-        // pinned Tool-mode stall warning must not flag (it is accepted by
-        // `allowed_tool_names_for_choice`, which advertises the output tool).
-        assert!(output_tool_callable(
-            Some(&ToolChoice::Specific {
-                function_names: vec!["final_result".to_string()],
-            }),
-            "final_result",
-        ));
-        // A `Specific` set that omits it — or `ToolChoice::None` — genuinely cannot
-        // finalize a pinned Tool-mode turn, so the warning should still fire there.
-        assert!(!output_tool_callable(
-            Some(&ToolChoice::Specific {
-                function_names: vec!["search".to_string()],
-            }),
-            "final_result",
-        ));
-        assert!(!output_tool_callable(
-            Some(&ToolChoice::None),
-            "final_result"
-        ));
-    }
-
-    #[test]
     fn required_with_no_advertised_tool_is_local_error() {
         let empty = tool_names(&[]);
-        let err = allowed_tool_names_for_choice(&empty, Some(&ToolChoice::Required), None, None)
+        let err = allowed_tool_names_for_choice(&empty, Some(&ToolChoice::Required), None)
             .expect_err("Required with no advertised tool must fail locally");
         assert!(matches!(
             err,
@@ -961,29 +619,11 @@ mod tests {
     }
 
     #[test]
-    fn required_with_only_the_output_tool_is_allowed() {
-        // Structured-output Tool mode with no real tools: the model can still be
-        // forced to call the synthetic output tool, so Required is valid.
-        let empty = tool_names(&[]);
-        let allowed = allowed_tool_names_for_choice(
-            &empty,
-            Some(&ToolChoice::Required),
-            Some("final_result"),
-            None,
-        )
-        .expect("Required is satisfiable by the output tool");
-        // The output tool is added to the allowed set by the caller, so the
-        // executable-derived allowed set is empty here.
-        assert!(allowed.is_empty());
-    }
-
-    #[test]
     fn required_with_active_tools_filter_names_the_filter_in_the_error() {
         let empty = tool_names(&[]);
         let err = allowed_tool_names_for_choice(
             &empty,
             Some(&ToolChoice::Required),
-            None,
             Some(&tool_names(&["add"])),
         )
         .expect_err("Required after active_tools filtered everything must fail locally");
@@ -1009,7 +649,6 @@ mod tests {
         let err = allowed_tool_names_for_choice(
             &executable,
             Some(&choice),
-            None,
             Some(&tool_names(&["add", "subtract"])),
         )
         .expect_err("Specific naming a filtered-out tool must fail locally");
@@ -1025,19 +664,6 @@ mod tests {
     }
 
     #[test]
-    fn specific_may_name_the_output_tool() {
-        // The effective advertised set includes the synthetic output tool.
-        let empty = tool_names(&[]);
-        let choice = ToolChoice::Specific {
-            function_names: vec!["final_result".to_string()],
-        };
-        let allowed =
-            allowed_tool_names_for_choice(&empty, Some(&choice), Some("final_result"), None)
-                .expect("Specific naming the output tool is valid");
-        assert_eq!(allowed, tool_names(&["final_result"]));
-    }
-
-    #[test]
     fn specific_typo_is_not_blamed_on_active_tools() {
         // Specific names a tool that never existed (a typo), even though an
         // active_tools filter was applied. The error must NOT blame active_tools,
@@ -1046,180 +672,14 @@ mod tests {
         let choice = ToolChoice::Specific {
             function_names: vec!["nonexistent".to_string()],
         };
-        let err = allowed_tool_names_for_choice(
-            &executable,
-            Some(&choice),
-            None,
-            Some(&tool_names(&["add"])),
-        )
-        .expect_err("Specific naming a non-existent tool must fail locally");
+        let err =
+            allowed_tool_names_for_choice(&executable, Some(&choice), Some(&tool_names(&["add"])))
+                .expect_err("Specific naming a non-existent tool must fail locally");
         let msg = err.to_string();
         assert!(msg.contains("nonexistent"), "error names the typo: {msg}");
         assert!(
             !msg.contains("active_tools"),
             "a plain typo must not be blamed on active_tools: {msg}"
-        );
-    }
-
-    #[test]
-    fn resolve_output_mode_without_schema_is_always_native() {
-        // No schema => nothing to enforce, regardless of the requested mode or tools.
-        for requested in [
-            OutputMode::Auto,
-            OutputMode::Tool,
-            OutputMode::Native,
-            OutputMode::Prompted,
-        ] {
-            assert_eq!(
-                resolve_output_mode(false, true, true, false, &requested),
-                OutputMode::Native,
-                "no schema should force Native for {requested:?}"
-            );
-            assert_eq!(
-                resolve_output_mode(false, false, true, false, &requested),
-                OutputMode::Native,
-            );
-        }
-    }
-
-    #[test]
-    fn resolve_output_mode_auto_picks_tool_only_when_tools_present() {
-        // This is the #1928 fix: with tools on a provider that does NOT compose
-        // native output with tools, the schema must not be a native `format`
-        // constraint on every turn, so Auto routes to Tool.
-        assert_eq!(
-            resolve_output_mode(true, true, true, false, &OutputMode::Auto),
-            OutputMode::Tool,
-        );
-        // No tools => native structured output is safe and preferred.
-        assert_eq!(
-            resolve_output_mode(true, false, true, false, &OutputMode::Auto),
-            OutputMode::Native,
-        );
-    }
-
-    #[test]
-    fn resolve_output_mode_auto_keeps_native_when_provider_composes() {
-        // On providers that compose native structured output with tools (OpenAI,
-        // Anthropic), Auto keeps guaranteed native output even with tools present.
-        assert_eq!(
-            resolve_output_mode(true, true, true, true, &OutputMode::Auto),
-            OutputMode::Native,
-        );
-    }
-
-    #[test]
-    fn resolve_output_mode_honors_explicit_choice_with_schema() {
-        for (requested, expected) in [
-            (OutputMode::Tool, OutputMode::Tool),
-            (OutputMode::Native, OutputMode::Native),
-            (OutputMode::Prompted, OutputMode::Prompted),
-        ] {
-            // Explicit modes are honored regardless of tools or provider support.
-            assert_eq!(
-                resolve_output_mode(true, true, true, false, &requested),
-                expected
-            );
-            assert_eq!(
-                resolve_output_mode(true, false, true, true, &requested),
-                expected
-            );
-        }
-    }
-
-    #[test]
-    fn resolve_output_mode_degrades_to_native_when_output_tool_not_callable() {
-        // Tool mode finalizes via the output-tool call; when the tool choice
-        // forbids it (None / Specific), structured output must still be enforced
-        // via Native rather than silently dropped (#1928 regression guard).
-        assert_eq!(
-            resolve_output_mode(true, true, false, false, &OutputMode::Auto),
-            OutputMode::Native,
-        );
-        assert_eq!(
-            resolve_output_mode(true, true, false, false, &OutputMode::Tool),
-            OutputMode::Native,
-        );
-        // Prompted does not rely on tools, so it is unaffected.
-        assert_eq!(
-            resolve_output_mode(true, true, false, false, &OutputMode::Prompted),
-            OutputMode::Prompted,
-        );
-    }
-
-    #[test]
-    fn tool_choice_permits_output_tool_only_for_auto_required_or_unset() {
-        assert!(tool_choice_permits_output_tool(None));
-        assert!(tool_choice_permits_output_tool(Some(&ToolChoice::Auto)));
-        assert!(tool_choice_permits_output_tool(Some(&ToolChoice::Required)));
-        assert!(!tool_choice_permits_output_tool(Some(&ToolChoice::None)));
-        assert!(!tool_choice_permits_output_tool(Some(
-            &ToolChoice::Specific {
-                function_names: vec!["add".to_string()],
-            }
-        )));
-    }
-
-    #[test]
-    fn pick_output_tool_name_defaults_when_unused() {
-        let executable = tool_names(&["add", "subtract"]);
-        assert_eq!(pick_output_tool_name(&executable), DEFAULT_OUTPUT_TOOL_NAME);
-    }
-
-    #[test]
-    fn pick_output_tool_name_avoids_collision_with_real_tools() {
-        // A user tool literally named `final_result` must not be shadowed, or
-        // the model's output call would be dispatched to the tool server.
-        let executable = tool_names(&["final_result"]);
-        assert_eq!(pick_output_tool_name(&executable), "final_result_1");
-
-        let executable = tool_names(&["final_result", "final_result_1"]);
-        assert_eq!(pick_output_tool_name(&executable), "final_result_2");
-    }
-
-    /// A run already committed to Tool output mode whose active `tool_choice`
-    /// forbids the output-tool call (`ToolChoice::None`, or a `Specific` set
-    /// that omits it) cannot finalize this turn. The request is still built
-    /// (the run is pinned to Tool mode, it cannot degrade mid-run); the pinned
-    /// name is reused and the stall is only warned about, not errored on.
-    #[tokio::test]
-    async fn committed_tool_mode_with_forbidding_choice_builds_but_warns() {
-        use crate::test_utils::MockCompletionModel;
-        use crate::tool::server::ToolServer;
-
-        let model = ModelHandle::new(MockCompletionModel::text("ignored"));
-        let tool_server_handle = ToolServer::new().run();
-        let schema = schemars::schema_for!(u32);
-
-        let prepared = build_prepared_completion_request(
-            &model,
-            &[Message::user("answer")],
-            None,
-            &[],
-            None,
-            None,
-            None,
-            false,
-            Some(&ToolChoice::None),
-            &tool_server_handle,
-            Some(&schema),
-            &OutputMode::Tool,
-            Some("final_result"),
-            None,
-            true,
-            None,
-        )
-        .await
-        .expect("a pinned Tool-mode turn must still prepare a request");
-
-        assert_eq!(
-            prepared.output_tool_name.as_deref(),
-            Some("final_result"),
-            "the committed output-tool name is reused"
-        );
-        assert!(
-            prepared.executable_tool_names.is_empty(),
-            "no real tools were configured"
         );
     }
 
@@ -1275,23 +735,5 @@ mod tests {
             .await
             .expect("prompt should succeed");
         assert_eq!(output, "ok");
-    }
-
-    /// `&Agent` implements `TypedPrompt` symmetrically with `Agent`.
-    #[tokio::test]
-    async fn prompt_typed_through_an_agent_reference_deserializes_the_output() {
-        use crate::test_utils::{MockCompletionModel, MockTurn};
-
-        #[derive(serde::Deserialize, schemars::JsonSchema)]
-        struct Answer {
-            value: String,
-        }
-
-        let model = MockCompletionModel::new([MockTurn::text(r#"{"value":"ok"}"#)]);
-        let agent = crate::AgentBuilder::new(model).build();
-        let answer: Answer = TypedPrompt::prompt_typed(&agent, "answer")
-            .await
-            .expect("typed prompt should succeed");
-        assert_eq!(answer.value, "ok");
     }
 }

@@ -23,7 +23,7 @@ use crate::{
 #[cfg_attr(docsrs, doc(cfg(feature = "rmcp")))]
 use crate::tool::rmcp::McpTool as RmcpTool;
 
-use super::{Agent, ModelHandle, OutputMode};
+use super::{Agent, ModelHandle};
 
 struct DynamicContext<I> {
     samples: usize,
@@ -172,10 +172,9 @@ pub struct AgentBuilder<ToolState = NoToolConfig> {
     tool_state: ToolState,
     /// Default hook stack applied to every prompt request from the built agent.
     hooks: HookStack,
-    /// Optional JSON Schema for structured output
+    /// Optional JSON Schema for structured output — pure pass-through to
+    /// the provider's native structured output; the engine has no policy.
     output_schema: Option<schemars::Schema>,
-    /// How `output_schema` is enforced (tool vs native vs prompted; see #1928)
-    output_mode: OutputMode,
     /// Optional conversation memory backend that loads/saves history per conversation id.
     memory: Option<Arc<dyn ConversationMemory>>,
     /// Optional default conversation id used when none is set per-request.
@@ -300,15 +299,6 @@ impl<ToolState> AgentBuilder<ToolState> {
         self
     }
 
-    /// Set how `output_schema` is enforced — [`OutputMode::Tool`] (output as a
-    /// tool call, the default when the agent has tools), [`OutputMode::Native`]
-    /// (provider structured output), or [`OutputMode::Prompted`] (see #1928).
-    /// Has no effect unless `output_schema`/`output_schema_raw` is also set.
-    pub fn output_mode(mut self, mode: OutputMode) -> Self {
-        self.output_mode = mode;
-        self
-    }
-
     /// Attach a [`ConversationMemory`] backend.
     ///
     /// When set, the agent will automatically load prior conversation history before
@@ -379,7 +369,6 @@ impl AgentBuilder<NoToolConfig> {
             tool_state: NoToolConfig,
             hooks: HookStack::new(),
             output_schema: None,
-            output_mode: OutputMode::default(),
             memory: None,
             default_conversation_id: None,
         }
@@ -411,7 +400,6 @@ impl AgentBuilder<NoToolConfig> {
             tool_state: WithToolServerHandle { handle },
             hooks: self.hooks,
             output_schema: self.output_schema,
-            output_mode: self.output_mode,
             memory: self.memory,
             default_conversation_id: self.default_conversation_id,
         }
@@ -445,7 +433,6 @@ impl AgentBuilder<NoToolConfig> {
             },
             hooks: self.hooks,
             output_schema: self.output_schema,
-            output_mode: self.output_mode,
             memory: self.memory,
             default_conversation_id: self.default_conversation_id,
         }
@@ -485,7 +472,6 @@ impl AgentBuilder<NoToolConfig> {
             default_max_turns: self.default_max_turns,
             hooks: self.hooks,
             output_schema: self.output_schema,
-            output_mode: self.output_mode,
             memory: self.memory,
             default_conversation_id: self.default_conversation_id,
             tool_state: WithBuilderTools {
@@ -580,7 +566,6 @@ impl AgentBuilder<NoToolConfig> {
             default_max_turns: self.default_max_turns,
             hooks: self.hooks,
             output_schema: self.output_schema,
-            output_mode: self.output_mode,
             memory: self.memory,
             default_conversation_id: self.default_conversation_id,
             tool_state: WithBuilderTools {
@@ -621,7 +606,6 @@ impl AgentBuilder<NoToolConfig> {
             default_max_turns: self.default_max_turns,
             hooks: self.hooks,
             output_schema: self.output_schema,
-            output_mode: self.output_mode,
             memory: self.memory,
             default_conversation_id: self.default_conversation_id,
             tool_state: WithBuilderTools {
@@ -652,7 +636,6 @@ impl AgentBuilder<NoToolConfig> {
             default_max_turns: self.default_max_turns,
             hooks: self.hooks,
             output_schema: self.output_schema,
-            output_mode: self.output_mode,
             memory: self.memory,
             default_conversation_id: self.default_conversation_id,
         }
@@ -677,7 +660,6 @@ impl AgentBuilder<WithToolServerHandle> {
             default_max_turns: self.default_max_turns,
             hooks: self.hooks,
             output_schema: self.output_schema,
-            output_mode: self.output_mode,
             memory: self.memory,
             default_conversation_id: self.default_conversation_id,
         }
@@ -793,7 +775,6 @@ impl AgentBuilder<WithBuilderTools> {
             default_max_turns: self.default_max_turns,
             hooks: self.hooks,
             output_schema: self.output_schema,
-            output_mode: self.output_mode,
             memory: self.memory,
             default_conversation_id: self.default_conversation_id,
         }

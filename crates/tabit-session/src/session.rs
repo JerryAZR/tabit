@@ -880,11 +880,11 @@ impl Session {
                 Ok(MultiTurnStreamItem::TurnCommitted { id }) => {
                     sink.emit(SessionEvent::TurnCommitted { id });
                 }
-                Ok(MultiTurnStreamItem::RoundtripClosed { turn_id, feedback }) => {
+                Ok(MultiTurnStreamItem::RoundtripClosed { turn_id }) => {
                     // The atomic commit (ENGINE.md, the durable
-                    // roundtrip): the assistant and its batch — or the
-                    // engine-authored feedback close — land as one unit.
-                    self.recorder.close_roundtrip(&turn_id, feedback);
+                    // roundtrip): the assistant and its complete batch
+                    // land as one unit.
+                    self.recorder.close_roundtrip(&turn_id);
                 }
                 Ok(MultiTurnStreamItem::ModelTurnRetried { .. }) => {
                     let turn_id = announce(&current_turn);

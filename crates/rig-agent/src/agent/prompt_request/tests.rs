@@ -1,12 +1,11 @@
-use super::{CompletionCall, PromptResponse, PromptResponseRepr, TypedPromptResponse};
+use super::{CompletionCall, PromptResponse, PromptResponseRepr};
 use crate::{
     agent::{
         AgentBuilder,
         hook::{AgentHook, HookContext},
     },
     completion::{
-        AssistantContent, CompletionError, CompletionRequest, Message, Prompt, PromptError,
-        StructuredOutputError, TypedPrompt, Usage,
+        AssistantContent, CompletionError, CompletionRequest, Message, Prompt, PromptError, Usage,
     },
     test_utils::{
         AppendFailingMemory, CountingMemory, FailingMemory, MockAddTool, MockCompletionModel,
@@ -14,55 +13,8 @@ use crate::{
     },
     tool::{Tool, ToolContext},
 };
-use rig_core::message::{Text, ToolCall, ToolChoice, ToolFunction, UserContent};
-use schemars::JsonSchema;
-use serde::{Deserialize, Serialize};
+use rig_core::message::{Text, ToolChoice, UserContent};
 use serde_json::json;
-
-#[derive(Serialize)]
-struct SerializeOnly {
-    value: &'static str,
-}
-
-#[derive(Deserialize)]
-struct DeserializeOnly {
-    value: String,
-}
-
-#[derive(Debug, Deserialize, JsonSchema, PartialEq)]
-struct TypedAnswer {
-    value: String,
-}
-
-#[test]
-fn deserialize_structured_output_tolerates_fences_and_prose() {
-    // Clean JSON (native / output-tool path).
-    assert_eq!(
-        super::deserialize_structured_output::<TypedAnswer>(r#"{"value":"x"}"#).unwrap(),
-        TypedAnswer { value: "x".into() }
-    );
-    // Markdown-fenced JSON (weak Prompted-mode models).
-    assert_eq!(
-        super::deserialize_structured_output::<TypedAnswer>("```json\n{\"value\":\"y\"}\n```")
-            .unwrap(),
-        TypedAnswer { value: "y".into() }
-    );
-    // Prose around the JSON object.
-    assert_eq!(
-        super::deserialize_structured_output::<TypedAnswer>(
-            "Here you go: {\"value\":\"z\"} — hope that helps!"
-        )
-        .unwrap(),
-        TypedAnswer { value: "z".into() }
-    );
-    // No JSON at all still errors.
-    assert!(super::deserialize_structured_output::<TypedAnswer>("no json here").is_err());
-}
-
-#[derive(Clone)]
-struct RepairDefaultApiHook;
-
-impl AgentHook for RepairDefaultApiHook {}
 
 fn usage(input_tokens: u64, output_tokens: u64) -> Usage {
     Usage {
@@ -75,40 +27,6 @@ fn usage(input_tokens: u64, output_tokens: u64) -> Usage {
         tool_use_prompt_tokens: 0,
         reasoning_tokens: 0,
     }
-}
-
-#[test]
-fn typed_prompt_response_serializes_with_serialize_only_output() {
-    let response = TypedPromptResponse::new(
-        SerializeOnly { value: "ok" },
-        Usage {
-            input_tokens: 1,
-            output_tokens: 2,
-            total_tokens: 3,
-            cached_input_tokens: 0,
-            cache_creation_input_tokens: 0,
-            cache_creation_1h_input_tokens: 0,
-            tool_use_prompt_tokens: 0,
-            reasoning_tokens: 0,
-        },
-    );
-
-    let json = serde_json::to_string(&response).expect("serialize typed prompt response");
-    assert!(json.contains("\"value\":\"ok\""));
-}
-
-#[test]
-fn typed_prompt_response_deserializes_with_deserialize_only_output() {
-    let response: TypedPromptResponse<DeserializeOnly> = serde_json::from_str(
-            r#"{"output":{"value":"ok"},"usage":{"input_tokens":1,"output_tokens":2,"total_tokens":3,"cached_input_tokens":0,"cache_creation_input_tokens":0,"cache_creation_1h_input_tokens":0,"reasoning_tokens":0}}"#,
-        )
-        .expect("deserialize typed prompt response");
-
-    assert_eq!(response.requests(), 0);
-    assert_eq!(response.output.value, "ok");
-    assert_eq!(response.usage.input_tokens, 1);
-    assert_eq!(response.usage.output_tokens, 2);
-    assert_eq!(response.usage.total_tokens, 3);
 }
 
 #[test]
@@ -164,18 +82,6 @@ fn prompt_response_serializes_completion_calls_with_missing_usage() {
         ]
     );
     assert_eq!(response.requests(), 2);
-}
-
-#[test]
-fn prompt_response_output_tool_marker_is_never_serialized() {
-    let response = PromptResponse::new("ok", usage(1, 2)).with_output_tool_calls(3);
-
-    let value = serde_json::to_value(&response).expect("serialize prompt response");
-    assert!(value.get("output_tool_calls").is_none());
-
-    let decoded: PromptResponse =
-        serde_json::from_value(value).expect("deserialize prompt response");
-    assert_eq!(decoded.output_tool_calls(), 0);
 }
 
 #[test]
@@ -313,41 +219,6 @@ async fn prompt_response_records_completion_call_without_reported_usage() {
     );
 }
 
-#[tokio::test]
-async fn typed_prompt_response_preserves_completion_calls() {
-    let call_usage = Usage {
-        input_tokens: 4,
-        output_tokens: 6,
-        total_tokens: 10,
-        cached_input_tokens: 0,
-        cache_creation_input_tokens: 0,
-        cache_creation_1h_input_tokens: 0,
-        tool_use_prompt_tokens: 0,
-        reasoning_tokens: 0,
-    };
-    let model =
-        MockCompletionModel::new([MockTurn::text(r#"{"value":"ok"}"#).with_usage(call_usage)]);
-    let agent = AgentBuilder::new(model).build();
-
-    let response = agent
-        .prompt_typed::<TypedAnswer>("return typed json")
-        .extended_details()
-        .await
-        .expect("typed prompt should succeed");
-
-    assert_eq!(
-        response.output,
-        TypedAnswer {
-            value: "ok".to_string()
-        }
-    );
-    assert_eq!(response.usage, call_usage);
-    assert_eq!(
-        response.completion_calls(),
-        &[CompletionCall::new(0, call_usage, None)]
-    );
-}
-
 fn validate_follow_up_tool_history(request: &CompletionRequest) {
     let history = request.chat_history.iter().cloned().collect::<Vec<_>>();
     assert_eq!(
@@ -475,29 +346,6 @@ async fn probe_direct_call_uses_context() {
         .expect("call succeeds");
     assert_eq!(out, "no-session");
     assert_eq!(probe.observed().as_deref(), Some("no-session"));
-}
-
-#[tokio::test]
-async fn typed_prompt_invalid_tool_call_hook_can_repair_tool_name() {
-    let model = MockCompletionModel::new([
-        MockTurn::tool_call("tool_call_1", "default_api", json!({"x": 2, "y": 3})),
-        MockTurn::text(r#"{"value":"repaired"}"#),
-    ]);
-    let agent = AgentBuilder::new(model).tool(MockAddTool).build();
-
-    let response = agent
-        .prompt_typed::<TypedAnswer>("return typed json")
-        .add_hook(RepairDefaultApiHook)
-        .max_turns(3)
-        .await
-        .expect("typed prompt should repair invalid tool call");
-
-    assert_eq!(
-        response,
-        TypedAnswer {
-            value: "repaired".to_string()
-        }
-    );
 }
 
 #[tokio::test]
@@ -1229,137 +1077,8 @@ async fn prompt_request_using_model_handle_swaps_the_run_model() {
     assert_eq!(out, "from handle model");
 }
 
-#[tokio::test]
-async fn typed_prompt_request_setters_and_model_swap_reach_the_run() {
-    let model = MockCompletionModel::new([MockTurn::text("from agent model")]);
-    let replacement = MockCompletionModel::new([MockTurn::text(r#"{"value":"swapped"}"#)]);
-    let recorded = replacement.clone();
-    let agent = AgentBuilder::new(model).preamble("agent preamble").build();
-
-    let response = agent
-        .prompt_typed::<TypedAnswer>("swap the model")
-        .preamble("request preamble")
-        .without_preamble()
-        .document(static_document("d1", "doc one"))
-        .documents([static_document("d2", "doc two")])
-        .temperature(0.7)
-        .without_temperature()
-        .max_tokens(128)
-        .without_max_tokens()
-        .merge_additional_params(serde_json::Map::new())
-        .replace_additional_params(json!({"replaced": true}))
-        .without_additional_params()
-        .tool_choice(ToolChoice::Auto)
-        .without_tool_choice()
-        .record_content_telemetry(true)
-        .using_model_value(replacement)
-        .max_turns(1)
-        .await
-        .expect("typed run with request-level setters should succeed");
-
-    assert_eq!(
-        response,
-        TypedAnswer {
-            value: "swapped".into()
-        }
-    );
-    let request = &recorded.requests()[0];
-    assert_eq!(request.preamble, None);
-    assert_eq!(request.documents.len(), 2);
-    assert_eq!(request.temperature, None);
-    assert_eq!(request.max_tokens, None);
-    assert_eq!(request.additional_params, None);
-    assert_eq!(request.tool_choice, None);
-}
-
 #[test]
 fn prompt_response_display_formats_the_output_text() {
     let response = PromptResponse::new("hello display", usage(1, 2));
     assert_eq!(format!("{response}"), "hello display");
-}
-
-#[test]
-fn invalid_tool_retry_user_message_skips_non_tool_call_content() {
-    let invalid = ToolCall::new(
-        "tool_call_1".to_string(),
-        ToolFunction::new("default_api".to_string(), json!({})),
-    );
-    let peer = ToolCall::new(
-        "tool_call_2".to_string(),
-        ToolFunction::new("add".to_string(), json!({})),
-    );
-    let contents = rig_core::OneOrMany::many(vec![
-        AssistantContent::text("prose alongside the calls"),
-        AssistantContent::ToolCall(invalid),
-        AssistantContent::ToolCall(peer),
-    ])
-    .expect("three content items");
-
-    let message =
-        super::invalid_tool_retry_user_message(&contents, "tool_call_1", "fix it".to_string())
-            .expect("tool calls should produce a retry user message");
-
-    let Message::User { content } = &message else {
-        panic!("expected a user message, got {message:?}");
-    };
-    // Only the two tool calls contribute results; the text part is skipped.
-    let mut items = content.iter();
-    assert!(matches!(
-        items.next(),
-        Some(UserContent::ToolResult(result))
-            if result.id == "tool_call_1"
-                && result.content.iter().any(|item| matches!(
-                    item,
-                    rig_core::message::ToolResultContent::Text(text) if text.text == "fix it"
-                ))
-    ));
-    assert!(matches!(
-        items.next(),
-        Some(UserContent::ToolResult(result))
-            if result.id == "tool_call_2"
-                && result.content.iter().any(|item| matches!(
-                    item,
-                    rig_core::message::ToolResultContent::Text(text)
-                        if text.text == super::TOOL_NOT_EXECUTED_DUE_TO_INVALID_PEER
-                ))
-    ));
-    assert!(
-        items.next().is_none(),
-        "the non-tool-call content part must not produce a result"
-    );
-}
-
-#[tokio::test]
-async fn typed_prompt_empty_final_output_reports_empty_response() {
-    let model = MockCompletionModel::new([MockTurn::text("")]);
-    let agent = AgentBuilder::new(model).build();
-
-    let err = agent
-        .prompt_typed::<TypedAnswer>("return nothing")
-        .max_turns(1)
-        .await
-        .expect_err("an empty final output cannot be deserialized");
-
-    assert!(
-        matches!(err, StructuredOutputError::EmptyResponse),
-        "expected EmptyResponse, got {err:?}"
-    );
-}
-
-#[tokio::test]
-async fn typed_prompt_extended_empty_final_output_reports_empty_response() {
-    let model = MockCompletionModel::new([MockTurn::text("")]);
-    let agent = AgentBuilder::new(model).build();
-
-    let err = agent
-        .prompt_typed::<TypedAnswer>("return nothing")
-        .extended_details()
-        .max_turns(1)
-        .await
-        .expect_err("an empty final output cannot be deserialized (extended)");
-
-    assert!(
-        matches!(err, StructuredOutputError::EmptyResponse),
-        "expected EmptyResponse, got {err:?}"
-    );
 }

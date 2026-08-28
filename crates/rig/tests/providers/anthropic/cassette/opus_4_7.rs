@@ -6,13 +6,12 @@ use rig::completion::{Chat, Message, Prompt};
 use rig::message::{DocumentSourceKind, ImageMediaType};
 use rig::prelude::*;
 use rig::streaming::{StreamingChat, StreamingPrompt};
-use rig_agent::test_utils::validate_extraction_fields;
 
 use crate::reasoning::{self, ReasoningRoundtripAgent, WeatherTool};
 use crate::support::{
-    Adder, BASIC_PREAMBLE, BASIC_PROMPT, EXTRACTOR_TEXT, IMAGE_FIXTURE_PATH, STREAMING_PREAMBLE,
-    STREAMING_PROMPT, STREAMING_TOOLS_PREAMBLE, STREAMING_TOOLS_PROMPT, STRUCTURED_OUTPUT_PROMPT,
-    SmokePerson, SmokeStructuredOutput, Subtract, TOOLS_PREAMBLE, TOOLS_PROMPT,
+    Adder, BASIC_PREAMBLE, BASIC_PROMPT, IMAGE_FIXTURE_PATH, STREAMING_PREAMBLE, STREAMING_PROMPT,
+    STREAMING_TOOLS_PREAMBLE, STREAMING_TOOLS_PROMPT, STRUCTURED_OUTPUT_PROMPT,
+    SmokeStructuredOutput, Subtract, TOOLS_PREAMBLE, TOOLS_PROMPT,
     assert_contains_any_case_insensitive, assert_mentions_expected_number,
     assert_nonempty_response, assert_smoke_structured_output, collect_stream_final_response,
 };
@@ -136,50 +135,6 @@ async fn messages_structured_output_smoke() {
                 serde_json::from_str(&response).expect("structured output should deserialize");
 
             assert_smoke_structured_output(&structured);
-        },
-    )
-    .await;
-}
-
-#[tokio::test]
-async fn messages_extractor_smoke() {
-    super::super::support::with_anthropic_cassette(
-        "opus_4_7/messages_extractor_smoke",
-        |client| async move {
-            let extractor = client
-                .extractor::<SmokePerson>("claude-opus-4-7")
-                .max_tokens(128_000)
-                .build();
-
-            let response = extractor
-                .extract_with_usage(EXTRACTOR_TEXT)
-                .await
-                .expect("extractor request should succeed");
-
-            validate_extraction_fields(
-                "anthropic_opus_4_7_extractor_smoke",
-                response.data.first_name.as_deref(),
-                response.data.last_name.as_deref(),
-                response.data.job.as_deref(),
-                response.usage,
-            )
-            .expect("portable extraction contract should hold");
-
-            assert_nonempty_response(
-                response
-                    .data
-                    .first_name
-                    .as_deref()
-                    .expect("first name should be present"),
-            );
-            assert_nonempty_response(
-                response
-                    .data
-                    .last_name
-                    .as_deref()
-                    .expect("last name should be present"),
-            );
-            assert!(response.usage.total_tokens > 0, "usage should be populated");
         },
     )
     .await;

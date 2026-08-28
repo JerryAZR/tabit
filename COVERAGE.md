@@ -31,7 +31,11 @@ Defensive ("unreachable") arms follow a stricter rule:
 - The whole suite runs offline (cassette replay + test doubles). Doctests
   are NOT included in these numbers (`llvm-cov` was run without
   `--doctests`); they are gated by the same CI run.
-- Current state: **93.45% lines / 94.21% regions** (4,184 of 63,846
+- Current state: **93.37% lines / 94.11% regions** (4,083 of 61,546
+  lines; re-measured after structured-output enforcement left the
+  engine (the deletion section below); the drop is bookkeeping --
+  deleted code carried more covered lines than it dragged in.
+  Before that: **93.45% lines / 94.21% regions** (4,184 of 63,846
   lines; re-measured after the durable-layer sweep -- atomic
   roundtrips through the one commit door, the one-pass parser, and
   the two-phase turn acceptance; see the dedicated section below.
@@ -725,14 +729,14 @@ with the new modules at `parser.rs` 95.6%, `tree.rs` 94.1%,
   file's end.
 - **Parser suite (new file)**: the produced state (tree, head,
   context with merged batches, register, cumulative stats over all
-  branches and discards), the feedback close, and every rejection --
+  branches and discards), and every rejection --
   torn tail (with its line number), trailing open batch, orphan
   result, mid-batch user message, side record inside a batch, broken
   parent link, mid-batch checkout target, unknown checkout target,
   future version, empty file.
 - **Recorder suite rewritten around the door**: staging and the
-  atomic close (file == memory == reloaded parse), the feedback
-  close, the pairing validation's sanctioned crash, the
+  atomic close (file == memory == reloaded parse), the pairing
+  validation's sanctioned crash, the
   single-occupancy slot mismatches (staging, results, close, discard
   -- all caught and named), the discard record (billed, nothing
   landed), the abort drop (no trace, unbilled -- not a ruled
@@ -756,3 +760,23 @@ with the new modules at `parser.rs` 95.6%, `tree.rs` 94.1%,
   passes -- defense in depth, exercised through the checkout arm);
   `recorder.rs` keeps the dead-channel no-ops and the fault arms
   behind a dead disk inside the door's write-behind core.
+
+## Structured-output enforcement deleted from the engine (2026-08)
+
+The owner ruling after the sweep (ENGINE.md delta 14): output modes,
+the synthetic `final_result` tool, both re-prompt policies, the
+typed-prompt/extractor surface (`TypedPrompt`, `TypedPromptRequest`,
+`TypedPromptResponse`, `StructuredOutputError`, `extractor.rs`,
+`run_with_error_usage`, the provider composition capability and its
+three provider overrides), and `finalize_streamed_choice` are deleted
+-- the problem they served is gone on the providers tabit keeps, and
+no tabit run ever set a schema. `output_schema` remains as pure
+pass-through to the provider's native structured output
+(`AgentBuilder::output_schema` -> request builder); the
+`RoundtripClosed` item and the session door lose their feedback arm,
+and a user message inside an open tool batch is corruption at the
+parser, the door, and the closed-path check alike. Test fallout: the
+output-tool collision suite, the typed/extractor suites (unit,
+conformance, runtime-swap, facade cassettes), and the
+structured-output cassettes trimmed to the native pass-through
+smoke.

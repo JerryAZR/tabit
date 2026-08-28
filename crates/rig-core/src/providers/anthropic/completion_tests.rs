@@ -4616,10 +4616,8 @@ fn cache_control_helpers_ignore_non_cacheable_variants() {
 }
 
 #[test]
-fn completion_model_capabilities_and_construct() {
-    use crate::client::CompletionClient;
+fn completion_model_construct() {
     use crate::client::ConstructCompletionModel as _;
-    use crate::completion::CompletionModel as _;
     use crate::providers::anthropic::Client;
     use crate::test_utils::RecordingHttpClient;
 
@@ -4628,11 +4626,6 @@ fn completion_model_capabilities_and_construct() {
         .http_client(RecordingHttpClient::new("{}"))
         .build()
         .expect("build client");
-    let model = client.completion_model("claude-a");
-
-    // Anthropic's structured outputs compose with strict tool use.
-    let capabilities = model.capabilities();
-    assert!(capabilities.composes_native_output_with_tools);
 
     let constructed = CompletionModel::construct(&client, "claude-b".to_string());
     assert_eq!(constructed.model, "claude-b");

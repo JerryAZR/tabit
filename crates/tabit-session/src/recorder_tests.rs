@@ -120,7 +120,7 @@ fn roundtrip(recorder: &SessionRecorder, turn_id: &str, calls: &[&str]) {
     for call in calls {
         recorder.stage_result(turn_id, result(call));
     }
-    recorder.close_roundtrip(turn_id, None);
+    recorder.close_roundtrip(turn_id);
 }
 
 #[test]
@@ -221,28 +221,9 @@ fn a_final_roundtrip_commits_the_assistant_alone() {
     let recorder = SessionRecorder::new(writer);
     recorder.commit_steer("u1", user_message("go"));
     recorder.stage_assistant("t1", assistant_call("t1", &[]), usage(5));
-    recorder.close_roundtrip("t1", None);
+    recorder.close_roundtrip("t1");
     assert_eq!(recorder.context().len(), 2, "user + assistant");
     assert_eq!(recorder.stats().total_usage().total_tokens, 5);
-    fs::remove_dir_all(store.dir()).ok();
-}
-
-#[test]
-fn a_feedback_close_commits_the_engine_message_as_the_batch() {
-    let store = temp_store("feedback");
-    let writer = store.create("C:/w");
-    let recorder = SessionRecorder::new(writer);
-    recorder.commit_steer("u1", user_message("go"));
-    recorder.stage_assistant("t1", assistant_call("t1", &["c1"]), usage(7));
-    let feedback = Message::User {
-        content: OneOrMany::one(UserContent::ToolResult(result("c1"))),
-    };
-    recorder.close_roundtrip("t1", Some(feedback));
-
-    assert_eq!(recorder.context().len(), 3, "user + assistant + feedback");
-    let branch = recorder.active_branch();
-    assert_eq!(branch.len(), 3);
-    assert!(matches!(branch[2].kind, EntryKind::UserMessage { .. }));
     fs::remove_dir_all(store.dir()).ok();
 }
 
@@ -280,7 +261,7 @@ fn roundtrip_slot_mismatches_panics() {
     // Closing a turn that never staged (the staged one mismatches, and
     // the failed close consumes it — nothing lingers).
     let outcome = std::panic::catch_unwind(|| {
-        recorder.close_roundtrip("ghost", None);
+        recorder.close_roundtrip("ghost");
     });
     let fault = panic_message(&outcome.expect_err("a mismatched close panics"));
     assert!(fault.contains("closed while `t1` was staged"), "{fault}");
@@ -291,7 +272,7 @@ fn roundtrip_slot_mismatches_panics() {
 
     // With the slot empty, closing anything is the no-staged-turn crash.
     let outcome = std::panic::catch_unwind(|| {
-        recorder.close_roundtrip("ghost", None);
+        recorder.close_roundtrip("ghost");
     });
     let fault = panic_message(&outcome.expect_err("an empty-slot close panics"));
     assert!(fault.contains("without a staged turn"), "{fault}");
@@ -307,7 +288,7 @@ fn an_unpaired_roundtrip_panics_at_the_door() {
     recorder.stage_assistant("t1", assistant_call("t1", &["c1", "c2"]), usage(1));
     recorder.stage_result("t1", result("c1"));
     let outcome = std::panic::catch_unwind(|| {
-        recorder.close_roundtrip("t1", None);
+        recorder.close_roundtrip("t1");
     });
     let fault = outcome.expect_err("c2 unanswered");
     let fault = panic_message(&fault);

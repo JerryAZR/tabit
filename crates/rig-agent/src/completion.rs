@@ -1,6 +1,5 @@
 //! High-level prompting traits and runtime errors for the classic agent runtime.
 
-use serde::de::DeserializeOwned;
 use thiserror::Error;
 
 use rig_core::{
@@ -85,47 +84,6 @@ impl PromptError {
     }
 }
 
-/// Errors returned by typed structured prompting.
-#[derive(Debug, Error)]
-#[non_exhaustive]
-pub enum StructuredOutputError {
-    /// The underlying classic run failed.
-    #[error("PromptError: {0}")]
-    PromptError(#[from] Box<PromptError>),
-    /// The accepted response could not be deserialized.
-    #[error("DeserializationError: {0}")]
-    DeserializationError(#[from] serde_json::Error),
-    /// The model returned no accepted content.
-    #[error("EmptyResponse: model returned no content")]
-    EmptyResponse,
-}
-
-impl StructuredOutputError {
-    /// Returns the provider response body exposed through the wrapped prompt error.
-    pub fn provider_response_body(&self) -> Option<&str> {
-        match self {
-            Self::PromptError(error) => error.provider_response_body(),
-            _ => None,
-        }
-    }
-
-    /// Parses the wrapped provider response body as JSON when present.
-    pub fn provider_response_json(&self) -> Result<Option<serde_json::Value>, serde_json::Error> {
-        match self {
-            Self::PromptError(error) => error.provider_response_json(),
-            _ => Ok(None),
-        }
-    }
-
-    /// Returns the provider HTTP status exposed through the wrapped prompt error.
-    pub fn provider_response_status(&self) -> Option<http::StatusCode> {
-        match self {
-            Self::PromptError(error) => error.provider_response_status(),
-            _ => None,
-        }
-    }
-}
-
 /// High-level one-shot prompting for the classic runtime.
 pub trait Prompt: WasmCompatSend + WasmCompatSync {
     /// Send a prompt and return accepted assistant text after runtime orchestration.
@@ -143,19 +101,6 @@ pub trait Chat: WasmCompatSend + WasmCompatSync {
         prompt: impl Into<Message> + WasmCompatSend,
         chat_history: &mut Vec<Message>,
     ) -> impl std::future::Future<Output = Result<String, PromptError>> + WasmCompatSend;
-}
-
-/// High-level typed structured prompting for the classic runtime.
-pub trait TypedPrompt: WasmCompatSend + WasmCompatSync {
-    /// Request type returned for one target output type.
-    type TypedRequest<T>: std::future::IntoFuture<Output = Result<T, StructuredOutputError>>
-    where
-        T: schemars::JsonSchema + DeserializeOwned + WasmCompatSend + 'static;
-
-    /// Send a prompt and deserialize the accepted structured response as `T`.
-    fn prompt_typed<T>(&self, prompt: impl Into<Message> + WasmCompatSend) -> Self::TypedRequest<T>
-    where
-        T: schemars::JsonSchema + DeserializeOwned + WasmCompatSend;
 }
 
 #[cfg(test)]
@@ -242,50 +187,6 @@ mod provider_response_tests {
         assert_eq!(error.provider_response_status(), None);
         assert_eq!(
             error
-                .provider_response_json()
-                .expect("no body is not an error"),
-            None
-        );
-    }
-
-    #[test]
-    fn structured_output_error_provider_response_helpers_forward_prompt_error() {
-        let body = r#"{"error":{"message":"bad input"}}"#;
-        let error = StructuredOutputError::PromptError(Box::new(PromptError::CompletionError(
-            CompletionError::ProviderResponse(ProviderResponseError {
-                status: Some(http::StatusCode::BAD_REQUEST),
-                body: body.to_string(),
-            }),
-        )));
-
-        assert_eq!(error.provider_response_body(), Some(body));
-        assert_eq!(
-            error.provider_response_status(),
-            Some(http::StatusCode::BAD_REQUEST)
-        );
-    }
-
-    /// Only the `PromptError` variant carries a provider response; the
-    /// deserialization and empty-response variants expose nothing.
-    #[test]
-    fn structured_output_error_provider_response_helpers_return_none_outside_prompt_errors() {
-        let deserialization = StructuredOutputError::DeserializationError(
-            serde_json::from_str::<u32>("not json").expect_err("invalid json must fail"),
-        );
-        assert_eq!(deserialization.provider_response_body(), None);
-        assert_eq!(deserialization.provider_response_status(), None);
-        assert_eq!(
-            deserialization
-                .provider_response_json()
-                .expect("no body is not an error"),
-            None
-        );
-
-        let empty = StructuredOutputError::EmptyResponse;
-        assert_eq!(empty.provider_response_body(), None);
-        assert_eq!(empty.provider_response_status(), None);
-        assert_eq!(
-            empty
                 .provider_response_json()
                 .expect("no body is not an error"),
             None

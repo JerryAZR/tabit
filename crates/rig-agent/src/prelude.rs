@@ -10,10 +10,7 @@ pub use crate::agent::{
     MultiTurnStreamItem, StreamingResult,
 };
 pub use crate::client::{AgentClientExt, AgentModelExt};
-pub use crate::completion::{
-    Chat, CompletionError, CompletionModel, Message, Prompt, PromptError, StructuredOutputError,
-    TypedPrompt,
-};
+pub use crate::completion::{Chat, CompletionError, CompletionModel, Message, Prompt, PromptError};
 pub use crate::streaming::{StreamingChat, StreamingPrompt};
 pub use crate::tool::{Tool, ToolSet};
 pub use rig_core::client::completion::CompletionClient;

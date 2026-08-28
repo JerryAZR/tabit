@@ -4,7 +4,7 @@ use super::*;
 use crate::entry::{EntryKind, SessionEntry, SideKind, SideRecord};
 use rig_core::OneOrMany;
 use rig_core::completion::{Message, Usage};
-use rig_core::message::{ToolCall, ToolFunction, ToolResult, ToolResultContent, UserContent};
+use rig_core::message::{ToolCall, ToolFunction, ToolResult, ToolResultContent};
 
 fn user_node(id: &str, parent: Option<&str>, text: &str) -> FileRecord {
     FileRecord::Node(SessionEntry::with_id(
@@ -56,30 +56,6 @@ fn result_node(id: &str, parent: Option<&str>, call_id: &str) -> FileRecord {
                 call_id: None,
                 content: OneOrMany::one(ToolResultContent::text("ok")),
                 status: None,
-            },
-        },
-    ))
-}
-
-fn feedback_node(id: &str, parent: Option<&str>, calls: &[&str]) -> FileRecord {
-    let content: Vec<UserContent> = calls
-        .iter()
-        .map(|call| {
-            UserContent::ToolResult(ToolResult {
-                id: call.to_string(),
-                call_id: None,
-                content: OneOrMany::one(ToolResultContent::text("retry me")),
-                status: None,
-            })
-        })
-        .collect();
-    FileRecord::Node(SessionEntry::with_id(
-        id.to_string(),
-        parent.map(str::to_string),
-        "t".to_string(),
-        EntryKind::UserMessage {
-            message: Message::User {
-                content: OneOrMany::many(content).expect("non-empty"),
             },
         },
     ))
@@ -183,18 +159,6 @@ fn usage_counts_all_branches_and_discarded_attempts() {
     assert_eq!(parsed.stats.total_usage().total_tokens, 14);
     assert_eq!(parsed.stats.per_model().len(), 1);
     assert_eq!(parsed.stats.per_model()[0].usage.total_tokens, 14);
-}
-
-#[test]
-fn a_feedback_user_node_closes_the_batch() {
-    let parsed = parse_ok(&[
-        user_node("u1", None, "go"),
-        assistant_node("a1", Some("u1"), &[("c1", "output")]),
-        feedback_node("f1", Some("a1"), &["c1"]),
-    ]);
-    assert_eq!(parsed.context.messages().len(), 3);
-    // The head sits on the feedback node and the branch is closed.
-    assert_eq!(parsed.tree.head(), Some("f1"));
 }
 
 #[test]

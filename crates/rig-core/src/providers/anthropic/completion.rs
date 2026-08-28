@@ -2585,13 +2585,6 @@ where
     T: HttpClientExt + Clone + Default + WasmCompatSend + WasmCompatSync + 'static,
     Ext: AnthropicCompatibleProvider + Clone + WasmCompatSend + WasmCompatSync + 'static,
 {
-    // Anthropic's native structured outputs (constrained decoding) are designed
-    // to compose with strict tool use, so the schema constraint does not suppress
-    // tool calls. See issue #1928.
-    fn capabilities(&self) -> completion::ProviderCapabilities {
-        completion::ProviderCapabilities::default().with_native_output_tool_composition(true)
-    }
-
     async fn completion(
         &self,
         completion_request: completion::CompletionRequest,

@@ -20,8 +20,8 @@ use serde::{Deserialize, Serialize};
 use crate::{
     agent::{
         AgentBuilder, AgentHook, CompletionCallAction, CompletionCallEvent, HookContext,
-        MultiTurnStreamItem, NoToolConfig, OutputMode, RequestPatch, StreamingError,
-        ToolCall as ToolCallEvent, ToolCallAction, ToolResultAction, ToolResultEvent,
+        MultiTurnStreamItem, NoToolConfig, RequestPatch, StreamingError, ToolCall as ToolCallEvent,
+        ToolCallAction, ToolResultAction, ToolResultEvent,
         run::{AgentRun, AgentRunStep, ModelTurn},
     },
     completion::{
@@ -50,9 +50,6 @@ pub enum ScenarioError {
     /// Structured content could not be decoded.
     #[error(transparent)]
     Json(#[from] serde_json::Error),
-    /// Rig's structured extractor failed.
-    #[error(transparent)]
-    Extraction(#[from] crate::extractor::ExtractionError),
     /// The model or agent violated the portable behavioral contract.
     #[error("{scenario} conformance failed: {details}")]
     Contract {
@@ -699,16 +696,6 @@ struct ComplexArgs {
     quote: String,
 }
 
-#[derive(Debug, Deserialize, Serialize, JsonSchema)]
-struct ExtractedPerson {
-    #[schemars(required)]
-    first_name: Option<String>,
-    #[schemars(required)]
-    last_name: Option<String>,
-    #[schemars(required)]
-    job: Option<String>,
-}
-
 #[derive(Clone)]
 struct CaptureComplexTool {
     calls: Arc<AtomicUsize>,
@@ -804,12 +791,6 @@ impl Tool for RepeatTool {
 struct BinOpArgs {
     a: i64,
     b: i64,
-}
-
-#[derive(Debug, Deserialize, JsonSchema)]
-struct ArithmeticResult {
-    answer: i64,
-    explanation: Option<String>,
 }
 
 #[derive(Clone)]
@@ -1254,44 +1235,6 @@ where
     })
 }
 
-/// Runs Rig's structured extractor and validates both the extracted semantic
-/// fields and accumulated usage.
-pub async fn structured_extraction<M>(model: M) -> Result<ScenarioReport, ScenarioError>
-where
-    M: CompletionModel + 'static,
-{
-    const SCENARIO: &str = "structured_extraction";
-    const INPUT: &str = "Hello, my name is Ada Lovelace and I work as a mathematician.";
-    let started = Instant::now();
-    let response = crate::extractor::ExtractorBuilder::<ExtractedPerson>::new(model)
-        .max_tokens(384)
-        .retries(0)
-        .build()
-        .extract_with_usage(INPUT)
-        .await?;
-    validate_extraction_fields(
-        SCENARIO,
-        response.data.first_name.as_deref(),
-        response.data.last_name.as_deref(),
-        response.data.job.as_deref(),
-        response.usage,
-    )?;
-    Ok(ScenarioReport {
-        name: SCENARIO,
-        tool_calls: 1,
-        prompt_tokens: response.usage.input_tokens,
-        generated_tokens: response.usage.output_tokens,
-        history_messages: 0,
-        duration: started.elapsed(),
-        response: format!(
-            "{} {} — {}",
-            response.data.first_name.as_deref().unwrap_or_default(),
-            response.data.last_name.as_deref().unwrap_or_default(),
-            response.data.job.as_deref().unwrap_or_default()
-        ),
-    })
-}
-
 /// Uses the conformance tool set to exercise in-band admission: a tool
 /// name the model was not offered returns a synthetic result naming the
 /// problem — the run continues, nothing is executed, nothing fails.
@@ -1711,43 +1654,6 @@ where
     })
 }
 
-/// Runs a normal tool followed by Rig's synthetic structured-output tool.
-pub async fn structured_after_tool<M, F>(
-    model: M,
-    configure: F,
-) -> Result<ScenarioReport, ScenarioError>
-where
-    M: CompletionModel + 'static,
-    F: FnOnce(AgentBuilder<NoToolConfig>) -> AgentBuilder<NoToolConfig>,
-{
-    let calls = Arc::new(AtomicUsize::new(0));
-    let started = Instant::now();
-    let agent = configure(AgentBuilder::new(model))
-        .preamble(
-            "Use add for arithmetic, then finish by calling the structured output tool exactly once.",
-        )
-        .output_schema::<ArithmeticResult>()
-        .output_mode(OutputMode::Tool)
-        .tool(AddTool(calls.clone()))
-        .default_max_turns(5)
-        .build();
-    let result = agent
-        .prompt("Use add to calculate 19 + 23. Return answer=42 and a short optional explanation.")
-        .extended_details()
-        .await?;
-    let response = result.output.clone();
-    let parsed: ArithmeticResult = serde_json::from_str(&response)?;
-    let tool_calls = calls.load(Ordering::SeqCst);
-    if tool_calls == 0 || parsed.answer != 42 || !has_tool_roundtrip(result.messages.as_deref()) {
-        return Err(ScenarioError::contract(
-            "structured_after_tool",
-            format!("calls={tool_calls}, response={response:?}"),
-        ));
-    }
-    let _ = parsed.explanation;
-    report_from_response("structured_after_tool", started, tool_calls + 1, result)
-}
-
 /// Runs all portable tool-choice modes directly against a completion model.
 pub async fn tool_choice_modes<M>(model: M) -> Result<ScenarioReport, ScenarioError>
 where
@@ -1854,69 +1760,6 @@ where
         duration: started.elapsed(),
         response: "none, required, and specific modes passed".to_string(),
     })
-}
-
-/// Runs a streamed real-tool turn followed by Rig's synthetic output tool.
-pub async fn streaming_structured_after_tool<M, F>(
-    model: M,
-    configure: F,
-) -> Result<ScenarioReport, ScenarioError>
-where
-    M: CompletionModel + 'static,
-    F: FnOnce(AgentBuilder<NoToolConfig>) -> AgentBuilder<NoToolConfig>,
-{
-    let calls = Arc::new(AtomicUsize::new(0));
-    let started = Instant::now();
-    let agent = configure(AgentBuilder::new(model))
-        .preamble(
-            "Use add for arithmetic, then finish by calling the structured output tool exactly once.",
-        )
-        .output_schema::<ArithmeticResult>()
-        .output_mode(OutputMode::Tool)
-        .tool(AddTool(calls.clone()))
-        .default_max_turns(5)
-        .build();
-    let mut stream = agent
-        .stream_prompt(
-            "Use add to calculate 19 + 23. Return answer=42 and a short optional explanation.",
-        )
-        .max_turns(5)
-        .await;
-    let mut final_response = None;
-    let mut final_count = 0_usize;
-    while let Some(item) = stream.next().await {
-        if let MultiTurnStreamItem::FinalResponse(response) = item? {
-            final_count += 1;
-            final_response = Some(response);
-        }
-    }
-    let result = final_response.ok_or_else(|| {
-        ScenarioError::contract(
-            "streaming_structured_after_tool",
-            "stream produced no final response",
-        )
-    })?;
-    let parsed: ArithmeticResult = serde_json::from_str(&result.output)?;
-    let calls = calls.load(Ordering::SeqCst);
-    if calls == 0
-        || final_count != 1
-        || parsed.answer != 42
-        || !has_tool_roundtrip(result.messages.as_deref())
-    {
-        return Err(ScenarioError::contract(
-            "streaming_structured_after_tool",
-            format!(
-                "calls={calls}, final_count={final_count}, response={:?}",
-                result.output
-            ),
-        ));
-    }
-    report_from_response(
-        "streaming_structured_after_tool",
-        started,
-        calls + 1,
-        result,
-    )
 }
 
 #[cfg(test)]
@@ -2026,24 +1869,6 @@ mod tests {
         )
         .await?;
         fixture_contract(report.tool_calls == 1, "complex-argument call count")?;
-        Ok(())
-    }
-
-    #[tokio::test]
-    async fn extraction_contract_requires_fields_and_usage() -> Result<(), ScenarioError> {
-        let report = structured_extraction(MockCompletionModel::new([MockTurn::tool_call(
-            "submit_call",
-            "submit",
-            serde_json::json!({
-                "first_name": "Ada",
-                "last_name": "Lovelace",
-                "job": "mathematician"
-            }),
-        )
-        .with_usage(usage(20, 5))]))
-        .await?;
-        fixture_contract(report.prompt_tokens == 20, "extraction input usage")?;
-        fixture_contract(report.generated_tokens == 5, "extraction output usage")?;
         Ok(())
     }
 
@@ -2605,24 +2430,6 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn structured_after_tool_contract_decodes_final_result() -> Result<(), ScenarioError> {
-        let report = structured_after_tool(
-            MockCompletionModel::new([
-                MockTurn::tool_call("add_call", "add", serde_json::json!({"a": 19, "b": 23})),
-                MockTurn::tool_call(
-                    "result_call",
-                    "final_result",
-                    serde_json::json!({"answer": 42, "explanation": "19 plus 23"}),
-                ),
-            ]),
-            |builder| builder,
-        )
-        .await?;
-        fixture_contract(report.tool_calls == 2, "structured-after-tool call count")?;
-        Ok(())
-    }
-
-    #[tokio::test]
     async fn tool_choice_mode_contract_accepts_scripted_choices() -> Result<(), ScenarioError> {
         let report = tool_choice_modes(MockCompletionModel::new([
             MockTurn::text("4"),
@@ -2631,31 +2438,6 @@ mod tests {
         ]))
         .await?;
         fixture_contract(report.tool_calls == 2, "tool-choice call count")?;
-        Ok(())
-    }
-
-    #[tokio::test]
-    async fn streaming_structured_contract_decodes_final_result() -> Result<(), ScenarioError> {
-        let model = MockCompletionModel::from_stream_turns([
-            vec![
-                MockStreamEvent::tool_call(
-                    "add_call",
-                    "add",
-                    serde_json::json!({"a": 19, "b": 23}),
-                ),
-                MockStreamEvent::FinalResponse(mock_final(usage(10, 2))),
-            ],
-            vec![
-                MockStreamEvent::tool_call(
-                    "result_call",
-                    "final_result",
-                    serde_json::json!({"answer": 42}),
-                ),
-                MockStreamEvent::FinalResponse(mock_final(usage(12, 3))),
-            ],
-        ]);
-        let report = streaming_structured_after_tool(model, |builder| builder).await?;
-        fixture_contract(report.tool_calls == 2, "streaming structured call count")?;
         Ok(())
     }
 
@@ -2893,26 +2675,6 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn structured_after_tool_contract_rejects_wrong_answers() {
-        let wrong_answer = MockTurn::tool_call(
-            "result_call",
-            "final_result",
-            serde_json::json!({"answer": 41}),
-        );
-        assert!(matches!(
-            structured_after_tool(
-                MockCompletionModel::new([
-                    MockTurn::tool_call("add_call", "add", serde_json::json!({"a": 19, "b": 23})),
-                    wrong_answer,
-                ]),
-                |builder| builder,
-            )
-            .await,
-            Err(ScenarioError::Contract { .. })
-        ));
-    }
-
-    #[tokio::test]
     async fn tool_choice_mode_contract_rejects_violating_choices() {
         // `none` mode must not emit a tool call.
         let none_emits_call = MockCompletionModel::new([MockTurn::tool_call(
@@ -2941,32 +2703,6 @@ mod tests {
         ]);
         assert!(matches!(
             tool_choice_modes(specific_wrong_tool).await,
-            Err(ScenarioError::Contract { .. })
-        ));
-    }
-
-    #[tokio::test]
-    async fn streaming_structured_contract_rejects_wrong_answers() {
-        let model = MockCompletionModel::from_stream_turns([
-            vec![
-                MockStreamEvent::tool_call(
-                    "add_call",
-                    "add",
-                    serde_json::json!({"a": 19, "b": 23}),
-                ),
-                MockStreamEvent::FinalResponse(mock_final(usage(10, 2))),
-            ],
-            vec![
-                MockStreamEvent::tool_call(
-                    "result_call",
-                    "final_result",
-                    serde_json::json!({"answer": 41}),
-                ),
-                MockStreamEvent::FinalResponse(mock_final(usage(12, 3))),
-            ],
-        ]);
-        assert!(matches!(
-            streaming_structured_after_tool(model, |builder| builder).await,
             Err(ScenarioError::Contract { .. })
         ));
     }
@@ -3014,24 +2750,6 @@ mod tests {
                 |builder| builder,
                 None,
             )
-            .await,
-            Err(ScenarioError::Contract { .. })
-        ));
-    }
-
-    #[tokio::test]
-    async fn extraction_contract_rejects_wrong_extracted_fields() {
-        assert!(matches!(
-            structured_extraction(MockCompletionModel::new([MockTurn::tool_call(
-                "submit_call",
-                "submit",
-                serde_json::json!({
-                    "first_name": "Grace",
-                    "last_name": "Lovelace",
-                    "job": "mathematician"
-                }),
-            )
-            .with_usage(usage(20, 5))]))
             .await,
             Err(ScenarioError::Contract { .. })
         ));

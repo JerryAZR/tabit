@@ -275,13 +275,10 @@ impl SessionRecorder {
 
     /// Close the roundtrip: the staged assistant plus its complete
     /// batch commit **as one unit** — all-or-none in the file (one
-    /// blob) and in memory (one grow step). `feedback` is the
-    /// engine-authored closing message (an output-mode re-prompt) when
-    /// the roundtrip closed with one instead of executed results; the
-    /// model saw it, so it lands as the batch's user node. Write-behind:
-    /// a refusing disk degrades, it never blocks the conversation.
+    /// blob) and in memory (one grow step). Write-behind: a refusing
+    /// disk degrades, it never blocks the conversation.
     #[allow(clippy::panic)] // sanctioned crash: an engine wiring bug, failed loud (AGENTS.md doctrine)
-    pub fn close_roundtrip(&self, turn_id: &str, feedback: Option<Message>) {
+    pub fn close_roundtrip(&self, turn_id: &str) {
         let mut resident = crate::lock::lock(&self.resident);
         let Some(pending) = resident.pending_roundtrip.take() else {
             panic!("recorder: roundtrip `{turn_id}` closed without a staged turn");
@@ -293,20 +290,14 @@ impl SessionRecorder {
             );
         }
         // Validation before any state-modifying action: the assistant's
-        // calls are answered exactly once by the staged results (or the
-        // feedback message's results). An unpaired batch is an engine
-        // contract violation — internal, fail loud.
-        let closing: Vec<ToolResult> = match &feedback {
-            Some(message) => projection::results_of(message)
-                .into_iter()
-                .cloned()
-                .collect(),
-            None => pending
-                .results
-                .iter()
-                .map(|(_, result)| result.clone())
-                .collect(),
-        };
+        // calls are answered exactly once by the staged results. An
+        // unpaired batch is an engine contract violation — internal,
+        // fail loud.
+        let closing: Vec<ToolResult> = pending
+            .results
+            .iter()
+            .map(|(_, result)| result.clone())
+            .collect();
         validate_paired(&pending.message, &closing);
 
         let mut records = Vec::new();
@@ -322,35 +313,17 @@ impl SessionRecorder {
         );
         records.push(FileRecord::Node(assistant.clone()));
         nodes.push((assistant, None));
-        match feedback {
-            Some(message) => {
-                let mut entry = SessionEntry::new(
-                    resident.tree.head().map(str::to_string),
-                    ids::now_rfc3339(),
-                    EntryKind::UserMessage { message },
-                );
-                // The feedback entry parents to the assistant — chain
-                // from the node just built, not the pre-batch head.
-                if let Some((last, _)) = nodes.last() {
-                    entry.parent_id = Some(last.id.clone());
-                }
-                records.push(FileRecord::Node(entry.clone()));
-                nodes.push((entry, None));
-            }
-            None => {
-                for (entry_id, result) in &pending.results {
-                    let entry = SessionEntry::with_id(
-                        entry_id.clone(),
-                        nodes.last().map(|(last, _)| last.id.clone()),
-                        ids::now_rfc3339(),
-                        EntryKind::ToolResult {
-                            result: result.clone(),
-                        },
-                    );
-                    records.push(FileRecord::Node(entry.clone()));
-                    nodes.push((entry, Some(result.clone())));
-                }
-            }
+        for (entry_id, result) in &pending.results {
+            let entry = SessionEntry::with_id(
+                entry_id.clone(),
+                nodes.last().map(|(last, _)| last.id.clone()),
+                ids::now_rfc3339(),
+                EntryKind::ToolResult {
+                    result: result.clone(),
+                },
+            );
+            records.push(FileRecord::Node(entry.clone()));
+            nodes.push((entry, Some(result.clone())));
         }
         // The grow step folds the batch's results as ONE user message —
         // the same shape the engine folds at settlement — between the
@@ -363,14 +336,8 @@ impl SessionRecorder {
                     Some(result) => batch_results.push(result.clone()),
                     None => {
                         flush_batch(resident, &mut batch_results);
-                        match &entry.kind {
-                            EntryKind::AssistantMessage { message, .. } => {
-                                resident.context.fold(message.clone())
-                            }
-                            EntryKind::UserMessage { message } => {
-                                resident.context.fold(message.clone())
-                            }
-                            EntryKind::ToolResult { .. } => {}
+                        if let EntryKind::AssistantMessage { message, .. } = &entry.kind {
+                            resident.context.fold(message.clone());
                         }
                     }
                 }

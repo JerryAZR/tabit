@@ -57,16 +57,3 @@ where
     let result = AssertUnwindSafe(test_body(client)).catch_unwind().await;
     cassette.finish_after_test_result(result).await
 }
-
-pub(super) async fn with_openai_completions_cassette_result<F, Fut, E>(
-    spec: impl Into<CassetteSpec>,
-    test_body: F,
-) -> Result<(), E>
-where
-    F: FnOnce(openai::CompletionsClient) -> Fut,
-    Fut: Future<Output = Result<(), E>>,
-{
-    let (cassette, client) = openai_completions_cassette(spec).await;
-    let result = AssertUnwindSafe(test_body(client)).catch_unwind().await;
-    cassette.finish_after_test_result(result).await
-}

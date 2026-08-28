@@ -1,17 +1,12 @@
 mod support;
 
-mod regressions;
-
 mod cassette {
     mod agent;
     mod chat_history;
     mod completions_api;
     mod document_ordering;
-    mod extractor;
-    mod extractor_usage;
     mod gpt_5_6_reasoning;
     mod models;
-    mod multi_extract;
     mod openai_compatible_reasoning_content;
     mod permission_control;
     mod reasoning_roundtrip;
@@ -29,7 +24,6 @@ mod cassette {
     mod streaming_grammar_chat;
     mod streaming_tools;
     mod structured_output;
-    mod typed_prompt_tools;
     mod url_pdf_document;
     mod vllm;
 }

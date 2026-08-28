@@ -60,26 +60,6 @@ fn tool_result(id: &str) -> EntryKind {
     }
 }
 
-/// A feedback close: a user message made of the calls' results.
-fn feedback(calls: &[&str]) -> EntryKind {
-    let content: Vec<UserContent> = calls
-        .iter()
-        .map(|call| {
-            UserContent::ToolResult(ToolResult {
-                id: call.to_string(),
-                call_id: None,
-                content: OneOrMany::one(ToolResultContent::text("retry")),
-                status: None,
-            })
-        })
-        .collect();
-    EntryKind::UserMessage {
-        message: Message::User {
-            content: OneOrMany::many(content).expect("non-empty"),
-        },
-    }
-}
-
 #[test]
 fn fold_branch_merges_result_batches_into_one_user_message() {
     let entries = vec![
@@ -104,22 +84,6 @@ fn fold_branch_folds_user_and_assistant_messages_verbatim() {
     assert_eq!(messages.len(), 2);
     assert!(matches!(&messages[0], Message::User { .. }));
     assert!(matches!(&messages[1], Message::Assistant { .. }));
-}
-
-#[test]
-fn fold_branch_folds_a_feedback_user_node_verbatim() {
-    let entries = vec![
-        entry(user("q")),
-        entry(assistant_tool_calls(&["c1"])),
-        entry(feedback(&["c1"])),
-    ];
-    let context = fold_branch(&entries);
-    let messages = context.messages();
-    assert_eq!(messages.len(), 3);
-    let Message::User { content } = &messages[2] else {
-        panic!("the feedback node folds as its own user message");
-    };
-    assert_eq!(content.len(), 1, "its tool-result content kept verbatim");
 }
 
 #[test]
@@ -150,16 +114,6 @@ fn a_branch_ending_on_a_calls_assistant_is_open() {
     let entries = vec![entry(user("q")), entry(assistant_tool_calls(&["c1"]))];
     let fault = path_is_closed(&entries).expect_err("calls never answered");
     assert!(fault.contains("mid-roundtrip"), "{fault}");
-}
-
-#[test]
-fn a_feedback_close_closes_the_branch() {
-    let entries = vec![
-        entry(user("q")),
-        entry(assistant_tool_calls(&["c1", "c2"])),
-        entry(feedback(&["c1", "c2"])),
-    ];
-    assert!(path_is_closed(&entries).is_ok());
 }
 
 #[test]

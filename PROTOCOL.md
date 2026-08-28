@@ -998,8 +998,8 @@ barrier-class record). One documented limit: steer records ride the
 buffer like turn output — a force-stop can lose a consumed steer's
 *record* (its effect steered the live run; the input itself was never
 lost). The sweep's amendment: **the roundtrip is atomic** — an
-assistant turn commits with its complete tool batch (or the engine's
-authored feedback close) through the one commit door, all-or-none, so
+assistant turn commits with its complete tool batch through the one
+commit door, all-or-none, so
 a crash mid-write can only tear a line or leave a batch wholly absent,
 and a torn or dangling tail **fails the next open loud** (the
 torn-tail repair is deleted — a file written only at commit boundaries
