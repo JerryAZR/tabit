@@ -272,7 +272,7 @@ impl SessionWriter {
 }
 
 impl WriteBuffer for SessionWriter {
-    #[allow(clippy::panic)] // sanctioned crash: unconstructible failure (AGENTS.md doctrine)
+    #[allow(clippy::panic, clippy::panic_in_result_fn)] // sanctioned crash: unconstructible failure (AGENTS.md doctrine)
     fn enqueue(&mut self, records: &[FileRecord]) -> Result<(), LogError> {
         let mark = self.outbox.len();
         for record in records {

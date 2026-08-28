@@ -44,6 +44,13 @@ unwrap_used = "warn"
 # Error enums (CompletionError etc.) exceed clippy's 128-byte threshold; the
 # size is irrelevant on error paths and boxing variants would blur matches.
 result_large_err = "allow"
+# Two enums carry one fat variant each (FileRecord's SessionEntry,
+# PhaseEvent's MultiTurnStreamItem) and pay its size on every value;
+# boxing would trade one move of already-heap-pointing headers for an
+# allocation per committed record / per streamed delta — a
+# pessimization on both paths. The genuinely heavy rare variants are
+# already boxed (ModelTurn).
+large_enum_variant = "allow"
 
 [workspace.dependencies]
 anyhow = "1.0.102"

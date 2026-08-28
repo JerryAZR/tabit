@@ -160,6 +160,7 @@ impl ContextManager {
         self.fold_entry(message, None);
     }
 
+    #[allow(clippy::panic)] // sanctioned crash: an engine wiring bug, failed loud (AGENTS.md doctrine)
     fn fold_entry(&mut self, message: Message, id: Option<String>) {
         let kind = match message {
             Message::User { .. } => EntryKind::UserMessage { message },

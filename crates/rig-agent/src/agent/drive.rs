@@ -69,6 +69,11 @@ pub(crate) type DriveStream<'a> =
 pub(crate) type DriveStream<'a> =
     Pin<Box<dyn Stream<Item = Result<PhaseEvent, StreamingError>> + 'a>>;
 
+/// The settled tool batch: results paired with their born-early entry
+/// ids (call order), plus a post-batch stop verdict when a `ToolResult`
+/// hook requested one.
+pub(crate) type SettledBatch = (Vec<(String, UserContent)>, Option<String>);
+
 /// What a phase stream yields: intermediate items as they happen, then
 /// exactly one settled value as its final event.
 pub(crate) enum PhaseEvent {
@@ -312,6 +317,9 @@ where
             // set and max_turns >= 1 — at-least-one-turn by construction.
             if pending_error_terminal {
                 store_error_usage(&runner, &ledger);
+                // Sanctioned crash: the flag is only ever set alongside
+                // the error it classifies (AGENTS.md doctrine).
+                #[allow(clippy::expect_used)]
                 let err = pending_error
                     .take()
                     .expect("a terminal classification carries its error");
@@ -541,6 +549,10 @@ where
                     }));
                 }
 
+                // Sanctioned slice: the `min` guard makes the range
+                // total — the run's entry never exceeds the grown
+                // conversation (the loop only folds into it).
+                #[allow(clippy::indexing_slicing)]
                 let run_messages = conversation.messages()[entry_len.min(
                     conversation.messages().len(),
                 )..]
@@ -579,7 +591,7 @@ where
             };
             let mut tool_stream =
                 source.run_tool_calls(&runner, &hook_ctx, calls, tool_snapshot);
-            let mut settled: Option<(Vec<(String, UserContent)>, Option<String>)> = None;
+            let mut settled: Option<SettledBatch> = None;
             let mut tool_error = None;
             let mut tool_protocol_fault: Option<&'static str> = None;
             while let Some(item) = tool_stream.next().await {

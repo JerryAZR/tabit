@@ -153,6 +153,18 @@ pub type ModelFactory =
 /// checkout probe's sibling; see [`Session::model_probe`]).
 pub type ModelProbe = Arc<dyn Fn(&ModelSelection) -> Result<(), String> + Send + Sync>;
 
+/// The persist-notice cell (flag 8): the event channel's weak sender
+/// plus the stream id every persist notice is stamped with. Attached by
+/// the worker at spawn; `None` before that or after it left.
+pub type PersistNotices = Arc<
+    Mutex<
+        Option<(
+            tokio::sync::mpsc::WeakUnboundedSender<tabit_protocol::EventFrame>,
+            tabit_protocol::StreamId,
+        )>,
+    >,
+>;
+
 impl SessionBuilder {
     /// Start building a session that will use `selection`. The selection is
     /// validated against the config immediately.
@@ -624,14 +636,7 @@ pub struct Session {
     shared_conversation: SharedConversation,
     /// The persist-state notice channel (flag 8's degraded/recovered
     /// events), attached by the worker at spawn.
-    persist_notices: Arc<
-        Mutex<
-            Option<(
-                tokio::sync::mpsc::WeakUnboundedSender<tabit_protocol::EventFrame>,
-                tabit_protocol::StreamId,
-            )>,
-        >,
-    >,
+    persist_notices: PersistNotices,
     /// The cumulative usage ledger as of load (the parser's fold over
     /// the file's usage facts — usage facts ride records; the ledger
     /// is derived at open, and **deferred after**: the live manager
@@ -968,6 +973,9 @@ impl Session {
                     // its turn's payload is an engine-contract
                     // violation — internal, loud.
                     let turn_id = announce(&current_turn);
+                    // Sanctioned crash: an engine-contract violation,
+                    // failed loud (AGENTS.md doctrine).
+                    #[allow(clippy::panic)]
                     let Some(assistant) = staged_assistant.take() else {
                         panic!(
                             "a tools turn's BatchResults arrived without its assistant payload \
@@ -977,6 +985,12 @@ impl Session {
                     };
                     let result_ids: Vec<String> =
                         results.iter().map(|(id, _)| id.clone()).collect();
+                    // Sanctioned crash: the engine never settles an empty
+                    // batch (AGENTS.md doctrine).
+                    #[allow(clippy::expect_used)]
+                    let batch_content =
+                        rig_core::OneOrMany::many(results.into_iter().map(|(_, content)| content))
+                            .expect("a tools turn's batch is never empty");
                     crate::lock::write(&self.conversation).fold_all_with_ids(
                         vec![
                             Message::Assistant {
@@ -984,13 +998,7 @@ impl Session {
                                 content: assistant,
                             },
                             Message::User {
-                                content: rig_core::OneOrMany::many(
-                                    results
-                                        .into_iter()
-                                        .map(|(_, content)| content)
-                                        .collect::<Vec<_>>(),
-                                )
-                                .expect("a tools turn's batch is never empty"),
+                                content: batch_content,
                             },
                         ],
                         result_ids,
