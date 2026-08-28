@@ -426,3 +426,30 @@ The known deviation from pi's subprocess model:
 - Eval harness (pi has one; build when there are sessions + tools to eval).
 - MCP client support — verify pi's current story before committing.
 - OAuth device-flow auth for providers (optional, late).
+
+## Deferred round: post-review architecture remediation (2026-08)
+
+Recorded from the five-reviewer fresh-eyes pass; ruled to wait until the
+top findings (rmcp stance, stop semantics, entry-id ownership, the
+dual-fold clarification) are settled:
+
+- **Split `tabit-session/src/session.rs`** (~1,850 lines, ten concerns:
+  mailbox, abort, steers, the Session core, SharedConversation,
+  ModelRegister, EventSink, DriveOutcome, the item→event translation,
+  assembly helpers) into own modules.
+- **A named notice-channel abstraction** for the ~10 copy-pasted
+  weak-sender `EventFrame` emission sites (one documented home for the
+  termination discipline).
+- **One home for the call/result pairing walk** — the same
+  every-call-answered-exactly-once verification exists in
+  `tabit-log/fold.rs`, `tabit-session/parser.rs`, and
+  `ContextManager::fold_all_entry`.
+- **The dual-fold unification** — the engine's seeded copy plus the
+  session's re-fold is the reviewers' #1 fragility; any new
+  conversation writer (backgrounding, compaction, subagents) forces
+  this. Design constraint to hold: the durable manager must stay
+  readable mid-run (receive-time checkout validation reads it between
+  folds).
+- **rig-core vendored-mass policy** — embeddings, vector stores, model
+  listings, telemetry (~5k lines tabit never calls): trim or record a
+  keep-policy in VENDOR.md.
