@@ -1236,6 +1236,95 @@ The historical alternatives considered (cut-and-synthesize, reject at
 verification, auto-extend past the batch) remain the design space if
 this is ever revisited; the panic is the ruled resting point.
 
+### 24. Veto-Feedback turns never land durably — OPEN (the last live/durable divergence)
+
+Raised 2026-08, the post-sweep review. When a model-turn hook vetoes a
+turn with `RetryRequest::Feedback`, the engine folds the rejected
+assistant plus the corrective feedback into the **run's** context (the
+retry must see them) — but a vetoed turn emits no `RoundtripClosed`,
+so the file never records either. The next roundtrip commits against
+a durable context that omits what the model saw, and a reload
+reproduces the pretend history.
+
+This is the exact divergence class that forced output-mode feedback to
+become durable during the sweep; there the door's pairing validation
+made the orphaned shape unrepresentable, while a vetoed *final* turn
+has no calls to pair, so the shape survives. Options: (a) land
+veto-Feedback attempts durably as `[assistant_message,
+user_message(feedback)]` exactly like the output-mode close did — one
+rule ("everything the model saw lands"), no exceptions; (b) rule the
+divergence is the *meaning* of a veto — history pretends the attempt
+never happened — and document it as such. Lean: (a); pretending is
+what bit us before.
+
+### 25. Abort discards the interrupted attempt's usage unbilled — OPEN
+
+Flag 22 bills veto/defect discards (`discarded { usage }`). An abort
+mid-roundtrip discards the staged attempt with **no record at all**:
+the completion call happened, the frontend saw the usage event,
+cumulative stats never count it. Same cost-truth class, half-covered
+by scope — the recorder tests pin the current behavior as "unbilled:
+not a ruled discard" precisely because it never was ruled. Ruling
+needed: abort writes a discard record too (or `aborted { usage }`),
+or stays unbilled by explicit decision.
+
+### 26. Staged-turn death is announced on some paths, swept on the rest — OPEN
+
+The engine announces a staged turn's death only via `ModelTurnRetried`
+(hook veto, defect retry). A Stop hook or an abort announces nothing;
+the session's `conclude` sweeps the pending slot unconditionally
+(`drop_open_roundtrip`) — correct, but one semantic ("this attempt
+died") re-assembled at several sites, the shape rule 12 deletes. A
+unified announcement — a `TurnDiscarded` item covering
+veto/defect/stop/abort, or extending `ModelTurnRetried` — gives the
+death one home and retires the sweep.
+
+### 27. Discard billing is the session's inference, not the engine's fact — OPEN
+
+The discard record's usage comes from the session tracking
+`CompletionCall` items per turn. The engine already knows the
+attempt's usage and could stamp it on the retry/discard item directly:
+cleaner data, one less piece of session-side bookkeeping that is
+approximately right rather than exactly right. Rides flag 26 if the
+unified item carries usage.
+
+### 28. The flag-23 checkout panic fires under the resident lock — OPEN
+
+The mid-roundtrip-checkout panic (ruled, flag 23) fires while holding
+the resident mutex, poisoning it; the crate's poison-recovering
+`lock()` is now load-bearing for a user-reachable path, and lock.rs's
+"no code panics while holding one, so poisoning cannot happen"
+comment is false. The panic ruling stands; the *placement* is the
+question — the target lookup and closed-path walk are read-only over
+the tree, so validating before taking the lock makes the poison
+question disappear.
+
+### 29. Empty final turns: recorded but not folded — OPEN (minor)
+
+The engine skips folding an empty final assistant into the live
+context; the recorder stages and commits it anyway, so a reload folds
+an empty assistant message the live run never carried. Pre-existing,
+cosmetic, one-sided — pick either "skip recording empty finals" or
+"fold them live" and the two contexts agree.
+
+### 30. Dead seams kept on judgment — OPEN (deletion candidates)
+
+Two surfaces kept deliberately during the output-mode deletion: the
+now-empty `ProviderCapabilities` struct with its `capabilities()`
+trait method (public seam for external model implementors; its one
+fact died with the engine policy), and `AgentBuilder::output_schema`
+pass-through (the layer-above hook if structured output ever
+returns). Both are deletable for zero dead surface; both are cheap to
+keep. Owner taste.
+
+**Post-sweep process note** (not a flag; AGENTS.md territory): the
+scripted-edit corruption the gate bullet warns about recurred during
+the deletion round (stray bytes, doubled attributes) — the practice
+that held is *file-based* scripts plus read-back, never
+shell-heredoc-embedded ones, and never scripted edits where a handful
+of `Edit` calls would do. Encode in the gate bullet or leave as
+discipline; owner call.
+
 ## Resolved
 
 - **1 — Resident loop** (supersedes 4, 5, 7, 12): one worker task owns
