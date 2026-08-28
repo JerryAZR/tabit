@@ -2,6 +2,7 @@ use rig_core::{OneOrMany, message::AssistantContent, wasm_compat::WasmBoxedFutur
 
 use crate::{
     agent::completion::PreparedCompletionRequest,
+    agent::drive::PhaseEvent,
     agent::drive::{DriveStream, TurnSource, drive_tool_calls, record_usage_on_span},
     agent::hook::{
         AgentHook, HookContext, HookStack, ModelTurnFinished, StepEventKind, StreamResponseFinish,
@@ -9,13 +10,10 @@ use crate::{
     },
     agent::prompt_request::{assistant_text_from_choice, is_empty_assistant_turn},
     agent::run::{
-        AcceptOutcome, AgentRun, PendingToolCall,
+        ModelTurn, PendingToolCall, RunLedger,
         streamed::{StreamedTurnAssembler, StreamedTurnEvent},
     },
-    agent::runner::{
-        AgentRunner, ModelTurnResolution, build_chat_span, observe_action,
-        resolve_model_turn_action,
-    },
+    agent::runner::{AgentRunner, build_chat_span},
     streaming::{StreamedAssistantContent, StreamedUserContent, ToolCallDeltaContent},
     tool::{ToolContext, server::ToolRegistrySnapshot},
 };
@@ -142,15 +140,6 @@ pub enum MultiTurnStreamItem {
         turn: usize,
     },
     /// The durable roundtrip closed: the assistant turn and its complete
-    /// tool batch are committed as one unit (all-or-none) — the cue a
-    /// session layer commits its pending roundtrip through its one door.
-    /// For a final turn, this follows
-    /// [`TurnCommitted`](Self::TurnCommitted) directly; for a tools turn,
-    /// it follows the batch's results at settlement.
-    RoundtripClosed {
-        /// The announced id of the turn the roundtrip belongs to.
-        turn_id: String,
-    },
     /// The final result from the stream: the unified [`PromptResponse`] shared
     /// with the blocking surface.
     FinalResponse(PromptResponse),
@@ -388,7 +377,7 @@ impl TurnSource for StreamingTurnSource {
         &'a mut self,
         runner: &'a AgentRunner,
         hook_ctx: &'a HookContext,
-        run: &'a mut AgentRun,
+        ledger: &'a mut RunLedger,
         prepared: PreparedCompletionRequest,
         chat_span: tracing::Span,
         agent_span: &'a tracing::Span,
@@ -420,8 +409,9 @@ impl TurnSource for StreamingTurnSource {
             let mut pending_final = None;
 
             // Emit the turn's single `CompletionCall` exactly once, recording its
-            // usage onto the chat span and into the run. Defined here (not a free
-            // fn) so it captures `completion_call_emitted`/`chat_span`/`run`; the
+            // usage onto the chat span and into the run ledger. Defined here
+            // (not a free fn) so it captures `completion_call_emitted`/`chat_span`/
+            // `ledger`; the
             // `yield` stays at each call site because `async_stream::stream!`
             // cannot see a `yield` produced inside a nested macro expansion.
             // Returns the item to yield (`Some` the first time, `None` after), or
@@ -434,13 +424,9 @@ impl TurnSource for StreamingTurnSource {
                         if usage.has_values() {
                             record_usage_on_span(&chat_span, usage);
                         }
-                        match run.record_streamed_completion_call(usage, $finish_reason) {
-                            Ok(call) => {
-                                completion_call_emitted = true;
-                                Ok(Some(MultiTurnStreamItem::CompletionCall(call)))
-                            }
-                            Err(err) => Err(Box::new(err).into()),
-                        }
+                        let call = ledger.record(usage, $finish_reason);
+                        completion_call_emitted = true;
+                        Ok(Some(MultiTurnStreamItem::CompletionCall(call)))
                     } else {
                         Ok(None)
                     }
@@ -479,26 +465,22 @@ impl TurnSource for StreamingTurnSource {
                             if self.observes_text_delta
                                 && let Some(StreamedAssistantContent::Text(text)) =
                                     item_slot.as_ref()
-                                && let Some(reason) = observe_action(
-                                    runner
-                                        .hooks
-                                        .on_text_delta(
-                                            hook_ctx,
-                                            TextDelta {
-                                                delta: &text.text,
-                                                aggregated: assembler.aggregated_text(),
-                                            },
-                                        )
-                                        .await,
-                                )
                             {
-                                yield Err(StreamingError::Prompt(Box::new(
-                                    run.cancel_error(reason),
-                                )));
-                                return;
+                                runner
+                                    .hooks
+                                    .on_text_delta(
+                                        hook_ctx,
+                                        TextDelta {
+                                            delta: &text.text,
+                                            aggregated: assembler.aggregated_text(),
+                                        },
+                                    )
+                                    .await;
                             }
                             if let Some(item) = item_slot.take() {
-                                yield Ok(MultiTurnStreamItem::stream_item(item));
+                                yield Ok(PhaseEvent::Item(
+                                    MultiTurnStreamItem::stream_item(item),
+                                ));
                             }
                         }
                         StreamedTurnEvent::EmitToolCallDelta {
@@ -511,33 +493,28 @@ impl TurnSource for StreamingTurnSource {
                                     ToolCallDeltaContent::Name(name) => (Some(name.as_str()), ""),
                                     ToolCallDeltaContent::Delta(delta) => (None, delta.as_str()),
                                 };
-                                if let Some(reason) = observe_action(
-                                    runner
-                                        .hooks
-                                        .on_tool_call_delta(
-                                            hook_ctx,
-                                            ToolCallDelta {
-                                                tool_call_id: &id,
-                                                internal_call_id: &internal_call_id,
-                                                tool_name: delta_name,
-                                                delta: delta_text,
-                                            },
-                                        )
-                                        .await,
-                                ) {
-                                    yield Err(StreamingError::Prompt(Box::new(
-                                        run.cancel_error(reason),
-                                    )));
-                                    return;
-                                }
+                                runner
+                                    .hooks
+                                    .on_tool_call_delta(
+                                        hook_ctx,
+                                        ToolCallDelta {
+                                            tool_call_id: &id,
+                                            internal_call_id: &internal_call_id,
+                                            tool_name: delta_name,
+                                            delta: delta_text,
+                                        },
+                                    )
+                                    .await;
                             }
 
-                            yield Ok(MultiTurnStreamItem::StreamAssistantItem(
-                                StreamedAssistantContent::ToolCallDelta {
-                                    id,
-                                    internal_call_id,
-                                    content,
-                                },
+                            yield Ok(PhaseEvent::Item(
+                                MultiTurnStreamItem::StreamAssistantItem(
+                                    StreamedAssistantContent::ToolCallDelta {
+                                        id,
+                                        internal_call_id,
+                                        content,
+                                    },
+                                )
                             ));
                         }
                         StreamedTurnEvent::Completed {
@@ -546,7 +523,7 @@ impl TurnSource for StreamingTurnSource {
                             emit_final,
                         } => {
                             match emit_completion_call!(usage, finish_reason) {
-                                Ok(Some(item)) => yield Ok(item),
+                                Ok(Some(item)) => yield Ok(PhaseEvent::Item(item)),
                                 Ok(None) => {}
                                 Err(err) => {
                                     yield Err(err);
@@ -592,122 +569,36 @@ impl TurnSource for StreamingTurnSource {
             // inline (not `emit_completion_call!`) so it doesn't emit a dead
             // `completion_call_emitted = true` write.
             if !completion_call_emitted {
-                match run.record_streamed_completion_call(crate::completion::Usage::new(), None) {
-                    Ok(call) => yield Ok(MultiTurnStreamItem::CompletionCall(call)),
-                    Err(err) => {
-                        yield Err(Box::new(err).into());
-                        return;
-                    }
-                }
+                let call = ledger.record(crate::completion::Usage::new(), None);
+                yield Ok(PhaseEvent::Item(MultiTurnStreamItem::CompletionCall(call)));
             }
 
             let final_turn_content = stream.choice.clone();
             let streamed_turn = assembler.finish(stream.message_id.clone(), &final_turn_content);
-            if pending_final.is_some()
-                && let Some(reason) = observe_action(
-                    runner
-                        .hooks
-                        .on_stream_response_finish(
-                            hook_ctx,
-                            StreamResponseFinish {
-                                prompt: &current_prompt,
-                                content: &streamed_turn.choice,
-                                usage: last_usage,
-                                message_id: streamed_turn.message_id.as_deref(),
-                            },
-                        )
-                        .await,
-                )
-            {
-                yield Err(StreamingError::Prompt(Box::new(run.cancel_error(reason))));
-                return;
+            if pending_final.is_some() {
+                runner
+                    .hooks
+                    .on_stream_response_finish(
+                        hook_ctx,
+                        StreamResponseFinish {
+                            prompt: &current_prompt,
+                            content: &streamed_turn.choice,
+                            usage: last_usage,
+                            message_id: streamed_turn.message_id.as_deref(),
+                        },
+                    )
+                    .await;
             }
             self.last_message_id = streamed_turn.message_id.clone();
             // The canonical assistant content: `finish` normalizes
             // reasoning/text/tool ordering, so this can differ from the raw
-            // `stream.choice` aggregate. `ModelTurnFinished` — the normalized
-            // per-turn event — carries this, matching what the turn will
-            // record into run history once accepted; the raw
-            // `stream.choice` is kept in `last_final_choice` for
-            // the raw/final streaming behavior.
+            // `stream.choice` aggregate. The turn settles with the canonical
+            // shape; the raw aggregate is kept in `last_final_choice` for the
+            // raw/final streaming behavior.
             let canonical_choice = streamed_turn.choice.clone();
-            // Park first, hooks second (the pre-commit veto reorder,
-            // ENGINE.md delta 11): the turn is classified and held,
-            // folded nowhere, until the hooks' verdict arrives.
-            if let Err(err) = run.turn_completed_streamed(streamed_turn) {
-                yield Err(Box::new(err).into());
-                return;
-            }
-            // Normalized per-turn event over the parked turn — including
-            // tool-only / reasoning-only turns that fire no
-            // `StreamResponseFinish`.
-            {
-                let action = AgentHook::on_model_turn_finished(
-                    &runner.hooks,
-                        hook_ctx,
-                        ModelTurnFinished {
-                            turn: hook_ctx.turn(),
-                            content: &canonical_choice,
-                            usage: last_usage,
-                        },
-                    )
-                    .await;
-                match resolve_model_turn_action(run, action) {
-                    Ok(ModelTurnResolution::Advance(outcome)) => {
-                        // The closing bracket of the announced turn: the
-                        // content is final and recorded (delta 10). The
-                        // other arms never commit — the discard signal
-                        // (`ModelTurnRetried`, the terminal error) already
-                        // tells the consumer the announced id is dead.
-                        if let Some(id) = hook_ctx.turn_id() {
-                            yield Ok(MultiTurnStreamItem::TurnCommitted { id: id.clone() });
-                            // A final turn's roundtrip closes here and now
-                            // (ENGINE.md, the durable roundtrip); a tools
-                            // turn closes at settlement, driven by
-                            // `drive_tool_calls`.
-                            if matches!(outcome, AcceptOutcome::Final) {
-                                yield Ok(MultiTurnStreamItem::RoundtripClosed { turn_id: id });
-                            }
-                        }
-                    }
-                    Ok(ModelTurnResolution::Retried) => {
-                        yield Ok(MultiTurnStreamItem::ModelTurnRetried {
-                            turn: hook_ctx.turn(),
-                        });
-                        return;
-                    }
-                    Ok(ModelTurnResolution::Terminate(reason)) => {
-                        // Before model-turn steering was added, Stop observed
-                        // this already completed provider turn: its buffered
-                        // final and content telemetry were visible before the
-                        // cancellation. Preserve that behavior while Retry
-                        // alone suppresses the provisional final.
-                        if self.created_agent_span && self.record_telemetry_content {
-                            agent_span.record(
-                                "gen_ai.completion",
-                                assistant_text_from_choice(&canonical_choice),
-                            );
-                        }
-                        rig_core::telemetry::record_model_output(
-                            &chat_span,
-                            &canonical_choice,
-                            runner.record_telemetry_content,
-                        );
-                        if let Some(item) = pending_final.take() {
-                            yield Ok(MultiTurnStreamItem::stream_item(item));
-                        }
-                        yield Err(StreamingError::Prompt(Box::new(run.cancel_error(reason))));
-                        return;
-                    }
-                    Err(err) => {
-                        yield Err(StreamingError::Prompt(Box::new(err)));
-                        return;
-                    }
-                }
-            }
 
-            // Only hook-accepted canonical output belongs in content telemetry.
-            // Keep caller-owned spans untouched, matching the blocking source.
+            // Only canonical output belongs in content telemetry. Keep
+            // caller-owned spans untouched, matching the blocking source.
             if self.created_agent_span && self.record_telemetry_content {
                 agent_span.record(
                     "gen_ai.completion",
@@ -721,9 +612,23 @@ impl TurnSource for StreamingTurnSource {
             );
 
             if let Some(item) = pending_final {
-                yield Ok(MultiTurnStreamItem::stream_item(item));
+                yield Ok(PhaseEvent::Item(MultiTurnStreamItem::stream_item(item)));
+
             }
             self.last_final_choice = final_turn_content;
+
+            // Settle: the loop observes (model-turn hooks), classifies, and
+            // folds — this source's part in the turn is done.
+            let mut turn = ModelTurn::new(
+                streamed_turn.message_id.clone(),
+                streamed_turn.choice.clone(),
+                last_usage,
+                None::<crate::completion::FinishReason>,
+                prepared.executable_tool_names.clone(),
+                prepared.allowed_tool_names.clone(),
+            );
+            turn.internal_call_ids = streamed_turn.internal_call_ids.clone();
+            yield Ok(PhaseEvent::ModelTurn(Box::new(turn)));
         })
     }
 
@@ -731,21 +636,12 @@ impl TurnSource for StreamingTurnSource {
         &'a self,
         runner: &'a AgentRunner,
         hook_ctx: &'a HookContext,
-        run: &'a mut AgentRun,
         calls: Vec<PendingToolCall>,
         tool_snapshot: Arc<ToolRegistrySnapshot>,
     ) -> DriveStream<'a> {
         // The streaming surface chains nothing onto its tool spans, and forwards
         // the ToolCall/ToolResult items to the consumer.
-        drive_tool_calls(
-            runner,
-            hook_ctx,
-            run,
-            calls,
-            tool_snapshot,
-            |span| span,
-            true,
-        )
+        drive_tool_calls(runner, hook_ctx, calls, tool_snapshot, |span| span, true)
     }
 
     fn record_run_level_telemetry(

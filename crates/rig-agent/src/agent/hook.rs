@@ -11,32 +11,22 @@
 //! Hooks run in registration order through [`HookStack`]. Model selections,
 //! tool-call argument rewrites, and tool-result presentation rewrites chain into
 //! later hooks; completion-call [`RequestPatch`] values accumulate and merge.
-//! A [`ModelTurnAction::Retry`] or stop action short-circuits the remaining
-//! hooks for that event. Nested stacks obey the same rules as flat stacks,
-//! including preserving an argument rewrite when an inner stack later skips or
-//! stops.
+//! Nested stacks obey the same rules as flat stacks, including preserving an
+//! argument rewrite when an inner stack later skips.
 //!
-//! Register observe-only hooks before steering hooks when every observation is
-//! required: a steering stop intentionally prevents later observers from
-//! running. Tool-result rewrites change the effective `presentation` sent to
+//! Tool-result rewrites change the effective `presentation` sent to
 //! the model and recorded as result-content telemetry. The
 //! [`ToolResultEvent::raw_result`] and its [`ToolResultEvent::tool_context`]
-//! remain unchanged for policy decisions and execution-outcome metadata. A
-//! tool-result stop omits result content from telemetry.
+//! remain unchanged for policy decisions and execution-outcome metadata.
 //!
 //! Blocking and streaming agents share model-turn, request, tool-call, and
 //! tool-result resolution. Streaming adds delta-specific observations, but
-//! shared lifecycle actions have identical semantics on both surfaces. Streamed
-//! deltas are provisional until the model turn is accepted; a retry is surfaced
-//! as [`MultiTurnStreamItem::ModelTurnRetried`](crate::agent::MultiTurnStreamItem::ModelTurnRetried)
-//! so consumers can discard the rejected turn's deltas.
+//! shared lifecycle actions have identical semantics on both surfaces.
 //!
 //! # Example
 //!
 //! ```
-//! use rig_agent::agent::{
-//!     AgentHook, CompletionResponseEvent, HookContext, ObservationAction,
-//! };
+//! use rig_agent::agent::{AgentHook, CompletionResponseEvent, HookContext};
 //!
 //! struct ResponseLogger;
 //!
@@ -45,74 +35,13 @@
 //!         &self,
 //!         _ctx: &HookContext,
 //!         event: CompletionResponseEvent<'_>,
-//!     ) -> ObservationAction {
+//!     ) {
 //!         println!(
 //!             "message {:?}: {:?} ({:?})",
 //!             event.message_id, event.content, event.usage
 //!         );
-//!         ObservationAction::continue_run()
 //!     }
 //! }
-//! ```
-//!
-//! # Retrying a completed model turn
-//!
-//! A hook can reject a tool-free turn and either reuse the same prompt and
-//! preceding history with fresh request preparation, or preserve the rejected
-//! response and append corrective feedback. Retries use the run's existing
-//! total model-call budget. A narrower policy limit belongs to the hook and can
-//! be stored in the run-scoped [`Scratchpad`]:
-//!
-//! ```
-//! use std::{collections::HashMap, sync::atomic::{AtomicUsize, Ordering}};
-//! use rig_agent::agent::{AgentHook, HookContext, ModelTurnAction, ModelTurnFinished};
-//! use rig_core::message::AssistantContent;
-//!
-//! static NEXT_HOOK_ID: AtomicUsize = AtomicUsize::new(1);
-//!
-//! #[derive(Clone, Default)]
-//! struct RetryCounts(HashMap<usize, usize>);
-//!
-//! struct RetryOnMarker {
-//!     id: usize,
-//!     max_retries: usize,
-//! }
-//!
-//! impl RetryOnMarker {
-//!     fn new(max_retries: usize) -> Self {
-//!         Self {
-//!             id: NEXT_HOOK_ID.fetch_add(1, Ordering::Relaxed),
-//!             max_retries,
-//!         }
-//!     }
-//! }
-//!
-//! impl AgentHook for RetryOnMarker {
-//!     async fn on_model_turn_finished(
-//!         &self,
-//!         ctx: &HookContext,
-//!         event: ModelTurnFinished<'_>,
-//!     ) -> ModelTurnAction {
-//!         let rejected = event.content.iter().any(|content| {
-//!             matches!(content, AssistantContent::Text(text) if text.text.contains("RETRY"))
-//!         });
-//!         if !rejected {
-//!             return ModelTurnAction::continue_run();
-//!         }
-//!
-//!         let attempt = ctx.scratchpad().update::<RetryCounts, _>(|counts| {
-//!             let attempt = counts.0.entry(self.id).or_default();
-//!             *attempt += 1;
-//!             *attempt
-//!         });
-//!         if attempt <= self.max_retries {
-//!             ModelTurnAction::retry_with_feedback("Return a complete answer.")
-//!         } else {
-//!             ModelTurnAction::stop("response retry limit exceeded")
-//!         }
-//!     }
-//! }
-//! # let _hook = RetryOnMarker::new(2);
 //! ```
 
 use std::collections::HashMap;
@@ -511,11 +440,12 @@ pub struct CompletionResponse<'a> {
     pub message_id: Option<&'a str>,
 }
 
-/// Medium-neutral accepted model-turn event.
+/// Medium-neutral completed model-turn event, observed by hooks.
 ///
-/// The turn is canonicalized and parked in the run state, but has not yet been
-/// advanced into tool execution or finalization. A hook may therefore reject a
-/// tool-free turn with [`ModelTurnAction::Retry`].
+/// The turn is canonicalized but has not yet been committed to the
+/// conversation. Hooks observe only — the run cannot be steered from
+/// here (ENGINE.md: the veto is deleted; correction is a steer, and
+/// the one stop site is post-tools).
 #[derive(Clone, Copy)]
 pub struct ModelTurnFinished<'a> {
     /// One-based model-call index.
@@ -524,59 +454,6 @@ pub struct ModelTurnFinished<'a> {
     pub content: &'a OneOrMany<AssistantContent>,
     /// Usage reported for the turn.
     pub usage: Usage,
-}
-
-/// How an accepted, tool-free model turn should be retried.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub enum RetryRequest {
-    /// Discard the rejected response and reuse the same prompt and preceding
-    /// history with fresh request preparation.
-    ///
-    /// Completion-call hooks, retrieval, and dynamic tool resolution run again,
-    /// so the resulting provider request may differ from the rejected attempt.
-    Repeat,
-    /// Preserve the rejected assistant response and append corrective feedback.
-    Feedback(String),
-}
-
-/// Action for the medium-neutral [`ModelTurnFinished`] event.
-///
-/// Every retry consumes the run's existing total model-call budget. Rig does
-/// not impose a separate response-retry limit; hooks that need one should keep
-/// run-scoped state in [`HookContext::scratchpad`]. Retrying a turn containing
-/// tool calls is rejected so provider-visible history never contains unanswered
-/// calls. Use tool-call hooks to steer those turns instead.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub enum ModelTurnAction {
-    /// Accept the turn and continue the run.
-    Continue,
-    /// Reject the turn and request another model call.
-    Retry(RetryRequest),
-    /// Stop the run with a reason.
-    Stop(String),
-}
-
-impl ModelTurnAction {
-    /// Accepts the completed model turn.
-    pub fn continue_run() -> Self {
-        Self::Continue
-    }
-
-    /// Discards the response and reuses the same prompt and preceding history
-    /// with fresh request preparation.
-    pub fn repeat() -> Self {
-        Self::Retry(RetryRequest::Repeat)
-    }
-
-    /// Preserves the response, appends corrective feedback, and retries.
-    pub fn retry_with_feedback(feedback: impl Into<String>) -> Self {
-        Self::Retry(RetryRequest::Feedback(feedback.into()))
-    }
-
-    /// Stops the run with the supplied reason.
-    pub fn stop(reason: impl Into<String>) -> Self {
-        Self::Stop(reason.into())
-    }
 }
 
 /// Pre-execution tool event.
@@ -832,8 +709,6 @@ pub enum ModelSelectionAction {
     Continue,
     /// Replace the candidate and pass it to later hooks.
     Select(ModelHandle),
-    /// Stop the run before request preparation or model execution.
-    Stop(String),
 }
 
 impl ModelSelectionAction {
@@ -846,14 +721,6 @@ impl ModelSelectionAction {
     pub fn select(model: ModelHandle) -> Self {
         Self::Select(model)
     }
-
-    /// Stops the run before the pending model attempt.
-    ///
-    /// A selection stop happens before the attempt is issued, so it does not
-    /// advance [`ModelSelection::previous_model`].
-    pub fn stop(reason: impl Into<String>) -> Self {
-        Self::Stop(reason.into())
-    }
 }
 
 /// Action for completion-call hooks.
@@ -863,8 +730,6 @@ pub enum CompletionCallAction {
     Continue,
     /// Merge this per-turn patch into the request.
     Patch(RequestPatch),
-    /// Stop the run with a reason.
-    Stop(String),
 }
 
 impl CompletionCallAction {
@@ -876,11 +741,6 @@ impl CompletionCallAction {
     /// Creates an action that applies a per-turn request patch.
     pub fn patch(patch: RequestPatch) -> Self {
         Self::Patch(patch)
-    }
-
-    /// Creates an action that stops the run with the supplied reason.
-    pub fn stop(reason: impl Into<String>) -> Self {
-        Self::Stop(reason.into())
     }
 }
 
@@ -964,27 +824,6 @@ impl ToolResultAction {
     }
 }
 
-/// Action for observe-only lifecycle events.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub enum ObservationAction {
-    /// Continue the run.
-    Continue,
-    /// Stop the run.
-    Stop(String),
-}
-
-impl ObservationAction {
-    /// Creates an action that continues the run.
-    pub fn continue_run() -> Self {
-        Self::Continue
-    }
-
-    /// Creates an action that stops the run with the supplied reason.
-    pub fn stop(reason: impl Into<String>) -> Self {
-        Self::Stop(reason.into())
-    }
-}
-
 /// Per-run lifecycle observer and steerer.
 pub trait AgentHook: WasmCompatSend + WasmCompatSync {
     /// Selects the model for the pending model-call boundary.
@@ -1019,26 +858,23 @@ pub trait AgentHook: WasmCompatSend + WasmCompatSync {
     }
 
     /// Observes a completed model response.
-    ///
-    /// The default action continues the run.
     fn on_completion_response(
         &self,
         _ctx: &HookContext,
         _event: CompletionResponse<'_>,
-    ) -> impl Future<Output = ObservationAction> + WasmCompatSend {
-        async { ObservationAction::Continue }
+    ) -> impl Future<Output = ()> + WasmCompatSend {
+        async {}
     }
 
-    /// Observes or rejects the content produced at the end of a model turn.
-    ///
-    /// A retry is valid only for a tool-free turn and consumes the existing
-    /// total model-call budget. The default action accepts the turn.
+    /// Observes the canonicalized content produced at the end of a model
+    /// turn, before it commits to the conversation. Observe-only — no
+    /// verdict (ENGINE.md: the veto is deleted).
     fn on_model_turn_finished(
         &self,
         _ctx: &HookContext,
         _event: ModelTurnFinished<'_>,
-    ) -> impl Future<Output = ModelTurnAction> + WasmCompatSend {
-        async { ModelTurnAction::Continue }
+    ) -> impl Future<Output = ()> + WasmCompatSend {
+        async {}
     }
 
     /// Resolves a model-emitted tool call before its body runs: the gate
@@ -1082,8 +918,8 @@ pub trait AgentHook: WasmCompatSend + WasmCompatSync {
         &self,
         _ctx: &HookContext,
         _event: TextDelta<'_>,
-    ) -> impl Future<Output = ObservationAction> + WasmCompatSend {
-        async { ObservationAction::Continue }
+    ) -> impl Future<Output = ()> + WasmCompatSend {
+        async {}
     }
 
     /// Observes an argument delta for a streaming tool call.
@@ -1093,8 +929,8 @@ pub trait AgentHook: WasmCompatSend + WasmCompatSync {
         &self,
         _ctx: &HookContext,
         _event: ToolCallDelta<'_>,
-    ) -> impl Future<Output = ObservationAction> + WasmCompatSend {
-        async { ObservationAction::Continue }
+    ) -> impl Future<Output = ()> + WasmCompatSend {
+        async {}
     }
 
     /// Observes a completed streaming response in canonical Rig form.
@@ -1104,8 +940,8 @@ pub trait AgentHook: WasmCompatSend + WasmCompatSync {
         &self,
         _ctx: &HookContext,
         _event: StreamResponseFinish<'_>,
-    ) -> impl Future<Output = ObservationAction> + WasmCompatSend {
-        async { ObservationAction::Continue }
+    ) -> impl Future<Output = ()> + WasmCompatSend {
+        async {}
     }
 
     /// Observation interest hint, primarily for high-frequency deltas.
@@ -1131,12 +967,12 @@ trait DynAgentHook: WasmCompatSend + WasmCompatSync {
         &'a self,
         ctx: &'a HookContext,
         event: CompletionResponse<'a>,
-    ) -> WasmBoxedFuture<'a, ObservationAction>;
+    ) -> WasmBoxedFuture<'a, ()>;
     fn model_turn_finished<'a>(
         &'a self,
         ctx: &'a HookContext,
         event: ModelTurnFinished<'a>,
-    ) -> WasmBoxedFuture<'a, ModelTurnAction>;
+    ) -> WasmBoxedFuture<'a, ()>;
     fn tool_call<'a>(
         &'a self,
         ctx: &'a HookContext,
@@ -1151,17 +987,17 @@ trait DynAgentHook: WasmCompatSend + WasmCompatSync {
         &'a self,
         ctx: &'a HookContext,
         event: TextDelta<'a>,
-    ) -> WasmBoxedFuture<'a, ObservationAction>;
+    ) -> WasmBoxedFuture<'a, ()>;
     fn tool_call_delta<'a>(
         &'a self,
         ctx: &'a HookContext,
         event: ToolCallDelta<'a>,
-    ) -> WasmBoxedFuture<'a, ObservationAction>;
+    ) -> WasmBoxedFuture<'a, ()>;
     fn stream_response_finish<'a>(
         &'a self,
         ctx: &'a HookContext,
         event: StreamResponseFinish<'a>,
-    ) -> WasmBoxedFuture<'a, ObservationAction>;
+    ) -> WasmBoxedFuture<'a, ()>;
     fn observes(&self, kind: StepEventKind) -> bool;
 }
 
@@ -1184,14 +1020,14 @@ where
         &'a self,
         ctx: &'a HookContext,
         event: CompletionResponse<'a>,
-    ) -> WasmBoxedFuture<'a, ObservationAction> {
+    ) -> WasmBoxedFuture<'a, ()> {
         Box::pin(self.on_completion_response(ctx, event))
     }
     fn model_turn_finished<'a>(
         &'a self,
         ctx: &'a HookContext,
         event: ModelTurnFinished<'a>,
-    ) -> WasmBoxedFuture<'a, ModelTurnAction> {
+    ) -> WasmBoxedFuture<'a, ()> {
         Box::pin(self.on_model_turn_finished(ctx, event))
     }
     fn tool_call<'a>(
@@ -1218,21 +1054,21 @@ where
         &'a self,
         ctx: &'a HookContext,
         event: TextDelta<'a>,
-    ) -> WasmBoxedFuture<'a, ObservationAction> {
+    ) -> WasmBoxedFuture<'a, ()> {
         Box::pin(self.on_text_delta(ctx, event))
     }
     fn tool_call_delta<'a>(
         &'a self,
         ctx: &'a HookContext,
         event: ToolCallDelta<'a>,
-    ) -> WasmBoxedFuture<'a, ObservationAction> {
+    ) -> WasmBoxedFuture<'a, ()> {
         Box::pin(self.on_tool_call_delta(ctx, event))
     }
     fn stream_response_finish<'a>(
         &'a self,
         ctx: &'a HookContext,
         event: StreamResponseFinish<'a>,
-    ) -> WasmBoxedFuture<'a, ObservationAction> {
+    ) -> WasmBoxedFuture<'a, ()> {
         Box::pin(self.on_stream_response_finish(ctx, event))
     }
     fn observes(&self, kind: StepEventKind) -> bool {
@@ -1293,11 +1129,8 @@ impl From<(&str, i32)> for HookSpec {
 pub type ToolCallFn = Box<
     dyn Fn(&HookContext, ToolCall<'_>) -> WasmBoxedFuture<'static, ToolCallAction> + Send + Sync,
 >;
-pub type ModelTurnFinishedFn = Box<
-    dyn Fn(&HookContext, ModelTurnFinished<'_>) -> WasmBoxedFuture<'static, ModelTurnAction>
-        + Send
-        + Sync,
->;
+pub type ModelTurnFinishedFn =
+    Box<dyn Fn(&HookContext, ModelTurnFinished<'_>) -> WasmBoxedFuture<'static, ()> + Send + Sync>;
 
 /// One registered closure, tagged by its event point (built by the
 /// [`on`] constructors).
@@ -1320,9 +1153,9 @@ pub mod on {
         OnEvent::ToolCall(Box::new(f))
     }
 
-    /// The turn-commit observation point (`ModelTurnAction`).
+    /// The turn-commit observation point (observe-only).
     pub fn model_turn_finished(
-        f: impl Fn(&HookContext, ModelTurnFinished<'_>) -> WasmBoxedFuture<'static, ModelTurnAction>
+        f: impl Fn(&HookContext, ModelTurnFinished<'_>) -> WasmBoxedFuture<'static, ()>
         + Send
         + Sync
         + 'static,
@@ -1346,14 +1179,9 @@ impl AgentHook for ClosureHook {
             None => ToolCallAction::run(),
         }
     }
-    async fn on_model_turn_finished(
-        &self,
-        ctx: &HookContext,
-        event: ModelTurnFinished<'_>,
-    ) -> ModelTurnAction {
-        match &self.model_turn_finished {
-            Some(f) => f(ctx, event).await,
-            None => ModelTurnAction::Continue,
+    async fn on_model_turn_finished(&self, ctx: &HookContext, event: ModelTurnFinished<'_>) {
+        if let Some(f) = &self.model_turn_finished {
+            f(ctx, event).await;
         }
     }
     fn observes(&self, kind: StepEventKind) -> bool {
@@ -1527,7 +1355,6 @@ impl AgentHook for HookStack {
             match action {
                 ModelSelectionAction::Continue => {}
                 ModelSelectionAction::Select(model) => selected = Some(model),
-                stop @ ModelSelectionAction::Stop(_) => return stop,
             }
         }
         selected.map_or(ModelSelectionAction::Continue, ModelSelectionAction::Select)
@@ -1545,7 +1372,6 @@ impl AgentHook for HookStack {
                 CompletionCallAction::Patch(patch) => {
                     merged = Some(merged.map_or(patch.clone(), |value| value.merge(patch)))
                 }
-                stop @ CompletionCallAction::Stop(_) => return stop,
             }
         }
         match merged {
@@ -1554,31 +1380,15 @@ impl AgentHook for HookStack {
         }
     }
 
-    async fn on_completion_response(
-        &self,
-        ctx: &HookContext,
-        event: CompletionResponse<'_>,
-    ) -> ObservationAction {
+    async fn on_completion_response(&self, ctx: &HookContext, event: CompletionResponse<'_>) {
         for record in &self.hooks {
-            let action = record.hook.completion_response(ctx, event).await;
-            if !matches!(action, ObservationAction::Continue) {
-                return action;
-            }
+            record.hook.completion_response(ctx, event).await;
         }
-        ObservationAction::Continue
     }
-    async fn on_model_turn_finished(
-        &self,
-        ctx: &HookContext,
-        event: ModelTurnFinished<'_>,
-    ) -> ModelTurnAction {
+    async fn on_model_turn_finished(&self, ctx: &HookContext, event: ModelTurnFinished<'_>) {
         for record in &self.hooks {
-            let action = record.hook.model_turn_finished(ctx, event).await;
-            if !matches!(action, ModelTurnAction::Continue) {
-                return action;
-            }
+            record.hook.model_turn_finished(ctx, event).await;
         }
-        ModelTurnAction::Continue
     }
     async fn on_tool_call(&self, ctx: &HookContext, event: ToolCall<'_>) -> ToolCallAction {
         let internal_call_id = event.internal_call_id;
@@ -1609,40 +1419,20 @@ impl AgentHook for HookStack {
         }
         effective.map_or(ToolResultAction::Keep, ToolResultAction::Rewrite)
     }
-    async fn on_text_delta(&self, ctx: &HookContext, event: TextDelta<'_>) -> ObservationAction {
+    async fn on_text_delta(&self, ctx: &HookContext, event: TextDelta<'_>) {
         for record in &self.hooks {
-            let action = record.hook.text_delta(ctx, event).await;
-            if !matches!(action, ObservationAction::Continue) {
-                return action;
-            }
+            record.hook.text_delta(ctx, event).await;
         }
-        ObservationAction::Continue
     }
-    async fn on_tool_call_delta(
-        &self,
-        ctx: &HookContext,
-        event: ToolCallDelta<'_>,
-    ) -> ObservationAction {
+    async fn on_tool_call_delta(&self, ctx: &HookContext, event: ToolCallDelta<'_>) {
         for record in &self.hooks {
-            let action = record.hook.tool_call_delta(ctx, event).await;
-            if !matches!(action, ObservationAction::Continue) {
-                return action;
-            }
+            record.hook.tool_call_delta(ctx, event).await;
         }
-        ObservationAction::Continue
     }
-    async fn on_stream_response_finish(
-        &self,
-        ctx: &HookContext,
-        event: StreamResponseFinish<'_>,
-    ) -> ObservationAction {
+    async fn on_stream_response_finish(&self, ctx: &HookContext, event: StreamResponseFinish<'_>) {
         for record in &self.hooks {
-            let action = record.hook.stream_response_finish(ctx, event).await;
-            if !matches!(action, ObservationAction::Continue) {
-                return action;
-            }
+            record.hook.stream_response_finish(ctx, event).await;
         }
-        ObservationAction::Continue
     }
     fn observes(&self, kind: StepEventKind) -> bool {
         self.hooks.iter().any(|record| record.hook.observes(kind))

@@ -123,10 +123,10 @@ pub use completion::Agent;
 pub use hook::CompletionCall as CompletionCallEvent;
 pub use hook::{
     AgentHook, CompletionCallAction, CompletionResponse as CompletionResponseEvent, HookContext,
-    HookSpec, HookStack, ModelSelection, ModelSelectionAction, ModelTurnAction, ModelTurnFinished,
-    ModelTurnFinishedFn, ObservationAction, OnEvent, RequestPatch, RetryRequest, RunId, Scratchpad,
-    StepEventKind, StreamResponseFinish, TextDelta, ToolCall, ToolCallAction, ToolCallDelta,
-    ToolCallFn, ToolResultAction, ToolResultEvent, on,
+    HookSpec, HookStack, ModelSelection, ModelSelectionAction, ModelTurnFinished,
+    ModelTurnFinishedFn, OnEvent, RequestPatch, RunId, Scratchpad, StepEventKind,
+    StreamResponseFinish, TextDelta, ToolCall, ToolCallAction, ToolCallDelta, ToolCallFn,
+    ToolResultAction, ToolResultEvent, on,
 };
 pub use model::ModelHandle;
 pub use prompt_request::streaming::{
@@ -136,5 +136,5 @@ pub use prompt_request::{
     CompletionCall, Extended, PromptRequest, PromptResponse, PromptType, Standard,
 };
 pub use rig_core::message::Text;
-pub use run::{AcceptOutcome, AgentRun, AgentRunStep, ModelTurn, PendingToolCall};
+pub use run::{ModelTurn, PendingToolCall, ProviderErrorClass};
 pub use runner::{AgentRunner, SteeringSource, TurnIdSource};

@@ -64,7 +64,13 @@ where
                 }),
             )),
             Err(error) => {
-                CompletionCallAction::stop(format!("failed to retrieve dynamic context: {error}"))
+                // External failure, and a completion-call hook has no stop
+                // action: degrade to no patch and say so.
+                tracing::warn!(
+                    error = %error,
+                    "dynamic context retrieval failed; continuing without it"
+                );
+                CompletionCallAction::continue_run()
             }
         }
     }

@@ -35,14 +35,13 @@ use tracing::{Instrument, info_span, span::Id};
 use super::{
     completion::{Agent, PreparedCompletionRequest},
     drive::{
-        DriveItem, DriveStream, TurnSource, drive_agent, drive_tool_calls, record_usage_on_span,
-        streaming_error_into_prompt,
+        DriveItem, DriveStream, PhaseEvent, TurnSource, drive_agent, drive_tool_calls,
+        record_usage_on_span, streaming_error_into_prompt,
     },
     hook::{
         AgentHook, CompletionCall, CompletionCallAction,
-        CompletionResponse as CompletionResponseEvent, HookContext, HookStack, ModelTurnAction,
-        ModelTurnFinished, ObservationAction, RequestPatch, ToolCall as ToolCallEvent,
-        ToolCallAction, ToolResultAction, ToolResultEvent,
+        CompletionResponse as CompletionResponseEvent, HookContext, HookStack, ModelTurnFinished,
+        RequestPatch, ToolCall as ToolCallEvent, ToolCallAction, ToolResultAction, ToolResultEvent,
     },
     model::ModelHandle,
     prompt_request::{
@@ -50,13 +49,15 @@ use super::{
         streaming::{MultiTurnStreamItem, StreamingError, StreamingResult, StreamingTurnSource},
         tool_result_output,
     },
-    run::{AcceptOutcome, AgentRun, ModelTurn, PendingToolCall},
+    run::{ModelTurn, PendingToolCall, RunLedger},
 };
 use rig_core::{
     memory::ConversationMemory,
     message::{ToolCall, ToolChoice, UserContent},
     wasm_compat::{WasmCompatSend, WasmCompatSync},
 };
+
+use tabit_log::ContextManager;
 
 use crate::{
     completion::{CompletionError, CompletionModel, Document, Message, PromptError, Usage},
@@ -97,49 +98,6 @@ macro_rules! build_chat_span {
 }
 pub(crate) use build_chat_span;
 
-/// Convert an observe-only action into an optional stop reason.
-pub(crate) fn observe_action(action: ObservationAction) -> Option<String> {
-    match action {
-        ObservationAction::Continue => None,
-        ObservationAction::Stop(reason) => Some(reason),
-    }
-}
-
-/// Resolved outcome of the shared, medium-neutral model-turn hook.
-// `AcceptOutcome` carries an optional `Message`; transient per-turn.
-#[allow(clippy::large_enum_variant)]
-pub(crate) enum ModelTurnResolution {
-    /// Accept the turn and advance normally, carrying what the driver
-    /// needs for the durable roundtrip close.
-    Advance(AcceptOutcome),
-    /// The turn was rejected and the run is ready to issue another model call.
-    Retried,
-    /// Stop the run with the supplied reason.
-    Terminate(String),
-}
-
-/// Apply a model-turn hook action to the parked turn. `Continue` accepts
-/// — the turn folds, and the [`AcceptOutcome`] tells the driver what
-/// closed for the durable roundtrip; `Retry` vetoes (nothing folds, or
-/// the turn folds with corrective feedback); `Stop` terminates with the
-/// turn unfolded.
-///
-/// Both blocking and streaming sources use this resolver so acceptance,
-/// veto history, and state transitions cannot diverge by medium.
-pub(crate) fn resolve_model_turn_action(
-    run: &mut AgentRun,
-    action: ModelTurnAction,
-) -> Result<ModelTurnResolution, PromptError> {
-    match action {
-        ModelTurnAction::Continue => Ok(ModelTurnResolution::Advance(run.accept_turn()?)),
-        ModelTurnAction::Retry(request) => {
-            run.veto_turn(request)?;
-            Ok(ModelTurnResolution::Retried)
-        }
-        ModelTurnAction::Stop(reason) => Ok(ModelTurnResolution::Terminate(reason)),
-    }
-}
-
 pub(crate) enum ToolCallDecision {
     Proceed,
     ProceedWith(serde_json::Value),
@@ -174,14 +132,12 @@ pub(crate) fn tool_result_decision(action: ToolResultAction) -> ToolResultDecisi
 pub(crate) enum CompletionCallDecision {
     Proceed,
     Patch(RequestPatch),
-    Terminate(String),
 }
 
 pub(crate) fn completion_call_decision(action: CompletionCallAction) -> CompletionCallDecision {
     match action {
         CompletionCallAction::Continue => CompletionCallDecision::Proceed,
         CompletionCallAction::Patch(patch) => CompletionCallDecision::Patch(patch),
-        CompletionCallAction::Stop(reason) => CompletionCallDecision::Terminate(reason),
     }
 }
 
@@ -551,7 +507,7 @@ impl AgentRunner {
     pub(crate) fn build_run(
         &self,
         history_override: Option<Vec<Message>>,
-    ) -> Result<AgentRun, PromptError> {
+    ) -> Result<ContextManager, PromptError> {
         // The run is entered with one already-joined history (ENGINE.md:
         // the request IS the history, no prompt/context split).
         let history = match &self.input {
@@ -580,7 +536,21 @@ impl AgentRunner {
                 "max_turns must be at least 1 — a run always executes one turn",
             ));
         }
-        Ok(AgentRun::new(history).max_turns(self.max_turns))
+        Ok(ContextManager::seeded(history))
+    }
+
+    /// The conversation this run drives: the caller's manager when one
+    /// is supplied (the session layer), else a fresh seeded standalone
+    /// one (nothing persists).
+    pub(crate) fn build_conversation(
+        &self,
+        history_override: Option<Vec<Message>>,
+        supplied: Option<ContextManager>,
+    ) -> Result<ContextManager, PromptError> {
+        match supplied {
+            Some(conversation) => Ok(conversation),
+            None => self.build_run(history_override),
+        }
     }
 
     /// The run's input history for prompt mode: an override (memory) or
@@ -631,23 +601,16 @@ pub(crate) fn acquire_agent_span(
     }
 }
 
-/// Outcome of firing the `CompletionCall` hook for a turn.
-pub(crate) enum CompletionCallOutcome {
-    /// Proceed, optionally applying a per-turn request patch (the merged patch
-    /// from every hook that contributed one).
-    Proceed(Option<RequestPatch>),
-    /// Terminate the run with this reason.
-    Terminate(String),
-}
-
-/// Fire the event-specific completion-call hook for a turn.
+/// Fire the event-specific completion-call hook for a turn: the merged
+/// per-turn patch from every hook that contributed one (observe-and-
+/// patch; there is no stop action — the veto deletion's ruling).
 pub(crate) async fn resolve_completion_call(
     hooks: &HookStack,
     ctx: &HookContext,
     prompt: &Message,
     history: &[Message],
     turn: usize,
-) -> CompletionCallOutcome {
+) -> Option<RequestPatch> {
     match completion_call_decision(
         hooks
             .on_completion_call(
@@ -660,9 +623,8 @@ pub(crate) async fn resolve_completion_call(
             )
             .await,
     ) {
-        CompletionCallDecision::Terminate(reason) => CompletionCallOutcome::Terminate(reason),
-        CompletionCallDecision::Patch(patch) => CompletionCallOutcome::Proceed(Some(patch)),
-        CompletionCallDecision::Proceed => CompletionCallOutcome::Proceed(None),
+        CompletionCallDecision::Patch(patch) => Some(patch),
+        CompletionCallDecision::Proceed => None,
     }
 }
 
@@ -997,7 +959,7 @@ impl TurnSource for UnaryTurnSource {
         &'a mut self,
         runner: &'a AgentRunner,
         hook_ctx: &'a HookContext,
-        run: &'a mut AgentRun,
+        ledger: &'a mut RunLedger,
         prepared: PreparedCompletionRequest,
         chat_span: tracing::Span,
         _agent_span: &'a tracing::Span,
@@ -1013,79 +975,35 @@ impl TurnSource for UnaryTurnSource {
             };
 
             let finish_reason = resp.finish_reason();
-            // Park first, hooks second (the pre-commit veto reorder,
-            // ENGINE.md delta 11): the model-turn hooks observe the parked
-            // turn and their verdict decides whether it ever folds.
-            if let Err(err) = run.turn_completed(ModelTurn::new(
+            ledger.record(resp.usage, finish_reason.clone());
+
+            // The response-finish observation (observe-only — there is no
+            // stop action; the veto deletion's ruling).
+            runner
+                .hooks
+                .on_completion_response(
+                    hook_ctx,
+                    CompletionResponseEvent {
+                        prompt: &current_prompt,
+                        content: &resp.choice,
+                        usage: resp.usage,
+                        message_id: resp.message_id.as_deref(),
+                    },
+                )
+                .await;
+
+            if runner.record_telemetry_content {
+                rig_core::telemetry::record_model_output(&chat_span, &resp.choice, true);
+            }
+
+            yield Ok(PhaseEvent::ModelTurn(Box::new(ModelTurn::new(
                 resp.message_id.clone(),
                 resp.choice.clone(),
                 resp.usage,
                 finish_reason,
                 prepared.executable_tool_names,
                 prepared.allowed_tool_names,
-            )) {
-                yield Err(Box::new(err).into());
-                return;
-            }
-
-            // The response-finish event fires first, then the normalized
-            // per-turn event. The first observes; the second can accept,
-            // retry, or stop the parked turn.
-            if let Some(reason) = observe_action(
-                runner
-                    .hooks
-                    .on_completion_response(
-                        hook_ctx,
-                        CompletionResponseEvent {
-                            prompt: &current_prompt,
-                            content: &resp.choice,
-                            usage: resp.usage,
-                            message_id: resp.message_id.as_deref(),
-                        },
-                    )
-                    .await,
-            ) {
-                yield Err(StreamingError::Prompt(Box::new(run.cancel_error(reason))));
-                return;
-            }
-            let action = AgentHook::on_model_turn_finished(
-                &runner.hooks,
-                    hook_ctx,
-                    ModelTurnFinished {
-                        turn: hook_ctx.turn(),
-                        content: &resp.choice,
-                        usage: resp.usage,
-                    },
-                )
-                .await;
-            match resolve_model_turn_action(run, action) {
-                Ok(ModelTurnResolution::Advance(_)) => {}
-                Ok(ModelTurnResolution::Retried) => return,
-                Ok(ModelTurnResolution::Terminate(reason)) => {
-                    // The stop observed this already completed provider turn:
-                    // record its content telemetry before the cancellation
-                    // surfaces (matching the streaming surface).
-                    if runner.record_telemetry_content {
-                        rig_core::telemetry::record_model_output(
-                            &chat_span,
-                            &resp.choice,
-                            true,
-                        );
-                    }
-                    yield Err(StreamingError::Prompt(Box::new(
-                        run.cancel_error(reason),
-                    )));
-                    return;
-                }
-                Err(err) => {
-                    yield Err(StreamingError::Prompt(Box::new(err)));
-                    return;
-                }
-            }
-
-            if runner.record_telemetry_content {
-                rig_core::telemetry::record_model_output(&chat_span, &resp.choice, true);
-            }
+            ))));
         })
     }
 
@@ -1093,7 +1011,6 @@ impl TurnSource for UnaryTurnSource {
         &'a self,
         runner: &'a AgentRunner,
         hook_ctx: &'a HookContext,
-        run: &'a mut AgentRun,
         calls: Vec<PendingToolCall>,
         tool_snapshot: Arc<ToolRegistrySnapshot>,
     ) -> DriveStream<'a> {
@@ -1103,7 +1020,6 @@ impl TurnSource for UnaryTurnSource {
         drive_tool_calls(
             runner,
             hook_ctx,
-            run,
             calls,
             tool_snapshot,
             |span| self.chain_span(span),
@@ -1168,7 +1084,7 @@ impl AgentRunner {
             }
         };
 
-        let run = self.build_run(history_override)?;
+        let mut conversation = self.build_run(history_override)?;
 
         // Fold the shared engine to its final response. The blocking surface
         // uses a unary model transport and ignores the intermediate items the
@@ -1179,7 +1095,7 @@ impl AgentRunner {
         let driver = drive_agent(
             self,
             UnaryTurnSource::new(record_telemetry_content),
-            run,
+            &mut conversation,
             agent_span,
             created_agent_span,
             memory_handle,
@@ -1248,7 +1164,8 @@ impl AgentRunner {
                         // (`tracing_futures::Instrument` — the stream trait, not
                         // the futures-only `tracing::Instrument` above.)
                         return Box::pin(tracing_futures::Instrument::instrument(
-                            stream, agent_span,
+                            stream,
+                            agent_span.clone(),
                         ));
                     }
                 },
@@ -1256,45 +1173,55 @@ impl AgentRunner {
             }
         };
 
-        let run = match self.build_run(history_override) {
-            Ok(run) => run,
+        // The conversation this run drives is owned by the returned
+        // stream (the loop borrows it for the run's lifetime); a build
+        // failure surfaces as the stream's first and only item.
+        let conversation = match self.build_run(history_override) {
+            Ok(conversation) => conversation,
             Err(err) => {
                 let stream = async_stream::stream! {
                     yield Err(StreamingError::from(Box::new(err)));
                 };
-                // Instrument under the agent span like the load-failure
-                // path above so the error stays tied to invoke_agent.
-                return Box::pin(tracing_futures::Instrument::instrument(stream, agent_span));
+                return Box::pin(tracing_futures::Instrument::instrument(
+                    stream,
+                    agent_span.clone(),
+                ));
             }
         };
-        let source = StreamingTurnSource::new(
-            &self.hooks,
-            self.agent_name_or_default().to_string(),
-            created_agent_span,
-            self.record_telemetry_content,
-        );
+        // The coroutine macro moves whatever its body mentions — hand it
+        // its own span handle so the entry keeps the original.
+        let loop_span = agent_span.clone();
+        let stream = async_stream::stream! {
+            let mut conversation = conversation;
+            let source = StreamingTurnSource::new(
+                &self.hooks,
+                self.agent_name_or_default().to_string(),
+                created_agent_span,
+                self.record_telemetry_content,
+            );
 
-        // The blocking surface folds this same engine; the streaming surface
-        // forwards intermediate items (the final response item is the last one)
-        // and ends on `Done`.
-        let driver = drive_agent(
-            self,
-            source,
-            run,
-            agent_span.clone(),
-            created_agent_span,
-            memory_handle,
-            true,
-        )
-        .filter_map(|item| {
-            std::future::ready(match item {
-                Ok(DriveItem::Item(item)) => Some(Ok(item)),
-                Ok(DriveItem::Done(_)) => None,
-                Err(err) => Some(Err(err)),
-            })
-        });
-
-        Box::pin(tracing_futures::Instrument::instrument(driver, agent_span))
+            // The blocking surface folds this same loop; the streaming surface
+            // forwards intermediate items (the final response item is the last
+            // one) and ends on `Done`.
+            let driver = drive_agent(
+                self,
+                source,
+                &mut conversation,
+                loop_span,
+                created_agent_span,
+                memory_handle,
+                true,
+            );
+            futures::pin_mut!(driver);
+            while let Some(item) = driver.next().await {
+                match item {
+                    Ok(DriveItem::Item(item)) => yield Ok(item),
+                    Ok(DriveItem::Done(_)) => {}
+                    Err(err) => yield Err(err),
+                }
+            }
+        };
+        Box::pin(tracing_futures::Instrument::instrument(stream, agent_span))
     }
 }
 

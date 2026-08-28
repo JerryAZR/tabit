@@ -78,6 +78,41 @@ impl ContextManager {
         Self { tree, buffer }
     }
 
+    /// Seed a standalone (in-memory) conversation from an existing
+    /// message list: the same verification as live folding — user
+    /// messages and tool-free assistants fold; an assistant carrying
+    /// tool calls folds with the results message that follows it, as
+    /// one roundtrip. Nothing persists (a [`NullBuffer`] underneath).
+    #[allow(clippy::panic)] // sanctioned crash: an invalid seed, failed loud (AGENTS.md doctrine)
+    pub fn seeded(messages: Vec<Message>) -> Self {
+        let mut seeded = Self::empty(std::sync::Arc::new(std::sync::Mutex::new(
+            crate::writer::NullBuffer,
+        )));
+        let mut batch: Vec<Message> = Vec::new();
+        for message in messages {
+            let opens_roundtrip = matches!(&message, Message::Assistant { content, .. }
+                if content.iter().any(|part| matches!(part, AssistantContent::ToolCall(_))));
+            if opens_roundtrip || !batch.is_empty() {
+                batch.push(message);
+                let roundtrip_ready = !batch.is_empty()
+                    && matches!(batch.last(), Some(Message::User { .. }));
+                if roundtrip_ready {
+                    let batch = std::mem::take(&mut batch);
+                    seeded.fold_all(batch);
+                }
+            } else {
+                seeded.fold(message);
+            }
+        }
+        if !batch.is_empty() {
+            panic!(
+                "ContextManager::seeded: the message list ends inside an open tool \
+                 roundtrip — tool calls never enter the context without results"
+            );
+        }
+        seeded
+    }
+
     /// The conversation so far, as the model sees it: the active branch
     /// folded through the one context builder. Derived on every call —
     /// the only read, and nothing stores it.
