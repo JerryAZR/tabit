@@ -196,7 +196,7 @@ loop {
   turn_id = ids.mint();               // announced ids are never reused
   events.emit(TurnStarted { turn_id });
 
-  // ── MODEL ── stream deltas → events as they arrive; hooks observe.
+  // ── MODEL ── stream deltas → events as they arrive.
   //   `cancel` races every await below: on abort the run future is
   //   dropped, nothing after the await runs, and the conversation is
   //   at a roundtrip boundary — every WRITE here is an atomic commit.
@@ -213,7 +213,6 @@ loop {
       if class is retryable { provider_streak += 1; }
       continue;
     Turn { choice, .. } => {
-      hooks.model_turn_finished(choice);   // observe-only
       if choice carries no tool calls {
         if !choice.is_empty() { conversation.fold(assistant(choice)); }  // [WRITE]
         events.emit(TurnCommitted { turn_id });
@@ -272,17 +271,28 @@ attended start — a message or an explicit continue signal); if
 continue is ever driven *automatically*, that driver needs its own
 cross-run bound.
 
-### Hooks (observe-only; ruled 2026-08)
+### Hooks (the tool pair only; ruled 2026-08, flag 31)
 
-The model-turn veto is deleted with the machine that housed it:
-`RetryRequest`, `ModelTurnAction`, and the parked-then-accept protocol
-are gone (upstream rig vocabulary, never consumed by tabit — the
-"continue with correction" case is a steer, the "retry fresh" case is
-unsupported until discussed; PROTOCOL.md flag 31 keeps the hook-action
-inventory open). Model-turn hooks observe the completed turn and
-return nothing. The remaining action surfaces (tool-call `Skip` /
-`Rewrite` / post-tool `Stop`, completion-call `active_tools`) are the
-stop-taxonomy and tool-phase machinery below.
+The model-turn veto was deleted with the machine that housed it
+(`RetryRequest`, `ModelTurnAction` — upstream rig vocabulary, never
+consumed by tabit). The flag-31 inventory then applied the veto
+precedent to everything else inherited: a surface with neither a
+consumer nor a ruling is deleted, not preserved by inertia. Gone:
+model-selection routing (the register ruling is the home; pi, the
+most-hooked reference, exposes no runtime routing hook on either of
+its surfaces), completion-call `RequestPatch` patches (no consumer;
+the `history` field was a second context authority against the
+ownership contract), and every observation point
+(`completion_response`, `model_turn_finished`, `text_delta`,
+`tool_call_delta`, `stream_response_finish` — all zero-consumer), with
+the `Scratchpad` and the `observes`/`StepEventKind` hint machinery
+they justified. What survives is the tool pair the phase below is
+built on: **gate → `ToolCallAction {Run, Rewrite, Skip}`**, **post →
+`ToolResultAction {Keep, Rewrite, Stop}`** (the stop-taxonomy
+machinery), plus the `HookStack` order law. New hook points are
+designed with their consumers in the extension discussion (item 9) —
+pi's own redesign (30 loose events → 11 typed transform/gate hooks +
+a passive event bus) is the reference shape when that day comes.
 
 ### The loop/leaves split
 

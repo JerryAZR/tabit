@@ -1342,22 +1342,62 @@ shell-heredoc-embedded ones, and never scripted edits where a handful
 of `Edit` calls would do. Encode in the gate bullet or leave as
 discipline; owner call.
 
-### 31. The hook-action inventory — OPEN (the veto precedent)
+### 31. The hook-action inventory — RESOLVED (2026-08: the tool pair survives, the inheritance goes)
 
-Raised 2026-08, the loop refactor. The model-turn veto deletion set
-the precedent: the hook vocabulary is upstream rig 0.41.0 inheritance,
-and inherited surface is not a ruling — `RetryRequest` survived three
-refactors unquestioned because it arrived in the vendor commit. The
-inventory owes every remaining action surface the same three
-questions: does a real tabit consumer exist; is the action flow
-control (then it is an ENGINE.md edge that must be ruled in) or pure
-observation; does the semantic already have a home (steer, mailbox,
-terminating flag)? Surfaces to review: `ToolCallAction` (`Skip`,
-`Rewrite` — the permission gate consumes `Skip`), the post-tool
-`Stop` (ruled: the stop taxonomy), `CompletionCallAction` /
-`active_tools`, `ToolResultAction`, `ModelSelectionAction`,
-`ObservationAction`. Anything without a consumer or a ruling gets
-deleted, not preserved by inertia.
+Raised 2026-08, the loop refactor; resolved the same month after a
+pi reference survey. The model-turn veto deletion set the precedent:
+the hook vocabulary is upstream rig 0.41.0 inheritance, and inherited
+surface is not a ruling — `RetryRequest` survived three refactors
+unquestioned because it arrived in the vendor commit. The inventory
+asked every remaining surface the three questions (real consumer?
+flow control ruled in? semantic already has a home?); pi — the
+most-hooked reference — supplied the external evidence, its own
+in-flight redesign collapsing ~30 loose extension events into 11
+typed transform/gate hooks plus a passive event bus, the same split
+the loop refactor landed.
+
+**The ruling: what to remove, not what to add** (additions are
+designed with their consumers in the item-9 extension discussion).
+Kept — the tool pair the stop-taxonomy and tool-phase machinery are
+built on, both with live consumers or rulings:
+
+- `on_tool_call` → `ToolCallAction {Run, Rewrite, Skip}` — the
+  permission-gate seam (the dev-time gate in tabit-session is the
+  consumer). `Skip` is in-band and per-call (siblings unaffected,
+  nothing kills a batch); rewrites chain and revalidate.
+- `on_tool_result` → `ToolResultAction {Keep, Rewrite, Stop}` —
+  `Stop` is the ruled one-stop site (the terminating flag, read
+  after the batch settles); `Rewrite` is pi-proven (its `after_tool`
+  patches content/isError/usage with real extension use — output
+  capping, redaction, nested-model billing).
+
+Deleted — inherited, zero tabit consumers, semantics with ruled
+homes:
+
+- `on_model_select` / `ModelSelectionAction` — per-turn model
+  routing; the ModelRegister receive-time write is the ruled home,
+  the agent a cache derived at run open. Pi exposes no runtime
+  routing hook on either surface (its `model_select` is
+  notification-only).
+- `on_completion_call` / `CompletionCallAction` / `RequestPatch` —
+  per-turn request patching; config applies at agent build. The
+  patch's `history` field was a second context authority against the
+  ContextManager ownership ruling; pi's analog (`before_request`)
+  is deliberately narrower — curated stream options, never history
+  or preamble.
+- The observation points — `on_completion_response`,
+  `on_model_turn_finished`, `on_text_delta`, `on_tool_call_delta`,
+  `on_stream_response_finish` — all zero-consumer (the session sees
+  deltas and turns through the drive items, not hooks), plus the
+  `Scratchpad` and the `observes`/`StepEventKind` hint machinery
+  they justified.
+
+When the extension discussion reopens the surface: pi's redesign is
+the reference shape (fail-open observers, fail-closed gates,
+first-block-terminal, chained argument patches — all already our
+rulings), `transform_context`-style context projection waits for the
+compaction design (item 6), and "retry fresh" stays unsupported
+until then.
 
 ## Resolved
 
