@@ -75,8 +75,9 @@ pub enum MultiTurnStreamItem {
     /// Emitted after the batch's [`ToolExecutionCommitted`](Self::ToolExecutionCommitted)
     /// and result items; a tools turn's fold payload.
     BatchResults {
-        /// The settled results, in call order.
-        results: Vec<rig_core::message::UserContent>,
+        /// The settled results with their born-early entry ids, in call
+        /// order — the roundtrip's fold payload.
+        results: Vec<(String, rig_core::message::UserContent)>,
     },
     /// A streamed assistant content item — the content the **model emitted**:
     /// text/reasoning deltas, tool-call deltas, and, when the model turn is

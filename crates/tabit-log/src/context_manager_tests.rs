@@ -35,7 +35,7 @@ impl BufferTap {
 
 impl WriteBuffer for BufferTap {
     fn prequeue(&mut self, record: &FileRecord) {
-        self.0.lock().expect("tap lock").push(record.clone());
+        self.0.lock().expect("tap lock").push(vec![record.clone()]);
     }
 
     fn pending(&self) -> usize {
@@ -199,12 +199,20 @@ fn fold_refuses_a_tool_calling_assistant() {
 }
 
 #[test]
-#[should_panic(expected = "only user and assistant messages fold")]
-fn fold_refuses_other_messages() {
-    let (mut manager, _tap) = manager();
+fn a_system_message_carries_verbatim_as_its_own_node() {
+    // Seeded standalone histories carry mid-conversation system
+    // messages; the request builder hoists them, and the view
+    // reproduces the verbatim message (reload folds the same list).
+    let (mut manager, tap) = manager();
     manager.fold(Message::System {
-        content: "no".to_string(),
+        content: "you are a codename keeper".to_string(),
     });
+    let messages = manager.messages();
+    assert!(matches!(
+        &messages[0],
+        Message::System { content } if content == "you are a codename keeper"
+    ));
+    assert_eq!(tap.records().len(), 1, "the node is durable");
 }
 
 #[test]

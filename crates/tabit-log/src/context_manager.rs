@@ -178,6 +178,15 @@ impl ContextManager {
                     usage: usage_deferred(),
                 }
             }
+            // A System message carries verbatim as its own message
+            // (mid-conversation system items hoist at request build —
+            // unsupported by design as a mid-run injection, but a
+            // seeded standalone history carries them and the provider
+            // must see the same list). The view reproduces the
+            // verbatim message; the tree holds it as a user node.
+            Message::System { content } => EntryKind::UserMessage {
+                message: Message::System { content },
+            },
             other => panic!(
                 "ContextManager::fold: only user and assistant messages fold, got `{other:?}`"
             ),

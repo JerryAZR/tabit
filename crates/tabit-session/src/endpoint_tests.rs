@@ -2531,6 +2531,48 @@ async fn a_checkout_targeting_a_queued_steer_misses_and_is_a_no_op() {
 }
 
 #[tokio::test]
+async fn a_continue_starts_a_run_over_the_existing_conversation() {
+    // Retry/continue with no new message: the run answers the
+    // conversation as it stands (the loop's first drain carries only
+    // steers that rode along).
+    let store = temp_store("endpoint-continue");
+    let session = Factory::new(vec![text_turn("one"), text_turn("again")])
+        .into_builder(store.clone())
+        .create("C:/w")
+        .expect("session");
+    let mut handle = SessionHost::spawn(session, Vec::new(), plain_wiring(&store));
+    let id = boot_id(&handle);
+
+    handle.message(&id, "go");
+    let mut frames = Vec::new();
+    collect_until(
+        &mut handle,
+        &mut frames,
+        |event| matches!(event, SessionEvent::RunFinished { output, .. } if output == "one"),
+    )
+    .await;
+
+    // Continue: a second run with no new user message — no
+    // `user_message` fires (nothing entered), and the model answers
+    // again over the same conversation.
+    handle.continue_run(&id);
+    let before = frames.len();
+    collect_until(
+        &mut handle,
+        &mut frames,
+        |event| matches!(event, SessionEvent::RunFinished { output, .. } if output == "again"),
+    )
+    .await;
+    assert!(
+        !frames[before..]
+            .iter()
+            .any(|frame| matches!(frame.event, SessionEvent::UserMessage { .. })),
+        "a continue enters no message"
+    );
+    std::fs::remove_dir_all(store.dir()).ok();
+}
+
+#[tokio::test]
 async fn abort_then_checkout_composes_at_the_pause_point() {
     let store = temp_store("endpoint-checkout-abort");
     let session = Factory::new(vec![tool_turn("t1", "slow"), text_turn("x")])

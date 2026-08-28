@@ -4,10 +4,7 @@ use anyhow::{Result, anyhow};
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
 
-use rig::agent::{
-    AgentHook, CompletionCallAction, CompletionCallEvent, CompletionResponseEvent,
-    ObservationAction,
-};
+use rig::agent::{AgentHook, CompletionCallAction, CompletionCallEvent, CompletionResponseEvent};
 use rig::completion::{Message, Prompt};
 use rig::message::UserContent;
 use rig::prelude::*;
@@ -31,7 +28,9 @@ impl AgentHook for SessionIdHook<'_> {
         event: CompletionCallEvent<'_>,
     ) -> CompletionCallAction {
         let Message::User { content } = event.prompt else {
-            return CompletionCallAction::stop("expected a user message");
+            // A non-user prompt is the harness's own fixture — an
+            // observation miss, not a stop (there is no stop action).
+            return CompletionCallAction::continue_run();
         };
         let prompt_text = content
             .iter()
@@ -47,7 +46,7 @@ impl AgentHook for SessionIdHook<'_> {
                 *seen_prompt = Some(format!("{}:{prompt_text}", self.session_id));
                 CompletionCallAction::continue_run()
             }
-            Err(_) => CompletionCallAction::stop("prompt hook state unavailable"),
+            Err(_) => CompletionCallAction::continue_run(),
         }
     }
 
@@ -55,14 +54,10 @@ impl AgentHook for SessionIdHook<'_> {
         &self,
         _ctx: &rig::agent::HookContext,
         event: CompletionResponseEvent<'_>,
-    ) -> ObservationAction {
+    ) {
         self.response_calls.fetch_add(1, Ordering::SeqCst);
-        match self.seen_response.lock() {
-            Ok(mut seen_response) => {
-                *seen_response = Some(format!("{:?}", event.content));
-                ObservationAction::continue_run()
-            }
-            Err(_) => ObservationAction::stop("response hook state unavailable"),
+        if let Ok(mut seen_response) = self.seen_response.lock() {
+            *seen_response = Some(format!("{:?}", event.content));
         }
     }
 }

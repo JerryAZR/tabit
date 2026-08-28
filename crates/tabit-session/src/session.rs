@@ -323,6 +323,10 @@ pub(crate) struct Mailbox {
     /// queue — they drain immediately, so `user_message` is the
     /// acknowledgment.
     live: std::sync::Arc<std::sync::atomic::AtomicBool>,
+    /// A parked continue intent (the `continue` command): the
+    /// worker's beat takes it and starts a run over the existing
+    /// conversation with no new message.
+    continue_pending: std::sync::Arc<std::sync::atomic::AtomicBool>,
     /// The event channel for submit-time notices — weak, so holding it
     /// never keeps the stream alive (the interaction hub's discipline),
     /// and absent for direct [`Session`] consumers (no frontend, no
@@ -407,6 +411,25 @@ impl Mailbox {
 
     pub(crate) fn is_empty(&self) -> bool {
         lock(&self.queue).is_empty()
+    }
+
+    /// Park a continue intent.
+    fn continue_run(&self) {
+        self.continue_pending
+            .store(true, std::sync::atomic::Ordering::Release);
+        self.work.notify_one();
+    }
+
+    /// Whether a continue intent is parked (the actor's beat check).
+    pub(crate) fn has_continue(&self) -> bool {
+        self.continue_pending
+            .load(std::sync::atomic::Ordering::Acquire)
+    }
+
+    /// The beat's take of a parked continue intent.
+    pub(crate) fn take_continue(&self) -> bool {
+        self.continue_pending
+            .swap(false, std::sync::atomic::Ordering::Acquire)
     }
 
     /// Discard everything queued, returning the pairs (the caller emits
@@ -510,6 +533,17 @@ impl MailboxHandle {
     /// Queue a user message. Always accepted.
     pub fn submit(&self, text: impl Into<String>) {
         self.mailbox.push(Message::user(text.into()));
+    }
+
+    /// Park a continue intent: the worker's next beat starts a run
+    /// over the existing conversation with no new message.
+    pub(crate) fn continue_run(&self) {
+        self.mailbox.continue_run();
+    }
+
+    /// Whether a continue intent is parked (the actor's beat check).
+    pub(crate) fn has_continue(&self) -> bool {
+        self.mailbox.has_continue()
     }
 
     /// Whether anything is queued (the actor's idle check).
@@ -690,18 +724,25 @@ impl Session {
         };
         loop {
             let batch = self.mailbox.take_batch();
-            if batch.is_empty() {
+            let continuing = self.mailbox.take_continue();
+            if batch.is_empty() && !continuing {
                 break;
             }
             // The handler's first drain: fold the batch into the
             // conversation at the drain (the entry id exists from this
             // point — the receive-time checkout probe validates
-            // against it), then run.
-            {
+            // against it), then run. A continue intent with an empty
+            // batch starts the run over the conversation as it stands
+            // (a continue on an empty conversation is a no-op —
+            // nothing to continue).
+            if !batch.is_empty() {
                 let mut conversation = crate::lock::lock(&self.conversation);
                 for queued in &batch {
                     conversation.fold_with_id(queued.message.clone(), queued.id.clone());
                 }
+            }
+            if crate::lock::lock(&self.conversation).messages().is_empty() {
+                break;
             }
             let run = self.run_one(&batch, on_event).await;
             // The last terminal decides the outcome; usage and events

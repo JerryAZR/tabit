@@ -3904,6 +3904,7 @@ dependencies = [
  "schemars",
  "serde",
  "serde_json",
+ "tabit-log",
  "thiserror 2.0.20",
  "tokio",
  "tokio-test",
@@ -4741,6 +4742,18 @@ dependencies = [
 ]
 
 [[package]]
+name = "tabit-log"
+version = "0.41.0"
+dependencies = [
+ "humantime",
+ "rig-core",
+ "serde",
+ "serde_json",
+ "thiserror 2.0.20",
+ "uuid",
+]
+
+[[package]]
 name = "tabit-protocol"
 version = "0.41.0"
 dependencies = [
@@ -4760,6 +4773,7 @@ dependencies = [
  "serde",
  "serde_json",
  "tabit-config",
+ "tabit-log",
  "tabit-protocol",
  "thiserror 2.0.20",
  "tokio",

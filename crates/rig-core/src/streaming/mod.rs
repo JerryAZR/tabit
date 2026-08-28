@@ -2309,6 +2309,10 @@ pub enum StreamedUserContent {
         /// belongs to. Use this to correlate with the originating
         /// [`StreamedAssistantContent::ToolCall::internal_call_id`].
         internal_call_id: String,
+        /// The born-early entry id this result commits under (minted
+        /// when its batch settles; the event announces it before the
+        /// fold, so live and replay name the same node).
+        entry_id: String,
     },
 }
 
@@ -2318,6 +2322,7 @@ impl StreamedUserContent {
         Self::ToolResult {
             tool_result,
             internal_call_id,
+            entry_id: crate::id::generate(),
         }
     }
 }

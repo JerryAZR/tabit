@@ -31,7 +31,15 @@ Defensive ("unreachable") arms follow a stricter rule:
 - The whole suite runs offline (cassette replay + test doubles). Doctests
   are NOT included in these numbers (`llvm-cov` was run without
   `--doctests`); they are gated by the same CI run.
-- Current state: **93.37% lines / 94.11% regions** (4,083 of 61,546
+- Current state: **93.36% lines / 94.08% regions** (4,037 of 60,818
+  lines; re-measured after the loop refactor — the turn state machine
+  became the ENGINE.md coroutine over a handler-owned ContextManager,
+  the recorder dissolved into tabit-log, hooks went observe-only, and
+  the session folds at its item arms. The ratio holds while the base
+  shrinks: the refactor deleted ~2k lines of machine/recorder and
+  added the tabit-log crate, whose suite covers the manager/writer/
+  tree folds.
+  Before that: **93.37% lines / 94.11% regions** (4,083 of 61,546
   lines; re-measured after structured-output enforcement left the
   engine (the deletion section below); the drop is bookkeeping --
   deleted code carried more covered lines than it dragged in.

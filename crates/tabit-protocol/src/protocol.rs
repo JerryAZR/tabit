@@ -92,6 +92,15 @@ pub enum SessionCommand {
         /// The target session id.
         session: String,
     },
+    /// Start a run over the existing conversation with no new user
+    /// message (retry / continue): the loop's first drain takes
+    /// whatever steers rode along, and the model answers the
+    /// conversation as it stands. A no-op on an empty conversation —
+    /// nothing to continue.
+    Continue {
+        /// The target session id.
+        session: String,
+    },
     /// Answer a pending `interaction_request`. Total, like every command:
     /// a response for an unknown or dead request is a logged no-op (the
     /// asker went away with its run — terminals close everything). The

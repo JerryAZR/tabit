@@ -174,6 +174,7 @@ impl Worker {
         match command {
             SessionCommand::Message { text, .. } => self.mailbox.submit(text),
             SessionCommand::Abort { .. } => self.abort(),
+            SessionCommand::Continue { .. } => self.mailbox.continue_run(),
             SessionCommand::InteractionResponse { id, payload, .. } => {
                 // Total: an unknown or dead id logs and drops inside
                 // the hub; the payload is the asker's to parse.
@@ -477,6 +478,17 @@ impl SessionHost {
             }));
     }
 
+    /// Start a run over the session's existing conversation with no
+    /// new message (retry / continue). A no-op on an empty
+    /// conversation.
+    pub fn continue_run(&self, session: &str) {
+        let _ = self
+            .commands
+            .send(HostCommand::Command(SessionCommand::Continue {
+                session: session.to_string(),
+            }));
+    }
+
     /// Move a session's active chain to an entry (checkout — any entry
     /// in the file; an off-chain target is a branch switch). Executed
     /// at the session's pause point: immediately when idle, after the
@@ -583,6 +595,7 @@ fn session_address(command: &SessionCommand) -> &str {
     match command {
         SessionCommand::Message { session, .. }
         | SessionCommand::Abort { session }
+        | SessionCommand::Continue { session }
         | SessionCommand::InteractionResponse { session, .. }
         | SessionCommand::Checkout { session, .. }
         | SessionCommand::Model { session, .. } => session,
@@ -788,7 +801,7 @@ fn spawn_worker(
             if let Some(entry_id) = lock(&checkout_slot).take() {
                 execute_checkout(&mut session, &event_tx, &stream, entry_id);
             }
-            if !worker_mailbox.is_empty() {
+            if !worker_mailbox.is_empty() || worker_mailbox.has_continue() {
                 // The pump returns on an aborted outcome (a checkout
                 // aborts its way here), so anything parked behind a
                 // run executes at this beat before a later message

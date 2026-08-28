@@ -83,7 +83,9 @@ pub(crate) enum PhaseEvent {
     /// The tool batch settled: its results (in call order) and, when a
     /// `ToolResult` hook requested it, the don't-continue reason.
     ToolResults {
-        results: Vec<UserContent>,
+        /// The settled results with their born-early entry ids, in
+        /// call order.
+        results: Vec<(String, UserContent)>,
         stop: Option<String>,
     },
 }
@@ -634,7 +636,7 @@ where
             };
             let mut tool_stream =
                 source.run_tool_calls(&runner, &hook_ctx, calls, tool_snapshot);
-            let mut settled: Option<(Vec<UserContent>, Option<String>)> = None;
+            let mut settled: Option<(Vec<(String, UserContent)>, Option<String>)> = None;
             let mut tool_error = None;
             let mut tool_protocol_fault: Option<&'static str> = None;
             while let Some(item) = tool_stream.next().await {
@@ -696,8 +698,10 @@ where
             // batch, verified and enqueued as one unit (ENGINE.md, the
             // durable conversation). Results are non-empty for a tools
             // turn; the construction cannot fail.
-            let results_vec = results.clone();
-            let results_content = match OneOrMany::from_iter_optional(results) {
+            let results_payload = results.clone();
+            let results_content = match OneOrMany::from_iter_optional(
+                results.into_iter().map(|(_, content)| content),
+            ) {
                 Some(content) => content,
                 None => {
                     store_error_usage(&runner, &ledger);
@@ -724,7 +728,7 @@ where
                 }));
             }
             yield Ok(DriveItem::Item(MultiTurnStreamItem::BatchResults {
-                results: results_vec,
+                results: results_payload,
             }));
             turns_used += 1;
             // The batch is committed; now — and only now — the loop
@@ -800,6 +804,9 @@ where
         content: UserContent,
         internal_call_id: String,
         surface: ToolSurface,
+        /// The born-early entry id this result commits under (minted at
+        /// settle; the event announces it before the fold).
+        entry_id: String,
     }
 
     Box::pin(async_stream::stream! {
@@ -855,6 +862,7 @@ where
                             content: result,
                             internal_call_id,
                             surface: ToolSurface::Preresolved,
+                            entry_id: tabit_log::new_entry_id(),
                         });
                     }
                     continue;
@@ -882,6 +890,7 @@ where
                         content: outcome.content,
                         internal_call_id,
                         surface,
+                        entry_id: tabit_log::new_entry_id(),
                     });
                 }
             }
@@ -900,6 +909,7 @@ where
                                     content: result,
                                     internal_call_id,
                                     surface: ToolSurface::Preresolved,
+                                    entry_id: tabit_log::new_entry_id(),
                                 }),
                                 None,
                             );
@@ -922,6 +932,7 @@ where
                                 content: outcome.content,
                                 internal_call_id,
                                 surface,
+                                entry_id: tabit_log::new_entry_id(),
                             }),
                             outcome.stop_reason.map(|reason| (index, reason)),
                         )
@@ -949,11 +960,11 @@ where
         // so the tool phase is flag-blind by construction. Every slot is
         // filled: settlement is unconditional and every chain returns an
         // outcome.
-        let mut settled: Vec<UserContent> = Vec::with_capacity(call_count);
+        let mut settled: Vec<(String, UserContent)> = Vec::with_capacity(call_count);
         let mut surface_items: Vec<MultiTurnStreamItem> =
             Vec::with_capacity(call_count.saturating_mul(2));
         for slot in collected {
-            let CollectedToolResult { content, internal_call_id, surface } = match slot {
+            let CollectedToolResult { content, internal_call_id, surface, entry_id } = match slot {
                 Some(collected_result) => collected_result,
                 None => {
                     yield Err(StreamingError::Prompt(Box::new(PromptError::CompletionError(
@@ -986,11 +997,12 @@ where
                         StreamedUserContent::ToolResult {
                             tool_result: tool_result.clone(),
                             internal_call_id,
+                            entry_id: entry_id.clone(),
                         },
                     ));
                 }
             }
-            settled.push(content);
+            settled.push((entry_id, content));
         }
 
         for item in surface_items {

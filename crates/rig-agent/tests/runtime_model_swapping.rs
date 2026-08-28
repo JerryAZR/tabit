@@ -533,55 +533,6 @@ async fn agent_and_request_model_selection_hooks_have_expected_scope() {
     );
 }
 
-#[tokio::test]
-async fn model_selection_stop_cancels_before_provider_execution() {
-    let blocking_model = alpha_static("must not execute");
-    let blocking_script = blocking_model.0.clone();
-    let blocking_completion_calls = Arc::new(AtomicUsize::new(0));
-    let error = AgentBuilder::new(blocking_model)
-        .build()
-        .prompt("stop before execution")
-        .add_hook(StopSelection {
-            completion_calls: blocking_completion_calls.clone(),
-        })
-        .await
-        .expect_err("selection stop should cancel the run");
-
-    assert!(matches!(
-        error,
-        PromptError::PromptCancelled { reason, .. } if reason == "routing denied"
-    ));
-    assert!(blocking_script.requests().is_empty());
-    // Completion-call hooks resolve BEFORE model selection, so the stop above
-    // does not suppress them.
-    assert_eq!(blocking_completion_calls.load(Ordering::SeqCst), 1);
-
-    let streaming_model = alpha_static("must not stream");
-    let streaming_script = streaming_model.0.clone();
-    let streaming_completion_calls = Arc::new(AtomicUsize::new(0));
-    let mut stream = AgentBuilder::new(streaming_model)
-        .build()
-        .stream_prompt("stop before streaming")
-        .add_hook(StopSelection {
-            completion_calls: streaming_completion_calls.clone(),
-        })
-        .await;
-    let error = stream
-        .next()
-        .await
-        .expect("selection stop should emit an error")
-        .expect_err("selection stop should cancel the stream");
-
-    assert!(matches!(
-        error,
-        StreamingError::Prompt(error)
-            if matches!(*error, PromptError::PromptCancelled { ref reason, .. }
-                if reason == "routing denied")
-    ));
-    assert!(streaming_script.requests().is_empty());
-    assert_eq!(streaming_completion_calls.load(Ordering::SeqCst), 1);
-}
-
 #[derive(Clone)]
 struct LookupTool {
     calls: Arc<AtomicUsize>,
@@ -1323,48 +1274,6 @@ async fn a_request_patch_can_influence_the_selected_model_on_both_surfaces() {
                 "beta answer"
             );
         }
-    }
-}
-
-#[tokio::test]
-async fn a_stopped_completion_call_hook_suppresses_selection_on_both_surfaces() {
-    for streaming in [false, true] {
-        let model = alpha_static("must not run");
-        let script = model.0.clone();
-        let observations: SelectionObservations = Arc::new(Mutex::new(Vec::new()));
-        let agent = AgentBuilder::new(model)
-            .add_hook(StopCompletionCall)
-            .add_hook(observing_selector(observations.clone()))
-            .build();
-
-        if streaming {
-            let error = drain_stream(agent.stream_prompt("stopped").await)
-                .await
-                .expect_err("streaming completion-call stop");
-            assert!(matches!(
-                error,
-                StreamingError::Prompt(error)
-                    if matches!(*error, PromptError::PromptCancelled { ref reason, .. }
-                        if reason == "completion denied")
-            ));
-        } else {
-            let error = agent
-                .prompt("stopped")
-                .await
-                .expect_err("blocking completion-call stop");
-            assert!(matches!(
-                error,
-                PromptError::PromptCancelled { reason, .. } if reason == "completion denied"
-            ));
-        }
-
-        // The stop resolves BEFORE model selection: no selection event fired,
-        // so previous_model never advanced and no attempt was issued.
-        assert!(
-            observations.lock().expect("observation lock").is_empty(),
-            "streaming={streaming}: a completion-call stop must suppress selection"
-        );
-        assert!(script.requests().is_empty());
     }
 }
 

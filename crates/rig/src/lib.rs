@@ -38,7 +38,7 @@ pub use rig_core::*;
 
 #[cfg(feature = "agent")]
 #[cfg_attr(docsrs, doc(cfg(feature = "agent")))]
-pub use rig_agent::{Agent, AgentBuilder, AgentRun, AgentRunner};
+pub use rig_agent::{Agent, AgentBuilder, AgentRunner};
 
 /// Direct access to the portable provider and data contracts.
 pub mod core {
