@@ -190,11 +190,11 @@ named, the classification applies to its current lcov-uncovered ranges.
    - Platform-absent arms in `tabit-tools`: the PowerShell interpreter
      fallback (this machine has Git Bash), interpreter spawn failure, the
      `try_wait` OS-error arm, and the abnormal-signal exit description.
-   - Engine-driven event arms in `stream_item_event`: `TurnRetried` (needs
-     a hook that rejects a turn — rig-agent's hook tests cover that engine
-     path), `NativeItem` from `Unknown` stream items (no mock builder
-     emits them), and the `FinalResponse`/`StreamUserItem` catch-arms the
-     caller handles directly.
+   - Engine-driven event arms in `stream_item_event`: `TurnRetried` (the
+     engine emits it on the malformed-tool-args defect path — rig-agent's
+     loop tests cover that engine path), `NativeItem` from `Unknown` stream
+     items (no mock builder emits them), and the `FinalResponse`/
+     `StreamUserItem` catch-arms the caller handles directly.
    - `build_model`'s `build_error` arm: provider client constructors cannot
      fail once config validation has checked URL scheme and key presence.
    - The repair-path `Persist` return in `reload_context` — the same
@@ -315,7 +315,7 @@ rather than skipping, reachable or not.)
 - Turn announcement (rig-agent `drive_agent`, `TurnStarted`/
   `TurnCommitted` items, hook-context id) — **covered** by the
   streaming tests: announcement-before-content, ids reach
-  `ModelTurnFinished` hooks, retry announces a fresh id and only the
+  the hook context, retry announces a fresh id and only the
   accepted attempt commits.
 - Session fold stamps + id continuity (`announced_turn_ids_are_the_
   log_entry_ids`) — **covered** end-to-end: announced ids are the

@@ -1,9 +1,6 @@
 use super::{CompletionCall, PromptResponse, PromptResponseRepr};
 use crate::{
-    agent::{
-        AgentBuilder,
-        hook::{AgentHook, HookContext},
-    },
+    agent::AgentBuilder,
     completion::{
         AssistantContent, CompletionError, CompletionRequest, Message, Prompt, PromptError, Usage,
     },

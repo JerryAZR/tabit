@@ -3,15 +3,11 @@ use std::{collections::HashMap, sync::Arc};
 use schemars::{JsonSchema, Schema, schema_for};
 
 use rig_core::{
-    memory::ConversationMemory,
-    message::ToolChoice,
-    vector_store::{VectorSearchRequest, VectorStoreIndexDyn},
+    memory::ConversationMemory, message::ToolChoice, vector_store::VectorStoreIndexDyn,
 };
 
 use crate::{
-    agent::hook::{
-        AgentHook, CompletionCall, CompletionCallAction, HookContext, HookStack, RequestPatch,
-    },
+    agent::hook::{AgentHook, HookStack},
     completion::{CompletionModel, Document},
     tool::{
         DynamicTool, PortableDynamicTool, Tool, ToolSet,
@@ -24,57 +20,6 @@ use crate::{
 use crate::tool::rmcp::McpTool as RmcpTool;
 
 use super::{Agent, ModelHandle};
-
-struct DynamicContext<I> {
-    samples: usize,
-    index: I,
-}
-
-impl<I> AgentHook for DynamicContext<I>
-where
-    I: VectorStoreIndexDyn,
-{
-    async fn on_completion_call(
-        &self,
-        _ctx: &HookContext,
-        event: CompletionCall<'_>,
-    ) -> CompletionCallAction {
-        let query = event.prompt.rag_text().or_else(|| {
-            event
-                .history
-                .iter()
-                .rev()
-                .find_map(|message| message.rag_text())
-        });
-        let Some(query) = query else {
-            return CompletionCallAction::continue_run();
-        };
-
-        let request = VectorSearchRequest::builder()
-            .query(query)
-            .samples(self.samples as u64)
-            .build();
-        match self.index.top_n(request).await {
-            Ok(results) => CompletionCallAction::patch(RequestPatch::new().extra_context(
-                results.into_iter().map(|(_, id, value)| Document {
-                    id,
-                    text:
-                        serde_json::to_string_pretty(&value).unwrap_or_else(|_| value.to_string()),
-                    additional_props: Default::default(),
-                }),
-            )),
-            Err(error) => {
-                // External failure, and a completion-call hook has no stop
-                // action: degrade to no patch and say so.
-                tracing::warn!(
-                    error = %error,
-                    "dynamic context retrieval failed; continuing without it"
-                );
-                CompletionCallAction::continue_run()
-            }
-        }
-    }
-}
 
 /// Build [`RmcpTool`]s from MCP tool definitions, applying the given per-call
 /// timeout to each (`None` disables it; see issue #1914). Returns
@@ -226,22 +171,6 @@ impl<ToolState> AgentBuilder<ToolState> {
             additional_props: HashMap::new(),
         });
         self
-    }
-
-    /// Add dynamic context retrieved from a vector store on every model call.
-    ///
-    /// This is a convenience wrapper around an internal completion-call hook.
-    /// The hook searches with the current prompt's first text part, falling back
-    /// to the latest textual history message, and appends the retrieved documents
-    /// to the request after static context. Retrieval and injected documents
-    /// follow registration order relative to application hooks, so register a
-    /// stop policy before this helper when it should prevent retrieval. A
-    /// retrieval failure stops the run before provider I/O.
-    pub fn dynamic_context<I>(self, samples: usize, index: I) -> Self
-    where
-        I: VectorStoreIndexDyn + 'static,
-    {
-        self.add_hook(DynamicContext { samples, index })
     }
 
     /// Set the tool choice for the agent
@@ -803,39 +732,6 @@ mod tests {
             .tool(MockAddTool)
             .add_hook(BuilderHook)
             .build();
-    }
-
-    /// With no retrievable text in the prompt or history (here: a prompt whose
-    /// only content is an image), the dynamic-context hook must continue the
-    /// run instead of querying the index or stopping.
-    #[tokio::test]
-    async fn dynamic_context_without_a_retrieval_query_continues_the_run() {
-        use crate::completion::Message;
-        use rig_core::OneOrMany;
-        use rig_core::message::UserContent;
-
-        let hook = DynamicContext {
-            samples: 1,
-            index: MockToolIndex::new(["add"]),
-        };
-
-        let prompt = Message::User {
-            content: OneOrMany::one(UserContent::image_url(
-                "https://example.com/a.png",
-                None,
-                None,
-            )),
-        };
-        let event = CompletionCall {
-            prompt: &prompt,
-            history: &[],
-            turn: 1,
-        };
-
-        let action = hook
-            .on_completion_call(&HookContext::new(false, None, Default::default()), event)
-            .await;
-        assert!(matches!(action, CompletionCallAction::Continue));
     }
 
     #[test]

@@ -11,7 +11,6 @@ mod cassette {
     mod permission_control;
     mod reasoning_roundtrip;
     mod reasoning_tool_roundtrip;
-    mod request_hook;
     mod response_schema;
     mod responses_behaviors;
     mod responses_input_item;

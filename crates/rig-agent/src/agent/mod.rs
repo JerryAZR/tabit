@@ -44,61 +44,6 @@
 //! # Ok(())
 //! # }
 //! ```
-//!
-//! [`AgentBuilder::dynamic_context`] provides passive RAG through the same
-//! completion-call hook lifecycle as every other request policy. For custom
-//! query selection, filtering, reranking, caching, formatting, or failure
-//! handling, applications can instead implement [`AgentHook`] and inject
-//! documents with [`RequestPatch::extra_context`]. Active RAG exposes a vector
-//! index or custom retriever as a tool so the model decides when to search.
-//!
-//! Passive RAG agent example
-//! ```no_run
-//! use rig_agent::{completion::Prompt, prelude::*};
-//! use rig_core::{
-//!     client::{EmbeddingsClient, ProviderClient},
-//!     embeddings::EmbeddingsBuilder,
-//!     providers::openai,
-//!     vector_store::in_memory_store::InMemoryVectorStore,
-//! };
-//!
-//! # async fn run() -> Result<(), Box<dyn std::error::Error>> {
-//! // Initialize OpenAI client
-//! let openai = openai::Client::from_env()?;
-//!
-//! // Initialize OpenAI embedding model
-//! let embedding_model = openai.embedding_model("text-embedding-3-small");
-//!
-//! // Create vector store, compute embeddings and load them in the store
-//! let mut vector_store = InMemoryVectorStore::default();
-//!
-//! let embeddings = EmbeddingsBuilder::new(embedding_model.clone())
-//!     .documents(vec![
-//!         "Definition of a *flurbo*: A flurbo is a green alien that lives on cold planets",
-//!         "Definition of a *glarb-glarb*: A glarb-glarb is an ancient tool used by the ancestors of the inhabitants of planet Jiro to farm the land.",
-//!         "Definition of a *linglingdong*: A term used by inhabitants of the far side of the moon to describe humans.",
-//!     ])?
-//!     .build()
-//!     .await?;
-//!
-//! vector_store.add_documents(embeddings);
-//!
-//! // Create vector store index
-//! let index = vector_store.index(embedding_model);
-//!
-//! let agent = openai.agent("gpt-5.2")
-//!     .preamble("
-//!         You are a dictionary assistant here to assist the user in understanding the meaning of words.
-//!         You will find additional non-standard word definitions that could be useful below.
-//!     ")
-//!     .dynamic_context(1, index)
-//!     .build();
-//!
-//! // Prompt the agent and print the response
-//! let response = agent.prompt("What does \"glarb-glarb\" mean?").await?;
-//! # Ok(())
-//! # }
-//! ```
 mod builder;
 mod completion;
 /// The committed conversation state visible to models — the one
@@ -120,13 +65,9 @@ pub(crate) const UNKNOWN_AGENT_NAME: &str = "Unnamed Agent";
 
 pub use builder::{AgentBuilder, NoToolConfig, WithBuilderTools, WithToolServerHandle};
 pub use completion::Agent;
-pub use hook::CompletionCall as CompletionCallEvent;
 pub use hook::{
-    AgentHook, CompletionCallAction, CompletionResponse as CompletionResponseEvent, HookContext,
-    HookSpec, HookStack, ModelSelection, ModelSelectionAction, ModelTurnFinished,
-    ModelTurnFinishedFn, OnEvent, RequestPatch, RunId, Scratchpad, StepEventKind,
-    StreamResponseFinish, TextDelta, ToolCall, ToolCallAction, ToolCallDelta, ToolCallFn,
-    ToolResultAction, ToolResultEvent, on,
+    AgentHook, HookContext, HookSpec, HookStack, OnEvent, RunId, ToolCall, ToolCallAction,
+    ToolCallFn, ToolResultAction, ToolResultEvent, on,
 };
 pub use model::ModelHandle;
 pub use prompt_request::streaming::{

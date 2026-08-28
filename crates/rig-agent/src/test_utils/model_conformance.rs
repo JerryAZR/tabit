@@ -5,7 +5,6 @@
 //! responsibilities.
 
 use std::{
-    collections::BTreeSet,
     sync::{
         Arc, Mutex, MutexGuard,
         atomic::{AtomicUsize, Ordering},
@@ -19,18 +18,16 @@ use serde::{Deserialize, Serialize};
 
 use crate::{
     agent::{
-        AgentBuilder, AgentHook, CompletionCallAction, CompletionCallEvent, HookContext,
-        MultiTurnStreamItem, NoToolConfig, RequestPatch, StreamingError, ToolCall as ToolCallEvent,
-        ToolCallAction, ToolResultAction, ToolResultEvent,
+        AgentBuilder, AgentHook, HookContext, MultiTurnStreamItem, NoToolConfig, StreamingError,
+        ToolCall as ToolCallEvent, ToolCallAction, ToolResultAction, ToolResultEvent,
     },
     completion::{
         AssistantContent, CompletionError, CompletionModel, Message, Prompt, PromptError,
-        ToolDefinition, Usage,
+        ToolDefinition,
     },
     streaming::StreamingPrompt,
     tool::{Tool, ToolContext},
 };
-use rig_core::OneOrMany;
 use rig_core::message::{ToolChoice, UserContent};
 
 /// Typed failure from a portable model-conformance scenario.
@@ -543,23 +540,6 @@ impl AgentHook for WrapResult {
             ToolResultAction::rewrite(format!("[{}]", event.presentation.render()))
         } else {
             ToolResultAction::keep()
-        }
-    }
-}
-
-#[derive(Clone)]
-struct FirstTurnPatch(RequestPatch);
-
-impl AgentHook for FirstTurnPatch {
-    async fn on_completion_call(
-        &self,
-        ctx: &HookContext,
-        _event: CompletionCallEvent<'_>,
-    ) -> CompletionCallAction {
-        if ctx.turn() == 1 {
-            CompletionCallAction::patch(self.0.clone())
-        } else {
-            CompletionCallAction::continue_run()
         }
     }
 }
@@ -1234,24 +1214,10 @@ where
     })
 }
 
-/// A per-turn allow-list: advertises `sum` only (the model's scripted
-/// `add` call is then unoffered — the admission case under test).
-struct OfferOnlySum;
-impl AgentHook for OfferOnlySum {
-    async fn on_completion_call(
-        &self,
-        _ctx: &HookContext,
-        _event: CompletionCallEvent<'_>,
-    ) -> CompletionCallAction {
-        CompletionCallAction::patch(
-            RequestPatch::new().active_tools([CountingSum::NAME.to_string()]),
-        )
-    }
-}
-
 /// Uses the conformance tool set to exercise in-band admission: a tool
-/// name the model was not offered returns a synthetic result naming the
-/// problem — the run continues, nothing is executed, nothing fails.
+/// name the model calls but the agent never registered returns a
+/// synthetic result naming the problem — the run continues, nothing is
+/// executed, nothing fails.
 pub async fn invalid_tool_recovery<M, F>(
     model: M,
     configure: F,
@@ -1263,26 +1229,23 @@ where
     const SCENARIO: &str = "invalid_tool_recovery";
     const PROMPT: &str = "Call the add tool exactly once with x=2 and y=3. Do not call sum.";
     let started = Instant::now();
-    let add_calls = Arc::new(AtomicUsize::new(0));
     let sum_calls = Arc::new(AtomicUsize::new(0));
     // Drive the loop through the public surface: the model emits a call
-    // to a tool it was not offered (per-turn active_tools advertises only
-    // `sum`; the model's `add` call is unoffered), so admission answers
-    // in-band — the model is told, nothing executes, the run finishes.
+    // to `add`, which the agent never registered (only `sum` exists), so
+    // admission answers in-band — the model is told, nothing executes,
+    // the run finishes.
     let agent = configure(AgentBuilder::new(model))
         .preamble(FORCE_TOOLS_PREAMBLE)
         .temperature(0.0)
-        .tool(CountingAdd(add_calls.clone()))
         .tool(CountingSum(sum_calls.clone()))
-        .add_hook(OfferOnlySum)
         .tool_choice(ToolChoice::Required)
         .build();
     let response = agent.runner(PROMPT).max_turns(4).run().await?;
-    // Nothing executed: the disallowed name never ran a body.
-    if add_calls.load(Ordering::SeqCst) != 0 || sum_calls.load(Ordering::SeqCst) != 0 {
+    // Nothing executed: the unregistered name never ran a body.
+    if sum_calls.load(Ordering::SeqCst) != 0 {
         return Err(ScenarioError::contract(
             SCENARIO,
-            "a disallowed tool name executed instead of being told in-band",
+            "an unregistered tool name executed instead of being told in-band",
         ));
     }
     // The model saw the in-band synthetic result in the run's history.
@@ -1309,17 +1272,15 @@ where
     })
 }
 
-/// Exercises chained argument/result rewrites and a first-turn-only request
-/// patch. Completion proves `tool_choice=Required` did not leak to turn two.
-pub async fn hook_rewrites_and_request_patch<M, F>(
-    model: M,
-    configure: F,
-) -> Result<ScenarioReport, ScenarioError>
+/// Exercises chained argument/result rewrites through the public agent
+/// surface: two argument rewrites compose, the result rewrites wrap in
+/// registration order.
+pub async fn hook_rewrites<M, F>(model: M, configure: F) -> Result<ScenarioReport, ScenarioError>
 where
     M: CompletionModel + 'static,
     F: FnOnce(AgentBuilder<NoToolConfig>) -> AgentBuilder<NoToolConfig>,
 {
-    const SCENARIO: &str = "hook_rewrites_and_request_patch";
+    const SCENARIO: &str = "hook_rewrites";
     let started = Instant::now();
     let calls = Arc::new(AtomicUsize::new(0));
     let observed = ObserveArguments::default();
@@ -1333,11 +1294,6 @@ where
     let response = agent
         .prompt("Use add once for x=1 and y=1, then report what the tool returns.")
         .max_turns(3)
-        .add_hook(FirstTurnPatch(
-            RequestPatch::new()
-                .active_tools([CountingAdd::NAME])
-                .tool_choice(ToolChoice::Required),
-        ))
         .add_hook(RewriteArgument {
             key: "x",
             value: serde_json::json!(7),
@@ -1892,7 +1848,7 @@ mod tests {
 
     #[tokio::test]
     async fn hook_rewrites_chain_and_request_patch_is_turn_local() -> Result<(), ScenarioError> {
-        let report = hook_rewrites_and_request_patch(
+        let report = hook_rewrites(
             MockCompletionModel::new([
                 MockTurn::tool_call("hook-add", "add", serde_json::json!({ "x": 1, "y": 1 })),
                 MockTurn::text("[portable-redacted]"),
@@ -2541,7 +2497,7 @@ mod tests {
         // The tool is never invoked, so there are no rewritten arguments to
         // observe.
         assert!(matches!(
-            hook_rewrites_and_request_patch(MockCompletionModel::text("no tool used"), |builder| {
+            hook_rewrites(MockCompletionModel::text("no tool used"), |builder| {
                 builder
             },)
             .await,
@@ -2556,7 +2512,7 @@ mod tests {
             MockTurn::text("[portable-redacted]"),
         ]);
         assert!(matches!(
-            hook_rewrites_and_request_patch(twice, |builder| builder).await,
+            hook_rewrites(twice, |builder| builder).await,
             Err(ScenarioError::Contract { .. })
         ));
     }

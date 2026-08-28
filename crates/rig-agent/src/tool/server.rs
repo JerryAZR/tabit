@@ -1,4 +1,4 @@
-use std::{collections::BTreeSet, sync::Arc};
+use std::sync::Arc;
 
 #[cfg(all(feature = "rmcp", not(target_family = "wasm")))]
 use std::collections::HashMap;
@@ -43,13 +43,6 @@ impl ToolRegistrySnapshot {
     /// Provider-facing definitions in the same order as their pinned handles.
     pub(crate) fn definitions(&self) -> &[ToolDefinition] {
         &self.definitions
-    }
-
-    /// Narrow both provider exposure and dispatch to one per-turn allow-list.
-    pub(crate) fn retain_names(&mut self, names: &BTreeSet<String>) {
-        self.definitions
-            .retain(|definition| names.contains(&definition.name));
-        self.tools.retain(|name, _| names.contains(name));
     }
 
     /// Dispatch through the exact implementation advertised for this turn.

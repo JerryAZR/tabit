@@ -5,12 +5,11 @@ mod tools;
 
 pub use model_conformance::{
     ConformanceToolError, ScenarioError, ScenarioReport, buffered_streaming_text_parity,
-    cancellation_and_max_turns, complex_tool_arguments, decode_structured_output,
-    hook_rewrites_and_request_patch, invalid_tool_recovery, optional_argument, parallel_tools,
-    sequential_tools, streaming_tool, tool_choice_modes, tool_output_serialization,
-    validate_cancelled_failure, validate_extraction_fields, validate_max_turns_failure,
-    validate_protocol_hygiene, validate_result_redaction, validate_rewritten_arguments,
-    zero_argument_tool,
+    cancellation_and_max_turns, complex_tool_arguments, decode_structured_output, hook_rewrites,
+    invalid_tool_recovery, optional_argument, parallel_tools, sequential_tools, streaming_tool,
+    tool_choice_modes, tool_output_serialization, validate_cancelled_failure,
+    validate_extraction_fields, validate_max_turns_failure, validate_protocol_hygiene,
+    validate_result_redaction, validate_rewritten_arguments, zero_argument_tool,
 };
 pub use rig_core::test_utils::*;
 pub use tools::{

@@ -24,16 +24,14 @@ use tracing_futures::Instrument;
 use crate::{
     agent::{
         completion::{PreparedCompletionRequest, build_prepared_completion_request},
-        hook::{AgentHook, HookContext, ModelSelection, ModelSelectionAction},
-        model::ModelHandle,
+        hook::HookContext,
         prompt_request::{
             PromptResponse,
             streaming::{MultiTurnStreamItem, StreamingError},
         },
         run::{ModelTurn, PendingToolCall, ProviderErrorClass, RunLedger},
         runner::{
-            AgentRunner, ToolExecution, append_run_messages, new_execute_tool_span,
-            resolve_completion_call, run_single_tool,
+            AgentRunner, ToolExecution, append_run_messages, new_execute_tool_span, run_single_tool,
         },
     },
     completion::{CompletionError, Message, PromptError},
@@ -259,11 +257,6 @@ where
         // its immediately following tool phase. This pins tool execution to
         // the definitions sent that turn.
         let mut pending_tool_snapshot: Option<Arc<ToolRegistrySnapshot>> = None;
-        // Live routing state: the model behind the preceding *issued*
-        // attempt. It advances immediately before the selected model's
-        // operation is invoked, so a preparation failure leaves it
-        // unchanged while a provider error still counts.
-        let mut previous_model: Option<ModelHandle> = None;
         // A provider failure's original error shape is restored at the exit.
         let mut provider_failure = false;
 
@@ -394,40 +387,10 @@ where
             }
             hook_ctx.set_turn(current_turn);
 
-            // Completion-call hooks: their merged `RequestPatch` shapes the
-            // request (observe-and-patch; there is no stop action — the
-            // veto deletion's ruling extends here, ENGINE.md hooks).
-            let request_patch =
-                resolve_completion_call(&runner.hooks, &hook_ctx, &prompt, &history, current_turn)
-                    .await;
-
-            // Resolve routing once at the model-call boundary.
-            let selected_model = match runner.hooks.on_model_select(
-                &hook_ctx,
-                ModelSelection {
-                    prompt: &prompt,
-                    history: &history,
-                    request_patch: request_patch.as_ref(),
-                    previous_model: previous_model.as_ref(),
-                    default_model: &runner.model,
-                    selected_model: &runner.model,
-                },
-            ) {
-                ModelSelectionAction::Continue => runner.model.clone(),
-                ModelSelectionAction::Select(model) => model,
-            };
-
-            // This turn's base system prompt — the patched-or-baseline
-            // preamble.
-            let effective_preamble = request_patch
-                .as_ref()
-                .and_then(|o| o.preamble.as_deref())
-                .or(runner.preamble.as_deref());
-
-            let chat_span = source.open_chat_span(&runner, effective_preamble);
+            let chat_span = source.open_chat_span(&runner, runner.preamble.as_deref());
 
             let mut prepared = match build_prepared_completion_request(
-                &selected_model,
+                &runner.model,
                 &history,
                 runner.preamble.as_deref(),
                 &runner.static_context,
@@ -438,7 +401,6 @@ where
                 runner.tool_choice.as_ref(),
                 &runner.tool_server_handle,
                 runner.output_schema.as_ref(),
-                request_patch.as_ref(),
             )
             .await
             {
@@ -458,11 +420,6 @@ where
                 rig_core::telemetry::record_model_input(&chat_span, &input_messages, true);
                 prepared.builder = prepared.builder.record_content_telemetry(false);
             }
-
-            // The attempt is now committed: advance `previous_model`
-            // immediately before the model turn is driven. An issued
-            // attempt counts even when the provider returns an error.
-            previous_model = Some(selected_model);
 
             // Announce the turn (ENGINE.md, delta 10): the attempt is
             // irreversible, so this is "the model call begins". Mint the
@@ -561,19 +518,6 @@ where
             };
 
             // ── SETTLE ──────────────────────────────────────────────
-            // Hooks observe the completed turn; there is no verdict
-            // (ENGINE.md: the veto is deleted).
-            AgentHook::on_model_turn_finished(
-                &runner.hooks,
-                &hook_ctx,
-                crate::agent::hook::ModelTurnFinished {
-                    turn: current_turn,
-                    content: &turn.choice,
-                    usage: turn.usage,
-                },
-            )
-            .await;
-
             // A completed turn resets the failure streaks (a committed
             // model call counts; the parked machine did this at park).
             defect_streak = 0;
@@ -596,7 +540,6 @@ where
                         content: Box::new(turn.choice.clone()),
                     }));
                 }
-                turns_used += 1;
 
                 let run_messages = conversation.messages()[entry_len.min(
                     conversation.messages().len(),

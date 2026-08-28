@@ -20,7 +20,7 @@
 //! extensions later plug into this same seam.
 
 use crate::context_manager::ContextManager;
-use crate::entry::{EntryKind, FileRecord, SideKind, SideRecord};
+use crate::entry::{FileRecord, SideKind, SideRecord};
 use crate::error::SessionError;
 use crate::interaction::InteractionHub;
 use crate::lock::lock;
@@ -482,16 +482,6 @@ impl Mailbox {
         lock(&self.queue).drain(..).collect()
     }
 
-    /// The handler-side drain: everything queued, read-only on the
-    /// parked ids — the engine's own drain takes them later, so the
-    /// fold (handler) and the id FIFO (engine) never share a take.
-    fn drain_steers(&self) -> Vec<Message> {
-        lock(&self.queue)
-            .iter()
-            .map(|queued| queued.message.clone())
-            .collect()
-    }
-
     /// The engine-side drain: the batch becomes steers. Ids park in FIFO
     /// order for the fold's `Steer` items.
     fn take_steers(&self) -> Vec<Message> {
@@ -913,9 +903,6 @@ impl Session {
         // `TurnStarted`, stamps every turn-scoped event, and outlives the
         // turn's commit (its tool results arrive after `TurnCommitted`).
         let mut current_turn: Option<String> = None;
-        // The current turn's completion-call usage (usage facts are
-        // deferred; kept for the truncation warning's finish reason).
-        let mut turn_usage = Usage::default();
         // A tools turn's assistant, staged between its TurnCommitted
         // (where the payload arrives) and its BatchResults (where the
         // roundtrip commits as one verified fold_all). Final turns
@@ -948,7 +935,6 @@ impl Session {
             match item {
                 Ok(MultiTurnStreamItem::TurnStarted { id }) => {
                     current_turn = Some(id.clone());
-                    turn_usage = Usage::default();
                     sink.emit(SessionEvent::TurnStarted { id });
                 }
                 Ok(MultiTurnStreamItem::TurnCommitted { id, content }) => {
@@ -983,9 +969,10 @@ impl Session {
                     // violation — internal, loud.
                     let turn_id = announce(&current_turn);
                     let Some(assistant) = staged_assistant.take() else {
-                        #[allow(clippy::panic)]
                         panic!(
-                            "a tools turn's BatchResults arrived without its assistant                              payload (its TurnCommitted) — the engine settled results for                              a turn it never announced"
+                            "a tools turn's BatchResults arrived without its assistant payload \
+                             (its TurnCommitted) — the engine settled results for a turn it \
+                             never announced"
                         );
                     };
                     let result_ids: Vec<String> =
@@ -1047,7 +1034,6 @@ impl Session {
                 }
                 Ok(MultiTurnStreamItem::CompletionCall(call)) => {
                     let turn_id = announce(&current_turn);
-                    turn_usage = call.usage;
                     // The live ledger grows with the deferred zeros:
                     // the per-model slot exists (usage facts ride the
                     // records; the totals resume at the usage

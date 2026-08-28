@@ -39,9 +39,8 @@ use super::{
         record_usage_on_span, streaming_error_into_prompt,
     },
     hook::{
-        AgentHook, CompletionCall, CompletionCallAction,
-        CompletionResponse as CompletionResponseEvent, HookContext, HookStack, ModelTurnFinished,
-        RequestPatch, ToolCall as ToolCallEvent, ToolCallAction, ToolResultAction, ToolResultEvent,
+        AgentHook, HookContext, HookStack, ToolCall as ToolCallEvent, ToolCallAction,
+        ToolResultAction, ToolResultEvent,
     },
     model::ModelHandle,
     prompt_request::{
@@ -126,18 +125,6 @@ pub(crate) fn tool_result_decision(action: ToolResultAction) -> ToolResultDecisi
         ToolResultAction::Keep => ToolResultDecision::Keep,
         ToolResultAction::Rewrite(result) => ToolResultDecision::Replace(result),
         ToolResultAction::Stop(reason) => ToolResultDecision::Stop(reason),
-    }
-}
-
-pub(crate) enum CompletionCallDecision {
-    Proceed,
-    Patch(RequestPatch),
-}
-
-pub(crate) fn completion_call_decision(action: CompletionCallAction) -> CompletionCallDecision {
-    match action {
-        CompletionCallAction::Continue => CompletionCallDecision::Proceed,
-        CompletionCallAction::Patch(patch) => CompletionCallDecision::Patch(patch),
     }
 }
 
@@ -525,7 +512,7 @@ impl AgentRunner {
             // with the contract in the message.
             return Err(PromptError::prompt_cancelled(
                 Vec::new(),
-                "empty conversation: stream_chat history must end with the                  message being sent",
+                "empty conversation: stream_chat history must end with the message being sent",
             ));
         }
         if self.max_turns == 0 {
@@ -537,20 +524,6 @@ impl AgentRunner {
             ));
         }
         Ok(ContextManager::seeded(history))
-    }
-
-    /// The conversation this run drives: the caller's manager when one
-    /// is supplied (the session layer), else a fresh seeded standalone
-    /// one (nothing persists).
-    pub(crate) fn build_conversation(
-        &self,
-        history_override: Option<Vec<Message>>,
-        supplied: Option<ContextManager>,
-    ) -> Result<ContextManager, PromptError> {
-        match supplied {
-            Some(conversation) => Ok(conversation),
-            None => self.build_run(history_override),
-        }
     }
 
     /// The run's input history for prompt mode: an override (memory) or
@@ -598,33 +571,6 @@ pub(crate) fn acquire_agent_span(
         (span, true)
     } else {
         (tracing::Span::current(), false)
-    }
-}
-
-/// Fire the event-specific completion-call hook for a turn: the merged
-/// per-turn patch from every hook that contributed one (observe-and-
-/// patch; there is no stop action — the veto deletion's ruling).
-pub(crate) async fn resolve_completion_call(
-    hooks: &HookStack,
-    ctx: &HookContext,
-    prompt: &Message,
-    history: &[Message],
-    turn: usize,
-) -> Option<RequestPatch> {
-    match completion_call_decision(
-        hooks
-            .on_completion_call(
-                ctx,
-                CompletionCall {
-                    prompt,
-                    history,
-                    turn,
-                },
-            )
-            .await,
-    ) {
-        CompletionCallDecision::Patch(patch) => Some(patch),
-        CompletionCallDecision::Proceed => None,
     }
 }
 
@@ -958,12 +904,12 @@ impl TurnSource for UnaryTurnSource {
     fn run_model_turn<'a>(
         &'a mut self,
         runner: &'a AgentRunner,
-        hook_ctx: &'a HookContext,
+        _hook_ctx: &'a HookContext,
         ledger: &'a mut RunLedger,
         prepared: PreparedCompletionRequest,
         chat_span: tracing::Span,
         _agent_span: &'a tracing::Span,
-        current_prompt: Message,
+        _current_prompt: Message,
     ) -> DriveStream<'a> {
         Box::pin(async_stream::stream! {
             let resp = match prepared.builder.send().instrument(chat_span.clone()).await {
@@ -976,21 +922,6 @@ impl TurnSource for UnaryTurnSource {
 
             let finish_reason = resp.finish_reason();
             ledger.record(resp.usage, finish_reason.clone());
-
-            // The response-finish observation (observe-only — there is no
-            // stop action; the veto deletion's ruling).
-            runner
-                .hooks
-                .on_completion_response(
-                    hook_ctx,
-                    CompletionResponseEvent {
-                        prompt: &current_prompt,
-                        content: &resp.choice,
-                        usage: resp.usage,
-                        message_id: resp.message_id.as_deref(),
-                    },
-                )
-                .await;
 
             if runner.record_telemetry_content {
                 rig_core::telemetry::record_model_output(&chat_span, &resp.choice, true);
@@ -1194,7 +1125,6 @@ impl AgentRunner {
         let stream = async_stream::stream! {
             let mut conversation = conversation;
             let source = StreamingTurnSource::new(
-                &self.hooks,
                 self.agent_name_or_default().to_string(),
                 created_agent_span,
                 self.record_telemetry_content,

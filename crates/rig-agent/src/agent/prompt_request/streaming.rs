@@ -4,17 +4,14 @@ use crate::{
     agent::completion::PreparedCompletionRequest,
     agent::drive::PhaseEvent,
     agent::drive::{DriveStream, TurnSource, drive_tool_calls, record_usage_on_span},
-    agent::hook::{
-        AgentHook, HookContext, HookStack, ModelTurnFinished, StepEventKind, StreamResponseFinish,
-        TextDelta, ToolCallDelta,
-    },
+    agent::hook::{AgentHook, HookContext},
     agent::prompt_request::{assistant_text_from_choice, is_empty_assistant_turn},
     agent::run::{
         ModelTurn, PendingToolCall, RunLedger,
         streamed::{StreamedTurnAssembler, StreamedTurnEvent},
     },
     agent::runner::{AgentRunner, build_chat_span},
-    streaming::{StreamedAssistantContent, StreamedUserContent, ToolCallDeltaContent},
+    streaming::{StreamedAssistantContent, StreamedUserContent},
     tool::{ToolContext, server::ToolRegistrySnapshot},
 };
 use futures::{Stream, StreamExt};
@@ -301,11 +298,9 @@ impl StreamingPromptRequest {
     }
 
     /// Append a hook to this request's hook stack (on top of any the agent
-    /// already carries). Hooks run in registration order; how their results
-    /// compose is event-dependent (model selections and `ToolCall`/`ToolResult` rewrites
-    /// chain, `CompletionCall` request patches accumulate and merge, while model-turn
-    /// steering and observe-only/recovery events use first-non-`Continue`-wins). See the
-    /// [`hook`](crate::agent::hook) module docs.
+    /// already carries). Hooks run in registration order; tool-call argument
+    /// rewrites chain into later hooks (see the
+    /// [`hook`](crate::agent::hook) module docs).
     pub fn add_hook<H>(mut self, hook: H) -> Self
     where
         H: AgentHook + 'static,
@@ -352,15 +347,10 @@ pub(crate) struct StreamingTurnSource {
     created_agent_span: bool,
     /// Whether sensitive run-level prompt and completion content may be recorded.
     record_telemetry_content: bool,
-    /// Hot-path interest gates, computed once: skip building/dispatching the
-    /// high-frequency delta events when no hook observes them.
-    observes_text_delta: bool,
-    observes_tool_call_delta: bool,
 }
 
 impl StreamingTurnSource {
     pub(crate) fn new(
-        hooks: &HookStack,
         agent_name: String,
         created_agent_span: bool,
         record_telemetry_content: bool,
@@ -371,8 +361,6 @@ impl StreamingTurnSource {
             agent_name,
             created_agent_span,
             record_telemetry_content,
-            observes_text_delta: hooks.observes(StepEventKind::TextDelta),
-            observes_tool_call_delta: hooks.observes(StepEventKind::ToolCallDelta),
         }
     }
 }
@@ -389,12 +377,12 @@ impl TurnSource for StreamingTurnSource {
     fn run_model_turn<'a>(
         &'a mut self,
         runner: &'a AgentRunner,
-        hook_ctx: &'a HookContext,
+        _hook_ctx: &'a HookContext,
         ledger: &'a mut RunLedger,
         prepared: PreparedCompletionRequest,
         chat_span: tracing::Span,
         agent_span: &'a tracing::Span,
-        current_prompt: Message,
+        _current_prompt: Message,
     ) -> DriveStream<'a> {
         Box::pin(async_stream::stream! {
             let mut stream = match prepared
@@ -409,8 +397,8 @@ impl TurnSource for StreamingTurnSource {
                     return;
                 }
             };
-            // Captured from each completion-call emission so the normalized
-            // `ModelTurnFinished` event carries the turn's usage.
+            // Captured from each completion-call emission so the settled
+            // `ModelTurn` carries the turn's usage.
             let mut last_usage = crate::completion::Usage::new();
 
             let mut assembler = StreamedTurnAssembler::new(
@@ -475,21 +463,6 @@ impl TurnSource for StreamingTurnSource {
                 while let Some(event) = events.pop_front() {
                     match event {
                         StreamedTurnEvent::EmitIngested => {
-                            if self.observes_text_delta
-                                && let Some(StreamedAssistantContent::Text(text)) =
-                                    item_slot.as_ref()
-                            {
-                                runner
-                                    .hooks
-                                    .on_text_delta(
-                                        hook_ctx,
-                                        TextDelta {
-                                            delta: &text.text,
-                                            aggregated: assembler.aggregated_text(),
-                                        },
-                                    )
-                                    .await;
-                            }
                             if let Some(item) = item_slot.take() {
                                 yield Ok(PhaseEvent::Item(
                                     MultiTurnStreamItem::stream_item(item),
@@ -501,31 +474,12 @@ impl TurnSource for StreamingTurnSource {
                             internal_call_id,
                             content,
                         } => {
-                            if self.observes_tool_call_delta {
-                                let (delta_name, delta_text) = match &content {
-                                    ToolCallDeltaContent::Name(name) => (Some(name.as_str()), ""),
-                                    ToolCallDeltaContent::Delta(delta) => (None, delta.as_str()),
-                                };
-                                runner
-                                    .hooks
-                                    .on_tool_call_delta(
-                                        hook_ctx,
-                                        ToolCallDelta {
-                                            tool_call_id: &id,
-                                            internal_call_id: &internal_call_id,
-                                            tool_name: delta_name,
-                                            delta: delta_text,
-                                        },
-                                    )
-                                    .await;
-                            }
-
                             yield Ok(PhaseEvent::Item(
                                 MultiTurnStreamItem::StreamAssistantItem(
                                     StreamedAssistantContent::ToolCallDelta {
                                         id,
-                                        internal_call_id,
-                                        content,
+                        internal_call_id,
+                        content,
                                     },
                                 )
                             ));
@@ -588,20 +542,6 @@ impl TurnSource for StreamingTurnSource {
 
             let final_turn_content = stream.choice.clone();
             let streamed_turn = assembler.finish(stream.message_id.clone(), &final_turn_content);
-            if pending_final.is_some() {
-                runner
-                    .hooks
-                    .on_stream_response_finish(
-                        hook_ctx,
-                        StreamResponseFinish {
-                            prompt: &current_prompt,
-                            content: &streamed_turn.choice,
-                            usage: last_usage,
-                            message_id: streamed_turn.message_id.as_deref(),
-                        },
-                    )
-                    .await;
-            }
             self.last_message_id = streamed_turn.message_id.clone();
             // The canonical assistant content: `finish` normalizes
             // reasoning/text/tool ordering, so this can differ from the raw
@@ -630,7 +570,7 @@ impl TurnSource for StreamingTurnSource {
             }
             self.last_final_choice = final_turn_content;
 
-            // Settle: the loop observes (model-turn hooks), classifies, and
+            // Settle: the loop classifies and
             // folds — this source's part in the turn is done.
             let mut turn = ModelTurn::new(
                 streamed_turn.message_id.clone(),

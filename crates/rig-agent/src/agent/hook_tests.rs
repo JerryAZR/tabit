@@ -1,40 +1,15 @@
 use super::*;
 use crate::tool::{ToolErrorKind, ToolExecutionError};
 
-struct Patcher(f64);
-impl AgentHook for Patcher {
-    async fn on_completion_call(
-        &self,
-        _ctx: &HookContext,
-        _event: CompletionCall<'_>,
-    ) -> CompletionCallAction {
-        CompletionCallAction::patch(RequestPatch::new().temperature(self.0))
-    }
-}
+use std::sync::{
+    Arc, Mutex,
+    atomic::{AtomicUsize, Ordering},
+};
 
-#[tokio::test]
-async fn nested_completion_patches_compose() {
-    let inner = HookStack::with(Patcher(0.1));
-    let mut outer = HookStack::with(inner);
-    outer.push(Patcher(0.2));
-    let prompt = Message::user("hi");
-    let action = outer
-        .on_completion_call(
-            &HookContext::new(false, None, Default::default()),
-            CompletionCall {
-                prompt: &prompt,
-                history: &[],
-                turn: 1,
-            },
-        )
-        .await;
-    assert!(matches!(
-        action,
-        CompletionCallAction::Patch(RequestPatch {
-            temperature: Some(0.2),
-            ..
-        })
-    ));
+use serde_json::{Value, json};
+
+fn ctx() -> HookContext {
+    HookContext::new(false, Some("test-agent".to_string()), Default::default())
 }
 
 #[derive(Clone)]
@@ -210,177 +185,6 @@ async fn terminal_result_action_short_circuits_later_hooks() {
     assert_eq!(calls.load(Ordering::Relaxed), 1);
 }
 
-use std::sync::{
-    Arc, Mutex,
-    atomic::{AtomicUsize, Ordering},
-};
-
-use serde_json::{Value, json};
-
-fn ctx() -> HookContext {
-    HookContext::new(false, Some("test-agent".to_string()), Default::default())
-}
-
-fn model(label: &str) -> ModelHandle {
-    ModelHandle::named(label, crate::test_utils::MockCompletionModel::default())
-}
-
-enum RouteDecision {
-    Continue,
-    Select(ModelHandle),
-}
-
-type RouteLog = Arc<Mutex<Vec<(&'static str, Option<String>)>>>;
-
-struct RouteRecorder {
-    label: &'static str,
-    log: RouteLog,
-    decision: RouteDecision,
-}
-
-impl AgentHook for RouteRecorder {
-    fn on_model_select(
-        &self,
-        _ctx: &HookContext,
-        event: ModelSelection<'_>,
-    ) -> ModelSelectionAction {
-        self.log
-            .lock()
-            .expect("route log")
-            .push((self.label, event.selected_model.label().map(str::to_owned)));
-        match &self.decision {
-            RouteDecision::Continue => ModelSelectionAction::continue_run(),
-            RouteDecision::Select(model) => ModelSelectionAction::select(model.clone()),
-        }
-    }
-}
-
-fn model_selection<'a>(prompt: &'a Message, default_model: &'a ModelHandle) -> ModelSelection<'a> {
-    ModelSelection {
-        prompt,
-        history: &[],
-        request_patch: None,
-        previous_model: None,
-        default_model,
-        selected_model: default_model,
-    }
-}
-
-#[test]
-fn model_selections_chain_in_registration_order_and_last_wins() {
-    let default = model("default");
-    let first = model("first");
-    let last = model("last");
-    let log = Arc::new(Mutex::new(Vec::new()));
-    let mut stack = HookStack::with(RouteRecorder {
-        label: "continue",
-        log: log.clone(),
-        decision: RouteDecision::Continue,
-    });
-    stack.push(RouteRecorder {
-        label: "first",
-        log: log.clone(),
-        decision: RouteDecision::Select(first),
-    });
-    stack.push(RouteRecorder {
-        label: "last",
-        log: log.clone(),
-        decision: RouteDecision::Select(last),
-    });
-    let prompt = Message::user("route");
-
-    let action = stack.on_model_select(&ctx(), model_selection(&prompt, &default));
-
-    let ModelSelectionAction::Select(selected) = action else {
-        panic!("stack should select the last candidate");
-    };
-    assert_eq!(selected.label(), Some("last"));
-    assert_eq!(
-        log.lock().expect("route log").as_slice(),
-        &[
-            ("continue", Some("default".to_owned())),
-            ("first", Some("default".to_owned())),
-            ("last", Some("first".to_owned())),
-        ]
-    );
-}
-
-#[test]
-fn nested_model_selection_stacks_preserve_candidate_chaining() {
-    let default = model("default");
-    let log = Arc::new(Mutex::new(Vec::new()));
-    let inner = HookStack::with(RouteRecorder {
-        label: "inner",
-        log: log.clone(),
-        decision: RouteDecision::Select(model("inner")),
-    });
-    let mut outer = HookStack::with(RouteRecorder {
-        label: "outer-before",
-        log: log.clone(),
-        decision: RouteDecision::Select(model("outer")),
-    });
-    outer.push(inner);
-    outer.push(RouteRecorder {
-        label: "outer-after",
-        log: log.clone(),
-        decision: RouteDecision::Continue,
-    });
-    let prompt = Message::user("route");
-
-    let action = outer.on_model_select(&ctx(), model_selection(&prompt, &default));
-
-    let ModelSelectionAction::Select(selected) = action else {
-        panic!("nested stack should preserve the inner selection");
-    };
-    assert_eq!(selected.label(), Some("inner"));
-    assert_eq!(
-        log.lock().expect("route log").as_slice(),
-        &[
-            ("outer-before", Some("default".to_owned())),
-            ("inner", Some("outer".to_owned())),
-            ("outer-after", Some("inner".to_owned())),
-        ]
-    );
-}
-
-#[test]
-fn nested_model_selection_stack_without_a_selection_preserves_outer_candidate() {
-    let default = model("default");
-    let log = Arc::new(Mutex::new(Vec::new()));
-    let inner = HookStack::with(RouteRecorder {
-        label: "inner-continue",
-        log: log.clone(),
-        decision: RouteDecision::Continue,
-    });
-    let mut outer = HookStack::with(RouteRecorder {
-        label: "outer-select",
-        log: log.clone(),
-        decision: RouteDecision::Select(model("outer")),
-    });
-    outer.push(inner);
-    outer.push(RouteRecorder {
-        label: "outer-after",
-        log: log.clone(),
-        decision: RouteDecision::Continue,
-    });
-    let prompt = Message::user("route");
-
-    let action = outer.on_model_select(&ctx(), model_selection(&prompt, &default));
-
-    let ModelSelectionAction::Select(selected) = action else {
-        panic!("outer selection should survive a continuing nested stack");
-    };
-    assert_eq!(selected.label(), Some("outer"));
-    assert_eq!(
-        log.lock().expect("route log").as_slice(),
-        &[
-            ("outer-select", Some("default".to_owned())),
-            ("inner-continue", Some("outer".to_owned())),
-            ("outer-after", Some("outer".to_owned())),
-        ]
-    );
-}
-
 struct ToolRecorder {
     label: u32,
     log: Arc<Mutex<Vec<u32>>>,
@@ -397,55 +201,12 @@ impl AgentHook for ToolRecorder {
     }
 }
 
-struct ObservationRecorder {
-    label: u32,
-    log: Arc<Mutex<Vec<u32>>>,
-    stop: bool,
-}
-impl AgentHook for ObservationRecorder {
-    async fn on_text_delta(&self, _ctx: &HookContext, _event: TextDelta<'_>) {
-        self.log.lock().expect("log").push(self.label);
-    }
-}
-
-struct ObservesOnly(StepEventKind);
-impl AgentHook for ObservesOnly {
-    fn observes(&self, kind: StepEventKind) -> bool {
-        kind == self.0
-    }
-}
-
-struct LabeledPatcher {
-    label: u32,
-    log: Arc<Mutex<Vec<u32>>>,
-    patch: RequestPatch,
-    stop: bool,
-}
-impl AgentHook for LabeledPatcher {
-    async fn on_completion_call(
-        &self,
-        _ctx: &HookContext,
-        _event: CompletionCall<'_>,
-    ) -> CompletionCallAction {
-        self.log.lock().expect("log").push(self.label);
-        CompletionCallAction::patch(self.patch.clone())
-    }
-}
-
 fn tool_call_event() -> ToolCall<'static> {
     ToolCall {
         tool_name: "add",
         tool_call_id: Some("tc1"),
         internal_call_id: "ic1",
         args: "{}",
-    }
-}
-fn completion_call_event() -> CompletionCall<'static> {
-    static PROMPT: std::sync::OnceLock<rig_core::message::Message> = std::sync::OnceLock::new();
-    CompletionCall {
-        prompt: PROMPT.get_or_init(|| rig_core::message::Message::user("hi")),
-        history: &[],
-        turn: 1,
     }
 }
 
@@ -487,220 +248,6 @@ async fn first_skip_short_circuits_on_chained_tool_call() {
         ToolCallAction::Skip(_)
     ));
     assert_eq!(*log.lock().unwrap(), vec![1]);
-}
-
-#[tokio::test]
-async fn observation_hooks_fire_every_observer() {
-    // Observation has no stop action: every observer runs, in order.
-    let log = Arc::new(Mutex::new(Vec::new()));
-    let mut stack = HookStack::with(ObservationRecorder {
-        label: 1,
-        log: log.clone(),
-        stop: false,
-    });
-    stack.push(ObservationRecorder {
-        label: 2,
-        log: log.clone(),
-        stop: false,
-    });
-    stack
-        .on_text_delta(
-            &ctx(),
-            TextDelta {
-                delta: "hi",
-                aggregated: "hi",
-            },
-        )
-        .await;
-    assert_eq!(*log.lock().unwrap(), vec![1, 2]);
-}
-
-#[tokio::test]
-async fn completion_patches_accumulate_and_stop_discards_prior_patch() {
-    let log = Arc::new(Mutex::new(Vec::new()));
-    let mut stack = HookStack::with(LabeledPatcher {
-        label: 1,
-        log: log.clone(),
-        patch: RequestPatch::new().temperature(0.1),
-        stop: false,
-    });
-    stack.push(LabeledPatcher {
-        label: 2,
-        log: log.clone(),
-        patch: RequestPatch::new().max_tokens(256),
-        stop: false,
-    });
-    match stack
-        .on_completion_call(&ctx(), completion_call_event())
-        .await
-    {
-        CompletionCallAction::Patch(p) => {
-            assert_eq!(p.temperature, Some(0.1));
-            assert_eq!(p.max_tokens, Some(256));
-        }
-        other => panic!("expected patch, got {other:?}"),
-    }
-    assert_eq!(*log.lock().unwrap(), vec![1, 2]);
-}
-
-#[tokio::test]
-async fn nested_stack_composes_patches() {
-    let log = Arc::new(Mutex::new(Vec::new()));
-    let mut inner = HookStack::with(LabeledPatcher {
-        label: 1,
-        log: log.clone(),
-        patch: RequestPatch::new().temperature(0.2),
-        stop: false,
-    });
-    inner.push(LabeledPatcher {
-        label: 2,
-        log: log.clone(),
-        patch: RequestPatch::new().max_tokens(128),
-        stop: false,
-    });
-    let mut outer = HookStack::with(inner);
-    outer.push(LabeledPatcher {
-        label: 3,
-        log: log.clone(),
-        patch: RequestPatch::new().preamble("outer"),
-        stop: false,
-    });
-    match outer
-        .on_completion_call(&ctx(), completion_call_event())
-        .await
-    {
-        CompletionCallAction::Patch(p) => {
-            assert_eq!(p.temperature, Some(0.2));
-            assert_eq!(p.max_tokens, Some(128));
-            assert_eq!(p.preamble.as_deref(), Some("outer"));
-        }
-        other => panic!("expected patch, got {other:?}"),
-    }
-    assert_eq!(*log.lock().unwrap(), vec![1, 2, 3]);
-}
-
-#[test]
-fn stack_observes_is_the_or_of_members() {
-    let mut stack = HookStack::with(ObservesOnly(StepEventKind::ToolCall));
-    stack.push(ObservesOnly(StepEventKind::ToolResult));
-    assert!(<HookStack as AgentHook>::observes(
-        &stack,
-        StepEventKind::ToolCall
-    ));
-    assert!(<HookStack as AgentHook>::observes(
-        &stack,
-        StepEventKind::ToolResult
-    ));
-    assert!(!<HookStack as AgentHook>::observes(
-        &stack,
-        StepEventKind::TextDelta
-    ));
-}
-
-#[test]
-fn empty_stack_observes_nothing() {
-    let empty = HookStack::new();
-    assert!(empty.is_empty());
-    assert!(!<HookStack as AgentHook>::observes(
-        &empty,
-        StepEventKind::ToolCall
-    ));
-}
-
-#[test]
-fn unit_hook_observes_no_event_kind() {
-    for kind in [
-        StepEventKind::CompletionCall,
-        StepEventKind::CompletionResponse,
-        StepEventKind::ModelTurnFinished,
-        StepEventKind::ToolCall,
-        StepEventKind::ToolResult,
-        StepEventKind::TextDelta,
-        StepEventKind::ToolCallDelta,
-        StepEventKind::StreamResponseFinish,
-    ] {
-        assert!(!<() as AgentHook>::observes(&(), kind));
-    }
-}
-
-fn doc(id: &str) -> crate::completion::Document {
-    crate::completion::Document {
-        id: id.into(),
-        text: String::new(),
-        additional_props: Default::default(),
-    }
-}
-
-#[test]
-fn merge_appends_extra_context_in_order() {
-    let merged = RequestPatch::new()
-        .context(doc("a"))
-        .merge(RequestPatch::new().context(doc("b")));
-    assert_eq!(
-        merged
-            .extra_context
-            .iter()
-            .map(|d| d.id.as_str())
-            .collect::<Vec<_>>(),
-        vec!["a", "b"]
-    );
-}
-
-#[test]
-fn merge_shallow_merges_additional_params_later_wins() {
-    let merged = RequestPatch::new()
-        .additional_params(json!({"x":1,"y":2}))
-        .merge(RequestPatch::new().additional_params(json!({"y":3,"z":4})));
-    assert_eq!(merged.additional_params, Some(json!({"x":1,"y":3,"z":4})));
-}
-
-#[test]
-fn merge_scalar_last_writer_wins() {
-    assert_eq!(
-        RequestPatch::new()
-            .temperature(0.1)
-            .merge(RequestPatch::new().temperature(0.9))
-            .temperature,
-        Some(0.9)
-    );
-}
-
-#[test]
-fn merge_active_tools_intersects() {
-    let merged = RequestPatch::new()
-        .active_tools(["add", "sub"])
-        .merge(RequestPatch::new().active_tools(["sub", "mul"]));
-    assert_eq!(merged.active_tools, Some(vec!["sub".into()]));
-}
-
-#[test]
-fn merge_active_tools_empty_intersection_yields_empty() {
-    assert_eq!(
-        RequestPatch::new()
-            .active_tools(["a"])
-            .merge(RequestPatch::new().active_tools(["b"]))
-            .active_tools,
-        Some(vec![])
-    );
-}
-
-#[test]
-fn scratchpad_insert_get_update_remove() {
-    #[derive(Clone, Default, Debug, PartialEq)]
-    struct Count(u32);
-    let pad = Scratchpad::default();
-    pad.update(|c: &mut Count| c.0 += 1);
-    pad.update(|c: &mut Count| c.0 += 1);
-    assert_eq!(pad.get::<Count>(), Some(Count(2)));
-    assert_eq!(pad.remove::<Count>(), Some(Count(2)));
-}
-
-#[test]
-fn scratchpad_is_shared_across_clones() {
-    let pad = Scratchpad::default();
-    let clone = pad.clone();
-    pad.insert(7u32);
-    assert_eq!(clone.get::<u32>(), Some(7));
 }
 
 #[test]
@@ -916,39 +463,6 @@ fn run_id_displays_as_text() {
 }
 
 #[test]
-fn scratchpad_contains_tracks_type_presence() {
-    let pad = Scratchpad::default();
-    assert!(!pad.contains::<u32>());
-    pad.insert(7_u32);
-    assert!(pad.contains::<u32>());
-    pad.remove::<u32>();
-    assert!(!pad.contains::<u32>());
-}
-
-#[test]
-fn hook_context_debug_reports_scratchpad_entry_count() {
-    let context = ctx();
-    context.scratchpad().insert(1_u32);
-    let debug = format!("{context:?}");
-    assert!(
-        debug.contains("entries: 1"),
-        "scratchpad entry count missing: {debug}"
-    );
-}
-
-#[test]
-fn model_selection_new_constructs_the_event_from_parts() {
-    let default = model("default");
-    let selected = model("selected");
-    let prompt = Message::user("route");
-    let event = ModelSelection::new(&prompt, &[], None, None, &default, &selected);
-    assert_eq!(event.default_model.label(), Some("default"));
-    assert_eq!(event.selected_model.label(), Some("selected"));
-    assert!(event.request_patch.is_none());
-    assert!(event.previous_model.is_none());
-}
-
-#[test]
 fn rewrite_output_replaces_with_explicit_tool_output() {
     let output = ToolOutput::text("redacted");
     assert_eq!(
@@ -957,13 +471,16 @@ fn rewrite_output_replaces_with_explicit_tool_output() {
     );
 }
 
+struct NoopHook;
+impl AgentHook for NoopHook {}
+
 #[test]
 fn hook_stack_len_reports_registration_count() {
     let mut stack = HookStack::new();
     assert_eq!(stack.len(), 0);
     assert!(stack.is_empty());
-    stack.push(());
-    stack.push(());
+    stack.push(NoopHook);
+    stack.push(NoopHook);
     assert_eq!(stack.len(), 2);
     assert!(!stack.is_empty());
 }
@@ -971,7 +488,7 @@ fn hook_stack_len_reports_registration_count() {
 #[test]
 fn hook_stack_debug_lists_registration_ids() {
     let mut stack = HookStack::new();
-    stack.push(());
+    stack.push(NoopHook);
     let debug = format!("{stack:?}");
     assert!(
         debug.contains("trait-0"),
@@ -1004,12 +521,8 @@ async fn dropped_tool_call_dispatch_future_releases_its_resolution_frame() {
 
 #[test]
 fn action_types_are_event_specific() {
-    fn model_selection(_: ModelSelectionAction) {}
-    fn completion(_: CompletionCallAction) {}
     fn call(_: ToolCallAction) {}
     fn result(_: ToolResultAction) {}
-    model_selection(ModelSelectionAction::continue_run());
-    completion(CompletionCallAction::continue_run());
     call(ToolCallAction::run());
     result(ToolResultAction::keep());
     let calls = AtomicUsize::new(0);
@@ -1058,35 +571,4 @@ async fn closure_records_order_by_priority_and_deny_is_absorbing() {
         vec!["auditor", "first"],
         "priority orders; the deny absorbs before `second`"
     );
-}
-
-#[tokio::test]
-async fn turn_finished_closures_observe_in_priority_order() {
-    let seen = Arc::new(std::sync::Mutex::new(Vec::new()));
-    let note = |label: &'static str| -> crate::agent::ModelTurnFinishedFn {
-        let seen = seen.clone();
-        Box::new(move |_, _| {
-            let seen = seen.clone();
-            Box::pin(async move {
-                seen.lock().unwrap().push(label);
-            })
-        })
-    };
-    // The observation point shares the order law: priority first,
-    // registration order breaking ties.
-    let stack = HookStack::new()
-        .hook(("late", 0), on::model_turn_finished(note("late")))
-        .hook(("early", -5), on::model_turn_finished(note("early")));
-    let content = OneOrMany::one(AssistantContent::text("done"));
-    AgentHook::on_model_turn_finished(
-        &stack,
-        &HookContext::new(false, None, Default::default()),
-        ModelTurnFinished {
-            turn: 1,
-            content: &content,
-            usage: Usage::default(),
-        },
-    )
-    .await;
-    assert_eq!(*seen.lock().unwrap(), vec!["early", "late"]);
 }

@@ -187,9 +187,6 @@ impl ContextManager {
             Message::System { content } => EntryKind::UserMessage {
                 message: Message::System { content },
             },
-            other => panic!(
-                "ContextManager::fold: only user and assistant messages fold, got `{other:?}`"
-            ),
         };
         self.commit_with_ids([(kind, id)]);
     }
@@ -302,7 +299,8 @@ impl ContextManager {
             });
         if let Err(reason) = path_is_closed(&path) {
             panic!(
-                "ContextManager::checkout to `{target:?}` refused: the target is inside an                  open tool roundtrip ({reason}) — a mid-roundtrip checkout is unsupported"
+                "ContextManager::checkout to `{target:?}` refused: the target is inside an \
+                 open tool roundtrip ({reason}) — a mid-roundtrip checkout is unsupported"
             );
         }
         self.tree
@@ -318,10 +316,6 @@ impl ContextManager {
     /// then grow the tree — never one without the other, and never a
     /// partial blob: a roundtrip enters the buffer whole or not at all,
     /// so a file with tool calls but no results is unrepresentable.
-    fn commit(&mut self, kinds: impl IntoIterator<Item = EntryKind>) {
-        self.commit_with_ids(kinds.into_iter().map(|kind| (kind, None)));
-    }
-
     fn commit_with_ids(&mut self, kinds: impl IntoIterator<Item = (EntryKind, Option<String>)>) {
         let mut parent = self.tree.head().map(str::to_string);
         let entries: Vec<SessionEntry> = kinds

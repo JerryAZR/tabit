@@ -1,8 +1,6 @@
-use crate::agent::{StreamResponseFinish, TextDelta, ToolCallDelta};
-
 use super::*;
 use crate::agent::AgentBuilder;
-use crate::agent::hook::{AgentHook, HookContext, ModelTurnFinished};
+use crate::agent::hook::{AgentHook, HookContext, ToolCall as ToolCallEvent, ToolCallAction};
 use crate::agent::prompt_request::tool_result_output;
 use crate::agent::run::streamed::merge_reasoning_blocks;
 use crate::client::AgentClientExt;
@@ -21,7 +19,7 @@ use rig_core::message::{
 };
 use rig_core::providers::anthropic;
 use serde::Deserialize;
-use std::collections::{BTreeSet, HashMap};
+use std::collections::HashMap;
 use std::sync::atomic::{AtomicBool, AtomicU32, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
@@ -40,33 +38,37 @@ fn reasoning(
     reasoning
 }
 
-struct CountingCompletionCallHook(std::sync::Arc<std::sync::atomic::AtomicUsize>);
+struct CountingToolCallHook(std::sync::Arc<std::sync::atomic::AtomicUsize>);
 
-impl AgentHook for CountingCompletionCallHook {
-    async fn on_completion_call(
-        &self,
-        _ctx: &HookContext,
-        _event: crate::agent::CompletionCallEvent<'_>,
-    ) -> crate::agent::CompletionCallAction {
+impl AgentHook for CountingToolCallHook {
+    async fn on_tool_call(&self, _ctx: &HookContext, _event: ToolCallEvent<'_>) -> ToolCallAction {
         self.0.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
-        crate::agent::CompletionCallAction::continue_run()
+        ToolCallAction::run()
     }
 }
 
 #[tokio::test]
 async fn public_streaming_request_constructor_preserves_agent_hooks() {
-    let model = MockCompletionModel::from_stream_turns([[
-        MockStreamEvent::text("answer"),
-        MockStreamEvent::final_response(Usage::new()),
-    ]]);
+    let model = MockCompletionModel::from_stream_turns([
+        vec![
+            MockStreamEvent::tool_call("tool_call_1", "add", serde_json::json!({"x": 1, "y": 2}))
+                .with_call_id("call_1"),
+            MockStreamEvent::final_response(Usage::new()),
+        ],
+        vec![
+            MockStreamEvent::text("answer"),
+            MockStreamEvent::final_response(Usage::new()),
+        ],
+    ]);
     let seen = std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0));
     let agent = Arc::new(
         AgentBuilder::new(model.clone())
-            .add_hook(CountingCompletionCallHook(seen.clone()))
+            .tool(MockAddTool)
+            .add_hook(CountingToolCallHook(seen.clone()))
             .build(),
     );
 
-    let mut stream = StreamingPromptRequest::new(agent, "go").await;
+    let mut stream = StreamingPromptRequest::new(agent, "go").max_turns(2).await;
     let mut finished = false;
     while let Some(item) = stream.next().await {
         if matches!(
@@ -77,7 +79,7 @@ async fn public_streaming_request_constructor_preserves_agent_hooks() {
         }
     }
     assert!(finished, "the run completes");
-    assert_eq!(model.request_count(), 1);
+    assert_eq!(model.request_count(), 2);
     assert_eq!(
         seen.load(std::sync::atomic::Ordering::SeqCst),
         1,
@@ -1674,139 +1676,9 @@ fn streaming_final_only_model() -> MockCompletionModel {
 }
 
 #[derive(Clone)]
-struct TerminateOnStreamFinish;
-
-impl AgentHook for TerminateOnStreamFinish {
-    async fn on_stream_response_finish(&self, _ctx: &HookContext, event: StreamResponseFinish<'_>) {
-        let _ = event;
-    }
-}
-
-type RecordedToolCallDelta = (String, String, Option<String>, String);
-
-#[derive(Clone)]
 struct SkipDefaultApiHook;
 
 impl AgentHook for SkipDefaultApiHook {}
-
-#[derive(Clone, Default)]
-struct RecordingToolCallDeltaHook {
-    deltas: Arc<Mutex<Vec<RecordedToolCallDelta>>>,
-}
-
-impl RecordingToolCallDeltaHook {
-    fn observed(&self) -> Vec<RecordedToolCallDelta> {
-        self.deltas
-            .lock()
-            .expect("tool call delta hook records mutex was poisoned")
-            .clone()
-    }
-}
-
-impl AgentHook for RecordingToolCallDeltaHook {
-    async fn on_tool_call_delta(&self, _ctx: &HookContext, event: ToolCallDelta<'_>) {
-        match event {
-            ToolCallDelta {
-                tool_call_id,
-                internal_call_id,
-                tool_name,
-                delta,
-            } => {
-                let record = (
-                    tool_call_id.to_string(),
-                    internal_call_id.to_string(),
-                    tool_name.map(str::to_string),
-                    delta.to_string(),
-                );
-                self.deltas
-                    .lock()
-                    .expect("tool call delta hook records mutex was poisoned")
-                    .push(record);
-            }
-            _ => {}
-        }
-    }
-}
-
-#[derive(Clone, Default)]
-struct RecordingTextDeltaHook {
-    deltas: Arc<Mutex<Vec<(String, String)>>>,
-}
-
-impl RecordingTextDeltaHook {
-    fn observed(&self) -> Vec<(String, String)> {
-        self.deltas
-            .lock()
-            .expect("text delta hook records mutex was poisoned")
-            .clone()
-    }
-}
-
-impl AgentHook for RecordingTextDeltaHook {
-    async fn on_text_delta(&self, _ctx: &HookContext, event: TextDelta<'_>) {
-        match event {
-            TextDelta { delta, aggregated } => {
-                let record = (delta.to_string(), aggregated.to_string());
-                self.deltas
-                    .lock()
-                    .expect("text delta hook records mutex was poisoned")
-                    .push(record);
-            }
-            _ => {}
-        }
-    }
-}
-
-#[derive(Clone)]
-struct RecordingTextAndSkipInvalidToolHook {
-    text: RecordingTextDeltaHook,
-}
-
-impl AgentHook for RecordingTextAndSkipInvalidToolHook {
-    async fn on_text_delta(&self, ctx: &HookContext, event: TextDelta<'_>) {
-        self.text.on_text_delta(ctx, event).await
-    }
-}
-
-#[derive(Clone, Default)]
-struct TerminatingToolCallDeltaHook {
-    deltas: Arc<Mutex<Vec<RecordedToolCallDelta>>>,
-}
-
-impl TerminatingToolCallDeltaHook {
-    fn observed(&self) -> Vec<RecordedToolCallDelta> {
-        self.deltas
-            .lock()
-            .expect("tool call delta hook records mutex was poisoned")
-            .clone()
-    }
-}
-
-impl AgentHook for TerminatingToolCallDeltaHook {
-    async fn on_tool_call_delta(&self, _ctx: &HookContext, event: ToolCallDelta<'_>) {
-        match event {
-            ToolCallDelta {
-                tool_call_id,
-                internal_call_id,
-                tool_name,
-                delta,
-            } => {
-                let record = (
-                    tool_call_id.to_string(),
-                    internal_call_id.to_string(),
-                    tool_name.map(str::to_string),
-                    delta.to_string(),
-                );
-                self.deltas
-                    .lock()
-                    .expect("tool call delta hook records mutex was poisoned")
-                    .push(record);
-                let _ = "stop on tool call delta";
-            }
-            _ => {}
-        }
-    }
-}
 
 fn text_metadata(content: &OneOrMany<AssistantContent>) -> Option<&serde_json::Value> {
     content.iter().find_map(|item| match item {
@@ -2050,8 +1922,7 @@ async fn invalid_completed_tool_call_skip_preserves_streaming_reasoning_history(
 }
 
 #[tokio::test]
-async fn invalid_tool_call_hook_skip_resets_streaming_text_delta_state() {
-    let text_hook = RecordingTextDeltaHook::default();
+async fn invalid_tool_call_skip_resets_streaming_text_delta_state() {
     let model = MockCompletionModel::from_stream_turns([
         vec![
             MockStreamEvent::text("stale "),
@@ -2071,28 +1942,26 @@ async fn invalid_tool_call_hook_skip_resets_streaming_text_delta_state() {
 
     let mut stream = agent
         .stream_prompt("use the tool")
-        .add_hook(RecordingTextAndSkipInvalidToolHook {
-            text: text_hook.clone(),
-        })
         .max_turns(3)
         .history(Vec::<Message>::new())
         .await;
 
+    // The delta state resets at the turn boundary: turn one streams
+    // "stale ", turn two streams "fresh" alone — never an aggregate
+    // carrying the prior turn's text forward.
+    let mut text_deltas = Vec::new();
     while let Some(item) = stream.next().await {
         match item {
+            Ok(MultiTurnStreamItem::StreamAssistantItem(StreamedAssistantContent::Text(text))) => {
+                text_deltas.push(text.text.clone())
+            }
             Ok(MultiTurnStreamItem::FinalResponse(_)) => break,
             Ok(_) => {}
             Err(err) => panic!("unexpected streaming error: {err:?}"),
         }
     }
 
-    assert_eq!(
-        text_hook.observed(),
-        vec![
-            ("stale ".to_string(), "stale ".to_string()),
-            ("fresh".to_string(), "fresh".to_string()),
-        ]
-    );
+    assert_eq!(text_deltas, vec!["stale ".to_string(), "fresh".to_string()]);
 }
 
 #[tokio::test]
@@ -2176,13 +2045,9 @@ async fn tool_call_args_delta_before_valid_name_buffers_then_emits_in_safe_order
         MockStreamEvent::tool_call_arguments_delta("tool_1", "1}"),
         MockStreamEvent::final_response_with_total_tokens(3),
     ]]);
-    let hook = RecordingToolCallDeltaHook::default();
     let agent = AgentBuilder::new(model).tool(MockAddTool).build();
 
-    let mut stream = agent
-        .stream_prompt("stream a tool call")
-        .add_hook(hook.clone())
-        .await;
+    let mut stream = agent.stream_prompt("stream a tool call").await;
     let mut stream_deltas = Vec::new();
 
     while let Some(item) = stream.next().await {
@@ -2210,29 +2075,6 @@ async fn tool_call_args_delta_before_valid_name_buffers_then_emits_in_safe_order
         .map(|delta| delta.1.clone())
         .expect("at least one delta");
     assert!(!internal.is_empty());
-    assert_eq!(
-        hook.observed(),
-        vec![
-            (
-                "tool_1".to_string(),
-                internal.clone(),
-                Some("add".to_string()),
-                String::new()
-            ),
-            (
-                "tool_1".to_string(),
-                internal.clone(),
-                None,
-                "{\"x\":".to_string()
-            ),
-            (
-                "tool_1".to_string(),
-                internal.clone(),
-                None,
-                "1}".to_string()
-            ),
-        ]
-    );
     assert_eq!(
         stream_deltas,
         vec![
@@ -2316,19 +2158,18 @@ async fn stream_prompt_emits_tool_call_deltas_without_hook() {
 }
 
 #[tokio::test]
-async fn stream_prompt_emits_tool_call_deltas_after_hook_continue() {
+async fn stream_prompt_emits_tool_call_deltas_with_a_hook_registered() {
     let model = MockCompletionModel::from_stream_turns([[
         MockStreamEvent::tool_call_name_delta("tool_1", "add"),
         MockStreamEvent::tool_call_arguments_delta("tool_1", "{\"x\":"),
         MockStreamEvent::tool_call_arguments_delta("tool_1", "1}"),
         MockStreamEvent::final_response_with_total_tokens(3),
     ]]);
-    let hook = RecordingToolCallDeltaHook::default();
     let agent = AgentBuilder::new(model).tool(MockAddTool).build();
 
     let mut stream = agent
         .stream_prompt("stream a tool call")
-        .add_hook(hook.clone())
+        .add_hook(SkipDefaultApiHook)
         .await;
     let mut stream_deltas = Vec::new();
 
@@ -2358,29 +2199,6 @@ async fn stream_prompt_emits_tool_call_deltas_after_hook_continue() {
         .expect("at least one delta");
     assert!(!internal.is_empty());
     assert_eq!(
-        hook.observed(),
-        vec![
-            (
-                "tool_1".to_string(),
-                internal.clone(),
-                Some("add".to_string()),
-                String::new()
-            ),
-            (
-                "tool_1".to_string(),
-                internal.clone(),
-                None,
-                "{\"x\":".to_string()
-            ),
-            (
-                "tool_1".to_string(),
-                internal.clone(),
-                None,
-                "1}".to_string()
-            ),
-        ]
-    );
-    assert_eq!(
         stream_deltas,
         vec![
             (
@@ -2400,50 +2218,6 @@ async fn stream_prompt_emits_tool_call_deltas_after_hook_continue() {
             ),
         ]
     );
-}
-
-#[tokio::test]
-async fn stream_prompt_tool_call_deltas_observe_without_stopping_the_stream() {
-    let model = MockCompletionModel::from_stream_turns([[
-        MockStreamEvent::tool_call_name_delta("tool_1", "add"),
-        MockStreamEvent::tool_call_arguments_delta("tool_1", "{\"x\":"),
-        MockStreamEvent::final_response_with_total_tokens(3),
-    ]]);
-    let hook = TerminatingToolCallDeltaHook::default();
-    let agent = AgentBuilder::new(model).tool(MockAddTool).build();
-
-    let mut stream = agent
-        .stream_prompt("stream a tool call")
-        .add_hook(hook.clone())
-        .await;
-    let mut saw_delta = false;
-    let mut finished = false;
-
-    while let Some(item) = stream.next().await {
-        match item {
-            Ok(MultiTurnStreamItem::StreamAssistantItem(
-                StreamedAssistantContent::ToolCallDelta { .. },
-            )) => {
-                saw_delta = true;
-            }
-            Ok(MultiTurnStreamItem::FinalResponse(_)) => {
-                finished = true;
-            }
-            Ok(_) => {}
-            Err(_) => panic!("delta observation has no stop action"),
-        }
-    }
-
-    // Internal ids are minted by the shared accumulator; assert presence,
-    // not a scripted literal.
-    let observed = hook.observed();
-    assert_eq!(observed.len(), 2, "both deltas observed, none stopped");
-    assert_eq!(observed[0].0, "tool_1");
-    assert_eq!(observed[0].2, Some("add".to_string()));
-    assert_eq!(observed[1].0, "tool_1");
-    assert!(!observed[1].1.is_empty());
-    assert!(saw_delta, "the observed delta flows to the consumer");
-    assert!(finished, "the run completes normally");
 }
 
 #[tokio::test]
@@ -2556,7 +2330,7 @@ async fn stream_prompt_records_multi_turn_usage_on_chat_spans_under_outer_span()
 }
 
 #[tokio::test]
-async fn stream_prompt_emits_completion_call_before_finish_hook_termination() {
+async fn stream_prompt_emits_completion_call_before_the_final_response() {
     let call_usage = usage(10, 2);
     let model = MockCompletionModel::from_stream_turns([[
         MockStreamEvent::text("done"),
@@ -2564,10 +2338,7 @@ async fn stream_prompt_emits_completion_call_before_finish_hook_termination() {
     ]]);
     let agent = AgentBuilder::new(model).build();
 
-    let mut stream = agent
-        .stream_prompt("say done")
-        .add_hook(TerminateOnStreamFinish)
-        .await;
+    let mut stream = agent.stream_prompt("say done").await;
     let mut completion_calls = Vec::new();
     let mut completion_call_index = None;
     let mut final_index = None;

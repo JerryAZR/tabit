@@ -79,8 +79,8 @@ pub mod test_utils;
 pub mod tool;
 
 pub use agent::{
-    Agent, AgentBuilder, AgentHook, AgentRunner, HookContext, ModelHandle, ModelSelection,
-    ModelSelectionAction, SteeringSource, TurnIdSource,
+    Agent, AgentBuilder, AgentHook, AgentRunner, HookContext, ModelHandle, SteeringSource,
+    TurnIdSource,
 };
 
 #[cfg(feature = "derive")]

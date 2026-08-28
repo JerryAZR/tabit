@@ -6,8 +6,7 @@ pub use rig_core::client::model_listing::ModelListingClient;
 pub use rig_core::client::verify::{VerifyClient, VerifyError};
 
 pub use crate::agent::{
-    Agent, AgentHook, HookContext, ModelHandle, ModelSelection, ModelSelectionAction,
-    MultiTurnStreamItem, StreamingResult,
+    Agent, AgentHook, HookContext, ModelHandle, MultiTurnStreamItem, StreamingResult,
 };
 pub use crate::client::{AgentClientExt, AgentModelExt};
 pub use crate::completion::{Chat, CompletionError, CompletionModel, Message, Prompt, PromptError};
