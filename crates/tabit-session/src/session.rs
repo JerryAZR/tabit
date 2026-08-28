@@ -262,7 +262,7 @@ impl SessionBuilder {
         // The conversation's owner is born from the parsed tree over
         // the session's one buffer (from_tree is the only preloaded
         // entrance; the context is derived, never parsed).
-        *crate::lock::lock(&session.conversation) =
+        *crate::lock::write(&session.conversation) =
             crate::context_manager::ContextManager::from_tree(
                 parsed.tree.clone(),
                 session.buffer.clone(),
@@ -623,7 +623,7 @@ pub struct Session {
     /// item arms (steer drained → fold, batch settled → fold_all,
     /// final committed → fold), and the receive-time probes read it
     /// through the same cell (the shared handle below).
-    conversation: Arc<Mutex<ContextManager>>,
+    conversation: Arc<std::sync::RwLock<ContextManager>>,
     /// The shared write buffer: the session's own handle for side
     /// records (the manager holds its clone; the writer lives behind
     /// it).
@@ -736,12 +736,12 @@ impl Session {
             // (a continue on an empty conversation is a no-op —
             // nothing to continue).
             if !batch.is_empty() {
-                let mut conversation = crate::lock::lock(&self.conversation);
+                let mut conversation = crate::lock::write(&self.conversation);
                 for queued in &batch {
                     conversation.fold_with_id(queued.message.clone(), queued.id.clone());
                 }
             }
-            if crate::lock::lock(&self.conversation).messages().is_empty() {
+            if crate::lock::read(&self.conversation).messages().is_empty() {
                 break;
             }
             let run = self.run_one(&batch, on_event).await;
@@ -821,7 +821,7 @@ impl Session {
         // conversation never leaving the session's hands (the batch is
         // already in it; the engine's own first drain carries only
         // messages submitted after this run started).
-        let history = crate::lock::lock(&self.conversation).messages();
+        let history = crate::lock::read(&self.conversation).messages();
         // The agent-cache check at run open — the single point of use.
         // A selection that validates against config but cannot be
         // constructed in this environment (client build trouble, the
@@ -959,7 +959,7 @@ impl Session {
                     if !content.iter().any(|part| {
                         matches!(part, rig_core::message::AssistantContent::ToolCall(_))
                     }) {
-                        crate::lock::lock(&self.conversation).fold_with_id(
+                        crate::lock::write(&self.conversation).fold_with_id(
                             Message::Assistant {
                                 id: Some(id.clone()),
                                 content: *content,
@@ -990,7 +990,7 @@ impl Session {
                     };
                     let result_ids: Vec<String> =
                         results.iter().map(|(id, _)| id.clone()).collect();
-                    crate::lock::lock(&self.conversation).fold_all_with_ids(
+                    crate::lock::write(&self.conversation).fold_all_with_ids(
                         vec![
                             Message::Assistant {
                                 id: Some(turn_id),
@@ -1138,7 +1138,7 @@ impl Session {
             .mailbox
             .next_steer_id()
             .expect("a Steer item must follow the drain that parked its id");
-        crate::lock::lock(&self.conversation)
+        crate::lock::write(&self.conversation)
             .fold_with_id(Message::user(text.clone()), entry_id.clone());
         sink.emit(SessionEvent::UserMessage { text, entry_id });
     }
@@ -1261,7 +1261,7 @@ impl Session {
     /// durable on its own: a `rewound` marker lands in the log even if no
     /// prompt follows.
     pub fn rewind(&mut self, turns: usize) -> Result<RewindSummary, SessionError> {
-        let branch = crate::lock::lock(&self.conversation).active_branch();
+        let branch = crate::lock::read(&self.conversation).active_branch();
         let boundaries = tabit_log::user_message_boundaries(&branch);
         if turns == 0 {
             return Err(SessionError::Config {
@@ -1306,14 +1306,16 @@ impl Session {
     /// non-barrier).
     fn apply_checkout(&mut self, to: Option<&str>) -> Result<RewindSummary, SessionError> {
         let before = {
-            let branch = crate::lock::lock(&self.conversation).active_branch();
+            let branch = crate::lock::read(&self.conversation).active_branch();
             tabit_log::user_message_boundaries(&branch).len()
         };
-        crate::lock::lock(&self.conversation).checkout(to).map_err(
-            |crate::context_manager::CheckoutError(target)| SessionError::Config {
-                message: format!("checkout target `{target}` is not in this session"),
-            },
-        )?;
+        crate::lock::write(&self.conversation)
+            .checkout(to)
+            .map_err(
+                |crate::context_manager::CheckoutError(target)| SessionError::Config {
+                    message: format!("checkout target `{target}` is not in this session"),
+                },
+            )?;
         if let Err(error) =
             crate::lock::lock(&self.buffer).enqueue(&[FileRecord::Side(SideRecord {
                 timestamp: crate::ids::now_rfc3339(),
@@ -1325,7 +1327,7 @@ impl Session {
             tracing::warn!(%error, "checkout record failed to flush; queued for retry");
         }
         let after = {
-            let branch = crate::lock::lock(&self.conversation).active_branch();
+            let branch = crate::lock::read(&self.conversation).active_branch();
             tabit_log::user_message_boundaries(&branch).len()
         };
         Ok(RewindSummary {
@@ -1456,7 +1458,7 @@ impl Session {
     /// The projected model-visible context (what the next outer loop
     /// sees) — the derived view, folded per call.
     pub fn context(&self) -> Vec<Message> {
-        crate::lock::lock(&self.conversation).messages()
+        crate::lock::read(&self.conversation).messages()
     }
 
     /// Usage and cost totals — the cumulative ledger as of load
@@ -1497,7 +1499,7 @@ impl Session {
     /// live turns with one set of arms. A checkout re-renders over a
     /// different branch through the same door.
     pub fn replay_events(&self) -> Vec<SessionEvent> {
-        crate::replay::project_events(&crate::lock::lock(&self.conversation).active_branch())
+        crate::replay::project_events(&crate::lock::read(&self.conversation).active_branch())
     }
 
     /// Convert the engine's usage record to the protocol's wire shape
@@ -1544,8 +1546,9 @@ impl Session {
         let id = writer.session_id().to_string();
         let buffer: crate::writer::SharedBuffer =
             std::sync::Arc::new(std::sync::Mutex::new(writer));
-        let conversation_cell: Arc<Mutex<ContextManager>> =
-            Arc::new(Mutex::new(ContextManager::empty(buffer.clone())));
+        let conversation_cell: Arc<std::sync::RwLock<ContextManager>> = Arc::new(
+            std::sync::RwLock::new(ContextManager::empty(buffer.clone())),
+        );
         let shared_conversation = SharedConversation {
             conversation: conversation_cell.clone(),
         };
@@ -1603,14 +1606,14 @@ impl Session {
 /// never mutate, and the read is the live tree even mid-run.
 #[derive(Clone)]
 pub(crate) struct SharedConversation {
-    conversation: Arc<Mutex<ContextManager>>,
+    conversation: Arc<std::sync::RwLock<ContextManager>>,
 }
 
 impl SharedConversation {
     /// Whether `id` names a node in the tree (any branch) — the
     /// receive-time checkout validation.
     pub(crate) fn contains(&self, id: &str) -> bool {
-        crate::lock::lock(&self.conversation).contains(id)
+        crate::lock::read(&self.conversation).contains(id)
     }
 }
 
