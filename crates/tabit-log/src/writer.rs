@@ -35,10 +35,21 @@ pub trait WriteBuffer: Send {
     /// `Err` is a report, not an undo.
     fn enqueue(&mut self, records: &[FileRecord]) -> Result<(), LogError>;
 
+    /// Queue a record WITHOUT the write attempt — pre-population (the
+    /// deferred opening `model_change` riding the first real commit:
+    /// a session that never commits materializes nothing, so the
+    /// register must not be the orphan-maker either).
+    fn prequeue(&mut self, record: &FileRecord);
+
     /// How many lines sit in the outbox (the persist-degraded count,
     /// and the `durable` verdict: zero means every commit reached the
     /// disk).
     fn pending(&self) -> usize;
+
+    /// The pending persist transition, if any (true = entered
+    /// degraded, false = recovered), taken once — the session emits
+    /// its notices from these.
+    fn take_degraded_transition(&mut self) -> Option<bool>;
 }
 
 /// A handle to a session's shared write buffer — what the
@@ -62,6 +73,16 @@ pub struct SessionWriter {
     /// The file offset just past the last flushed byte — the rollback
     /// point when a write tears, and the boundary of the clean prefix.
     durable_offset: u64,
+    /// The persist-degraded state: set while the outbox holds records
+    /// a flush could not place, cleared when it drains. The
+    /// transitions ride the notice channel so a frontend can nag about
+    /// disk space instead of string-matching run failures.
+    degraded: bool,
+    /// One pending transition notice, if any (true = entered
+    /// degraded, false = recovered). The session takes them at its
+    /// emission points; at most one is pending (a transition that has
+    /// not been observed still happened).
+    transition: Option<bool>,
 }
 
 impl SessionWriter {
@@ -82,7 +103,22 @@ impl SessionWriter {
             file: None,
             outbox: VecDeque::from([header_line]),
             durable_offset: 0,
+            degraded: false,
+            transition: None,
         }
+    }
+
+    /// Queue a record WITHOUT the write attempt — the deferred
+    /// opening `model_change` rides the first real commit's drain (a
+    /// session that never commits materializes nothing: the
+    /// no-orphan gate holds even for the register).
+    pub fn prequeue(&mut self, record: &FileRecord) {
+        // A `FileRecord` of plain strings and numbers serializes;
+        // a failure here is unconstructible (same stance as the
+        // header). Sanctioned crash.
+        #[allow(clippy::expect_used)]
+        let line = serde_json::to_string(record).expect("a session record always serializes");
+        self.outbox.push_back(line);
     }
 
     /// Re-open an existing session file for appending. The durable
@@ -102,6 +138,8 @@ impl SessionWriter {
             file: Some(file),
             outbox: VecDeque::new(),
             durable_offset,
+            degraded: false,
+            transition: None,
         })
     }
 
@@ -110,6 +148,17 @@ impl SessionWriter {
     /// reached the disk).
     pub fn pending(&self) -> usize {
         self.outbox.len()
+    }
+
+    /// Whether the outbox holds records a flush could not place.
+    pub fn degraded(&self) -> bool {
+        self.degraded
+    }
+
+    /// The pending persist transition, if any (true = entered
+    /// degraded, false = recovered), taken once.
+    pub fn take_degraded_transition(&mut self) -> Option<bool> {
+        self.transition.take()
     }
 
     /// The session file path.
@@ -236,11 +285,31 @@ impl WriteBuffer for SessionWriter {
                 panic!("session record failed to serialize: {error}");
             }
         }
-        self.drain()
+        let outcome = self.drain();
+        match &outcome {
+            Ok(()) if self.degraded => {
+                self.degraded = false;
+                self.transition = Some(false);
+            }
+            Err(_) if !self.degraded => {
+                self.degraded = true;
+                self.transition = Some(true);
+            }
+            _ => {}
+        }
+        outcome
+    }
+
+    fn prequeue(&mut self, record: &FileRecord) {
+        SessionWriter::prequeue(self, record);
     }
 
     fn pending(&self) -> usize {
         SessionWriter::pending(self)
+    }
+
+    fn take_degraded_transition(&mut self) -> Option<bool> {
+        SessionWriter::take_degraded_transition(self)
     }
 }
 
@@ -266,8 +335,14 @@ impl WriteBuffer for NullBuffer {
         Ok(())
     }
 
+    fn prequeue(&mut self, _record: &FileRecord) {}
+
     fn pending(&self) -> usize {
         0
+    }
+
+    fn take_degraded_transition(&mut self) -> Option<bool> {
+        None
     }
 }
 

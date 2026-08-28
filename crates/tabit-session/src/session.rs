@@ -235,11 +235,7 @@ impl SessionBuilder {
         // never runs materializes nothing (the writer's no-orphan
         // gate). A register write before then supersedes it (last
         // model_change wins).
-        if let Err(error) =
-            crate::lock::lock(&session.buffer).enqueue(&[register_record(&selection)])
-        {
-            tracing::warn!(%error, "the opening model_change failed to flush; queued for retry");
-        }
+        crate::lock::lock(&session.buffer).prequeue(&register_record(&selection));
         Ok(session)
     }
 
@@ -612,9 +608,6 @@ pub struct Session {
             )>,
         >,
     >,
-    /// The degraded flag: set when the entry guard fails, cleared when
-    /// it recovers — the transitions emit the notices.
-    degraded: Arc<Mutex<bool>>,
     /// The cumulative usage ledger as of load (the parser's fold over
     /// the file's usage facts — usage facts ride records; the ledger
     /// is derived at open, and **deferred after**: the live manager
@@ -758,8 +751,9 @@ impl Session {
         // whatever lines a previous failure stuck in the outbox; a
         // still-refusing buffer blocks this start (the first failed
         // drain ran in memory; no run proceeds twice on it).
-        if let Err(error) = crate::lock::lock(&self.buffer).enqueue(&[]) {
-            self.note_degraded(&error);
+        let guard_outcome = crate::lock::lock(&self.buffer).enqueue(&[]);
+        if let Err(error) = &guard_outcome {
+            self.drain_persist_transitions();
             sink.emit(SessionEvent::RunFailed {
                 message: format!(
                     "the session log is undrained and still refuses to flush: {error}"
@@ -772,7 +766,7 @@ impl Session {
                 events: sink.events,
             };
         }
-        self.note_recovered();
+        self.drain_persist_transitions();
         // The batch folded at the pump's drain; acknowledge each
         // message (1:1 with what the model is about to see — the
         // history below carries them).
@@ -924,10 +918,13 @@ impl Session {
                     if !content.iter().any(|part| {
                         matches!(part, rig_core::message::AssistantContent::ToolCall(_))
                     }) {
-                        crate::lock::lock(&self.conversation).fold(Message::Assistant {
-                            id: Some(id.clone()),
-                            content: *content,
-                        });
+                        crate::lock::lock(&self.conversation).fold_with_id(
+                            Message::Assistant {
+                                id: Some(id.clone()),
+                                content: *content,
+                            },
+                            id.clone(),
+                        );
                     } else {
                         staged_assistant = Some(*content);
                     }
@@ -950,16 +947,26 @@ impl Session {
                             "a tools turn's BatchResults arrived without its assistant                              payload (its TurnCommitted) — the engine settled results for                              a turn it never announced"
                         );
                     };
-                    crate::lock::lock(&self.conversation).fold_all(vec![
-                        Message::Assistant {
-                            id: Some(turn_id),
-                            content: assistant,
-                        },
-                        Message::User {
-                            content: rig_core::OneOrMany::many(results)
+                    let result_ids: Vec<String> =
+                        results.iter().map(|(id, _)| id.clone()).collect();
+                    crate::lock::lock(&self.conversation).fold_all_with_ids(
+                        vec![
+                            Message::Assistant {
+                                id: Some(turn_id),
+                                content: assistant,
+                            },
+                            Message::User {
+                                content: rig_core::OneOrMany::many(
+                                    results
+                                        .into_iter()
+                                        .map(|(_, content)| content)
+                                        .collect::<Vec<_>>(),
+                                )
                                 .expect("a tools turn's batch is never empty"),
-                        },
-                    ]);
+                            },
+                        ],
+                        result_ids,
+                    );
                 }
                 Ok(MultiTurnStreamItem::ModelTurnRetried { .. }) => {
                     let turn_id = announce(&current_turn);
@@ -973,11 +980,13 @@ impl Session {
                 Ok(MultiTurnStreamItem::StreamUserItem(StreamedUserContent::ToolResult {
                     tool_result,
                     internal_call_id,
+                    entry_id,
                 })) => {
                     let turn_id = announce(&current_turn);
                     self.note_tool_result(
                         tool_result,
                         internal_call_id,
+                        entry_id,
                         turn_id,
                         &mut tool_names,
                         sink,
@@ -998,6 +1007,19 @@ impl Session {
                 Ok(MultiTurnStreamItem::CompletionCall(call)) => {
                     let turn_id = announce(&current_turn);
                     turn_usage = call.usage;
+                    // The live ledger grows with the deferred zeros:
+                    // the per-model slot exists (usage facts ride the
+                    // records; the totals resume at the usage
+                    // discussion, which updates these the same way).
+                    {
+                        let selection = self.selection();
+                        self.ledger.add(
+                            &selection.provider,
+                            &selection.model,
+                            selection.thinking_level.as_deref(),
+                            call.usage,
+                        );
+                    }
                     sink.emit(SessionEvent::CompletionCall {
                         turn_id: turn_id.clone(),
                         input_tokens: call.usage.input_tokens,
@@ -1039,16 +1061,16 @@ impl Session {
         &self,
         tool_result: rig_core::message::ToolResult,
         internal_call_id: String,
+        entry_id: String,
         turn_id: String,
         tool_names: &mut std::collections::BTreeMap<String, String>,
         sink: &mut EventSink<'_>,
     ) {
         let content = result_text(&tool_result);
         let status = wire_status(&tool_result.status);
-        // The result's entry id is born-early (like turn ids): the
-        // fold_all at BatchResults reuses these ids for its result
-        // entries, so live and replay name the same node.
-        let entry_id = crate::ids::new_entry_id();
+        // The entry id rides the result item (born-early at settlement;
+        // the fold_all at BatchResults reuses it, so live and replay
+        // name the same node).
         sink.emit(SessionEvent::ToolResult {
             turn_id,
             entry_id,
@@ -1097,6 +1119,7 @@ impl Session {
             aborted,
             failure,
         } = driven;
+        self.drain_persist_transitions();
         // Nothing half-open carries across runs by construction: a
         // roundtrip folds only at BatchResults, so an aborted or
         // failed run simply never folded its in-flight turn (the
@@ -1245,11 +1268,6 @@ impl Session {
             let branch = crate::lock::lock(&self.conversation).active_branch();
             tabit_log::user_message_boundaries(&branch).len()
         };
-        let contains = to.map(|t| crate::lock::lock(&self.conversation).contains(t));
-        let contains_shared =
-            to.map(|t| crate::lock::lock(&self.shared_conversation.conversation).contains(t));
-        let same =
-            std::sync::Arc::ptr_eq(&self.conversation, &self.shared_conversation.conversation);
         crate::lock::lock(&self.conversation).checkout(to).map_err(
             |crate::context_manager::CheckoutError(target)| SessionError::Config {
                 message: format!("checkout target `{target}` is not in this session"),
@@ -1323,44 +1341,34 @@ impl Session {
         true // placeholder until the writer exposes pending()
     }
 
-    /// The entry guard failed: the buffer holds undrained records and
-    /// still refuses to flush — set the flag and say so (once per
-    /// transition).
-    fn note_degraded(&self, error: &tabit_log::LogError) {
-        let mut degraded = lock(&self.degraded);
-        if *degraded {
+    /// Drain any pending persist transitions into the notice events:
+    /// a failed enqueue set the writer's degraded flag (true), a
+    /// successful retry cleared it (false). Called at the emission
+    /// points — the entry guard, conclude — so the notices ride the
+    /// same channel the run's events do.
+    fn drain_persist_transitions(&self) {
+        let (transition, pending) = {
+            let mut buffer = crate::lock::lock(&self.buffer);
+            (buffer.take_degraded_transition(), buffer.pending() as u64)
+        };
+        let Some(degraded) = transition else {
             return;
-        }
-        *degraded = true;
+        };
         let notices = lock(&self.persist_notices).clone();
         if let Some((sender, stream)) = notices
             && let Some(sender) = sender.upgrade()
         {
+            let event = if degraded {
+                tabit_protocol::SessionEvent::error_persist_degraded(
+                    pending,
+                    "the session log refuses to flush; records stay queued and retry",
+                )
+            } else {
+                tabit_protocol::SessionEvent::error_persist_recovered()
+            };
             let _ = sender.send(tabit_protocol::EventFrame {
                 stream: Some(stream),
-                event: tabit_protocol::SessionEvent::error_persist_degraded(
-                    0,
-                    format!("the session log refuses to flush: {error}"),
-                ),
-            });
-        }
-    }
-
-    /// The entry guard recovered (a stuck buffer drained): the flag
-    /// clears and the recovery says so (once per transition).
-    fn note_recovered(&self) {
-        let mut degraded = lock(&self.degraded);
-        if !*degraded {
-            return;
-        }
-        *degraded = false;
-        let notices = lock(&self.persist_notices).clone();
-        if let Some((sender, stream)) = notices
-            && let Some(sender) = sender.upgrade()
-        {
-            let _ = sender.send(tabit_protocol::EventFrame {
-                stream: Some(stream),
-                event: tabit_protocol::SessionEvent::error_persist_recovered(),
+                event,
             });
         }
     }
@@ -1525,7 +1533,6 @@ impl Session {
             buffer,
             shared_conversation,
             persist_notices: Arc::new(Mutex::new(None)),
-            degraded: Arc::new(Mutex::new(false)),
             ledger: crate::stats::UsageLedger::default(),
             abort: std::sync::Arc::new(std::sync::Mutex::new(CancellationToken::new())),
             mailbox: Mailbox::default(),

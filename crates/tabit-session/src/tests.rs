@@ -318,9 +318,11 @@ async fn single_turn_prompt_persists_and_projects() -> Result<(), SessionError> 
     let nodes = file_nodes(session.path());
     assert_eq!(nodes.len(), 2);
     assert!(matches!(&nodes[0].kind, EntryKind::UserMessage { .. }));
+    // Usage facts are deferred (the ruling): the assistant entry
+    // records the zero sentinel until the usage discussion returns.
     assert!(matches!(
         &nodes[1].kind,
-        EntryKind::AssistantMessage { usage, .. } if usage.input_tokens == 100
+        EntryKind::AssistantMessage { usage, .. } if *usage == Usage::new()
     ));
 
     // Events tell the whole run in order.
@@ -811,13 +813,14 @@ async fn malformed_tool_call_exhaustion_fails_the_run_and_leaves_the_session_ali
         run.events
     );
 
-    // The defective turns never entered history — but their tokens were
-    // spent, so each discard is billed as a side record (flag 22): the
-    // log holds the model change, the user message, and two discards.
+    // The defective turns never entered history. Discard billing
+    // (flag 22) is parked with the usage deferral — the log holds the
+    // model change and the user message; the two attempts record
+    // nothing until the usage discussion returns.
     assert_eq!(
         load_records(session.path()).len(),
-        4,
-        "model change + the user message + two discarded attempts"
+        2,
+        "model change + the user message; discards are deferred"
     );
     let run = session.prompt("try again").await;
     assert_eq!(run.output, "recovered");
@@ -1302,8 +1305,8 @@ async fn thinking_level_changes_are_validated_and_recorded() -> Result<(), Sessi
         })
         .count();
     assert_eq!(
-        changes, 2,
-        "two switches; the pending initial was superseded"
+        changes, 3,
+        "the opening record rides the first drain, then both switches (last-write-wins)"
     );
     std::fs::remove_dir_all(store.dir()).ok();
     Ok(())

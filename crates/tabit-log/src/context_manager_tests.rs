@@ -34,8 +34,16 @@ impl BufferTap {
 }
 
 impl WriteBuffer for BufferTap {
+    fn prequeue(&mut self, record: &FileRecord) {
+        self.0.lock().expect("tap lock").push(record.clone());
+    }
+
     fn pending(&self) -> usize {
         self.0.lock().expect("tap lock").len()
+    }
+
+    fn take_degraded_transition(&mut self) -> Option<bool> {
+        None
     }
 
     fn enqueue(&mut self, records: &[FileRecord]) -> Result<(), LogError> {

@@ -2586,17 +2586,19 @@ async fn abort_then_checkout_composes_at_the_pause_point() {
 }
 
 #[tokio::test]
-async fn the_prompt_barrier_discards_the_batch_when_the_disk_refuses() {
-    // The session's store directory is a regular file: file creation
-    // fails portably at the first record, so the barrier's flush
-    // cannot succeed — the bootstrap-failure class of persist
-    // degrade.
-    let base = temp_store("barrier-blocked");
+async fn a_blocked_store_blocks_starts_and_recovers() {
+    // The degraded-buffer guard (flag 8's second amendment): the
+    // session's store directory is a regular file, so the first
+    // drain fails — the start blocks (the guard retries the stuck
+    // outbox and fails), the degrade is announced. Repair and the
+    // next start's retry drains, the recovery is announced, and the
+    // run happens.
+    let base = temp_store("guard-blocked");
     let blocked = base.dir().join("blocker");
     std::fs::create_dir_all(base.dir()).expect("base dir");
     std::fs::write(&blocked, b"not a directory").expect("blocker");
     let store = SessionStore::new(&blocked);
-    let factory = Factory::new(vec![text_turn("a"), text_turn("b")]);
+    let factory = Factory::new(vec![text_turn("a")]);
     let session = factory
         .clone()
         .into_builder(store.clone())
@@ -2605,70 +2607,52 @@ async fn the_prompt_barrier_discards_the_batch_when_the_disk_refuses() {
     let mut handle = SessionHost::spawn(session, Vec::new(), plain_wiring(&base));
     let id = boot_id(&handle);
 
-    // The prompt cannot be made durable: it is discarded back as
-    // drafts (the abort-site shape — no user_message ever fires, no
-    // run starts, no terminal), and the degrade is announced on the
-    // recorder's notice channel.
-    handle.message(&id, "must not run");
+    // The start's guard retries the opening model_change's stuck
+    // write and fails: the run refuses before any turn, and the
+    // degrade is announced (the notice rides the guard).
+    handle.message(&id, "blocked");
     let mut frames = Vec::new();
     collect_until(&mut handle, &mut frames, |event| {
-        matches!(
-            event,
-            SessionEvent::Error {
-                kind,
-                ..
-            } if kind == tabit_protocol::ErrorKind::PERSIST_DEGRADED
-        )
-    })
-    .await;
-    collect_until(&mut handle, &mut frames, |event| {
-        matches!(event, SessionEvent::MessagesDiscarded { .. })
+        matches!(event, SessionEvent::RunFailed { .. })
     })
     .await;
     assert!(
-        frames.iter().any(|frame| matches!(&frame.event,
-            SessionEvent::MessagesDiscarded { messages }
-                if messages.iter().any(|m| m.text == "must not run"))),
-        "the batch came back as drafts: {:?}",
-        frames
+        frames.iter().any(|frame| matches!(
+            &frame.event,
+            SessionEvent::RunFailed { message } if message.contains("undrained")
+        )),
+        "the start blocked on the stuck buffer: {frames:?}"
     );
     assert!(
-        !frames
-            .iter()
-            .any(|frame| matches!(frame.event, SessionEvent::UserMessage { .. })),
-        "no message entered the conversation"
-    );
-    assert!(
-        !frames.iter().any(|frame| terminal(&frame.event)),
-        "no run started, no terminal fired"
+        frames.iter().any(|frame| matches!(
+            &frame.event,
+            SessionEvent::Error { kind, .. }
+                if kind == tabit_protocol::ErrorKind::PERSIST_DEGRADED
+        )),
+        "the degradation was announced"
     );
 
-    // Repair the path: the next prompt's barrier succeeds — the run
-    // happens, its terminal is durable, and the recovery is announced.
+    // Repair: the next start's retry drains everything, the recovery
+    // is announced, and the run happens with the whole queue durable.
     std::fs::remove_file(&blocked).expect("unblock");
     std::fs::create_dir(&blocked).expect("dir");
     handle.message(&id, "now it works");
     collect_until(&mut handle, &mut frames, terminal).await;
     frames.extend(drain(&mut handle).await);
-
     assert!(
-        frames.iter().any(|frame| matches!(&frame.event,
-            SessionEvent::UserMessage { text, .. } if text == "now it works")),
-        "the repaired prompt entered the conversation"
-    );
-    assert!(
-        frames.iter().any(
-            |frame| matches!(&frame.event, SessionEvent::Error { kind, .. }
-                if kind == tabit_protocol::ErrorKind::PERSIST_RECOVERED)
-        ),
+        frames.iter().any(|frame| matches!(
+            &frame.event,
+            SessionEvent::Error { kind, .. }
+                if kind == tabit_protocol::ErrorKind::PERSIST_RECOVERED
+        )),
         "the drain's success was announced"
     );
-    match frames.iter().find_map(|frame| match &frame.event {
-        SessionEvent::RunFinished { durable, .. } => Some(*durable),
-        _ => None,
-    }) {
-        Some(durable) => assert!(durable, "the repaired run's terminal is durable"),
-        None => panic!("the repaired run finished: {:?}", frames),
-    }
+    assert!(
+        frames.iter().any(|frame| matches!(
+            &frame.event,
+            SessionEvent::RunFinished { output, .. } if output == "a"
+        )),
+        "the repaired run proceeded"
+    );
     let _ = std::fs::remove_dir_all(base.dir());
 }

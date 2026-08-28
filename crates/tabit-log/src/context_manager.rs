@@ -185,13 +185,25 @@ impl ContextManager {
         self.commit_with_ids([(kind, id)]);
     }
 
+    /// As [`fold_all`](Self::fold_all), but the result entries reuse
+    /// their born-early ids (minted at settlement, announced by the
+    /// result events) — live and replay name the same nodes. `result_ids`
+    /// pairs 1:1 with the batch's results, in order.
+    pub fn fold_all_with_ids(&mut self, batch: Vec<Message>, result_ids: Vec<String>) {
+        self.fold_all_entry(batch, result_ids);
+    }
+
     /// The roundtrip commit. The batch must be exactly one tool-carrying
     /// assistant turn followed by user messages of tool results, every
     /// call answered exactly once, nothing unpaired. Verified whole,
     /// then committed whole: one buffer blob, one tree grow, all-or-none
     /// — tool calls enter the context only with their results, or never.
-    #[allow(clippy::panic)] // sanctioned crash: an engine wiring bug, failed loud (AGENTS.md doctrine)
     pub fn fold_all(&mut self, batch: Vec<Message>) {
+        self.fold_all_entry(batch, Vec::new());
+    }
+
+    #[allow(clippy::panic)] // sanctioned crash: an engine wiring bug, failed loud (AGENTS.md doctrine)
+    fn fold_all_entry(&mut self, batch: Vec<Message>, result_ids: Vec<String>) {
         let mut messages = batch.into_iter();
         let assistant = match messages.next() {
             Some(message @ Message::Assistant { .. }) => message,
@@ -250,11 +262,10 @@ impl ContextManager {
             },
             assistant_id,
         ));
-        kinds.extend(
-            results
-                .into_iter()
-                .map(|result| (EntryKind::ToolResult { result }, None)),
-        );
+        kinds.extend(results.into_iter().enumerate().map(|(index, result)| {
+            let entry_id = result_ids.get(index).cloned();
+            (EntryKind::ToolResult { result }, entry_id)
+        }));
         self.commit_with_ids(kinds);
     }
 
@@ -281,7 +292,9 @@ impl ContextManager {
                 panic!("ContextManager::checkout: {fault}");
             });
         if let Err(reason) = path_is_closed(&path) {
-            panic!("ContextManager::checkout to `{target:?}` refused: {reason}");
+            panic!(
+                "ContextManager::checkout to `{target:?}` refused: the target is inside an                  open tool roundtrip ({reason}) — a mid-roundtrip checkout is unsupported"
+            );
         }
         self.tree
             .move_head(target)
