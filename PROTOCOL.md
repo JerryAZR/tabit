@@ -1006,6 +1006,23 @@ torn-tail repair is deleted — a file written only at commit boundaries
 cannot honestly contain a half-open roundtrip, and a repair that
 survives its regime hides real bugs).
 
+**The loop-refactor amendment (2026-08): the prompt barrier is
+replaced by the degraded-buffer guard.** The write buffer's one
+interface (enqueue a batch; flush is private; one behavior — revert
+the file on failure, keep the lines, retry on every later enqueue)
+has no barrier class to express "never accepted," and the opening
+batch now commits through the loop's first drain like every other
+fold. The weak guard: at run entry the buffer gets one drain attempt
+(`enqueue(&[])` — an empty batch is, by construction, a pure retry
+of stuck lines); `Err` blocks the start gracefully
+(`persist_degraded`); recovery at a later entry
+(`persist_recovered`). Semantics: **the first failed drain runs in
+memory** — the conversation proceeds, the lines stay queued — **but
+the next start is blocked** until a drain succeeds. At most one run
+proceeds on undrained state, and only the first. No turn is refused
+for the disk before trying; none runs twice on the same degraded
+buffer. Owner ruling: a rare edge case not worth over-engineering.
+
 ### 9. Empty conversation rides `PromptCancelled` — resolved by the v2 pass
 
 The wire side is decided: the `run_failed { kind: stopped }` taxonomy
@@ -1236,28 +1253,28 @@ The historical alternatives considered (cut-and-synthesize, reject at
 verification, auto-extend past the batch) remain the design space if
 this is ever revisited; the panic is the ruled resting point.
 
-### 24. Veto-Feedback turns never land durably — OPEN (the last live/durable divergence)
+### 24. Veto-Feedback turns never land durably — RESOLVED (moot: the veto is deleted)
 
-Raised 2026-08, the post-sweep review. When a model-turn hook vetoes a
-turn with `RetryRequest::Feedback`, the engine folds the rejected
-assistant plus the corrective feedback into the **run's** context (the
-retry must see them) — but a vetoed turn emits no `RoundtripClosed`,
-so the file never records either. The next roundtrip commits against
-a durable context that omits what the model saw, and a reload
-reproduces the pretend history.
+Raised 2026-08, the post-sweep review; resolved by the loop refactor
+the same month. The hook veto itself turned out to be upstream rig
+vocabulary (verbatim from the 0.41.0 vendoring), never ruled in and
+never consumed by tabit — "continue with correction" is a steer, and
+"retry fresh" is unsupported until discussed (flag 31). Deleted
+wholesale with the machine that housed it. With no veto there is no
+fold-then-discard anywhere: the in-flight turn is a loop local, and
+the `ContextManager` commits only complete verified batches — the
+live/durable divergence class is unrepresentable because there is one
+context, derived per read, and nothing else holds a copy.
 
-This is the exact divergence class that forced output-mode feedback to
-become durable during the sweep; there the door's pairing validation
-made the orphaned shape unrepresentable, while a vetoed *final* turn
-has no calls to pair, so the shape survives. Options: (a) land
-veto-Feedback attempts durably as `[assistant_message,
-user_message(feedback)]` exactly like the output-mode close did — one
-rule ("everything the model saw lands"), no exceptions; (b) rule the
-divergence is the *meaning* of a veto — history pretends the attempt
-never happened — and document it as such. Lean: (a); pretending is
-what bit us before.
+The historical record (what the flag asked): when a model-turn hook
+vetoed a turn with `RetryRequest::Feedback`, the engine folded the
+rejected assistant plus corrective feedback into the run's context,
+while the veto's stream item meant "discard" to the session — the
+file never recorded what the model saw. It was the exact divergence
+class that had forced output-mode feedback to become durable during
+the sweep.
 
-### 25. Abort discards the interrupted attempt's usage unbilled — OPEN
+### 25. Abort discards the interrupted attempt's usage unbilled — OPEN (parked with the usage deferral)
 
 Flag 22 bills veto/defect discards (`discarded { usage }`). An abort
 mid-roundtrip discards the staged attempt with **no record at all**:
@@ -1266,46 +1283,46 @@ cumulative stats never count it. Same cost-truth class, half-covered
 by scope — the recorder tests pin the current behavior as "unbilled:
 not a ruled discard" precisely because it never was ruled. Ruling
 needed: abort writes a discard record too (or `aborted { usage }`),
-or stays unbilled by explicit decision.
+or stays unbilled by explicit decision. **Parked (2026-08, the loop
+refactor): usage facts are deferred by owner ruling — discards
+record nothing until that discussion returns.**
 
-### 26. Staged-turn death is announced on some paths, swept on the rest — OPEN
+### 26. Staged-turn death is announced on some paths, swept on the rest — RESOLVED (moot: the staging is deleted)
 
-The engine announces a staged turn's death only via `ModelTurnRetried`
-(hook veto, defect retry). A Stop hook or an abort announces nothing;
-the session's `conclude` sweeps the pending slot unconditionally
-(`drop_open_roundtrip`) — correct, but one semantic ("this attempt
-died") re-assembled at several sites, the shape rule 12 deletes. A
-unified announcement — a `TurnDiscarded` item covering
-veto/defect/stop/abort, or extending `ModelTurnRetried` — gives the
-death one home and retires the sweep.
+The loop refactor deleted the pending-roundtrip slot and the
+session-side sweep entirely: an attempt that dies (defect, stop,
+abort, failure) was a **loop local** — it never entered the
+conversation, so there is nothing to sweep and nothing whose death
+needs a durable announcement. The one surviving death signal is the
+frontend-facing `ModelTurnRetried` (defect discards — the frontend
+drops provisional output), which the loop emits at its single
+discard site.
 
-### 27. Discard billing is the session's inference, not the engine's fact — OPEN
+### 27. Discard billing is the session's inference, not the engine's fact — OPEN (parked with the usage deferral)
 
 The discard record's usage comes from the session tracking
 `CompletionCall` items per turn. The engine already knows the
 attempt's usage and could stamp it on the retry/discard item directly:
 cleaner data, one less piece of session-side bookkeeping that is
 approximately right rather than exactly right. Rides flag 26 if the
-unified item carries usage.
+unified item carries usage. **Parked with flag 25: no discard records
+exist until the usage discussion returns.**
 
-### 28. The flag-23 checkout panic fires under the resident lock — OPEN
+### 28. The flag-23 checkout panic fires under the resident lock — RESOLVED (moot: the resident lock is deleted)
 
-The mid-roundtrip-checkout panic (ruled, flag 23) fires while holding
-the resident mutex, poisoning it; the crate's poison-recovering
-`lock()` is now load-bearing for a user-reachable path, and lock.rs's
-"no code panics while holding one, so poisoning cannot happen"
-comment is false. The panic ruling stands; the *placement* is the
-question — the target lookup and closed-path walk are read-only over
-the tree, so validating before taking the lock makes the poison
-question disappear.
+The recorder and its resident mutex are gone — the `ContextManager`
+is exclusively owned (`&mut`), has no interior lock, and validates
+the checkout target and closed path before touching anything. The
+flag-23 panic ruling stands; it now unwinds through a frame that owns
+nothing shared, so there is nothing to poison.
 
-### 29. Empty final turns: recorded but not folded — OPEN (minor)
+### 29. Empty final turns: recorded but not folded — RESOLVED (deleted by one decision site)
 
-The engine skips folding an empty final assistant into the live
-context; the recorder stages and commits it anyway, so a reload folds
-an empty assistant message the live run never carried. Pre-existing,
-cosmetic, one-sided — pick either "skip recording empty finals" or
-"fold them live" and the two contexts agree.
+The loop folds nothing for an empty final turn, and the manager
+records only what it is given: one site decides, so live and reload
+agree by construction. The old divergence existed because two owners
+(each with its own skip/record policy) had to be kept in agreement;
+the second owner is deleted.
 
 ### 30. Dead seams kept on judgment — OPEN (deletion candidates)
 
@@ -1324,6 +1341,23 @@ that held is *file-based* scripts plus read-back, never
 shell-heredoc-embedded ones, and never scripted edits where a handful
 of `Edit` calls would do. Encode in the gate bullet or leave as
 discipline; owner call.
+
+### 31. The hook-action inventory — OPEN (the veto precedent)
+
+Raised 2026-08, the loop refactor. The model-turn veto deletion set
+the precedent: the hook vocabulary is upstream rig 0.41.0 inheritance,
+and inherited surface is not a ruling — `RetryRequest` survived three
+refactors unquestioned because it arrived in the vendor commit. The
+inventory owes every remaining action surface the same three
+questions: does a real tabit consumer exist; is the action flow
+control (then it is an ENGINE.md edge that must be ruled in) or pure
+observation; does the semantic already have a home (steer, mailbox,
+terminating flag)? Surfaces to review: `ToolCallAction` (`Skip`,
+`Rewrite` — the permission gate consumes `Skip`), the post-tool
+`Stop` (ruled: the stop taxonomy), `CompletionCallAction` /
+`active_tools`, `ToolResultAction`, `ModelSelectionAction`,
+`ObservationAction`. Anything without a consumer or a ruling gets
+deleted, not preserved by inertia.
 
 ## Resolved
 

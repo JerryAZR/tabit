@@ -6,93 +6,83 @@ PROTOCOL.md's frontend contract. Two layers, kept strictly separate:
 1. the **outer loop** — run lifecycle: when a run starts, what it is
    entered with, what it emits, how it is preempted — with the inner
    loop as a black box;
-2. the **inner loop** — the turn state machine inside one run.
+2. the **inner loop** — one run's coroutine: the turn cycle inside it.
 
-Structure, not steps: states, each state's single responsibility, the
-machine/driver split, and the behavior deltas of the redesign. The
-implementation follows this document; changes to the machine change
-this document.
+Structure, not steps: phases, each phase's single responsibility, the
+loop/leaves split, and the behavior rulings. The implementation follows
+this document; changes to the loop change this document.
 
 **Standing rule (owner):** flow-level changes consult this document
 first and amend it before touching code. New flow behavior gets new
-states (or new edges) — never conditionals grown inside existing
-states, and never driver-side control flow outside the machine.
-(PROTOCOL.md keeps the frontend/event view of the same
-loop; the session actor implements the outer layer.)
+phases (or new edges) — never conditionals grown inside existing
+phases, and never control flow outside the loop.
+(PROTOCOL.md keeps the frontend/event view of the same loop; the
+session actor implements the outer layer.)
 
 ## Layer 1 — the outer loop (the inner loop is a black box)
 
 ```mermaid
 stateDiagram-v2
-    Idle --> Draining : work signal — queue non-empty
-    Draining --> Running : the batch joins the history —<br/>the prompt barrier flushed through it<br/>(flag 8: durable before the turn) —<br/>enter the inner loop at Preparing
-    Draining --> Idle : the prompt barrier fails — the batch is<br/>un-recorded and handed back as drafts<br/>(messages_discarded + persist_degraded;<br/>never held, never run on memory-only input)
-    Running --> Idle : Done — emit run_finished<br/>(durable: whether the outbox is empty)
+    Idle --> Running : work signal — mailbox non-empty, or a continue<br/>signal with a non-empty conversation —<br/>and the entry guard passes:<br/>the buffer's drain attempt succeeds<br/>(stuck lines retry here; a still-degraded<br/>buffer blocks the start)
+    Running --> Idle : Done — emit run_finished
     Running --> Idle : Failed — emit run_failed
     Running --> Idle : abort preempts (token race at any await)<br/>— emit run_aborted; the ABORT SITE cleared the<br/>at-abort-time queue (the discard notice is immediate)
     Idle --> Idle : abort while idle — the abort site clears the<br/>queue (the notice is immediate; a no-op when empty)
     Idle --> Idle : checkout — the chain rewinds to entry_id;<br/>what was queued before the checkout is discarded<br/>(messages_discarded), then checked_out +<br/>a full replay pass
-    Running --> Idle : checkout aborts the run mid-flight<br/>and executes at the beat — the pause point —<br/>before the next Draining
+    Running --> Idle : checkout aborts the run mid-flight<br/>and executes at the beat — the pause point —<br/>before the next work signal
 ```
 
-The **Draining** step is the outer loop's single responsibility between
-idle and running: take the whole queue, join it into the history, and
-yield each message's `user_message` event (the 1:1 invariant). It is
-synchronous — no await between the take and entering the inner loop —
-so nothing interleaves, and batching is exact. Its gate is the **prompt
-barrier** (flag 8, ruled with the discard twist): the batch is
-committed and flushed through as one writer-locked sequence before the
-turn starts; a flush failure un-records the batch (it exists nowhere)
-and returns it as drafts — a run is never held for the disk and never
-runs on memory-only input. Steers join mid-run instead (the inner
-drain) and their records ride the write-behind buffer like turn
-output.
+**The opening batch is not pre-joined.** The old Draining step (join
+the queue into history behind the prompt barrier) is deleted: the
+inner loop's first CONVERGE drains the opening batch itself — the same
+code path as every other drain. One queue, **one** drain: a message
+arriving while idle and a message steering a live run take the same
+`take_all` at the loop top; batching, ordering, and the 1:1
+message-to-event invariant hold across both without special cases.
+
+**The degraded-buffer guard (the weak barrier; ruled 2026-08).** At
+run entry the buffer gets one drain attempt — `enqueue(&[])`, an empty
+batch, which is by construction a pure retry of any stuck lines. Ok
+proceeds (clean, or just recovered: `persist_recovered`); Err blocks
+the start gracefully (`persist_degraded` — an external condition, not
+a crash). Semantics: **the first failed drain runs in memory** — the
+prompt fold's enqueue fails, the conversation proceeds anyway, the
+lines stay queued and retry on every later enqueue — **but the next
+start is blocked** until a drain succeeds. At most one run proceeds on
+undrained state, and only the first. This supersedes the old prompt
+barrier (flag 8's second amendment): no run is ever refused for the
+disk *before* trying, and none runs twice on the same degraded buffer.
 
 **Entry contract** (what the outer layer hands the black box):
-
-- the history **already joined** with the opening batch — the outer
-  loop's Draining step did the join, so the inner loop receives one
-  history and sends it as-is;
-- at least one turn of budget (`max_turns ≥ 1` — entering a run that
-  cannot run is unrepresentable).
+the conversation (a `ContextManager`) and `max_turns ≥ 1` — entering a
+run that cannot run is unrepresentable. The mailbox may be empty (a
+continue run); the conversation must not be (nothing to continue).
 
 **Exit contract** (what the black box guarantees):
 
 - **at least one turn runs** — control never enters and leaves without
-  issuing a model call;
+  issuing a model call (by construction: the first pass of the loop
+  can exit at nothing — no streak is set, no error is pending, and the
+  budget is ≥ 1);
 - exactly one terminal: `Done(response)` or `Failed(reason)` — unless
   an internal error panics, which produces no terminal by design (the
   process dies; that is the loud failure);
 - the run never observes abort as a state — abort preempts it from
-  outside, and the mechanism matters: the machine's stream is polled
-  **only through** the outer layer's `select!`, which is biased on the
-  cancel token, so the first poll after cancellation returns the
-  cancelled branch without polling the machine again — the stream
-  future is dropped mid-step and **no further transition can fire**
-  (a token-aware tool that returns a cancelled result instead of
-  dying by drop changes nothing: its result lands in a future nobody
-  polls). Tools die by drop-safety; the interrupted roundtrip
-  **never lands** (the durable roundtrip, below: an assistant turn
-  commits with its complete tool batch or not at all, so abort
-  simply discards the open roundtrip — there is nothing to repair,
-  and the repair machinery is deleted). The outer layer records
-  `Aborted` and discards the queue.
+  outside: the actor's `select!` is biased on the cancel token, so the
+  run future is dropped mid-await and **no code after the await runs**.
+  Drop-safety is structural: every conversation write in the loop is
+  an atomic commit (below), so the conversation always stands at a
+  roundtrip boundary when the future dies — the interrupted turn was a
+  loop local and never entered anything. The outer layer records
+  `Aborted` and clears the queue.
 
 **Outer-layer responsibilities:** queue custody (the always-queue
 invariant — every message yields exactly one user event or steers the
 run in flight; the only discards are the clear sites, abort and
 checkout, each discarding only what was submitted before it), the
-Draining step (opening-input construction), terminal-event emission,
-preemption, pause-point operations (checkout). Implemented today by
-the tabit-session actor (`pump`/`run_one` + the mailbox and cancel
-token); documented here because the entry/exit contracts above are
-what the inner machine is designed against.
-
-**One queue, two drains:** the outer drain opens runs (Idle →
-Draining → Running); the inner drain converges turn outcomes. Both
-take the whole queue at their instant. A message arriving while idle
-lands in the outer drain; during a run, in the inner one. No-loss and
-ordering hold across both.
+work-signal and entry-guard, terminal-event emission, preemption,
+pause-point operations (checkout). Implemented by the tabit-session
+actor (`pump`/`run_one` + the mailbox and cancel token).
 
 **Pause-point operations (checkout, ruled 2026-08 stage 2).** Some
 commands rewrite the conversation itself, so they cannot run inside a
@@ -112,17 +102,16 @@ command path that serves this (owner-ruled through design review):
   forced boundary is: session mutations wait for the worker's beat.
   Everything else can act at receive.
 - **Checkout, at receive:** validate the target against the
-  module's own id truth (a resident set the recorder maintains— every
-  id the append-only file has ever held, dropped branches included;
-  a bad target errors immediately, even mid-run) **— then abort**
-  (ruled 2026-08: checkout composes abort, it does not wait on the
-  run — the clear inside the abort IS the discard-at-receive: what
-  `message_queued` announced and nothing drained comes back as
-  `messages_discarded` right away, and the cancel ends the run at
-  its next await point; what already entered the conversation is
-  history the rewind drops) **— then park in the slot**
-  (a slot, not a queue: a newer checkout replaces an older—
-  concurrently parked checkouts are one intent re-aimed,
+  conversation's id truth (the tree — every entry the append-only file
+  has ever held, dropped branches included; a bad target errors
+  immediately, even mid-run) **— then abort** (ruled 2026-08: checkout
+  composes abort, it does not wait on the run — the clear inside the
+  abort IS the discard-at-receive: what `message_queued` announced and
+  nothing drained comes back as `messages_discarded` right away, and
+  the cancel ends the run at its next await point; what already
+  entered the conversation is history the rewind drops) **— then park
+  in the slot** (a slot, not a queue: a newer checkout replaces an
+  older— concurrently parked checkouts are one intent re-aimed,
   and the collapse is lossless since each receive-clear already took
   everything pending before it).
 - **Abort is drop-all-pending-intent:** cancel the run, clear the
@@ -149,302 +138,212 @@ command path that serves this (owner-ruled through design review):
   Reads never hold writes: messages keep flowing while a pass is
   parked.
 
-## Layer 2 — the inner loop (one run's turn machine)
+## Layer 2 — the inner loop (one run's coroutine)
 
-Entry is **Preparing**: it takes the existing history and constructs
-the request. Every later iteration is preceded by exactly one drain
-and one decision. **Every** turn outcome — final, broken, tools, and
-failure — converges at the same drain, because steering is
-independent of everything the model does.
+The turn state machine is **deleted** (ruled 2026-08, the loop
+refactor): it was a coroutine re-encoded as a state enum plus a
+feeding protocol — one feeder, no external events choosing
+transitions, and all genuinely asynchronous things (abort, steers,
+tool chains) already lived outside it. The run is now **one async
+function** — a coroutine for real — that holds `&mut ContextManager`
+for its lifetime and receives the shared leaves (steer source, cancel
+token, interaction hub, event channel) as parameters. The
+conversation's source of truth is the `ContextManager` (tabit-log):
+`fold` / `fold_all` / `messages`, context derived per read and never
+stored, batches verified whole and committed whole. There is no
+engine-side history copy, no parked-turn slot, and no session-side
+mirror.
 
-The run's history container is the **one context builder**
-(`agent::context::Context`): the same fold a session layer persists
-its durable context from. A run holds a run-scoped instance seeded at
-entry; there is no second history-assembly logic anywhere.
+```
+run(conversation: &mut ContextManager, leaves, budget) -> Outcome
 
-```mermaid
-stateDiagram-v2
-    [*] --> Preparing : enter — one history,<br/>drained and joined by the outer loop
-    Preparing --> ModelTurn : request issued
-    ModelTurn --> TurnParked : turn completed — parked,<br/>nothing folded (hooks observe)
-    ModelTurn --> BrokenTurn : typed defect — never committed
-    ModelTurn --> DrainingSteers : provider/transport error (flagged)<br/>the queue still drains
-    TurnParked --> FinalTurn : accept — no tool calls
-    TurnParked --> ExecutingTools : accept — calls<br/>(admission scan at entry)
-    TurnParked --> DrainingSteers : veto (the Retry hook) — the turn<br/>never folds (Repeat) or folds with<br/>corrective feedback (Feedback)
-    BrokenTurn --> DrainingSteers
-    FinalTurn --> DrainingSteers
-    ExecutingTools --> DrainingSteers : results appended
-    DrainingSteers --> Deciding
-    Deciding --> Preparing : loop — another turn<br/>(steers/tools/retry budget left)
-    Deciding --> Done : final turn, queue silent
-    Deciding --> Failed : terminal error / budgets exhausted / terminating
-    Done --> [*]
-    Failed --> [*]
+state carried across iterations — run locals, the whole of it:
+  defect_streak, provider_streak   // consecutive failed attempts
+  pending_error                    // classified failure of the last attempt
+  terminating                      // reason; settable ONLY post-tools
+  turns_used                       // committed turns only
+
+loop {
+  // ── CONVERGE ── the one drain; reaching it is the convergence.
+  //   Every SETTLE branch falls through to here, so the drain is
+  //   unconditional by shape — a bypass edge would need a `continue`
+  //   that skips the loop top, which is not writable.
+  if terminating {                    // the turn that set it finished
+                                      // and committed naturally; a stop
+                                      // never drains
+    mailbox.clear_with_notice();      // messages_discarded — the stop is final
+    exit Failed(stopped);
+  }
+  steers = mailbox.take_all();
+  for s in steers {
+    conversation.fold(user(s));       // [WRITE] the first iteration's fold
+    events.emit(user_message(s));     // IS the prompt commit
+  }
+  if !steers.is_empty() { defect_streak = 0; provider_streak = 0; }
+                                      // a steering user is their own breaker
+
+  // ── DECIDE ── the one policy site; every loop-or-exit conditional
+  //   lives here. The first pass cannot exit: nothing is set and
+  //   budget >= 1 — at-least-one-turn by construction.
+  if pending_error is terminal     { exit Failed(pending_error); }
+  if defect_streak   > DEFECT_CAP  { exit Failed(defects_exhausted); }
+  if provider_streak > RETRY_CAP   { exit Failed(retries_exhausted); }
+  if turns_used      >= budget     { exit Failed(budget_exhausted); }
+
+  // ── PREPARE ──
+  history = conversation.messages();  // [READ] the request IS the history;
+                                      // no prompt/context split
+  turn_id = ids.mint();               // announced ids are never reused
+  events.emit(TurnStarted { turn_id });
+
+  // ── MODEL ── stream deltas → events as they arrive; hooks observe.
+  //   `cancel` races every await below: on abort the run future is
+  //   dropped, nothing after the await runs, and the conversation is
+  //   at a roundtrip boundary — every WRITE here is an atomic commit.
+  outcome = model.call(history).await;
+
+  // ── SETTLE ──
+  match classify(outcome) {
+    Defect =>                          // malformed tool-call arguments
+      events.emit(ModelTurnRetried { turn_id });
+      defect_streak += 1;              // the turn was a local: nothing
+      continue;                        // folded, nothing to un-fold
+    ProviderError(class, e) =>
+      pending_error = (class, e);
+      if class is retryable { provider_streak += 1; }
+      continue;
+    Turn { choice, .. } => {
+      hooks.model_turn_finished(choice);   // observe-only
+      if choice carries no tool calls {
+        if !choice.is_empty() { conversation.fold(assistant(choice)); }  // [WRITE]
+        events.emit(TurnCommitted { turn_id });
+        turns_used += 1;
+        exit Done(response_from(choice));  // a steer arriving now is the
+      }                                    // NEXT run's opening batch
+      calls   = admit(choice.calls);       // name scan; unknown → in-band
+      results = execute(calls).await;      // chains on the sidecar (below)
+      conversation.fold_all([assistant(choice), results]);  // [WRITE] atomic
+      events.emit(TurnCommitted { turn_id });
+      turns_used += 1;
+      if hooks.requested_stop { terminating = reason; }  // set AFTER the batch
+      continue;
+    }
+  }
+}
 ```
 
-**The drain is unconditional.** Steering messages are information the
-user sent *for the model* — extra context, or a correction when the
-user noticed the model on (or about to be on) a wrong path. A
-model-side failure does not invalidate them, so nothing except abort
-(a user action — and, as of the stop-semantics ruling, a hook stop)
-ever discards or strands them: every outcome drains
-the queue into history first, and a run that then fails carries that
-history forward — the messages are recorded, surfaced as events, and
-seen by the next attempt. There are **no bypass edges**.
+**The write sites are the whole durability story.** Exactly three:
+the drain's user folds, the final `fold`, the roundtrip `fold_all` —
+each an atomic verify-then-commit (records enqueue as one batch, tree
+grows in the same operation). Every await point therefore sees the
+conversation at a roundtrip boundary, which is why abort can simply
+drop the future. The in-flight turn — from MODEL completion to its
+`fold`/`fold_all` — is a **loop local**: it enters nothing, so a turn
+that dies (defect, abort, failure) needs no un-folding, no discard
+machinery, and no pending slot anywhere.
+
+**Entry ids and announced ids are one value**: the assistant
+`Message`'s `id` (minted by the engine from the injected id source,
+announced by `TurnStarted` before the first content byte) becomes the
+assistant entry's id at commit. `TurnStarted { id } … TurnCommitted
+{ id }` bracket a turn for live and replay alike; an attempt that dies
+leaves its announced id uncommitted. **`TurnCommitted` is the sole
+commit event** — final folds and roundtrips alike (the old
+`RoundtripClosed` is deleted: it always fired beside `TurnCommitted`
+and only existed as the session door's trigger, and the door is now
+inline in `fold_all`).
 
 ### Error taxonomy (what a model turn can fail with)
 
 | class | examples | handling |
 |---|---|---|
-| model-side defect | tool-call arguments that cannot be parsed | BrokenTurn; bounded retry; steers reset the streak |
-| model-side mistake | a tool name not in the registry | admission scan at ExecutingTools entry: an in-band synthetic result tells the model; never stops the run |
+| model-side defect | tool-call arguments that cannot be parsed | discarded as a local; `ModelTurnRetried`; bounded streak; steers reset it |
+| model-side mistake | a tool name not in the registry | admission scan: an in-band synthetic result tells the model; never stops the run |
 | retryable provider/transport | rate-limit, transient connection failures, timeouts | drained, then bounded retry through the normal loop |
 | terminal provider | auth failure, permanent quota, context overflow | drained, then exit-Failed — history (with steers) carries forward |
-| internal (ours) | our own invariants | **panic and hard stop** — a development bug; the process dies loud. Not a state machine path and not a terminal: there is nothing graceful to do with ourselves |
+| internal (ours) | our own invariants | **panic and hard stop** — a development bug; the process dies loud. Not a loop path and not a terminal: there is nothing graceful to do with ourselves |
 | request construction | a provider cannot carry the content (e.g. a video attachment on Anthropic) | surfaced as a **terminal** error through the drain — implementation judgment: it can stem from *user content* (external input), so it fails gracefully rather than panicking |
 
 A drained steer resets every retry streak, for the same reason as the
 defect streak: new user input changes the situation, and the budgets
 bound unattended loops. Retry budgets are small named constants.
+Streaks are run locals: fresh at every run entry (every run is an
+attended start — a message or an explicit continue signal); if
+continue is ever driven *automatically*, that driver needs its own
+cross-run bound.
 
-### The machine contract
+### Hooks (observe-only; ruled 2026-08)
 
-**Inputs** — the driver feeds the machine, and the contract is total:
+The model-turn veto is deleted with the machine that housed it:
+`RetryRequest`, `ModelTurnAction`, and the parked-then-accept protocol
+are gone (upstream rig vocabulary, never consumed by tabit — the
+"continue with correction" case is a steer, the "retry fresh" case is
+unsupported until discussed; PROTOCOL.md flag 31 keeps the hook-action
+inventory open). Model-turn hooks observe the completed turn and
+return nothing. The remaining action surfaces (tool-call `Skip` /
+`Rewrite` / post-tool `Stop`, completion-call `active_tools`) are the
+stop-taxonomy and tool-phase machinery below.
 
-| input | meaning | destination |
-|---|---|---|
-| `turn_completed { turn }` | a provider turn finished streaming; park it (classify, fold nothing) | TurnParked |
-| `accept` | the model-turn hooks approved the parked turn; fold it and proceed | FinalTurn / ExecutingTools (the parked classification decides) |
-| `veto { request }` | a model-turn hook rejected the parked turn (`Repeat` folds nothing; `Feedback` folds the turn plus corrective feedback) | DrainingSteers, with the retry flag set |
-| `Broken { defect }` | typed malformed-tool-call defect; nothing committed | BrokenTurn |
-| `error { class, reason }` | a provider/transport failure, classified per the taxonomy | flagged → DrainingSteers |
-| `terminate { reason }` | a hook stopped the run | flag, read at Deciding |
+### The loop/leaves split
 
-**Flags owned by the machine** (the "data collected earlier" that
-Deciding reads):
-
-- `pending_error` — the classified error from the last turn, if it
-  failed; Deciding retries it (budget permitting) or exits with it.
-- retry streaks — consecutive failed attempts per retryable class
-  (defects, retryable provider errors); each capped at a small named
-  constant; reset by any committed turn and by any drained steer (a
-  present, steering user is their own circuit breaker).
-- `terminating` — set by hook stops; exits at the next decision.
-- `steers_drained` — set by the drain; distinguishes "queue was silent"
-  from "queue drained into history".
-- budget — turns consumed by committed model calls only (a discarded
-  turn returns its slot; a recovery retry consumes another).
-- `last_outcome` — what kind of turn (if any) just ended; Deciding's
-  exits are unreachable before the first outcome exists (the
-  at-least-one-turn invariant, structurally).
-
-serde/suspension remains a property of the machine (it stays
-serializable), but nothing serializes a run today — there are no
-compatibility constraints, only the discipline.
-
-### State responsibilities
-
-Each state has exactly one. Where a state was considered for splitting
-during design review, the verdict is recorded.
-
-- **Preparing** — take the existing history and construct the request.
-  **The request is the history — no prompt/context split** ("just send
-  the history", the same ruling that shaped `stream_chat`); consumers
-  that need "the message being answered" (hooks, cancel errors) derive
-  it as the history's last message, a view, not a field. Emits the
-  model-call step carrying the whole history. *Self-review: the
-  max-turns budget gate currently hiding in `PreparingRequest`'s
-  `next_step` moves to Deciding — Preparing keeps nothing conditional.*
-- **ModelTurn** — the provider turn is in flight; the driver drives it
-  (request, stream, spans). The machine waits for one input of the
-  five above.
-- **TurnParked** — the completed turn, classified and held, **nothing
-  folded**. This is where the model-turn hooks observe: acceptance and
-  rejection both happen before the fold (the pre-commit veto reorder,
-  delta 11), so a rejected turn never needs un-folding and there is no
-  undo API on the context. The parked classification (final /
-  output-finalize / tools) was computed at park time, so the veto
-  knows a tools turn when it sees one — rejecting a turn with tool
-  calls stays a loud contract violation, exactly as before.
-- **FinalTurn** — the accepted tool-free turn, folded; awaiting the
-  drain. One shape, no policy.
-- **BrokenTurn** — discard the defective turn (it never entered
-  history, on any provider), bump the defect streak. Simple path.
-- **ExecutingTools** — admit the batch, hold it, receive paired
-  results. Admission is a pure scan at entry: a call whose name is not
-  in the registry is a *model-side mistake* — it executes as an
-  in-band synthetic result naming the problem, so the model is told
-  and can fix it; the run never stops on the model's own error (there
-  is nothing a user could do about it). *Single concern: custody.
-  Execution itself (concurrency, drop guards) is the driver's.
-  Validating is deliberately not a separate state — interaction
-  landed driver-side (see the tool phase below), and the machine
-  deliberately gains no state for it: the machine awaits input only
-  where the machine itself decides (classification, steering,
-  budget), and no interaction decision is the machine's.*
-- **DrainingSteers** — **the one and only drain point**: take the whole
-  queue, append to history, set `steers_drained` (which resets every
-  retry streak). Legality is structural — the machine offers the
-  drain exactly here, so draining anywhere else is unrepresentable,
-  not silently ignored.
-- **Deciding** — read the flags, choose: loop (→ Preparing), Done, or
-  Failed with its reason (budget / streak exhaustion / terminating).
-  *Pure: no I/O, no stored state — realized as the drain's exit
-  transition, but kept a named decision point so every loop-or-exit
-  conditional has exactly one home. A conditional found anywhere else
-  is a design bug.*
-- **Done / Failed** — terminals. Done carries the `PromptResponse`;
-  Failed carries the reason and the full history.
-
-### The machine/driver split
-
-| machine (control) | driver (data) |
+| the loop (control) | the leaves (shared cells) |
 |---|---|
-| classification of the turn result | issuing requests, spans, telemetry |
-| stage transitions (park → accept/veto) | firing the model-turn hooks between the phases |
-| steering points (when) | fetching from the `SteeringSource` (what), feeding `steer()` |
-| budget, streak, terminating flags | tool dispatch: concurrency, drop guards |
-| loop-or-exit decision | hook invocation, memory append at Done |
-| — | turn identity: minting from the injected id source, announcing `TurnStarted`, publishing the id on the hook context (delta 10) |
+| classification of the turn result | steer source / mailbox: `take_all` at the loop top only |
+| the one drain; the one policy site | cancel token: races every await, never a state |
+| conversation writes (`fold`, `fold_all`) | interaction hub: asks register/resolve; run terminals clear |
+| budget, streaks, `terminating`, `turns_used` | event channel: write-only, frontend-facing |
+| loop-or-exit decisions | the conversation itself: `&mut ContextManager`, moved in |
 
-### What the redesign deletes
+What the session consumes is conversation truth (`manager.messages()`)
+and frontend feed (events) — it mirrors nothing. Side records
+(`model_change`, `checkout`, `aborted`, …) are the session's own
+enqueues through its shared buffer handle.
 
-- `ready_for_steering()` as a public runtime gate (structure replaces
-  the check).
-- `steer()`'s commit-the-pending-final-turn special case (FinalTurn
-  commits at classification).
-- The driver's three inline drains and its streak counter.
-- `AwaitingAdvance`'s five-way conditional arm.
-- `discard_turn` as a public transition (BrokenTurn's entry action).
-- **`pop_last_assistant` / the post-commit veto** (superseded by the
-  TurnParked reorder, delta 11): the hooks ran after the fold and the
-  undo followed; both halves are gone.
-- **The dangling-tail repair pass** (superseded by the atomic durable
-  roundtrip, delta 12): crash- and abort-shaped files cannot hold a
-  half-open roundtrip, and the synthesized "interrupted" results with
-  it.
-- **The `InvalidToolCall` hook and its pause machinery** — the
-  choices (`Fail`/`Retry`/`Repair`/`Skip`/`Stop`), the
-  `ResolvingToolCalls` pause state, and `max_invalid_tool_call_retries`.
-  Unknown tool names are handled in-band at admission; if a
-  validation-time extension point is ever needed (permissions), it
-  will be designed fresh, not restored in this form.
-- Every failure path that skips the drain — there are none.
-- Graceful handling of internal errors — they panic (see the
-  taxonomy).
+### What the loop refactor deletes
 
-### Behavior deltas (documented, intended)
-
-1. **One drain point** (was three), at the convergence — and it is
-   unconditional: failures drain too; only abort discards. (Second
-   discard case added: stop exits — the stop-semantics ruling below.)
-2. **Retryable provider errors** (rate-limit, transient transport)
-   are retried through the normal loop, bounded, with steers riding
-   along — not an immediate hard stop.
-3. **Exhaustion only fires on a silent queue** — a drained steer
-   resets the streaks (owner ruling).
-4. **Unknown tool names never stop or pause the run** — an in-band
-   synthetic result tells the model; no hook question, no
-   `UnknownToolCall` failure.
-5. **The final turn commits at classification**, not lazily on the
-   first steer.
-6. **`max_turns` fires at Deciding** (after the drain), same observable
-   outcome, one exit site instead of two.
-7. **Hook stops unify** as the `terminating` flag read at Deciding
-   (and at classification for pre-turn stops). (Superseded in part:
-   flag-only stops, two verbs at the drain — the stop-semantics
-   ruling below.)
-8. **Internal errors panic** — the process dies loud instead of
-   degrading gracefully through the machine.
-9. **Output-budget truncation is a warning, not a failure** (ruled
-   2026-08, upstream-triage discussion): when a committed turn's
-   terminal reports a truncation-class finish reason (`Length`), the
-   engine surfaces a turn warning to the frontend and the flow proceeds
-   exactly as usual — steers drain into the next turn, the
-   another-turn check is unchanged, the run may end normally. Partial
-   tool calls keep their own uniform path: in-band errors, never
-   conditioned on the turn's finish reason (a partial call from a
-   length cap is handled exactly like one from broken model output —
-   no cause-based carve-out).
-10. **Every model-call attempt is announced** (ruled 2026-08, v2 slice 1).
-   At the moment an attempt commits — the same point the driver advances
-   `previous_model`, after every hook stop and preparation failure, so an
-   attempt that is announced is a request that will actually be issued —
-   the driver mints a turn id from the run's id source, publishes it on
-   the hook context (hooks observe the id of the turn in flight; the
-   session's recorder stamps the committed entry with it), and emits a
-   `TurnStarted { id }` item before any content of the attempt. The id
-   source is injected: the engine's default is its short random ids, and
-   consumers that key durable records on turn identity inject their own
-   mint (tabit injects UUIDv7, so announced ids and log entry ids are
-   literally the same value). Announced ids are never reused — a
-   retried or failed attempt announces again with a fresh id, and an
-   attempt that never commits leaves its id uncommitted (the frontend
-   already discards provisional output on `TurnRetried`/abort). The
-   announcement precedes the first content byte, so consumers learn a
-   turn began before first-token latency elapses. The matching **commit
-   edge is announced too**: a turn accepted into run history emits
-   `TurnCommitted { id }` (after model-turn hooks resolve to advance),
-   so live and replay bracket a turn with the same shapes — a turn
-   discarded by a retry hook, a stop, a provider failure, or an abort
-   never commits, and its announced id stays uncommitted.
-11. **Turn acceptance is two-phase; vetoes precede the fold** (ruled
-   2026-08, the durable-layer sweep). A completed turn parks first
-   (TurnParked — classified, folded nowhere); the model-turn hooks
-   observe the parked turn; only their approval folds it
-   (`accept`), and a `Retry` veto (`veto`) discards or
-   feedback-amends it before anything lands. The superseded shape —
-   fold, then hooks, then un-fold (`pop_last_assistant`) — is deleted;
-   the context has no undo because no caller ever needs one.
-12. **The durable roundtrip is atomic** (ruled 2026-08, the durable-layer
-   sweep; see the section below). An assistant turn and its complete
-   tool batch commit to the session through one door as one unit —
-   all-or-none — announced by the `RoundtripClosed { turn_id }`
-   stream item. Abort discards the open roundtrip (it never landed), a
-   hook veto or defect discard records the attempt's usage as a
-   `discarded` side record (PROTOCOL.md flag 22), and the
-   dangling-tail repair machinery is deleted: a file written only at
-   roundtrip boundaries cannot contain a half-open roundtrip, so a
-   torn or dangling tail is corruption and fails loud at open.
-13. **Defect retries are surfaced** — the BrokenTurn path (a discarded
-   malformed-tool-call attempt) emits `ModelTurnRetried` like a hook
-   veto does, so consumers (and the durable discard record) learn the
-   attempt was discarded, not silent.
-14. **Structured-output enforcement is not the engine's** (ruled
-   2026-08). Output modes, the synthetic output tool, both re-prompt
-   policies, the typed-prompt/extractor surface, and the
-   provider-composition capability are deleted: the problem they
-   served (schema-validated finals on providers whose structured
-   output fought tool use) is gone on the providers tabit keeps, and
-   no tabit run ever set a schema. A schema, if ever wanted, is the
-   caller's concern one layer above — at most a pass-through to the
-   provider's native structured output.
+- the `RunState` enum, the `AgentRunStep` protocol, and the
+  machine/driver split they forced;
+- `TurnParked`, two-phase acceptance, `veto_turn`, and every parallel
+  flag (`pending_final`, `pending_response`, `retry_requested`,
+  `steers_drained`, `last_outcome`) — locals now;
+- the engine's `Context` type and its public fold surface (the
+  one-context-builder fold lives inside `ContextManager::messages`);
+- the recorder: its door (the manager's `fold_all`), its pending
+  roundtrip slot (the loop local), its item mirror (nothing mirrors),
+  and its register/notice machinery (session-side enqueues and the
+  entry guard);
+- `RoundtripClosed` and the session-side commit choreography it
+  drove;
+- the serde/suspension discipline (nothing serializes a run; a
+  coroutine has no state to serialize).
 
 ## Implementation judgments (refactor landing)
 
 Recorded where the code had to pick; revisit on review:
 
-- **Request-construction failures** are terminal errors, not panics (see
-  the taxonomy row) — they can stem from user content.
+- **Request-construction failures** are terminal errors, not panics
+  (see the taxonomy row) — they can stem from user content.
 - **Zero budget is rejected at run construction** with a clear
-  configuration error; the at-least-one-turn invariant makes "a run that
-  cannot run" unrepresentable, so `max_turns(0)` is not a run shape.
-- **Provider-error identity survives the decision**: the machine stores
-  the classified error as a `PromptError`, but the driver restores the
-  original `Completion`-shaped error at the exit, so consumers keep
-  matching the provider's own error type.
-- **The final turn commits at classification** and the Done candidate
-  response is built then; a drained steer discards the candidate and
-  re-opens the run.
-- `AgentRunStep::Done` carries `Box<PromptResponse>` (the step enum's
-  size is dominated by it).
+  configuration error; the at-least-one-turn invariant makes "a run
+  that cannot run" unrepresentable, so `max_turns(0)` is not a run
+  shape.
+- **Provider-error identity survives the exit**: the loop stores the
+  classified error, but the exit restores the original
+  `Completion`-shaped error, so consumers keep matching the
+  provider's own error type.
+- **A steer arriving during the final turn** exits the run (`Done`) —
+  the steer opens the next run at the work signal (ruled 2026-08: one
+  less thing to check, identical behavior).
+- **Empty finals fold nothing and record nothing** — one decision
+  site (the loop), which closes PROTOCOL.md flag 29 by deletion.
+- **Usage facts are deferred** (owner ruling 2026-08): assistant
+  entries the manager constructs carry zeros from one named site;
+  discard billing (flags 25/27) returns with that discussion.
 
-## The tool phase (driver-side, ruled 2026-08)
+## The tool phase (loop-side subsystem, ruled 2026-08)
 
-The batch's execution is a designed driver subsystem — the machine's
-`ExecutingTools` stays custody-only, but what happens under it is
-specified here, not accreted.
+The batch's execution is a designed subsystem of SETTLE — specified
+here, not accreted.
 
 **The chain is the unit.** Each admitted call runs one independent
 chain: **gate → body → post** —
@@ -502,7 +401,7 @@ each; **nothing may kill a batch**:
 | need | mechanism | semantics |
 |---|---|---|
 | stop now | **abort** (the token leaf) | preempts at any await; `run_aborted`; queue discarded; unanswered calls get synthesized interrupted results. Callable by the user, frontends, and any hook constructed with the leaf. |
-| don't continue after this batch | **post-tool `Stop` → the `terminating` flag** | no effect on the current batch — unstarted chains still run; the flag is fed only after `tool_results` commits, so the tool phase is flag-blind by construction. Steers still drain on every non-stop outcome; `Deciding`'s another-turn check is overridden → `run_failed(reason)`; history carries forward. (The stop exit's drain becomes a discard — amended by the stop-semantics ruling below.) |
+| don't continue after this batch | **post-tool `Stop` → the `terminating` flag** | no effect on the current batch — unstarted chains still run; the flag is fed only after `fold_all` commits, so the tool phase is flag-blind by construction. The loop top exits `run_failed(stopped)` and **discards the pending queue with notice** (the stop-semantics ruling, below). |
 | don't run this call | **`Skip`** | in-band synthetic result; the model is told; siblings unaffected. |
 
 The pre-tool `Stop` action is deleted (its niches compose from
@@ -512,8 +411,8 @@ drain-vs-drop): `run_single_tool` has no error path, and settlement
 is unconditional — nothing exists that could strand a parked ask.
 
 **Interaction — the ask pattern.** One hub (the actor's third shared
-leaf beside the mailbox and abort): an ask registers a oneshot in
-the pending map, emits `interaction_request` on the event channel,
+leaf beside the mailbox and abort): an ask registers a oneshot in the
+pending map, emits `interaction_request` on the event channel,
 and awaits; `interaction_response` routes by id (unknown id or dead
 receiver: log and drop — total semantics, like abort-while-idle).
 Two sites share the one primitive: the gate (a permission hook
@@ -552,49 +451,43 @@ Pause points are enumerable — only context-carrying sites can ask
 `ToolContext`); other hook points gain the capability when a
 consumer exists.
 
-## The durable roundtrip (ruled 2026-08; the durable-layer sweep)
+## The durable conversation (ruled 2026-08; the loop refactor)
 
-Everything the model saw lands in the session log, one roundtrip at a
-time, through **one commit door** (the session recorder's door,
-composing the write queue, the tree, the context, and the stats
-ledger). A **roundtrip** is an assistant turn plus its complete tool
-batch — either all of it lands in the file or none of it does. The
-batch's buffering-until-complete lives at the commit site (the
-recorder's pending slot), never inside the context builder: the
-context receives only committed history.
-
-**The door's law:** validate before any state-modifying action
-(parent linking against the head, paired tool calls — an unpaired
-batch is an engine contract violation and panics loud), then write
-(the queue drains as one blob; the verdict rides home as a flag),
-then grow (tree, context, stats — one step, under one lock).
+Everything the model saw lands in the session log, one roundtrip at
+a time, through the `ContextManager` (tabit-log) — the single owner
+of the tree, the buffer handle, and the derived context. A
+**roundtrip** is an assistant turn plus its complete tool batch:
+`fold_all` verifies it whole (every call answered exactly once),
+enqueues its records as one all-or-nothing batch, and grows the tree
+in the same operation — all of it lands or none of it does, so a
+file with tool calls but no results is unrepresentable by
+construction.
 
 **Commit sites:**
 
-- **the prompt barrier** (gated — the outer loop's Draining edge): the
-  opening user batch commits and flushes through before the turn
-  starts; a failed flush rejects the batch (it exists nowhere) and the
-  texts go back as drafts;
-- **the roundtrip** (atomic): `RoundtripClosed` commits the parked
-  assistant plus its results. Write-behind: a refusing disk degrades
-  (the persist notices), it never blocks the conversation;
-- **the steer drain** (write-behind): each drained steer commits as
-  its own user node, in drain order;
-- **side records** (write-behind): `model_change`, `checkout`,
-  `aborted`, `discarded { usage }`, and the reserved kinds — session
-  facts outside the tree, order-significant.
+- **the drain folds** (the loop top): the opening batch and every
+  steer commit as user nodes, in drain order;
+- **the final fold**: a tool-free accepted turn commits at
+  classification (empty finals fold nothing — one decision site);
+- **the roundtrip** (`fold_all`): assistant + results, atomic;
+- **side records**: session facts (`model_change`, `checkout`,
+  `aborted`, …) enqueued by the session through its own shared
+  buffer handle — order-significant, never part of the tree.
 
-**Discards are billed** (PROTOCOL.md flag 22): a hook-vetoed or
-defect-discarded attempt commits a `discarded { usage }` side record
-at discard time; cumulative stats count it. The log stays the cost
-source of truth.
+**The write buffer's one behavior** (the writer's contract): enqueue
+a batch, all-or-nothing into the outbox, then attempt the write —
+flush; on failure revert the file to its clean prefix and keep the
+lines queued (every later enqueue retries them); on success drop the
+lines. The `Err` is a report, not an undo. Degradation surfaces at
+the run-entry guard (flag 8's second amendment). Usage facts are
+deferred; discards record nothing (flags 25/27 parked).
 
 **The load pass is one fold.** Opening a session parses the file once
-— header, tree (with head), context (the active branch, consecutive
-tool results merged into the batch's single user message), selection
-register, and the computed cumulative stats (all branches; abandoned
-spend is still spend). Raw records are not retained. A torn tail or
-any structural violation (a dangling roundtrip, a checkout to a
+— header, tree (with head), selection register, and the computed
+cumulative stats (all branches; abandoned spend is still spend). The
+context is *derived* on every read (`messages()`), never parsed,
+never stored. Raw records are not retained. A torn tail or any
+structural violation (a dangling roundtrip, a checkout to a
 mid-roundtrip node, a broken parent link) fails loud at open — the
 repair pass is deleted because atomic roundtrips made the shapes it
 papered over unrepresentable, and a repair that survives its regime
@@ -608,183 +501,16 @@ were never answered on that branch, a batch's interior result —
 panics ("revisit later"; owner ruling, flag 23). `rewind(n)` targets
 user messages and is unaffected.
 
-## Turn-level stop semantics (ruled 2026-08; pre-implementation)
+## Turn-level stop semantics (ruled 2026-08; implemented by the loop)
 
-The owner ruling on what a hook stop *means*, recorded after the
-pre-handover review found the agreed semantics written down nowhere —
-and the inherited trait-era behavior contradicting it in three ways.
-Amends delta 1 (a second discard case), delta 7, and the stop
-taxonomy's post-tool row. **Implementation is pending**; the driver
-still implements the superseded shape, described at the end for the
-implementor.
-
-**The ruling.** A hook stop means: the current turn **finishes
-naturally** — it streams to completion, commits, its tools execute,
-the results commit — and the run does not loop into the next turn; it
-exits `run_failed(reason)` (the `stopped` kind, PROTOCOL.md flag 9).
-On the stop exit the pending queue is **discarded with notice**
-(`messages_discarded`), never drained into history. The discard is
-what makes a stop final: the mailbox keeps draining after a run
-failure, so a stopped run with a live queue would otherwise bounce
-straight into a new run, defeating the stop. Stops join abort as the
-second discard class.
-
-**The mechanism — one flag, one check rule, two verbs.**
-
-- A stop only ever **sets the flag** (reason attached) on the run
-  context — any hook, any point. Repeated requests: last write wins.
-- The machine reads the flag **exactly where a model call would
-  begin**: at Deciding (post-turn / post-batch stops — skip the loop)
-  and at Preparing (pre-turn stops — skip issuing the request). One
-  rule: *a stop takes effect before the next model call, never
-  mid-turn, never mid-batch.* Mid-turn and mid-batch the flag is
-  invisible, so the turn finishes and the roundtrip commits.
-  Immediate preemption stays abort's exclusive row — a hook needing
-  stop-now holds the abort leaf.
-- The drain point keeps its single-convergence shape and gains **two
-  verbs**: drain (every non-stop outcome — steers join history,
-  streaks reset; unchanged) or discard (the flag is set — the queue
-  leaves with `messages_discarded`, nothing enters history). The
-  machine owns the flag, so it owns the verb; the watermark holds —
-  the discard takes the queue at that instant, later messages queue
-  for the next run.
-- The discard is an **internal, beat-time** clear, executed inside
-  the run at the decision point; `messages_discarded` rides the run's
-  normal event flow ahead of `run_failed`. It does NOT use the abort
-  site's receive-time notice channel — that channel exists for
-  external, preemptive commands acting from the caller's thread. Two
-  discard mechanisms, each matched to its trigger: receive-time clear
-  (abort; checkout composes abort and adds no clear of its own) and
-  beat-time discard (stop).
-
-**What this deletes** (rule 12 — the current shape re-assembles one
-semantic at several sites):
-
-- The six per-site stop paths in the two turn sources (blocking
-  `runner.rs`: `on_completion_response`, `on_model_turn_finished`;
-  `streaming.rs`: `on_text_delta`, `on_tool_call_delta`,
-  `on_stream_response_finish`, `on_model_turn_finished`) — each
-  yields `cancel_error` and returns today, the driver classifying it
-  into `TurnFailure::Stop` → `run.terminate`.
-- `AgentRun::terminate()`'s jump-to-DrainingSteers transition — the
-  amputation that cuts pre-commit turns and skips ExecutingTools.
-- The driver-side `Stop` arm of `classify_turn_failure`.
-- Fixed structurally, not patched: the recorder-ordering fragility (a
-  stopped post-commit turn's durability depended on hook priority
-  relative to the recorder — the turn now always commits through the
-  normal path, so the recorder always fires) and the
-  open-roundtrip-on-stop edge (a stopped tools-turn no longer strands
-  its calls).
-
-**Current-implementation deltas** (what the code does today, all
-superseded): mid-turn delta stops cut the stream pre-commit — the
-turn is discarded, never history; post-commit stops skip
-ExecutingTools, leaving the roundtrip open (and at the blocking
-`on_completion_response` site the recorder never fires, so the turn
-is not even durable); the stop exit drains the queue into history —
-the opposite of the discard ruling, though it is what delta 1's
-"only abort discards" swept stops under.
-
-**Implementation notes** (for whoever lands this):
-
-- `SteeringSource` grows the discard verb. The notice carries the
-  born-early ids, which the engine never sees — the vehicle must be
-  mailbox-side, or an engine item carrying the mailbox's pairs;
-  ordering must land the notice ahead of the run's terminal.
-- The machine's step contract gains the Preparing flag check — a new
-  edge; this document's diagram amends when the code lands.
-- Machine-generated terminal failures (defect-streak exhaustion,
-  empty conversation) are NOT stops: they keep drain-and-carry-
-  forward. Only hook stop requests set the flag. (The
-  `PromptCancelled` umbrella typing stays PROTOCOL.md flag 9's
-  question.)
-- Sequencing note: the observation actions live on the trait-era hook
-  surface the closure-record migration is still retiring — the two
-  efforts touch the same sites; order them deliberately.
-
-## The hook surface — closure registration (ruled 2026-08;
-shipped)
-
-`AgentHook` (the nine-method observer trait) is retired as the public
-authoring surface. It solved an extension-authoring problem—a
-coherent multi-event observer with shared state—inside the
-dispatch mechanism, at dispatch-layer cost: the wide defaulted
-interface (every real consumer implements exactly one method), the
-RPITIT dyn-incompatibility, and the private `DynAgentHook`/`HookStack`
-erasure layer that translates bundles back into per-event callables.
-Dispatch wants callables; bundling is the extension's concern.
-
-- **Registration is a record, not a bare closure**: `{ id, priority,
-  closure, metadata }`—the extension runtime stamps its owner id
-  onto records when it arrives. Bare closures remain sugar (generated
-  id, default priority). Attribution ("hook `perms` denied the
-  call"), introspection, and replace-by-id fall out of the id. The id
-  is **author-chosen** (a declared artifact, like a tool name—the
-  author namespaces it, `ext:<id>:<name>` when the runtime arrives);
-  it never reaches the wire, and it is never the interaction id—a
-  registration names a subscription, a transaction id names one ask.
-  Attribution may flow into an ask's *payload*; routing never knows
-  which hook asked.
-- **One shape per event**: `Fn(&RunContext, Event<'_>) ->
-  BoxFuture<'static, Action>`— a single async form for all events
-  (sync events ride trivial futures) and a copy-out signature: the
-  future may not borrow, so closures take what they need from the
-  event by value before awaiting. The shape guest adapters cross
-  naturally.
-- **The order law**: per event, subscribers are stably sorted by
-  priority (`i32`; equal priorities fall back to registration order),
-  sorted when the run seals the stack. Reference priority bands are
-  extension docs, not type-level.
-- **Action algebras, stated per event** (composition in sorted
-  order): `on_tool_call`— **Skip is absorbing** (the first deny
-  in order wins; later hooks do not see the call), **Run is neutral**
-  (an early allow never stops a later gate—a hook that must
-  observe denials registers earlier; priority is also visibility);
-  `on_model_select`—the last selection in order wins and a stop
-  is terminal; patches compose sequentially. Each event's rule is
-  contract, restated under sorted order from today's semantics.
-- **`observes()` dies**—not-registered is the filter.
-- **One run context**: `HookContext` and `ToolContext` merge into a
-  single run context (run id, turn state, scratchpad, the capability
-  map with accessors) handed to hooks and tool bodies alike. "Why
-  could my tool ask the user but not my hook" is removed, not
-  documented; the interaction capability is the interaction round's
-  generic ask.
-- **Mounting and sealing**: registrations live on the session
-  builder (the extension mount—tools, hooks, later skills, one
-  surface); the stack seals per run. Reload applies to future
-  session builds—a built session is sealed (recorded choice).
-- **Failure doctrine** unchanged (AGENTS.md): extension (external)
-  failures are graceful, clear, and attributed by registration id;
-  the engine's own stay loud. The extension runtime wraps its
-  closures accordingly—nothing below it changes.
-
-The trait remains for the engine's internal multi-event observers;
-`DynAgentHook`/`HookStack` remain the storage, now built from
-records. Cross-event state is the asker's concern: captured `Arc`s
-(chains run concurrently—interior mutability was always required
-of `&self` too, so nothing is lost) or id-keyed correlation; the
-scratchpad stays engine-internal.
-
-## Migration map (old → new)
-
-| current | new home |
-|---|---|
-| tabit-session `pump`/`run_one` + mailbox + token | Layer 1 (already implemented; documented here for the contracts) |
-| `PreparingRequest` | Preparing (split only; budget gate → Deciding) |
-| `CallModel { prompt, history }` step split | deleted — the step carries the whole history; "the message being answered" is a derived last-message view |
-| `AwaitingModel` | ModelTurn |
-| `ResolvingToolCalls` + `resolve_invalid_tool_call` + the `InvalidToolCall` hook | deleted — admission is a pure scan at ExecutingTools entry; unknown names get in-band synthetic results |
-| `max_invalid_tool_call_retries` | deleted (no interactive recovery) |
-| `AwaitingAdvance` (no-tool arm) | FinalTurn |
-| `AwaitingAdvance` (tools arm) | ExecutingTools entry (admission scan) |
-| `AwaitingAdvance` (output-tool arm) | deleted — structured-output enforcement left the engine (delta 14) |
-| `ExecutingTools` + `tool_results` | ExecutingTools (+ closing transition) |
-| `Done` / `Failed` | Done / Failed |
-| driver defect path + `discard_turn` | BrokenTurn |
-| driver hard-fail on provider errors | `error { class }` input → drain → bounded retry or exit |
-| driver `drain_steers` × 3 | DrainingSteers |
-| driver streak counter | machine `defect_streak` flag |
-| driver hook-stop exits | machine `terminating` flag |
-| `retry_model_turn` (hook Retry) | FinalTurn transition (rejected turn re-queues; feedback mode records it) |
-| `ready_for_steering` / `steer()` commit case | deleted (structural) |
+A hook stop means: the current turn **finishes naturally** — it
+streams to completion, commits, its tools execute, the results commit
+(`fold_all`) — and the run does not loop into the next turn. The
+`terminating` flag is settable only at that post-commit site, so the
+loop-top check can fire only after a completed turn (at-least-one-turn
+holds absolutely; pre-turn stops do not exist). On the stop exit the
+pending queue is **discarded with notice** (`messages_discarded`),
+never drained — the discard is what makes a stop final: the mailbox
+keeps serving after a run failure, so a stopped run with a live queue
+would otherwise bounce straight into a new run, defeating the stop.
+Stops join abort as the only queue-discard sites.
