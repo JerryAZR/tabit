@@ -134,16 +134,13 @@ pub(crate) trait TurnSource: WasmCompatSend {
     /// completion call into the ledger, yield every intermediate item,
     /// and settle with the completed [`ModelTurn`]. Yielding an `Err`
     /// terminates the turn (the loop classifies it).
-    #[allow(clippy::too_many_arguments)]
     fn run_model_turn<'a>(
         &'a mut self,
         runner: &'a AgentRunner,
-        hook_ctx: &'a HookContext,
         ledger: &'a mut RunLedger,
         prepared: PreparedCompletionRequest,
         chat_span: tracing::Span,
         agent_span: &'a tracing::Span,
-        prompt: Message,
     ) -> DriveStream<'a>;
 
     /// Execute a turn's tool calls, yielding intermediate items and
@@ -374,17 +371,10 @@ where
             }
 
             // ── PREPARE ─────────────────────────────────────────────
+            // The conversation is never empty here: a run starts only on a
+            // non-empty one (`build_run` rejects the empty case at entry),
+            // and the loop only folds into it.
             let history = conversation.messages();
-            // The message being answered — a derived view; the conversation
-            // is never empty here (a run starts only on a non-empty one,
-            // and the loop only folds into it).
-            let prompt = match history.last() {
-                Some(message) => message.clone(),
-                None => panic!(
-                    "drive: the conversation is empty at PREPARE — a run starts \
-                     only on a non-empty conversation"
-                ),
-            };
             current_turn += 1;
             if runner.max_turns > 1 {
                 tracing::info!(
@@ -444,15 +434,8 @@ where
             // layer drops the run future on abort); nothing below runs
             // after that, and the conversation stands at a roundtrip
             // boundary.
-            let mut turn_stream = source.run_model_turn(
-                &runner,
-                &hook_ctx,
-                &mut ledger,
-                prepared,
-                chat_span,
-                &agent_span,
-                prompt,
-            );
+            let mut turn_stream =
+                source.run_model_turn(&runner, &mut ledger, prepared, chat_span, &agent_span);
             let mut completed: Option<Box<ModelTurn>> = None;
             let mut turn_error = None;
             let mut turn_protocol_fault: Option<&'static str> = None;

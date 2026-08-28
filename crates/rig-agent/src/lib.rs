@@ -13,8 +13,8 @@
 )]
 //! Rig's classic agent runtime.
 //!
-//! This crate owns the mature builder, run state machine, typed hook system,
-//! contextual tool registry, memory orchestration, extraction, and shared
+//! This crate owns the mature builder, the driving loop, the tool-phase hook
+//! pair, contextual tool registry, memory orchestration, and the shared
 //! blocking/streaming driver. Portable provider, message, tool, and storage
 //! contracts remain in [`rig_core`] and are reachable here through the
 //! explicit [`core`] namespace; this crate's root deliberately exports only

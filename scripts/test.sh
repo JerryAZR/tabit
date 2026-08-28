@@ -7,9 +7,11 @@
 # Usage:
 #   scripts/test.sh              cargo test --workspace --no-fail-fast
 #   scripts/test.sh <args...>    extra cargo-test args pass through
-#                                (e.g. `-p tabit-session name_filter`,
-#                                or `--target-dir target-test` when the
-#                                GUI holds a lock on target\debug)
+#                                (e.g. `--target-dir target-test` when the
+#                                GUI holds a lock on target\debug). Note
+#                                the workspace set is always included:
+#                                `-p crate` ADDS to it (cargo's rule), and
+#                                a bare name filters within every suite.
 #   scripts/test.sh --gate       fmt --check + clippy + test — the full
 #                                green gate, same quiet reporting
 #

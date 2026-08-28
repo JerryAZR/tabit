@@ -1,11 +1,9 @@
-//! [`AgentRunner`]: the hook-aware driver that turns a sans-IO
-//! [`AgentRun`] into a complete agent loop.
+//! [`AgentRunner`]: the run entry that pairs an agent's configuration with
+//! the driving loop ([`drive_agent`](crate::agent::drive)).
 //!
-//! [`AgentRun`] decides *what* to do next; it
-//! performs no IO and carries no hooks. `AgentRunner` pairs that machine with
-//! the side-effecting concerns — building and sending completion requests,
-//! executing tools, loading/saving conversation memory — and fires an
-//! [`AgentHook`] at every observable point. Both the blocking
+//! The runner owns the side-effecting concerns' inputs — the request
+//! assembly inputs, memory handles, the hook stack — while the loop owns
+//! control flow (ENGINE.md is the design record). Both the blocking
 //! [`PromptRequest`](crate::agent::prompt_request::PromptRequest) and the
 //! [`StreamingPromptRequest`](crate::agent::prompt_request::streaming::StreamingPromptRequest)
 //! APIs are thin wrappers over an `AgentRunner`, and you can build one directly
@@ -486,11 +484,11 @@ impl AgentRunner {
         self.agent_name.as_deref().unwrap_or(UNKNOWN_AGENT_NAME)
     }
 
-    /// Build the sans-IO [`AgentRun`] for this runner's configuration.
-    /// `history_override` replaces the configured chat history (e.g. with
-    /// memory-loaded history; never in conversation mode — a conversation
-    /// IS its history). Delegates to [`build_agent_run`] — the single
-    /// construction site shared with the streaming driver.
+    /// Build this runner's conversation (the loop's `ContextManager`):
+    /// the caller-supplied conversation, or a fresh seeded standalone
+    /// one. `history_override` replaces the configured chat history
+    /// (e.g. with memory-loaded history; never in conversation mode —
+    /// a conversation IS its history).
     pub(crate) fn build_run(
         &self,
         history_override: Option<Vec<Message>>,
@@ -904,12 +902,10 @@ impl TurnSource for UnaryTurnSource {
     fn run_model_turn<'a>(
         &'a mut self,
         runner: &'a AgentRunner,
-        _hook_ctx: &'a HookContext,
         ledger: &'a mut RunLedger,
         prepared: PreparedCompletionRequest,
         chat_span: tracing::Span,
         _agent_span: &'a tracing::Span,
-        _current_prompt: Message,
     ) -> DriveStream<'a> {
         Box::pin(async_stream::stream! {
             let resp = match prepared.builder.send().instrument(chat_span.clone()).await {

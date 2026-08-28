@@ -17,11 +17,11 @@ that pi's `pi-ai` provides, at or above its robustness:
   typed transport errors,
   per-index content-block routing with loud interleave guards, orphan
   tool-result validation, cache-usage reporting, refusal surfacing.
-- **rig-agent**: agent loop with lifecycle hooks, sans-IO serializable
-  `AgentRun` state machine, tool-panic containment, `#[rig_tool]` +
-  `PortableTool` as the canonical tool surface, strict tool-arg parsing.
-- ~97% line coverage, zero warnings, wasm-clean, offline cassette tests,
-  COVERAGE.md ledger, docs/policies in AGENTS.md / VENDOR.md.
+- **rig-agent**: the driving loop (one coroutine, ENGINE.md), the tool-phase
+  hook pair, tool-panic containment, `#[rig_tool]` + `PortableTool` as the
+  canonical tool surface, strict tool-arg parsing.
+- Coverage per the COVERAGE.md ledger, zero warnings, wasm-clean, offline
+  cassette tests, docs/policies in AGENTS.md / VENDOR.md.
 - `examples/local_probe.rs` — verified live probe against LM Studio
   (OpenAI completions, OpenAI Responses, Anthropic wire formats).
 

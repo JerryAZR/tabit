@@ -377,12 +377,10 @@ impl TurnSource for StreamingTurnSource {
     fn run_model_turn<'a>(
         &'a mut self,
         runner: &'a AgentRunner,
-        _hook_ctx: &'a HookContext,
         ledger: &'a mut RunLedger,
         prepared: PreparedCompletionRequest,
         chat_span: tracing::Span,
         agent_span: &'a tracing::Span,
-        _current_prompt: Message,
     ) -> DriveStream<'a> {
         Box::pin(async_stream::stream! {
             let mut stream = match prepared

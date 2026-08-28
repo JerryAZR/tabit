@@ -457,16 +457,6 @@ pub struct HookSpec {
     pub priority: i32,
 }
 
-impl HookSpec {
-    /// The full form.
-    pub fn new(id: impl Into<String>, priority: i32) -> Self {
-        Self {
-            id: id.into(),
-            priority,
-        }
-    }
-}
-
 impl From<&str> for HookSpec {
     fn from(id: &str) -> Self {
         Self {
