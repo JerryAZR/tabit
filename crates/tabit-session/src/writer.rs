@@ -1,20 +1,23 @@
-//! The session file's write queue: a plain FIFO of serialized lines and
-//! the one drain that puts them on disk.
+//! The session file's write buffer: the contract, and the file-backed
+//! implementor.
 //!
-//! The writer is structure-blind — records arrive pre-constructed (the
-//! recorder owns the tree, the context, the validation), join the outbox
-//! as lines, and drain as **one write** per attempt, so the file is
-//! always a clean prefix of commit order. Initialization lines are
-//! pre-populated, not special-cased: a fresh session queues its header
-//! (and the recorder queues the opening `model_change`) before anything
-//! happens, and the **first drain materializes the file** — the
-//! no-orphan gate. A session that never commits drains nothing and
-//! leaves nothing on disk.
+//! [`WriteBuffer`] is the contract — the one interface callers have:
+//! enqueue a batch. Everything else about file writing is the buffer's
+//! private business. A batch enters the outbox as one all-or-nothing
+//! unit (a failure anywhere rolls the whole batch back out — a partial
+//! blob never queues), then the buffer attempts to write everything
+//! queued. The write behavior is one thing, not a family of verbs:
+//! **flush; on failure revert the file to its clean prefix and keep
+//! the lines queued — every later enqueue retries them; on success
+//! drop the lines.** The `Err` an enqueue returns is a report, not an
+//! undo.
 //!
-//! A failed drain rolls the file back to the durable offset (the
-//! boundary of the clean prefix — only a fully successful write advances
-//! it); whether the failed batch's lines stay queued or pop back out is
-//! the caller's policy, expressed by the two write verbs.
+//! Initialization lines are pre-populated, not special-cased: a fresh
+//! session queues its header at construction, and the **first write
+//! attempt materializes the file** — the no-orphan gate. A session
+//! that never enqueues drains nothing and leaves nothing on disk; a
+//! session that committed at least once tries a best-effort final
+//! flush at drop.
 
 use crate::entry::{FileRecord, SessionHeader};
 use crate::error::SessionError;
@@ -23,13 +26,30 @@ use std::fs::{self, File, OpenOptions};
 use std::io::Write as _;
 use std::path::{Path, PathBuf};
 
-/// The write-behind queue for one session file. See the module docs.
+/// The buffer contract: the one interface callers have. See the module
+/// docs for the behavior an implementation owns.
+pub trait WriteBuffer: Send {
+    /// Enqueue a batch of records as one all-or-nothing unit, then
+    /// attempt the write of everything queued. On failure the batch
+    /// stays queued and the file is reverted to its clean prefix — the
+    /// `Err` is a report, not an undo.
+    fn enqueue(&mut self, records: &[FileRecord]) -> Result<(), SessionError>;
+}
+
+/// A handle to a session's shared write buffer — what the
+/// [`ContextManager`](crate::context_manager::ContextManager) holds,
+/// and what the session holds for its side records. One buffer per
+/// session file.
+pub type SharedBuffer = std::sync::Arc<std::sync::Mutex<dyn WriteBuffer + Send>>;
+
+/// The file-backed write buffer for one session file. See the module
+/// docs.
 #[derive(Debug)]
 pub struct SessionWriter {
     path: PathBuf,
     id: String,
-    /// The append handle, opened at the first drain. `None` until then:
-    /// nothing has touched the disk.
+    /// The append handle, opened at the first write attempt. `None`
+    /// until then: nothing has touched the disk.
     file: Option<File>,
     /// Serialized lines whose bytes have not reached the disk yet, in
     /// commit order.
@@ -41,9 +61,9 @@ pub struct SessionWriter {
 
 impl SessionWriter {
     /// A fresh session: queue the header line, touch nothing. The file
-    /// materializes at the first drain (with whatever else the outbox
-    /// holds by then — the no-orphan gate: a session that never commits
-    /// leaves nothing behind).
+    /// materializes at the first write attempt (with whatever else the
+    /// outbox holds by then — the no-orphan gate: a session that never
+    /// commits leaves nothing behind).
     pub fn create(path: PathBuf, header: SessionHeader) -> Self {
         let id = header.id.clone();
         // A `SessionHeader` is plain strings and numbers; a failure here
@@ -80,54 +100,9 @@ impl SessionWriter {
         })
     }
 
-    /// Queue one record without draining — pre-population (a deferred
-    /// opening `model_change` riding the first commit) and nothing else:
-    /// every real commit uses a write verb.
-    pub fn buffer(&mut self, record: &FileRecord) -> Option<SessionError> {
-        self.buffer_line(record)
-    }
-
-    /// The gated write (the prompt barrier): queue the records and drain
-    /// as one blob. On failure the batch pops back out — it exists
-    /// nowhere, and the caller treats the `Err` as "never accepted".
-    pub fn write_gated(&mut self, records: &[FileRecord]) -> Result<(), SessionError> {
-        let mark = self.outbox.len();
-        for record in records {
-            if let Some(error) = self.buffer_line(record) {
-                self.rollback_to_mark(mark);
-                return Err(error);
-            }
-        }
-        if let Err(error) = self.drain() {
-            self.rollback_to_mark(mark);
-            return Err(error);
-        }
-        Ok(())
-    }
-
-    /// The write-behind verb (roundtrips, steers, side records): queue
-    /// the records and drain as one blob. On failure the lines **stay**
-    /// queued — the caller already accepted them into memory, the file
-    /// is rolled back to its clean prefix, and every later write (and
-    /// the clean-exit flush) retries. Returns the drain error, if any.
-    pub fn write_behind(&mut self, records: &[FileRecord]) -> Option<SessionError> {
-        for record in records {
-            if let Some(error) = self.buffer_line(record) {
-                return Some(error);
-            }
-        }
-        self.drain().err()
-    }
-
-    /// One flush attempt over the outbox — the clean-exit retry (the
-    /// same drain every write attempts).
-    pub fn flush(&mut self) -> Result<(), SessionError> {
-        self.drain()
-    }
-
     /// How many lines sit in the outbox (the persist-degraded `pending`
-    /// count, and the `durable` verdict: zero means every commit reached
-    /// the disk).
+    /// count, and the `durable` verdict: zero means every commit
+    /// reached the disk).
     pub fn pending(&self) -> usize {
         self.outbox.len()
     }
@@ -143,7 +118,11 @@ impl SessionWriter {
         &self.id
     }
 
-    fn buffer_line(&mut self, record: &FileRecord) -> Option<SessionError> {
+    /// Serialize one record into the outbox. These record types are
+    /// plain strings and numbers — a serialization failure cannot
+    /// happen; the `Err` exists so the enqueue rollback and this stay
+    /// one mechanism.
+    fn serialize(&mut self, record: &FileRecord) -> Option<SessionError> {
         match serde_json::to_string(record) {
             Ok(line) => {
                 self.outbox.push_back(line);
@@ -156,19 +135,20 @@ impl SessionWriter {
         }
     }
 
-    /// Un-queue everything a failed gated write buffered.
+    /// Un-queue everything a failed enqueue serialized.
     fn rollback_to_mark(&mut self, mark: usize) {
         while self.outbox.len() > mark {
             self.outbox.pop_back();
         }
     }
 
-    /// Drain the outbox: materialize the file if this is the first
-    /// attempt (the only open site), then **one write** for everything
-    /// queued. On success the offset advances past the blob; on failure
-    /// the file is truncated back to the durable offset (whatever bytes
-    /// a partial write left are a torn tail, gone), so a retried write
-    /// can never splice into torn bytes.
+    /// The one write attempt over the outbox: materialize the file if
+    /// this is the first attempt (the only open site), then **one
+    /// write** for everything queued. On success the offset advances
+    /// past the blob and the lines are dropped; on failure the file is
+    /// truncated back to the durable offset (whatever bytes a partial
+    /// write left are a torn tail, gone) and the lines stay queued, so
+    /// a retried write can never splice into torn bytes.
     fn drain(&mut self) -> Result<(), SessionError> {
         if self.outbox.is_empty() {
             return Ok(());
@@ -233,6 +213,35 @@ impl SessionWriter {
                     source,
                 })
             }
+        }
+    }
+}
+
+impl WriteBuffer for SessionWriter {
+    #[allow(clippy::panic)] // sanctioned crash: unconstructible failure (AGENTS.md doctrine)
+    fn enqueue(&mut self, records: &[FileRecord]) -> Result<(), SessionError> {
+        let mark = self.outbox.len();
+        for record in records {
+            if let Some(error) = self.serialize(record) {
+                // Roll the partial batch back out first — even the
+                // crash path leaves no half blob queued — then fail
+                // loud: a record that cannot serialize is an internal
+                // bug, not an external condition.
+                self.rollback_to_mark(mark);
+                panic!("session record failed to serialize: {error}");
+            }
+        }
+        self.drain()
+    }
+}
+
+impl Drop for SessionWriter {
+    /// Best-effort final flush — only for a session that already
+    /// materialized its file (the no-orphan gate: a session that never
+    /// committed leaves nothing behind, not even by dropping).
+    fn drop(&mut self) {
+        if self.file.is_some() {
+            let _ = self.drain();
         }
     }
 }

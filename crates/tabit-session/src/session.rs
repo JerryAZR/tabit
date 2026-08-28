@@ -255,8 +255,20 @@ impl SessionBuilder {
         };
         validate_selection(&self.selection, &self.config)?;
         let id = parsed.header.id.clone();
-        let writer = SessionWriter::append_to(&parsed.path, id, parsed.file_len)?;
-        let session = Session::assemble(self, writer, true)?;
+        let writer = SessionWriter::append_to(&parsed.path, id.clone(), parsed.file_len)?;
+        let mut session = Session::assemble(self, writer, true)?;
+        // Design-set wiring (2026-08): the reload path also builds the
+        // conversation's future owner from the parsed tree. Dormant —
+        // its own buffer handle is never written through until the
+        // live loop rewires onto it (pending discussion); the recorder
+        // remains the live path's writer.
+        let manager_buffer: crate::writer::SharedBuffer = std::sync::Arc::new(
+            std::sync::Mutex::new(SessionWriter::append_to(&parsed.path, id, parsed.file_len)?),
+        );
+        session.context_manager = Some(crate::context_manager::ContextManager::from_tree(
+            parsed.tree.clone(),
+            manager_buffer,
+        ));
         // From here on memory is authoritative and the file is the
         // write-behind mirror (the one pass — no second parse).
         session.recorder.adopt(parsed);
@@ -577,6 +589,13 @@ pub struct Session {
     /// started fresh (`create`) — reported in the handshake so a
     /// frontend that asked to resume can note a silent fresh start.
     resumed: bool,
+    /// The conversation's source of truth (design-set 2026-08): built
+    /// on the reload path only for now — the live agent loop consumes
+    /// it after the rewiring discussion. Dormant: nothing writes
+    /// through its buffer handle yet; the recorder remains the live
+    /// path's owner until then.
+    #[allow(dead_code)]
+    context_manager: Option<crate::context_manager::ContextManager>,
     /// The interaction hub, attached by the session worker when it takes
     /// ownership (the hub needs the worker's event channel, which does
     /// not exist until spawn). `None` for direct [`Session`] consumers:
@@ -1357,6 +1376,7 @@ impl Session {
             path,
             id,
             resumed,
+            context_manager: None,
             interaction: None,
         };
         Ok(session)

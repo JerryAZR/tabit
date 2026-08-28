@@ -65,6 +65,7 @@
 //!
 //! [`Session::prompt`]: crate::Session::prompt
 
+mod context_manager;
 mod endpoint;
 mod entry;
 mod error;
@@ -85,6 +86,7 @@ mod store;
 mod tree;
 mod writer;
 
+pub use context_manager::{CheckoutError, ContextManager};
 pub use endpoint::{
     OpenSessionSource, SessionCommandLink, SessionHost, SessionHostWiring, SessionInfo,
     SessionSource,
@@ -108,7 +110,7 @@ pub use tabit_protocol::{
     SessionCommand, SessionEvent, StreamId,
 };
 pub use tree::{SessionTree, TreeFault};
-pub use writer::SessionWriter;
+pub use writer::{SessionWriter, SharedBuffer, WriteBuffer};
 
 #[cfg(test)]
 mod tests;
