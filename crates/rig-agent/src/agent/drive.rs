@@ -398,7 +398,6 @@ where
                 runner.record_telemetry_content,
                 runner.tool_choice.as_ref(),
                 &runner.tool_server_handle,
-                runner.output_schema.as_ref(),
             )
             .await
             {

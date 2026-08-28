@@ -22,7 +22,6 @@ mod cassette {
     mod streaming;
     mod streaming_grammar;
     mod streaming_tools;
-    mod structured_output;
     mod think_tool;
     mod think_tool_with_other_tools;
     mod tool_call_rewrite_args;

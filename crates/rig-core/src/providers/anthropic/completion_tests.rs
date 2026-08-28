@@ -14,7 +14,6 @@ fn missing_max_tokens_defaults_to_64k() {
         max_tokens: None,
         tool_choice: None,
         additional_params: None,
-        output_schema: None,
         record_telemetry_content: false,
     };
 
@@ -42,7 +41,6 @@ fn automatic_caching_pins_one_top_level_directive_on_the_wire() {
         max_tokens: None,
         tool_choice: None,
         additional_params: None,
-        output_schema: None,
         record_telemetry_content: false,
     };
 
@@ -517,7 +515,6 @@ fn completion_request_with_tools(
         max_tokens: Some(64),
         tool_choice: None,
         additional_params,
-        output_schema: None,
         record_telemetry_content: false,
     }
 }
@@ -536,7 +533,6 @@ fn completion_request_with_history(
         max_tokens: Some(64),
         tool_choice: None,
         additional_params: None,
-        output_schema: None,
         record_telemetry_content: false,
     }
 }
@@ -4280,120 +4276,6 @@ fn tool_choice_specific_requires_exactly_one_function() {
     })
     .expect_err("multiple tool names are rejected");
     assert!(err.to_string().contains("Only one tool may be specified"));
-}
-
-#[test]
-fn sanitize_schema_strips_numeric_constraints_and_enforces_strict_objects() {
-    let mut schema = json!({
-        "type": "object",
-        "properties": {
-            "name": {"type": "string"},
-            "count": {
-                "type": "integer",
-                "minimum": 0,
-                "maximum": 10,
-                "exclusiveMinimum": -1,
-                "exclusiveMaximum": 5,
-                "multipleOf": 2
-            },
-            "ratio": {"type": "number", "minimum": 0.5}
-        }
-    });
-    sanitize_schema(&mut schema);
-
-    assert_eq!(schema["additionalProperties"], json!(false));
-    assert_eq!(schema["required"], json!(["name", "count", "ratio"]));
-
-    let count = &schema["properties"]["count"];
-    for key in [
-        "minimum",
-        "maximum",
-        "exclusiveMinimum",
-        "exclusiveMaximum",
-        "multipleOf",
-    ] {
-        assert!(
-            count.get(key).is_none(),
-            "{key} should be stripped: {count}"
-        );
-    }
-
-    assert!(schema["properties"]["ratio"].get("minimum").is_none());
-}
-
-#[test]
-fn sanitize_schema_recurses_into_defs_properties_items_and_variants() {
-    let mut schema = json!({
-        "type": "object",
-        "properties": {
-            "nested": {
-                "type": "object",
-                "properties": {"inner": {"type": "integer", "minimum": 1}}
-            },
-            "list": {
-                "type": "array",
-                "items": {"properties": {"item": {"type": "number", "maximum": 2}}}
-            },
-            "pick": {"oneOf": [{"type": "string"}, {"oneOf": [{"type": "boolean"}]}]},
-            "merged": {
-                "anyOf": [{"type": "null"}],
-                "oneOf": [{"type": "string"}]
-            },
-            "combo": {
-                "anyOf": [{"type": "integer", "minimum": 3}],
-                "allOf": [{"type": "object", "properties": {"x": {"type": "string"}}}]
-            }
-        },
-        "$defs": {
-            "definition": {"properties": {"y": {"type": "integer", "exclusiveMinimum": 4}}}
-        }
-    });
-    sanitize_schema(&mut schema);
-
-    // Nested properties recurse.
-    assert!(
-        schema["properties"]["nested"]["properties"]["inner"]
-            .get("minimum")
-            .is_none()
-    );
-    assert_eq!(schema["properties"]["nested"]["required"], json!(["inner"]));
-
-    // Array items recurse.
-    let item = &schema["properties"]["list"]["items"];
-    assert_eq!(item["additionalProperties"], json!(false));
-    assert_eq!(item["required"], json!(["item"]));
-    assert!(item["properties"]["item"].get("maximum").is_none());
-
-    // oneOf is rewritten to anyOf and recursed into: the nested oneOf
-    // inside the second variant is itself rewritten.
-    let pick = &schema["properties"]["pick"];
-    assert!(pick.get("oneOf").is_none());
-    assert_eq!(pick["anyOf"][1]["anyOf"][0]["type"], "boolean");
-
-    // An existing anyOf absorbs the oneOf variants.
-    let merged = &schema["properties"]["merged"];
-    assert!(merged.get("oneOf").is_none());
-    assert_eq!(merged["anyOf"].as_array().unwrap().len(), 2);
-
-    // anyOf/allOf variants recurse (numeric constraints stripped, strict
-    // objects completed).
-    assert!(
-        schema["properties"]["combo"]["anyOf"][0]
-            .get("minimum")
-            .is_none()
-    );
-    assert_eq!(
-        schema["properties"]["combo"]["allOf"][0]["required"],
-        json!(["x"])
-    );
-
-    // $defs recurse.
-    assert!(
-        schema["$defs"]["definition"]["properties"]["y"]
-            .get("exclusiveMinimum")
-            .is_none()
-    );
-    assert_eq!(schema["$defs"]["definition"]["required"], json!(["y"]));
 }
 
 #[test]

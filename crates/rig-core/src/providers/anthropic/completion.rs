@@ -1820,89 +1820,6 @@ impl TryFrom<message::ToolChoice> for ToolChoice {
     }
 }
 
-/// Recursively ensures all object schemas respect Anthropic structured output restrictions:
-/// - `additionalProperties` must be explicitly set to `false` on every object
-/// - All properties must be listed in `required`
-///
-/// Source: <https://docs.anthropic.com/en/docs/build-with-claude/structured-outputs#json-schema-limitations>
-fn sanitize_schema(schema: &mut serde_json::Value) {
-    use serde_json::Value;
-
-    if let Value::Object(obj) = schema {
-        let is_object_schema = obj.get("type") == Some(&Value::String("object".to_string()))
-            || obj.contains_key("properties");
-
-        if is_object_schema && !obj.contains_key("additionalProperties") {
-            obj.insert("additionalProperties".to_string(), Value::Bool(false));
-        }
-
-        if let Some(Value::Object(properties)) = obj.get("properties") {
-            let prop_keys = properties.keys().cloned().map(Value::String).collect();
-            obj.insert("required".to_string(), Value::Array(prop_keys));
-        }
-
-        // Anthropic does not support numerical constraints on integer/number types.
-        let is_numeric_schema = obj.get("type") == Some(&Value::String("integer".to_string()))
-            || obj.get("type") == Some(&Value::String("number".to_string()));
-
-        if is_numeric_schema {
-            for key in [
-                "minimum",
-                "maximum",
-                "exclusiveMinimum",
-                "exclusiveMaximum",
-                "multipleOf",
-            ] {
-                obj.remove(key);
-            }
-        }
-
-        if let Some(defs) = obj.get_mut("$defs")
-            && let Value::Object(defs_obj) = defs
-        {
-            for (_, def_schema) in defs_obj.iter_mut() {
-                sanitize_schema(def_schema);
-            }
-        }
-
-        if let Some(properties) = obj.get_mut("properties")
-            && let Value::Object(props) = properties
-        {
-            for (_, prop_value) in props.iter_mut() {
-                sanitize_schema(prop_value);
-            }
-        }
-
-        if let Some(items) = obj.get_mut("items") {
-            sanitize_schema(items);
-        }
-
-        // Anthropic doesn't support oneOf, convert to anyOf
-        if let Some(one_of) = obj.remove("oneOf") {
-            match obj.get_mut("anyOf") {
-                Some(Value::Array(existing)) => {
-                    if let Value::Array(mut incoming) = one_of {
-                        existing.append(&mut incoming);
-                    }
-                }
-                _ => {
-                    obj.insert("anyOf".to_string(), one_of);
-                }
-            }
-        }
-
-        for key in ["anyOf", "allOf"] {
-            if let Some(variants) = obj.get_mut(key)
-                && let Value::Array(variants_array) = variants
-            {
-                for variant in variants_array.iter_mut() {
-                    sanitize_schema(variant);
-                }
-            }
-        }
-    }
-}
-
 /// Output format specifier for Anthropic's structured output.
 /// Source: <https://docs.anthropic.com/en/api/messages>
 #[derive(Debug, Deserialize, Serialize)]
@@ -2407,18 +2324,6 @@ impl TryFrom<AnthropicRequestParams<'_>> for AnthropicCompletionRequest {
             top_level_cache_control.as_ref(),
         )?;
 
-        let output_config = if let Some(schema) = req.output_schema {
-            let mut schema_value = schema.to_value();
-            sanitize_schema(&mut schema_value);
-            Some(OutputConfig {
-                format: OutputFormat::JsonSchema {
-                    schema: schema_value,
-                },
-            })
-        } else {
-            None
-        };
-
         Ok(Self {
             model: model.to_string(),
             messages,
@@ -2427,7 +2332,11 @@ impl TryFrom<AnthropicRequestParams<'_>> for AnthropicCompletionRequest {
             temperature: req.temperature,
             tool_choice: req.tool_choice.map(ToolChoice::try_from).transpose()?,
             tools,
-            output_config,
+            // Anthropic's structured-output wire field. The runtime has no
+            // structured-output feature (PROTOCOL.md flag 30); a user who
+            // wants it sets `output_config` through `extra_body`, which
+            // merges straight into the JSON body.
+            output_config: None,
             // Automatic caching: one top-level field; the API moves the breakpoint automatically.
             cache_control: top_level_cache_control,
             additional_params: if additional_params_payload.is_null() {

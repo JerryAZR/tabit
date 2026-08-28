@@ -26,13 +26,11 @@ use std::collections::HashMap;
 /// Build the Anthropic streaming request body.
 ///
 /// Derives it from the *same* typed [`AnthropicCompletionRequest`] the blocking
-/// path builds (in `completion.rs`), rather than re-assembling the body by hand.
-/// The previous hand-rolled `json!` body had drifted from the blocking one and
-/// silently dropped `output_schema` (structured-output config); reaching for the
-/// typed request fixes that and keeps the two in lockstep. The one intentional
-/// streaming-only difference — an explicit `tool_choice: auto` when tools are
-/// advertised but the caller left the choice unset — is re-applied below so the
-/// streaming request bytes stay stable.
+/// path builds (in `completion.rs`), rather than re-assembling the body by hand
+/// (the previous hand-rolled `json!` body had drifted from the blocking one).
+/// The one intentional streaming-only difference — an explicit `tool_choice:
+/// auto` when tools are advertised but the caller left the choice unset — is
+/// re-applied below so the streaming request bytes stay stable.
 fn create_streaming_request_body(
     request_model: String,
     mut completion_request: CompletionRequest,
@@ -1085,7 +1083,6 @@ mod tests {
             max_tokens: Some(64),
             tool_choice: None,
             additional_params: None,
-            output_schema: None,
             record_telemetry_content: false,
         };
 
@@ -1123,14 +1120,7 @@ mod tests {
     }
 
     #[test]
-    fn streaming_body_is_blocking_body_plus_stream_flag_and_carries_output_schema() {
-        let schema: schemars::Schema = serde_json::from_value(json!({
-            "title": "WeatherResponse",
-            "type": "object",
-            "properties": { "city": { "type": "string" } }
-        }))
-        .expect("schema should deserialize");
-
+    fn streaming_body_is_blocking_body_plus_stream_flag() {
         let request = CompletionRequest {
             model: None,
             preamble: Some("You are helpful".to_string()),
@@ -1141,7 +1131,6 @@ mod tests {
             max_tokens: Some(64),
             tool_choice: None,
             additional_params: None,
-            output_schema: Some(schema),
             record_telemetry_content: false,
         };
 
@@ -1157,18 +1146,6 @@ mod tests {
 
         // The streaming endpoint flag is set.
         assert_eq!(streaming_body["stream"], serde_json::Value::Bool(true));
-
-        // Regression: `output_schema` now reaches the streaming wire as
-        // `output_config` (the hand-rolled body dropped it entirely, so this
-        // assertion would have failed before the typed-request unification).
-        assert_eq!(
-            streaming_body["output_config"]["format"]["type"],
-            "json_schema"
-        );
-        assert!(
-            streaming_body["output_config"]["format"]["schema"].is_object(),
-            "streaming body must carry the structured-output schema: {streaming_body}"
-        );
 
         // Unification invariant: the streaming body is exactly the blocking body
         // (built via the same typed request) plus `stream: true`. Pins the two
@@ -1209,7 +1186,6 @@ mod tests {
             max_tokens: Some(64),
             tool_choice: None,
             additional_params: None,
-            output_schema: None,
             record_telemetry_content: false,
         };
 
@@ -1246,7 +1222,6 @@ mod tests {
             max_tokens: Some(64),
             tool_choice: Some(crate::message::ToolChoice::Auto),
             additional_params: None,
-            output_schema: None,
             record_telemetry_content: false,
         };
 

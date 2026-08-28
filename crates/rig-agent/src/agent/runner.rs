@@ -193,9 +193,6 @@ pub struct AgentRunner {
     /// Typed context cloned freshly for every tool dispatch.
     pub(crate) tool_context: ToolContext,
     pub(crate) tool_choice: Option<ToolChoice>,
-    /// Caller-supplied structured-output schema — pure pass-through to the
-    /// provider's native structured output (the engine has no policy).
-    pub(crate) output_schema: Option<schemars::Schema>,
     pub(crate) concurrency: usize,
     pub(crate) memory: Option<Arc<dyn ConversationMemory>>,
     pub(crate) conversation_id: Option<String>,
@@ -246,7 +243,6 @@ impl AgentRunner {
             tool_server_handle: agent.tool_server_handle.clone(),
             tool_context: ToolContext::new(),
             tool_choice: agent.tool_choice.clone(),
-            output_schema: agent.output_schema.clone(),
             concurrency: 1,
             memory: agent.memory.clone(),
             conversation_id: agent.default_conversation_id.clone(),

@@ -111,7 +111,6 @@ pub(crate) async fn build_prepared_completion_request(
     record_telemetry_content: bool,
     tool_choice: Option<&ToolChoice>,
     tool_server_handle: &ToolServerHandle,
-    output_schema: Option<&schemars::Schema>,
 ) -> Result<PreparedCompletionRequest, CompletionError> {
     // Retrieved tools keep their existing query-selection behavior: prefer the
     // current prompt's RAG text, then the latest matching history message.
@@ -149,7 +148,7 @@ pub(crate) async fn build_prepared_completion_request(
         preceding
     };
 
-    let mut completion_request = model
+    let completion_request = model
         .completion_request(prompt)
         .messages(chat_history)
         .temperature_opt(temperature)
@@ -158,11 +157,6 @@ pub(crate) async fn build_prepared_completion_request(
         .record_content_telemetry(record_telemetry_content)
         .documents(static_context.to_vec())
         .tools(tooldefs);
-
-    // A caller-supplied schema is pure pass-through: the provider's native
-    // structured output enforces it (ENGINE.md delta 14 — the engine has no
-    // structured-output policy of its own).
-    completion_request = completion_request.output_schema_opt(output_schema.cloned());
 
     let completion_request = if let Some(tool_choice) = tool_choice {
         completion_request.tool_choice(tool_choice.clone())
@@ -244,9 +238,6 @@ pub struct Agent {
     /// Default hook stack applied to every prompt request and runner created
     /// from this agent. Empty by default.
     pub(crate) hooks: HookStack,
-    /// Optional JSON Schema for structured output — pure pass-through to
-    /// the provider's native structured output; the engine has no policy.
-    pub(crate) output_schema: Option<schemars::Schema>,
     /// Optional conversation memory backend that loads/saves history per conversation id.
     pub(crate) memory: Option<Arc<dyn rig_core::memory::ConversationMemory>>,
     /// Optional default conversation id used when none is set per-request.

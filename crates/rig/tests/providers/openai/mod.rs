@@ -21,7 +21,6 @@ mod cassette {
     mod streaming_grammar;
     mod streaming_grammar_chat;
     mod streaming_tools;
-    mod structured_output;
     mod url_pdf_document;
     mod vllm;
 }

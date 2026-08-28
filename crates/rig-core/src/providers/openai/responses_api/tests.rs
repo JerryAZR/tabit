@@ -426,7 +426,6 @@ fn weather_tool_request() -> completion::CompletionRequest {
         max_tokens: None,
         tool_choice: None,
         additional_params: None,
-        output_schema: None,
         record_telemetry_content: false,
     }
 }
@@ -595,7 +594,6 @@ fn request_with_preamble(preamble: &str) -> completion::CompletionRequest {
         max_tokens: None,
         tool_choice: None,
         additional_params: None,
-        output_schema: None,
         record_telemetry_content: false,
     }
 }
@@ -611,7 +609,6 @@ fn system_only_request(system_text: &str) -> completion::CompletionRequest {
         max_tokens: None,
         tool_choice: None,
         additional_params: None,
-        output_schema: None,
         record_telemetry_content: false,
     }
 }
@@ -860,7 +857,6 @@ fn orphan_tool_result_history_fails_request_conversion() {
         max_tokens: None,
         tool_choice: None,
         additional_params: None,
-        output_schema: None,
         record_telemetry_content: false,
     };
 
@@ -1119,7 +1115,6 @@ fn responses_direct_request_keeps_mid_conversation_system_messages_in_input() {
         max_tokens: None,
         tool_choice: None,
         additional_params: None,
-        output_schema: None,
         record_telemetry_content: false,
     };
 
@@ -2125,7 +2120,6 @@ fn mocked_second_turn_request_omits_unreplayable_reasoning() {
         max_tokens: Some(64),
         tool_choice: None,
         additional_params: None,
-        output_schema: None,
         record_telemetry_content: false,
     };
 
@@ -2627,7 +2621,6 @@ fn url_pdf_in_full_completion_request_omits_filename() {
         max_tokens: None,
         tool_choice: None,
         additional_params: None,
-        output_schema: None,
         record_telemetry_content: false,
     };
 

@@ -1324,15 +1324,31 @@ agree by construction. The old divergence existed because two owners
 (each with its own skip/record policy) had to be kept in agreement;
 the second owner is deleted.
 
-### 30. Dead seams kept on judgment — OPEN (deletion candidates)
+### 30. Dead seams kept on judgment — RESOLVED (2026-08: deleted — no coding-agent use case)
 
-Two surfaces kept deliberately during the output-mode deletion: the
-now-empty `ProviderCapabilities` struct with its `capabilities()`
-trait method (public seam for external model implementors; its one
-fact died with the engine policy), and `AgentBuilder::output_schema`
-pass-through (the layer-above hook if structured output ever
-returns). Both are deletable for zero dead surface; both are cheap to
-keep. Owner taste.
+Two surfaces were kept deliberately during the output-mode deletion:
+the then-empty `ProviderCapabilities` struct with its `capabilities()`
+trait method, and the `output_schema` pass-through (agent builder →
+request knob → both providers' native structured-output
+serialization). The ruling, on review: **structured output is not a
+coding-agent feature** — forcing JSON over free text has no justified
+use case here, and if a consumer ever appears it is config business
+(a provider-native `response_format`/`output_config` rides `extra_body`
+straight into the JSON body), not engine machinery. Hooks cannot do it
+either — request patching died with flag 31.
+
+Deleted wholesale: the agent-side setters and field, the
+`CompletionRequest`/builder knob with `output_schema_name`, the
+Responses `text.format` / completions `response_format` mapping with
+its llama.cpp first-turn delay and `supports_response_format` flag
+threading, Anthropic's `output_config` construction and its
+structured-output `sanitize_schema` (OpenAI's lives — strict tools
+still use it), the `ProviderCapabilities` ceremony including
+`ModelHandle`'s erasure-time snapshot (the chain was self-referential:
+captured, served, read by nobody), and the structured-output cassette
+suites. Anthropic's `output_config` wire field stays as typed API
+surface, always unset — wire fidelity, like the other real-API fields
+direct JSON users reach through `extra_body`.
 
 **Post-sweep process note** (not a flag; AGENTS.md territory): the
 scripted-edit corruption the gate bullet warns about recurred during

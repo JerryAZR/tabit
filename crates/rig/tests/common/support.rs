@@ -13,7 +13,6 @@ use rig::{
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 use serde_json::json;
-use sha2::{Digest, Sha256};
 
 pub(crate) const BASIC_PREAMBLE: &str = "You are a concise assistant. Answer directly.";
 pub(crate) const BASIC_PROMPT: &str = "In one or two sentences, explain what Rust programming language is and why memory safety matters.";
@@ -61,12 +60,6 @@ pub(crate) const MULTI_TURN_STREAMING_EXPECTED_RESULT: i32 = 16;
 pub(crate) const ALPHA_SIGNAL_OUTPUT: &str = "crimson-harbor";
 pub(crate) const BETA_SIGNAL_OUTPUT: &str = "silver-orchard";
 
-pub(crate) const STRUCTURED_OUTPUT_PROMPT: &str =
-    "Return a concise event object for a local Rust meetup in Seattle.";
-
-pub(crate) const EXTRACTOR_TEXT: &str =
-    "Hello, my name is Ada Lovelace and I work as a mathematician.";
-
 pub(crate) const IMAGE_FIXTURE_PATH: &str = concat!(
     env!("CARGO_MANIFEST_DIR"),
     "/tests/data/camponotus_flavomarginatus_ant.jpg"
@@ -77,37 +70,6 @@ pub(crate) const EMBEDDING_INPUTS: [&str; 3] = [
     "Streaming responses arrive incrementally instead of all at once.",
     "Embeddings turn text into numeric vectors for similarity search.",
 ];
-
-#[derive(Debug, Deserialize, JsonSchema, Serialize)]
-pub(crate) struct SmokeStructuredOutput {
-    pub(crate) title: String,
-    pub(crate) category: String,
-    pub(crate) summary: String,
-}
-
-pub(crate) fn smoke_structured_output_value() -> serde_json::Value {
-    json!({
-        "title": "Seattle Rust Meetup",
-        "category": "Technology",
-        "summary": "A focused local meetup for Rust developers."
-    })
-}
-
-pub(crate) fn ecs_synthetic_output_tool_name<T>() -> String
-where
-    T: JsonSchema,
-{
-    let schema = schemars::schema_for!(T);
-    let mut hasher = Sha256::new();
-    hasher.update(schema.as_value().to_string().as_bytes());
-    let prefix = hasher
-        .finalize()
-        .iter()
-        .take(4)
-        .map(|byte| format!("{byte:02x}"))
-        .collect::<String>();
-    format!("__rig_output_{prefix}")
-}
 
 #[derive(Debug, Deserialize, JsonSchema, Serialize)]
 pub(crate) struct SmokePerson {
@@ -1023,10 +985,4 @@ pub(crate) fn assert_raw_stream_text_contains(
         "raw stream should emit a final response"
     );
     assert_contains_all_case_insensitive(&observation.text, expected);
-}
-
-pub(crate) fn assert_smoke_structured_output(output: &SmokeStructuredOutput) {
-    assert_nonempty_response(&output.title);
-    assert_nonempty_response(&output.category);
-    assert_nonempty_response(&output.summary);
 }

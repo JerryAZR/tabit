@@ -589,26 +589,6 @@ impl AddAssign for Usage {
     }
 }
 
-/// Provider behavior that affects how runtimes prepare completion requests.
-///
-/// Capabilities are immutable facts about a model implementation rather than
-/// per-request state, so a runtime can snapshot this value when it erases a
-/// concrete model instead of retaining a callback into the provider.
-///
-/// The type is `#[non_exhaustive]`: build from [`ProviderCapabilities::new`] or
-/// [`Default`] and enable flags with the `with_*` methods, which keeps external
-/// implementations compiling when new capabilities are added.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
-#[non_exhaustive]
-pub struct ProviderCapabilities {}
-
-impl ProviderCapabilities {
-    /// Create the conservative capability set used by default.
-    pub const fn new() -> Self {
-        Self {}
-    }
-}
-
 /// Trait defining a completion model that can be used to generate completion responses.
 /// This trait is meant to be implemented by the user to define a custom completion model,
 /// either from a third party provider (e.g.: OpenAI) or a local model.
@@ -645,14 +625,6 @@ pub trait CompletionModel: WasmCompatSend + WasmCompatSync {
     {
         CompletionRequestBuilder::new(self.clone(), prompt)
     }
-
-    /// Provider behavior a runtime should account for when preparing requests.
-    ///
-    /// The default is conservative — see [`ProviderCapabilities`]. Override
-    /// this to declare the capabilities a provider actually supports.
-    fn capabilities(&self) -> ProviderCapabilities {
-        ProviderCapabilities::default()
-    }
 }
 
 /// A shared model is a model: `Arc<M>` forwards every method to `M`, so the
@@ -675,10 +647,6 @@ impl<M: CompletionModel + ?Sized> CompletionModel for std::sync::Arc<M> {
     ) -> impl std::future::Future<Output = Result<StreamingCompletionResponse, CompletionError>>
     + WasmCompatSend {
         (**self).stream(request)
-    }
-
-    fn capabilities(&self) -> ProviderCapabilities {
-        (**self).capabilities()
     }
 }
 
@@ -707,9 +675,6 @@ pub struct CompletionRequest {
     pub tool_choice: Option<ToolChoice>,
     /// Additional provider-specific parameters to be sent to the completion model provider
     pub additional_params: Option<serde_json::Value>,
-    /// Optional JSON Schema for structured output. When set, providers that support
-    /// native structured outputs will constrain the model's response to match this schema.
-    pub output_schema: Option<schemars::Schema>,
     /// Whether to record sensitive request, response, and tool content on GenAI
     /// telemetry spans.
     ///
@@ -732,19 +697,6 @@ pub struct CompletionRequest {
 }
 
 impl CompletionRequest {
-    /// Extracts a name from the output schema's `"title"` field, falling back to `"response_schema"`.
-    /// Useful for providers that require a name alongside the JSON Schema (e.g., OpenAI).
-    pub fn output_schema_name(&self) -> Option<String> {
-        self.output_schema.as_ref().map(|schema| {
-            schema
-                .as_object()
-                .and_then(|o| o.get("title"))
-                .and_then(|v| v.as_str())
-                .unwrap_or("response_schema")
-                .to_string()
-        })
-    }
-
     /// Returns documents normalized into a message (if any).
     /// Most providers do not accept documents directly as input, so it needs to convert into a
     /// `Message` so that it can be incorporated into `chat_history`.
@@ -899,7 +851,6 @@ pub struct CompletionRequestBuilder<M: CompletionModel> {
     max_tokens: Option<u64>,
     tool_choice: Option<ToolChoice>,
     additional_params: Option<serde_json::Value>,
-    output_schema: Option<schemars::Schema>,
     record_telemetry_content: bool,
 }
 
@@ -918,7 +869,6 @@ impl<M: CompletionModel> CompletionRequestBuilder<M> {
             max_tokens: None,
             tool_choice: None,
             additional_params: None,
-            output_schema: None,
             record_telemetry_content: false,
         }
     }
@@ -1059,27 +1009,6 @@ impl<M: CompletionModel> CompletionRequestBuilder<M> {
         self
     }
 
-    /// Sets the output schema for structured output. When set, providers that support
-    /// native structured outputs will constrain the model's response to match this schema.
-    /// NOTE: For direct type conversion, you may want to use `Agent::prompt_typed()` - using this method
-    /// with `Agent::prompt()` will still output a String at the end, it'll just be compatible with whatever
-    /// type you want to use here. This method is primarily an escape hatch for agents being used as tools
-    /// to still be able to leverage structured outputs.
-    pub fn output_schema(mut self, schema: schemars::Schema) -> Self {
-        self.output_schema = Some(schema);
-        self
-    }
-
-    /// Sets the output schema for structured output from an optional value.
-    /// NOTE: For direct type conversion, you may want to use `Agent::prompt_typed()` - using this method
-    /// with `Agent::prompt()` will still output a String at the end, it'll just be compatible with whatever
-    /// type you want to use here. This method is primarily an escape hatch for agents being used as tools
-    /// to still be able to leverage structured outputs.
-    pub fn output_schema_opt(mut self, schema: Option<schemars::Schema>) -> Self {
-        self.output_schema = schema;
-        self
-    }
-
     /// Opt in or out of recording sensitive request, response, and tool content
     /// on GenAI telemetry spans for this request.
     ///
@@ -1156,7 +1085,6 @@ impl<M: CompletionModel> CompletionRequestBuilder<M> {
             max_tokens: self.max_tokens,
             tool_choice: self.tool_choice,
             additional_params,
-            output_schema: self.output_schema,
             record_telemetry_content: self.record_telemetry_content,
         };
         (model, request)
@@ -1177,7 +1105,7 @@ impl<M: CompletionModel> CompletionRequestBuilder<M> {
 
 #[cfg(test)]
 mod tests {
-    use super::{CompletionResponse, FinishReason, ProviderCapabilities, Usage};
+    use super::{CompletionResponse, FinishReason, Usage};
     use crate::OneOrMany;
     use crate::message::AssistantContent;
 
@@ -1473,7 +1401,6 @@ mod tests {
             max_tokens: None,
             tool_choice: None,
             additional_params: None,
-            output_schema: None,
             record_telemetry_content: false,
         };
 
@@ -1506,7 +1433,6 @@ mod tests {
             max_tokens: None,
             tool_choice: None,
             additional_params: None,
-            output_schema: None,
             record_telemetry_content: false,
         };
 
@@ -1632,7 +1558,6 @@ mod tests {
             max_tokens: None,
             tool_choice: None,
             additional_params: None,
-            output_schema: None,
             record_telemetry_content: false,
         };
 
@@ -1666,7 +1591,6 @@ mod tests {
             max_tokens: None,
             tool_choice: None,
             additional_params: None,
-            output_schema: None,
             record_telemetry_content: false,
         };
 
@@ -1704,7 +1628,6 @@ mod tests {
             max_tokens: None,
             tool_choice: None,
             additional_params: None,
-            output_schema: None,
             record_telemetry_content: false,
         };
 
@@ -1873,46 +1796,9 @@ mod tests {
         use futures::StreamExt as _;
         while streamed.next().await.is_some() {}
 
-        assert_eq!(model.capabilities(), ProviderCapabilities::default());
-
         // The `completion_request` convenience works through the Arc too.
         let builder_request = model.completion_request("hi").build();
         assert_eq!(builder_request.chat_history.len(), 1);
-    }
-
-    /// The schema name extraction: a `title` is used verbatim, anything else
-    /// falls back to `"response_schema"`, and no schema means no name.
-    #[test]
-    fn output_schema_name_uses_the_title_or_falls_back() {
-        let titled: schemars::Schema = serde_json::from_value(serde_json::json!({
-            "title": "WeatherResponse",
-            "type": "object",
-        }))
-        .expect("schema should deserialize");
-        let untitled: schemars::Schema = serde_json::from_value(serde_json::json!({
-            "type": "object",
-        }))
-        .expect("schema should deserialize");
-
-        let request = CompletionRequest {
-            output_schema: Some(titled),
-            ..base_request()
-        };
-        assert_eq!(
-            request.output_schema_name(),
-            Some("WeatherResponse".to_string())
-        );
-
-        let request = CompletionRequest {
-            output_schema: Some(untitled),
-            ..base_request()
-        };
-        assert_eq!(
-            request.output_schema_name(),
-            Some("response_schema".to_string())
-        );
-
-        assert_eq!(base_request().output_schema_name(), None);
     }
 
     fn base_request() -> CompletionRequest {
@@ -1926,7 +1812,6 @@ mod tests {
             max_tokens: None,
             tool_choice: None,
             additional_params: None,
-            output_schema: None,
             record_telemetry_content: false,
         }
     }
@@ -2002,23 +1887,16 @@ mod tests {
         assert_eq!(request.additional_params, None);
     }
 
-    /// The builder's model override, additional-params merging, provider
-    /// tools, and output schema all land on the built request.
+    /// The builder's model override, additional-params merging, and provider
+    /// tools all land on the built request.
     #[test]
-    fn builder_overrides_model_merges_params_and_carries_schema() {
-        let schema: schemars::Schema = serde_json::from_value(serde_json::json!({
-            "title": "Typed",
-            "type": "object",
-        }))
-        .expect("schema should deserialize");
-
+    fn builder_overrides_model_and_merges_params() {
         let request = CompletionRequestBuilder::new(MockCompletionModel::default(), "Prompt")
             .model("override-model")
             .additional_params(serde_json::json!({"a": 1}))
             .additional_params(serde_json::json!({"b": 2}))
             .provider_tool(provider_tool("web_search"))
             .provider_tools(vec![provider_tool("file_search")])
-            .output_schema(schema)
             .build();
 
         assert_eq!(request.model.as_deref(), Some("override-model"));
@@ -2031,7 +1909,6 @@ mod tests {
             })),
             "additional_params calls merge and provider tools append"
         );
-        assert_eq!(request.output_schema_name(), Some("Typed".to_string()));
 
         // `model_opt` clears or replaces the override.
         let request = CompletionRequestBuilder::new(MockCompletionModel::default(), "Prompt")

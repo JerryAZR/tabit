@@ -1372,21 +1372,6 @@ impl TryFrom<ResponsesRequestParams> for CompletionRequest {
             }
         }
 
-        // Apply output_schema as structured output if not already configured via additional_params
-        if additional_parameters.text.is_none()
-            && let Some(schema) = req.output_schema
-        {
-            let name = schema
-                .as_object()
-                .and_then(|o| o.get("title"))
-                .and_then(|v| v.as_str())
-                .unwrap_or("response_schema")
-                .to_string();
-            let mut schema_value = schema.to_value();
-            super::sanitize_schema(&mut schema_value);
-            additional_parameters.text = Some(TextConfig::structured_output(name, schema_value));
-        }
-
         let tool_choice = req.tool_choice.map(ToolChoice::try_from).transpose()?;
         let mut tools: Vec<ResponsesToolDefinition> = req
             .tools

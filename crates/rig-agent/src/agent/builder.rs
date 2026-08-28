@@ -1,7 +1,5 @@
 use std::{collections::HashMap, sync::Arc};
 
-use schemars::{JsonSchema, Schema, schema_for};
-
 use rig_core::{
     memory::ConversationMemory, message::ToolChoice, vector_store::VectorStoreIndexDyn,
 };
@@ -123,9 +121,6 @@ pub struct AgentBuilder<ToolState = NoToolConfig> {
     tool_state: ToolState,
     /// Default hook stack applied to every prompt request from the built agent.
     hooks: HookStack,
-    /// Optional JSON Schema for structured output — pure pass-through to
-    /// the provider's native structured output; the engine has no policy.
-    output_schema: Option<schemars::Schema>,
     /// Optional conversation memory backend that loads/saves history per conversation id.
     memory: Option<Arc<dyn ConversationMemory>>,
     /// Optional default conversation id used when none is set per-request.
@@ -218,22 +213,6 @@ impl<ToolState> AgentBuilder<ToolState> {
         self
     }
 
-    /// Set the output schema for structured output. When set, providers that support
-    /// native structured outputs will constrain the model's response to match this schema.
-    pub fn output_schema<T>(mut self) -> Self
-    where
-        T: JsonSchema,
-    {
-        self.output_schema = Some(schema_for!(T));
-        self
-    }
-
-    /// Set the output schema for structured output. In comparison to `AgentBuilder::schema()` which requires type annotation, you can put in any schema you'd like here.
-    pub fn output_schema_raw(mut self, schema: Schema) -> Self {
-        self.output_schema = Some(schema);
-        self
-    }
-
     /// Attach a [`ConversationMemory`] backend.
     ///
     /// When set, the agent will automatically load prior conversation history before
@@ -303,7 +282,6 @@ impl AgentBuilder<NoToolConfig> {
             default_max_turns: None,
             tool_state: NoToolConfig,
             hooks: HookStack::new(),
-            output_schema: None,
             memory: None,
             default_conversation_id: None,
         }
@@ -334,7 +312,6 @@ impl AgentBuilder<NoToolConfig> {
             default_max_turns: self.default_max_turns,
             tool_state: WithToolServerHandle { handle },
             hooks: self.hooks,
-            output_schema: self.output_schema,
             memory: self.memory,
             default_conversation_id: self.default_conversation_id,
         }
@@ -367,7 +344,6 @@ impl AgentBuilder<NoToolConfig> {
                 retrieval_indexes: vec![],
             },
             hooks: self.hooks,
-            output_schema: self.output_schema,
             memory: self.memory,
             default_conversation_id: self.default_conversation_id,
         }
@@ -406,7 +382,6 @@ impl AgentBuilder<NoToolConfig> {
             tool_choice: self.tool_choice,
             default_max_turns: self.default_max_turns,
             hooks: self.hooks,
-            output_schema: self.output_schema,
             memory: self.memory,
             default_conversation_id: self.default_conversation_id,
             tool_state: WithBuilderTools {
@@ -500,7 +475,6 @@ impl AgentBuilder<NoToolConfig> {
             tool_choice: self.tool_choice,
             default_max_turns: self.default_max_turns,
             hooks: self.hooks,
-            output_schema: self.output_schema,
             memory: self.memory,
             default_conversation_id: self.default_conversation_id,
             tool_state: WithBuilderTools {
@@ -540,7 +514,6 @@ impl AgentBuilder<NoToolConfig> {
             tool_choice: self.tool_choice,
             default_max_turns: self.default_max_turns,
             hooks: self.hooks,
-            output_schema: self.output_schema,
             memory: self.memory,
             default_conversation_id: self.default_conversation_id,
             tool_state: WithBuilderTools {
@@ -570,7 +543,6 @@ impl AgentBuilder<NoToolConfig> {
             tool_server_handle,
             default_max_turns: self.default_max_turns,
             hooks: self.hooks,
-            output_schema: self.output_schema,
             memory: self.memory,
             default_conversation_id: self.default_conversation_id,
         }
@@ -594,7 +566,6 @@ impl AgentBuilder<WithToolServerHandle> {
             tool_server_handle: self.tool_state.handle,
             default_max_turns: self.default_max_turns,
             hooks: self.hooks,
-            output_schema: self.output_schema,
             memory: self.memory,
             default_conversation_id: self.default_conversation_id,
         }
@@ -709,7 +680,6 @@ impl AgentBuilder<WithBuilderTools> {
             tool_server_handle,
             default_max_turns: self.default_max_turns,
             hooks: self.hooks,
-            output_schema: self.output_schema,
             memory: self.memory,
             default_conversation_id: self.default_conversation_id,
         }
@@ -741,18 +711,6 @@ mod tests {
             .without_preamble()
             .build();
         assert_eq!(agent.preamble, None);
-    }
-
-    #[test]
-    fn output_schema_raw_installs_a_caller_supplied_schema() {
-        let schema = schemars::schema_for!(u32);
-        let agent = AgentBuilder::new(MockCompletionModel::text("ok"))
-            .output_schema_raw(schema.clone())
-            .build();
-        assert_eq!(
-            agent.output_schema.as_ref().map(schemars::Schema::as_value),
-            Some(schema.as_value())
-        );
     }
 
     fn portable_tool(name: &str) -> PortableDynamicTool {

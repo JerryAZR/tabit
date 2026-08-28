@@ -7,16 +7,11 @@
 //! at the provider boundary, the erasure is lossless: a handle is itself a
 //! [`CompletionModel`] with the same unary and streaming behavior.
 //!
-//! [`CompletionModel::capabilities`] is captured **by value** at erasure time;
-//! the handle never calls back into the provider for capability checks.
 
 use std::{fmt, sync::Arc};
 
 use rig_core::{
-    completion::{
-        CompletionError, CompletionModel, CompletionRequest, CompletionResponse,
-        ProviderCapabilities,
-    },
+    completion::{CompletionError, CompletionModel, CompletionRequest, CompletionResponse},
     streaming::StreamingCompletionResponse,
     wasm_compat::{WasmBoxedFuture, WasmCompatSend, WasmCompatSync},
 };
@@ -26,9 +21,7 @@ use rig_core::{
 /// this dyn-safe twin exists only so [`ModelHandle`] can store one vtable.
 ///
 /// The `WasmCompat*` supertraits carry the cfg fork (no-op markers on browser
-/// wasm), mirroring `ErasedTool` in `crate::tool`. Capabilities are
-/// deliberately absent: they are construction-time data captured alongside the
-/// erased model, not behavior to call back into.
+/// wasm), mirroring `ErasedTool` in `crate::tool`.
 trait ErasedModel: WasmCompatSend + WasmCompatSync {
     fn completion(
         &self,
@@ -67,8 +60,6 @@ where
 /// model last, so `Arc<ModelDriver<M>>` unsize-coerces to
 /// `Arc<ModelDriver<dyn ErasedModel>>` without a second box.
 struct ModelDriver<M: ?Sized> {
-    /// Capability snapshot taken at erasure time (see [`ProviderCapabilities`]).
-    capabilities: ProviderCapabilities,
     label: Option<String>,
     model: M,
 }
@@ -133,16 +124,10 @@ impl ModelHandle {
     where
         M: CompletionModel + 'static,
     {
-        // Capture the capability snapshot once, at erasure time; the model is
-        // consumed by value and never cloned again (pinned by the
-        // `erasure_never_clones_the_model` test below).
-        let capabilities = model.capabilities();
+        // The model is consumed by value and never cloned again (pinned by
+        // the `erasure_never_clones_the_model` test below).
         Self {
-            inner: Arc::new(ModelDriver {
-                capabilities,
-                label,
-                model,
-            }),
+            inner: Arc::new(ModelDriver { label, model }),
         }
     }
 
@@ -152,8 +137,7 @@ impl ModelHandle {
     }
 }
 
-/// A handle behaves exactly like the model it erased, with capabilities served
-/// from the snapshot captured at erasure time.
+/// A handle behaves exactly like the model it erased.
 impl CompletionModel for ModelHandle {
     fn completion(
         &self,
@@ -170,10 +154,6 @@ impl CompletionModel for ModelHandle {
     + rig_core::wasm_compat::WasmCompatSend {
         self.inner.model.stream(request)
     }
-
-    fn capabilities(&self) -> ProviderCapabilities {
-        self.inner.capabilities
-    }
 }
 
 impl fmt::Debug for ModelHandle {
@@ -181,7 +161,6 @@ impl fmt::Debug for ModelHandle {
         formatter
             .debug_struct("ModelHandle")
             .field("label", &self.label())
-            .field("capabilities", &self.inner.capabilities)
             .finish_non_exhaustive()
     }
 }

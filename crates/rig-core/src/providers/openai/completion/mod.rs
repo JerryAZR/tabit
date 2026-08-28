@@ -118,12 +118,6 @@ impl Message {
     }
 }
 
-fn history_contains_tool_result(messages: &[Message]) -> bool {
-    messages
-        .iter()
-        .any(|message| matches!(message, Message::ToolResult { .. }))
-}
-
 #[derive(Debug, Serialize, Deserialize, PartialEq, Clone)]
 pub struct AudioAssistant {
     pub id: String,
@@ -1367,11 +1361,6 @@ pub trait OpenAICompatibleProvider: crate::client::Provider {
     /// never error client-side on a provider that ignores tools anyway.
     const SUPPORTS_TOOLS: bool = true;
 
-    /// Whether `output_schema` maps to OpenAI's `response_format`. Providers
-    /// whose APIs reject `json_schema` response formats set this to false;
-    /// the schema is then dropped with a warning instead of being sent.
-    const SUPPORTS_RESPONSE_FORMAT: bool = true;
-
     /// Whether streaming requests include
     /// `"stream_options": {"include_usage": true}`. Providers that reject
     /// unknown parameters and already report usage on the final chunk set
@@ -1430,7 +1419,6 @@ pub trait OpenAICompatibleProvider: crate::client::Provider {
             request,
             strict_tools: options.strict_tools,
             tool_result_array_content: options.tool_result_array_content,
-            supports_response_format: Self::SUPPORTS_RESPONSE_FORMAT,
             supports_tools: Self::SUPPORTS_TOOLS,
         })
     }
@@ -1591,9 +1579,6 @@ pub struct OpenAIRequestParams {
     pub request: CoreCompletionRequest,
     pub strict_tools: bool,
     pub tool_result_array_content: bool,
-    /// Maps `output_schema` to `response_format` when true; drops it with a
-    /// warning when false (providers whose APIs reject `json_schema`).
-    pub supports_response_format: bool,
     /// Serializes `tools`/`tool_choice` when true; drops them with a warning
     /// when false (providers without tool-calling support).
     pub supports_tools: bool,
@@ -1608,7 +1593,6 @@ impl TryFrom<OpenAIRequestParams> for CompletionRequest {
             request: req,
             strict_tools,
             tool_result_array_content,
-            supports_response_format,
             supports_tools,
         } = params;
         let chat_history = req.chat_history_with_documents();
@@ -1632,7 +1616,6 @@ impl TryFrom<OpenAIRequestParams> for CompletionRequest {
             max_tokens,
             additional_params,
             tool_choice,
-            output_schema,
             ..
         } = req;
 
@@ -1677,8 +1660,6 @@ impl TryFrom<OpenAIRequestParams> for CompletionRequest {
                 *content = normalized;
             }
         }
-
-        let history_has_tool_result = history_contains_tool_result(&full_history);
 
         let (mut tools, tool_choice) = if supports_tools {
             let tool_choice = tool_choice.map(ToolChoice::try_from).transpose()?;
@@ -1749,49 +1730,6 @@ impl TryFrom<OpenAIRequestParams> for CompletionRequest {
             }
         }
 
-        if output_schema.is_some() && !supports_response_format {
-            tracing::warn!(
-                "Structured outputs are not supported by this provider; ignoring output_schema"
-            );
-        }
-
-        // Some OpenAI-compatible backends such as llama.cpp will skip tool execution
-        // if `response_format` is sent on the first turn alongside tools. Delay the
-        // schema until after the conversation contains a tool result.
-        let should_apply_response_format = output_schema.is_some()
-            && supports_response_format
-            && (tools.is_empty() || history_has_tool_result);
-
-        // Map output_schema to OpenAI's response_format and merge into additional_params
-        let additional_params = if let Some(schema) = output_schema
-            && should_apply_response_format
-        {
-            let name = schema
-                .as_object()
-                .and_then(|o| o.get("title"))
-                .and_then(|v| v.as_str())
-                .unwrap_or("response_schema")
-                .to_string();
-            let mut schema_value = schema.to_value();
-            super::sanitize_schema(&mut schema_value);
-            let response_format = serde_json::json!({
-                "response_format": {
-                    "type": "json_schema",
-                    "json_schema": {
-                        "name": name,
-                        "strict": true,
-                        "schema": schema_value
-                    }
-                }
-            });
-            Some(match additional_params {
-                Some(existing) => json_utils::merge(existing, response_format),
-                None => response_format,
-            })
-        } else {
-            additional_params
-        };
-
         let res = Self {
             model: request_model.unwrap_or(model),
             messages: full_history,
@@ -1815,7 +1753,6 @@ impl TryFrom<(String, CoreCompletionRequest)> for CompletionRequest {
             request: req,
             strict_tools: false,
             tool_result_array_content: false,
-            supports_response_format: true,
             supports_tools: true,
         })
     }

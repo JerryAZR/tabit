@@ -101,7 +101,6 @@ fn request_with_multi_block_tool_result() -> CoreCompletionRequest {
         max_tokens: None,
         tool_choice: None,
         additional_params: None,
-        output_schema: None,
         record_telemetry_content: false,
     }
 }
@@ -181,7 +180,6 @@ fn tool_result_array_content_preserves_multiple_text_blocks() {
         request: request_with_multi_block_tool_result(),
         strict_tools: false,
         tool_result_array_content: true,
-        supports_response_format: true,
         supports_tools: true,
     })
     .expect("request conversion should succeed");
@@ -220,7 +218,6 @@ fn tool_result_string_content_flattens_multiple_text_blocks() {
         request: request_with_multi_block_tool_result(),
         strict_tools: false,
         tool_result_array_content: false,
-        supports_response_format: true,
         supports_tools: true,
     })
     .expect("request conversion should succeed");
@@ -269,7 +266,6 @@ fn orphan_tool_result_history_fails_request_conversion() {
         max_tokens: None,
         tool_choice: None,
         additional_params: None,
-        output_schema: None,
         record_telemetry_content: false,
     };
 
@@ -278,7 +274,6 @@ fn orphan_tool_result_history_fails_request_conversion() {
         request,
         strict_tools: false,
         tool_result_array_content: false,
-        supports_response_format: true,
         supports_tools: true,
     })
     .expect_err("an orphan tool result must fail request conversion");
@@ -337,7 +332,6 @@ fn test_openai_request_uses_request_model_override() {
         max_tokens: None,
         tool_choice: None,
         additional_params: None,
-        output_schema: None,
         record_telemetry_content: false,
     };
 
@@ -346,7 +340,6 @@ fn test_openai_request_uses_request_model_override() {
         request,
         strict_tools: false,
         tool_result_array_content: false,
-        supports_response_format: true,
         supports_tools: true,
     })
     .expect("request conversion should succeed");
@@ -367,7 +360,6 @@ fn test_openai_request_uses_default_model_when_override_unset() {
         max_tokens: None,
         tool_choice: None,
         additional_params: None,
-        output_schema: None,
         record_telemetry_content: false,
     };
 
@@ -376,7 +368,6 @@ fn test_openai_request_uses_default_model_when_override_unset() {
         request,
         strict_tools: false,
         tool_result_array_content: false,
-        supports_response_format: true,
         supports_tools: true,
     })
     .expect("request conversion should succeed");
@@ -418,7 +409,6 @@ fn additional_params_function_tools_merge_and_native_tools_stay() {
                 {"type": "browser_search"}
             ]
         })),
-        output_schema: None,
         record_telemetry_content: false,
     };
 
@@ -427,7 +417,6 @@ fn additional_params_function_tools_merge_and_native_tools_stay() {
         request,
         strict_tools: false,
         tool_result_array_content: false,
-        supports_response_format: true,
         supports_tools: true,
     })
     .expect("request conversion should succeed");
@@ -481,7 +470,6 @@ fn additional_params_function_tools_merge_and_native_tools_stay() {
         temperature: None,
         max_tokens: None,
         tool_choice: None,
-        output_schema: None,
         record_telemetry_content: false,
     };
     let openai_request = CompletionRequest::try_from(OpenAIRequestParams {
@@ -489,7 +477,6 @@ fn additional_params_function_tools_merge_and_native_tools_stay() {
         request,
         strict_tools: false,
         tool_result_array_content: false,
-        supports_response_format: true,
         supports_tools: true,
     })
     .expect("request conversion should succeed");
@@ -519,7 +506,6 @@ fn openai_chat_request_keeps_documents_after_system_messages() {
         request,
         strict_tools: false,
         tool_result_array_content: false,
-        supports_response_format: true,
         supports_tools: true,
     })
     .expect("request conversion should succeed");
@@ -570,7 +556,6 @@ fn openai_chat_direct_request_keeps_documents_after_system_messages() {
         max_tokens: None,
         tool_choice: None,
         additional_params: None,
-        output_schema: None,
         record_telemetry_content: false,
     };
 
@@ -579,7 +564,6 @@ fn openai_chat_direct_request_keeps_documents_after_system_messages() {
         request,
         strict_tools: false,
         tool_result_array_content: false,
-        supports_response_format: true,
         supports_tools: true,
     })
     .expect("request conversion should succeed");
@@ -780,7 +764,6 @@ fn test_max_tokens_is_forwarded_to_request() {
         max_tokens: Some(4096),
         tool_choice: None,
         additional_params: None,
-        output_schema: None,
         record_telemetry_content: false,
     };
 
@@ -789,7 +772,6 @@ fn test_max_tokens_is_forwarded_to_request() {
         request,
         strict_tools: false,
         tool_result_array_content: false,
-        supports_response_format: true,
         supports_tools: true,
     })
     .expect("request conversion should succeed");
@@ -810,7 +792,6 @@ fn test_max_tokens_omitted_when_none() {
         max_tokens: None,
         tool_choice: None,
         additional_params: None,
-        output_schema: None,
         record_telemetry_content: false,
     };
 
@@ -819,7 +800,6 @@ fn test_max_tokens_omitted_when_none() {
         request,
         strict_tools: false,
         tool_result_array_content: false,
-        supports_response_format: true,
         supports_tools: true,
     })
     .expect("request conversion should succeed");
@@ -843,7 +823,6 @@ fn request_conversion_errors_when_all_messages_are_filtered() {
         max_tokens: None,
         tool_choice: None,
         additional_params: None,
-        output_schema: None,
         record_telemetry_content: false,
     };
 
@@ -852,138 +831,10 @@ fn request_conversion_errors_when_all_messages_are_filtered() {
         request,
         strict_tools: false,
         tool_result_array_content: false,
-        supports_response_format: true,
         supports_tools: true,
     });
 
     assert!(matches!(result, Err(CompletionError::RequestError(_))));
-}
-
-#[test]
-fn request_conversion_omits_response_format_on_initial_tool_turn() {
-    let request = CoreCompletionRequest {
-        model: None,
-        preamble: None,
-        chat_history: OneOrMany::one(message::Message::user(
-            "Hello, whats the weather in London?",
-        )),
-        documents: vec![],
-        tools: vec![completion::ToolDefinition {
-            name: "weather".to_string(),
-            description: "Get the weather".to_string(),
-            parameters: serde_json::json!({
-                "type": "object",
-                "properties": {
-                    "city": { "type": "string" }
-                },
-                "required": ["city"]
-            }),
-        }],
-        temperature: None,
-        max_tokens: None,
-        tool_choice: None,
-        additional_params: None,
-        output_schema: Some(
-            serde_json::from_value(serde_json::json!({
-                "title": "WeatherResponse",
-                "type": "object",
-                "properties": {
-                    "city": { "type": "string" },
-                    "weather": { "type": "string" }
-                },
-                "required": ["city", "weather"]
-            }))
-            .expect("schema should deserialize"),
-        ),
-        record_telemetry_content: false,
-    };
-
-    let openai_request = CompletionRequest::try_from(OpenAIRequestParams {
-        model: "gpt-4o-mini".to_string(),
-        request,
-        strict_tools: false,
-        tool_result_array_content: false,
-        supports_response_format: true,
-        supports_tools: true,
-    })
-    .expect("request conversion should succeed");
-
-    let serialized = serde_json::to_value(openai_request).expect("serialization should succeed");
-
-    assert!(
-        serialized.get("response_format").is_none(),
-        "initial tool turn should omit response_format: {serialized:?}"
-    );
-}
-
-#[test]
-fn request_conversion_restores_response_format_after_tool_result() {
-    let request = CoreCompletionRequest {
-        model: None,
-        preamble: None,
-        chat_history: OneOrMany::many(vec![
-            message::Message::user("Hello, whats the weather in London?"),
-            message::Message::Assistant {
-                id: None,
-                content: OneOrMany::one(message::AssistantContent::tool_call(
-                    "call_1",
-                    "weather",
-                    serde_json::json!({ "city": "London" }),
-                )),
-            },
-            message::Message::tool_result(
-                "call_1",
-                "The weather in London is all fire and brimstone",
-            ),
-        ])
-        .expect("history should be non-empty"),
-        documents: vec![],
-        tools: vec![completion::ToolDefinition {
-            name: "weather".to_string(),
-            description: "Get the weather".to_string(),
-            parameters: serde_json::json!({
-                "type": "object",
-                "properties": {
-                    "city": { "type": "string" }
-                },
-                "required": ["city"]
-            }),
-        }],
-        temperature: None,
-        max_tokens: None,
-        tool_choice: None,
-        additional_params: None,
-        output_schema: Some(
-            serde_json::from_value(serde_json::json!({
-                "title": "WeatherResponse",
-                "type": "object",
-                "properties": {
-                    "city": { "type": "string" },
-                    "weather": { "type": "string" }
-                },
-                "required": ["city", "weather"]
-            }))
-            .expect("schema should deserialize"),
-        ),
-        record_telemetry_content: false,
-    };
-
-    let openai_request = CompletionRequest::try_from(OpenAIRequestParams {
-        model: "gpt-4o-mini".to_string(),
-        request,
-        strict_tools: false,
-        tool_result_array_content: false,
-        supports_response_format: true,
-        supports_tools: true,
-    })
-    .expect("request conversion should succeed");
-
-    let serialized = serde_json::to_value(openai_request).expect("serialization should succeed");
-
-    assert!(
-        serialized.get("response_format").is_some(),
-        "follow-up turn should restore response_format: {serialized:?}"
-    );
 }
 
 #[test]
@@ -1444,16 +1295,6 @@ fn completion_response_with_message(message: Message) -> CompletionResponse {
     }
 }
 
-fn weather_output_schema() -> serde_json::Value {
-    serde_json::json!({
-        "title": "WeatherResponse",
-        "type": "object",
-        "properties": {
-            "city": { "type": "string" }
-        }
-    })
-}
-
 fn core_request(history: Vec<message::Message>) -> CoreCompletionRequest {
     CoreCompletionRequest {
         model: None,
@@ -1465,7 +1306,6 @@ fn core_request(history: Vec<message::Message>) -> CoreCompletionRequest {
         max_tokens: None,
         tool_choice: None,
         additional_params: None,
-        output_schema: None,
         record_telemetry_content: false,
     }
 }
@@ -2236,7 +2076,7 @@ fn joined_text_parts_concatenates_text_parts_in_order() {
 }
 
 #[test]
-fn request_conversion_drops_tools_and_schema_for_unsupported_provider() {
+fn request_conversion_drops_tools_for_unsupported_provider() {
     let request = CoreCompletionRequest {
         tools: vec![completion::ToolDefinition {
             name: "get_weather".to_string(),
@@ -2247,9 +2087,6 @@ fn request_conversion_drops_tools_and_schema_for_unsupported_provider() {
             }),
         }],
         tool_choice: Some(message::ToolChoice::Required),
-        output_schema: Some(
-            serde_json::from_value(weather_output_schema()).expect("schema should deserialize"),
-        ),
         ..core_request(vec![message::Message::user("hello")])
     };
 
@@ -2258,7 +2095,6 @@ fn request_conversion_drops_tools_and_schema_for_unsupported_provider() {
         request,
         strict_tools: false,
         tool_result_array_content: false,
-        supports_response_format: false,
         supports_tools: false,
     })
     .expect("request conversion should succeed");
@@ -2272,42 +2108,6 @@ fn request_conversion_drops_tools_and_schema_for_unsupported_provider() {
         serialized.get("tool_choice").is_none(),
         "tool_choice should be dropped: {serialized:?}"
     );
-    assert!(
-        serialized.get("response_format").is_none(),
-        "response_format should be dropped: {serialized:?}"
-    );
-}
-
-#[test]
-fn response_format_merges_with_existing_additional_params() {
-    let request = CoreCompletionRequest {
-        additional_params: Some(serde_json::json!({ "top_p": 0.5 })),
-        output_schema: Some(
-            serde_json::from_value(weather_output_schema()).expect("schema should deserialize"),
-        ),
-        ..core_request(vec![message::Message::user("hello")])
-    };
-
-    let converted = CompletionRequest::try_from(OpenAIRequestParams {
-        model: "gpt-4o-mini".to_string(),
-        request,
-        strict_tools: false,
-        tool_result_array_content: false,
-        supports_response_format: true,
-        supports_tools: true,
-    })
-    .expect("request conversion should succeed");
-
-    let serialized = serde_json::to_value(converted).expect("serialization should succeed");
-    assert_eq!(
-        serialized["top_p"], 0.5,
-        "existing params survive: {serialized:?}"
-    );
-    assert_eq!(
-        serialized["response_format"]["json_schema"]["name"], "WeatherResponse",
-        "schema name comes from the schema title: {serialized:?}"
-    );
-    assert_eq!(serialized["response_format"]["json_schema"]["strict"], true);
 }
 
 #[test]
@@ -2378,7 +2178,6 @@ fn malformed_additional_params_tools_fail_loudly() {
         temperature: None,
         max_tokens: None,
         tool_choice: None,
-        output_schema: None,
         record_telemetry_content: false,
     };
     let error = match CompletionRequest::try_from(OpenAIRequestParams {
@@ -2386,7 +2185,6 @@ fn malformed_additional_params_tools_fail_loudly() {
         request,
         strict_tools: false,
         tool_result_array_content: false,
-        supports_response_format: true,
         supports_tools: true,
     }) {
         Err(error) => error,
@@ -2412,7 +2210,6 @@ fn malformed_additional_params_tools_fail_loudly() {
         temperature: None,
         max_tokens: None,
         tool_choice: None,
-        output_schema: None,
         record_telemetry_content: false,
     };
     let error = match CompletionRequest::try_from(OpenAIRequestParams {
@@ -2420,7 +2217,6 @@ fn malformed_additional_params_tools_fail_loudly() {
         request,
         strict_tools: false,
         tool_result_array_content: false,
-        supports_response_format: true,
         supports_tools: true,
     }) {
         Err(error) => error,

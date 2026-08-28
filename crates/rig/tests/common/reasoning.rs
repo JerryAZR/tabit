@@ -101,7 +101,6 @@ pub(crate) async fn run_reasoning_roundtrip_streaming_with_final<M, F>(
         tool_choice: None,
         additional_params: agent.additional_params.clone(),
         model: None,
-        output_schema: None,
         record_telemetry_content: false,
     };
 
@@ -184,7 +183,6 @@ pub(crate) async fn run_reasoning_roundtrip_streaming_with_final<M, F>(
         tool_choice: None,
         additional_params: agent.additional_params.clone(),
         model: None,
-        output_schema: None,
         record_telemetry_content: false,
     };
 
@@ -235,7 +233,6 @@ where
         tool_choice: None,
         additional_params: agent.additional_params.clone(),
         model: None,
-        output_schema: None,
         record_telemetry_content: false,
     };
 
@@ -282,7 +279,6 @@ where
         tool_choice: None,
         additional_params: agent.additional_params.clone(),
         model: None,
-        output_schema: None,
         record_telemetry_content: false,
     };
 

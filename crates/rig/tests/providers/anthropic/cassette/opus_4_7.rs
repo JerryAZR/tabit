@@ -10,10 +10,9 @@ use rig::streaming::{StreamingChat, StreamingPrompt};
 use crate::reasoning::{self, ReasoningRoundtripAgent, WeatherTool};
 use crate::support::{
     Adder, BASIC_PREAMBLE, BASIC_PROMPT, IMAGE_FIXTURE_PATH, STREAMING_PREAMBLE, STREAMING_PROMPT,
-    STREAMING_TOOLS_PREAMBLE, STREAMING_TOOLS_PROMPT, STRUCTURED_OUTPUT_PROMPT,
-    SmokeStructuredOutput, Subtract, TOOLS_PREAMBLE, TOOLS_PROMPT,
+    STREAMING_TOOLS_PREAMBLE, STREAMING_TOOLS_PROMPT, Subtract, TOOLS_PREAMBLE, TOOLS_PROMPT,
     assert_contains_any_case_insensitive, assert_mentions_expected_number,
-    assert_nonempty_response, assert_smoke_structured_output, collect_stream_final_response,
+    assert_nonempty_response, collect_stream_final_response,
 };
 
 fn opus_4_7_thinking_params() -> serde_json::Value {
@@ -111,30 +110,6 @@ async fn messages_streaming_tools_smoke() {
                 .expect("streaming tool prompt should succeed");
 
             assert_mentions_expected_number(&response, -3);
-        },
-    )
-    .await;
-}
-
-#[tokio::test]
-async fn messages_structured_output_smoke() {
-    super::super::support::with_anthropic_cassette(
-        "opus_4_7/messages_structured_output_smoke",
-        |client| async move {
-            let agent = client
-                .agent("claude-opus-4-7")
-                .output_schema::<SmokeStructuredOutput>()
-                .max_tokens(128_000)
-                .build();
-
-            let response = agent
-                .prompt(STRUCTURED_OUTPUT_PROMPT)
-                .await
-                .expect("structured output prompt should succeed");
-            let structured: SmokeStructuredOutput =
-                serde_json::from_str(&response).expect("structured output should deserialize");
-
-            assert_smoke_structured_output(&structured);
         },
     )
     .await;
