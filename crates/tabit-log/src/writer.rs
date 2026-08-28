@@ -20,7 +20,7 @@
 //! flush at drop.
 
 use crate::entry::{FileRecord, SessionHeader};
-use crate::error::SessionError;
+use crate::error::LogError;
 use std::collections::VecDeque;
 use std::fs::{self, File, OpenOptions};
 use std::io::Write as _;
@@ -33,7 +33,7 @@ pub trait WriteBuffer: Send {
     /// attempt the write of everything queued. On failure the batch
     /// stays queued and the file is reverted to its clean prefix — the
     /// `Err` is a report, not an undo.
-    fn enqueue(&mut self, records: &[FileRecord]) -> Result<(), SessionError>;
+    fn enqueue(&mut self, records: &[FileRecord]) -> Result<(), LogError>;
 }
 
 /// A handle to a session's shared write buffer — what the
@@ -83,11 +83,11 @@ impl SessionWriter {
     /// Re-open an existing session file for appending. The durable
     /// prefix is everything already in the file (the caller holds the
     /// parsed state; there is deliberately no second parse here).
-    pub fn append_to(path: &Path, id: String, durable_offset: u64) -> Result<Self, SessionError> {
+    pub fn append_to(path: &Path, id: String, durable_offset: u64) -> Result<Self, LogError> {
         let file = OpenOptions::new()
             .append(true)
             .open(path)
-            .map_err(|source| SessionError::Io {
+            .map_err(|source| LogError::Io {
                 path: path.to_path_buf(),
                 source,
             })?;
@@ -122,13 +122,13 @@ impl SessionWriter {
     /// plain strings and numbers — a serialization failure cannot
     /// happen; the `Err` exists so the enqueue rollback and this stay
     /// one mechanism.
-    fn serialize(&mut self, record: &FileRecord) -> Option<SessionError> {
+    fn serialize(&mut self, record: &FileRecord) -> Option<LogError> {
         match serde_json::to_string(record) {
             Ok(line) => {
                 self.outbox.push_back(line);
                 None
             }
-            Err(source) => Some(SessionError::Io {
+            Err(source) => Some(LogError::Io {
                 path: self.path.clone(),
                 source: source.into(),
             }),
@@ -149,12 +149,12 @@ impl SessionWriter {
     /// truncated back to the durable offset (whatever bytes a partial
     /// write left are a torn tail, gone) and the lines stay queued, so
     /// a retried write can never splice into torn bytes.
-    fn drain(&mut self) -> Result<(), SessionError> {
+    fn drain(&mut self) -> Result<(), LogError> {
         if self.outbox.is_empty() {
             return Ok(());
         }
         self.materialize()?;
-        let file = self.file.as_mut().ok_or_else(|| SessionError::Io {
+        let file = self.file.as_mut().ok_or_else(|| LogError::Io {
             path: self.path.clone(),
             source: std::io::Error::other("internal invariant violated: drain without a file"),
         })?;
@@ -170,7 +170,7 @@ impl SessionWriter {
             // append-mode handle cannot set_len on Windows — and the
             // append handle's next write lands at the new end regardless.
             let _ = truncate_to(&self.path, self.durable_offset);
-            return Err(SessionError::Io {
+            return Err(LogError::Io {
                 path: self.path.clone(),
                 source,
             });
@@ -187,7 +187,7 @@ impl SessionWriter {
     /// `create_new` open refuses to replace: remove the orphan so this
     /// attempt (and the next) can proceed — the outbox still holds every
     /// line, so nothing is lost.
-    fn materialize(&mut self) -> Result<(), SessionError> {
+    fn materialize(&mut self) -> Result<(), LogError> {
         if self.file.is_some() {
             return Ok(());
         }
@@ -196,7 +196,7 @@ impl SessionWriter {
             .parent()
             .map(Path::to_path_buf)
             .unwrap_or_else(|| PathBuf::from("."));
-        fs::create_dir_all(&dir).map_err(|source| SessionError::Io { path: dir, source })?;
+        fs::create_dir_all(&dir).map_err(|source| LogError::Io { path: dir, source })?;
         match OpenOptions::new()
             .create_new(true)
             .append(true)
@@ -208,7 +208,7 @@ impl SessionWriter {
             }
             Err(source) => {
                 let _ = fs::remove_file(&self.path);
-                Err(SessionError::Io {
+                Err(LogError::Io {
                     path: self.path.clone(),
                     source,
                 })
@@ -219,7 +219,7 @@ impl SessionWriter {
 
 impl WriteBuffer for SessionWriter {
     #[allow(clippy::panic)] // sanctioned crash: unconstructible failure (AGENTS.md doctrine)
-    fn enqueue(&mut self, records: &[FileRecord]) -> Result<(), SessionError> {
+    fn enqueue(&mut self, records: &[FileRecord]) -> Result<(), LogError> {
         let mark = self.outbox.len();
         for record in records {
             if let Some(error) = self.serialize(record) {
@@ -246,17 +246,29 @@ impl Drop for SessionWriter {
     }
 }
 
+/// The no-op buffer: the same contract with the disk unplugged — the
+/// conversation owner for standalone and wasm consumers. Everything
+/// folds and grows; nothing persists.
+#[derive(Debug, Default, Clone, Copy)]
+pub struct NullBuffer;
+
+impl WriteBuffer for NullBuffer {
+    fn enqueue(&mut self, _records: &[FileRecord]) -> Result<(), LogError> {
+        Ok(())
+    }
+}
+
 /// Truncate `path` to `len` through a separate write handle (Windows:
 /// append-mode handles cannot `set_len`).
-fn truncate_to(path: &Path, len: u64) -> Result<(), SessionError> {
+fn truncate_to(path: &Path, len: u64) -> Result<(), LogError> {
     let file = OpenOptions::new()
         .write(true)
         .open(path)
-        .map_err(|source| SessionError::Io {
+        .map_err(|source| LogError::Io {
             path: path.to_path_buf(),
             source,
         })?;
-    file.set_len(len).map_err(|source| SessionError::Io {
+    file.set_len(len).map_err(|source| LogError::Io {
         path: path.to_path_buf(),
         source,
     })

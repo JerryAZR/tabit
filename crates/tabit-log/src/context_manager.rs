@@ -5,7 +5,7 @@
 //! buffer is not owned, because non-context records (side facts) ride
 //! the same one from the session side. The model-facing context is a
 //! **view**: `messages` folds the active branch on every call through
-//! the one context builder ([`fold_branch`](crate::projection::fold_branch)),
+//! the one context builder ([`fold_branch`](crate::fold::fold_branch)),
 //! so live and reload are literally the same derivation and there is no
 //! stored context to drift.
 //!
@@ -23,9 +23,9 @@
 //! the live agent loop consumes it after the rewiring discussion.
 
 use crate::entry::{EntryKind, FileRecord, SessionEntry};
+use crate::fold::{calls_of, fold_branch, path_is_closed};
 use crate::ids;
 use crate::lock;
-use crate::projection::{calls_of, fold_branch, path_is_closed};
 use crate::tree::{SessionTree, TreeFault};
 use crate::writer::SharedBuffer;
 use rig_core::completion::{Message, Usage};
@@ -82,7 +82,7 @@ impl ContextManager {
     /// folded through the one context builder. Derived on every call —
     /// the only read, and nothing stores it.
     pub fn messages(&self) -> Vec<Message> {
-        fold_branch(&self.tree.path_to_head()).into_messages()
+        fold_branch(&self.tree.path_to_head())
     }
 
     /// Fold one immediately-committable message: a user message, or a

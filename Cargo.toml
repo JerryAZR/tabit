@@ -10,6 +10,7 @@ default-members = [
     "crates/rig-derive",
     "crates/rig",
     "crates/tabit-config",
+    "crates/tabit-log",
     "crates/tabit-protocol",
     "crates/tabit-session",
     "crates/tabit-gui",

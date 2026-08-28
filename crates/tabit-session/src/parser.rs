@@ -19,7 +19,6 @@ use crate::entry::{
     EntryKind, FileRecord, SESSION_FORMAT_VERSION, SessionEntry, SessionHeader, SideKind,
 };
 use crate::error::SessionError;
-use crate::projection;
 use crate::stats::UsageLedger;
 use crate::tree::{SessionTree, TreeFault};
 use std::path::{Path, PathBuf};
@@ -31,10 +30,11 @@ use tabit_protocol::ModelSelection;
 pub struct Parsed {
     /// The header line.
     pub header: SessionHeader,
-    /// The conversation tree, head included.
+    /// The conversation tree, head included. The model-visible context
+    /// is NOT parsed or stored — it is derived on every read
+    /// (`ContextManager::messages`); a reload and a live run are the
+    /// same fold by construction.
     pub tree: SessionTree,
-    /// The active branch's model-visible context.
-    pub context: rig_agent::agent::context::Context,
     /// The last `model_change` (the session preference register), when
     /// the file records one.
     pub register: Option<ModelSelection>,
@@ -142,7 +142,7 @@ pub fn parse(raw: &str, path: &Path) -> Result<Parsed, SessionError> {
                             )));
                         }
                         let branch = tree.path_to(to.as_deref()).map_err(tree_fault)?;
-                        projection::path_is_closed(&branch)
+                        tabit_log::path_is_closed(&branch)
                             .map_err(|message| corrupt(format!("checkout target: {message}")))?;
                         tree.move_head(to.as_deref()).map_err(tree_fault)?;
                     }
@@ -163,14 +163,12 @@ pub fn parse(raw: &str, path: &Path) -> Result<Parsed, SessionError> {
         ));
     }
     let branch = tree.path_to_head();
-    projection::path_is_closed(&branch)
+    tabit_log::path_is_closed(&branch)
         .map_err(|message| corrupt(format!("head branch: {message}")))?;
-    let context = projection::fold_branch(&branch);
 
     Ok(Parsed {
         header,
         tree,
-        context,
         register,
         stats,
         path: path.to_path_buf(),
@@ -202,7 +200,7 @@ fn validate_node_order(
                     entry.id
                 ));
             }
-            *pending_calls = projection::calls_of(message)
+            *pending_calls = tabit_log::calls_of(message)
                 .iter()
                 .map(|call| call.id.clone())
                 .collect();
@@ -217,20 +215,6 @@ fn validate_node_order(
             };
             pending_calls.swap_remove(index);
             Ok(())
-        }
-    }
-}
-
-impl SideKind {
-    /// The side kind's tag name, for error messages.
-    fn kind_name(&self) -> &'static str {
-        match self {
-            SideKind::ModelChange { .. } => "model_change",
-            SideKind::Checkout { .. } => "checkout",
-            SideKind::Aborted => "aborted",
-            SideKind::Discarded { .. } => "discarded",
-            SideKind::Label { .. } => "label",
-            SideKind::Custom { .. } => "custom",
         }
     }
 }

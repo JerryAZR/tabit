@@ -199,6 +199,20 @@ pub enum SideKind {
     },
 }
 
+impl SideKind {
+    /// The side kind's tag name, for error messages.
+    pub fn kind_name(&self) -> &'static str {
+        match self {
+            SideKind::ModelChange { .. } => "model_change",
+            SideKind::Checkout { .. } => "checkout",
+            SideKind::Aborted => "aborted",
+            SideKind::Discarded { .. } => "discarded",
+            SideKind::Label { .. } => "label",
+            SideKind::Custom { .. } => "custom",
+        }
+    }
+}
+
 #[cfg(test)]
 #[path = "entry_tests.rs"]
 mod tests;

@@ -24,7 +24,6 @@ use crate::error::SessionError;
 use crate::interaction::InteractionHub;
 use crate::lock::lock;
 use crate::model::validate_selection;
-use crate::projection;
 use crate::recorder::{RecorderHook, SessionRecorder};
 use crate::registry::ModelRegistry;
 use crate::stats::{UsageLedger, add_usage};
@@ -1132,7 +1131,7 @@ impl Session {
     /// prompt follows.
     pub fn rewind(&mut self, turns: usize) -> Result<RewindSummary, SessionError> {
         let branch = self.recorder.active_branch();
-        let boundaries = projection::user_message_boundaries(&branch);
+        let boundaries = tabit_log::user_message_boundaries(&branch);
         if turns == 0 {
             return Err(SessionError::Config {
                 message: "rewind needs at least 1 user message to drop".to_string(),
@@ -1175,9 +1174,9 @@ impl Session {
     /// — degraded notices announce a failed flush; the ruling keeps it
     /// non-barrier).
     fn apply_checkout(&mut self, to: Option<&str>) -> Result<RewindSummary, SessionError> {
-        let before = projection::user_message_boundaries(&self.recorder.active_branch()).len();
+        let before = tabit_log::user_message_boundaries(&self.recorder.active_branch()).len();
         self.recorder.checkout(to, &self.path)?;
-        let after = projection::user_message_boundaries(&self.recorder.active_branch()).len();
+        let after = tabit_log::user_message_boundaries(&self.recorder.active_branch()).len();
         Ok(RewindSummary {
             dropped: before.saturating_sub(after),
             to_entry: to.unwrap_or_default().to_string(),

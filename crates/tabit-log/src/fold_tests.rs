@@ -69,8 +69,7 @@ fn fold_branch_merges_result_batches_into_one_user_message() {
         entry(tool_result("c2")),
         entry(assistant_text("done")),
     ];
-    let context = fold_branch(&entries);
-    let messages = context.messages();
+    let messages = fold_branch(&entries);
     assert_eq!(messages.len(), 4, "user, assistant, merged results, final");
     assert!(matches!(&messages[2], Message::User { content } if content.len() == 2));
     assert!(matches!(&messages[3], Message::Assistant { .. }));
@@ -79,8 +78,7 @@ fn fold_branch_merges_result_batches_into_one_user_message() {
 #[test]
 fn fold_branch_folds_user_and_assistant_messages_verbatim() {
     let entries = vec![entry(user("q")), entry(assistant_text("a"))];
-    let context = fold_branch(&entries);
-    let messages = context.messages();
+    let messages = fold_branch(&entries);
     assert_eq!(messages.len(), 2);
     assert!(matches!(&messages[0], Message::User { .. }));
     assert!(matches!(&messages[1], Message::Assistant { .. }));

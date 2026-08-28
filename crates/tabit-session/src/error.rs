@@ -39,6 +39,10 @@ pub enum SessionError {
         message: String,
     },
 
+    /// An error from the durable-conversation layer (tabit-log).
+    #[error(transparent)]
+    Log(#[from] tabit_log::LogError),
+
     /// The session log could not be found.
     #[error("session file `{path}` does not exist")]
     NotFound {

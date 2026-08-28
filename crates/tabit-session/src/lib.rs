@@ -65,17 +65,12 @@
 //!
 //! [`Session::prompt`]: crate::Session::prompt
 
-mod context_manager;
 mod endpoint;
-mod entry;
 mod error;
-mod ids;
 mod interaction;
-mod lock;
 mod model;
 mod parser;
 mod permission;
-mod projection;
 mod prompt;
 mod recorder;
 mod registry;
@@ -83,8 +78,16 @@ pub(crate) mod replay;
 mod session;
 mod stats;
 mod store;
-mod tree;
-mod writer;
+
+// The durable-conversation layer, extracted to tabit-log (2026-08):
+// re-exposed as modules so internal `crate::` paths and the public
+// surface stay stable through the extraction.
+pub use tabit_log::context_manager;
+pub use tabit_log::entry;
+pub use tabit_log::ids;
+pub use tabit_log::lock;
+pub use tabit_log::tree;
+pub use tabit_log::writer;
 
 pub use context_manager::{CheckoutError, ContextManager};
 pub use endpoint::{

@@ -3,7 +3,7 @@
 
 use super::*;
 use crate::entry::{EntryKind, FileRecord, SessionEntry, SideKind, SideRecord};
-use crate::error::SessionError;
+use crate::error::LogError;
 use crate::tree::SessionTree;
 use crate::writer::WriteBuffer;
 use rig_core::OneOrMany;
@@ -34,7 +34,7 @@ impl BufferTap {
 }
 
 impl WriteBuffer for BufferTap {
-    fn enqueue(&mut self, records: &[FileRecord]) -> Result<(), SessionError> {
+    fn enqueue(&mut self, records: &[FileRecord]) -> Result<(), LogError> {
         self.0.lock().expect("tap lock").push(records.to_vec());
         Ok(())
     }

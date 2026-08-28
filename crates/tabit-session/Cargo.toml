@@ -22,6 +22,7 @@ http = { workspace = true }
 serde = { workspace = true, features = ["derive"] }
 serde_json = { workspace = true }
 tabit-config = { path = "../tabit-config", version = "0.41.0" }
+tabit-log = { path = "../tabit-log", version = "0.41.0" }
 tabit-protocol = { path = "../tabit-protocol", version = "0.41.0" }
 thiserror = { workspace = true }
 tracing = { workspace = true }
