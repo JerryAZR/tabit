@@ -25,7 +25,7 @@ fn user_node() -> crate::entry::FileRecord {
 
 fn commit_one(writer: &mut SessionWriter) {
     assert!(
-        writer.write_behind(&[user_node()]).is_none(),
+        tabit_log::WriteBuffer::enqueue(writer, &[user_node()]).is_ok(),
         "the fixture write drains"
     );
 }

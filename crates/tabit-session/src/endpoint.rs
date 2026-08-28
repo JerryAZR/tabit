@@ -127,8 +127,8 @@ struct Worker {
     events: mpsc::WeakUnboundedSender<EventFrame>,
     stream: StreamId,
     /// The read-only entry-id probe — checkout verification at receive
-    /// (see [`crate::recorder::EntryIdProbe`]).
-    entry_probe: crate::recorder::EntryIdProbe,
+    /// (see [`crate::session::SharedConversation`]).
+    entry_probe: crate::session::SharedConversation,
     /// Pending checkout intent — a slot, not a queue: a newer checkout
     /// replaces an older (collapse; the newer intent is the intent),
     /// abort clears it (drop-all-pending-intent), and the worker takes
@@ -899,7 +899,8 @@ fn execute_checkout(
     stream: &StreamId,
     entry_id: String,
 ) {
-    if let Err(error) = session.rewind_to_entry(&entry_id) {
+    let res = session.rewind_to_entry(&entry_id);
+    if let Err(error) = res {
         let _ = event_tx.send(EventFrame {
             stream: Some(stream.clone()),
             event: SessionEvent::error_checkout(error.to_string()),

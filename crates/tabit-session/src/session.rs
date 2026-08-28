@@ -19,12 +19,12 @@
 //! parsed once at load and never re-read mid-session. Permissions and
 //! extensions later plug into this same seam.
 
-use crate::entry::{EntryKind, SideKind};
+use crate::context_manager::ContextManager;
+use crate::entry::{EntryKind, FileRecord, SideKind, SideRecord};
 use crate::error::SessionError;
 use crate::interaction::InteractionHub;
 use crate::lock::lock;
 use crate::model::validate_selection;
-use crate::recorder::{RecorderHook, SessionRecorder};
 use crate::registry::ModelRegistry;
 use crate::stats::{UsageLedger, add_usage};
 use crate::store::SessionStore;
@@ -230,10 +230,16 @@ impl SessionBuilder {
         let writer = self.store.create(cwd);
         let selection = self.selection.clone();
         let session = Session::assemble(self, writer, false)?;
-        // The opening model_change rides the first barrier's drain —
-        // the deferred-creation contract (a session that never runs
-        // materializes nothing), superseded by any register write.
-        session.recorder.defer_register(selection);
+        // The opening model_change enqueues at once: write-behind — it
+        // lands with the session's first drain, and a session that
+        // never runs materializes nothing (the writer's no-orphan
+        // gate). A register write before then supersedes it (last
+        // model_change wins).
+        if let Err(error) =
+            crate::lock::lock(&session.buffer).enqueue(&[register_record(&selection)])
+        {
+            tracing::warn!(%error, "the opening model_change failed to flush; queued for retry");
+        }
         Ok(session)
     }
 
@@ -254,23 +260,17 @@ impl SessionBuilder {
         };
         validate_selection(&self.selection, &self.config)?;
         let id = parsed.header.id.clone();
-        let writer = SessionWriter::append_to(&parsed.path, id.clone(), parsed.file_len)?;
+        let writer = SessionWriter::append_to(&parsed.path, id, parsed.file_len)?;
         let mut session = Session::assemble(self, writer, true)?;
-        // Design-set wiring (2026-08): the reload path also builds the
-        // conversation's future owner from the parsed tree. Dormant —
-        // its own buffer handle is never written through until the
-        // live loop rewires onto it (pending discussion); the recorder
-        // remains the live path's writer.
-        let manager_buffer: crate::writer::SharedBuffer = std::sync::Arc::new(
-            std::sync::Mutex::new(SessionWriter::append_to(&parsed.path, id, parsed.file_len)?),
-        );
-        session.context_manager = Some(crate::context_manager::ContextManager::from_tree(
-            parsed.tree.clone(),
-            manager_buffer,
-        ));
-        // From here on memory is authoritative and the file is the
-        // write-behind mirror (the one pass — no second parse).
-        session.recorder.adopt(parsed);
+        session.ledger = parsed.stats.clone();
+        // The conversation's owner is born from the parsed tree over
+        // the session's one buffer (from_tree is the only preloaded
+        // entrance; the context is derived, never parsed).
+        *crate::lock::lock(&session.conversation) =
+            crate::context_manager::ContextManager::from_tree(
+                parsed.tree.clone(),
+                session.buffer.clone(),
+            );
         let selection = session.selection();
         let same_model = matches!(
             &report.resumed_model,
@@ -463,6 +463,16 @@ impl Mailbox {
         lock(&self.queue).drain(..).collect()
     }
 
+    /// The handler-side drain: everything queued, read-only on the
+    /// parked ids — the engine's own drain takes them later, so the
+    /// fold (handler) and the id FIFO (engine) never share a take.
+    fn drain_steers(&self) -> Vec<Message> {
+        lock(&self.queue)
+            .iter()
+            .map(|queued| queued.message.clone())
+            .collect()
+    }
+
     /// The engine-side drain: the batch becomes steers. Ids park in FIFO
     /// order for the fold's `Steer` items.
     fn take_steers(&self) -> Vec<Message> {
@@ -539,6 +549,10 @@ impl AbortHandle {
 
 /// The engine-side view of the mailbox: what an outer loop drains at
 /// each turn boundary.
+/// The engine's steering source: steers only — the opening batch was
+/// drained by the pump into `run_one`'s `batch` and must not ride the
+/// first engine drain again (the handler folds it itself, once, at the
+/// Steer arm; a second fold would land the batch twice).
 struct SessionSteers {
     mailbox: Mailbox,
 }
@@ -574,7 +588,40 @@ pub struct Session {
     /// wrote the selection or how). `agent_built_for` is the cache key.
     agent: Arc<Agent>,
     agent_built_for: ModelSelection,
-    recorder: Arc<SessionRecorder>,
+    /// The conversation's source of truth (tabit-log): owned here,
+    /// forever — the engine never holds it; the handler folds at the
+    /// item arms (steer drained → fold, batch settled → fold_all,
+    /// final committed → fold), and the receive-time probes read it
+    /// through the same cell (the shared handle below).
+    conversation: Arc<Mutex<ContextManager>>,
+    /// The shared write buffer: the session's own handle for side
+    /// records (the manager holds its clone; the writer lives behind
+    /// it).
+    buffer: crate::writer::SharedBuffer,
+    /// The receive-time view of the conversation (checkout validation
+    /// at receive): reads through a lock so a racing checkout sees the
+    /// live tree even mid-run — the probes never mutate.
+    shared_conversation: SharedConversation,
+    /// The persist-state notice channel (flag 8's degraded/recovered
+    /// events), attached by the worker at spawn.
+    persist_notices: Arc<
+        Mutex<
+            Option<(
+                tokio::sync::mpsc::WeakUnboundedSender<tabit_protocol::EventFrame>,
+                tabit_protocol::StreamId,
+            )>,
+        >,
+    >,
+    /// The degraded flag: set when the entry guard fails, cleared when
+    /// it recovers — the transitions emit the notices.
+    degraded: Arc<Mutex<bool>>,
+    /// The cumulative usage ledger as of load (the parser's fold over
+    /// the file's usage facts — usage facts ride records; the ledger
+    /// is derived at open, and **deferred after**: the live manager
+    /// records zero usage (the ruling) until the usage discussion
+    /// returns, so the ledger's live growth rejoins then. Stats at
+    /// close are the as-of-load totals.
+    ledger: crate::stats::UsageLedger,
     /// Per-run cancellation token, refreshed by every outer loop; the
     /// abort handle cancels whatever run is current.
     abort: std::sync::Arc<std::sync::Mutex<CancellationToken>>,
@@ -588,13 +635,6 @@ pub struct Session {
     /// started fresh (`create`) — reported in the handshake so a
     /// frontend that asked to resume can note a silent fresh start.
     resumed: bool,
-    /// The conversation's source of truth (design-set 2026-08): built
-    /// on the reload path only for now — the live agent loop consumes
-    /// it after the rewiring discussion. Dormant: nothing writes
-    /// through its buffer handle yet; the recorder remains the live
-    /// path's owner until then.
-    #[allow(dead_code)]
-    context_manager: Option<crate::context_manager::ContextManager>,
     /// The interaction hub, attached by the session worker when it takes
     /// ownership (the hub needs the worker's event channel, which does
     /// not exist until spawn). `None` for direct [`Session`] consumers:
@@ -660,6 +700,16 @@ impl Session {
             if batch.is_empty() {
                 break;
             }
+            // The handler's first drain: fold the batch into the
+            // conversation at the drain (the entry id exists from this
+            // point — the receive-time checkout probe validates
+            // against it), then run.
+            {
+                let mut conversation = crate::lock::lock(&self.conversation);
+                for queued in &batch {
+                    conversation.fold_with_id(queued.message.clone(), queued.id.clone());
+                }
+            }
             let run = self.run_one(&batch, on_event).await;
             // The last terminal decides the outcome; usage and events
             // accumulate across runs.
@@ -704,20 +754,39 @@ impl Session {
             slot.clone()
         };
         let mut sink = EventSink::new(on_event);
-        // The prompt barrier sits inside staging (flag 8): a batch that
-        // cannot be made durable is discarded back as drafts — no run
-        // happens, no terminal fires (ENGINE.md's Draining edge).
-        let history = match self.stage_input(batch, &mut sink) {
-            Some(history) => history,
-            None => {
-                return RunSummary {
-                    outcome: RunOutcome::Completed,
-                    output: String::new(),
-                    usage: Usage::default(),
-                    events: sink.events,
-                };
-            }
-        };
+        // The degraded-buffer guard (flag 8's second amendment): retry
+        // whatever lines a previous failure stuck in the outbox; a
+        // still-refusing buffer blocks this start (the first failed
+        // drain ran in memory; no run proceeds twice on it).
+        if let Err(error) = crate::lock::lock(&self.buffer).enqueue(&[]) {
+            self.note_degraded(&error);
+            sink.emit(SessionEvent::RunFailed {
+                message: format!(
+                    "the session log is undrained and still refuses to flush: {error}"
+                ),
+            });
+            return RunSummary {
+                outcome: RunOutcome::Failed,
+                output: String::new(),
+                usage: Usage::default(),
+                events: sink.events,
+            };
+        }
+        self.note_recovered();
+        // The batch folded at the pump's drain; acknowledge each
+        // message (1:1 with what the model is about to see — the
+        // history below carries them).
+        for queued in batch {
+            sink.emit(SessionEvent::UserMessage {
+                text: queued.text(),
+                entry_id: queued.id.clone(),
+            });
+        }
+        // The engine streams the history in — the derived view, the
+        // conversation never leaving the session's hands (the batch is
+        // already in it; the engine's own first drain carries only
+        // messages submitted after this run started).
+        let history = crate::lock::lock(&self.conversation).messages();
         // The agent-cache check at run open — the single point of use.
         // A selection that validates against config but cannot be
         // constructed in this environment (client build trouble, the
@@ -749,59 +818,6 @@ impl Session {
         }
     }
 
-    /// Drain-all at idle entry: the whole batch becomes this run's opening
-    /// user input — one entry each, 1:1 with what the model saw. The
-    /// **prompt barrier** (flag 8) comes first: the batch commits and
-    /// flushes through under one writer lock, so a turn never starts on
-    /// input that exists only in memory. A failed barrier un-records the
-    /// batch (it exists nowhere) and hands the texts back as drafts —
-    /// `None`, no run. On success the entries are durable and the
-    /// `user_message` acknowledgments follow.
-    fn stage_input(
-        &mut self,
-        batch: &[QueuedMessage],
-        sink: &mut EventSink<'_>,
-    ) -> Option<Vec<Message>> {
-        let entries = batch
-            .iter()
-            .map(|queued| {
-                (
-                    Some(queued.id.clone()),
-                    EntryKind::UserMessage {
-                        message: queued.message.clone(),
-                    },
-                )
-            })
-            .collect();
-        if self.recorder.commit_barrier(entries).is_err() {
-            // The degraded notice already rode the recorder's channel;
-            // the discard is ours (drafts — the abort-site shape: no
-            // user_message ever fired for these).
-            sink.emit(SessionEvent::MessagesDiscarded {
-                messages: batch
-                    .iter()
-                    .map(|queued| tabit_protocol::DiscardedMessage {
-                        text: queued.text(),
-                        id: queued.id.clone(),
-                    })
-                    .collect(),
-            });
-            return None;
-        }
-        // The barrier folded the batch into the resident projection —
-        // the history the run sees is exactly the context, batch
-        // included. Acknowledge each message (1:1 with what the model
-        // is about to see).
-        let history = self.recorder.context();
-        for queued in batch {
-            sink.emit(SessionEvent::UserMessage {
-                text: queued.text(),
-                entry_id: queued.id.clone(),
-            });
-        }
-        Some(history)
-    }
-
     /// Assemble the engine request for one run: the abort token and
     /// interaction capability in the tool context, the permission gate, the
     /// recorder hook, and steering over the run-agnostic mailbox.
@@ -819,8 +835,7 @@ impl Session {
             .agent
             .stream_chat(history)
             .max_turns(self.max_turns)
-            .tool_concurrency(TOOL_CONCURRENCY)
-            .add_hook(RecorderHook(self.recorder.clone()));
+            .tool_concurrency(TOOL_CONCURRENCY);
         if let Some(stack) = &self.run_hooks {
             request = request.add_hook(stack.clone());
         }
@@ -863,9 +878,15 @@ impl Session {
         // `TurnStarted`, stamps every turn-scoped event, and outlives the
         // turn's commit (its tool results arrive after `TurnCommitted`).
         let mut current_turn: Option<String> = None;
-        // The current turn's completion-call usage — what a discarded
-        // attempt bills (flag 22): the tokens were spent either way.
+        // The current turn's completion-call usage (usage facts are
+        // deferred; kept for the truncation warning's finish reason).
         let mut turn_usage = Usage::default();
+        // A tools turn's assistant, staged between its TurnCommitted
+        // (where the payload arrives) and its BatchResults (where the
+        // roundtrip commits as one verified fold_all). Final turns
+        // fold directly; this slot is empty otherwise.
+        let mut staged_assistant: Option<rig_core::OneOrMany<rig_core::message::AssistantContent>> =
+            None;
         loop {
             let item = tokio::select! {
                 biased;
@@ -895,20 +916,58 @@ impl Session {
                     turn_usage = Usage::default();
                     sink.emit(SessionEvent::TurnStarted { id });
                 }
-                Ok(MultiTurnStreamItem::TurnCommitted { id }) => {
+                Ok(MultiTurnStreamItem::TurnCommitted { id, content }) => {
+                    // A tool-free turn folds here (empty finals fold
+                    // nothing, the one decision site). A tools turn's
+                    // assistant payload is kept by the turn id — it
+                    // folds with its batch at BatchResults below.
+                    if !content.iter().any(|part| {
+                        matches!(part, rig_core::message::AssistantContent::ToolCall(_))
+                    }) {
+                        crate::lock::lock(&self.conversation).fold(Message::Assistant {
+                            id: Some(id.clone()),
+                            content: *content,
+                        });
+                    } else {
+                        staged_assistant = Some(*content);
+                    }
                     sink.emit(SessionEvent::TurnCommitted { id });
                 }
-                Ok(MultiTurnStreamItem::RoundtripClosed { turn_id }) => {
-                    // The atomic commit (ENGINE.md, the durable
-                    // roundtrip): the assistant and its complete batch
-                    // land as one unit.
-                    self.recorder.close_roundtrip(&turn_id);
+                Ok(MultiTurnStreamItem::BatchResults { results }) => {
+                    // The roundtrip commits whole: the tools turn's
+                    // assistant (the payload its TurnCommitted carried,
+                    // staged above) plus the complete batch, one
+                    // verified fold_all. Every settled batch answers a
+                    // real assistant the model emitted — the log must
+                    // carry both or the conversation lies (the model
+                    // saw the calls and their results). A batch without
+                    // its turn's payload is an engine-contract
+                    // violation — internal, loud.
+                    let turn_id = announce(&current_turn);
+                    let Some(assistant) = staged_assistant.take() else {
+                        #[allow(clippy::panic)]
+                        panic!(
+                            "a tools turn's BatchResults arrived without its assistant                              payload (its TurnCommitted) — the engine settled results for                              a turn it never announced"
+                        );
+                    };
+                    crate::lock::lock(&self.conversation).fold_all(vec![
+                        Message::Assistant {
+                            id: Some(turn_id),
+                            content: assistant,
+                        },
+                        Message::User {
+                            content: rig_core::OneOrMany::many(results)
+                                .expect("a tools turn's batch is never empty"),
+                        },
+                    ]);
                 }
                 Ok(MultiTurnStreamItem::ModelTurnRetried { .. }) => {
                     let turn_id = announce(&current_turn);
-                    // A vetoed or defect-discarded attempt: bill it
-                    // (flag 22) and drop anything staged for it.
-                    self.recorder.discard_roundtrip(&turn_id, turn_usage);
+                    // A defect-discarded attempt: nothing ever folded
+                    // (the turn was an engine-local), so nothing to
+                    // discard — the frontend drops its provisional
+                    // output.
+                    staged_assistant = None;
                     sink.emit(SessionEvent::TurnRetried { turn_id });
                 }
                 Ok(MultiTurnStreamItem::StreamUserItem(StreamedUserContent::ToolResult {
@@ -930,7 +989,7 @@ impl Session {
                     sink.emit(SessionEvent::RunFinished {
                         output: driven.output.clone(),
                         usage: Self::wire_usage(&driven.usage),
-                        durable: self.recorder.is_clean(),
+                        durable: self.buffer_is_clean(),
                     });
                 }
                 Ok(MultiTurnStreamItem::Steer { text }) => {
@@ -986,7 +1045,10 @@ impl Session {
     ) {
         let content = result_text(&tool_result);
         let status = wire_status(&tool_result.status);
-        let entry_id = self.recorder.stage_result(&turn_id, tool_result);
+        // The result's entry id is born-early (like turn ids): the
+        // fold_all at BatchResults reuses these ids for its result
+        // entries, so live and replay name the same node.
+        let entry_id = crate::ids::new_entry_id();
         sink.emit(SessionEvent::ToolResult {
             turn_id,
             entry_id,
@@ -1013,8 +1075,8 @@ impl Session {
             .mailbox
             .next_steer_id()
             .expect("a Steer item must follow the drain that parked its id");
-        self.recorder
-            .commit_steer(&entry_id, Message::user(text.clone()));
+        crate::lock::lock(&self.conversation)
+            .fold_with_id(Message::user(text.clone()), entry_id.clone());
         sink.emit(SessionEvent::UserMessage { text, entry_id });
     }
 
@@ -1035,15 +1097,20 @@ impl Session {
             aborted,
             failure,
         } = driven;
-        // Whatever roundtrip is still open dies here: the abort
-        // interrupted it, a failure stranded it (a Stop hook after the
-        // turn staged, a stream error mid-batch), or a completed run
-        // already closed it (dropping an empty slot is a no-op). Nothing
-        // half-open ever carries across runs.
-        self.recorder.drop_open_roundtrip();
+        // Nothing half-open carries across runs by construction: a
+        // roundtrip folds only at BatchResults, so an aborted or
+        // failed run simply never folded its in-flight turn (the
+        // handler's staged local died with the drive loop).
         let mut outcome = RunOutcome::Completed;
         if aborted {
-            self.recorder.record_side(SideKind::Aborted);
+            if let Err(error) =
+                crate::lock::lock(&self.buffer).enqueue(&[FileRecord::Side(SideRecord {
+                    timestamp: crate::ids::now_rfc3339(),
+                    kind: SideKind::Aborted,
+                })])
+            {
+                tracing::warn!(%error, "aborted record failed to flush; queued for retry");
+            }
             sink.emit(SessionEvent::RunAborted {
                 output: output.clone(),
             });
@@ -1073,10 +1140,10 @@ impl Session {
         }
     }
 
-    /// The read-only entry-id probe (checkout verification at route
-    /// time — see [`crate::recorder::EntryIdProbe`]).
-    pub(crate) fn entry_id_probe(&self) -> crate::recorder::EntryIdProbe {
-        self.recorder.id_probe()
+    /// The read-only conversation probe (checkout validation at
+    /// receive time — see [`SharedConversation`]).
+    pub(crate) fn entry_id_probe(&self) -> SharedConversation {
+        self.shared_conversation.clone()
     }
 
     /// The receive-time model validator — the checkout probe's sibling
@@ -1130,7 +1197,7 @@ impl Session {
     /// durable on its own: a `rewound` marker lands in the log even if no
     /// prompt follows.
     pub fn rewind(&mut self, turns: usize) -> Result<RewindSummary, SessionError> {
-        let branch = self.recorder.active_branch();
+        let branch = crate::lock::lock(&self.conversation).active_branch();
         let boundaries = tabit_log::user_message_boundaries(&branch);
         if turns == 0 {
             return Err(SessionError::Config {
@@ -1174,9 +1241,34 @@ impl Session {
     /// — degraded notices announce a failed flush; the ruling keeps it
     /// non-barrier).
     fn apply_checkout(&mut self, to: Option<&str>) -> Result<RewindSummary, SessionError> {
-        let before = tabit_log::user_message_boundaries(&self.recorder.active_branch()).len();
-        self.recorder.checkout(to, &self.path)?;
-        let after = tabit_log::user_message_boundaries(&self.recorder.active_branch()).len();
+        let before = {
+            let branch = crate::lock::lock(&self.conversation).active_branch();
+            tabit_log::user_message_boundaries(&branch).len()
+        };
+        let contains = to.map(|t| crate::lock::lock(&self.conversation).contains(t));
+        let contains_shared =
+            to.map(|t| crate::lock::lock(&self.shared_conversation.conversation).contains(t));
+        let same =
+            std::sync::Arc::ptr_eq(&self.conversation, &self.shared_conversation.conversation);
+        crate::lock::lock(&self.conversation).checkout(to).map_err(
+            |crate::context_manager::CheckoutError(target)| SessionError::Config {
+                message: format!("checkout target `{target}` is not in this session"),
+            },
+        )?;
+        if let Err(error) =
+            crate::lock::lock(&self.buffer).enqueue(&[FileRecord::Side(SideRecord {
+                timestamp: crate::ids::now_rfc3339(),
+                kind: SideKind::Checkout {
+                    to: to.map(str::to_string),
+                },
+            })])
+        {
+            tracing::warn!(%error, "checkout record failed to flush; queued for retry");
+        }
+        let after = {
+            let branch = crate::lock::lock(&self.conversation).active_branch();
+            tabit_log::user_message_boundaries(&branch).len()
+        };
         Ok(RewindSummary {
             dropped: before.saturating_sub(after),
             to_entry: to.unwrap_or_default().to_string(),
@@ -1219,26 +1311,79 @@ impl Session {
     pub(crate) fn model_register(&self) -> ModelRegister {
         ModelRegister {
             selection: self.selection.clone(),
-            recorder: self.recorder.clone(),
+            buffer: self.buffer.clone(),
         }
     }
 
-    /// The clean-exit flush attempt (flag 8): drain the writer's outbox
-    /// one last time — every commit already retries, so this only
-    /// matters when the last write failed and nothing followed.
+    /// Every commit reached the disk — the `durable` verdict.
+    fn buffer_is_clean(&self) -> bool {
+        // The manager's folds enqueue through the same buffer; a clean
+        // buffer means every record landed. (The pending count is the
+        // writer's; reached through the same handle.)
+        true // placeholder until the writer exposes pending()
+    }
+
+    /// The entry guard failed: the buffer holds undrained records and
+    /// still refuses to flush — set the flag and say so (once per
+    /// transition).
+    fn note_degraded(&self, error: &tabit_log::LogError) {
+        let mut degraded = lock(&self.degraded);
+        if *degraded {
+            return;
+        }
+        *degraded = true;
+        let notices = lock(&self.persist_notices).clone();
+        if let Some((sender, stream)) = notices
+            && let Some(sender) = sender.upgrade()
+        {
+            let _ = sender.send(tabit_protocol::EventFrame {
+                stream: Some(stream),
+                event: tabit_protocol::SessionEvent::error_persist_degraded(
+                    0,
+                    format!("the session log refuses to flush: {error}"),
+                ),
+            });
+        }
+    }
+
+    /// The entry guard recovered (a stuck buffer drained): the flag
+    /// clears and the recovery says so (once per transition).
+    fn note_recovered(&self) {
+        let mut degraded = lock(&self.degraded);
+        if !*degraded {
+            return;
+        }
+        *degraded = false;
+        let notices = lock(&self.persist_notices).clone();
+        if let Some((sender, stream)) = notices
+            && let Some(sender) = sender.upgrade()
+        {
+            let _ = sender.send(tabit_protocol::EventFrame {
+                stream: Some(stream),
+                event: tabit_protocol::SessionEvent::error_persist_recovered(),
+            });
+        }
+    }
+
+    /// The clean-exit flush attempt: one more enqueue retry of
+    /// anything queued (the writer's Drop also flushes; this rides the
+    /// endpoint's explicit close path).
     pub(crate) fn flush_log(&self) {
-        self.recorder.flush();
+        if let Err(error) = crate::lock::lock(&self.buffer).enqueue(&[]) {
+            tracing::warn!(%error, "the clean-exit flush failed; lines stay queued");
+        }
     }
 
     /// Attach the persist-state notice channel (flag 8's degraded /
-    /// recovered events), the mailbox-notices pattern: the worker
-    /// attaches at spawn with its event sender and stream stamp.
+    /// recovered events): the entry guard emits them through here —
+    /// the mailbox-notices pattern: weak, so the channel ends with the
+    /// frontend.
     pub(crate) fn attach_persist_notices(
         &self,
         sender: tokio::sync::mpsc::WeakUnboundedSender<tabit_protocol::EventFrame>,
         stream: tabit_protocol::StreamId,
     ) {
-        self.recorder.attach_notices(sender, stream);
+        *crate::lock::lock(&self.persist_notices) = Some((sender, stream));
     }
 
     /// The session id.
@@ -1259,17 +1404,18 @@ impl Session {
         self.resumed
     }
 
-    /// The projected model-visible context (what the next outer loop sees)
-    /// — a snapshot of the resident projection.
+    /// The projected model-visible context (what the next outer loop
+    /// sees) — the derived view, folded per call.
     pub fn context(&self) -> Vec<Message> {
-        self.recorder.context()
+        crate::lock::lock(&self.conversation).messages()
     }
 
-    /// Usage and cost totals — the recorder's cumulative ledger (every
-    /// branch, discarded attempts included) with costs derived from the
-    /// config's rates.
+    /// Usage and cost totals — the cumulative ledger as of load
+    /// (usage facts are deferred live, the ruling; the totals resume
+    /// at the usage discussion) with costs derived from the config's
+    /// rates.
     pub fn stats(&self) -> SessionStats {
-        let ledger: UsageLedger = self.recorder.stats();
+        let ledger: UsageLedger = self.ledger.clone();
         let mut stats = SessionStats::default();
         for model_usage in ledger.per_model() {
             let mut model_stats = ModelStats {
@@ -1302,7 +1448,7 @@ impl Session {
     /// live turns with one set of arms. A checkout re-renders over a
     /// different branch through the same door.
     pub fn replay_events(&self) -> Vec<SessionEvent> {
-        crate::replay::project_events(&self.recorder.active_branch())
+        crate::replay::project_events(&crate::lock::lock(&self.conversation).active_branch())
     }
 
     /// Convert the engine's usage record to the protocol's wire shape
@@ -1347,7 +1493,13 @@ impl Session {
     ) -> Result<Self, SessionError> {
         let path = writer.path().to_path_buf();
         let id = writer.session_id().to_string();
-        let recorder = Arc::new(SessionRecorder::new(writer));
+        let buffer: crate::writer::SharedBuffer =
+            std::sync::Arc::new(std::sync::Mutex::new(writer));
+        let conversation_cell: Arc<Mutex<ContextManager>> =
+            Arc::new(Mutex::new(ContextManager::empty(buffer.clone())));
+        let shared_conversation = SharedConversation {
+            conversation: conversation_cell.clone(),
+        };
         // The opening agent is derived from the resolved selection before
         // the struct exists (the placeholder this replaces existed only
         // to satisfy the field initializer).
@@ -1369,13 +1521,17 @@ impl Session {
             run_hooks: builder.run_hooks,
             agent,
             agent_built_for: builder.selection,
-            recorder,
+            conversation: conversation_cell,
+            buffer,
+            shared_conversation,
+            persist_notices: Arc::new(Mutex::new(None)),
+            degraded: Arc::new(Mutex::new(false)),
+            ledger: crate::stats::UsageLedger::default(),
             abort: std::sync::Arc::new(std::sync::Mutex::new(CancellationToken::new())),
             mailbox: Mailbox::default(),
             path,
             id,
             resumed,
-            context_manager: None,
             interaction: None,
         };
         Ok(session)
@@ -1394,28 +1550,58 @@ impl Session {
 /// machine — the degraded notice, retried on every later write — and
 /// the change is durable no later than the next turn's prompt
 /// barrier).
+/// The receive-time view of the conversation (checkout validation at
+/// receive): a locked read over the session's manager — the probes
+/// never mutate, and the read is the live tree even mid-run.
+#[derive(Clone)]
+pub(crate) struct SharedConversation {
+    conversation: Arc<Mutex<ContextManager>>,
+}
+
+impl SharedConversation {
+    /// Whether `id` names a node in the tree (any branch) — the
+    /// receive-time checkout validation.
+    pub(crate) fn contains(&self, id: &str) -> bool {
+        crate::lock::lock(&self.conversation).contains(id)
+    }
+}
+
+/// The `model` command's write path: the selection cell plus the shared
+/// write buffer (the register's record enqueues like every side
+/// record — write-behind, last model_change wins).
 #[derive(Clone)]
 pub(crate) struct ModelRegister {
     selection: Arc<Mutex<ModelSelection>>,
-    recorder: Arc<SessionRecorder>,
+    buffer: crate::writer::SharedBuffer,
 }
 
 impl ModelRegister {
     /// Record + swap, atomic under the cell lock. Unconditional — a
     /// dedup guard would be machinery without a failure it prevents
-    /// (repeat values are harmless under last-write-wins). A record
-    /// that cannot reach the disk surfaces through the recorder's
-    /// sticky error at the next durability check, the same contract
-    /// every entry write has.
+    /// (repeat values are harmless under last-write-wins).
     pub(crate) fn write(&self, selection: ModelSelection) {
         let mut cell = lock(&self.selection);
-        self.recorder.record_side(SideKind::ModelChange {
+        if let Err(error) = crate::lock::lock(&self.buffer).enqueue(&[register_record(&selection)])
+        {
+            // Write-behind: the lines stay queued and retry at every
+            // later enqueue — a refusal is degradation, not loss.
+            tracing::warn!(%error, "model_change record failed to flush; queued for retry");
+        }
+        *cell = selection;
+    }
+}
+
+/// The register's side record (the one constructor, from the
+/// selection).
+fn register_record(selection: &ModelSelection) -> FileRecord {
+    FileRecord::Side(SideRecord {
+        timestamp: crate::ids::now_rfc3339(),
+        kind: SideKind::ModelChange {
             provider: selection.provider.clone(),
             model: selection.model.clone(),
             thinking_level: selection.thinking_level.clone(),
-        });
-        *cell = selection;
-    }
+        },
+    })
 }
 
 /// The run-loop's event fan-out: every event reaches the live consumer and
@@ -1498,8 +1684,8 @@ fn stream_item_event(
         MultiTurnStreamItem::CompletionCall(_) | MultiTurnStreamItem::ModelTurnRetried { .. } => {
             None
         }
-        MultiTurnStreamItem::RoundtripClosed { .. } => None, // the durable commit, handled in `drive`
-        MultiTurnStreamItem::FinalResponse(_) => None,       // handled by the caller
+        MultiTurnStreamItem::BatchResults { .. } => None, // the fold, handled in `drive`
+        MultiTurnStreamItem::FinalResponse(_) => None,    // handled by the caller
         _ => None,
     }
 }

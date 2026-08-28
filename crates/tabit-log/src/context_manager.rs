@@ -128,14 +128,39 @@ impl ContextManager {
         fold_branch(&self.tree.path_to_head())
     }
 
+    /// The active branch as entries (root → head), for session-side
+    /// projections that read nodes, not messages (rewind targets,
+    /// replay). Materialized on demand — never stored.
+    pub fn active_branch(&self) -> Vec<SessionEntry> {
+        self.tree.path_to_head()
+    }
+
+    /// Whether `id` names a node in the tree (any branch) — the
+    /// receive-time checkout validation.
+    pub fn contains(&self, id: &str) -> bool {
+        self.tree.contains(id)
+    }
+
     /// Fold one immediately-committable message: a user message, or a
     /// tool-free assistant turn. Verified trivially, then committed —
     /// record queued and tree grown in one operation. An assistant
     /// carrying tool calls is refused loud: tool calls commit only
     /// through [`fold_all`](Self::fold_all), never without their
     /// results.
+    /// As [`fold`](Self::fold), but the entry reuses the id its
+    /// producer announced (a user message's born-early id from its
+    /// `message_queued`; an assistant's announced turn id) — so live
+    /// and replay name the same node.
+    pub fn fold_with_id(&mut self, message: Message, id: String) {
+        self.fold_entry(message, Some(id));
+    }
+
     #[allow(clippy::panic)] // sanctioned crash: an engine wiring bug, failed loud (AGENTS.md doctrine)
     pub fn fold(&mut self, message: Message) {
+        self.fold_entry(message, None);
+    }
+
+    fn fold_entry(&mut self, message: Message, id: Option<String>) {
         let kind = match message {
             Message::User { .. } => EntryKind::UserMessage { message },
             Message::Assistant { id, content } => {
@@ -157,7 +182,7 @@ impl ContextManager {
                 "ContextManager::fold: only user and assistant messages fold, got `{other:?}`"
             ),
         };
-        self.commit([kind]);
+        self.commit_with_ids([(kind, id)]);
     }
 
     /// The roundtrip commit. The batch must be exactly one tool-carrying
@@ -213,17 +238,24 @@ impl ContextManager {
                 open.len()
             );
         }
-        let mut kinds = Vec::with_capacity(results.len() + 1);
-        kinds.push(EntryKind::AssistantMessage {
-            message: assistant,
-            usage: usage_deferred(),
-        });
+        let assistant_id = match &assistant {
+            Message::Assistant { id, .. } => id.clone(),
+            _ => None,
+        };
+        let mut kinds: Vec<(EntryKind, Option<String>)> = Vec::with_capacity(results.len() + 1);
+        kinds.push((
+            EntryKind::AssistantMessage {
+                message: assistant,
+                usage: usage_deferred(),
+            },
+            assistant_id,
+        ));
         kinds.extend(
             results
                 .into_iter()
-                .map(|result| EntryKind::ToolResult { result }),
+                .map(|result| (EntryKind::ToolResult { result }, None)),
         );
-        self.commit(kinds);
+        self.commit_with_ids(kinds);
     }
 
     /// Move the head (a checkout / rewind). The branch ending at the
@@ -265,11 +297,18 @@ impl ContextManager {
     /// partial blob: a roundtrip enters the buffer whole or not at all,
     /// so a file with tool calls but no results is unrepresentable.
     fn commit(&mut self, kinds: impl IntoIterator<Item = EntryKind>) {
+        self.commit_with_ids(kinds.into_iter().map(|kind| (kind, None)));
+    }
+
+    fn commit_with_ids(&mut self, kinds: impl IntoIterator<Item = (EntryKind, Option<String>)>) {
         let mut parent = self.tree.head().map(str::to_string);
         let entries: Vec<SessionEntry> = kinds
             .into_iter()
-            .map(|kind| {
-                let entry = SessionEntry::new(parent.clone(), ids::now_rfc3339(), kind);
+            .map(|(kind, id)| {
+                let entry = match id {
+                    Some(id) => SessionEntry::with_id(id, parent.clone(), ids::now_rfc3339(), kind),
+                    None => SessionEntry::new(parent.clone(), ids::now_rfc3339(), kind),
+                };
                 parent = Some(entry.id.clone());
                 entry
             })

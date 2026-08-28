@@ -34,6 +34,11 @@ pub trait WriteBuffer: Send {
     /// stays queued and the file is reverted to its clean prefix — the
     /// `Err` is a report, not an undo.
     fn enqueue(&mut self, records: &[FileRecord]) -> Result<(), LogError>;
+
+    /// How many lines sit in the outbox (the persist-degraded count,
+    /// and the `durable` verdict: zero means every commit reached the
+    /// disk).
+    fn pending(&self) -> usize;
 }
 
 /// A handle to a session's shared write buffer — what the
@@ -233,6 +238,10 @@ impl WriteBuffer for SessionWriter {
         }
         self.drain()
     }
+
+    fn pending(&self) -> usize {
+        SessionWriter::pending(self)
+    }
 }
 
 impl Drop for SessionWriter {
@@ -255,6 +264,10 @@ pub struct NullBuffer;
 impl WriteBuffer for NullBuffer {
     fn enqueue(&mut self, _records: &[FileRecord]) -> Result<(), LogError> {
         Ok(())
+    }
+
+    fn pending(&self) -> usize {
+        0
     }
 }
 

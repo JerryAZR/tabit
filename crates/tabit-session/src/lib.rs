@@ -72,7 +72,6 @@ mod model;
 mod parser;
 mod permission;
 mod prompt;
-mod recorder;
 mod registry;
 pub(crate) mod replay;
 mod session;

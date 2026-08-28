@@ -34,6 +34,10 @@ impl BufferTap {
 }
 
 impl WriteBuffer for BufferTap {
+    fn pending(&self) -> usize {
+        self.0.lock().expect("tap lock").len()
+    }
+
     fn enqueue(&mut self, records: &[FileRecord]) -> Result<(), LogError> {
         self.0.lock().expect("tap lock").push(records.to_vec());
         Ok(())

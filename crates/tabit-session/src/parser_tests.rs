@@ -114,8 +114,12 @@ fn a_clean_session_parses_into_tree_context_register_and_stats() {
         Some("m1".into())
     );
     assert_eq!(parsed.tree.head(), Some("u2"));
-    // The context: user, assistant, batch-as-one-user-message, user.
-    let messages = parsed.context.messages();
+    // The context is derived, never parsed: the manager's view.
+    let messages = crate::context_manager::ContextManager::from_tree(
+        parsed.tree.clone(),
+        std::sync::Arc::new(std::sync::Mutex::new(tabit_log::NullBuffer)),
+    )
+    .messages();
     assert_eq!(messages.len(), 4);
     assert!(matches!(&messages[2], Message::User { content } if content.len() == 1));
     assert_eq!(parsed.stats.total_usage().total_tokens, 0);
@@ -130,7 +134,11 @@ fn consecutive_results_merge_into_one_user_message() {
         result_node("r1", Some("a1"), "c1"),
         result_node("r2", Some("r1"), "c2"),
     ]);
-    let messages = parsed.context.messages();
+    let messages = crate::context_manager::ContextManager::from_tree(
+        parsed.tree.clone(),
+        std::sync::Arc::new(std::sync::Mutex::new(tabit_log::NullBuffer)),
+    )
+    .messages();
     assert_eq!(messages.len(), 3, "user + assistant + ONE merged batch");
     let Message::User { content } = &messages[2] else {
         panic!("the batch folds as one user message");
@@ -291,12 +299,14 @@ fn branch_switching_via_checkout_rebuilds_head_and_context() {
         user_node("u3", Some("a1"), "three"),
     ]);
     assert_eq!(parsed.tree.head(), Some("u3"));
-    let texts: Vec<String> = parsed
-        .context
-        .messages()
-        .iter()
-        .filter_map(|m| m.user_text())
-        .collect();
+    let texts: Vec<String> = crate::context_manager::ContextManager::from_tree(
+        parsed.tree.clone(),
+        std::sync::Arc::new(std::sync::Mutex::new(tabit_log::NullBuffer)),
+    )
+    .messages()
+    .iter()
+    .filter_map(|m| m.user_text())
+    .collect();
     assert_eq!(texts, ["one", "three"], "the active branch only");
     // The abandoned node stays in the tree.
     assert!(parsed.tree.contains("u2"));

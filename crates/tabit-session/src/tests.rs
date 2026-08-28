@@ -706,8 +706,9 @@ async fn a_dangling_tool_roundtrip_fails_the_resume_loudly() -> Result<(), Sessi
             },
         },
     );
-    let error = writer.write_behind(&[crate::entry::FileRecord::Node(user)]);
-    assert!(error.is_none(), "write user: {error:?}");
+    let error =
+        tabit_log::WriteBuffer::enqueue(&mut writer, &[crate::entry::FileRecord::Node(user)]);
+    assert!(error.is_ok(), "write user: {error:?}");
     let assistant = crate::entry::SessionEntry::with_id(
         "a1".to_string(),
         Some("u1".to_string()),
@@ -725,8 +726,9 @@ async fn a_dangling_tool_roundtrip_fails_the_resume_loudly() -> Result<(), Sessi
             usage: Usage::default(),
         },
     );
-    let error = writer.write_behind(&[crate::entry::FileRecord::Node(assistant)]);
-    assert!(error.is_none(), "write assistant: {error:?}");
+    let error =
+        tabit_log::WriteBuffer::enqueue(&mut writer, &[crate::entry::FileRecord::Node(assistant)]);
+    assert!(error.is_ok(), "write assistant: {error:?}");
     let path = writer.path().to_path_buf();
 
     let resumed = Factory::new(vec![text_turn("never runs")])
@@ -1594,6 +1596,26 @@ async fn abort_discards_messages_queued_behind_the_run() -> Result<(), SessionEr
 }
 
 #[tokio::test]
+async fn repro_failed_tools_run_terminates() -> Result<(), SessionError> {
+    let store = temp_store("repro-failed-tools");
+    let mut session = Factory::new(vec![tool_turn("c1", "echo"), text_turn("recovered")])
+        .into_builder(store.clone())
+        .max_turns(1)
+        .dynamic_tool(echo_tool())
+        .create("C:/w")?;
+    session.submit("will fail");
+    let mut events = Vec::new();
+    session
+        .pump(&mut |event| {
+            events.push(format!("{event:?}"));
+        })
+        .await;
+    eprintln!("REPRO-EVENTS: {events:#?}");
+    std::fs::remove_dir_all(store.dir()).ok();
+    Ok(())
+}
+
+#[tokio::test]
 async fn pump_continues_with_the_next_message_after_a_failed_run() -> Result<(), SessionError> {
     // max_turns(1) makes the first message's run fail (a tool turn needs
     // a second model call); a message submitted after the failure still
@@ -1845,8 +1867,9 @@ fn write_node(
     kind: EntryKind,
 ) -> crate::entry::SessionEntry {
     let entry = crate::entry::SessionEntry::new(parent.map(str::to_string), "t".to_string(), kind);
-    let error = writer.write_behind(&[crate::entry::FileRecord::Node(entry.clone())]);
-    assert!(error.is_none(), "write node: {error:?}");
+    let error =
+        tabit_log::WriteBuffer::enqueue(writer, &[crate::entry::FileRecord::Node(entry.clone())]);
+    assert!(error.is_ok(), "write node: {error:?}");
     entry
 }
 
@@ -2087,15 +2110,18 @@ async fn a_ghost_model_in_history_does_not_block_a_rewind() -> Result<(), Sessio
     // current (valid) selection keeps answering — so the rewind
     // succeeds where it once failed loudly.
     let mut writer = store.create("C:/w");
-    let error = writer.write_behind(&[crate::entry::FileRecord::Side(crate::entry::SideRecord {
-        timestamp: "t".to_string(),
-        kind: crate::entry::SideKind::ModelChange {
-            provider: "ghost".to_string(),
-            model: "gone".to_string(),
-            thinking_level: None,
-        },
-    })]);
-    assert!(error.is_none(), "write ghost model change: {error:?}");
+    let error = tabit_log::WriteBuffer::enqueue(
+        &mut writer,
+        &[crate::entry::FileRecord::Side(crate::entry::SideRecord {
+            timestamp: "t".to_string(),
+            kind: crate::entry::SideKind::ModelChange {
+                provider: "ghost".to_string(),
+                model: "gone".to_string(),
+                thinking_level: None,
+            },
+        })],
+    );
+    assert!(error.is_ok(), "write ghost model change: {error:?}");
     let user = write_node(
         &mut writer,
         None,

@@ -717,15 +717,15 @@ where
                     content: results_content,
                 },
             ]);
-            yield Ok(DriveItem::Item(MultiTurnStreamItem::BatchResults {
-                results: results_vec,
-            }));
             if let Some(id) = hook_ctx.turn_id() {
                 yield Ok(DriveItem::Item(MultiTurnStreamItem::TurnCommitted {
                     id: id.clone(),
                     content: Box::new(turn.choice.clone()),
                 }));
             }
+            yield Ok(DriveItem::Item(MultiTurnStreamItem::BatchResults {
+                results: results_vec,
+            }));
             turns_used += 1;
             // The batch is committed; now — and only now — the loop
             // learns a hook's run-stop decision (flag-blind by
