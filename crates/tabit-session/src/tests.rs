@@ -1650,6 +1650,85 @@ async fn pump_continues_with_the_next_message_after_a_failed_run() -> Result<(),
 }
 
 #[tokio::test]
+async fn a_post_tool_stop_discards_the_pending_queue() -> Result<(), SessionError> {
+    // Stop semantics (ENGINE.md): the turn that triggered the stop
+    // finishes and commits, the run exits failed, and everything queued
+    // behind the stopped run dies with it — unlike an ordinary failure,
+    // where a post-failure message starts the next run (the test above).
+    // The session itself stays alive: a later message runs.
+    struct StopAfterEcho;
+    impl rig_agent::agent::AgentHook for StopAfterEcho {
+        async fn on_tool_result(
+            &self,
+            _ctx: &rig_agent::agent::HookContext,
+            _event: rig_agent::agent::hook::ToolResultEvent<'_>,
+        ) -> rig_agent::agent::hook::ToolResultAction {
+            rig_agent::agent::hook::ToolResultAction::stop("stopped: one echo is enough")
+        }
+    }
+
+    let store = temp_store("stop-discards-queue");
+    let factory = Factory::new(vec![tool_turn("c1", "echo"), text_turn("later answer")]);
+    let mut session = factory
+        .into_builder(store.clone())
+        .dynamic_tool(echo_tool())
+        .hooks(rig_agent::agent::HookStack::with(StopAfterEcho))
+        .create("C:/w")?;
+    let mailbox = session.mailbox_handle();
+    session.submit("start");
+    let mut steer_seen = false;
+    let summary = session
+        .pump(&mut |event| {
+            if matches!(event, SessionEvent::ToolCall { .. }) {
+                // A steer arriving while the tool body runs: it queues
+                // behind the run the stop is about to kill.
+                mailbox.submit("queued behind the stop");
+            }
+            if let SessionEvent::UserMessage { text, .. } = &event
+                && text == "queued behind the stop"
+            {
+                steer_seen = true;
+            }
+        })
+        .await;
+    assert_eq!(summary.outcome, crate::session::RunOutcome::Failed);
+    assert!(
+        summary.events.iter().any(
+            |e| matches!(e, SessionEvent::RunFailed { message } if message.contains("one echo"))
+        ),
+        "the stop reason is the failure: {:?}",
+        summary.events
+    );
+    assert!(!steer_seen, "the queued steer never became a user message");
+    // The discarded steer is gone from the durable log too: only the
+    // opening message landed as a user entry.
+    let log_user_texts: Vec<String> = {
+        let messages: Vec<Message> = file_nodes(session.path())
+            .into_iter()
+            .filter_map(|entry| match entry.kind {
+                EntryKind::UserMessage { message } => Some(message),
+                _ => None,
+            })
+            .collect();
+        user_messages(&messages)
+    };
+    assert_eq!(log_user_texts, vec!["start".to_string()]);
+    // The stop killed the queue, not the session: an empty pump does
+    // nothing, and a later message runs (the factory's second turn).
+    let idle = session.pump(&mut |_| {}).await;
+    assert_eq!(
+        idle.events.len(),
+        0,
+        "an empty queue pumps nothing: {:?}",
+        idle.events
+    );
+    let recovered = session.prompt("after the stop").await;
+    assert_eq!(recovered.output, "later answer");
+    std::fs::remove_dir_all(store.dir()).ok();
+    Ok(())
+}
+
+#[tokio::test]
 async fn abort_while_idle_does_nothing() -> Result<(), SessionError> {
     // Each run mints a fresh token before any observable activity, so a
     // stray cancel between runs (or before the first) hits a dead token.

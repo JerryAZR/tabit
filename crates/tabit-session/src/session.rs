@@ -593,6 +593,14 @@ impl rig_agent::SteeringSource for SessionSteers {
     fn drain(&self) -> Vec<Message> {
         self.mailbox.take_steers()
     }
+
+    /// The post-tool stop's queue discard (ENGINE.md, stop semantics):
+    /// the stop exits through the engine, the mailbox is the session's —
+    /// this is the one clear-and-tell for it, same emitter and timing
+    /// as abort's (flag 6).
+    fn discard_pending(&self) {
+        self.mailbox.clear_noticing();
+    }
 }
 
 /// A persistent, resumable conversation.
@@ -1370,12 +1378,11 @@ impl Session {
         }
     }
 
-    /// Every commit reached the disk — the `durable` verdict.
+    /// Every commit reached the disk — the `durable` verdict. The
+    /// manager's folds enqueue through the same buffer; a clean buffer
+    /// means every record landed.
     fn buffer_is_clean(&self) -> bool {
-        // The manager's folds enqueue through the same buffer; a clean
-        // buffer means every record landed. (The pending count is the
-        // writer's; reached through the same handle.)
-        true // placeholder until the writer exposes pending()
+        crate::lock::lock(&self.buffer).pending() == 0
     }
 
     /// Drain any pending persist transitions into the notice events:

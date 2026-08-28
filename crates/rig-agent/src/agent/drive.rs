@@ -274,10 +274,15 @@ where
             // ── CONVERGE ────────────────────────────────────────────
             // The stop check precedes the drain: the turn that set the
             // flag finished and committed naturally, and a stop never
-            // drains (the stop-semantics ruling — the queue discard with
-            // notice is the session actor's, at the stopped terminal).
+            // drains. The queue discard with notice is the stop-semantics
+            // ruling, delivered through the steering source — the
+            // session actor's presence in the engine — so the notice
+            // rides the mailbox's own channel ahead of the terminal.
             if let Some(reason) = terminating.take() {
                 store_error_usage(&runner, &ledger);
+                if let Some(steering) = runner.steering.as_ref() {
+                    steering.discard_pending();
+                }
                 yield Err(Box::new(
                     PromptError::prompt_cancelled(conversation.messages().to_vec(), reason),
                 )

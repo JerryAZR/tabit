@@ -25,9 +25,9 @@ fn delta_events(
     events
 }
 
-/// Text accumulates and is emitted as it arrives.
+/// Text deltas are emitted as they arrive.
 #[test]
-fn text_deltas_accumulate_and_emit() {
+fn text_deltas_emit_as_they_arrive() {
     let mut assembler = assembler();
     let events = delta_events(
         &mut assembler,
@@ -37,7 +37,6 @@ fn text_deltas_accumulate_and_emit() {
         ],
     );
     assert_eq!(events.len(), 2);
-    assert_eq!(assembler.aggregated_text(), "Hello");
 }
 
 /// A tool name the model was not offered flows through the assembler —

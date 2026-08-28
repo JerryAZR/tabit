@@ -1,31 +1,25 @@
-//! Streamed-turn assembly for [`AgentRun`](super::AgentRun).
+//! Streamed-turn assembly: a streamed model turn arrives as incremental
+//! [`StreamedAssistantContent`] items, and [`StreamedTurnAssembler`] is
+//! the sans-IO accumulator that turns that item stream into the same
+//! canonical complete turn the blocking path produces — while telling
+//! the driver what to forward to its consumer. Tool-name admission is
+//! NOT the assembler's concern: unknown names flow through and are
+//! answered in-band by the loop's admission scan at SETTLE (ENGINE.md).
 //!
-//! A streamed model turn arrives as incremental [`StreamedAssistantContent`]
-//! items. [`StreamedTurnAssembler`] is the sans-IO accumulator that turns that
-//! item stream into the same canonical complete turn the non-streaming path
-//! feeds the machine — while telling the driver what to forward to its
-//! consumer. Tool-name admission is NOT the assembler's concern: unknown
-//! names flow through and are handled in-band by the machine's admission
-//! scan at ExecutingTools entry (ENGINE.md).
+//! The driving protocol, paired with the streaming
+//! [`TurnSource`](crate::agent::drive::TurnSource):
 //!
-//! The protocol, paired with the streamed entry points on
-//! [`AgentRun`](super::AgentRun):
+//! 1. Open a provider stream and create one assembler per turn with
+//!    the tool names advertised for that turn.
+//! 2. Feed every stream item to [`StreamedTurnAssembler::ingest`] and
+//!    act on the returned [`StreamedTurnEvent`]s: forward items to the
+//!    consumer as they clear.
+//! 3. When the provider stream ends, call [`StreamedTurnAssembler::finish`]
+//!    — the settled [`ModelTurn`](super::ModelTurn) then flows to the
+//!    loop's SETTLE exactly like a non-streamed one.
 //!
-//! 1. On [`AgentRunStep::CallModel`](super::AgentRunStep::CallModel), open a
-//!    provider stream and create one assembler per turn with the tool names
-//!    advertised for that turn.
-//! 2. Feed every stream item to [`StreamedTurnAssembler::ingest`] and act on
-//!    the returned [`StreamedTurnEvent`]s: forward items to the consumer.
-//! 3. When the provider stream ends//! 3. When the provider stream ends, call [`StreamedTurnAssembler::finish`]
-//!    and feed the result to
-//!    [`AgentRun::turn_committed_streamed`](super::AgentRun::turn_committed_streamed); the run
-//!    then proceeds exactly like a non-streamed one
-//!    ([`CallTools`](super::AgentRunStep::CallTools) /
-//!    [`Done`](super::AgentRunStep::Done)).
-//!
-//! [`crate::streaming::StreamingPrompt::stream_prompt`] drives this protocol
-//! internally; hand-driven runs can use it to stream any
-//! [`AgentRun`](super::AgentRun).
+//! [`crate::streaming::StreamingPrompt::stream_prompt`] drives this
+//! protocol internally through the shared loop.
 
 use std::collections::{BTreeSet, HashMap};
 
@@ -167,7 +161,6 @@ struct ToolCallDeltaState {
 pub struct StreamedTurnAssembler {
     executable_tool_names: BTreeSet<String>,
     allowed_tool_names: BTreeSet<String>,
-    text: String,
     saw_text: bool,
     accumulated_reasoning: Vec<Reasoning>,
     pending_reasoning_delta_text: String,
@@ -186,7 +179,6 @@ impl StreamedTurnAssembler {
         Self {
             executable_tool_names,
             allowed_tool_names,
-            text: String::new(),
             saw_text: false,
             accumulated_reasoning: Vec::new(),
             pending_reasoning_delta_text: String::new(),
@@ -194,12 +186,6 @@ impl StreamedTurnAssembler {
             pending_tool_calls: Vec::new(),
             delta_states: HashMap::new(),
         }
-    }
-
-    /// Aggregated assistant text streamed so far this turn (empty until the
-    /// first text delta).
-    pub fn aggregated_text(&self) -> &str {
-        &self.text
     }
 
     /// Normalize a snapshot of the provider aggregate into the content that
@@ -242,12 +228,8 @@ impl StreamedTurnAssembler {
         item: &StreamedAssistantContent,
     ) -> Result<Vec<StreamedTurnEvent>, CompletionError> {
         match item {
-            StreamedAssistantContent::Text(text) => {
-                if !self.saw_text {
-                    self.text.clear();
-                    self.saw_text = true;
-                }
-                self.text.push_str(&text.text);
+            StreamedAssistantContent::Text(_) => {
+                self.saw_text = true;
                 Ok(vec![StreamedTurnEvent::EmitIngested])
             }
             StreamedAssistantContent::Reasoning(reasoning) => {

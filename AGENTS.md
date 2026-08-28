@@ -200,7 +200,10 @@ consistency, never design fit (see the gate bullet below).
 
 - WebSocket streaming: **removed** — HTTP SSE only.
 - Companion crates (bedrock, gemini-grpc, vector stores, …), `discord-bot`,
-  `rmcp` (the rig-agent `rmcp` module is deleted, not just deferred).
+  `rmcp` (the rig-agent `rmcp` module is **kept, feature-gated, off by
+  default** — MCP is a bad protocol, but some services are only
+  reachable through it; whether tabit ships an MCP client is a later
+  decision, low priority).
 - Mid-conversation system messages: **unsupported by design** — always hoisted
   into the preamble.
 - SSE reconnect/resumption for completion streams (retry belongs at the

@@ -410,7 +410,8 @@ The known deviation from pi's subprocess model:
 
 - WebSocket streaming (removed).
 - SSE resumption / reconnect.
-- rmcp integration (deleted).
+- rmcp integration (kept, feature-gated, off by default — decide later
+  whether tabit ships an MCP client; low priority).
 - Mid-conversation system messages.
 - Model catalog / name-keyed behavior.
 - Vendor instruction files (CLAUDE.md etc.) — AGENTS.md only.

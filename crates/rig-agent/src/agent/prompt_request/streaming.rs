@@ -476,8 +476,8 @@ impl TurnSource for StreamingTurnSource {
                                 MultiTurnStreamItem::StreamAssistantItem(
                                     StreamedAssistantContent::ToolCallDelta {
                                         id,
-                        internal_call_id,
-                        content,
+                                        internal_call_id,
+                                        content,
                                     },
                                 )
                             ));

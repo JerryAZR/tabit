@@ -46,11 +46,6 @@
 //! ```
 mod builder;
 mod completion;
-/// The committed conversation state visible to models — the one
-/// context, grown only through its doors. The engine holds a
-/// run-scoped instance seeded at entry; the session layer holds the
-/// durable one. Two instances of one builder, never two builders.
-pub mod context;
 pub(crate) mod drive;
 pub mod hook;
 pub mod model;

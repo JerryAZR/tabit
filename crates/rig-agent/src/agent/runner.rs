@@ -129,13 +129,21 @@ pub(crate) fn tool_result_decision(action: ToolResultAction) -> ToolResultDecisi
 /// Where the driver drains queued steering messages: user input that joins
 /// the run at a tool-use roundtrip or after a final model turn.
 ///
-/// The drain is unconditional: the machine offers exactly one drain point
+/// The drain is unconditional: the loop offers exactly one drain point
 /// (ENGINE.md), the driver always takes the whole queue there, and an
 /// empty take is a valid feed. The contract is single-consumer — one
 /// driver per source.
 pub trait SteeringSource: WasmCompatSend + WasmCompatSync {
     /// Take every queued steering message, in the order they arrived.
     fn drain(&self) -> Vec<Message>;
+
+    /// Discard everything still queued, with the source's own notice.
+    /// Called at exactly one site: the post-tool stop exit (ENGINE.md,
+    /// stop taxonomy — the queue dies with the stopped run, and only
+    /// what the stop's owner says may survive). A stop never drains,
+    /// so nothing drained goes un-discarded. Default no-op for sources
+    /// with nothing to discard.
+    fn discard_pending(&self) {}
 }
 
 /// What a runner sends: one new message, or a whole conversation.

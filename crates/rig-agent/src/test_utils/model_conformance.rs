@@ -1847,7 +1847,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn hook_rewrites_chain_and_request_patch_is_turn_local() -> Result<(), ScenarioError> {
+    async fn hook_rewrites_chain_across_hooks() -> Result<(), ScenarioError> {
         let report = hook_rewrites(
             MockCompletionModel::new([
                 MockTurn::tool_call("hook-add", "add", serde_json::json!({ "x": 1, "y": 1 })),
