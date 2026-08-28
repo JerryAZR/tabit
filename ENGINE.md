@@ -292,7 +292,44 @@ stop-taxonomy and tool-phase machinery below.
 | the one drain; the one policy site | cancel token: races every await, never a state |
 | conversation writes (`fold`, `fold_all`) | interaction hub: asks register/resolve; run terminals clear |
 | budget, streaks, `terminating`, `turns_used` | event channel: write-only, frontend-facing |
-| loop-or-exit decisions | the conversation itself: `&mut ContextManager`, moved in |
+| loop-or-exit decisions | the conversation: **owned by the session's
+handler** (`ContextManager` behind the session's `RwLock`); the loop
+streams its history in and its durable items out — the handler folds
+at the item arms |
+
+**Every shared cell has one owner, named.** Whoever else may read it
+is stated; nobody else may write it. The table above is the contract
+— a seam with two writers (or an unnamed owner) is a design bug, not
+a gap to patch around. Today:
+
+| cell | owner | readers (never writers) |
+|---|---|---|
+| the conversation (tree + head) | the session's handler, via `ContextManager` | the receive-time probes (checkout validation) — read-only |
+| the write buffer | the session's `SessionWriter` (shared handle) | the manager's commits, the session's side records — both enqueue through it |
+| the mailbox | the session actor | the loop's steer drain (take at the loop top) |
+| the cancel token | the abort handle | every await in the run (raced, never read as state) |
+| the interaction hub | the session actor | tool gates/bodies (asks) |
+| the model register | the `ModelRegister` (receive-time write) | run open (reads the selection) |
+| the persist-degraded flag | the writer (set/clear on its enqueue outcome) | the session, draining transitions at the guard and conclude |
+
+**The probe's read is tree-truth.** The probe's `contains` names
+committed nodes only: a checkout target must be a committed,
+roundtrip-closed node (flag 23's rule), so an id that is announced
+but not yet folded (a queued message, an in-flight turn) is not a
+valid target — and that is correct: you can only rewind to a
+committed checkpoint. The read is race-free by the `RwLock`
+discipline (folds grow the tree in one write-hold; a probe reads
+through `read()`, so it can never observe a partially folded state).
+A checkout composes abort, so its application at the beat runs
+against a quiescent tree — the only writes after abort are the
+session's side records, never tree growth.
+
+**The persist-degraded flag's one clear site is the entry guard's
+retry.** A stuck buffer retries at every later enqueue and at run
+entry; the flag clears when a retry drains. There is deliberately no
+user-facing "retry persistence" command — the entry guard is the
+only retry site until a frontend asks for one (then it is designed,
+not grown).
 
 What the session consumes is conversation truth (`manager.messages()`)
 and frontend feed (events) — it mirrors nothing. Side records
