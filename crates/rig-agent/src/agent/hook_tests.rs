@@ -228,7 +228,6 @@ fn model(label: &str) -> ModelHandle {
 enum RouteDecision {
     Continue,
     Select(ModelHandle),
-    Stop,
 }
 
 type RouteLog = Arc<Mutex<Vec<(&'static str, Option<String>)>>>;
@@ -252,7 +251,6 @@ impl AgentHook for RouteRecorder {
         match &self.decision {
             RouteDecision::Continue => ModelSelectionAction::continue_run(),
             RouteDecision::Select(model) => ModelSelectionAction::select(model.clone()),
-            RouteDecision::Stop => ModelSelectionAction::stop("routing stopped"),
         }
     }
 }
@@ -304,32 +302,6 @@ fn model_selections_chain_in_registration_order_and_last_wins() {
             ("first", Some("default".to_owned())),
             ("last", Some("first".to_owned())),
         ]
-    );
-}
-
-#[test]
-fn model_selection_stop_short_circuits_later_hooks() {
-    let default = model("default");
-    let log = Arc::new(Mutex::new(Vec::new()));
-    let mut stack = HookStack::with(RouteRecorder {
-        label: "stop",
-        log: log.clone(),
-        decision: RouteDecision::Stop,
-    });
-    stack.push(RouteRecorder {
-        label: "later",
-        log: log.clone(),
-        decision: RouteDecision::Select(model("later")),
-    });
-    let prompt = Message::user("route");
-
-    assert!(matches!(
-        stack.on_model_select(&ctx(), model_selection(&prompt, &default)),
-        ModelSelectionAction::Stop(reason) if reason == "routing stopped"
-    ));
-    assert_eq!(
-        log.lock().expect("route log").as_slice(),
-        &[("stop", Some("default".to_owned()))]
     );
 }
 
@@ -409,41 +381,6 @@ fn nested_model_selection_stack_without_a_selection_preserves_outer_candidate() 
     );
 }
 
-#[test]
-fn nested_model_selection_stop_short_circuits_the_outer_stack() {
-    let default = model("default");
-    let log = Arc::new(Mutex::new(Vec::new()));
-    let inner = HookStack::with(RouteRecorder {
-        label: "inner-stop",
-        log: log.clone(),
-        decision: RouteDecision::Stop,
-    });
-    let mut outer = HookStack::with(RouteRecorder {
-        label: "outer-before",
-        log: log.clone(),
-        decision: RouteDecision::Select(model("outer")),
-    });
-    outer.push(inner);
-    outer.push(RouteRecorder {
-        label: "outer-after",
-        log: log.clone(),
-        decision: RouteDecision::Select(model("unreachable")),
-    });
-    let prompt = Message::user("route");
-
-    assert!(matches!(
-        outer.on_model_select(&ctx(), model_selection(&prompt, &default)),
-        ModelSelectionAction::Stop(reason) if reason == "routing stopped"
-    ));
-    assert_eq!(
-        log.lock().expect("route log").as_slice(),
-        &[
-            ("outer-before", Some("default".to_owned())),
-            ("inner-stop", Some("outer".to_owned())),
-        ]
-    );
-}
-
 struct ToolRecorder {
     label: u32,
     log: Arc<Mutex<Vec<u32>>>,
@@ -466,13 +403,8 @@ struct ObservationRecorder {
     stop: bool,
 }
 impl AgentHook for ObservationRecorder {
-    async fn on_text_delta(&self, _ctx: &HookContext, _event: TextDelta<'_>) -> ObservationAction {
+    async fn on_text_delta(&self, _ctx: &HookContext, _event: TextDelta<'_>) {
         self.log.lock().expect("log").push(self.label);
-        if self.stop {
-            ObservationAction::stop("stop")
-        } else {
-            ObservationAction::continue_run()
-        }
     }
 }
 
@@ -496,11 +428,7 @@ impl AgentHook for LabeledPatcher {
         _event: CompletionCall<'_>,
     ) -> CompletionCallAction {
         self.log.lock().expect("log").push(self.label);
-        if self.stop {
-            CompletionCallAction::stop("stop")
-        } else {
-            CompletionCallAction::patch(self.patch.clone())
-        }
+        CompletionCallAction::patch(self.patch.clone())
     }
 }
 
@@ -562,31 +490,29 @@ async fn first_skip_short_circuits_on_chained_tool_call() {
 }
 
 #[tokio::test]
-async fn first_stop_short_circuits_observation() {
+async fn observation_hooks_fire_every_observer() {
+    // Observation has no stop action: every observer runs, in order.
     let log = Arc::new(Mutex::new(Vec::new()));
     let mut stack = HookStack::with(ObservationRecorder {
         label: 1,
         log: log.clone(),
-        stop: true,
+        stop: false,
     });
     stack.push(ObservationRecorder {
         label: 2,
         log: log.clone(),
         stop: false,
     });
-    assert!(matches!(
-        stack
-            .on_text_delta(
-                &ctx(),
-                TextDelta {
-                    delta: "hi",
-                    aggregated: "hi"
-                }
-            )
-            .await,
-        ObservationAction::Stop(_)
-    ));
-    assert_eq!(*log.lock().unwrap(), vec![1]);
+    stack
+        .on_text_delta(
+            &ctx(),
+            TextDelta {
+                delta: "hi",
+                aggregated: "hi",
+            },
+        )
+        .await;
+    assert_eq!(*log.lock().unwrap(), vec![1, 2]);
 }
 
 #[tokio::test]
@@ -615,25 +541,6 @@ async fn completion_patches_accumulate_and_stop_discards_prior_patch() {
         other => panic!("expected patch, got {other:?}"),
     }
     assert_eq!(*log.lock().unwrap(), vec![1, 2]);
-    let mut stopped = HookStack::with(LabeledPatcher {
-        label: 3,
-        log: log.clone(),
-        patch: RequestPatch::new(),
-        stop: true,
-    });
-    stopped.push(LabeledPatcher {
-        label: 4,
-        log: log.clone(),
-        patch: RequestPatch::new(),
-        stop: false,
-    });
-    assert!(matches!(
-        stopped
-            .on_completion_call(&ctx(), completion_call_event())
-            .await,
-        CompletionCallAction::Stop(_)
-    ));
-    assert_eq!(*log.lock().unwrap(), vec![1, 2, 3]);
 }
 
 #[tokio::test]
@@ -1099,18 +1006,12 @@ async fn dropped_tool_call_dispatch_future_releases_its_resolution_frame() {
 fn action_types_are_event_specific() {
     fn model_selection(_: ModelSelectionAction) {}
     fn completion(_: CompletionCallAction) {}
-    fn model_turn(_: ModelTurnAction) {}
-    fn retry_request(_: RetryRequest) {}
     fn call(_: ToolCallAction) {}
     fn result(_: ToolResultAction) {}
-    fn observation(_: ObservationAction) {}
     model_selection(ModelSelectionAction::continue_run());
     completion(CompletionCallAction::continue_run());
-    model_turn(ModelTurnAction::retry_with_feedback("try again"));
-    retry_request(RetryRequest::Repeat);
     call(ToolCallAction::run());
     result(ToolResultAction::keep());
-    observation(ObservationAction::continue_run());
     let calls = AtomicUsize::new(0);
     calls.fetch_add(1, Ordering::Relaxed);
     assert_eq!(calls.load(Ordering::Relaxed), 1);
@@ -1168,7 +1069,6 @@ async fn turn_finished_closures_observe_in_priority_order() {
             let seen = seen.clone();
             Box::pin(async move {
                 seen.lock().unwrap().push(label);
-                ModelTurnAction::Continue
             })
         })
     };
@@ -1178,7 +1078,7 @@ async fn turn_finished_closures_observe_in_priority_order() {
         .hook(("late", 0), on::model_turn_finished(note("late")))
         .hook(("early", -5), on::model_turn_finished(note("early")));
     let content = OneOrMany::one(AssistantContent::text("done"));
-    let action = AgentHook::on_model_turn_finished(
+    AgentHook::on_model_turn_finished(
         &stack,
         &HookContext::new(false, None, Default::default()),
         ModelTurnFinished {
@@ -1188,6 +1088,5 @@ async fn turn_finished_closures_observe_in_priority_order() {
         },
     )
     .await;
-    assert!(matches!(action, ModelTurnAction::Continue));
     assert_eq!(*seen.lock().unwrap(), vec!["early", "late"]);
 }

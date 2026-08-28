@@ -760,32 +760,22 @@ async fn append_persists_only_newly_committed_messages() {
 }
 
 #[tokio::test]
-async fn hook_stopped_run_does_not_append() {
-    // A run stopped by a hook before it completes must not append.
-    struct StopOnCompletion;
-    impl AgentHook for StopOnCompletion {
-        async fn on_completion_call(
-            &self,
-            _ctx: &HookContext,
-            _event: crate::agent::CompletionCallEvent<'_>,
-        ) -> crate::agent::CompletionCallAction {
-            crate::agent::CompletionCallAction::stop("stop")
-        }
-    }
-
+async fn failed_runs_do_not_append_to_memory() {
     let memory = CountingMemory::default();
-    let model = MockCompletionModel::text("unreached");
-    let agent = AgentBuilder::new(model)
-        .memory(memory.clone())
-        .add_hook(StopOnCompletion)
-        .build();
+    // A run that fails before any final response (a mock model with no
+    // scripted turns fails its first call): failed runs do not append.
+    let model = MockCompletionModel::from_turns([]);
+    let agent = AgentBuilder::new(model).memory(memory.clone()).build();
 
     let result = agent.prompt("hello").conversation("t1").await;
-    assert!(result.is_err(), "a stop hook terminates the run");
+    assert!(result.is_err(), "the run fails");
 
-    assert_eq!(memory.append_count(), 0, "stopped runs do not append");
+    assert_eq!(memory.append_count(), 0, "failed runs do not append");
     let stored = memory.load("t1").await.unwrap();
-    assert!(stored.is_empty(), "nothing persisted on stop: {stored:?}");
+    assert!(
+        stored.is_empty(),
+        "nothing persisted on failure: {stored:?}"
+    );
 }
 
 #[tokio::test]

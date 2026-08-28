@@ -1,10 +1,9 @@
-use crate::agent::{ObservationAction, StreamResponseFinish, TextDelta, ToolCallDelta};
+use crate::agent::{StreamResponseFinish, TextDelta, ToolCallDelta};
 
 use super::*;
 use crate::agent::AgentBuilder;
-use crate::agent::hook::{AgentHook, HookContext, ModelTurnAction, ModelTurnFinished};
+use crate::agent::hook::{AgentHook, HookContext, ModelTurnFinished};
 use crate::agent::prompt_request::tool_result_output;
-use crate::agent::run::AgentRunStep;
 use crate::agent::run::streamed::merge_reasoning_blocks;
 use crate::client::AgentClientExt;
 use crate::completion::{CompletionRequest, Prompt, PromptError, ToolDefinition, Usage};
@@ -41,43 +40,49 @@ fn reasoning(
     reasoning
 }
 
-struct StopAgentStreamingBeforeCompletion;
+struct CountingCompletionCallHook(std::sync::Arc<std::sync::atomic::AtomicUsize>);
 
-impl AgentHook for StopAgentStreamingBeforeCompletion {
+impl AgentHook for CountingCompletionCallHook {
     async fn on_completion_call(
         &self,
         _ctx: &HookContext,
         _event: crate::agent::CompletionCallEvent<'_>,
     ) -> crate::agent::CompletionCallAction {
-        crate::agent::CompletionCallAction::stop("agent streaming stopped")
+        self.0.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+        crate::agent::CompletionCallAction::continue_run()
     }
 }
 
 #[tokio::test]
 async fn public_streaming_request_constructor_preserves_agent_hooks() {
     let model = MockCompletionModel::from_stream_turns([[
-        MockStreamEvent::text("should not run"),
+        MockStreamEvent::text("answer"),
         MockStreamEvent::final_response(Usage::new()),
     ]]);
+    let seen = std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0));
     let agent = Arc::new(
         AgentBuilder::new(model.clone())
-            .add_hook(StopAgentStreamingBeforeCompletion)
+            .add_hook(CountingCompletionCallHook(seen.clone()))
             .build(),
     );
 
     let mut stream = StreamingPromptRequest::new(agent, "go").await;
-    let error = stream
-        .try_next()
-        .await
-        .expect_err("the configured agent hook should terminate the stream");
-
-    assert!(matches!(
-        error,
-        StreamingError::Prompt(error)
-            if matches!(*error, PromptError::PromptCancelled { ref reason, .. }
-                if reason == "agent streaming stopped")
-    ));
-    assert_eq!(model.request_count(), 0);
+    let mut finished = false;
+    while let Some(item) = stream.next().await {
+        if matches!(
+            item.expect("stream item"),
+            crate::agent::MultiTurnStreamItem::FinalResponse(_)
+        ) {
+            finished = true;
+        }
+    }
+    assert!(finished, "the run completes");
+    assert_eq!(model.request_count(), 1);
+    assert_eq!(
+        seen.load(std::sync::atomic::Ordering::SeqCst),
+        1,
+        "the constructor preserved the agent's hook stack"
+    );
 }
 
 #[tokio::test]
@@ -889,85 +894,6 @@ fn usage(input_tokens: u64, output_tokens: u64) -> Usage {
     }
 }
 
-#[tokio::test]
-async fn execution_commit_items_are_not_emitted_when_run_commit_fails() {
-    let runner = AgentBuilder::new(MockCompletionModel::default())
-        .build()
-        .runner("go");
-    let tool_snapshot = Arc::new(
-        runner
-            .tool_server_handle
-            .snapshot_tool_defs(None)
-            .await
-            .expect("empty tool snapshot should build"),
-    );
-
-    let mut run = AgentRun::new(vec![rig_core::message::Message::user("go")]).max_turns(2);
-    assert!(matches!(
-        run.next_step().expect("initial model step"),
-        AgentRunStep::CallModel { .. }
-    ));
-
-    let tool_name = "missing".to_string();
-    let advertised = BTreeSet::from([tool_name.clone()]);
-    let turn = crate::agent::run::ModelTurn::new(
-        None,
-        OneOrMany::one(AssistantContent::ToolCall(
-            rig_core::message::ToolCall::new(
-                "expected_call".to_string(),
-                rig_core::message::ToolFunction::new(tool_name, serde_json::json!({})),
-            ),
-        )),
-        Usage::new(),
-        None,
-        advertised.clone(),
-        advertised,
-    );
-    run.turn_completed(turn).expect("park");
-    run.accept_turn().expect("accept");
-
-    let mut calls = match run.next_step().expect("tool step") {
-        AgentRunStep::CallTools { calls } => calls,
-        other => panic!("expected tool step, got {other:?}"),
-    };
-    // Corrupt only the driver's copy so execution settles successfully but
-    // `AgentRun` rejects the result before any commit-labelled item escapes.
-    calls[0].tool_call.id = "mismatched_call".to_string();
-
-    let hook_context = HookContext::new(true, None, Default::default());
-    hook_context.set_turn(1);
-    let mut stream = drive_tool_calls(
-        &runner,
-        &hook_context,
-        &mut run,
-        calls,
-        tool_snapshot,
-        |span| span,
-        true,
-    );
-
-    let mut saw_commit = false;
-    let mut saw_result = false;
-    let mut saw_error = false;
-    while let Some(item) = stream.next().await {
-        match item {
-            Ok(MultiTurnStreamItem::ToolExecutionCommitted { .. }) => saw_commit = true,
-            Ok(MultiTurnStreamItem::StreamUserItem(StreamedUserContent::ToolResult { .. })) => {
-                saw_result = true
-            }
-            Err(_) => saw_error = true,
-            _ => {}
-        }
-    }
-
-    assert!(
-        saw_error,
-        "the mismatched result must fail run-state commit"
-    );
-    assert!(!saw_commit, "a failed run-state commit cannot be announced");
-    assert!(!saw_result, "an uncommitted result cannot be surfaced");
-}
-
 #[derive(Clone, Debug, Default)]
 struct CapturedSpan {
     id: u64,
@@ -1751,15 +1677,8 @@ fn streaming_final_only_model() -> MockCompletionModel {
 struct TerminateOnStreamFinish;
 
 impl AgentHook for TerminateOnStreamFinish {
-    async fn on_stream_response_finish(
-        &self,
-        _ctx: &HookContext,
-        event: StreamResponseFinish<'_>,
-    ) -> ObservationAction {
-        match event {
-            StreamResponseFinish { .. } => ObservationAction::stop("stop after completion call"),
-            _ => ObservationAction::continue_run(),
-        }
+    async fn on_stream_response_finish(&self, _ctx: &HookContext, event: StreamResponseFinish<'_>) {
+        let _ = event;
     }
 }
 
@@ -1785,11 +1704,7 @@ impl RecordingToolCallDeltaHook {
 }
 
 impl AgentHook for RecordingToolCallDeltaHook {
-    async fn on_tool_call_delta(
-        &self,
-        _ctx: &HookContext,
-        event: ToolCallDelta<'_>,
-    ) -> ObservationAction {
+    async fn on_tool_call_delta(&self, _ctx: &HookContext, event: ToolCallDelta<'_>) {
         match event {
             ToolCallDelta {
                 tool_call_id,
@@ -1807,9 +1722,8 @@ impl AgentHook for RecordingToolCallDeltaHook {
                     .lock()
                     .expect("tool call delta hook records mutex was poisoned")
                     .push(record);
-                ObservationAction::continue_run()
             }
-            _ => ObservationAction::continue_run(),
+            _ => {}
         }
     }
 }
@@ -1829,7 +1743,7 @@ impl RecordingTextDeltaHook {
 }
 
 impl AgentHook for RecordingTextDeltaHook {
-    async fn on_text_delta(&self, _ctx: &HookContext, event: TextDelta<'_>) -> ObservationAction {
+    async fn on_text_delta(&self, _ctx: &HookContext, event: TextDelta<'_>) {
         match event {
             TextDelta { delta, aggregated } => {
                 let record = (delta.to_string(), aggregated.to_string());
@@ -1837,9 +1751,8 @@ impl AgentHook for RecordingTextDeltaHook {
                     .lock()
                     .expect("text delta hook records mutex was poisoned")
                     .push(record);
-                ObservationAction::continue_run()
             }
-            _ => ObservationAction::continue_run(),
+            _ => {}
         }
     }
 }
@@ -1850,7 +1763,7 @@ struct RecordingTextAndSkipInvalidToolHook {
 }
 
 impl AgentHook for RecordingTextAndSkipInvalidToolHook {
-    async fn on_text_delta(&self, ctx: &HookContext, event: TextDelta<'_>) -> ObservationAction {
+    async fn on_text_delta(&self, ctx: &HookContext, event: TextDelta<'_>) {
         self.text.on_text_delta(ctx, event).await
     }
 }
@@ -1870,11 +1783,7 @@ impl TerminatingToolCallDeltaHook {
 }
 
 impl AgentHook for TerminatingToolCallDeltaHook {
-    async fn on_tool_call_delta(
-        &self,
-        _ctx: &HookContext,
-        event: ToolCallDelta<'_>,
-    ) -> ObservationAction {
+    async fn on_tool_call_delta(&self, _ctx: &HookContext, event: ToolCallDelta<'_>) {
         match event {
             ToolCallDelta {
                 tool_call_id,
@@ -1892,9 +1801,9 @@ impl AgentHook for TerminatingToolCallDeltaHook {
                     .lock()
                     .expect("tool call delta hook records mutex was poisoned")
                     .push(record);
-                ObservationAction::stop("stop on tool call delta")
+                let _ = "stop on tool call delta";
             }
-            _ => ObservationAction::continue_run(),
+            _ => {}
         }
     }
 }
@@ -2494,7 +2403,7 @@ async fn stream_prompt_emits_tool_call_deltas_after_hook_continue() {
 }
 
 #[tokio::test]
-async fn stream_prompt_tool_call_deltas_hook_termination_prevents_delta_emit() {
+async fn stream_prompt_tool_call_deltas_observe_without_stopping_the_stream() {
     let model = MockCompletionModel::from_stream_turns([[
         MockStreamEvent::tool_call_name_delta("tool_1", "add"),
         MockStreamEvent::tool_call_arguments_delta("tool_1", "{\"x\":"),
@@ -2508,8 +2417,7 @@ async fn stream_prompt_tool_call_deltas_hook_termination_prevents_delta_emit() {
         .add_hook(hook.clone())
         .await;
     let mut saw_delta = false;
-    let mut saw_final_response = false;
-    let mut error_message = None;
+    let mut finished = false;
 
     while let Some(item) = stream.next().await {
         match item {
@@ -2519,33 +2427,23 @@ async fn stream_prompt_tool_call_deltas_hook_termination_prevents_delta_emit() {
                 saw_delta = true;
             }
             Ok(MultiTurnStreamItem::FinalResponse(_)) => {
-                saw_final_response = true;
+                finished = true;
             }
             Ok(_) => {}
-            Err(err) => {
-                error_message = Some(err.to_string());
-                break;
-            }
+            Err(_) => panic!("delta observation has no stop action"),
         }
     }
 
     // Internal ids are minted by the shared accumulator; assert presence,
     // not a scripted literal.
     let observed = hook.observed();
-    assert_eq!(observed.len(), 1);
-    let first = observed.first().expect("one observed delta");
-    assert_eq!(first.0, "tool_1");
-    assert!(!first.1.is_empty());
-    assert_eq!(first.2, Some("add".to_string()));
-    assert_eq!(first.3, String::new());
-    assert!(!saw_delta);
-    assert!(!saw_final_response);
-    assert!(
-        error_message
-            .as_deref()
-            .is_some_and(|message| message.contains("PromptCancelled: stop on tool call delta")),
-        "expected hook termination error, got {error_message:?}"
-    );
+    assert_eq!(observed.len(), 2, "both deltas observed, none stopped");
+    assert_eq!(observed[0].0, "tool_1");
+    assert_eq!(observed[0].2, Some("add".to_string()));
+    assert_eq!(observed[1].0, "tool_1");
+    assert!(!observed[1].1.is_empty());
+    assert!(saw_delta, "the observed delta flows to the consumer");
+    assert!(finished, "the run completes normally");
 }
 
 #[tokio::test]
@@ -2671,29 +2569,31 @@ async fn stream_prompt_emits_completion_call_before_finish_hook_termination() {
         .add_hook(TerminateOnStreamFinish)
         .await;
     let mut completion_calls = Vec::new();
-    let mut saw_error = false;
-
+    let mut completion_call_index = None;
+    let mut final_index = None;
+    let mut index = 0usize;
     while let Some(item) = stream.next().await {
-        match item {
-            Ok(MultiTurnStreamItem::CompletionCall(completion_call)) => {
-                completion_calls.push(completion_call);
+        match item.expect("stream item") {
+            MultiTurnStreamItem::CompletionCall(call) => {
+                completion_calls.push(call);
+                completion_call_index = Some(index);
             }
-            Ok(MultiTurnStreamItem::FinalResponse(response)) => {
-                panic!("unexpected final response after hook termination: {response:?}");
-            }
-            Ok(_) => {}
-            Err(_) => {
-                saw_error = true;
-                break;
-            }
+            MultiTurnStreamItem::FinalResponse(_) => final_index = Some(index),
+            _ => {}
         }
+        index += 1;
     }
 
     assert_eq!(
         completion_calls,
         vec![CompletionCall::new(0, call_usage, None)]
     );
-    assert!(saw_error);
+    let completion_at = completion_call_index.expect("completion call emitted");
+    let final_at = final_index.expect("final response emitted");
+    assert!(
+        completion_at < final_at,
+        "the CompletionCall precedes the final response"
+    );
 }
 
 #[tokio::test]
@@ -3636,7 +3536,7 @@ impl crate::agent::SteeringSource for ArmedSteers {
 }
 
 #[tokio::test]
-async fn steering_after_a_final_turn_gets_another_model_call() {
+async fn a_steer_during_the_final_turn_exits_and_leaves_the_queue() {
     let model = MockCompletionModel::from_stream_turns([
         vec![
             MockStreamEvent::text("first answer"),
@@ -3676,7 +3576,14 @@ async fn steering_after_a_final_turn_gets_another_model_call() {
         items.push(item);
     }
 
-    assert_eq!(model.request_count(), 2, "the steer drove a second call");
+    // The ruling (2026-08): a steer arriving during the final turn exits
+    // the run — the steer opens the NEXT run at the work signal. In-run:
+    // one model call, no drain, the first turn's answer is final.
+    assert_eq!(
+        model.request_count(),
+        1,
+        "the steer must not drive a second in-run call"
+    );
     let steered: Vec<&String> = items
         .iter()
         .filter_map(|item| match item {
@@ -3684,7 +3591,10 @@ async fn steering_after_a_final_turn_gets_another_model_call() {
             _ => None,
         })
         .collect();
-    assert_eq!(steered, [&"and also?".to_string()]);
+    assert!(
+        steered.is_empty(),
+        "the final-turn steer is not drained into this run"
+    );
     let final_text = items
         .iter()
         .find_map(|item| match item {
@@ -3692,7 +3602,7 @@ async fn steering_after_a_final_turn_gets_another_model_call() {
             _ => None,
         })
         .expect("final response");
-    assert_eq!(final_text, "steered answer");
+    assert_eq!(final_text, "first answer");
 }
 
 /// An id source counting attempts, so announced ids are deterministic.
@@ -3799,155 +3709,5 @@ async fn each_model_call_attempt_is_announced_before_its_content() {
             |item| matches!(item, MultiTurnStreamItem::TurnCommitted { id } if id == "attempt-1")
         ),
         "the second turn commits before the run ends"
-    );
-}
-
-/// The announced id reaches hooks for the rest of its attempt: a hook
-/// observing `ModelTurnFinished` (the recorder's event) sees exactly the id
-/// that was announced for that turn.
-#[tokio::test]
-async fn hooks_observe_the_announced_turn_id() {
-    use std::sync::Mutex;
-
-    /// One observed turn finish: its announced id and one-based index.
-    type ObservedTurn = (Option<String>, usize);
-    type ObservedTurns = Arc<Mutex<Vec<ObservedTurn>>>;
-
-    #[derive(Clone, Default)]
-    struct CaptureIds(ObservedTurns);
-    impl AgentHook for CaptureIds {
-        async fn on_model_turn_finished(
-            &self,
-            ctx: &HookContext,
-            event: ModelTurnFinished<'_>,
-        ) -> ModelTurnAction {
-            self.0
-                .lock()
-                .expect("captured ids")
-                .push((ctx.turn_id(), event.turn));
-            ModelTurnAction::Continue
-        }
-    }
-
-    let (ids, _calls) = counting_turn_ids();
-    let model = streaming_tool_then_text_model();
-    let capture = CaptureIds::default();
-    let agent = AgentBuilder::new(model)
-        .tool(MockAddTool)
-        .add_hook(capture.clone())
-        .build();
-
-    let mut stream = agent
-        .stream_prompt("do tool work")
-        .max_turns(3)
-        .turn_id_source(ids)
-        .await;
-    while let Some(item) = stream.next().await {
-        item.expect("unexpected streaming error");
-    }
-
-    assert_eq!(
-        capture.0.lock().expect("captured ids").as_slice(),
-        [
-            (Some("attempt-0".to_string()), 1),
-            (Some("attempt-1".to_string()), 2)
-        ],
-        "each turn's finish hook sees that turn's announced id"
-    );
-}
-
-/// A hook-retried turn announces again with a fresh id — announced ids are
-/// never reused, and the discarded attempt's id stays distinct from the
-/// retry's (ENGINE.md behavior delta 10).
-#[tokio::test]
-async fn a_retried_attempt_announces_a_fresh_id() {
-    use std::sync::Mutex;
-
-    #[derive(Default)]
-    struct RetryFirstTurn(Mutex<usize>);
-    impl AgentHook for RetryFirstTurn {
-        async fn on_model_turn_finished(
-            &self,
-            _ctx: &HookContext,
-            _event: ModelTurnFinished<'_>,
-        ) -> ModelTurnAction {
-            let seen = {
-                let mut count = self.0.lock().expect("retry counter");
-                *count += 1;
-                *count
-            };
-            if seen == 1 {
-                ModelTurnAction::repeat()
-            } else {
-                ModelTurnAction::Continue
-            }
-        }
-    }
-
-    let (ids, _calls) = counting_turn_ids();
-    // The first scripted turn is tool-free (a retryable turn must be
-    // tool-free), the second is the accepted answer.
-    let model = MockCompletionModel::from_stream_turns([
-        vec![
-            MockStreamEvent::text("first try"),
-            MockStreamEvent::final_response_with_total_tokens(1),
-        ],
-        vec![
-            MockStreamEvent::text("second try"),
-            MockStreamEvent::final_response_with_total_tokens(2),
-        ],
-    ]);
-    let agent = AgentBuilder::new(model)
-        .add_hook(RetryFirstTurn::default())
-        .build();
-
-    let mut stream = agent
-        .stream_prompt("answer twice")
-        .max_turns(3)
-        .turn_id_source(ids)
-        .await;
-
-    let mut sequence = Vec::new();
-    while let Some(item) = stream.next().await {
-        let item = item.expect("unexpected streaming error");
-        let label = match &item {
-            MultiTurnStreamItem::TurnStarted { id } => format!("announce:{id}"),
-            MultiTurnStreamItem::TurnCommitted { id } => format!("committed:{id}"),
-            MultiTurnStreamItem::RoundtripClosed { turn_id, .. } => format!("closed:{turn_id}"),
-            MultiTurnStreamItem::ModelTurnRetried { .. } => "retried".to_string(),
-            MultiTurnStreamItem::StreamAssistantItem(StreamedAssistantContent::Text(text)) => {
-                format!("text:{}", text.text)
-            }
-            MultiTurnStreamItem::CompletionCall(_) => "completion".to_string(),
-            MultiTurnStreamItem::StreamAssistantItem(StreamedAssistantContent::Final(_)) => {
-                "final-item".to_string()
-            }
-            MultiTurnStreamItem::FinalResponse(_) => "final".to_string(),
-            _ => "other".to_string(),
-        };
-        sequence.push(label);
-    }
-
-    assert_eq!(
-        sequence,
-        vec![
-            "announce:attempt-0",
-            "text:first try",
-            "completion",
-            // No commit for the discarded attempt — its announced id dies
-            // with the retry.
-            "retried",
-            "announce:attempt-1",
-            "text:second try",
-            "completion",
-            "committed:attempt-1",
-            // The accepted final turn's durable roundtrip closes right
-            // after its commit (the durable roundtrip, ENGINE.md delta 12).
-            "closed:attempt-1",
-            "final-item",
-            "final",
-        ],
-        "the discarded attempt and its retry announce distinct fresh ids, \
-         and only the accepted attempt commits"
     );
 }

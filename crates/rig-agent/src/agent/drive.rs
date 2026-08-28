@@ -273,7 +273,10 @@ where
         let mut terminating: Option<String> = None;
         let mut turns_used = 0usize; // committed turns only
         let mut current_turn = 0usize; // issued model calls (announced ids)
-        let entry_len = conversation.messages().len();
+        // The run's own messages start at the message being answered (the
+        // conversation's last entry message): memory appends the prompt
+        // onward, matching what the model saw this run.
+        let entry_len = conversation.messages().len().saturating_sub(1);
 
         'outer: loop {
             // ── CONVERGE ────────────────────────────────────────────
@@ -334,8 +337,9 @@ where
                 yield Err(Box::new(
                     PromptError::prompt_cancelled(
                         conversation.messages().to_vec(),
-                        "model-side defect streak exhausted: the model kept emitting \
-                         malformed tool calls",
+                        format!(
+                            "the model repeatedly emitted tool calls with malformed arguments ({defect_streak} consecutive turns discarded and retried); the conversation history is unchanged — resend the prompt to try again, or raise the model's output token limit if the calls keep getting cut."
+                        ),
                     ),
                 )
                 .into());
@@ -354,16 +358,15 @@ where
             }
             if turns_used >= runner.max_turns {
                 store_error_usage(&runner, &ledger);
-                yield Err(Box::new(
-                    PromptError::prompt_cancelled(
-                        conversation.messages().to_vec(),
-                        format!(
-                            "agent reached the maximum turn count ({})",
-                            runner.max_turns
-                        ),
-                    ),
-                )
-                .into());
+                let mut history = conversation.messages();
+                let last = history.pop().unwrap_or_else(|| Message::user(""));
+                yield Err(StreamingError::Prompt(Box::new(
+                    PromptError::MaxTurnsError {
+                        max_turns: runner.max_turns,
+                        prompt: Box::new(last),
+                        chat_history: Box::new(history),
+                    },
+                )));
                 break 'outer;
             }
 

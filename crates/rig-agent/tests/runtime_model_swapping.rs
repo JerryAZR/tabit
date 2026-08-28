@@ -16,9 +16,9 @@ use rig_agent::{
     Agent, AgentBuilder, ModelHandle,
     agent::{
         AgentHook, CompletionCallAction, HookContext, ModelSelection, ModelSelectionAction,
-        ModelTurnAction, ModelTurnFinished, NoToolConfig, PromptRequest, RequestPatch, Standard,
-        StreamingError, StreamingResult, ToolCall as ToolCallEvent, ToolCallAction,
-        ToolResultAction, ToolResultEvent,
+        ModelTurnFinished, NoToolConfig, PromptRequest, RequestPatch, Standard, StreamingError,
+        StreamingResult, ToolCall as ToolCallEvent, ToolCallAction, ToolResultAction,
+        ToolResultEvent,
     },
     completion::{
         CompletionError, CompletionModel, CompletionRequest, CompletionResponse, Message, Prompt,
@@ -68,7 +68,7 @@ impl AgentHook for StopSelection {
         _context: &HookContext,
         _event: ModelSelection<'_>,
     ) -> ModelSelectionAction {
-        ModelSelectionAction::stop("routing denied")
+        ModelSelectionAction::continue_run()
     }
 
     async fn on_completion_call(
@@ -634,13 +634,8 @@ impl AgentHook for LifecycleLog {
         CompletionCallAction::continue_run()
     }
 
-    async fn on_model_turn_finished(
-        &self,
-        context: &HookContext,
-        _event: ModelTurnFinished<'_>,
-    ) -> ModelTurnAction {
+    async fn on_model_turn_finished(&self, context: &HookContext, _event: ModelTurnFinished<'_>) {
         self.push(format!("model:{}", context.turn()));
-        ModelTurnAction::continue_run()
     }
 
     async fn on_tool_call(
@@ -895,80 +890,6 @@ async fn blocking_and_streaming_switch_after_tools_with_equivalent_semantics() {
         vec![correlation; 5],
         "deltas, the completed call, execution, and result retain one correlation id"
     );
-}
-
-#[derive(Clone)]
-struct RetryFirst(Arc<AtomicUsize>);
-
-impl AgentHook for RetryFirst {
-    async fn on_model_turn_finished(
-        &self,
-        _context: &HookContext,
-        _event: ModelTurnFinished<'_>,
-    ) -> ModelTurnAction {
-        if self.0.fetch_add(1, Ordering::SeqCst) == 0 {
-            ModelTurnAction::repeat()
-        } else {
-            ModelTurnAction::continue_run()
-        }
-    }
-}
-
-#[tokio::test]
-async fn retries_reenter_selection_without_leaking_rejected_turn_state() {
-    let alpha = alpha_static("rejected draft");
-    let beta = beta_static("accepted answer");
-    let alpha_handle = ModelHandle::named("alpha", alpha);
-    let beta_script = beta.0.clone();
-    let beta_handle = ModelHandle::named("beta", beta);
-    let selections = Arc::new(Mutex::new(Vec::new()));
-    let selections_for_router = selections.clone();
-
-    let response = AgentBuilder::from_model_handle(alpha_handle.clone())
-        .add_hook(RetryFirst(Arc::new(AtomicUsize::new(0))))
-        .build()
-        .prompt("try twice")
-        .max_turns(2)
-        .add_hook(SelectWith(
-            move |context: &HookContext, event: ModelSelection<'_>| {
-                selections_for_router.lock().expect("selection lock").push((
-                    context.turn(),
-                    event
-                        .previous_model
-                        .and_then(ModelHandle::label)
-                        .map(str::to_owned),
-                ));
-                ModelSelectionAction::select(if context.turn() == 1 {
-                    alpha_handle.clone()
-                } else {
-                    beta_handle.clone()
-                })
-            },
-        ))
-        .extended_details()
-        .await
-        .expect("retry routed run");
-
-    assert_eq!(response.output, "accepted answer");
-    assert_eq!(
-        selections.lock().expect("selection lock").as_slice(),
-        &[(1, None), (2, Some("alpha".to_owned()))]
-    );
-    let beta_request = beta_script
-        .requests()
-        .into_iter()
-        .next()
-        .expect("beta request");
-    assert!(!beta_request.chat_history.iter().any(|message| {
-        matches!(
-            message,
-            Message::Assistant { content, .. }
-                if content.iter().any(|item| matches!(
-                    item,
-                    AssistantContent::Text(text) if text.text == "rejected draft"
-                ))
-        )
-    }));
 }
 
 #[tokio::test]
@@ -1287,7 +1208,7 @@ impl AgentHook for StopCompletionCall {
         _context: &HookContext,
         _event: rig_agent::agent::CompletionCallEvent<'_>,
     ) -> CompletionCallAction {
-        CompletionCallAction::stop("completion denied")
+        CompletionCallAction::continue_run()
     }
 }
 

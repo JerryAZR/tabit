@@ -22,7 +22,6 @@ use crate::{
         AgentBuilder, AgentHook, CompletionCallAction, CompletionCallEvent, HookContext,
         MultiTurnStreamItem, NoToolConfig, RequestPatch, StreamingError, ToolCall as ToolCallEvent,
         ToolCallAction, ToolResultAction, ToolResultEvent,
-        run::{AgentRun, AgentRunStep, ModelTurn},
     },
     completion::{
         AssistantContent, CompletionError, CompletionModel, Message, Prompt, PromptError,
@@ -1235,6 +1234,21 @@ where
     })
 }
 
+/// A per-turn allow-list: advertises `sum` only (the model's scripted
+/// `add` call is then unoffered — the admission case under test).
+struct OfferOnlySum;
+impl AgentHook for OfferOnlySum {
+    async fn on_completion_call(
+        &self,
+        _ctx: &HookContext,
+        _event: CompletionCallEvent<'_>,
+    ) -> CompletionCallAction {
+        CompletionCallAction::patch(
+            RequestPatch::new().active_tools([CountingSum::NAME.to_string()]),
+        )
+    }
+}
+
 /// Uses the conformance tool set to exercise in-band admission: a tool
 /// name the model was not offered returns a synthetic result naming the
 /// problem — the run continues, nothing is executed, nothing fails.
@@ -1251,79 +1265,47 @@ where
     let started = Instant::now();
     let add_calls = Arc::new(AtomicUsize::new(0));
     let sum_calls = Arc::new(AtomicUsize::new(0));
-    let _agent = configure(AgentBuilder::new(model))
+    // Drive the loop through the public surface: the model emits a call
+    // to a tool it was not offered (per-turn active_tools advertises only
+    // `sum`; the model's `add` call is unoffered), so admission answers
+    // in-band — the model is told, nothing executes, the run finishes.
+    let agent = configure(AgentBuilder::new(model))
         .preamble(FORCE_TOOLS_PREAMBLE)
         .temperature(0.0)
         .tool(CountingAdd(add_calls.clone()))
         .tool(CountingSum(sum_calls.clone()))
+        .add_hook(OfferOnlySum)
         .tool_choice(ToolChoice::Required)
         .build();
-
-    // Hand-drive the machine with a turn that calls `add` while only `sum`
-    // is offered: admission must return an in-band synthetic result (the
-    // model is told), execute nothing, and keep the run alive.
-    let offered = BTreeSet::from([CountingSum::NAME.to_string()]);
-    let mut run = AgentRun::new(vec![Message::user(PROMPT)]).max_turns(2);
-    if !matches!(run.next_step()?, AgentRunStep::CallModel { .. }) {
+    let response = agent.runner(PROMPT).max_turns(4).run().await?;
+    // Nothing executed: the disallowed name never ran a body.
+    if add_calls.load(Ordering::SeqCst) != 0 || sum_calls.load(Ordering::SeqCst) != 0 {
         return Err(ScenarioError::contract(
             SCENARIO,
-            "fresh AgentRun did not request a model turn",
+            "a disallowed tool name executed instead of being told in-band",
         ));
     }
-    run.turn_completed(ModelTurn::new(
-        None,
-        OneOrMany::one(AssistantContent::ToolCall(
-            rig_core::message::ToolCall::new(
-                "invalid-add".to_string(),
-                rig_core::message::ToolFunction::new(
-                    CountingAdd::NAME.to_string(),
-                    serde_json::json!({ "x": 2, "y": 3 }),
-                ),
-            ),
-        )),
-        Usage::default(),
-        None,
-        offered.clone(),
-        offered,
-    ))?;
-    run.accept_turn()?;
-    let AgentRunStep::CallTools { calls } = run.next_step()? else {
-        return Err(ScenarioError::contract(
-            SCENARIO,
-            "admission did not produce pending tool execution",
-        ));
-    };
-    let Some(first) = calls.first() else {
-        return Err(ScenarioError::contract(SCENARIO, "no pending calls"));
-    };
-    if first.tool_call.function.name != CountingAdd::NAME {
-        return Err(ScenarioError::contract(
-            SCENARIO,
-            format!("unexpected pending call: {:?}", first.tool_call),
-        ));
-    }
-    let Some(preresolved) = &first.preresolved_result else {
-        return Err(ScenarioError::contract(
-            SCENARIO,
-            "a disallowed tool name was executed instead of told in-band",
-        ));
-    };
-    let rendered = serde_json::to_string(preresolved).unwrap_or_default();
+    // The model saw the in-band synthetic result in the run's history.
+    let rendered = serde_json::to_string(&response.messages).unwrap_or_default();
     if !rendered.contains("unknown or disallowed tool") {
         return Err(ScenarioError::contract(
             SCENARIO,
-            format!("synthetic result does not name the problem: {rendered}"),
+            format!("synthetic result did not reach the history: {rendered}"),
         ));
     }
 
     Ok(ScenarioReport {
         name: SCENARIO,
         tool_calls: 0,
-        prompt_tokens: 0,
-        generated_tokens: 0,
-        history_messages: 0,
+        prompt_tokens: response.usage.input_tokens,
+        generated_tokens: response.usage.output_tokens,
+        history_messages: response
+            .messages
+            .as_ref()
+            .map(|messages| messages.len())
+            .unwrap_or(0),
         duration: started.elapsed(),
-        response: String::new(),
+        response: response.output.clone(),
     })
 }
 
@@ -1600,7 +1582,6 @@ where
             | MultiTurnStreamItem::TurnCommitted { .. }
             | MultiTurnStreamItem::ToolExecutionCommitted { .. }
             | MultiTurnStreamItem::ModelTurnRetried { .. }
-            | MultiTurnStreamItem::RoundtripClosed { .. }
             | MultiTurnStreamItem::Steer { .. } => {}
         }
     }
@@ -1897,11 +1878,10 @@ mod tests {
     #[tokio::test]
     async fn invalid_recovery_paths_do_not_execute_tools() -> Result<(), ScenarioError> {
         let report = invalid_tool_recovery(
-            MockCompletionModel::new([MockTurn::tool_call(
-                "invalid-add",
-                "add",
-                serde_json::json!({ "x": 2, "y": 3 }),
-            )]),
+            MockCompletionModel::new([
+                MockTurn::tool_call("invalid-add", "add", serde_json::json!({ "x": 2, "y": 3 })),
+                MockTurn::text("understood, done"),
+            ]),
             |builder| builder,
         )
         .await?;
