@@ -1022,7 +1022,6 @@ impl AgentRunner {
             agent_span,
             created_agent_span,
             memory_handle,
-            false,
         );
         futures::pin_mut!(driver);
 
@@ -1132,7 +1131,6 @@ impl AgentRunner {
                 loop_span,
                 created_agent_span,
                 memory_handle,
-                true,
             );
             futures::pin_mut!(driver);
             while let Some(item) = driver.next().await {

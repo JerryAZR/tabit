@@ -41,7 +41,6 @@
 //! ```
 
 use std::collections::HashMap;
-use std::sync::atomic::{AtomicUsize, Ordering};
 use std::{future::Future, sync::Arc, sync::Mutex};
 
 use rig_core::wasm_compat::{WasmBoxedFuture, WasmCompatSend, WasmCompatSync};
@@ -50,27 +49,6 @@ use crate::{
     json_utils,
     tool::{ToolContext, ToolOutput, ToolResult},
 };
-
-/// Opaque process-scoped identifier for one agent run.
-#[derive(Debug, Clone, PartialEq, Eq, Hash)]
-pub struct RunId(String);
-
-impl RunId {
-    pub(crate) fn generate() -> Self {
-        Self(rig_core::id::generate())
-    }
-
-    /// Identifier as text.
-    pub fn as_str(&self) -> &str {
-        &self.0
-    }
-}
-
-impl std::fmt::Display for RunId {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.write_str(&self.0)
-    }
-}
 
 type ToolCallRewriteFrameMap = HashMap<String, Vec<Option<serde_json::Value>>>;
 
@@ -154,18 +132,20 @@ impl Drop for ToolCallResolutionFrame<'_> {
     }
 }
 
-/// Run-scoped context supplied to hooks.
+/// Run-scoped context supplied to hooks: the announced turn id, the
+/// unified capability map, and the rewrite-chaining frames. Identity
+/// accessors (run id, turn counter, surface, agent name) are
+/// deliberately absent — those identities live where their consumers
+/// are (announced turn ids on events, run/agent names on telemetry
+/// spans), and unconsumed surface is deleted, not kept by inertia
+/// (PROTOCOL.md flag 31 and its follow-up).
 #[derive(Debug)]
 pub struct HookContext {
-    run_id: RunId,
-    turn: AtomicUsize,
     /// The announced id of the turn in flight (ENGINE.md behavior delta
     /// 10): set when a model-call attempt commits, read by hooks for the
     /// rest of that attempt. `None` only before the first attempt or on
     /// surfaces that never announce.
     turn_id: Mutex<Option<String>>,
-    is_streaming: bool,
-    agent_name: Option<String>,
     tool_call_rewrite_frames: ToolCallRewriteFrames,
     /// The run's capability map — the same [`ToolContext`] the tool
     /// bodies read (snapshot at run start), so hooks and tools see one
@@ -175,24 +155,12 @@ pub struct HookContext {
 }
 
 impl HookContext {
-    pub(crate) fn new(
-        is_streaming: bool,
-        agent_name: Option<String>,
-        capabilities: crate::tool::ToolContext,
-    ) -> Self {
+    pub(crate) fn new(capabilities: crate::tool::ToolContext) -> Self {
         Self {
-            capabilities,
-            run_id: RunId::generate(),
-            turn: AtomicUsize::new(0),
             turn_id: Mutex::new(None),
-            is_streaming,
-            agent_name,
+            capabilities,
             tool_call_rewrite_frames: ToolCallRewriteFrames::default(),
         }
-    }
-
-    pub(crate) fn set_turn(&self, turn: usize) {
-        self.turn.store(turn, Ordering::Relaxed);
     }
 
     pub(crate) fn set_turn_id(&self, id: String) {
@@ -200,16 +168,6 @@ impl HookContext {
             .turn_id
             .lock()
             .unwrap_or_else(|error| error.into_inner()) = Some(id);
-    }
-
-    /// Stable run identifier.
-    pub fn run_id(&self) -> &RunId {
-        &self.run_id
-    }
-
-    /// Current one-based model-call index.
-    pub fn turn(&self) -> usize {
-        self.turn.load(Ordering::Relaxed)
     }
 
     /// The announced id of the turn in flight, when one has been
@@ -220,16 +178,6 @@ impl HookContext {
             .lock()
             .unwrap_or_else(|error| error.into_inner())
             .clone()
-    }
-
-    /// Whether the streaming surface is driving this run.
-    pub fn is_streaming(&self) -> bool {
-        self.is_streaming
-    }
-
-    /// Configured agent name.
-    pub fn agent_name(&self) -> Option<&str> {
-        self.agent_name.as_deref()
     }
 
     /// The run's [`UserInteraction`](crate::tool::interaction::UserInteraction)

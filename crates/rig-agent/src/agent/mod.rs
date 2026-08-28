@@ -66,8 +66,8 @@ pub(crate) const UNKNOWN_AGENT_NAME: &str = "Unnamed Agent";
 pub use builder::{AgentBuilder, NoToolConfig, WithBuilderTools, WithToolServerHandle};
 pub use completion::Agent;
 pub use hook::{
-    AgentHook, HookContext, HookSpec, HookStack, OnEvent, RunId, ToolCall, ToolCallAction,
-    ToolCallFn, ToolResultAction, ToolResultEvent, on,
+    AgentHook, HookContext, HookSpec, HookStack, OnEvent, ToolCall, ToolCallAction, ToolCallFn,
+    ToolResultAction, ToolResultEvent, on,
 };
 pub use model::ModelHandle;
 pub use prompt_request::streaming::{

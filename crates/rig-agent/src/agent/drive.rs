@@ -237,20 +237,15 @@ pub(crate) fn drive_agent<'a, S>(
     agent_span: tracing::Span,
     created_agent_span: bool,
     memory_handle: Option<(Arc<dyn rig_core::memory::ConversationMemory>, String)>,
-    is_streaming: bool,
 ) -> impl Stream<Item = Result<DriveItem, StreamingError>> + 'a
 where
     S: TurnSource + 'a,
 {
     async_stream::stream! {
-        // Run-scoped hook context: minted once, shared by every hook event on
-        // both surfaces. `is_streaming` records which surface is driving; the
-        // per-turn index is advanced at each PREPARE below.
-        let hook_ctx = HookContext::new(
-            is_streaming,
-            runner.agent_name.clone(),
-            runner.tool_context.clone(),
-        );
+        // Run-scoped hook context: minted once, shared by every hook event
+        // on both surfaces (the unified capability map — hooks and tools
+        // see one set).
+        let hook_ctx = HookContext::new(runner.tool_context.clone());
         // The run's completion-call ledger: one entry per issued provider
         // call, usage aggregated as it is learned (mid-stream for the
         // streaming surface).
@@ -383,7 +378,6 @@ where
                     runner.max_turns
                 );
             }
-            hook_ctx.set_turn(current_turn);
 
             let chat_span = source.open_chat_span(&runner, runner.preamble.as_deref());
 

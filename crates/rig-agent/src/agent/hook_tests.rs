@@ -9,7 +9,7 @@ use std::sync::{
 use serde_json::{Value, json};
 
 fn ctx() -> HookContext {
-    HookContext::new(false, Some("test-agent".to_string()), Default::default())
+    HookContext::new(Default::default())
 }
 
 #[derive(Clone)]
@@ -39,7 +39,7 @@ async fn tool_call_rewrites_chain_in_registration_order() {
 
     let action = stack
         .on_tool_call(
-            &HookContext::new(false, None, Default::default()),
+            &HookContext::new(Default::default()),
             ToolCall {
                 tool_name: "tool",
                 tool_call_id: Some("provider-id"),
@@ -97,7 +97,7 @@ async fn result_rewrites_chain_without_mutating_raw_result_or_context() {
 
     let action = stack
         .on_tool_result(
-            &HookContext::new(false, None, Default::default()),
+            &HookContext::new(Default::default()),
             ToolResultEvent {
                 tool_name: "tool",
                 tool_call_id: None,
@@ -168,7 +168,7 @@ async fn terminal_result_action_short_circuits_later_hooks() {
     let context = ToolContext::new();
     let action = stack
         .on_tool_result(
-            &HookContext::new(false, None, Default::default()),
+            &HookContext::new(Default::default()),
             ToolResultEvent {
                 tool_name: "tool",
                 tool_call_id: None,
@@ -248,16 +248,6 @@ async fn first_skip_short_circuits_on_chained_tool_call() {
         ToolCallAction::Skip(_)
     ));
     assert_eq!(*log.lock().unwrap(), vec![1]);
-}
-
-#[test]
-fn hook_context_reports_identity_and_turn() {
-    let context = HookContext::new(true, Some("agent".into()), Default::default());
-    assert!(context.is_streaming());
-    assert_eq!(context.agent_name(), Some("agent"));
-    context.set_turn(3);
-    assert_eq!(context.turn(), 3);
-    assert!(!context.run_id().as_str().is_empty());
 }
 
 struct RewriteHook(Value);
@@ -456,13 +446,6 @@ impl AgentHook for NeverResolvingHook {
 }
 
 #[test]
-fn run_id_displays_as_text() {
-    let run_id = RunId::generate();
-    assert!(!run_id.as_str().is_empty());
-    assert_eq!(run_id.to_string(), run_id.as_str());
-}
-
-#[test]
 fn rewrite_output_replaces_with_explicit_tool_output() {
     let output = ToolOutput::text("redacted");
     assert_eq!(
@@ -556,7 +539,7 @@ async fn closure_records_order_by_priority_and_deny_is_absorbing() {
         .hook(("second", 0), on::tool_call(note("second")));
     let action = AgentHook::on_tool_call(
         &stack,
-        &HookContext::new(false, None, Default::default()),
+        &HookContext::new(Default::default()),
         ToolCall {
             tool_name: "t",
             tool_call_id: None,

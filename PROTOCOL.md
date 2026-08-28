@@ -1415,6 +1415,19 @@ rulings), `transform_context`-style context projection waits for the
 compaction design (item 6), and "retry fresh" stays unsupported
 until then.
 
+**Follow-up (2026-08, owner ruling): the context's introspection
+getters went the same way.** `HookContext`'s `run_id`/`turn`/
+`is_streaming`/`agent_name` — with `RunId` itself and the
+construction params feeding them — had no consumer in this
+architecture, and the reference survey showed why none will: pi's
+run ids exist for hook-replay idempotency (tabit never replays
+hooks), codex's turn ids feed the frontend projection (tabit's
+announced turn ids already do, through the protocol), and the rest
+is telemetry (the spans carry it). `HookContext` is now exactly what
+the tool pair consumes: the announced turn id, the unified
+capability map, and the rewrite-chaining frames. Re-addable if a
+consumer ever appears.
+
 ## Resolved
 
 - **1 — Resident loop** (supersedes 4, 5, 7, 12): one worker task owns
