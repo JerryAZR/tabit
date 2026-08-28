@@ -13,6 +13,11 @@
 #   scripts/test.sh --gate       fmt --check + clippy + test — the full
 #                                green gate, same quiet reporting
 #
+# A hung test fails the gate instead of parking it forever (the
+# loop-refactor mutex deadlocks hung the whole suite): the cargo-test
+# legs run under a wall-clock bound, TABIT_TEST_TIMEOUT seconds
+# (default 1200; generous against slow machines and cold builds).
+#
 # Report: totals; failing suites and test names; panic blocks; compile
 # and clippy errors. The exit code is always the underlying cargo exit
 # code (0 only when everything passed; --gate is 0 only when all three
@@ -22,6 +27,10 @@ set -u -o pipefail
 
 LOG=$(mktemp)
 trap 'rm -f "$LOG"' EXIT
+
+# Normalize the bound to a "Ns" duration (accepts 90 or 90s).
+TEST_TIMEOUT="${TABIT_TEST_TIMEOUT:-1200}"
+TEST_TIMEOUT="${TEST_TIMEOUT%s}s"
 
 # The interesting parts of a cargo-test log, nothing else.
 summarize() {
@@ -36,14 +45,25 @@ summarize() {
     true
 }
 
-# Run one cargo command, report quietly, propagate its exit code.
+# Run one cargo command under the wall-clock bound, report quietly,
+# propagate its exit code.
 run() {
     echo "== $* =="
     local start=$SECONDS
-    "$@" >"$LOG" 2>&1
+    timeout --kill-after=30s "$TEST_TIMEOUT" "$@" >"$LOG" 2>&1
     local status=$?
+    local elapsed=$((SECONDS - start))
+    # 124 = timeout's TERM, 137 = its KILL; MSYS killing native cargo
+    # surfaces as 125 — so also key off the elapsed bound itself.
+    local bound="${TEST_TIMEOUT%s}"
+    if [ "$status" -eq 124 ] || [ "$status" -eq 137 ] || [ "$elapsed" -ge "$bound" ]; then
+        echo "TIMED OUT after $TEST_TIMEOUT — a test (or the build) is likely hung, not slow."
+        echo "Find it: rerun with the same args plus '-- --test-threads=1 --nocapture';"
+        echo "the hang is the test after the last name printed. Note the killed"
+        echo "run may leave an orphaned process holding a target-dir lock."
+    fi
     summarize "$LOG"
-    printf '(%ds, exit %d)\n\n' "$((SECONDS - start))" "$status"
+    printf '(%ds, exit %d)\n\n' "$elapsed" "$status"
     return "$status"
 }
 

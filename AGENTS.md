@@ -138,7 +138,11 @@ consistency, never design fit (see the gate bullet below).
 - The green gate (verify by **exit code**, not by grepping output — a piped
   grep once masked a failing suite): `cargo fmt --check`,
   `cargo clippy --workspace --all-targets`, and
-  `cargo test --workspace --no-fail-fast`. The suite runs fully offline
+  `cargo test --workspace --no-fail-fast`. A hung suite fails the gate
+  instead of parking it forever: `scripts/test.sh` bounds the test legs
+  (`TABIT_TEST_TIMEOUT` seconds, default 1200) and prints how to find the
+  hang; CI bounds the tests step at 20 minutes. The suite runs fully
+  offline
   (see rule 5); some tests carry upstream-marked `#[ignore]`s
   (live-network scenarios). Don't record pass counts here — they change
   constantly; run the suite for current numbers. The gate proves

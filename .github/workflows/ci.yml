@@ -39,4 +39,7 @@ jobs:
       - name: clippy
         run: cargo clippy --workspace --all-targets -- -D warnings
       - name: tests
+        # A deadlocked test fails the step in bounded time instead of
+        # burning the job's whole 60-minute budget (AGENTS.md gate).
+        timeout-minutes: 20
         run: cargo test --workspace --no-fail-fast
