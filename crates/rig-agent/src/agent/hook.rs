@@ -62,8 +62,9 @@ struct ToolCallRewriteFrames {
 }
 
 impl ToolCallRewriteFrames {
-    fn lock(&self) -> std::sync::MutexGuard<'_, ToolCallRewriteFrameMap> {
-        self.inner.lock().unwrap_or_else(|error| error.into_inner())
+    #[track_caller]
+    fn lock(&self) -> tabit_log::lock::Guard<'_, ToolCallRewriteFrameMap> {
+        tabit_log::lock::lock(&self.inner)
     }
 
     fn begin(&self, internal_call_id: &str) -> ToolCallResolutionFrame<'_> {
@@ -164,20 +165,14 @@ impl HookContext {
     }
 
     pub(crate) fn set_turn_id(&self, id: String) {
-        *self
-            .turn_id
-            .lock()
-            .unwrap_or_else(|error| error.into_inner()) = Some(id);
+        *tabit_log::lock::lock(&self.turn_id) = Some(id);
     }
 
     /// The announced id of the turn in flight, when one has been
     /// announced. Stable for the whole attempt; a retried attempt
     /// announces a fresh id (ids are never reused).
     pub fn turn_id(&self) -> Option<String> {
-        self.turn_id
-            .lock()
-            .unwrap_or_else(|error| error.into_inner())
-            .clone()
+        tabit_log::lock::lock(&self.turn_id).clone()
     }
 
     /// The run's [`UserInteraction`](crate::tool::interaction::UserInteraction)

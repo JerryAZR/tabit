@@ -1,5 +1,8 @@
-# Rust build artifacts (target-dir is redirected to D: via .cargo/config.toml).
+# Rust build artifacts (target-dir is redirected to D: via .cargo/config.toml;
+# target-test/ is the GUI-lock workaround named in AGENTS.md).
 /target/
+/target-test/
+/test-test/
 
 # llvm-cov raw profiles
 *.profraw

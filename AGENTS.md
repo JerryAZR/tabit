@@ -135,6 +135,13 @@ consistency, never design fit (see the gate bullet below).
 ## Environment / commands
 
 - **Windows.** Use `python` (not `python3`); read/write files as UTF-8 explicitly.
+- **Hang diagnosis.** Every sync lock claim funnels through
+  `tabit_log::lock` (the claim contract — order, no re-entrancy, no
+  guard across an await — is documented there). `TABIT_LOCK_TRACE=1`
+  logs each acquire/release; `TABIT_LOCK_TIMEOUT=<secs>` bounds each
+  claim and panics with a waiting-for report (who holds what, from
+  which site) instead of hanging silently. Diagnose a hung test by
+  running it alone under both variables.
 - The green gate (verify by **exit code**, not by grepping output — a piped
   grep once masked a failing suite): `cargo fmt --check`,
   `cargo clippy --workspace --all-targets`, and
