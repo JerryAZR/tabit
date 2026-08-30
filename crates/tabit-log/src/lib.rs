@@ -45,7 +45,7 @@ pub mod lock;
 pub mod tree;
 pub mod writer;
 
-pub use context_manager::{CheckoutError, ContextManager};
+pub use context_manager::{CheckoutError, ContextManager, ConversationCell};
 pub use entry::{
     EntryKind, FileRecord, SESSION_FORMAT_VERSION, SessionEntry, SessionHeader, SideKind,
     SideRecord,

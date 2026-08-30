@@ -175,8 +175,13 @@ impl ScriptedSteers {
 }
 
 impl crate::agent::runner::SteeringSource for ScriptedSteers {
-    fn drain(&self) -> Vec<Message> {
-        self.queue.lock().expect("steer queue").drain(..).collect()
+    fn drain(&self) -> Vec<(String, Message)> {
+        self.queue
+            .lock()
+            .expect("steer queue")
+            .drain(..)
+            .map(|message| (rig_core::id::generate(), message))
+            .collect()
     }
 }
 
@@ -204,7 +209,7 @@ struct OneSteerAtATime {
 }
 
 impl crate::agent::runner::SteeringSource for OneSteerAtATime {
-    fn drain(&self) -> Vec<Message> {
+    fn drain(&self) -> Vec<(String, Message)> {
         let mut remaining = self.remaining.lock().expect("steer remaining");
         if *remaining == 0 {
             return Vec::new();
@@ -212,7 +217,10 @@ impl crate::agent::runner::SteeringSource for OneSteerAtATime {
         *remaining -= 1;
         let mut released = self.released.lock().expect("steer released");
         *released += 1;
-        vec![Message::user(format!("steer {}", *released))]
+        vec![(
+            rig_core::id::generate(),
+            Message::user(format!("steer {}", *released)),
+        )]
     }
 }
 
@@ -3301,8 +3309,12 @@ impl ArmedSteers {
 }
 
 impl crate::agent::SteeringSource for ArmedSteers {
-    fn drain(&self) -> Vec<Message> {
-        std::mem::take(&mut self.pending.lock().expect("steer lock"))
+    fn drain(&self) -> Vec<(String, Message)> {
+        let taken: Vec<Message> = self.pending.lock().expect("steer lock").drain(..).collect();
+        taken
+            .into_iter()
+            .map(|message| (rig_core::id::generate(), message))
+            .collect()
     }
 }
 
@@ -3358,7 +3370,7 @@ async fn a_steer_during_the_final_turn_exits_and_leaves_the_queue() {
     let steered: Vec<&String> = items
         .iter()
         .filter_map(|item| match item {
-            MultiTurnStreamItem::Steer { text } => Some(text),
+            MultiTurnStreamItem::Steer { text, .. } => Some(text),
             _ => None,
         })
         .collect();

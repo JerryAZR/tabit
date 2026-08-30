@@ -1536,7 +1536,6 @@ where
             MultiTurnStreamItem::StreamAssistantItem(_)
             | MultiTurnStreamItem::TurnStarted { .. }
             | MultiTurnStreamItem::TurnCommitted { .. }
-            | MultiTurnStreamItem::BatchResults { .. }
             | MultiTurnStreamItem::ToolExecutionCommitted { .. }
             | MultiTurnStreamItem::ModelTurnRetried { .. }
             | MultiTurnStreamItem::Steer { .. } => {}

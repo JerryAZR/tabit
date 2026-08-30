@@ -325,11 +325,6 @@ impl QueuedMessage {
 #[derive(Clone, Default)]
 pub(crate) struct Mailbox {
     queue: std::sync::Arc<std::sync::Mutex<std::collections::VecDeque<QueuedMessage>>>,
-    /// Entry ids of steers the engine drained this run, in drain order —
-    /// the fold pairs them with the run's `Steer` items (the engine has
-    /// no use for tabit entry ids, so the pairing lives here; drain order
-    /// is emission order, both FIFO).
-    steered: std::sync::Arc<std::sync::Mutex<std::collections::VecDeque<String>>>,
     /// True while a pump may drain at any instant (a run is live): the
     /// gate for submit-time `message_queued` notices. Idle sends never
     /// queue — they drain immediately, so `user_message` is the
@@ -372,11 +367,9 @@ impl Mailbox {
         self.live.store(true, std::sync::atomic::Ordering::Release);
     }
 
-    /// The pump ended. Steers drained but never recorded (an abort raced
-    /// their `Steer` items) cannot pair anymore — drop the leftovers.
+    /// The pump ended: submits queue for the next run again.
     pub(crate) fn run_ended(&self) {
         self.live.store(false, std::sync::atomic::Ordering::Release);
-        lock(&self.steered).clear();
     }
 
     pub(crate) fn push(&self, message: Message) {
@@ -489,29 +482,21 @@ impl Mailbox {
         });
     }
 
-    /// Take the whole batch (idle entry: the worker's next run input).
-    fn take_batch(&self) -> Vec<QueuedMessage> {
-        lock(&self.queue).drain(..).collect()
-    }
-
-    /// The engine-side drain: the batch becomes steers. Ids park in FIFO
-    /// order for the fold's `Steer` items.
-    fn take_steers(&self) -> Vec<Message> {
-        let batch = lock(&self.queue).drain(..).collect::<Vec<_>>();
-        let mut steered = lock(&self.steered);
-        batch
-            .into_iter()
-            .map(|queued| {
-                steered.push_back(queued.id);
-                queued.message
-            })
+    /// The one drain take: everything queued, as id-carrying pairs (the
+    /// born-early ids minted at `message_queued`). The engine's loop
+    /// drains this — opening batch and mid-run steers alike — and
+    /// folds each under its id; the ids ride the `Steer` items back
+    /// for the `user_message` events.
+    fn take_all(&self) -> Vec<(String, Message)> {
+        lock(&self.queue)
+            .drain(..)
+            .map(|queued| (queued.id, queued.message))
             .collect()
     }
 
-    /// The id of the next `Steer` item's message (drain order is
-    /// emission order). `None` means the run drained no more steers.
-    fn next_steer_id(&self) -> Option<String> {
-        lock(&self.steered).pop_front()
+    /// Whether anything is queued (the pump's run-or-idle check).
+    fn has_queued(&self) -> bool {
+        !lock(&self.queue).is_empty()
     }
 
     /// The work signal the resident worker waits on. A push before the
@@ -580,18 +565,16 @@ impl AbortHandle {
 }
 
 /// The engine-side view of the mailbox: what an outer loop drains at
-/// each turn boundary.
-/// The engine's steering source: steers only — the opening batch was
-/// drained by the pump into `run_one`'s `batch` and must not ride the
-/// first engine drain again (the handler folds it itself, once, at the
-/// Steer arm; a second fold would land the batch twice).
+/// each convergence — the opening batch and mid-run steers alike (one
+/// queue, one drain; ENGINE.md's not-pre-joined rule). The engine folds
+/// what it drains under the born-early ids; the session never folds.
 struct SessionSteers {
     mailbox: Mailbox,
 }
 
 impl rig_agent::SteeringSource for SessionSteers {
-    fn drain(&self) -> Vec<Message> {
-        self.mailbox.take_steers()
+    fn drain(&self) -> Vec<(String, Message)> {
+        self.mailbox.take_all()
     }
 
     /// The post-tool stop's queue discard (ENGINE.md, stop semantics):
@@ -726,28 +709,20 @@ impl Session {
             events: Vec::new(),
         };
         loop {
-            let batch = self.mailbox.take_batch();
+            let queued = self.mailbox.has_queued();
             let continuing = self.mailbox.take_continue();
-            if batch.is_empty() && !continuing {
+            if !queued && !continuing {
                 break;
             }
-            // The handler's first drain: fold the batch into the
-            // conversation at the drain (the entry id exists from this
-            // point — the receive-time checkout probe validates
-            // against it), then run. A continue intent with an empty
-            // batch starts the run over the conversation as it stands
-            // (a continue on an empty conversation is a no-op —
-            // nothing to continue).
-            if !batch.is_empty() {
-                let mut conversation = crate::lock::write(&self.conversation);
-                for queued in &batch {
-                    conversation.fold_with_id(queued.message.clone(), queued.id.clone());
-                }
-            }
-            if crate::lock::read(&self.conversation).messages().is_empty() {
+            // A continue intent with nothing queued starts the run over
+            // the conversation as it stands — a no-op on an empty
+            // conversation (nothing to continue). Queued messages need
+            // no check here: the engine's first CONVERGE drains and
+            // folds them before the first turn (one drain point).
+            if !queued && crate::lock::read(&self.conversation).messages().is_empty() {
                 break;
             }
-            let run = self.run_one(&batch, on_event).await;
+            let run = self.run_one(on_event).await;
             // The last terminal decides the outcome; usage and events
             // accumulate across runs.
             total.output = run.output;
@@ -778,11 +753,7 @@ impl Session {
     /// ([`Self::conclude`] — where the write-behind log lands;
     /// `messages_discarded` does not land here at all, the abort site
     /// emits it immediately through the mailbox's notice channel).
-    async fn run_one(
-        &mut self,
-        batch: &[QueuedMessage],
-        on_event: &mut (dyn FnMut(SessionEvent) + Send),
-    ) -> RunSummary {
+    async fn run_one(&mut self, on_event: &mut (dyn FnMut(SessionEvent) + Send)) -> RunSummary {
         // Run-scoped machinery: a fresh abort token for this loop; steers
         // arrive through the run-agnostic mailbox.
         let run_token = {
@@ -798,11 +769,10 @@ impl Session {
         let guard_outcome = crate::lock::lock(&self.buffer).enqueue(&[]);
         if let Err(error) = &guard_outcome {
             self.drain_persist_transitions();
-            sink.emit(SessionEvent::RunFailed {
-                message: format!(
-                    "the session log is undrained and still refuses to flush: {error}"
-                ),
-            });
+            self.fail_before_engine(
+                format!("the session log is undrained and still refuses to flush: {error}"),
+                &mut sink,
+            );
             return RunSummary {
                 outcome: RunOutcome::Failed,
                 output: String::new(),
@@ -811,33 +781,16 @@ impl Session {
             };
         }
         self.drain_persist_transitions();
-        // The batch folded at the pump's drain; acknowledge each
-        // message (1:1 with what the model is about to see — the
-        // history below carries them).
-        for queued in batch {
-            sink.emit(SessionEvent::UserMessage {
-                text: queued.text(),
-                entry_id: queued.id.clone(),
-            });
-        }
-        // The engine streams the history in — the derived view, the
-        // conversation never leaving the session's hands (the batch is
-        // already in it; the engine's own first drain carries only
-        // messages submitted after this run started).
-        let history = crate::lock::read(&self.conversation).messages();
         // The agent-cache check at run open — the single point of use.
         // A selection that validates against config but cannot be
         // constructed in this environment (client build trouble, the
         // only residual class: config is immutable per process) fails
-        // here, before any turn: the accepted message is already
-        // recorded, so the frontend sees `user_message` then
-        // `run_failed`, the same shape a provider stream error takes.
+        // here, before any turn: the frontend sees the queued
+        // `user_message`s (the failed open's drain acknowledges them)
+        // then `run_failed` — the same shape a provider stream error
+        // takes.
         if let Err(error) = self.ensure_agent() {
-            let message = error.to_string();
-            sink.emit(SessionEvent::RunFailed { message });
-            if let Some(hub) = &self.interaction {
-                hub.clear_pending();
-            }
+            self.fail_before_engine(error.to_string(), &mut sink);
             return RunSummary {
                 outcome: RunOutcome::Failed,
                 output: String::new(),
@@ -845,7 +798,7 @@ impl Session {
                 events: sink.events,
             };
         }
-        let stream = self.open_run(history, &run_token).await;
+        let stream = self.open_run(&run_token).await;
         let driven = self.drive(stream, &run_token, &mut sink).await;
         let (outcome, output, usage) = self.conclude(driven, &mut sink);
         RunSummary {
@@ -856,14 +809,36 @@ impl Session {
         }
     }
 
+    /// A run that cannot start its engine: the queued batch is still
+    /// acknowledged and recorded — the engine's opening drain (the
+    /// first CONVERGE in `drive.rs` is the twin), run by the session
+    /// because the engine cannot — then the failure. Without this a
+    /// failed open would leave its batch queued and the pump would
+    /// spin on it forever; with it the failure takes the same shape a
+    /// provider error does: `user_message` events, then `run_failed`.
+    /// The only other pre-drain failure (a zero turn budget) is
+    /// rejected when the session is built.
+    fn fail_before_engine(&mut self, message: String, sink: &mut EventSink<'_>) {
+        for (id, queued) in self.mailbox.take_all() {
+            // Commit first, then announce — the engine's CONVERGE idiom;
+            // the helper is synchronous, so no suspension can interleave,
+            // but one ordering lives in the codebase, not two.
+            let text = user_text(&queued);
+            crate::lock::write(&self.conversation).fold_with_id(queued, id.clone());
+            sink.emit(SessionEvent::UserMessage { text, entry_id: id });
+        }
+        if let Some(hub) = &self.interaction {
+            hub.clear_pending();
+        }
+        sink.emit(SessionEvent::RunFailed { message });
+    }
+
     /// Assemble the engine request for one run: the abort token and
-    /// interaction capability in the tool context, the permission gate, the
-    /// recorder hook, and steering over the run-agnostic mailbox.
-    async fn open_run(
-        &self,
-        history: Vec<Message>,
-        run_token: &CancellationToken,
-    ) -> rig_agent::agent::StreamingResult {
+    /// interaction capability in the tool context, the permission gate,
+    /// and steering over the run-agnostic mailbox. The conversation is
+    /// the shared cell — the loop's folds ARE the durable commits; the
+    /// session never folds.
+    async fn open_run(&self, run_token: &CancellationToken) -> rig_agent::agent::StreamingResult {
         let mut tool_context = rig_agent::tool::ToolContext::new();
         tool_context.insert(run_token.clone());
         if let Some(hub) = &self.interaction {
@@ -871,9 +846,12 @@ impl Session {
         }
         let mut request = self
             .agent
-            .stream_chat(history)
+            .stream_chat(Vec::<Message>::new())
             .max_turns(self.max_turns)
-            .tool_concurrency(TOOL_CONCURRENCY);
+            .tool_concurrency(TOOL_CONCURRENCY)
+            // The cell IS the conversation — the history argument above
+            // is vestigial when one is supplied (build_run ignores it).
+            .conversation_cell(self.conversation.clone());
         if let Some(stack) = &self.run_hooks {
             request = request.add_hook(stack.clone());
         }
@@ -916,12 +894,6 @@ impl Session {
         // `TurnStarted`, stamps every turn-scoped event, and outlives the
         // turn's commit (its tool results arrive after `TurnCommitted`).
         let mut current_turn: Option<String> = None;
-        // A tools turn's assistant, staged between its TurnCommitted
-        // (where the payload arrives) and its BatchResults (where the
-        // roundtrip commits as one verified fold_all). Final turns
-        // fold directly; this slot is empty otherwise.
-        let mut staged_assistant: Option<rig_core::OneOrMany<rig_core::message::AssistantContent>> =
-            None;
         loop {
             let item = tokio::select! {
                 biased;
@@ -950,67 +922,11 @@ impl Session {
                     current_turn = Some(id.clone());
                     sink.emit(SessionEvent::TurnStarted { id });
                 }
-                Ok(MultiTurnStreamItem::TurnCommitted { id, content }) => {
-                    // A tool-free turn folds here (empty finals fold
-                    // nothing, the one decision site). A tools turn's
-                    // assistant payload is kept by the turn id — it
-                    // folds with its batch at BatchResults below.
-                    if !content.iter().any(|part| {
-                        matches!(part, rig_core::message::AssistantContent::ToolCall(_))
-                    }) {
-                        crate::lock::write(&self.conversation).fold_with_id(
-                            Message::Assistant {
-                                id: Some(id.clone()),
-                                content: *content,
-                            },
-                            id.clone(),
-                        );
-                    } else {
-                        staged_assistant = Some(*content);
-                    }
+                Ok(MultiTurnStreamItem::TurnCommitted { id, .. }) => {
+                    // The engine's own fold is the durable commit; this
+                    // is the announcement only (emission-only drive —
+                    // the session never folds).
                     sink.emit(SessionEvent::TurnCommitted { id });
-                }
-                Ok(MultiTurnStreamItem::BatchResults { results }) => {
-                    // The roundtrip commits whole: the tools turn's
-                    // assistant (the payload its TurnCommitted carried,
-                    // staged above) plus the complete batch, one
-                    // verified fold_all. Every settled batch answers a
-                    // real assistant the model emitted — the log must
-                    // carry both or the conversation lies (the model
-                    // saw the calls and their results). A batch without
-                    // its turn's payload is an engine-contract
-                    // violation — internal, loud.
-                    let turn_id = announce(&current_turn);
-                    // Sanctioned crash: an engine-contract violation,
-                    // failed loud (AGENTS.md doctrine).
-                    #[allow(clippy::panic)]
-                    let Some(assistant) = staged_assistant.take() else {
-                        panic!(
-                            "a tools turn's BatchResults arrived without its assistant payload \
-                             (its TurnCommitted) — the engine settled results for a turn it \
-                             never announced"
-                        );
-                    };
-                    let result_ids: Vec<String> =
-                        results.iter().map(|(id, _)| id.clone()).collect();
-                    // Sanctioned crash: the engine never settles an empty
-                    // batch (AGENTS.md doctrine).
-                    #[allow(clippy::expect_used)]
-                    let batch_content =
-                        rig_core::OneOrMany::many(results.into_iter().map(|(_, content)| content))
-                            .expect("a tools turn's batch is never empty");
-                    crate::lock::write(&self.conversation).fold_all_with_ids(
-                        vec![
-                            Message::Assistant {
-                                id: Some(turn_id),
-                                content: assistant,
-                            },
-                            Message::User {
-                                content: batch_content,
-                            },
-                        ],
-                        result_ids,
-                    );
                 }
                 Ok(MultiTurnStreamItem::ModelTurnRetried { .. }) => {
                     let turn_id = announce(&current_turn);
@@ -1018,7 +934,6 @@ impl Session {
                     // (the turn was an engine-local), so nothing to
                     // discard — the frontend drops its provisional
                     // output.
-                    staged_assistant = None;
                     sink.emit(SessionEvent::TurnRetried { turn_id });
                 }
                 Ok(MultiTurnStreamItem::StreamUserItem(StreamedUserContent::ToolResult {
@@ -1045,8 +960,8 @@ impl Session {
                         durable: self.buffer_is_clean(),
                     });
                 }
-                Ok(MultiTurnStreamItem::Steer { text }) => {
-                    self.note_steer(text, sink);
+                Ok(MultiTurnStreamItem::Steer { id, text }) => {
+                    self.note_steer(id, text, sink);
                 }
                 Ok(MultiTurnStreamItem::CompletionCall(call)) => {
                     let turn_id = announce(&current_turn);
@@ -1130,18 +1045,11 @@ impl Session {
     /// A steer drained into history mid-run: one user node under the
     /// message's born-early id (the id its `message_queued` announced,
     /// parked by the drain in FIFO order), 1:1 with what the model saw.
-    fn note_steer(&self, text: String, sink: &mut EventSink<'_>) {
-        // The engine drains a steer before emitting its `Steer` item and
-        // in the same order, so the parked-id FIFO always has this
-        // item's id. An empty FIFO is an engine-contract violation —
-        // internal, fail loud. Sanctioned crash (AGENTS.md doctrine).
-        #[allow(clippy::expect_used)]
-        let entry_id = self
-            .mailbox
-            .next_steer_id()
-            .expect("a Steer item must follow the drain that parked its id");
-        crate::lock::write(&self.conversation)
-            .fold_with_id(Message::user(text.clone()), entry_id.clone());
+    /// Announce one drained message (opening batch and mid-run steers
+    /// alike): the engine's fold is the durable commit under the
+    /// born-early id the `Steer` item carries; the session only
+    /// emits — the 1:1 acknowledgment.
+    fn note_steer(&self, entry_id: String, text: String, sink: &mut EventSink<'_>) {
         sink.emit(SessionEvent::UserMessage { text, entry_id });
     }
 
@@ -1543,6 +1451,17 @@ impl Session {
         writer: SessionWriter,
         resumed: bool,
     ) -> Result<Self, SessionError> {
+        if builder.max_turns == 0 {
+            // The engine's entry contract (ENGINE.md): every outer loop
+            // runs at least one turn. Rejected here — at the builder —
+            // because a zero budget would otherwise fail every run
+            // before its engine could drain, and the session cannot be
+            // built to run at all.
+            return Err(SessionError::Config {
+                message: "max_turns must be at least 1 — every outer loop runs at least one turn"
+                    .to_string(),
+            });
+        }
         let path = writer.path().to_path_buf();
         let id = writer.session_id().to_string();
         let buffer: crate::writer::SharedBuffer =
@@ -1736,8 +1655,7 @@ fn stream_item_event(
         MultiTurnStreamItem::CompletionCall(_) | MultiTurnStreamItem::ModelTurnRetried { .. } => {
             None
         }
-        MultiTurnStreamItem::BatchResults { .. } => None, // the fold, handled in `drive`
-        MultiTurnStreamItem::FinalResponse(_) => None,    // handled by the caller
+        MultiTurnStreamItem::FinalResponse(_) => None, // handled by the caller
         _ => None,
     }
 }

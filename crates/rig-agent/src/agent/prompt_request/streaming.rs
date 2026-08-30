@@ -57,24 +57,15 @@ pub enum MultiTurnStreamItem {
     /// the run's history. The closing bracket of the turn the matching
     /// [`TurnStarted`](Self::TurnStarted) opened: a turn discarded by a
     /// defect retry, a provider failure, or an abort never commits, and
-    /// its announced id stays uncommitted. Carries the committed
-    /// content — the fold payload the durable layer commits through
-    /// `fold` (a final turn) or as the head of `fold_all` (a tools
-    /// turn).
+    /// its announced id stays uncommitted. The loop's own fold is the
+    /// durable commit; this item announces it, carrying the committed
+    /// content for consumers that render it.
     TurnCommitted {
-        /// The announced id of the committed turn.
+        /// The announced id of the committed turn — the assistant
+        /// entry's id (the one-value rule).
         id: String,
         /// The committed assistant content.
         content: Box<rig_core::OneOrMany<rig_core::message::AssistantContent>>,
-    },
-    /// The complete settled tool batch — the results the roundtrip
-    /// commits through `fold_all` (call order, every call answered).
-    /// Emitted after the batch's [`ToolExecutionCommitted`](Self::ToolExecutionCommitted)
-    /// and result items; a tools turn's fold payload.
-    BatchResults {
-        /// The settled results with their born-early entry ids, in call
-        /// order — the roundtrip's fold payload.
-        results: Vec<(String, rig_core::message::UserContent)>,
     },
     /// A streamed assistant content item — the content the **model emitted**:
     /// text/reasoning deltas, tool-call deltas, and, when the model turn is
@@ -149,16 +140,17 @@ pub enum MultiTurnStreamItem {
         /// One-based model-call index of the rejected turn.
         turn: usize,
     },
-    /// The durable roundtrip closed: the assistant turn and its complete
     /// The final result from the stream: the unified [`PromptResponse`] shared
     /// with the blocking surface.
     FinalResponse(PromptResponse),
-    /// A steering message the user queued while the run was in flight,
-    /// injected at a tool-use roundtrip or after a final model turn. This is
-    /// an observation event: the message is already part of the model's
-    /// context (and of the final response's history) — session layers record
-    /// it as its own user message.
+    /// A steering message the loop drained and folded — the opening
+    /// batch and mid-run steers alike (one drain). This is an
+    /// observation event: the message is already folded into the
+    /// conversation under `entry_id` (the born-early id from the
+    /// mailbox); session layers announce it as its own user message.
     Steer {
+        /// The born-early entry id the message folded under.
+        id: String,
         /// The message text.
         text: String,
     },

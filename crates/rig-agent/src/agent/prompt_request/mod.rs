@@ -180,6 +180,15 @@ macro_rules! forward_prompt_setters {
             self.$recv = self.$recv.using_model_value(model);
             self
         }
+
+        /// Supply the conversation cell the loop folds — the one durable
+        /// manager, whose folds are the run's commits (ENGINE.md, the
+        /// unified conversation). Without one, the run seeds a
+        /// standalone in-memory conversation (nothing persists).
+        pub fn conversation_cell(mut self, cell: ::tabit_log::ConversationCell) -> Self {
+            self.$recv = self.$recv.conversation_cell(cell);
+            self
+        }
     };
 }
 pub(crate) use forward_prompt_setters;

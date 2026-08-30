@@ -38,7 +38,7 @@ use crate::{
     streaming::{StreamedAssistantContent, StreamedUserContent},
     tool::server::ToolRegistrySnapshot,
 };
-use tabit_log::ContextManager;
+use tabit_log::ConversationCell;
 
 pub(crate) fn record_usage_on_span(span: &tracing::Span, usage: crate::completion::Usage) {
     span.record("gen_ai.usage.input_tokens", usage.input_tokens);
@@ -179,7 +179,7 @@ pub(crate) fn streaming_error_into_prompt(err: StreamingError) -> PromptError {
 
 pub(crate) fn store_error_usage(runner: &AgentRunner, ledger: &RunLedger) {
     if let Some(usage) = &runner.error_usage {
-        *usage.lock().unwrap_or_else(|error| error.into_inner()) = ledger.usage();
+        *tabit_log::lock::lock(usage) = ledger.usage();
     }
 }
 
@@ -224,16 +224,42 @@ fn classify_provider_error(err: &CompletionError) -> ProviderErrorClass {
     }
 }
 
+/// Cell access helpers — plain functions so every lock guard is
+/// dropped before the call returns: the loop is a generator, and a
+/// generator stores statement temporaries in its state across
+/// suspension points, so a guard written inline (`read(cell).…`)
+/// would ride an await and break `Send`. These are the only door to
+/// the cell inside the loop (the mutex-scrutinee rule, generator
+/// edition).
+fn cell_history(cell: &ConversationCell) -> Vec<Message> {
+    tabit_log::lock::read(cell).messages()
+}
+
+fn cell_fold_steers(cell: &ConversationCell, steers: &[(String, Message)]) {
+    let mut manager = tabit_log::lock::write(cell);
+    for (id, message) in steers {
+        manager.fold_with_id(message.clone(), id.clone());
+    }
+}
+
+fn cell_fold_final(cell: &ConversationCell, message: Message, id: String) {
+    tabit_log::lock::write(cell).fold_with_id(message, id);
+}
+
+fn cell_fold_roundtrip(cell: &ConversationCell, batch: Vec<Message>, result_ids: Vec<String>) {
+    tabit_log::lock::write(cell).fold_all_with_ids(batch, result_ids);
+}
+
 /// The run: one coroutine over the conversation. See the module docs
-/// and ENGINE.md (layer 2) — the loop IS that design.
-// `clippy::panic`: one deliberate internal-invariant crash (the empty
-// conversation is unrepresentable — a run starts only with a
-// non-empty conversation). AGENTS.md's error doctrine sanctions it.
-#[allow(clippy::panic, clippy::too_many_lines)]
+/// and ENGINE.md (layer 2) — the loop IS that design. The loop's
+/// folds ARE the durable commits: the cell is the one durable manager
+/// (a standalone run seeds a write-less twin), each fold a brief
+/// synchronous `write()` hold, no await under a guard.
+#[allow(clippy::too_many_lines)]
 pub(crate) fn drive_agent<'a, S>(
     runner: AgentRunner,
     mut source: S,
-    conversation: &'a mut ContextManager,
+    conversation: &'a ConversationCell,
     agent_span: tracing::Span,
     created_agent_span: bool,
     memory_handle: Option<(Arc<dyn rig_core::memory::ConversationMemory>, String)>,
@@ -265,10 +291,11 @@ where
         let mut terminating: Option<String> = None;
         let mut turns_used = 0usize; // committed turns only
         let mut current_turn = 0usize; // issued model calls (announced ids)
-        // The run's own messages start at the message being answered (the
-        // conversation's last entry message): memory appends the prompt
-        // onward, matching what the model saw this run.
-        let entry_len = conversation.messages().len().saturating_sub(1);
+        // Where the run's own messages begin — the message being
+        // answered. Set once, at the first decision (see DECIDE): after
+        // the opening drain, so a steered opening (the session's
+        // mailbox) counts as the run's own and nothing before it does.
+        let mut entry_len: Option<usize> = None;
 
         'outer: loop {
             // ── CONVERGE ────────────────────────────────────────────
@@ -283,26 +310,38 @@ where
                 if let Some(steering) = runner.steering.as_ref() {
                     steering.discard_pending();
                 }
-                yield Err(Box::new(
-                    PromptError::prompt_cancelled(conversation.messages().to_vec(), reason),
-                )
+                yield Err(Box::new(PromptError::prompt_cancelled(
+                    cell_history(conversation),
+                    reason,
+                ))
                 .into());
                 break 'outer;
             }
             // THE drain — unconditional for every non-stop outcome: the
             // loop shape makes a bypass unrepresentable (every SETTLE
-            // branch falls through to here).
+            // branch falls through to here). The drain is id-carrying:
+            // every steered message folds under its born-early id, so
+            // live and replay name the same node.
             let steers = runner
                 .steering
                 .as_ref()
                 .map(|steering| steering.drain())
                 .unwrap_or_default();
-            for text in steers.iter().filter_map(Message::user_text) {
-                yield Ok(DriveItem::Item(MultiTurnStreamItem::Steer { text }));
-            }
             if !steers.is_empty() {
-                for message in steers {
-                    conversation.fold(message);
+                // Commit first, then announce (ENGINE.md's pseudo-code
+                // order): every suspension the consumer sees must be at
+                // a committed boundary — announcing before the fold
+                // would let an abort drop the run between the two,
+                // leaving a message the frontend saw but the
+                // conversation never kept.
+                cell_fold_steers(conversation, &steers);
+                for (id, message) in steers.iter() {
+                    if let Some(text) = message.user_text() {
+                        yield Ok(DriveItem::Item(MultiTurnStreamItem::Steer {
+                            id: id.clone(),
+                            text: text.to_string(),
+                        }));
+                    }
                 }
                 // A steering user is their own circuit breaker.
                 defect_streak = 0;
@@ -310,8 +349,10 @@ where
             }
 
             // ── DECIDE ──────────────────────────────────────────────
-            // The one policy site. The first pass cannot exit: nothing is
-            // set and max_turns >= 1 — at-least-one-turn by construction.
+            // The one policy site. The first pass cannot exit on the
+            // policy rules: nothing is set and max_turns >= 1 —
+            // at-least-one-turn by construction. The entry rule below
+            // is the one first-pass exit.
             if pending_error_terminal {
                 store_error_usage(&runner, &ledger);
                 // Sanctioned crash: the flag is only ever set alongside
@@ -336,7 +377,7 @@ where
                 store_error_usage(&runner, &ledger);
                 yield Err(Box::new(
                     PromptError::prompt_cancelled(
-                        conversation.messages().to_vec(),
+                        cell_history(conversation),
                         format!(
                             "the model repeatedly emitted tool calls with malformed arguments ({defect_streak} consecutive turns discarded and retried); the conversation history is unchanged — resend the prompt to try again, or raise the model's output token limit if the calls keep getting cut."
                         ),
@@ -349,7 +390,7 @@ where
                 store_error_usage(&runner, &ledger);
                 yield Err(Box::new(
                     PromptError::prompt_cancelled(
-                        conversation.messages().to_vec(),
+                        cell_history(conversation),
                         "provider retry streak exhausted",
                     ),
                 )
@@ -358,7 +399,7 @@ where
             }
             if turns_used >= runner.max_turns {
                 store_error_usage(&runner, &ledger);
-                let mut history = conversation.messages();
+                let mut history = cell_history(conversation);
                 let last = history.pop().unwrap_or_else(|| Message::user(""));
                 yield Err(StreamingError::Prompt(Box::new(
                     PromptError::MaxTurnsError {
@@ -369,12 +410,34 @@ where
                 )));
                 break 'outer;
             }
+            // The entry rule (ENGINE.md's entry contract), measured at
+            // the first decision — after the opening drain, so cell and
+            // drain have converged: the conversation must end with the
+            // message being answered, and the run's own messages start
+            // there. A still-empty conversation means the caller ran on
+            // an empty cell with nothing queued (the session pump and
+            // the standalone builder both prevent it) — a caller error,
+            // failed loud with the contract in the message.
+            if entry_len.is_none() {
+                let history = cell_history(conversation);
+                if history.is_empty() {
+                    store_error_usage(&runner, &ledger);
+                    yield Err(Box::new(PromptError::prompt_cancelled(
+                        history,
+                        "empty conversation: a run needs the message being sent — the cell \
+                         and the steering drain both produced nothing",
+                    ))
+                    .into());
+                    break 'outer;
+                }
+                entry_len = Some(history.len().saturating_sub(1));
+            }
 
             // ── PREPARE ─────────────────────────────────────────────
             // The conversation is never empty here: a run starts only on a
             // non-empty one (`build_run` rejects the empty case at entry),
             // and the loop only folds into it.
-            let history = conversation.messages();
+            let history = cell_history(conversation);
             current_turn += 1;
             if runner.max_turns > 1 {
                 tracing::info!(
@@ -517,27 +580,43 @@ where
             if !turn.carries_tools() {
                 // FINAL — fold (empty finals fold nothing: one decision
                 // site, ENGINE.md implementation judgments), commit, exit.
+                // The announced id is the entry id (the one-value rule):
+                // the provider's message id never enters the tree.
+                // Sanctioned crash: PREPARE always announces before MODEL
+                // (the bracket contract), so SETTLE always has the id
+                // (AGENTS.md doctrine).
+                #[allow(clippy::expect_used)]
+                let turn_id = hook_ctx
+                    .turn_id()
+                    .expect("SETTLE without an announced turn id");
                 if !crate::agent::prompt_request::is_empty_assistant_turn(&turn.choice) {
-                    conversation.fold(Message::Assistant {
-                        id: turn.message_id.clone(),
-                        content: turn.choice.clone(),
-                    });
+                    cell_fold_final(
+                        conversation,
+                        Message::Assistant {
+                            id: Some(turn_id.clone()),
+                            content: turn.choice.clone(),
+                        },
+                        turn_id.clone(),
+                    );
                 }
-                if let Some(id) = hook_ctx.turn_id() {
-                    yield Ok(DriveItem::Item(MultiTurnStreamItem::TurnCommitted {
-                        id: id.clone(),
-                        content: Box::new(turn.choice.clone()),
-                    }));
-                }
+                yield Ok(DriveItem::Item(MultiTurnStreamItem::TurnCommitted {
+                    id: turn_id,
+                    content: Box::new(turn.choice.clone()),
+                }));
 
                 // Sanctioned slice: the `min` guard makes the range
                 // total — the run's entry never exceeds the grown
-                // conversation (the loop only folds into it).
-                #[allow(clippy::indexing_slicing)]
-                let run_messages = conversation.messages()[entry_len.min(
-                    conversation.messages().len(),
-                )..]
-                    .to_vec();
+                // conversation (the loop only folds into it). The
+                // window is always set here: FINAL follows a PREPARE,
+                // which follows the first decision that sets it
+                // (AGENTS.md doctrine).
+                #[allow(clippy::expect_used, clippy::indexing_slicing)]
+                let run_messages = {
+                    let entry = entry_len
+                        .expect("FINAL without a first decision — engine wiring bug");
+                    let messages = cell_history(conversation);
+                    messages[entry.min(messages.len())..].to_vec()
+                };
                 let response = PromptResponse::new(
                     crate::agent::prompt_request::assistant_text_from_choice(&turn.choice),
                     ledger.usage(),
@@ -632,11 +711,12 @@ where
 
             // The roundtrip commits whole: the assistant and its complete
             // batch, verified and enqueued as one unit (ENGINE.md, the
-            // durable conversation). Results are non-empty for a tools
-            // turn; the construction cannot fail.
-            let results_payload = results.clone();
+            // durable conversation). The announced id is the assistant's
+            // entry id; the results fold under their born-early ids —
+            // one fold, the durable commit, through the cell's one
+            // write hold.
             let results_content = match OneOrMany::from_iter_optional(
-                results.into_iter().map(|(_, content)| content),
+                results.iter().map(|(_, content)| content.clone()),
             ) {
                 Some(content) => content,
                 None => {
@@ -648,23 +728,30 @@ where
                     break 'outer;
                 }
             };
-            conversation.fold_all(vec![
-                Message::Assistant {
-                    id: turn.message_id.clone(),
-                    content: turn.choice.clone(),
-                },
-                Message::User {
-                    content: results_content,
-                },
-            ]);
-            if let Some(id) = hook_ctx.turn_id() {
-                yield Ok(DriveItem::Item(MultiTurnStreamItem::TurnCommitted {
-                    id: id.clone(),
-                    content: Box::new(turn.choice.clone()),
-                }));
-            }
-            yield Ok(DriveItem::Item(MultiTurnStreamItem::BatchResults {
-                results: results_payload,
+            // Sanctioned crash: PREPARE always announces before MODEL
+            // (the bracket contract), so SETTLE always has the id
+            // (AGENTS.md doctrine).
+            #[allow(clippy::expect_used)]
+            let turn_id = hook_ctx
+                .turn_id()
+                .expect("SETTLE without an announced turn id");
+            let result_ids: Vec<String> = results.iter().map(|(id, _)| id.clone()).collect();
+            cell_fold_roundtrip(
+                conversation,
+                vec![
+                    Message::Assistant {
+                        id: Some(turn_id.clone()),
+                        content: turn.choice.clone(),
+                    },
+                    Message::User {
+                        content: results_content,
+                    },
+                ],
+                result_ids,
+            );
+            yield Ok(DriveItem::Item(MultiTurnStreamItem::TurnCommitted {
+                id: turn_id,
+                content: Box::new(turn.choice.clone()),
             }));
             turns_used += 1;
             // The batch is committed; now — and only now — the loop

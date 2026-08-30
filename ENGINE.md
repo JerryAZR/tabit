@@ -55,8 +55,25 @@ disk *before* trying, and none runs twice on the same degraded buffer.
 
 **Entry contract** (what the outer layer hands the black box):
 the conversation (a `ContextManager`) and `max_turns ≥ 1` — entering a
-run that cannot run is unrepresentable. The mailbox may be empty (a
-continue run); the conversation must not be (nothing to continue).
+run that cannot run is unrepresentable. The conversation may be empty
+at entry — the opening batch arrives through the first CONVERGE's
+drain (the not-pre-joined rule above) — but it must not be empty at
+the **first decision**: after that first drain the conversation ends
+with the message being answered, and a still-empty one is a caller
+error (a run on an empty conversation with nothing queued). The run's
+own message window (`entry_len`) is measured at that same first
+decision — after the drain, so a steered opening counts as the run's
+own and nothing before it does.
+
+**A failed open consumes its batch.** The engine drains the opening
+batch at its first CONVERGE; a run that fails *before* its engine
+exists (the degraded-buffer guard, the agent derivation) cannot. Those
+failure paths run the opening drain themselves — the messages are
+acknowledged (`user_message`) and recorded, then the run fails — so
+the outer pump never spins on a batch a failed open left queued, and
+the failure takes the same shape a provider error does. The one other
+pre-drain failure (a zero turn budget) is rejected when the session is
+built, never reaching a run.
 
 **Exit contract** (what the black box guarantees):
 
@@ -145,17 +162,26 @@ refactor): it was a coroutine re-encoded as a state enum plus a
 feeding protocol — one feeder, no external events choosing
 transitions, and all genuinely asynchronous things (abort, steers,
 tool chains) already lived outside it. The run is now **one async
-function** — a coroutine for real — that holds `&mut ContextManager`
-for its lifetime and receives the shared leaves (steer source, cancel
+function** — a coroutine for real — that receives the shared
+conversation **cell** (the one durable `ContextManager` behind the
+session's `RwLock`) plus the shared leaves (steer source, cancel
 token, interaction hub, event channel) as parameters. The
 conversation's source of truth is the `ContextManager` (tabit-log):
 `fold` / `fold_all` / `messages`, context derived per read and never
-stored, batches verified whole and committed whole. There is no
-engine-side history copy, no parked-turn slot, and no session-side
-mirror.
+stored, batches verified whole and committed whole. **The loop's
+folds are the durable commits** — one instance, one writer at a time:
+during a run the loop folds the cell (each fold a brief, synchronous
+`write()` hold; no await under a guard), between runs the beat writes
+(checkout, after abort made the tree quiescent), and the session
+handler never folds — it is emission-only, translating the loop's
+items into events. There is no engine-side copy (no `NullBuffer`
+twin), no parked-turn slot, and no session-side mirror; every fold is
+a real buffered write through the one commit door. A standalone run
+seeds its own in-memory manager over a `NullBuffer` — the same loop,
+a write-less cell, by construction.
 
 ```
-run(conversation: &mut ContextManager, leaves, budget) -> Outcome
+run(conversation: &ConversationCell, leaves, budget) -> Outcome
 
 state carried across iterations — run locals, the whole of it:
   defect_streak, provider_streak   // consecutive failed attempts
@@ -183,12 +209,19 @@ loop {
                                       // a steering user is their own breaker
 
   // ── DECIDE ── the one policy site; every loop-or-exit conditional
-  //   lives here. The first pass cannot exit: nothing is set and
-  //   budget >= 1 — at-least-one-turn by construction.
+  //   lives here. The first pass cannot exit on the policy rules:
+  //   nothing is set and budget >= 1 — at-least-one-turn by
+  //   construction; the entry rule below is the one first-pass exit.
   if pending_error is terminal     { exit Failed(pending_error); }
   if defect_streak   > DEFECT_CAP  { exit Failed(defects_exhausted); }
   if provider_streak > RETRY_CAP   { exit Failed(retries_exhausted); }
   if turns_used      >= budget     { exit Failed(budget_exhausted); }
+  if entry_len unset {                   // the entry rule, at the first
+    if conversation is empty {           // decision — after the opening
+      exit Failed(empty_conversation);   // drain, the conversation must
+    }                                    // end with the message being
+    entry_len = len - 1;                 // answered; the run's own
+  }                                      // messages start there
 
   // ── PREPARE ──
   history = conversation.messages();  // [READ] the request IS the history;
@@ -243,14 +276,15 @@ machinery, and no pending slot anywhere.
 
 **Entry ids and announced ids are one value**: the assistant
 `Message`'s `id` (minted by the engine from the injected id source,
-announced by `TurnStarted` before the first content byte) becomes the
-assistant entry's id at commit. `TurnStarted { id } … TurnCommitted
-{ id }` bracket a turn for live and replay alike; an attempt that dies
-leaves its announced id uncommitted. **`TurnCommitted` is the sole
-commit event** — final folds and roundtrips alike (the old
-`RoundtripClosed` is deleted: it always fired beside `TurnCommitted`
-and only existed as the session door's trigger, and the door is now
-inline in `fold_all`).
+announced by `TurnStarted` before the first content byte) is the id
+the loop's own fold commits — the provider-assigned message id never
+enters the tree (it is telemetry metadata only). `TurnStarted { id }
+… TurnCommitted { id }` bracket a turn for live and replay alike; an
+attempt that dies leaves its announced id uncommitted.
+**`TurnCommitted` is the sole commit event** — final folds and
+roundtrips alike (the old `RoundtripClosed` is deleted: it always
+fired beside `TurnCommitted` and only existed as the session door's
+trigger, and the door is now inline in `fold_all`).
 
 ### Error taxonomy (what a model turn can fail with)
 
@@ -302,10 +336,11 @@ a passive event bus) is the reference shape when that day comes.
 | the one drain; the one policy site | cancel token: races every await, never a state |
 | conversation writes (`fold`, `fold_all`) | interaction hub: asks register/resolve; run terminals clear |
 | budget, streaks, `terminating`, `turns_used` | event channel: write-only, frontend-facing |
-| loop-or-exit decisions | the conversation: **owned by the session's
-handler** (`ContextManager` behind the session's `RwLock`); the loop
-streams its history in and its durable items out — the handler folds
-at the item arms |
+| loop-or-exit decisions | the conversation: **one instance behind
+the shared cell** (`ContextManager` in the session's `RwLock`); the
+loop folds it during a run — its folds are the durable commits — and
+the beat writes between runs (checkout, post-abort); writers are
+mutually exclusive in time |
 
 **Every shared cell has one owner, named.** Whoever else may read it
 is stated; nobody else may write it. The table above is the contract
@@ -314,7 +349,7 @@ a gap to patch around. Today:
 
 | cell | owner | readers (never writers) |
 |---|---|---|
-| the conversation (tree + head) | the session's handler, via `ContextManager` | the receive-time probes (checkout validation) — read-only |
+| the conversation (tree + head) | the session's handler, via `ContextManager`; **written during a run by the loop as its delegate, between runs by the beat** — one writer at a time | the receive-time probes (checkout validation) — read-only |
 | the write buffer | the session's `SessionWriter` (shared handle) | the manager's commits, the session's side records — both enqueue through it |
 | the mailbox | the session actor | the loop's steer drain (take at the loop top) |
 | the cancel token | the abort handle | every await in the run (raced, never read as state) |
@@ -328,11 +363,12 @@ roundtrip-closed node (flag 23's rule), so an id that is announced
 but not yet folded (a queued message, an in-flight turn) is not a
 valid target — and that is correct: you can only rewind to a
 committed checkpoint. The read is race-free by the `RwLock`
-discipline (folds grow the tree in one write-hold; a probe reads
-through `read()`, so it can never observe a partially folded state).
-A checkout composes abort, so its application at the beat runs
-against a quiescent tree — the only writes after abort are the
-session's side records, never tree growth.
+discipline (the loop's folds grow the tree in one synchronous
+write-hold; a probe reads through `read()`, so it can never observe
+a partially folded state, and blocks at most one commit —
+microseconds). A checkout composes abort, so its application at the
+beat runs against a quiescent tree — the only writes after abort are
+the session's side records, never tree growth.
 
 **The persist-degraded flag's one clear site is the entry guard's
 retry.** A stuck buffer retries at every later enqueue and at run

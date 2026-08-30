@@ -332,6 +332,7 @@ async fn blocking_and_streaming_preserve_raw_failure_while_rewriting_presentatio
         .build()
         .runner("go")
         .max_turns(3)
+        .turn_id_source(parity_turn_ids())
         .run()
         .await
         .expect("blocking run");
@@ -355,6 +356,7 @@ async fn blocking_and_streaming_preserve_raw_failure_while_rewriting_presentatio
         .build()
         .runner("go")
         .max_turns(3)
+        .turn_id_source(parity_turn_ids())
         .stream()
         .await;
     while let Some(item) = stream.next().await {
@@ -731,49 +733,42 @@ fn canonical_usage() -> Usage {
 }
 
 #[tokio::test]
-async fn response_scoped_id_is_not_promoted_into_history() {
+async fn assistant_entries_carry_announced_turn_ids_not_provider_ids() {
+    // The one-value rule (ENGINE.md): the announced turn id is THE
+    // entry id; provider-assigned message/response ids never enter
+    // the history (telemetry metadata only). A provider that assigns
+    // either id shape changes nothing here.
     let prompt = Message::user("prompt");
-    let response = AgentBuilder::new(MockCompletionModel::new([
-        MockTurn::text("reply").with_response_id("chatcmpl-123")
-    ]))
-    .build()
-    .runner(prompt)
-    .run()
-    .await
-    .expect("blocking response");
-
-    let messages = response.messages.expect("history enabled");
-    let assistant_ids: Vec<_> = messages
-        .iter()
-        .filter_map(|message| match message {
-            Message::Assistant { id, .. } => Some(id.clone()),
-            _ => None,
-        })
-        .collect();
-    assert_eq!(assistant_ids, [None]);
-}
-
-#[tokio::test]
-async fn message_id_is_promoted_into_history() {
-    let prompt = Message::user("prompt");
-    let response = AgentBuilder::new(MockCompletionModel::new([
-        MockTurn::text("reply").with_message_id("msg_abc")
-    ]))
-    .build()
-    .runner(prompt)
-    .run()
-    .await
-    .expect("blocking response");
-
-    let messages = response.messages.expect("history enabled");
-    let assistant_ids: Vec<_> = messages
-        .iter()
-        .filter_map(|message| match message {
-            Message::Assistant { id, .. } => Some(id.clone()),
-            _ => None,
-        })
-        .collect();
-    assert_eq!(assistant_ids, [Some("msg_abc".to_string())]);
+    let assistant_ids_of = |turn: MockTurn| {
+        let prompt = prompt.clone();
+        async move {
+            let response = AgentBuilder::new(MockCompletionModel::new([turn]))
+                .build()
+                .runner(prompt)
+                .turn_id_source(parity_turn_ids())
+                .run()
+                .await
+                .expect("blocking response");
+            let messages = response.messages.expect("history enabled");
+            messages
+                .iter()
+                .filter_map(|message| match message {
+                    Message::Assistant { id, .. } => Some(id.clone()),
+                    _ => None,
+                })
+                .collect::<Vec<_>>()
+        }
+    };
+    let with_message_id =
+        assistant_ids_of(MockTurn::text("reply").with_message_id("msg_abc")).await;
+    let with_response_id =
+        assistant_ids_of(MockTurn::text("reply").with_response_id("chatcmpl-123")).await;
+    assert_eq!(with_message_id, [Some("turn-1".to_string())]);
+    assert_eq!(
+        with_response_id,
+        [Some("turn-1".to_string())],
+        "a response-scoped id is not the entry id either"
+    );
 }
 
 #[tokio::test]
@@ -1064,6 +1059,7 @@ async fn run_and_stream_behave_identically_for_a_tool_call() {
         .build()
         .runner("add 2 and 3")
         .max_turns(2)
+        .turn_id_source(parity_turn_ids())
         .add_hook(blocking_hook.clone())
         .run()
         .await
@@ -1077,6 +1073,7 @@ async fn run_and_stream_behave_identically_for_a_tool_call() {
         .build()
         .runner("add 2 and 3")
         .max_turns(2)
+        .turn_id_source(parity_turn_ids())
         .add_hook(streaming_hook.clone())
         .stream()
         .await;
@@ -2595,6 +2592,7 @@ async fn run_and_stream_same_message_history_for_parallel_tool_calls() {
         .build()
         .runner("add two pairs")
         .max_turns(3)
+        .turn_id_source(parity_turn_ids())
         .tool_concurrency(4)
         .run()
         .await
@@ -2616,6 +2614,7 @@ async fn run_and_stream_same_message_history_for_parallel_tool_calls() {
         .build()
         .runner("add two pairs")
         .max_turns(3)
+        .turn_id_source(parity_turn_ids())
         .stream()
         .await;
     let mut final_response = None;
@@ -2779,6 +2778,7 @@ async fn stream_and_run_same_message_history_for_parallel_tool_calls_under_concu
         .build()
         .runner("add two pairs")
         .max_turns(3)
+        .turn_id_source(parity_turn_ids())
         .tool_concurrency(4)
         .run()
         .await
@@ -2800,6 +2800,7 @@ async fn stream_and_run_same_message_history_for_parallel_tool_calls_under_concu
         .build()
         .runner("add two pairs")
         .max_turns(3)
+        .turn_id_source(parity_turn_ids())
         .tool_concurrency(4)
         .stream()
         .await;
@@ -2842,6 +2843,7 @@ async fn stream_preserves_history_order_under_out_of_order_completion() {
         .build()
         .runner("go")
         .max_turns(3)
+        .turn_id_source(parity_turn_ids())
         .tool_concurrency(4)
         .stream()
         .await;
@@ -4037,6 +4039,17 @@ struct ParityOutcome {
     tool_results: Vec<String>,
 }
 
+/// Deterministic announced-id mint for parity runs: both scenarios
+/// restart the same sequence, so assistant entries (which carry the
+/// announced ids — the one-value rule) compare equal across surfaces.
+fn parity_turn_ids() -> crate::agent::TurnIdSource {
+    let counter = Arc::new(AtomicU32::new(0));
+    Arc::new(move || {
+        let n = counter.fetch_add(1, Ordering::SeqCst) + 1;
+        format!("turn-{n}")
+    })
+}
+
 async fn run_blocking_scenario(prompt: &'static str, turns: &[ScriptedTurn]) -> ParityOutcome {
     let model = MockCompletionModel::from_turns(turns.iter().map(ScriptedTurn::as_blocking_turn));
     let hook = RecordingHook::default();
@@ -4045,6 +4058,7 @@ async fn run_blocking_scenario(prompt: &'static str, turns: &[ScriptedTurn]) -> 
         .build()
         .runner(prompt)
         .max_turns(8)
+        .turn_id_source(parity_turn_ids())
         .add_hook(hook.clone())
         .run()
         .await
@@ -4071,6 +4085,7 @@ async fn run_streaming_scenario(
         .build()
         .runner(prompt)
         .max_turns(8)
+        .turn_id_source(parity_turn_ids())
         .add_hook(hook.clone())
         .stream()
         .await;
@@ -4252,6 +4267,7 @@ async fn valid_tool_call_skip_parity_across_run_and_stream() {
         .build()
         .runner("add 2 and 3")
         .max_turns(3)
+        .turn_id_source(parity_turn_ids())
         .add_hook(blocking_hook.clone())
         .add_hook(SkipToolCallHook("skipped by policy"))
         .run()
@@ -4269,6 +4285,7 @@ async fn valid_tool_call_skip_parity_across_run_and_stream() {
         .build()
         .runner("add 2 and 3")
         .max_turns(3)
+        .turn_id_source(parity_turn_ids())
         .add_hook(streaming_hook.clone())
         .add_hook(SkipToolCallHook("skipped by policy"))
         .stream()
@@ -4848,6 +4865,7 @@ async fn valid_tool_result_rewrite_parity_across_run_and_stream() {
         .build()
         .runner("add 2 and 3")
         .max_turns(3)
+        .turn_id_source(parity_turn_ids())
         .add_hook(blocking_hook.clone())
         .add_hook(RewriteToolResultHook("redacted-result"))
         .run()
@@ -4865,6 +4883,7 @@ async fn valid_tool_result_rewrite_parity_across_run_and_stream() {
         .build()
         .runner("add 2 and 3")
         .max_turns(3)
+        .turn_id_source(parity_turn_ids())
         .add_hook(streaming_hook.clone())
         .add_hook(RewriteToolResultHook("redacted-result"))
         .stream()
@@ -5294,6 +5313,7 @@ async fn human_in_the_loop_approve_deny_edit_parity_across_run_and_stream() {
         .build()
         .runner("carry out the plan")
         .max_turns(3)
+        .turn_id_source(parity_turn_ids())
         .add_hook(blocking_recorder.clone())
         .add_hook(blocking_approver.clone())
         .run()
@@ -5312,6 +5332,7 @@ async fn human_in_the_loop_approve_deny_edit_parity_across_run_and_stream() {
         .build()
         .runner("carry out the plan")
         .max_turns(3)
+        .turn_id_source(parity_turn_ids())
         .add_hook(streaming_recorder.clone())
         .add_hook(streaming_approver.clone())
         .stream()

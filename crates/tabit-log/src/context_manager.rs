@@ -39,6 +39,15 @@ use rig_core::message::{AssistantContent, ToolResult, UserContent};
 #[error("checkout target `{0}` is not in this session")]
 pub struct CheckoutError(pub String);
 
+/// The conversation as a shared cell: the one manager behind the
+/// session's `RwLock`. Writers are enumerated and mutually exclusive
+/// in time — during a run the engine's folds (brief, synchronous
+/// `write()` holds through [`lock::write`](crate::lock::write));
+/// between runs the session beat — and readers take `read()` holds
+/// (the receive-time probe, the engine's turn-history reads). No
+/// await is ever held under a guard.
+pub type ConversationCell = std::sync::Arc<std::sync::RwLock<ContextManager>>;
+
 /// The source of truth for the conversation. Whoever holds the manager
 /// is the conversation — the session idle, the run live.
 ///

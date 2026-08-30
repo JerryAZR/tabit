@@ -134,8 +134,10 @@ pub(crate) fn tool_result_decision(action: ToolResultAction) -> ToolResultDecisi
 /// empty take is a valid feed. The contract is single-consumer — one
 /// driver per source.
 pub trait SteeringSource: WasmCompatSend + WasmCompatSync {
-    /// Take every queued steering message, in the order they arrived.
-    fn drain(&self) -> Vec<Message>;
+    /// Take every queued steering message with its born-early entry id,
+    /// in arrival order — the loop folds each under its id, so live and
+    /// replay name the same node.
+    fn drain(&self) -> Vec<(String, Message)>;
 
     /// Discard everything still queued, with the source's own notice.
     /// Called at exactly one site: the post-tool stop exit (ENGINE.md,
@@ -209,6 +211,11 @@ pub struct AgentRunner {
     /// Queued user input injected at steering points; `None` disables
     /// steering for this request.
     pub(crate) steering: Option<Arc<dyn SteeringSource>>,
+    /// The caller-supplied conversation cell: when set, the loop folds
+    /// THIS manager — its folds are the durable commits (ENGINE.md, the
+    /// unified conversation); when absent, the run seeds a standalone
+    /// in-memory manager over a `NullBuffer`.
+    pub(crate) conversation_cell: Option<tabit_log::ConversationCell>,
     /// Called once per model-call attempt, at the moment the attempt
     /// commits, to mint the turn's announced id. The engine's default is
     /// its short random ids; consumers that key durable records on turn
@@ -257,6 +264,7 @@ impl AgentRunner {
             hooks: agent.hooks.clone(),
             error_usage: None,
             steering: None,
+            conversation_cell: None,
             turn_id_source: Arc::new(rig_core::id::generate),
         }
     }
@@ -267,6 +275,15 @@ impl AgentRunner {
     /// attempt.
     pub fn turn_id_source(mut self, source: TurnIdSource) -> Self {
         self.turn_id_source = source;
+        self
+    }
+
+    /// Supply the conversation cell the loop folds — the one durable
+    /// manager, whose folds are the run's commits (ENGINE.md, the unified
+    /// conversation). Without one, the run seeds a standalone in-memory
+    /// conversation (nothing persists).
+    pub fn conversation_cell(mut self, cell: tabit_log::ConversationCell) -> Self {
+        self.conversation_cell = Some(cell);
         self
     }
 
@@ -488,15 +505,31 @@ impl AgentRunner {
         self.agent_name.as_deref().unwrap_or(UNKNOWN_AGENT_NAME)
     }
 
-    /// Build this runner's conversation (the loop's `ContextManager`):
-    /// the caller-supplied conversation, or a fresh seeded standalone
-    /// one. `history_override` replaces the configured chat history
-    /// (e.g. with memory-loaded history; never in conversation mode —
-    /// a conversation IS its history).
+    /// Build this runner's conversation cell: the caller-supplied
+    /// durable manager when one was set ([`Self::conversation_cell`]) —
+    /// the loop's folds are the durable commits — else a fresh seeded
+    /// standalone one over a `NullBuffer` (nothing persists).
+    /// `history_override` replaces the configured chat history for the
+    /// seeded case only (a supplied cell IS its history).
     pub(crate) fn build_run(
         &self,
         history_override: Option<Vec<Message>>,
-    ) -> Result<ContextManager, PromptError> {
+    ) -> Result<tabit_log::ConversationCell, PromptError> {
+        if let Some(cell) = &self.conversation_cell {
+            if self.max_turns == 0 {
+                return Err(PromptError::prompt_cancelled(
+                    Vec::new(),
+                    "max_turns must be at least 1 — a run always executes one turn",
+                ));
+            }
+            // The cell may be empty at entry: the opening message can
+            // arrive through the steering drain at the loop's first
+            // CONVERGE (the session's mailbox — ENGINE.md's
+            // not-pre-joined rule). The non-empty rule lives at the
+            // loop's first decision, after cell and drain have
+            // converged.
+            return Ok(cell.clone());
+        }
         // The run is entered with one already-joined history (ENGINE.md:
         // the request IS the history, no prompt/context split).
         let history = match &self.input {
@@ -525,7 +558,9 @@ impl AgentRunner {
                 "max_turns must be at least 1 — a run always executes one turn",
             ));
         }
-        Ok(ContextManager::seeded(history))
+        Ok(std::sync::Arc::new(std::sync::RwLock::new(
+            ContextManager::seeded(history),
+        )))
     }
 
     /// The run's input history for prompt mode: an override (memory) or
@@ -1015,7 +1050,7 @@ impl AgentRunner {
             }
         };
 
-        let mut conversation = self.build_run(history_override)?;
+        let conversation = self.build_run(history_override)?;
 
         // Fold the shared engine to its final response. The blocking surface
         // uses a unary model transport and ignores the intermediate items the
@@ -1026,7 +1061,7 @@ impl AgentRunner {
         let driver = drive_agent(
             self,
             UnaryTurnSource::new(record_telemetry_content),
-            &mut conversation,
+            &conversation,
             agent_span,
             created_agent_span,
             memory_handle,
@@ -1103,8 +1138,8 @@ impl AgentRunner {
             }
         };
 
-        // The conversation this run drives is owned by the returned
-        // stream (the loop borrows it for the run's lifetime); a build
+        // The conversation cell this run folds (supplied durable
+        // manager, or the stream-owned standalone twin); a build
         // failure surfaces as the stream's first and only item.
         let conversation = match self.build_run(history_override) {
             Ok(conversation) => conversation,
@@ -1122,7 +1157,6 @@ impl AgentRunner {
         // its own span handle so the entry keeps the original.
         let loop_span = agent_span.clone();
         let stream = async_stream::stream! {
-            let mut conversation = conversation;
             let source = StreamingTurnSource::new(
                 self.agent_name_or_default().to_string(),
                 created_agent_span,
@@ -1135,7 +1169,7 @@ impl AgentRunner {
             let driver = drive_agent(
                 self,
                 source,
-                &mut conversation,
+                &conversation,
                 loop_span,
                 created_agent_span,
                 memory_handle,
