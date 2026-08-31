@@ -458,38 +458,37 @@ dual-fold clarification) are settled:
 Recorded from the public-API discussion after the conversation
 unification; ruled to wait until the discussion series concludes:
 
-- **Batch the steer announcement into one yield** (owner-ruled, the
-  alt-2 design): drain all → fold all → a single `Steer { batch }`
-  item; the session's handler announces every `user_message` in one
-  synchronous loop. Consistent by construction — abort acts only at
-  select-poll boundaries, and fold-plus-yield is one uninterrupted
-  poll, so the parked state "committed but unannounced" is
-  unrepresentable (the multi-steer residual of the per-item
-  announcement dies with it). ENGINE.md gains the rule: **a suspension
-  never sits between a commit and its announcement.**
-- **Delete `ConversationMemory` wholesale** (owner-ruled): rig-core's
-  `memory` module (the trait, `InMemoryConversationMemory`,
-  `DemotionHook` — no users outside the module), the builder's
-  `memory`/`conversation_id`/`without_memory` knobs, the runner's
-  load block, the `memory_handle` threading through `drive_agent`,
-  and `append_run_messages`. It is the weaker sibling of
-  `ContextManager` (rule 7: one concern, one home), zero tabit
-  callers, bypassed by construction under sessions, and the
-  `entry_len` bug of 2026-08 lived in machinery that exists only to
-  feed it.
-- **Drop `PromptResponse.messages` and the `entry_len` window**
-  (owner-ruled direction): the response reports outcomes (output,
-  usage, completion_calls, content); the conversation reports
-  history. Every stateful caller already holds the durable read
-  handle (their cell Arc, or `Session::context()` — readable even
-  mid-run); the only caller who needed the response to carry history
-  was the memory-backed one, deleted above.
-- **Same sweep, error paths**: `PromptError::prompt_cancelled` and
-  `MaxTurnsError` embed full conversation copies; the session only
-  stringifies the message, and the caller holds the grown cell even
-  after a failed run (folds committed). Same duplication family.
+- **Batch the steer announcement into one yield** — done (2026-08,
+  `ee58a93`): one `Steer { batch }` item per drain, the fold and the
+  yield sharing one uninterrupted poll; ENGINE.md carries the rule
+  (**a suspension never sits between a commit and its announcement**)
+  and the channel split (stream = progress; the mailbox's notice
+  channel = ledger).
+- **Delete `ConversationMemory` wholesale** — done (2026-08,
+  `06ccb0b`): the module, the knobs, the load/append pair, the
+  `memory_handle` threading, the error variant, the facade re-export,
+  and the memory test families. `build_run` lost its only-for-memory
+  `history_override` parameter.
+- **Drop `PromptResponse.messages` and the `entry_len` window** — done
+  (2026-08, `e24d2b9`): outcomes only; the conversation is the
+  transcript. Error paths lost their embedded history copies the same
+  day. Callers migrated to the cell door (conformance harness, parity
+  tests — now comparing the durable conversations both surfaces fold —
+  cassette suites, `Chat::chat`'s mirror).
 - **Parity-test review** (owner lens: "if you need two things to work
   identically, first consider whether there should be two at all") —
-  review the blocking/streaming parity harness under that lens;
-  anything the two surfaces must keep identical by hand is a
-  candidate for one implementation.
+  reviewed 2026-08. Findings: the loop is ONE implementation
+  (`drive_agent`); blocking/streaming differ only in `TurnSource`, so
+  the parity family guards the adapter seam, not a duplicated loop —
+  no collapse available there. The lens does catch two things:
+  1. **The blocking surface has zero tabit consumers** — sessions run
+     streaming only (`open_run` → `stream_chat`); the blocking
+     `Prompt` surface exists for the vendored facade. Half the parity
+     family exists to guard it. Feed this into the rig-core
+     vendored-mass-policy item below: whether the blocking surface
+     stays decides how much parity surface stays.
+  2. The ~8 ad-hoc blocking/streaming builder pairs in
+     `runner_tests.rs` hand-roll what
+     `run_blocking_scenario`/`run_streaming_scenario` already
+     abstract — a mechanical consolidation whenever those files are
+     next touched; low priority.
