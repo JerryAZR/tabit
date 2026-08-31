@@ -739,7 +739,7 @@ async fn a_dangling_tool_roundtrip_fails_the_resume_loudly() -> Result<(), Sessi
     match resumed {
         Err(SessionError::Corrupt { message, .. }) => {
             assert!(
-                message.contains("open tool batch"),
+                message.contains("unanswered"),
                 "the failure names the dangling shape: {message}"
             );
         }

@@ -1,5 +1,5 @@
 //! Folding conversation nodes into the model-visible view, and the
-//! structural checks over folded branches.
+//! structural check over a path's tail.
 //!
 //! The context builder here is the one implementation everywhere
 //! ([`crate::ContextManager::messages`] calls it; the parser's reload
@@ -64,53 +64,76 @@ pub fn calls_of(message: &Message) -> Vec<&ToolCall> {
         .collect()
 }
 
-/// Validate that a branch is **roundtrip-closed**: every assistant turn
-/// on it that called tools is fully answered by the tool results that
-/// follow it on the branch. `Err` names the violation — the checkout
-/// rule (a mid-roundtrip target refuses at the door) and the parser's
-/// final-head check both route through here.
-pub fn path_is_closed(entries: &[SessionEntry]) -> Result<(), String> {
-    let mut pending: Vec<String> = Vec::new();
-    for entry in entries {
-        match &entry.kind {
-            EntryKind::UserMessage { .. } => {
-                if pending.is_empty() {
-                    continue;
-                }
+/// Validate that a path **ends roundtrip-closed**: the tip must not sit
+/// inside a tool roundtrip. Walks back from the tip only as far as the
+/// trailing result run and its assistant — one batch's span. Under the
+/// one-commit-door invariant (a roundtrip enters the tree whole or not
+/// at all) everything further back is closed by construction, so the
+/// check is a bounded lookback, never a branch walk. The live checkout
+/// door (a mid-roundtrip target refuses) and the parser's torn-tail
+/// check both route through here.
+pub fn tail_is_closed(path: &[SessionEntry]) -> Result<(), String> {
+    // The trailing run of tool results, walking back from the tip.
+    let batch_start = path
+        .iter()
+        .rposition(|entry| !matches!(entry.kind, EntryKind::ToolResult { .. }))
+        .map(|pos| pos + 1)
+        .unwrap_or(0);
+    let (before, trailing) = path.split_at(batch_start);
+    let Some(boundary) = before.last() else {
+        return match trailing.first() {
+            None => Ok(()),
+            Some(entry) => Err(format!(
+                "the tail's tool results (from entry `{}`) have no assistant behind them",
+                entry.id
+            )),
+        };
+    };
+    if trailing.is_empty() {
+        // A tip that is not a tool result: illegal only when it is a
+        // call-carrying assistant (its roundtrip never landed).
+        if let EntryKind::AssistantMessage { message, .. } = &boundary.kind {
+            let calls = calls_of(message);
+            if !calls.is_empty() {
                 return Err(format!(
-                    "user message interrupts the open tool batch of entry `{}`",
-                    entry.id
+                    "the tail ends at assistant entry `{}` with {} unanswered call(s)",
+                    boundary.id,
+                    calls.len()
                 ));
             }
-            EntryKind::AssistantMessage { message, .. } => {
-                if !pending.is_empty() {
-                    return Err(format!(
-                        "branch ends the batch of a previous turn open at entry `{}`",
-                        entry.id
-                    ));
-                }
-                pending = calls_of(message)
-                    .iter()
-                    .map(|call| call.id.clone())
-                    .collect();
-            }
-            EntryKind::ToolResult { result } => {
-                let Some(index) = pending.iter().position(|id| *id == result.id) else {
-                    return Err(format!(
-                        "tool result `{}` answers no open call at entry `{}`",
-                        result.id, entry.id
-                    ));
-                };
-                pending.swap_remove(index);
-            }
         }
+        return Ok(());
     }
-    if pending.is_empty() {
+    // A trailing result run: its assistant sits right before it (the
+    // whole-roundtrip shape), and the run must answer every call once.
+    let EntryKind::AssistantMessage { message, .. } = &boundary.kind else {
+        return Err(format!(
+            "the tail's tool results follow entry `{}`, not their assistant",
+            boundary.id
+        ));
+    };
+    let mut open: Vec<String> = calls_of(message)
+        .iter()
+        .map(|call| call.id.clone())
+        .collect();
+    for entry in trailing {
+        let EntryKind::ToolResult { result } = &entry.kind else {
+            continue; // the trailing run holds only results by construction
+        };
+        let Some(index) = open.iter().position(|id| *id == result.id) else {
+            return Err(format!(
+                "tool result `{}` answers no open call at entry `{}`",
+                result.id, entry.id
+            ));
+        };
+        open.swap_remove(index);
+    }
+    if open.is_empty() {
         Ok(())
     } else {
         Err(format!(
-            "branch ends mid-roundtrip: {} call(s) unanswered",
-            pending.len()
+            "the tail ends mid-roundtrip: {} call(s) unanswered",
+            open.len()
         ))
     }
 }

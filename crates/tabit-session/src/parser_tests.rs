@@ -188,58 +188,16 @@ fn a_trailing_open_batch_is_corruption() {
         assistant_node("a2", Some("r1"), &[("c2", "read")]),
         // c2 never answered.
     ]);
-    assert!(err.to_string().contains("open tool batch"), "{err}");
+    assert!(err.to_string().contains("unanswered"), "{err}");
 }
 
 #[test]
-fn a_result_without_an_open_batch_is_corruption() {
+fn a_result_without_its_assistant_is_corruption() {
     let err = parse_err(&[
         user_node("u1", None, "go"),
         result_node("r1", Some("u1"), "ghost"),
     ]);
-    assert!(err.to_string().contains("no open call"), "{err}");
-}
-
-#[test]
-fn a_user_message_interrupting_a_batch_is_corruption() {
-    let err = parse_err(&[
-        user_node("u1", None, "go"),
-        assistant_node("a1", Some("u1"), &[("c1", "read"), ("c2", "read")]),
-        result_node("r1", Some("a1"), "c1"),
-        user_node("u2", Some("r1"), "mid-batch!"),
-    ]);
-    assert!(err.to_string().contains("interrupts"), "{err}");
-}
-
-#[test]
-fn a_mid_batch_checkout_target_is_corruption() {
-    // A complete batch, then a checkout onto its first result: the branch
-    // there leaves the second call unanswered. (A checkout *inside* the
-    // batch's records is unrepresentable — batches write as one blob —
-    // and is rejected even earlier, as a side record in an open batch.)
-    let err = parse_err(&[
-        user_node("u1", None, "go"),
-        assistant_node("a1", Some("u1"), &[("c1", "read"), ("c2", "read")]),
-        result_node("r1", Some("a1"), "c1"),
-        result_node("r2", Some("r1"), "c2"),
-        side(SideKind::Checkout {
-            to: Some("r1".to_string()),
-        }),
-    ]);
-    assert!(err.to_string().contains("checkout target"), "{err}");
-}
-
-#[test]
-fn a_side_record_inside_a_batch_is_corruption() {
-    let err = parse_err(&[
-        user_node("u1", None, "go"),
-        assistant_node("a1", Some("u1"), &[("c1", "read")]),
-        side(SideKind::Aborted),
-    ]);
-    assert!(
-        err.to_string().contains("inside the open tool batch"),
-        "{err}"
-    );
+    assert!(err.to_string().contains("not their assistant"), "{err}");
 }
 
 #[test]

@@ -1,4 +1,4 @@
-//! Node→context projection and the structural checks over branches.
+//! Node→context projection and the tail closedness check.
 
 use super::*;
 use crate::entry::{EntryKind, SessionEntry};
@@ -93,7 +93,18 @@ fn a_closed_branch_passes() {
         entry(tool_result("c2")),
         entry(user("again")),
     ];
-    assert!(path_is_closed(&entries).is_ok());
+    assert!(tail_is_closed(&entries).is_ok());
+}
+
+#[test]
+fn a_complete_roundtrip_at_the_tail_passes() {
+    let entries = vec![
+        entry(user("q")),
+        entry(assistant_tool_calls(&["c1", "c2"])),
+        entry(tool_result("c1")),
+        entry(tool_result("c2")),
+    ];
+    assert!(tail_is_closed(&entries).is_ok());
 }
 
 #[test]
@@ -103,44 +114,40 @@ fn a_branch_ending_mid_batch_is_open() {
         entry(assistant_tool_calls(&["c1", "c2"])),
         entry(tool_result("c1")),
     ];
-    let fault = path_is_closed(&entries).expect_err("c2 unanswered");
+    let fault = tail_is_closed(&entries).expect_err("c2 unanswered");
     assert!(fault.contains("unanswered"), "{fault}");
 }
 
 #[test]
 fn a_branch_ending_on_a_calls_assistant_is_open() {
     let entries = vec![entry(user("q")), entry(assistant_tool_calls(&["c1"]))];
-    let fault = path_is_closed(&entries).expect_err("calls never answered");
-    assert!(fault.contains("mid-roundtrip"), "{fault}");
+    let fault = tail_is_closed(&entries).expect_err("calls never answered");
+    assert!(fault.contains("unanswered"), "{fault}");
 }
 
 #[test]
-fn a_plain_user_message_after_an_open_batch_is_open() {
+fn a_tail_result_without_its_assistant_is_open() {
+    let entries = vec![entry(user("q")), entry(tool_result("ghost"))];
+    let fault = tail_is_closed(&entries).expect_err("result behind a user message");
+    assert!(fault.contains("not their assistant"), "{fault}");
+}
+
+#[test]
+fn a_tail_result_answering_no_open_call_is_open() {
     let entries = vec![
         entry(user("q")),
         entry(assistant_tool_calls(&["c1"])),
-        entry(user("interrupts")),
+        entry(tool_result("ghost")),
     ];
-    let fault = path_is_closed(&entries).expect_err("mid-batch user message");
-    assert!(fault.contains("interrupts"), "{fault}");
-}
-
-#[test]
-fn a_result_answering_no_open_call_is_open() {
-    let entries = vec![entry(user("q")), entry(tool_result("ghost"))];
-    let fault = path_is_closed(&entries).expect_err("orphan result");
+    let fault = tail_is_closed(&entries).expect_err("orphan result in the tail run");
     assert!(fault.contains("no open call"), "{fault}");
 }
 
 #[test]
-fn an_assistant_after_an_open_batch_is_open() {
-    let entries = vec![
-        entry(user("q")),
-        entry(assistant_tool_calls(&["c1"])),
-        entry(assistant_text("too early")),
-    ];
-    let fault = path_is_closed(&entries).expect_err("batch left open");
-    assert!(fault.contains("open"), "{fault}");
+fn a_result_run_with_nothing_behind_it_is_open() {
+    let entries = vec![entry(tool_result("c1"))];
+    let fault = tail_is_closed(&entries).expect_err("results cannot start a path");
+    assert!(fault.contains("no assistant behind them"), "{fault}");
 }
 
 #[test]
@@ -153,7 +160,7 @@ fn a_non_assistant_message_carries_no_calls() {
         },
         usage: rig_core::completion::Usage::default(),
     })];
-    assert!(path_is_closed(&entries).is_ok());
+    assert!(tail_is_closed(&entries).is_ok());
     assert_eq!(calls_of(&Message::user("x")).len(), 0);
 }
 

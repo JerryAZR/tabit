@@ -7,17 +7,22 @@
 //! cumulative stats. Raw records are **not** retained: the file stays
 //! on disk for the rare need; memory keeps only what it means.
 //!
-//! Every structural invariant is enforced here, loudly — there is no
-//! repair pass and no tail tolerance: a file written only at commit
-//! boundaries (atomic roundtrips, one-blob drains) cannot contain a
-//! half-open roundtrip or a torn line, so seeing one means corruption
-//! or a foreign writer, and the honest answer is a named error, not a
-//! guess. A violation anywhere — a torn final line included — fails
-//! the open.
+//! Structural integrity is enforced loudly, under a stated threat
+//! model. **Detected, and fatal at open:** a torn or unparseable line,
+//! an unsupported format version, a dangling parent, an unknown
+//! checkout target, and a tail left inside an open tool batch — the
+//! realistic shape of a torn write, because the writer flushes a
+//! roundtrip as one blob, so only the tail can tear mid-batch (the
+//! check walks back from the last node over one batch's span, never
+//! the file). **Trusted, by policy:** mid-file records that remain
+//! valid JSON with valid parentage — split batches, interleaved side
+//! records, edited checkout targets — because no app-level failure
+//! produces them (one-blob commits), and below-app damage severe
+//! enough to create them breaks the JSON or the parent links first,
+//! which IS caught. There is no repair pass: a detected violation
+//! fails the open with a named error, not a guess.
 
-use crate::entry::{
-    EntryKind, FileRecord, SESSION_FORMAT_VERSION, SessionEntry, SessionHeader, SideKind,
-};
+use crate::entry::{EntryKind, FileRecord, SESSION_FORMAT_VERSION, SessionHeader, SideKind};
 use crate::error::SessionError;
 use crate::stats::UsageLedger;
 use crate::tree::{SessionTree, TreeFault};
@@ -88,9 +93,9 @@ pub fn parse(raw: &str, path: &Path) -> Result<Parsed, SessionError> {
     // The model usage attributes to (empty ids before any change —
     // uncosted), mirroring the record stream's own sequence.
     let mut attribution = (String::new(), String::new(), None);
-    // The open tool batch in file order: the assistant's unanswered
-    // call ids, drained by its results (or a feedback close).
-    let mut pending_calls: Vec<String> = Vec::new();
+    // The last node the file appended — the tail check's tip (a torn
+    // write shows as its batch left open).
+    let mut last_node: Option<String> = None;
 
     for (offset, line) in lines.enumerate() {
         let line = line.trim_end_matches(['\r']);
@@ -105,66 +110,51 @@ pub fn parse(raw: &str, path: &Path) -> Result<Parsed, SessionError> {
             })?;
         match record {
             FileRecord::Node(entry) => {
-                validate_node_order(&entry, &mut pending_calls).map_err(corrupt)?;
                 if let EntryKind::AssistantMessage { usage, .. } = &entry.kind {
                     let (provider, model, level) = &attribution;
                     stats.add(provider, model, level.as_deref(), *usage);
                 }
+                last_node = Some(entry.id.clone());
                 tree.load_append(entry).map_err(tree_fault)?;
             }
-            FileRecord::Side(record) => {
-                if !pending_calls.is_empty() {
-                    return Err(corrupt(format!(
-                        "side record (`{}`) inside the open tool batch at `{}`",
-                        record.timestamp,
-                        record.kind.kind_name()
-                    )));
-                }
-                match record.kind {
-                    SideKind::ModelChange {
+            FileRecord::Side(record) => match record.kind {
+                SideKind::ModelChange {
+                    provider,
+                    model,
+                    thinking_level,
+                } => {
+                    attribution = (provider.clone(), model.clone(), thinking_level.clone());
+                    register = Some(ModelSelection {
                         provider,
                         model,
                         thinking_level,
-                    } => {
-                        attribution = (provider.clone(), model.clone(), thinking_level.clone());
-                        register = Some(ModelSelection {
-                            provider,
-                            model,
-                            thinking_level,
-                        });
-                    }
-                    SideKind::Checkout { to } => {
-                        if let Some(to) = &to
-                            && !tree.contains(to)
-                        {
-                            return Err(corrupt(format!(
-                                "checkout targets unknown or later node `{to}`"
-                            )));
-                        }
-                        let branch = tree.path_to(to.as_deref()).map_err(tree_fault)?;
-                        tabit_log::path_is_closed(&branch)
-                            .map_err(|message| corrupt(format!("checkout target: {message}")))?;
-                        tree.move_head(to.as_deref()).map_err(tree_fault)?;
-                    }
-                    SideKind::Aborted | SideKind::Label { .. } | SideKind::Custom { .. } => {}
-                    SideKind::Discarded { usage } => {
-                        let (provider, model, level) = &attribution;
-                        stats.add(provider, model, level.as_deref(), usage);
-                    }
+                    });
                 }
-            }
+                SideKind::Checkout { to } => {
+                    if let Some(to) = &to
+                        && !tree.contains(to)
+                    {
+                        return Err(corrupt(format!(
+                            "checkout targets unknown or later node `{to}`"
+                        )));
+                    }
+                    tree.move_head(to.as_deref()).map_err(tree_fault)?;
+                }
+                SideKind::Aborted | SideKind::Label { .. } | SideKind::Custom { .. } => {}
+                SideKind::Discarded { usage } => {
+                    let (provider, model, level) = &attribution;
+                    stats.add(provider, model, level.as_deref(), usage);
+                }
+            },
         }
     }
-    if !pending_calls.is_empty() {
-        return Err(corrupt(
-            "the file ends inside an open tool batch — a batch written only at \
-             commit boundaries cannot look like this"
-                .to_string(),
-        ));
+    // The tail check — the load's one pairing validation (see the
+    // module docs' threat model): a torn write left the trailing batch
+    // open. Bounded: one walk back over the last batch's span.
+    if let Some(tip) = last_node {
+        let tail = tree.path_to(Some(&tip)).map_err(tree_fault)?;
+        tabit_log::tail_is_closed(&tail).map_err(corrupt)?;
     }
-    let branch = tree.path_to_head();
-    tabit_log::path_is_closed(&branch)
-        .map_err(|message| corrupt(format!("head branch: {message}")))?;
 
     Ok(Parsed {
         header,
@@ -174,49 +164,6 @@ pub fn parse(raw: &str, path: &Path) -> Result<Parsed, SessionError> {
         path: path.to_path_buf(),
         file_len: raw.len() as u64,
     })
-}
-
-/// The file-order pairing law: an assistant's calls are answered by the
-/// immediately following `tool_result` nodes — nothing else may
-/// intervene.
-fn validate_node_order(
-    entry: &SessionEntry,
-    pending_calls: &mut Vec<String>,
-) -> Result<(), String> {
-    match &entry.kind {
-        EntryKind::UserMessage { .. } => {
-            if pending_calls.is_empty() {
-                return Ok(());
-            }
-            Err(format!(
-                "user entry `{}` interrupts the open tool batch",
-                entry.id
-            ))
-        }
-        EntryKind::AssistantMessage { message, .. } => {
-            if !pending_calls.is_empty() {
-                return Err(format!(
-                    "assistant entry `{}` follows an unanswered tool batch",
-                    entry.id
-                ));
-            }
-            *pending_calls = tabit_log::calls_of(message)
-                .iter()
-                .map(|call| call.id.clone())
-                .collect();
-            Ok(())
-        }
-        EntryKind::ToolResult { result } => {
-            let Some(index) = pending_calls.iter().position(|id| *id == result.id) else {
-                return Err(format!(
-                    "tool result entry `{}` answers no open call",
-                    entry.id
-                ));
-            };
-            pending_calls.swap_remove(index);
-            Ok(())
-        }
-    }
 }
 
 #[cfg(test)]

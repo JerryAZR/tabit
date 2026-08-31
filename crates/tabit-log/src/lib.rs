@@ -50,7 +50,7 @@ pub use entry::{
     EntryKind, FileRecord, SESSION_FORMAT_VERSION, SessionEntry, SessionHeader, SideKind,
     SideRecord,
 };
-pub use fold::{calls_of, fold_branch, path_is_closed, user_message_boundaries};
+pub use fold::{calls_of, fold_branch, tail_is_closed, user_message_boundaries};
 pub use ids::{filename_timestamp, new_entry_id, new_session_id, now_rfc3339};
 pub use tree::{SessionTree, TreeFault};
 pub use writer::{NullBuffer, SessionWriter, SharedBuffer, WriteBuffer};

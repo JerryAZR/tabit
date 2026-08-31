@@ -23,7 +23,7 @@
 //! the live agent loop consumes it after the rewiring discussion.
 
 use crate::entry::{EntryKind, FileRecord, SessionEntry};
-use crate::fold::{calls_of, fold_branch, path_is_closed};
+use crate::fold::{calls_of, fold_branch, tail_is_closed};
 use crate::ids;
 use crate::lock;
 use crate::tree::{SessionTree, TreeFault};
@@ -288,10 +288,12 @@ impl ContextManager {
     /// Move the head (a checkout / rewind). The branch ending at the
     /// target must be roundtrip-closed: a target inside an open tool
     /// batch names an unrepresentable conversation state and panics
-    /// loud (PROTOCOL.md flag 23). An unknown target is user input — a
-    /// graceful [`CheckoutError`]. The manager records nothing here; the
-    /// `checkout` side record is session business through its own
-    /// buffer handle.
+    /// loud (PROTOCOL.md flag 23). Under the one-commit-door invariant
+    /// only the path's tail can be open, so the check is a bounded
+    /// walk-back, never a branch walk. An unknown target is user input
+    /// — a graceful [`CheckoutError`]. The manager records nothing
+    /// here; the `checkout` side record is session business through
+    /// its own buffer handle.
     #[allow(clippy::panic, clippy::panic_in_result_fn)] // sanctioned crashes: corruption / contract violations, loud (AGENTS.md doctrine)
     pub fn checkout(&mut self, target: Option<&str>) -> Result<(), CheckoutError> {
         if let Some(id) = target
@@ -307,7 +309,7 @@ impl ContextManager {
             .unwrap_or_else(|TreeFault(fault)| {
                 panic!("ContextManager::checkout: {fault}");
             });
-        if let Err(reason) = path_is_closed(&path) {
+        if let Err(reason) = tail_is_closed(&path) {
             panic!(
                 "ContextManager::checkout to `{target:?}` refused: the target is inside an \
                  open tool roundtrip ({reason}) — a mid-roundtrip checkout is unsupported"

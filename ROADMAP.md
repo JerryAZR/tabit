@@ -453,7 +453,20 @@ dual-fold clarification) are settled:
 - **One home for the call/result pairing walk** — the same
   every-call-answered-exactly-once verification exists in
   `tabit-log/fold.rs`, `tabit-session/parser.rs`, and
-  `ContextManager::fold_all_entry`.
+  `ContextManager::fold_all_entry` — resolved (2026-08) the other way:
+  the unified commit made closedness a *local* property, so the walks
+  died instead of merging. `fold_all_entry` keeps the one full
+  validation (the commit batch); every other site checks only a tail —
+  `tail_is_closed` walks back one batch's span, serving the live
+  checkout door and the parser's torn-tail check. The parser runs one
+  streaming pass under a documented threat model: torn tail, bad JSON,
+  dangling parents, and unknown checkout targets are detected;
+  mid-file corruption that stays valid-JSON-with-valid-parentage is
+  trusted away (one-blob commits make it unproducible by the app, and
+  below-app damage severe enough breaks JSON or parentage first).
+  `path_is_closed`, `validate_node_order`, the side-record interleave
+  check, and the parser's per-checkout and final-head walks are all
+  deleted.
 - **The dual-fold unification** — done (2026-08, commits `188ed17` +
   `a9e7cf0`): one durable `ContextManager` behind the session's cell,
   the engine's folds are the durable commits, the session
