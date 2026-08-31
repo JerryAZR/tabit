@@ -444,12 +444,43 @@ dual-fold clarification) are settled:
   every-call-answered-exactly-once verification exists in
   `tabit-log/fold.rs`, `tabit-session/parser.rs`, and
   `ContextManager::fold_all_entry`.
-- **The dual-fold unification** — the engine's seeded copy plus the
-  session's re-fold is the reviewers' #1 fragility; any new
-  conversation writer (backgrounding, compaction, subagents) forces
-  this. Design constraint to hold: the durable manager must stay
-  readable mid-run (receive-time checkout validation reads it between
-  folds).
+- **The dual-fold unification** — done (2026-08, commits `188ed17` +
+  `a9e7cf0`): one durable `ContextManager` behind the session's cell,
+  the engine's folds are the durable commits, the session
+  emission-only. The mid-run readability constraint held (brief
+  write holds; the checkout probe reads between folds).
 - **rig-core vendored-mass policy** — embeddings, vector stores, model
   listings, telemetry (~5k lines tabit never calls): trim or record a
   keep-policy in VENDOR.md.
+
+## Deferred round 2: engine surface trims + test review (2026-08)
+
+Recorded from the public-API discussion after the conversation
+unification; ruled to wait until the discussion series concludes:
+
+- **Delete `ConversationMemory` wholesale** (owner-ruled): rig-core's
+  `memory` module (the trait, `InMemoryConversationMemory`,
+  `DemotionHook` — no users outside the module), the builder's
+  `memory`/`conversation_id`/`without_memory` knobs, the runner's
+  load block, the `memory_handle` threading through `drive_agent`,
+  and `append_run_messages`. It is the weaker sibling of
+  `ContextManager` (rule 7: one concern, one home), zero tabit
+  callers, bypassed by construction under sessions, and the
+  `entry_len` bug of 2026-08 lived in machinery that exists only to
+  feed it.
+- **Drop `PromptResponse.messages` and the `entry_len` window**
+  (owner-ruled direction): the response reports outcomes (output,
+  usage, completion_calls, content); the conversation reports
+  history. Every stateful caller already holds the durable read
+  handle (their cell Arc, or `Session::context()` — readable even
+  mid-run); the only caller who needed the response to carry history
+  was the memory-backed one, deleted above.
+- **Same sweep, error paths**: `PromptError::prompt_cancelled` and
+  `MaxTurnsError` embed full conversation copies; the session only
+  stringifies the message, and the caller holds the grown cell even
+  after a failed run (folds committed). Same duplication family.
+- **Parity-test review** (owner lens: "if you need two things to work
+  identically, first consider whether there should be two at all") —
+  review the blocking/streaming parity harness under that lens;
+  anything the two surfaces must keep identical by hand is a
+  candidate for one implementation.
