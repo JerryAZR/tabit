@@ -458,6 +458,15 @@ dual-fold clarification) are settled:
 Recorded from the public-API discussion after the conversation
 unification; ruled to wait until the discussion series concludes:
 
+- **Batch the steer announcement into one yield** (owner-ruled, the
+  alt-2 design): drain all → fold all → a single `Steer { batch }`
+  item; the session's handler announces every `user_message` in one
+  synchronous loop. Consistent by construction — abort acts only at
+  select-poll boundaries, and fold-plus-yield is one uninterrupted
+  poll, so the parked state "committed but unannounced" is
+  unrepresentable (the multi-steer residual of the per-item
+  announcement dies with it). ENGINE.md gains the rule: **a suspension
+  never sits between a commit and its announcement.**
 - **Delete `ConversationMemory` wholesale** (owner-ruled): rig-core's
   `memory` module (the trait, `InMemoryConversationMemory`,
   `DemotionHook` — no users outside the module), the builder's
