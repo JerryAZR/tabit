@@ -85,10 +85,12 @@ model catalog). Decisions:
   packages/hardcoded transforms; codex ships zero compat flags and only
   speaks the Responses API. Tabit sides with codex on strictness but keeps
   `extra_body` as the generic escape hatch.
-- Embedding `ndims`/`dimensions` explicitly (see AGENTS.md open item) —
-  still to add when embeddings enter the config story.
 - Dynamic model listing (fetch from endpoint and merge with local config) —
-  planned; design deferred until the CLI exists.
+  planned; design deferred until the CLI exists. The wire clients are kept
+  and cassette-covered (both providers); the call is backend-only by
+  construction (credentials + the front/back split), and the trigger shape
+  (on-demand command vs startup push) is decided against the GUI picker
+  when it asks.
 
 ### 2. Session layer
 

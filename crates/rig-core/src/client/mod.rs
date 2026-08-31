@@ -1,14 +1,12 @@
 //! This module provides traits for defining and creating provider clients.
-//! Clients are used to create models for completion, embeddings, etc.
+//! Clients are used to create models for completion, etc.
 
 pub mod completion;
-pub mod embeddings;
 pub mod model_listing;
 pub mod verify;
 
 use bytes::Bytes;
 pub use completion::{CompletionClient, ConstructCompletionModel};
-pub use embeddings::EmbeddingsClient;
 use http::{HeaderMap, HeaderName, HeaderValue};
 pub use model_listing::{ModelLister, ModelListingClient};
 use std::{env::VarError, fmt::Debug, marker::PhantomData, sync::Arc, time::Duration};
@@ -42,7 +40,6 @@ impl Default for TransportOptions {
 
 use crate::{
     completion::CompletionModel,
-    embeddings::EmbeddingModel,
     http_client::{
         self, Builder, HttpClientExt, LazyBody, MultipartForm, Request, Response, make_auth_header,
     },
@@ -283,12 +280,10 @@ impl Capability for Nothing {
     const CAPABLE: bool = false;
 }
 
-/// The capabilities of a given provider, i.e. embeddings, text completion
+/// The capabilities of a given provider, i.e. completion, model listing
 pub trait Capabilities<H = reqwest::Client> {
     /// Completion model capability marker.
     type Completion: Capability;
-    /// Embedding model capability marker.
-    type Embeddings: Capability;
     /// Model listing capability marker.
     type ModelListing: Capability;
 }
@@ -865,26 +860,6 @@ where
 
     fn completion_model(&self, model: impl Into<String>) -> Self::CompletionModel {
         M::construct(self, model.into())
-    }
-}
-
-impl<M, Ext, H> EmbeddingsClient for Client<Ext, H>
-where
-    Ext: Capabilities<H, Embeddings = Capable<M>>,
-    M: EmbeddingModel<Client = Self>,
-{
-    type EmbeddingModel = M;
-
-    fn embedding_model(&self, model: impl Into<String>) -> Self::EmbeddingModel {
-        M::make(self, model, None)
-    }
-
-    fn embedding_model_with_ndims(
-        &self,
-        model: impl Into<String>,
-        ndims: usize,
-    ) -> Self::EmbeddingModel {
-        M::make(self, model, Some(ndims))
     }
 }
 

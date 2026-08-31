@@ -5,7 +5,6 @@ use futures::StreamExt;
 use rig::{
     agent::{MultiTurnStreamItem, StreamingError, StreamingResult},
     completion::{AssistantContent, ToolDefinition},
-    embeddings::Embedding,
     streaming::{StreamedAssistantContent, StreamedUserContent, StreamingCompletionResponse},
     tool::PortableTool,
     tool::Tool,
@@ -64,12 +63,6 @@ pub(crate) const IMAGE_FIXTURE_PATH: &str = concat!(
     env!("CARGO_MANIFEST_DIR"),
     "/tests/data/camponotus_flavomarginatus_ant.jpg"
 );
-
-pub(crate) const EMBEDDING_INPUTS: [&str; 3] = [
-    "Rust values memory safety and predictable performance.",
-    "Streaming responses arrive incrementally instead of all at once.",
-    "Embeddings turn text into numeric vectors for similarity search.",
-];
 
 #[derive(Debug, Deserialize, JsonSchema, Serialize)]
 pub(crate) struct SmokePerson {
@@ -390,37 +383,6 @@ pub(crate) fn assert_weather_tool_roundtrip_response(
 
 pub(crate) fn assert_nonempty_bytes(bytes: &[u8]) {
     assert!(!bytes.is_empty(), "Expected non-empty bytes.");
-}
-
-pub(crate) fn assert_embeddings_nonempty_and_consistent(
-    embeddings: &[Embedding],
-    expected_count: usize,
-) {
-    assert_eq!(
-        embeddings.len(),
-        expected_count,
-        "Expected {expected_count} embeddings but received {}.",
-        embeddings.len()
-    );
-
-    let mut expected_dims = None;
-
-    for embedding in embeddings {
-        assert!(
-            !embedding.vec.is_empty(),
-            "Embedding for {:?} was empty.",
-            embedding.document
-        );
-
-        let dims = embedding.vec.len();
-        match expected_dims {
-            Some(previous_dims) => assert_eq!(
-                dims, previous_dims,
-                "Expected consistent embedding dimensionality."
-            ),
-            None => expected_dims = Some(dims),
-        }
-    }
 }
 
 pub(crate) async fn collect_stream_final_response(

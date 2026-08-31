@@ -1371,11 +1371,6 @@ async fn unary_prompt_message_telemetry_records_accepted_output_when_opted_in() 
     assert!(
         !default_agent_span
             .string_fields
-            .contains_key("gen_ai.prompt")
-    );
-    assert!(
-        !default_agent_span
-            .string_fields
             .contains_key("gen_ai.completion")
     );
     assert_eq!(default_requests.len(), 1);
@@ -1402,13 +1397,6 @@ async fn unary_prompt_message_telemetry_records_accepted_output_when_opted_in() 
             .get("gen_ai.system_instructions")
             .map(String::as_str),
         Some(r#"[{"type":"text","content":"blocking system secret"}]"#)
-    );
-    assert_eq!(
-        opt_in_agent_span
-            .string_fields
-            .get("gen_ai.prompt")
-            .map(String::as_str),
-        Some("blocking prompt secret")
     );
     assert_eq!(
         opt_in_agent_span

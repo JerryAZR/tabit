@@ -12,7 +12,7 @@
 //!
 //! ```
 //! use rig_agent::tool::{Tool, ToolContext};
-//! use serde::{Deserialize, Serialize};
+//! use serde::Deserialize;
 //! use std::convert::Infallible;
 //!
 //! #[derive(Deserialize)]
@@ -115,12 +115,9 @@ pub mod interaction;
 
 use futures::{Future, FutureExt};
 use indexmap::IndexMap;
-use serde::{Deserialize, Serialize};
+use serde::Deserialize;
 
-use rig_core::{
-    embeddings::{embed::EmbedError, tool::ToolSchema},
-    wasm_compat::{WasmBoxedFuture, WasmCompatSend, WasmCompatSync},
-};
+use rig_core::wasm_compat::{WasmBoxedFuture, WasmCompatSend, WasmCompatSync};
 
 use crate::completion::{self, ToolDefinition};
 
@@ -231,44 +228,6 @@ where
         args: Self::Args,
     ) -> Result<Self::Output, Self::Error> {
         rig_core::tool::PortableTool::call(self, args).await
-    }
-}
-
-/// A tool that can be stored in a vector store and reconstructed for RAG.
-pub trait ToolEmbedding: Tool {
-    /// Error returned while reconstructing the tool.
-    type InitError: std::error::Error + WasmCompatSend + WasmCompatSync + 'static;
-    /// Serializable static context.
-    type Context: for<'de> Deserialize<'de> + Serialize;
-    /// Runtime initialization state.
-    type State: WasmCompatSend;
-
-    /// Documents used to retrieve the tool.
-    fn embedding_docs(&self) -> Vec<String>;
-    /// Serializable tool context.
-    fn context(&self) -> Self::Context;
-    /// Reconstruct the tool.
-    fn init(state: Self::State, context: Self::Context) -> Result<Self, Self::InitError>;
-}
-
-impl<T> ToolEmbedding for T
-where
-    T: rig_core::tool::PortableToolEmbedding,
-{
-    type InitError = <T as rig_core::tool::PortableToolEmbedding>::InitError;
-    type Context = <T as rig_core::tool::PortableToolEmbedding>::Context;
-    type State = <T as rig_core::tool::PortableToolEmbedding>::State;
-
-    fn embedding_docs(&self) -> Vec<String> {
-        rig_core::tool::PortableToolEmbedding::embedding_docs(self)
-    }
-
-    fn context(&self) -> Self::Context {
-        rig_core::tool::PortableToolEmbedding::context(self)
-    }
-
-    fn init(state: Self::State, context: Self::Context) -> Result<Self, Self::InitError> {
-        rig_core::tool::PortableToolEmbedding::init(state, context)
     }
 }
 
@@ -499,53 +458,25 @@ fn definition_with_name(name: impl Into<String>, tool: &dyn ErasedTool) -> ToolD
     }
 }
 
-pub(crate) trait ErasedEmbeddingTool: ErasedTool {
-    fn serialized_context(&self) -> serde_json::Result<serde_json::Value>;
-    fn embedding_docs(&self) -> Vec<String>;
-}
-
-impl<T> ErasedEmbeddingTool for T
-where
-    T: ToolEmbedding + 'static,
-{
-    fn serialized_context(&self) -> serde_json::Result<serde_json::Value> {
-        serde_json::to_value(ToolEmbedding::context(self))
-    }
-
-    fn embedding_docs(&self) -> Vec<String> {
-        ToolEmbedding::embedding_docs(self)
-    }
-}
-
 #[derive(Clone)]
-pub(crate) enum RegisteredTool {
-    Static(Arc<dyn ErasedTool>),
-    Embedding(Arc<dyn ErasedEmbeddingTool>),
-}
+pub(crate) struct RegisteredTool(Arc<dyn ErasedTool>);
 
 impl RegisteredTool {
-    fn erased(&self) -> &dyn ErasedTool {
-        match self {
-            Self::Static(tool) => &**tool,
-            Self::Embedding(tool) => &**tool,
-        }
-    }
-
     pub(crate) fn name(&self) -> String {
-        self.erased().name()
+        self.0.name()
     }
 
     pub(crate) fn definition_with_name(&self, name: impl Into<String>) -> ToolDefinition {
-        definition_with_name(name, self.erased())
+        definition_with_name(name, &*self.0)
     }
 
     #[cfg(all(feature = "rmcp", not(target_family = "wasm")))]
     pub(crate) fn is_live(&self) -> bool {
-        self.erased().is_live()
+        self.0.is_live()
     }
 
     pub(crate) async fn execute(&self, args: String, context: &mut ToolContext) -> ToolResult {
-        self.erased().execute(args, context).await
+        self.0.execute(args, context).await
     }
 }
 
@@ -553,15 +484,11 @@ impl RegisteredTool {
 #[derive(Clone)]
 pub(crate) struct ToolRegistration {
     tool: RegisteredTool,
-    always_exposed: bool,
 }
 
 impl ToolRegistration {
-    fn new(tool: RegisteredTool, always_exposed: bool) -> Self {
-        Self {
-            tool,
-            always_exposed,
-        }
+    fn new(tool: RegisteredTool) -> Self {
+        Self { tool }
     }
 }
 
@@ -791,12 +718,12 @@ impl ToolSet {
     where
         T: Tool + 'static,
     {
-        self.insert(RegisteredTool::Static(Arc::new(tool)))
+        self.insert(RegisteredTool(Arc::new(tool)))
     }
 
     /// Register a runtime-defined tool.
     pub fn add_dynamic_tool(&mut self, tool: DynamicTool) -> String {
-        self.insert(RegisteredTool::Static(Arc::new(tool)))
+        self.insert(RegisteredTool(Arc::new(tool)))
     }
 
     /// Register a context-free dynamic tool without rewriting its callback.
@@ -806,23 +733,20 @@ impl ToolSet {
 
     #[cfg(all(feature = "rmcp", not(target_family = "wasm")))]
     pub(crate) fn add_erased(&mut self, tool: Arc<dyn ErasedTool>) -> String {
-        self.insert(RegisteredTool::Static(tool))
+        self.insert(RegisteredTool(tool))
     }
 
     pub(crate) fn insert(&mut self, tool: RegisteredTool) -> String {
         let name = tool.name();
-        self.insert_registration(name.clone(), ToolRegistration::new(tool, true));
+        self.insert_registration(name.clone(), ToolRegistration::new(tool));
         name
     }
 
-    fn insert_registration(&mut self, name: String, mut registration: ToolRegistration) {
-        if let Some(current) = self.tools.get_mut(&name) {
-            registration.always_exposed |= current.always_exposed;
-            *current = registration;
+    fn insert_registration(&mut self, name: String, registration: ToolRegistration) {
+        if self.tools.contains_key(&name) {
             tracing::warn!(tool_name = %name, "replacing an existing tool registration");
-        } else {
-            self.tools.insert(name, registration);
         }
+        self.tools.insert(name, registration);
     }
 
     /// Delete a tool by name.
@@ -837,22 +761,8 @@ impl ToolSet {
         }
     }
 
-    /// Merge tools that are advertised only when selected by a retrieval index.
-    pub(crate) fn add_retrievable_tools(&mut self, set: ToolSet) {
-        for (name, mut registration) in set.tools {
-            registration.always_exposed = false;
-            self.insert_registration(name, registration);
-        }
-    }
-
     pub(crate) fn get(&self, name: &str) -> Option<&RegisteredTool> {
         self.tools.get(name).map(|registration| &registration.tool)
-    }
-
-    pub(crate) fn always_exposed_names(&self) -> impl Iterator<Item = &String> {
-        self.tools
-            .iter()
-            .filter_map(|(name, registration)| registration.always_exposed.then_some(name))
     }
 
     /// Provider-facing definitions in registration order.
@@ -907,28 +817,9 @@ impl ToolSet {
         }
         docs
     }
-
-    /// Convert embedding tools to vector-store schemas.
-    pub fn schemas(&self) -> Result<Vec<ToolSchema>, EmbedError> {
-        self.tools
-            .iter()
-            .filter_map(|(name, registration)| match &registration.tool {
-                RegisteredTool::Embedding(tool) => Some(
-                    tool.serialized_context()
-                        .map_err(EmbedError::new)
-                        .map(|context| ToolSchema {
-                            name: name.clone(),
-                            context,
-                            embedding_docs: tool.embedding_docs(),
-                        }),
-                ),
-                RegisteredTool::Static(_) => None,
-            })
-            .collect()
-    }
 }
 
-/// Builder for static, runtime-defined, and embedding tools.
+/// Builder for static and runtime-defined tools.
 #[derive(Default)]
 pub struct ToolSetBuilder {
     tools: Vec<RegisteredTool>,
@@ -940,30 +831,20 @@ impl ToolSetBuilder {
     where
         T: Tool + 'static,
     {
-        self.tools.push(RegisteredTool::Static(Arc::new(tool)));
+        self.tools.push(RegisteredTool(Arc::new(tool)));
         self
     }
 
     /// Add a runtime-defined tool.
     pub fn dynamic_tool(mut self, tool: DynamicTool) -> Self {
-        self.tools.push(RegisteredTool::Static(Arc::new(tool)));
+        self.tools.push(RegisteredTool(Arc::new(tool)));
         self
     }
 
     /// Add a context-free dynamic tool through the classic adapter.
     pub fn portable_dynamic_tool(mut self, tool: PortableDynamicTool) -> Self {
-        self.tools.push(RegisteredTool::Static(Arc::new(
-            DynamicTool::from_portable(tool),
-        )));
-        self
-    }
-
-    /// Add a tool that is retrieved from an embedding index at prompt time.
-    pub fn retrieved_tool<T>(mut self, tool: T) -> Self
-    where
-        T: ToolEmbedding + 'static,
-    {
-        self.tools.push(RegisteredTool::Embedding(Arc::new(tool)));
+        self.tools
+            .push(RegisteredTool(Arc::new(DynamicTool::from_portable(tool))));
         self
     }
 
@@ -1529,7 +1410,7 @@ mod tests {
         let dispatch = dispatch_tool(
             "blocker",
             "{}".to_string(),
-            Some(RegisteredTool::Static(Arc::new(blocker))),
+            Some(RegisteredTool(Arc::new(blocker))),
             &ToolContext::new(),
         )
         .await;
@@ -1589,7 +1470,7 @@ mod tests {
         let dispatch = dispatch_tool(
             "span_probe",
             "{}".to_string(),
-            Some(RegisteredTool::Static(Arc::new(probe))),
+            Some(RegisteredTool(Arc::new(probe))),
             &context,
         );
         let dispatch = dispatch
@@ -1709,14 +1590,6 @@ mod tests {
             "the null-argument failure should stay actionable for the model"
         );
     }
-
-    #[test]
-    fn static_only_toolsets_produce_no_schemas() {
-        let schemas = crate::test_utils::mock_math_toolset()
-            .schemas()
-            .expect("static tools have no embedding context to fail on");
-        assert!(schemas.is_empty());
-    }
 }
 
 #[cfg(test)]
@@ -1725,9 +1598,7 @@ mod migrated_tests {
         MockExampleTool, MockImageOutputTool, MockObjectOutputTool, MockStringOutputTool,
         MockToolError, mock_math_toolset,
     };
-    use portable_fixtures::{
-        PortableEmbeddingFixture, portable_dynamic_fixture, portable_fixture_output,
-    };
+    use portable_fixtures::{portable_dynamic_fixture, portable_fixture_output};
     use rig_core::message::{DocumentSourceKind, ToolResultContent};
     use serde_json::json;
 
@@ -1739,30 +1610,10 @@ mod migrated_tests {
         use rig_core::{
             OneOrMany,
             message::{ImageMediaType, ToolResultContent},
-            tool::{
-                PortableDynamicTool, PortableTool, PortableToolEmbedding, ToolExecutionError,
-                ToolOutput,
-            },
+            tool::{PortableDynamicTool, ToolExecutionError, ToolOutput},
         };
-        use serde::{Deserialize, Serialize};
 
         const PORTABLE_FIXTURE_IMAGE: &str = "cG9ydGFibGUtZml4dHVyZQ==";
-
-        #[derive(Clone, Debug, Deserialize, Serialize)]
-        pub struct PortableEmbeddingArgs {
-            pub value: String,
-            #[serde(default)]
-            pub fail: bool,
-        }
-
-        #[derive(Clone, Debug, Deserialize, PartialEq, Serialize)]
-        pub struct PortableEmbeddingContext {
-            pub prefix: String,
-        }
-
-        #[derive(Debug, thiserror::Error)]
-        #[error("portable fixture failure")]
-        pub struct PortableFixtureError;
 
         pub fn portable_fixture_output(label: impl Into<String>) -> ToolOutput {
             let mut content = OneOrMany::one(ToolResultContent::json(
@@ -1812,82 +1663,6 @@ mod migrated_tests {
                     })
                 },
             )
-        }
-
-        #[derive(Clone)]
-        pub struct PortableEmbeddingFixture {
-            context: PortableEmbeddingContext,
-        }
-
-        impl PortableEmbeddingFixture {
-            pub fn new(prefix: impl Into<String>) -> Self {
-                Self {
-                    context: PortableEmbeddingContext {
-                        prefix: prefix.into(),
-                    },
-                }
-            }
-        }
-
-        impl PortableTool for PortableEmbeddingFixture {
-            const NAME: &'static str = "portable_embedding_fixture";
-            type Args = PortableEmbeddingArgs;
-            type Output = ToolOutput;
-            type Error = PortableFixtureError;
-
-            fn description(&self) -> String {
-                format!("{} portable embedding fixture", self.context.prefix)
-            }
-
-            fn parameters(&self) -> serde_json::Value {
-                serde_json::json!({
-                    "type": "object",
-                    "properties": {
-                        "value": {"type": "string"},
-                        "fail": {"type": "boolean"}
-                    },
-                    "required": ["value"]
-                })
-            }
-
-            fn map_error(&self, error: Self::Error) -> ToolExecutionError {
-                ToolExecutionError::provider(error.to_string())
-                    .with_code("portable_fixture")
-                    .with_model_output(portable_fixture_output("portable failure"))
-                    .with_source(error)
-            }
-
-            async fn call(&self, arguments: Self::Args) -> Result<Self::Output, Self::Error> {
-                if arguments.fail {
-                    Err(PortableFixtureError)
-                } else {
-                    Ok(portable_fixture_output(format!(
-                        "{}:{}",
-                        self.context.prefix, arguments.value
-                    )))
-                }
-            }
-        }
-
-        impl PortableToolEmbedding for PortableEmbeddingFixture {
-            type InitError = std::convert::Infallible;
-            type Context = PortableEmbeddingContext;
-            type State = ();
-
-            fn embedding_docs(&self) -> Vec<String> {
-                vec![format!(
-                    "{} portable embedding document",
-                    self.context.prefix
-                )]
-            }
-
-            fn context(&self) -> Self::Context {
-                self.context.clone()
-            }
-
-            fn init(_state: Self::State, context: Self::Context) -> Result<Self, Self::InitError> {
-                Ok(Self { context })
-            }
         }
     }
 
@@ -2034,78 +1809,6 @@ mod migrated_tests {
         assert_eq!(result.output().render(), "ok");
     }
 
-    #[tokio::test]
-    async fn retrieved_tool_schemas_use_canonical_name() {
-        #[derive(Debug, thiserror::Error)]
-        #[error("init error")]
-        struct InitError;
-
-        struct RetrievedTool;
-
-        impl Tool for RetrievedTool {
-            const NAME: &'static str = "retrieved";
-            type Error = rig::tool::ToolExecutionError;
-            type Args = serde_json::Value;
-            type Output = String;
-
-            fn description(&self) -> String {
-                "dynamic tool".to_string()
-            }
-
-            fn parameters(&self) -> serde_json::Value {
-                json!({ "type": "object", "properties": {} })
-            }
-
-            async fn call(
-                &self,
-                _context: &mut ToolContext,
-                _args: Self::Args,
-            ) -> Result<Self::Output, ToolExecutionError> {
-                Ok("ok".to_string())
-            }
-        }
-
-        impl ToolEmbedding for RetrievedTool {
-            type InitError = InitError;
-            type Context = ();
-            type State = ();
-
-            fn embedding_docs(&self) -> Vec<String> {
-                vec!["dynamic tool docs".to_string()]
-            }
-
-            fn context(&self) -> Self::Context {}
-
-            fn init(_state: Self::State, _context: Self::Context) -> Result<Self, Self::InitError> {
-                Ok(Self)
-            }
-        }
-
-        let toolset = ToolSet::builder().retrieved_tool(RetrievedTool).build();
-
-        let schemas = toolset.schemas().unwrap();
-        assert_eq!(schemas.len(), 1);
-        assert_eq!(schemas[0].name, RetrievedTool::NAME);
-        assert_eq!(
-            schemas[0].embedding_docs,
-            vec!["dynamic tool docs".to_string()]
-        );
-
-        // Definitions and execution go through the same registration, and the
-        // embedding tool reconstructs through `ToolEmbedding::init`.
-        let defs = toolset.get_tool_definitions();
-        assert_eq!(defs[0].description, "dynamic tool");
-
-        let result = toolset
-            .execute(RetrievedTool::NAME, "{}", &mut ToolContext::new())
-            .await;
-        assert_eq!(result.output().render(), "ok");
-
-        let restored: RetrievedTool =
-            ToolEmbedding::init((), ()).expect("init should reconstruct the tool");
-        assert_eq!(Tool::description(&restored), "dynamic tool");
-    }
-
     #[test]
     fn builder_registers_every_tool_kind_in_registration_order() {
         struct BuilderStaticTool;
@@ -2135,7 +1838,6 @@ mod migrated_tests {
             .static_tool(BuilderStaticTool)
             .dynamic_tool(named_tool("builder_dynamic", "builder dynamic tool"))
             .portable_dynamic_tool(portable_dynamic_fixture())
-            .retrieved_tool(PortableEmbeddingFixture::new("builder"))
             .build();
 
         assert_eq!(
@@ -2143,96 +1845,8 @@ mod migrated_tests {
                 .iter()
                 .map(|definition| definition.name.as_str())
                 .collect::<Vec<_>>(),
-            [
-                "builder_static",
-                "builder_dynamic",
-                "portable_runtime_name",
-                "portable_embedding_fixture"
-            ]
+            ["builder_static", "builder_dynamic", "portable_runtime_name"]
         );
-        // Only the embedding registration contributes retrieval schemas.
-        assert_eq!(set.schemas().unwrap().len(), 1);
-    }
-
-    #[test]
-    fn portable_embedding_tools_reconstruct_through_the_blanket_init() {
-        let tool = PortableEmbeddingFixture::new("shared");
-        let context = ToolEmbedding::context(&tool);
-        let restored: PortableEmbeddingFixture =
-            ToolEmbedding::init((), context).expect("init should reconstruct");
-        assert_eq!(Tool::description(&restored), Tool::description(&tool));
-        assert_eq!(Tool::parameters(&restored), Tool::parameters(&tool));
-    }
-
-    #[tokio::test]
-    async fn portable_embedding_tool_uses_classic_retrieval_without_schema_drift() {
-        let tool = PortableEmbeddingFixture::new("shared");
-        let portable_schema = ToolSchema::try_from(&tool).unwrap();
-        let toolset = ToolSet::builder().retrieved_tool(tool).build();
-
-        let schemas = toolset.schemas().unwrap();
-        assert_eq!(schemas.len(), 1);
-        assert_eq!(schemas[0].name, portable_schema.name);
-        assert_eq!(schemas[0].context, portable_schema.context);
-        assert_eq!(schemas[0].embedding_docs, portable_schema.embedding_docs);
-
-        let handle = server::ToolServer::new()
-            .retrieved_tools(
-                1,
-                crate::test_utils::MockToolIndex::new([portable_schema.name.as_str()]),
-                toolset,
-            )
-            .run();
-        let definitions = handle
-            .get_tool_defs(Some("find the shared portable tool".to_string()))
-            .await
-            .unwrap();
-
-        assert_eq!(definitions.len(), 1);
-        assert_eq!(definitions[0].name, portable_schema.name);
-        assert_eq!(
-            definitions[0].description,
-            "shared portable embedding fixture"
-        );
-        assert_eq!(
-            definitions[0].parameters,
-            serde_json::json!({
-                "type": "object",
-                "properties": {
-                    "value": {"type": "string"},
-                    "fail": {"type": "boolean"}
-                },
-                "required": ["value"]
-            })
-        );
-
-        let success = handle
-            .execute(
-                &definitions[0].name,
-                r#"{"value":"ok"}"#,
-                &mut ToolContext::new(),
-            )
-            .await;
-        assert!(success.is_success());
-        assert_eq!(success.output(), &portable_fixture_output("shared:ok"));
-
-        let failure = handle
-            .execute(
-                &definitions[0].name,
-                r#"{"value":"ignored","fail":true}"#,
-                &mut ToolContext::new(),
-            )
-            .await;
-        let error = failure
-            .error()
-            .expect("portable failure should be retained");
-        assert_eq!(error.kind(), ToolErrorKind::Provider);
-        assert_eq!(error.code(), Some("portable_fixture"));
-        assert_eq!(
-            error.model_output(),
-            &portable_fixture_output("portable failure")
-        );
-        assert_eq!(failure.output(), error.model_output());
     }
 
     #[tokio::test]

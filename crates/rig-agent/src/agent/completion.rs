@@ -9,7 +9,7 @@ use crate::{
         ToolDefinition,
     },
     streaming::{StreamingChat, StreamingPrompt},
-    tool::server::{ToolRegistrySnapshot, ToolServerError, ToolServerHandle},
+    tool::server::{ToolRegistrySnapshot, ToolServerHandle},
 };
 use rig_core::{message::ToolChoice, wasm_compat::WasmCompatSend};
 use std::{collections::BTreeSet, sync::Arc};
@@ -112,16 +112,7 @@ pub(crate) async fn build_prepared_completion_request(
     tool_choice: Option<&ToolChoice>,
     tool_server_handle: &ToolServerHandle,
 ) -> Result<PreparedCompletionRequest, CompletionError> {
-    // Retrieved tools keep their existing query-selection behavior: prefer the
-    // current prompt's RAG text, then the latest matching history message.
-    // The message being answered is the history's last entry — a view,
-    // not a field (ENGINE.md: no prompt/context split).
-    let retrieval_query = history.iter().rev().find_map(|message| message.rag_text());
-
-    let tool_snapshot = tool_server_handle
-        .snapshot_tool_defs(retrieval_query)
-        .await
-        .map_err(|_| CompletionError::RequestError("Failed to get tool definitions".into()))?;
+    let tool_snapshot = tool_server_handle.snapshot_tool_defs().await;
 
     let tooldefs = tool_snapshot.definitions().to_vec();
 
@@ -310,11 +301,8 @@ impl Agent {
     ///
     /// This read-only view does not expose tool dispatch. Agent execution and
     /// tool lifecycle hooks remain owned by [`Self::runner`].
-    pub async fn tool_definitions(
-        &self,
-        prompt: Option<String>,
-    ) -> Result<Vec<ToolDefinition>, ToolServerError> {
-        self.tool_server_handle.get_tool_defs(prompt).await
+    pub async fn tool_definitions(&self) -> Vec<ToolDefinition> {
+        self.tool_server_handle.get_tool_defs().await
     }
 }
 
@@ -513,10 +501,7 @@ mod tests {
             .tool(MockAddTool)
             .build();
 
-        let definitions = agent
-            .tool_definitions(None)
-            .await
-            .expect("tool definitions should resolve");
+        let definitions = agent.tool_definitions().await;
         assert_eq!(
             definitions
                 .iter()

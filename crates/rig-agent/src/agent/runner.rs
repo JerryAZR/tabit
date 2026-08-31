@@ -169,18 +169,7 @@ pub(crate) enum RunInput {
     Cell(tabit_log::ConversationCell),
 }
 
-impl RunInput {
-    /// The message being sent this turn, if any: the prompt, or the
-    /// conversation's final message. A cell input has none — the
-    /// opening message, if any, arrives through the steering drain.
-    fn prompt_for_turn(&self) -> Option<&Message> {
-        match self {
-            RunInput::Prompt(message) => Some(message),
-            RunInput::Conversation(messages) => messages.last(),
-            RunInput::Cell(_) => None,
-        }
-    }
-}
+impl RunInput {}
 
 /// A hook-aware driver over [`AgentRun`].
 ///
@@ -965,12 +954,6 @@ impl AgentRunner {
             self.record_telemetry_content,
         );
 
-        if self.record_telemetry_content
-            && let Some(text) = self.input.prompt_for_turn().and_then(Message::rag_text)
-        {
-            agent_span.record("gen_ai.prompt", text);
-        }
-
         let conversation = self.build_run()?;
 
         // Fold the shared engine to its final response. The blocking surface
@@ -1024,12 +1007,6 @@ impl AgentRunner {
             self.preamble.as_deref(),
             self.record_telemetry_content,
         );
-
-        if self.record_telemetry_content
-            && let Some(text) = self.input.prompt_for_turn().and_then(Message::rag_text)
-        {
-            agent_span.record("gen_ai.prompt", text);
-        }
 
         // The conversation cell this run folds (supplied durable
         // manager, or the stream-owned standalone twin); a build

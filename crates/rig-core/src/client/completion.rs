@@ -198,7 +198,6 @@ mod tests {
 
         impl<H> Capabilities<H> for ExternalExt {
             type Completion = Capable<ExternalGenericModel<H>>;
-            type Embeddings = Nothing;
             type ModelListing = Nothing;
         }
 

@@ -221,5 +221,3 @@ consistency, never design fit (see the gate bullet below).
 
 ## Open items for the owner
 
-- The embedding `ndims`/`dimensions` params are now caller-supplied only
-  (was name-inferred). Any tabit config schema should carry these explicitly.

@@ -13,13 +13,11 @@
 //! ```
 pub mod client;
 pub mod completion;
-pub mod embedding;
 pub mod model_listing;
 pub mod responses_api;
 
 pub use client::*;
 pub use completion::*;
-pub use embedding::*;
 pub use model_listing::*;
 
 /// Recursively ensures all object schemas in a JSON schema respect OpenAI structured output restrictions.

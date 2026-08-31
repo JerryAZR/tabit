@@ -20,8 +20,8 @@
 //! - [Integrations](#integrations)
 //!
 //! # High-level features
-//! - Full support for LLM completion and embedding workflows
-//! - Simple but powerful common abstractions over LLM providers (e.g. OpenAI, Cohere) and vector stores (e.g. MongoDB, in-memory)
+//! - Full support for LLM completion workflows
+//! - Simple but powerful common abstractions over LLM providers (e.g. OpenAI, Anthropic)
 //! - Integrate LLMs in your app with minimal boilerplate
 //!
 //! # Simple example
@@ -54,29 +54,16 @@
 //! or just `full` to enable all features (`cargo add tokio --features macros,rt-multi-thread`).
 //!
 //! # Core concepts
-//! ## Completion and embedding models
-//! Rig provides a consistent API for working with LLMs and embeddings. Specifically,
-//! each provider (e.g. OpenAI, Cohere) has a `Client` struct that can be used to initialize completion
-//! and embedding models. These models implement the [CompletionModel](crate::completion::CompletionModel)
-//! and [EmbeddingModel](crate::embeddings::EmbeddingModel) traits respectively, which provide a common,
-//! low-level interface for creating completion and embedding requests and executing them.
+//! ## Completion models
+//! Rig provides a consistent API for working with LLMs. Specifically,
+//! each provider (e.g. OpenAI, Anthropic) has a `Client` struct that can be used to initialize completion
+//! models. These models implement the [CompletionModel](crate::completion::CompletionModel)
+//! trait, which provides a common, low-level interface for creating completion requests and executing them.
 //!
 //! ## Agent runtimes
 //! This crate owns the provider-agnostic model, message, tool, and storage
 //! contracts. The sibling `rig-agent` crate provides the classic builder and
 //! run-loop API.
-//!
-//! ## Vector stores and indexes
-//! Rig provides a common interface for working with vector stores and indexes. Specifically, the library
-//! provides the [VectorStoreIndex](crate::vector_store::VectorStoreIndex)
-//! trait, which can be implemented to define vector stores and indices respectively.
-//! Indexes can be queried directly by applications or runtimes. For active RAG,
-//! expose the index through its blanket [`PortableTool`](crate::tool::PortableTool)
-//! implementation, or through a custom tool, so the model decides when and how
-//! to retrieve. The classic `rig-agent` runtime can also query indexes from
-//! hooks and append the resulting documents to a turn's extra context.
-//!
-//! Indexes can also serve custom architectures that use multiple LLMs or agents.
 //!
 //! # Integrations
 //! ## Model Providers
@@ -85,7 +72,7 @@
 //! - OpenAI
 //!
 //! You can also implement your own model provider integration by defining types that
-//! implement the [CompletionModel](crate::completion::CompletionModel) and [EmbeddingModel](crate::embeddings::EmbeddingModel) traits.
+//! implement the [CompletionModel](crate::completion::CompletionModel) trait.
 
 // `rig` self-alias: doctests and intra-doc links written against the facade
 // path (`rig::…`) compile inside this split crate, and `#[rig_tool]` can
@@ -94,7 +81,6 @@ extern crate self as rig;
 
 pub mod client;
 pub mod completion;
-pub mod embeddings;
 pub mod http_client;
 pub mod id;
 /// Internal JSON helpers shared with sibling runtime crates (e.g. `rig-agent`).
@@ -113,12 +99,10 @@ pub mod streaming;
 #[cfg_attr(docsrs, doc(cfg(feature = "test-utils")))]
 pub mod test_utils;
 pub mod tool;
-pub mod vector_store;
 pub mod wasm_compat;
 
 // Re-export commonly used types and traits
 pub use completion::message;
-pub use embeddings::Embed;
 pub use one_or_many::{EmptyListError, OneOrMany};
 pub use provider_response::ProviderResponseError;
 // `schemars`, `serde`, and `serde_json` are re-exported so macro-generated
@@ -127,10 +111,6 @@ pub use provider_response::ProviderResponseError;
 pub use schemars;
 pub use serde;
 pub use serde_json;
-
-#[cfg(feature = "derive")]
-#[cfg_attr(docsrs, doc(cfg(feature = "derive")))]
-pub use rig_derive::Embed;
 
 // The portable `#[rig_tool]` macro produces context-free `PortableTool`s, which
 // are rig-core-owned, so direct `rig-core` dependents can reach it without

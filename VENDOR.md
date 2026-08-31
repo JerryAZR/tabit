@@ -300,11 +300,35 @@ outside the deleted concern itself; grep evidence in the task report):
   `ImageGeneration`/`AudioGeneration`) associated types; the four blanket
   client impls and `json_utils::merge_inplace` (whose only callers were the
   image/audio request builders) went with them.
-- `vector_store`: kept `VectorStoreIndex`/`VectorStoreIndexDyn`/
+- `vector_store`: initially kept `VectorStoreIndex`/`VectorStoreIndexDyn`/
   `VectorSearchRequest`/`Filter` and `InMemoryVectorStore` (consumed by
-  rig-agent RAG paths and doctests); deleted `lsh.rs`, `builder.rs`
-  (`InMemoryVectorStoreBuilder`), and the `IndexStrategy` enum —
-  `InMemoryVectorStore` is brute-force only now.
+  rig-agent RAG paths); later deleted whole with the RAG mass (see
+  "RAG mass removal" below).
+
+## RAG mass removal (ruled 2026-08)
+
+Reviewer-round item "vendored-mass policy", resolved in three rulings:
+
+- **Deleted — embeddings + vector stores + retrieval plumbing.** No tabit
+  consumer exists or is planned: tabit's tools are `PortableTool`/
+  `DynamicTool` registrations, always exposed; rig-agent's vector-retrieval
+  path (`add_retrieval_index`/`snapshot_tool_defs`'s search branch) ran over
+  an empty index list in every tabit run. Removed: `rig-core/src/embeddings`,
+  `rig-core/src/vector_store`, `client/embeddings.rs`,
+  `providers/openai/embedding.rs`, the `#[derive(Embed)]` macro and its
+  `rig-derive/src/embed`, the `ToolEmbedding`/`PortableToolEmbedding`/
+  `ErasedEmbeddingTool`/`RegisteredTool::Embedding` tool category,
+  `always_exposed`/`add_retrievable_tools` (every tool is always exposed
+  now), `Message::rag_text`, the `Embeddings` capability, `ToolServerError`
+  (snapshot can no longer fail), and `get_tool_defs`/`tool_definitions`/
+  `snapshot_tool_defs`'s prompt parameter. If a memory feature ever needs
+  embeddings, it comes back as a purpose-built provider client, not this
+  trait zoo.
+- **Kept — model listing** (`model/listing.rs`, `client/model_listing.rs`,
+  both provider listers, cassette-covered). Planned consumer: dynamic
+  listing merged with local config in the registry (ROADMAP). The call is
+  backend-only by construction (credentials + the front/back split).
+- **Telemetry** — separate ruling, recorded with its own commit.
 
 ## Cherry-picking from upstream (optional)
 
@@ -368,5 +392,6 @@ access, response identity, error request-ids — no product pull),
 and the consolidation/erasure/audit sweeps wholesale.
 
 **Deferred with a home**: `4be867de` (per-breakpoint cache TTL) and
-`46c436b6` (anthropic strict tools) → ROADMAP item 10 / config knobs;
-embeddings ndims-style items fold into RAG-if-ever.
+`46c436b6` (anthropic strict tools) → ROADMAP item 10 / config knobs.
+The embeddings ndims-style deferral is moot — the embeddings module is
+deleted (RAG mass removal below).

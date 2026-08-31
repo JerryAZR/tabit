@@ -13,37 +13,10 @@
 extern crate proc_macro;
 
 use proc_macro::TokenStream;
-use syn::{DeriveInput, parse_macro_input};
+use syn::parse_macro_input;
 
-mod embed;
 mod resolve;
 mod tool;
-
-//References:
-//<https://doc.rust-lang.org/book/ch19-06-macros.html#how-to-write-a-custom-derive-macro>
-//<https://doc.rust-lang.org/reference/procedural-macros.html>
-/// A macro that allows you to implement the `rig::embeddings::Embed` trait by deriving it.
-/// Usage can be found below:
-///
-/// ```text
-/// use rig::Embed;
-/// use rig_derive::Embed;
-///
-/// #[derive(Embed)]
-/// struct Foo {
-///     id: String,
-///     #[embed] // this helper shows which field to embed
-///     description: String
-///}
-/// ```
-#[proc_macro_derive(Embed, attributes(embed))]
-pub fn derive_embedding_trait(item: TokenStream) -> TokenStream {
-    let mut input = parse_macro_input!(item as DeriveInput);
-
-    embed::expand_derive_embedding(&mut input)
-        .unwrap_or_else(syn::Error::into_compile_error)
-        .into()
-}
 
 /// A procedural macro that transforms a function into a portable
 /// `rig_core::tool::PortableTool`, or into the classic contextual

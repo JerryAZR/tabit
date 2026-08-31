@@ -666,23 +666,6 @@ impl Message {
         }
     }
 
-    /// This helper method is primarily used to extract the first string prompt from a `Message`.
-    /// Since `Message` might have more than just text content, we need to find the first text.
-    pub fn rag_text(&self) -> Option<String> {
-        match self {
-            Message::User { content } => {
-                for item in content.iter() {
-                    if let UserContent::Text(Text { text, .. }) = item {
-                        return Some(text.clone());
-                    }
-                }
-                None
-            }
-            Message::System { .. } => None,
-            _ => None,
-        }
-    }
-
     /// Helper constructor to make creating system messages easier.
     pub fn system(text: impl Into<String>) -> Self {
         Message::System {
@@ -1689,30 +1672,6 @@ mod tests {
         assert!(DocumentMediaType::Python.is_code());
         assert!(!DocumentMediaType::PDF.is_code());
         assert!(!DocumentMediaType::TXT.is_code());
-    }
-
-    #[test]
-    fn rag_text_finds_first_text_and_rejects_non_user_roles() {
-        let user_with_text = Message::User {
-            content: OneOrMany::many(vec![
-                UserContent::image_url("https://example.com/a.png", None, None),
-                UserContent::text("find me"),
-            ])
-            .unwrap(),
-        };
-        assert_eq!(user_with_text.rag_text(), Some("find me".to_string()));
-
-        let user_without_text = Message::User {
-            content: OneOrMany::one(UserContent::image_url(
-                "https://example.com/a.png",
-                None,
-                None,
-            )),
-        };
-        assert_eq!(user_without_text.rag_text(), None);
-
-        assert_eq!(Message::system("sys").rag_text(), None);
-        assert_eq!(Message::assistant("a").rag_text(), None);
     }
 
     #[test]

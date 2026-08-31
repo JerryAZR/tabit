@@ -242,7 +242,6 @@ mod tests {
     #[test]
     fn funnel_preserves_status_and_body_for_every_capability_error() {
         assert_funnel!(crate::completion::CompletionError);
-        assert_funnel!(crate::embeddings::embedding::EmbeddingError);
         assert_funnel!(crate::client::verify::VerifyError);
     }
 }

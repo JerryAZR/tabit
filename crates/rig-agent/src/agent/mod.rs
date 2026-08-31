@@ -1,11 +1,10 @@
 //! This module contains the implementation of the [Agent] struct and its builder.
 //!
 //! The [Agent] struct represents an LLM agent, which combines an LLM model with a preamble (system prompt),
-//! a set of static context documents, and a set of tools. Tools can be always
-//! available or selected from a retrieval index at prompt time.
+//! a set of static context documents, and a set of tools.
 //!
 //! The [Agent] struct is highly configurable, allowing the user to define anything from
-//! a simple bot with a specific system prompt to a complex RAG system.
+//! a simple bot with a specific system prompt to a complex multi-tool system.
 //!
 //! The [Agent] struct implements the runner-backed [crate::completion::Prompt]
 //! and [crate::completion::Chat] traits. All

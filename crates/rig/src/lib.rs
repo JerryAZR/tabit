@@ -20,7 +20,7 @@
 //! `rig::tool` keeps the classic contextual tool API (`Tool`, `ToolContext`,
 //! …) with the default `agent` feature — the same surface as before the runtime
 //! split — and always exposes the runtime-independent contracts explicitly as
-//! `PortableTool`, `PortableToolEmbedding`, and `PortableDynamicTool`. The
+//! `PortableTool` and `PortableDynamicTool`. The
 //! classic API also lives at [`crate::agent::tool`]. Classic construction
 //! methods such as `client.agent(...)` come from
 //! [`crate::client::AgentClientExt`]; `use rig::prelude::*;` brings it in
@@ -31,7 +31,7 @@
 //!
 //! Depend on the `rig-core` package directly when you only need the core Rig
 //! implementation crate, including provider abstractions, built-in core
-//! providers, tools, and vector-store traits, without the root
+//! providers, and tools, without the root
 //! facade's companion integration feature surface.
 
 pub use rig_core::*;
@@ -112,7 +112,7 @@ pub mod streaming {
 /// here are the classic *contextual* tool API — the same surface as before the
 /// runtime split, so `use rig::tool::{Tool, ToolContext};` keeps working. The
 /// runtime-independent portable contracts are always exposed explicitly as
-/// [`crate::tool::PortableTool`], [`crate::tool::PortableToolEmbedding`], and
+/// [`crate::tool::PortableTool`] and
 /// [`crate::tool::PortableDynamicTool`] (and in full under
 /// [`crate::tool::portable`]). The classic API also lives at
 /// [`crate::agent::tool`] for code that prefers the explicit runtime path.
@@ -122,9 +122,7 @@ pub mod tool {
         IntoToolOutput, ToolErrorKind, ToolExecutionError, ToolOutput, ToolResult,
     };
     // Runtime-independent portable contracts — explicit, always available.
-    pub use rig_core::tool::{
-        PortableDynamicTool, PortableTool, PortableToolEmbedding, portable_tool_definition,
-    };
+    pub use rig_core::tool::{PortableDynamicTool, PortableTool, portable_tool_definition};
     // Built-in portable tools (e.g. `ThinkTool`), always available.
     pub use rig_core::tool::builtin;
 
@@ -136,8 +134,8 @@ pub mod tool {
     #[cfg(feature = "agent")]
     #[cfg_attr(docsrs, doc(cfg(feature = "agent")))]
     pub use rig_agent::tool::{
-        DynamicTool, MissingToolContext, Tool, ToolContext, ToolEmbedding, ToolSet, ToolSetBuilder,
-        server, tool_definition,
+        DynamicTool, MissingToolContext, Tool, ToolContext, ToolSet, ToolSetBuilder, server,
+        tool_definition,
     };
 
     /// The complete portable `rig-core` tool surface, under one explicit path.

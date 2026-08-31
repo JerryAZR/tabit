@@ -1,7 +1,6 @@
 //! Test utilities for deterministic completion-model tests.
 
 mod completion;
-mod embeddings;
 mod http;
 #[cfg(test)]
 pub(crate) mod internal_streaming_profiles;
@@ -13,7 +12,6 @@ pub mod streaming_conformance;
 mod tracing_isolation;
 
 pub use completion::{MockCompletionModel, MockError, MockTurn};
-pub use embeddings::{MockEmbeddingModel, MockMultiTextDocument, MockTextDocument};
 pub use http::{
     CapturedHttpRequest, HttpErrorStreamingClient, MockHttpResponse, MockStreamingClient,
     RecordingHttpClient, SequencedHttpClient, SequencedStreamingHttpClient,

@@ -8,8 +8,6 @@ use serde_json::json;
 use rig_core::{
     OneOrMany,
     message::{ImageMediaType, ToolResultContent},
-    vector_store::{VectorSearchRequest, VectorStoreError, VectorStoreIndex, request::Filter},
-    wasm_compat::WasmCompatSend,
 };
 
 use crate::tool::{Tool, ToolContext, ToolErrorKind, ToolExecutionError, ToolOutput, ToolSet};
@@ -387,78 +385,6 @@ impl Tool for MockControlledTool {
     }
 }
 
-/// A vector index that returns a predefined list of tool IDs from `top_n_ids`.
-pub struct MockToolIndex {
-    tool_ids: Vec<String>,
-}
-
-impl MockToolIndex {
-    /// Create a tool index that returns the given IDs in order.
-    pub fn new(tool_ids: impl IntoIterator<Item = impl Into<String>>) -> Self {
-        Self {
-            tool_ids: tool_ids.into_iter().map(Into::into).collect(),
-        }
-    }
-}
-
-impl VectorStoreIndex for MockToolIndex {
-    type Filter = Filter<serde_json::Value>;
-
-    async fn top_n<T: for<'a> Deserialize<'a> + WasmCompatSend>(
-        &self,
-        _req: VectorSearchRequest,
-    ) -> Result<Vec<(f64, String, T)>, VectorStoreError> {
-        Ok(vec![])
-    }
-
-    async fn top_n_ids(
-        &self,
-        _req: VectorSearchRequest,
-    ) -> Result<Vec<(f64, String)>, VectorStoreError> {
-        Ok(self
-            .tool_ids
-            .iter()
-            .enumerate()
-            .map(|(i, id)| (1.0 - (i as f64 * 0.1), id.clone()))
-            .collect())
-    }
-}
-
-/// A vector index that waits at a barrier before returning one tool ID.
-pub struct BarrierMockToolIndex {
-    barrier: Arc<tokio::sync::Barrier>,
-    tool_id: String,
-}
-
-impl BarrierMockToolIndex {
-    /// Create a barrier-backed tool index.
-    pub fn new(barrier: Arc<tokio::sync::Barrier>, tool_id: impl Into<String>) -> Self {
-        Self {
-            barrier,
-            tool_id: tool_id.into(),
-        }
-    }
-}
-
-impl VectorStoreIndex for BarrierMockToolIndex {
-    type Filter = Filter<serde_json::Value>;
-
-    async fn top_n<T: for<'a> Deserialize<'a> + WasmCompatSend>(
-        &self,
-        _req: VectorSearchRequest,
-    ) -> Result<Vec<(f64, String, T)>, VectorStoreError> {
-        Ok(vec![])
-    }
-
-    async fn top_n_ids(
-        &self,
-        _req: VectorSearchRequest,
-    ) -> Result<Vec<(f64, String)>, VectorStoreError> {
-        self.barrier.wait().await;
-        Ok(vec![(1.0, self.tool_id.clone())])
-    }
-}
-
 /// Error type for [`MockFailingTool`], carrying a fixed message.
 #[derive(Debug, thiserror::Error)]
 #[error("mock tool call failed")]
@@ -616,7 +542,6 @@ impl Tool for MockMetadataTool {
 mod tests {
     use super::*;
     use crate::tool::ToolContext;
-    use rig_core::vector_store::VectorStoreIndex;
 
     #[tokio::test]
     async fn subtract_tool_computes_differences() {
@@ -664,39 +589,6 @@ mod tests {
             assert!(!description.is_empty(), "{name} lost its description");
             assert_eq!(parameters["type"], "object", "{name} schema shape");
         }
-    }
-
-    #[tokio::test]
-    async fn tool_indexes_return_no_documents_from_top_n() {
-        let request = VectorSearchRequest::builder()
-            .query("anything")
-            .samples(3)
-            .build();
-
-        let plain = MockToolIndex::new(["add", "subtract"]);
-        let documents: Vec<(f64, String, serde_json::Value)> =
-            plain.top_n(request.clone()).await.expect("top_n succeeds");
-        assert!(documents.is_empty());
-        let ids = plain
-            .top_n_ids(request.clone())
-            .await
-            .expect("top_n_ids succeeds");
-        assert_eq!(ids.len(), 2);
-        assert_eq!(ids[0].1, "add");
-        assert!(ids[0].0 > ids[1].0, "ids arrive in rank order");
-
-        let barrier = Arc::new(tokio::sync::Barrier::new(1));
-        let barrier_index = BarrierMockToolIndex::new(barrier, "add");
-        let documents: Vec<(f64, String, serde_json::Value)> = barrier_index
-            .top_n(request.clone())
-            .await
-            .expect("barrier top_n succeeds");
-        assert!(documents.is_empty());
-        let ids = barrier_index
-            .top_n_ids(request)
-            .await
-            .expect("barrier top_n_ids succeeds");
-        assert_eq!(ids, vec![(1.0, "add".to_string())]);
     }
 
     #[test]

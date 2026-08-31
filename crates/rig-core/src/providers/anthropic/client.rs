@@ -4,8 +4,7 @@ use http::{HeaderName, HeaderValue};
 use super::completion::{ANTHROPIC_VERSION_LATEST, CompletionModel};
 use crate::{
     client::{
-        self, ApiKey, Capabilities, Capable, DebugExt, Nothing, Provider, ProviderBuilder,
-        ProviderClient,
+        self, ApiKey, Capabilities, Capable, DebugExt, Provider, ProviderBuilder, ProviderClient,
     },
     http_client::{self, HttpClientExt},
     providers::anthropic::model_listing::AnthropicModelLister,
@@ -24,8 +23,6 @@ impl Provider for AnthropicExt {
 
 impl<H> Capabilities<H> for AnthropicExt {
     type Completion = Capable<CompletionModel<H>>;
-
-    type Embeddings = Nothing;
     type ModelListing = Capable<AnthropicModelLister<H>>;
 }
 

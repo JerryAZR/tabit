@@ -70,13 +70,11 @@ impl Provider for OpenAICompletionsExt {
 
 impl<H> Capabilities<H> for OpenAIResponsesExt {
     type Completion = Capable<super::responses_api::ResponsesCompletionModel<H>>;
-    type Embeddings = Capable<super::EmbeddingModel<H>>;
     type ModelListing = Capable<super::OpenAIModelLister<H>>;
 }
 
 impl<H> Capabilities<H> for OpenAICompletionsExt {
     type Completion = Capable<super::completion::CompletionModel<H>>;
-    type Embeddings = Capable<super::GenericEmbeddingModel<OpenAICompletionsExt, H>>;
     type ModelListing = Capable<super::OpenAIModelLister<H>>;
 }
 
@@ -265,7 +263,7 @@ pub(crate) enum ApiResponse<T> {
 
 #[cfg(test)]
 mod tests {
-    use crate::client::{CompletionClient, EmbeddingsClient, ProviderClient};
+    use crate::client::{CompletionClient, ProviderClient};
     use crate::message::ImageDetail;
     use crate::providers::openai::{
         AssistantContent, Function, ImageUrl, Message, ToolCall, ToolType, UserContent,
@@ -751,14 +749,5 @@ mod tests {
 
         let _model: crate::providers::openai::completion::CompletionModel<reqwest::Client> =
             client.completion_model("gpt-4o");
-    }
-
-    #[test]
-    fn test_legacy_embedding_model_type_annotation_still_compiles() {
-        let client =
-            crate::providers::openai::Client::new("dummy-key").expect("Client::new() failed");
-
-        let _model: crate::providers::openai::EmbeddingModel<reqwest::Client> =
-            client.embedding_model("text-embedding-3-small");
     }
 }

@@ -649,7 +649,6 @@ async fn content_telemetry_records_effective_args_for_a_skip_rewrite() {
 
 use std::sync::atomic::{AtomicU32, Ordering::SeqCst};
 
-use serde::Deserialize;
 use tokio::sync::{Barrier, Notify};
 
 use crate::agent::hook::ToolCall as ToolCallEvent;
@@ -657,16 +656,8 @@ use crate::agent::prompt_request::streaming::{MultiTurnStreamItem, StreamingErro
 use crate::completion::{CompletionError, Message, Prompt, Usage};
 use crate::streaming::{StreamedAssistantContent, StreamedUserContent, StreamingPrompt};
 use crate::test_utils::{MockBarrierTool, MockOperationArgs, MockSubtractTool, MockToolError};
-use crate::tool::{
-    ToolSet,
-    server::{ToolServer, ToolServerHandle},
-};
-use rig_core::OneOrMany;
+use crate::tool::server::{ToolServer, ToolServerHandle};
 use rig_core::message::{AssistantContent, ToolCall as MessageToolCall, ToolFunction, UserContent};
-use rig_core::vector_store::{
-    VectorSearchRequest, VectorStoreError, VectorStoreIndex, request::Filter,
-};
-use rig_core::wasm_compat::WasmCompatSend;
 
 /// Records the kind of every hook event (and every tool-result payload) so a
 /// run() and a stream() of the same scenario can be compared. The kinds are
@@ -4958,139 +4949,6 @@ async fn rewrite_result_is_delivered_verbatim_not_reparsed() {
         tool_result_text_in_history(&messages, IMAGE_JSON),
         "the JSON-shaped replacement must reach history verbatim as text, not be \
              re-parsed into a structured/image content block"
-    );
-}
-
-struct QueryRecordingToolIndex {
-    queries: Arc<Mutex<Vec<String>>>,
-}
-
-impl VectorStoreIndex for QueryRecordingToolIndex {
-    type Filter = Filter<serde_json::Value>;
-
-    async fn top_n<T: for<'a> Deserialize<'a> + WasmCompatSend>(
-        &self,
-        _req: VectorSearchRequest,
-    ) -> Result<Vec<(f64, String, T)>, VectorStoreError> {
-        Ok(Vec::new())
-    }
-
-    async fn top_n_ids(
-        &self,
-        req: VectorSearchRequest,
-    ) -> Result<Vec<(f64, String)>, VectorStoreError> {
-        self.queries
-            .lock()
-            .expect("query recorder lock")
-            .push(req.query().to_string());
-        Ok(vec![(1.0, MockAddTool::NAME.to_string())])
-    }
-}
-
-fn one_text_stream_turn(text: &'static str) -> Vec<MockStreamEvent> {
-    vec![
-        MockStreamEvent::text(text),
-        MockStreamEvent::final_response_with_total_tokens(0),
-    ]
-}
-
-#[tokio::test]
-async fn retrieved_tool_query_selection_is_unchanged_on_both_surfaces() {
-    let queries = Arc::new(Mutex::new(Vec::new()));
-    AgentBuilder::new(MockCompletionModel::from_turns([MockTurn::text("done")]))
-        .retrieved_tools(
-            1,
-            QueryRecordingToolIndex {
-                queries: queries.clone(),
-            },
-            ToolSet::from_tools(vec![MockAddTool]),
-        )
-        .build()
-        .runner("blocking retrieval query")
-        .history(vec![Message::user("blocking history query")])
-        .run()
-        .await
-        .expect("blocking run should succeed");
-
-    AgentBuilder::new(MockCompletionModel::from_turns([MockTurn::text("done")]))
-        .retrieved_tools(
-            1,
-            QueryRecordingToolIndex {
-                queries: queries.clone(),
-            },
-            ToolSet::from_tools(vec![MockAddTool]),
-        )
-        .build()
-        .runner(Message::User {
-            content: OneOrMany::one(UserContent::image_url(
-                "https://example.com/blocking.png",
-                None,
-                None,
-            )),
-        })
-        .history(vec![
-            Message::user("older blocking history query"),
-            Message::user("latest blocking history query"),
-        ])
-        .run()
-        .await
-        .expect("blocking history fallback should succeed");
-
-    let mut stream = AgentBuilder::new(MockCompletionModel::from_stream_turns([
-        one_text_stream_turn("done"),
-    ]))
-    .retrieved_tools(
-        1,
-        QueryRecordingToolIndex {
-            queries: queries.clone(),
-        },
-        ToolSet::from_tools(vec![MockAddTool]),
-    )
-    .build()
-    .runner("streaming retrieval query")
-    .history(vec![Message::user("streaming history query")])
-    .stream()
-    .await;
-    while let Some(item) = stream.next().await {
-        item.expect("stream item should succeed");
-    }
-
-    let mut stream = AgentBuilder::new(MockCompletionModel::from_stream_turns([
-        one_text_stream_turn("done"),
-    ]))
-    .retrieved_tools(
-        1,
-        QueryRecordingToolIndex {
-            queries: queries.clone(),
-        },
-        ToolSet::from_tools(vec![MockAddTool]),
-    )
-    .build()
-    .runner(Message::User {
-        content: OneOrMany::one(UserContent::image_url(
-            "https://example.com/streaming.png",
-            None,
-            None,
-        )),
-    })
-    .history(vec![
-        Message::user("older streaming history query"),
-        Message::user("latest streaming history query"),
-    ])
-    .stream()
-    .await;
-    while let Some(item) = stream.next().await {
-        item.expect("stream item should succeed");
-    }
-
-    assert_eq!(
-        *queries.lock().expect("query recorder lock"),
-        vec![
-            "blocking retrieval query",
-            "latest blocking history query",
-            "streaming retrieval query",
-            "latest streaming history query",
-        ]
     );
 }
 

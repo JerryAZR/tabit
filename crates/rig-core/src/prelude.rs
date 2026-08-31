@@ -1,8 +1,7 @@
 //! The `rig` prelude.
 //!
 //! Bringing this module into scope with `use rig::prelude::*` pulls in the
-//! portable provider-client, completion, embedding, tool, and vector-store
-//! contracts.
+//! portable provider-client, completion, and tool contracts.
 //!
 //! This is deliberately the *common* path, not the whole crate. Advanced
 //! surfaces — the hook system, the run-loop stepping types, message content
@@ -12,25 +11,13 @@
 // Provider-client traits.
 pub use crate::client::ProviderClient;
 pub use crate::client::completion::CompletionClient;
-pub use crate::client::embeddings::EmbeddingsClient;
 pub use crate::client::model_listing::ModelListingClient;
 pub use crate::client::verify::{VerifyClient, VerifyError};
 
 pub use crate::completion::{CompletionError, CompletionModel, Message};
 
-// Embeddings. `Embed` is re-exported from the crate root so that, with the
-// `derive` feature enabled, the `#[derive(Embed)]` macro comes along with the
-// trait of the same name.
-pub use crate::Embed;
-pub use crate::embeddings::{EmbeddingModel, EmbeddingsBuilder};
-
 // Tools.
 pub use crate::tool::PortableTool;
-
-// Vector stores.
-pub use crate::vector_store::VectorStoreIndex;
-pub use crate::vector_store::in_memory_store::InMemoryVectorStore;
-pub use crate::vector_store::request::VectorSearchRequest;
 
 // Common container type.
 pub use crate::OneOrMany;
