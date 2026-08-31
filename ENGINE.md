@@ -58,12 +58,12 @@ the conversation (a `ContextManager`) and `max_turns ≥ 1` — entering a
 run that cannot run is unrepresentable. The conversation may be empty
 at entry — the opening batch arrives through the first CONVERGE's
 drain (the not-pre-joined rule above) — but it must not be empty at
-the **first decision**: after that first drain the conversation ends
-with the message being answered, and a still-empty one is a caller
-error (a run on an empty conversation with nothing queued). The run's
-own message window (`entry_len`) is measured at that same first
-decision — after the drain, so a steered opening counts as the run's
-own and nothing before it does.
+the **first decision**: after that first drain the conversation holds
+something to answer, and a still-empty one is a caller error (a run
+on an empty conversation with nothing queued). The response reports
+outcomes only (text, content, usage, calls); the conversation is the
+transcript — callers read it through their cell or the session's
+context door, never through a copy in the response.
 
 **A failed open consumes its batch.** The engine drains the opening
 batch at its first CONVERGE; a run that fails *before* its engine
@@ -216,12 +216,11 @@ loop {
   if defect_streak   > DEFECT_CAP  { exit Failed(defects_exhausted); }
   if provider_streak > RETRY_CAP   { exit Failed(retries_exhausted); }
   if turns_used      >= budget     { exit Failed(budget_exhausted); }
-  if entry_len unset {                   // the entry rule, at the first
-    if conversation is empty {           // decision — after the opening
-      exit Failed(empty_conversation);   // drain, the conversation must
-    }                                    // end with the message being
-    entry_len = len - 1;                 // answered; the run's own
-  }                                      // messages start there
+  if entry unchecked {                   // the entry rule, checked once at
+    if conversation is empty {           // the first decision — after the
+      exit Failed(empty_conversation);   // opening drain, the conversation
+    }                                    // must hold something to answer
+  }
 
   // ── PREPARE ──
   history = conversation.messages();  // [READ] the request IS the history;

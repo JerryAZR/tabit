@@ -162,13 +162,10 @@ fn final_response_from_content(
     content: OneOrMany<AssistantContent>,
     aggregated_usage: crate::completion::Usage,
     completion_calls: Vec<CompletionCall>,
-    history: Option<Vec<Message>>,
 ) -> PromptResponse {
-    let mut response = PromptResponse::new(assistant_text_from_choice(&content), aggregated_usage)
+    PromptResponse::new(assistant_text_from_choice(&content), aggregated_usage)
         .with_content(content)
-        .with_completion_calls(completion_calls);
-    response.messages = history;
-    response
+        .with_completion_calls(completion_calls)
 }
 
 impl MultiTurnStreamItem {
@@ -184,20 +181,6 @@ impl MultiTurnStreamItem {
             content,
             aggregated_usage,
             Vec::new(),
-            None,
-        ))
-    }
-
-    pub fn final_response_with_history(
-        content: OneOrMany<AssistantContent>,
-        aggregated_usage: crate::completion::Usage,
-        history: Option<Vec<Message>>,
-    ) -> Self {
-        Self::FinalResponse(final_response_from_content(
-            content,
-            aggregated_usage,
-            Vec::new(),
-            history,
         ))
     }
 
@@ -205,13 +188,11 @@ impl MultiTurnStreamItem {
         content: OneOrMany<AssistantContent>,
         aggregated_usage: crate::completion::Usage,
         completion_calls: Vec<CompletionCall>,
-        history: Option<Vec<Message>>,
     ) -> Self {
         Self::FinalResponse(final_response_from_content(
             content,
             aggregated_usage,
             completion_calls,
-            history,
         ))
     }
 }
@@ -600,15 +581,10 @@ impl TurnSource for StreamingTurnSource {
                 "Streaming turn completed without assistant text; final response will be empty"
             );
         }
-        // Always surface the accumulated messages (parity with the blocking
-        // `run()`), regardless of whether the caller supplied input history.
-        let final_messages: Option<Vec<Message>> =
-            Some(response.messages.clone().unwrap_or_default());
         Some(MultiTurnStreamItem::final_response_with_completion_calls(
             self.last_final_choice.clone(),
             response.usage,
             response.completion_calls.clone(),
-            final_messages,
         ))
     }
 }

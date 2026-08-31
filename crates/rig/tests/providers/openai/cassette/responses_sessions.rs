@@ -8,12 +8,21 @@
 //! Run cassette tests in replay mode by default, or set
 //! `RIG_PROVIDER_TEST_MODE=record` to record against the real provider.
 
+fn test_cell(prompt: &str) -> tabit_log::ConversationCell {
+    std::sync::Arc::new(std::sync::RwLock::new(tabit_log::ContextManager::seeded(
+        vec![Message::user(prompt)],
+    )))
+}
+
+fn cell_conversation(cell: &tabit_log::ConversationCell) -> Vec<Message> {
+    tabit_log::lock::read(cell).messages()
+}
 use std::sync::Arc;
 use std::sync::atomic::{AtomicUsize, Ordering};
 
 use futures::StreamExt;
 use rig::agent::MultiTurnStreamItem;
-use rig::completion::{Chat, CompletionModel, Message};
+use rig::completion::{CompletionModel, Message};
 use rig::message::{AssistantContent, UserContent};
 use rig::prelude::*;
 use rig::streaming::{StreamingChat, StreamingPrompt};
@@ -105,15 +114,18 @@ async fn sequential_tool_calls_nonstreaming() {
                 .tool(Subtract)
                 .default_max_turns(6)
                 .build();
-            let mut history = Vec::<Message>::new();
+            let cell = test_cell(SEQUENTIAL_TOOLS_PROMPT);
 
             let result = agent
-                .chat(SEQUENTIAL_TOOLS_PROMPT, &mut history)
+                .prompt(SEQUENTIAL_TOOLS_PROMPT)
+                .conversation_cell(cell.clone())
+                .max_turns(6)
                 .await
-                .expect("sequential tool chat should succeed");
+                .expect("sequential tool run should succeed");
 
             assert_mentions_expected_number(&result, 2);
 
+            let history = cell_conversation(&cell);
             let calls = history_tool_calls(&history);
             let results = history_tool_results(&history);
             let add_call = calls
@@ -223,12 +235,14 @@ async fn parallel_tool_calls_single_turn_nonstreaming() {
                 .tool(BetaSignal)
                 .default_max_turns(5)
                 .build();
-            let mut history = Vec::<Message>::new();
+            let cell = test_cell(TWO_TOOL_STREAM_PROMPT);
 
             let result = agent
-                .chat(TWO_TOOL_STREAM_PROMPT, &mut history)
+                .prompt(TWO_TOOL_STREAM_PROMPT)
+                .conversation_cell(cell.clone())
+                .max_turns(5)
                 .await
-                .expect("parallel tool chat should succeed");
+                .expect("parallel tool run should succeed");
 
             let lowered = result.to_ascii_lowercase();
             assert!(
@@ -236,6 +250,7 @@ async fn parallel_tool_calls_single_turn_nonstreaming() {
                 "final response should include both tool outputs, got {result:?}"
             );
 
+            let history = cell_conversation(&cell);
             let calls = history_tool_calls(&history);
             let results = history_tool_results(&history);
             assert_eq!(

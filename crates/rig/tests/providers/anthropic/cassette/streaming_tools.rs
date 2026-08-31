@@ -1,5 +1,15 @@
 //! Anthropic streaming tools smoke test.
 
+fn test_cell(prompt: &str) -> tabit_log::ConversationCell {
+    std::sync::Arc::new(std::sync::RwLock::new(tabit_log::ContextManager::seeded(
+        vec![rig::message::Message::user(prompt)],
+    )))
+}
+
+fn cell_conversation(cell: &tabit_log::ConversationCell) -> Vec<rig::message::Message> {
+    tabit_log::lock::read(cell).messages()
+}
+
 use futures::StreamExt;
 use rig::agent::{MultiTurnStreamItem, StreamingError, StreamingResult};
 use rig::message::{Message, UserContent};
@@ -34,7 +44,11 @@ async fn streaming_tools_smoke() {
                 .max_tokens(64_000)
                 .build();
 
-            let mut stream = agent.stream_prompt(STREAMING_TOOLS_PROMPT).await;
+            let cell = test_cell(STREAMING_TOOLS_PROMPT);
+            let mut stream = agent
+                .stream_prompt(STREAMING_TOOLS_PROMPT)
+                .conversation_cell(cell.clone())
+                .await;
             let response = collect_stream_final_response(&mut stream)
                 .await
                 .expect("streaming tool prompt should succeed");
@@ -121,14 +135,16 @@ async fn streaming_tool_concurrency_surfaces_results_in_call_order_after_batch_s
             .max_tokens(64_000)
             .build();
 
+        let cell = test_cell(TWO_TOOL_STREAM_PROMPT);
         let mut stream = agent
             .stream_prompt(TWO_TOOL_STREAM_PROMPT)
             .max_turns(8)
             .tool_concurrency(2)
+            .conversation_cell(cell.clone())
             .await;
         let observation = tokio::time::timeout(
             std::time::Duration::from_secs(5),
-            collect_concurrent_tool_observation(&mut stream),
+            collect_concurrent_tool_observation(&mut stream, &cell),
         )
         .await
         .expect("streamed tools must run concurrently, not deadlock on the first tool");
@@ -266,6 +282,7 @@ struct ConcurrentToolObservation {
 
 async fn collect_concurrent_tool_observation(
     stream: &mut StreamingResult,
+    cell: &tabit_log::ConversationCell,
 ) -> ConcurrentToolObservation {
     let mut observation = ConcurrentToolObservation::default();
     let mut tool_names_by_id = HashMap::new();
@@ -295,11 +312,12 @@ async fn collect_concurrent_tool_observation(
             Ok(MultiTurnStreamItem::FinalResponse(response)) => {
                 observation.final_response_text = Some(response.output().to_owned());
                 observation.got_final_response = true;
-                if let Some(history) = response.messages() {
+                {
+                    let history = cell_conversation(cell);
                     observation.history_tool_results =
-                        tool_result_names_in_history(history, &tool_names_by_id);
+                        tool_result_names_in_history(&history, &tool_names_by_id);
                     observation.last_history_tool_result_message =
-                        last_tool_result_message_names(history, &tool_names_by_id);
+                        last_tool_result_message_names(&history, &tool_names_by_id);
                 }
                 observation.events.push("final_response");
             }

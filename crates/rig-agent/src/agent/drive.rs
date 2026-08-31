@@ -288,11 +288,10 @@ where
         let mut terminating: Option<String> = None;
         let mut turns_used = 0usize; // committed turns only
         let mut current_turn = 0usize; // issued model calls (announced ids)
-        // Where the run's own messages begin — the message being
-        // answered. Set once, at the first decision (see DECIDE): after
-        // the opening drain, so a steered opening (the session's
-        // mailbox) counts as the run's own and nothing before it does.
-        let mut entry_len: Option<usize> = None;
+        // Whether the entry rule has run (once per run, at the first
+        // decision — after the opening drain, where cell and drain have
+        // converged).
+        let mut entry_checked = false;
 
         'outer: loop {
             // ── CONVERGE ────────────────────────────────────────────
@@ -307,11 +306,7 @@ where
                 if let Some(steering) = runner.steering.as_ref() {
                     steering.discard_pending();
                 }
-                yield Err(Box::new(PromptError::prompt_cancelled(
-                    cell_history(conversation),
-                    reason,
-                ))
-                .into());
+                yield Err(Box::new(PromptError::prompt_cancelled(reason)).into());
                 break 'outer;
             }
             // THE drain — unconditional for every non-stop outcome: the
@@ -372,68 +367,55 @@ where
             }
             if defect_streak > crate::agent::run::TURN_RETRY_CAP {
                 store_error_usage(&runner, &ledger);
-                yield Err(Box::new(
-                    PromptError::prompt_cancelled(
-                        cell_history(conversation),
-                        format!(
-                            "the model repeatedly emitted tool calls with malformed arguments ({defect_streak} consecutive turns discarded and retried); the conversation history is unchanged — resend the prompt to try again, or raise the model's output token limit if the calls keep getting cut."
-                        ),
-                    ),
-                )
+                yield Err(Box::new(PromptError::prompt_cancelled(format!(
+                    "the model repeatedly emitted tool calls with malformed arguments \
+                     ({defect_streak} consecutive turns discarded and retried); the \
+                     conversation history is unchanged — resend the prompt to try again, \
+                     or raise the model's output token limit if the calls keep getting cut."
+                )))
                 .into());
                 break 'outer;
             }
             if provider_streak > crate::agent::run::TURN_RETRY_CAP {
                 store_error_usage(&runner, &ledger);
-                yield Err(Box::new(
-                    PromptError::prompt_cancelled(
-                        cell_history(conversation),
-                        "provider retry streak exhausted",
-                    ),
-                )
+                yield Err(Box::new(PromptError::prompt_cancelled(
+                    "provider retry streak exhausted",
+                ))
                 .into());
                 break 'outer;
             }
             if turns_used >= runner.max_turns {
                 store_error_usage(&runner, &ledger);
-                let mut history = cell_history(conversation);
-                let last = history.pop().unwrap_or_else(|| Message::user(""));
                 yield Err(StreamingError::Prompt(Box::new(
                     PromptError::MaxTurnsError {
                         max_turns: runner.max_turns,
-                        prompt: Box::new(last),
-                        chat_history: Box::new(history),
                     },
                 )));
                 break 'outer;
             }
-            // The entry rule (ENGINE.md's entry contract), measured at
+            // The entry rule (ENGINE.md's entry contract), checked once at
             // the first decision — after the opening drain, so cell and
-            // drain have converged: the conversation must end with the
-            // message being answered, and the run's own messages start
-            // there. A still-empty conversation means the caller ran on
-            // an empty cell with nothing queued (the session pump and
-            // the standalone builder both prevent it) — a caller error,
-            // failed loud with the contract in the message.
-            if entry_len.is_none() {
-                let history = cell_history(conversation);
-                if history.is_empty() {
+            // drain have converged: the conversation must hold something to
+            // answer. A still-empty conversation means the caller ran on an
+            // empty cell with nothing queued (the session pump and the
+            // standalone builder both prevent it) — a caller error, failed
+            // loud with the contract in the message.
+            if !entry_checked {
+                entry_checked = true;
+                if cell_history(conversation).is_empty() {
                     store_error_usage(&runner, &ledger);
                     yield Err(Box::new(PromptError::prompt_cancelled(
-                        history,
                         "empty conversation: a run needs the message being sent — the cell \
                          and the steering drain both produced nothing",
                     ))
                     .into());
                     break 'outer;
                 }
-                entry_len = Some(history.len().saturating_sub(1));
             }
 
             // ── PREPARE ─────────────────────────────────────────────
-            // The conversation is never empty here: a run starts only on a
-            // non-empty one (`build_run` rejects the empty case at entry),
-            // and the loop only folds into it.
+            // The conversation is never empty here: the entry rule above
+            // just proved it, and the loop only folds into it.
             let history = cell_history(conversation);
             current_turn += 1;
             if runner.max_turns > 1 {
@@ -601,24 +583,10 @@ where
                     content: Box::new(turn.choice.clone()),
                 }));
 
-                // Sanctioned slice: the `min` guard makes the range
-                // total — the run's entry never exceeds the grown
-                // conversation (the loop only folds into it). The
-                // window is always set here: FINAL follows a PREPARE,
-                // which follows the first decision that sets it
-                // (AGENTS.md doctrine).
-                #[allow(clippy::expect_used, clippy::indexing_slicing)]
-                let run_messages = {
-                    let entry = entry_len
-                        .expect("FINAL without a first decision — engine wiring bug");
-                    let messages = cell_history(conversation);
-                    messages[entry.min(messages.len())..].to_vec()
-                };
                 let response = PromptResponse::new(
                     crate::agent::prompt_request::assistant_text_from_choice(&turn.choice),
                     ledger.usage(),
                 )
-                .with_messages(run_messages)
                 .with_completion_calls(ledger.calls().to_vec())
                 .with_content(turn.choice.clone());
                 tracing::info!(

@@ -393,9 +393,6 @@ pub struct PromptResponse {
     /// length. Zero-valued entry usage means the provider reported no usage
     /// metrics for that request.
     pub completion_calls: Vec<CompletionCall>,
-    /// Accumulated message history for the run (the run's persisted transcript),
-    /// unless memory/history bookkeeping was disabled for the request.
-    pub messages: Option<Vec<Message>>,
     /// Structured assistant content for the final turn.
     ///
     /// Where [`output`](Self::output) is the concatenated text, this preserves
@@ -409,14 +406,15 @@ pub struct PromptResponse {
 /// keeping [`PromptResponse::output`] and [`PromptResponse::content`] consistent
 /// for legacy data rather than defaulting to empty text. It carries the field
 /// serde attributes for both directions, keeping the serialized shape identical
-/// (`completion_calls` omitted when empty; `messages`/`content` always present).
+/// (`completion_calls` omitted when empty; `content` always present). History
+/// serialized by older versions (a former `messages` field) is ignored — the
+/// conversation is the transcript's home, not the response.
 #[derive(Serialize, Deserialize)]
 struct PromptResponseRepr {
     output: String,
     usage: Usage,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     completion_calls: Vec<CompletionCall>,
-    messages: Option<Vec<Message>>,
     #[serde(default)]
     content: Option<OneOrMany<AssistantContent>>,
 }
@@ -430,7 +428,6 @@ impl From<PromptResponseRepr> for PromptResponse {
             output: repr.output,
             usage: repr.usage,
             completion_calls: repr.completion_calls,
-            messages: repr.messages,
             content,
         }
     }
@@ -442,7 +439,6 @@ impl From<PromptResponse> for PromptResponseRepr {
             output: response.output,
             usage: response.usage,
             completion_calls: response.completion_calls,
-            messages: response.messages,
             content: Some(response.content),
         }
     }
@@ -462,18 +458,12 @@ impl PromptResponse {
             output,
             usage,
             completion_calls: Vec::new(),
-            messages: None,
         }
     }
 
-    /// An empty run result (empty output, zero usage, no history).
+    /// An empty run result (empty output, zero usage).
     pub fn empty() -> Self {
         Self::new(String::new(), Usage::new())
-    }
-
-    pub fn with_messages(mut self, messages: Vec<Message>) -> Self {
-        self.messages = Some(messages);
-        self
     }
 
     /// Attach completion call details to this response.
@@ -496,11 +486,6 @@ impl PromptResponse {
     /// Aggregated token usage across the whole run.
     pub fn usage(&self) -> Usage {
         self.usage
-    }
-
-    /// The run's accumulated message history, if tracked.
-    pub fn messages(&self) -> Option<&[Message]> {
-        self.messages.as_deref()
     }
 
     /// The structured assistant content for the final turn.

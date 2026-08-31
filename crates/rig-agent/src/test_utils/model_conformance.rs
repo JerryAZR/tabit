@@ -65,25 +65,38 @@ impl ScenarioError {
     }
 }
 
-/// Validate cancellation diagnostics, including the exact reason and retained
-/// assistant tool-call history.
+/// A standalone conversation cell seeded with the scenario's prompt. The
+/// harness is a cell-supplying caller: the run folds into the cell, and the
+/// cell — not the response — is the transcript the scenarios read back.
+pub fn scenario_cell(prompt: &str) -> tabit_log::ConversationCell {
+    std::sync::Arc::new(std::sync::RwLock::new(tabit_log::ContextManager::seeded(
+        vec![Message::user(prompt)],
+    )))
+}
+
+/// The conversation a scenario's run committed, durable through failures —
+/// committed folds survive even when the run errors.
+pub fn conversation_of(cell: &tabit_log::ConversationCell) -> Vec<Message> {
+    tabit_log::lock::read(cell).messages()
+}
+
+/// Validate cancellation diagnostics: the exact reason, and — through the
+/// run's conversation cell — that the committed history retains the
+/// assistant tool call.
 pub fn validate_cancelled_failure(
     error: &PromptError,
     expected_reason: &str,
     expected_tool: &str,
+    history: &[Message],
 ) -> Result<(), ScenarioError> {
     const SCENARIO: &str = "cancelled_failure";
-    let PromptError::PromptCancelled {
-        chat_history,
-        reason,
-    } = error
-    else {
+    let PromptError::PromptCancelled { reason } = error else {
         return Err(ScenarioError::contract(
             SCENARIO,
             format!("expected PromptCancelled, observed {error:?}"),
         ));
     };
-    let history_has_call = chat_history.iter().any(|message| {
+    let history_has_call = history.iter().any(|message| {
         matches!(
             message,
             Message::Assistant { content, .. }
@@ -97,40 +110,36 @@ pub fn validate_cancelled_failure(
         return Err(ScenarioError::contract(
             SCENARIO,
             format!(
-                "reason={reason:?}, expected={expected_reason:?}, history_has_call={history_has_call}, history={chat_history:?}"
+                "reason={reason:?}, expected={expected_reason:?}, history_has_call={history_has_call}, history={history:?}"
             ),
         ));
     }
     Ok(())
 }
 
-/// Validate max-turn diagnostics, including the exact configured budget and a
-/// retained pending prompt.
+/// Validate max-turn diagnostics: the exact configured budget, and — through
+/// the run's conversation cell — that the pending prompt was committed for
+/// the next run to answer.
 pub fn validate_max_turns_failure(
     error: &PromptError,
     expected_max_turns: usize,
+    history: &[Message],
 ) -> Result<(), ScenarioError> {
     const SCENARIO: &str = "max_turns_failure";
-    let PromptError::MaxTurnsError {
-        max_turns,
-        chat_history,
-        prompt,
-    } = error
-    else {
+    let PromptError::MaxTurnsError { max_turns } = error else {
         return Err(ScenarioError::contract(
             SCENARIO,
             format!("expected MaxTurnsError, observed {error:?}"),
         ));
     };
-    let pending_prompt_retained = matches!(
-        prompt.as_ref(),
-        Message::User { content } if content.iter().next().is_some()
-    );
-    if *max_turns != expected_max_turns || chat_history.is_empty() || !pending_prompt_retained {
+    let pending_prompt_retained = history
+        .last()
+        .is_some_and(|message| matches!(message, Message::User { content } if !content.is_empty()));
+    if *max_turns != expected_max_turns || history.is_empty() || !pending_prompt_retained {
         return Err(ScenarioError::contract(
             SCENARIO,
             format!(
-                "max_turns={max_turns}, expected={expected_max_turns}, history={chat_history:?}, pending_prompt_retained={pending_prompt_retained}, pending_prompt={prompt:?}"
+                "max_turns={max_turns}, expected={expected_max_turns}, history={history:?}, pending_prompt_retained={pending_prompt_retained}"
             ),
         ));
     }
@@ -707,24 +716,20 @@ impl Tool for CaptureComplexTool {
     }
 }
 
-fn has_tool_roundtrip(messages: Option<&[Message]>) -> bool {
-    let saw_call = messages.is_some_and(|messages| {
-        messages.iter().any(|message| {
-            matches!(
-                message,
-                Message::Assistant { content, .. }
-                    if content.iter().any(|item| matches!(item, AssistantContent::ToolCall(_)))
-            )
-        })
+fn has_tool_roundtrip(messages: &[Message]) -> bool {
+    let saw_call = messages.iter().any(|message| {
+        matches!(
+            message,
+            Message::Assistant { content, .. }
+                if content.iter().any(|item| matches!(item, AssistantContent::ToolCall(_)))
+        )
     });
-    let saw_result = messages.is_some_and(|messages| {
-        messages.iter().any(|message| {
-            matches!(
-                message,
-                Message::User { content }
-                    if content.iter().any(|item| matches!(item, UserContent::ToolResult(_)))
-            )
-        })
+    let saw_result = messages.iter().any(|message| {
+        matches!(
+            message,
+            Message::User { content }
+                if content.iter().any(|item| matches!(item, UserContent::ToolResult(_)))
+        )
     });
     saw_call && saw_result
 }
@@ -831,30 +836,29 @@ fn report_from_response(
     started: Instant,
     tool_calls: usize,
     response: crate::agent::PromptResponse,
+    history: &[Message],
 ) -> Result<ScenarioReport, ScenarioError> {
-    if let Some(messages) = response.messages.as_deref() {
-        validate_protocol_hygiene(
-            name,
-            &response.output,
-            messages,
-            &[
-                "<tool_call>",
-                "</tool_call>",
-                "<tool_response>",
-                "</tool_response>",
-                "<|im_start|>",
-                "<|im_end|>",
-                "<think>",
-                "</think>",
-            ],
-        )?;
-    }
+    validate_protocol_hygiene(
+        name,
+        &response.output,
+        history,
+        &[
+            "<tool_call>",
+            "</tool_call>",
+            "<tool_response>",
+            "</tool_response>",
+            "<|im_start|>",
+            "<|im_end|>",
+            "<think>",
+            "</think>",
+        ],
+    )?;
     Ok(ScenarioReport {
         name,
         tool_calls,
         prompt_tokens: response.usage.input_tokens,
         generated_tokens: response.usage.output_tokens,
-        history_messages: response.messages.as_ref().map_or(0, Vec::len),
+        history_messages: history.len(),
         duration: started.elapsed(),
         response: response.output,
     })
@@ -892,7 +896,11 @@ where
         .tool(CountingSubtract(subtract_calls.clone()))
         .default_max_turns(3)
         .build();
-    let request = agent.prompt(PARALLEL_PROMPT).max_turns(3);
+    let cell = scenario_cell(PARALLEL_PROMPT);
+    let request = agent
+        .prompt(PARALLEL_PROMPT)
+        .max_turns(3)
+        .conversation_cell(cell.clone());
     let response = match tool_concurrency {
         Some(concurrency) => {
             request
@@ -907,10 +915,8 @@ where
     } else {
         "parallel_tools"
     };
-    let messages = response.messages.as_deref().ok_or_else(|| {
-        ScenarioError::contract(scenario, "extended run omitted accumulated message history")
-    })?;
-    validate_tool_correlation(scenario, messages)?;
+    let messages = conversation_of(&cell);
+    validate_tool_correlation(scenario, &messages)?;
 
     let Some((call_index, calls)) = messages.iter().enumerate().find_map(|(index, message)| {
         let Message::Assistant { content, .. } = message else {
@@ -965,7 +971,7 @@ where
             format!("execution counts were add={add}, subtract={subtract}, expected one each"),
         ));
     }
-    report_from_response(scenario, started, add + subtract, response)
+    report_from_response(scenario, started, add + subtract, response, &messages)
 }
 
 /// Runs a zero-argument tool and validates verbatim string-result handling.
@@ -986,15 +992,16 @@ where
         .tool(PingTool(calls.clone()))
         .default_max_turns(2)
         .build();
+    let prompt = "Call the ping tool, then report the exact marker it returns.";
+    let cell = scenario_cell(prompt);
     let response = agent
-        .prompt("Call the ping tool, then report the exact marker it returns.")
+        .prompt(prompt)
         .max_turns(2)
+        .conversation_cell(cell.clone())
         .extended_details()
         .await?;
-    let messages = response.messages.as_deref().ok_or_else(|| {
-        ScenarioError::contract(SCENARIO, "extended run omitted accumulated message history")
-    })?;
-    validate_tool_correlation(SCENARIO, messages)?;
+    let messages = conversation_of(&cell);
+    validate_tool_correlation(SCENARIO, &messages)?;
     let values = messages
         .iter()
         .flat_map(tool_result_values)
@@ -1014,7 +1021,7 @@ where
             ),
         ));
     }
-    report_from_response(SCENARIO, started, 1, response)
+    report_from_response(SCENARIO, started, 1, response, &messages)
 }
 
 /// Runs string- and JSON-returning tools and validates that neither output is
@@ -1038,15 +1045,16 @@ where
         .tool(ConfigTool(config_calls.clone()))
         .default_max_turns(3)
         .build();
+    let prompt = "Call fetch_motto and fetch_config, then summarize both outputs in one sentence.";
+    let cell = scenario_cell(prompt);
     let response = agent
-        .prompt("Call fetch_motto and fetch_config, then summarize both outputs in one sentence.")
+        .prompt(prompt)
         .max_turns(3)
+        .conversation_cell(cell.clone())
         .extended_details()
         .await?;
-    let messages = response.messages.as_deref().ok_or_else(|| {
-        ScenarioError::contract(SCENARIO, "extended run omitted accumulated message history")
-    })?;
-    validate_tool_correlation(SCENARIO, messages)?;
+    let messages = conversation_of(&cell);
+    validate_tool_correlation(SCENARIO, &messages)?;
     let values = messages
         .iter()
         .flat_map(tool_result_values)
@@ -1076,7 +1084,13 @@ where
             ),
         ));
     }
-    report_from_response(SCENARIO, started, motto_count + config_count, response)
+    report_from_response(
+        SCENARIO,
+        started,
+        motto_count + config_count,
+        response,
+        &messages,
+    )
 }
 
 /// Runs a nested, escaped, Unicode-bearing argument payload through typed tool
@@ -1111,11 +1125,12 @@ where
         })
         .default_max_turns(3)
         .build();
+    let prompt = "Call store_profile with profile.name exactly `Zoë \\\"Z\\\"`, profile.tags exactly [`rust`, `東京`], mode `careful`, note containing the two lines `line one` and `line two` separated by a newline, and quote exactly `path C:\\\\tmp and \\\"quoted\\\"`. Then confirm it was stored.";
+    let cell = scenario_cell(prompt);
     let response = agent
-        .prompt(
-            "Call store_profile with profile.name exactly `Zoë \\\"Z\\\"`, profile.tags exactly [`rust`, `東京`], mode `careful`, note containing the two lines `line one` and `line two` separated by a newline, and quote exactly `path C:\\\\tmp and \\\"quoted\\\"`. Then confirm it was stored.",
-        )
+        .prompt(prompt)
         .max_turns(3)
+        .conversation_cell(cell.clone())
         .extended_details()
         .await?;
     let observed = lock_recover(&captured).clone();
@@ -1129,11 +1144,9 @@ where
             ),
         ));
     }
-    let messages = response.messages.as_deref().ok_or_else(|| {
-        ScenarioError::contract(SCENARIO, "extended run omitted accumulated message history")
-    })?;
-    validate_tool_correlation(SCENARIO, messages)?;
-    report_from_response(SCENARIO, started, 1, response)
+    let messages = conversation_of(&cell);
+    validate_tool_correlation(SCENARIO, &messages)?;
+    report_from_response(SCENARIO, started, 1, response, &messages)
 }
 
 /// Runs the same deterministic text request through buffered and raw streaming
@@ -1240,7 +1253,13 @@ where
         .tool(CountingSum(sum_calls.clone()))
         .tool_choice(ToolChoice::Required)
         .build();
-    let response = agent.runner(PROMPT).max_turns(4).run().await?;
+    let cell = scenario_cell(PROMPT);
+    let response = agent
+        .runner(PROMPT)
+        .max_turns(4)
+        .conversation_cell(cell.clone())
+        .run()
+        .await?;
     // Nothing executed: the unregistered name never ran a body.
     if sum_calls.load(Ordering::SeqCst) != 0 {
         return Err(ScenarioError::contract(
@@ -1249,7 +1268,8 @@ where
         ));
     }
     // The model saw the in-band synthetic result in the run's history.
-    let rendered = serde_json::to_string(&response.messages).unwrap_or_default();
+    let messages = conversation_of(&cell);
+    let rendered = serde_json::to_string(&messages).unwrap_or_default();
     if !rendered.contains("unknown or disallowed tool") {
         return Err(ScenarioError::contract(
             SCENARIO,
@@ -1262,11 +1282,7 @@ where
         tool_calls: 0,
         prompt_tokens: response.usage.input_tokens,
         generated_tokens: response.usage.output_tokens,
-        history_messages: response
-            .messages
-            .as_ref()
-            .map(|messages| messages.len())
-            .unwrap_or(0),
+        history_messages: messages.len(),
         duration: started.elapsed(),
         response: response.output.clone(),
     })
@@ -1291,9 +1307,12 @@ where
         .tool(CountingAdd(calls.clone()))
         .default_max_turns(3)
         .build();
+    let prompt = "Use add once for x=1 and y=1, then report what the tool returns.";
+    let cell = scenario_cell(prompt);
     let response = agent
-        .prompt("Use add once for x=1 and y=1, then report what the tool returns.")
+        .prompt(prompt)
         .max_turns(3)
+        .conversation_cell(cell.clone())
         .add_hook(RewriteArgument {
             key: "x",
             value: serde_json::json!(7),
@@ -1313,9 +1332,7 @@ where
         &observations,
         &serde_json::json!({ "x": 7, "y": 8 }),
     )?;
-    let messages = response.messages.as_deref().ok_or_else(|| {
-        ScenarioError::contract(SCENARIO, "extended hook run omitted message history")
-    })?;
+    let messages = conversation_of(&cell);
     let results = messages
         .iter()
         .flat_map(tool_result_values)
@@ -1336,7 +1353,7 @@ where
             ),
         ));
     }
-    report_from_response(SCENARIO, started, 1, response)
+    report_from_response(SCENARIO, started, 1, response, &messages)
 }
 
 /// Exercises post-execution cancellation and max-turn diagnostics through the
@@ -1358,9 +1375,12 @@ where
         .temperature(0.0)
         .tool(CountingAdd(cancelled_calls.clone()))
         .build();
+    let cancelled_prompt = "Use add once to compute x=20 plus y=22.";
+    let cancelled_cell = scenario_cell(cancelled_prompt);
     let cancelled = match cancelled_agent
-        .prompt("Use add once to compute x=20 plus y=22.")
+        .prompt(cancelled_prompt)
         .max_turns(2)
+        .conversation_cell(cancelled_cell.clone())
         .add_hook(StopAfterResult(REASON))
         .await
     {
@@ -1372,7 +1392,12 @@ where
             ));
         }
     };
-    validate_cancelled_failure(&cancelled, REASON, CountingAdd::NAME)?;
+    validate_cancelled_failure(
+        &cancelled,
+        REASON,
+        CountingAdd::NAME,
+        &conversation_of(&cancelled_cell),
+    )?;
 
     let max_turn_calls = Arc::new(AtomicUsize::new(0));
     let max_turn_agent = configure(AgentBuilder::new(model))
@@ -1380,9 +1405,12 @@ where
         .temperature(0.0)
         .tool(CountingAdd(max_turn_calls.clone()))
         .build();
+    let max_turn_prompt = "Use add once to compute x=20 plus y=22, then report the result.";
+    let max_turn_cell = scenario_cell(max_turn_prompt);
     let max_turn = match max_turn_agent
-        .prompt("Use add once to compute x=20 plus y=22, then report the result.")
+        .prompt(max_turn_prompt)
         .max_turns(1)
+        .conversation_cell(max_turn_cell.clone())
         .await
     {
         Err(error) => error,
@@ -1393,7 +1421,7 @@ where
             ));
         }
     };
-    validate_max_turns_failure(&max_turn, 1)?;
+    validate_max_turns_failure(&max_turn, 1, &conversation_of(&max_turn_cell))?;
     let cancelled_count = cancelled_calls.load(Ordering::SeqCst);
     let max_turn_count = max_turn_calls.load(Ordering::SeqCst);
     if cancelled_count != 1 || max_turn_count != 1 {
@@ -1435,24 +1463,23 @@ where
         })
         .default_max_turns(4)
         .build();
+    let prompt = "Use the repeat_text tool to repeat the word \"banana\" 3 times, then show me the exact result.";
+    let cell = scenario_cell(prompt);
     let result = agent
-        .prompt(
-            "Use the repeat_text tool to repeat the word \"banana\" 3 times, then show me the exact result.",
-        )
+        .prompt(prompt)
+        .conversation_cell(cell.clone())
         .extended_details()
         .await?;
+    let messages = conversation_of(&cell);
     let response = result.output.clone();
     let tool_calls = calls.load(Ordering::SeqCst);
-    if tool_calls == 0
-        || response.matches("banana").count() < 1
-        || !has_tool_roundtrip(result.messages.as_deref())
-    {
+    if tool_calls == 0 || response.matches("banana").count() < 1 || !has_tool_roundtrip(&messages) {
         return Err(ScenarioError::contract(
             "optional_argument",
             format!("calls={tool_calls}, response={response:?}"),
         ));
     }
-    report_from_response("optional_argument", started, tool_calls, result)
+    report_from_response("optional_argument", started, tool_calls, result, &messages)
 }
 
 /// Runs a portable two-tool sequential arithmetic scenario.
@@ -1472,26 +1499,30 @@ where
         .tool(MultiplyTool(multiply_calls.clone()))
         .default_max_turns(6)
         .build();
+    let prompt = "Compute (4 + 6) * 2. First call the add tool, then call the multiply tool on the result. Tell me the final number.";
+    let cell = scenario_cell(prompt);
     let result = agent
-        .prompt(
-            "Compute (4 + 6) * 2. First call the add tool, then call the multiply tool on the result. Tell me the final number.",
-        )
+        .prompt(prompt)
+        .conversation_cell(cell.clone())
         .extended_details()
         .await?;
+    let messages = conversation_of(&cell);
     let response = result.output.clone();
     let add = add_calls.load(Ordering::SeqCst);
     let multiply = multiply_calls.load(Ordering::SeqCst);
-    if add == 0
-        || multiply == 0
-        || !response.contains("20")
-        || !has_tool_roundtrip(result.messages.as_deref())
-    {
+    if add == 0 || multiply == 0 || !response.contains("20") || !has_tool_roundtrip(&messages) {
         return Err(ScenarioError::contract(
             "sequential_tools",
             format!("add={add}, multiply={multiply}, response={response:?}"),
         ));
     }
-    report_from_response("sequential_tools", started, add + multiply, result)
+    report_from_response(
+        "sequential_tools",
+        started,
+        add + multiply,
+        result,
+        &messages,
+    )
 }
 
 /// Runs a tool through Rig's multi-turn streaming agent driver.
@@ -1507,9 +1538,12 @@ where
         .tool(AddTool(calls.clone()))
         .default_max_turns(4)
         .build();
+    let prompt = "Use add to calculate 17 + 25, then state the final number.";
+    let cell = scenario_cell(prompt);
     let mut stream = agent
-        .stream_prompt("Use add to calculate 17 + 25, then state the final number.")
+        .stream_prompt(prompt)
         .max_turns(4)
+        .conversation_cell(cell.clone())
         .await;
     let mut final_response = None;
     let mut final_count = 0_usize;
@@ -1545,16 +1579,14 @@ where
         ScenarioError::contract("streaming_tool", "stream produced no final response")
     })?;
     let response = result.output.clone();
-    let history_messages = result.messages.as_ref().map_or(0, Vec::len);
+    let messages = conversation_of(&cell);
+    let history_messages = messages.len();
     let tool_calls = calls.load(Ordering::SeqCst);
     streamed_call_ids.sort();
     streamed_result_ids.sort();
     let correlated_stream =
         !streamed_call_ids.is_empty() && streamed_call_ids == streamed_result_ids;
-    let correlated_history = result
-        .messages
-        .as_deref()
-        .is_some_and(|messages| validate_tool_correlation("streaming_tool", messages).is_ok());
+    let correlated_history = validate_tool_correlation("streaming_tool", &messages).is_ok();
     if tool_calls == 0
         || !response.contains("42")
         || history_messages < 4
@@ -1572,14 +1604,12 @@ where
             ),
         ));
     }
-    if let Some(messages) = result.messages.as_deref() {
-        validate_protocol_hygiene(
-            "streaming_tool",
-            &response,
-            messages,
-            &["<tool_call>", "</tool_call>", "<think>", "</think>"],
-        )?;
-    }
+    validate_protocol_hygiene(
+        "streaming_tool",
+        &response,
+        &messages,
+        &["<tool_call>", "</tool_call>", "<think>", "</think>"],
+    )?;
     Ok(ScenarioReport {
         name: "streaming_tool",
         tool_calls,
@@ -1899,12 +1929,13 @@ mod tests {
     fn validators_reject_wrong_error_shapes() {
         let wrong =
             PromptError::CompletionError(CompletionError::ProviderError("wrong shape".to_string()));
+        let empty = Vec::new();
         assert!(matches!(
-            validate_cancelled_failure(&wrong, "reason", "add"),
+            validate_cancelled_failure(&wrong, "reason", "add", &empty),
             Err(ScenarioError::Contract { .. })
         ));
         assert!(matches!(
-            validate_max_turns_failure(&wrong, 1),
+            validate_max_turns_failure(&wrong, 1, &empty),
             Err(ScenarioError::Contract { .. })
         ));
     }
@@ -1916,20 +1947,18 @@ mod tests {
             content: OneOrMany::one(AssistantContent::text("no tool calls")),
         }];
         let mismatched_reason = PromptError::PromptCancelled {
-            chat_history: no_calls.clone(),
             reason: "other reason".to_string(),
         };
         assert!(matches!(
-            validate_cancelled_failure(&mismatched_reason, "expected", "add"),
+            validate_cancelled_failure(&mismatched_reason, "expected", "add", &no_calls),
             Err(ScenarioError::Contract { .. })
         ));
 
         let matching_reason_missing_call = PromptError::PromptCancelled {
-            chat_history: no_calls,
             reason: "expected".to_string(),
         };
         assert!(matches!(
-            validate_cancelled_failure(&matching_reason_missing_call, "expected", "add"),
+            validate_cancelled_failure(&matching_reason_missing_call, "expected", "add", &no_calls),
             Err(ScenarioError::Contract { .. })
         ));
 
@@ -1948,36 +1977,30 @@ mod tests {
             },
         ];
         let matching = PromptError::PromptCancelled {
-            chat_history: with_call,
             reason: "expected".to_string(),
         };
-        assert!(validate_cancelled_failure(&matching, "expected", "add").is_ok());
+        assert!(validate_cancelled_failure(&matching, "expected", "add", &with_call).is_ok());
     }
 
     #[test]
     fn max_turns_validation_rejects_budget_and_history_mismatches() {
-        let prompt = Message::User {
+        let pending = vec![Message::User {
             content: OneOrMany::one(UserContent::text("pending")),
-        };
-        let wrong_budget = PromptError::MaxTurnsError {
-            max_turns: 2,
-            chat_history: Box::new(Vec::new()),
-            prompt: Box::new(prompt.clone()),
-        };
+        }];
+        let wrong_budget = PromptError::MaxTurnsError { max_turns: 2 };
         assert!(matches!(
-            validate_max_turns_failure(&wrong_budget, 1),
+            validate_max_turns_failure(&wrong_budget, 1, &pending),
             Err(ScenarioError::Contract { .. })
         ));
 
-        let right_budget_empty_history = PromptError::MaxTurnsError {
-            max_turns: 1,
-            chat_history: Box::new(Vec::new()),
-            prompt: Box::new(prompt),
-        };
+        let right_budget_empty_history = PromptError::MaxTurnsError { max_turns: 1 };
         assert!(matches!(
-            validate_max_turns_failure(&right_budget_empty_history, 1),
+            validate_max_turns_failure(&right_budget_empty_history, 1, &[]),
             Err(ScenarioError::Contract { .. })
         ));
+
+        let right_budget_with_prompt = PromptError::MaxTurnsError { max_turns: 1 };
+        assert!(validate_max_turns_failure(&right_budget_with_prompt, 1, &pending).is_ok());
     }
 
     #[test]

@@ -496,7 +496,6 @@ impl AgentRunner {
         if let Some(cell) = &self.conversation_cell {
             if self.max_turns == 0 {
                 return Err(PromptError::prompt_cancelled(
-                    Vec::new(),
                     "max_turns must be at least 1 — a run always executes one turn",
                 ));
             }
@@ -522,7 +521,6 @@ impl AgentRunner {
             // Reached only at send time (the builder is infallible); loud,
             // with the contract in the message.
             return Err(PromptError::prompt_cancelled(
-                Vec::new(),
                 "empty conversation: stream_chat history must end with the message being sent",
             ));
         }
@@ -530,7 +528,6 @@ impl AgentRunner {
             // The entry contract (ENGINE.md): a run executes at least one
             // turn. A zero budget is configuration error, not a run shape.
             return Err(PromptError::prompt_cancelled(
-                history,
                 "max_turns must be at least 1 — a run always executes one turn",
             ));
         }

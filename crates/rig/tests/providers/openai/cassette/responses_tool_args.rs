@@ -8,7 +8,16 @@
 //! Run cassette tests in replay mode by default, or set
 //! `RIG_PROVIDER_TEST_MODE=record` to record against the real provider.
 
-use rig::completion::{Chat, CompletionModel, Message, ToolDefinition};
+fn test_cell(prompt: &str) -> tabit_log::ConversationCell {
+    std::sync::Arc::new(std::sync::RwLock::new(tabit_log::ContextManager::seeded(
+        vec![Message::user(prompt)],
+    )))
+}
+
+fn cell_conversation(cell: &tabit_log::ConversationCell) -> Vec<Message> {
+    tabit_log::lock::read(cell).messages()
+}
+use rig::completion::{CompletionModel, Message, ToolDefinition};
 use rig::message::AssistantContent;
 use rig::prelude::*;
 use rig::tool::Tool;
@@ -222,19 +231,21 @@ async fn nested_arguments_roundtrip_nonstreaming() {
                 .tool(PlanTrip)
                 .default_max_turns(4)
                 .build();
-            let mut history = Vec::<Message>::new();
+            let cell = test_cell(NESTED_ARGS_PROMPT);
 
             let result = agent
-                .chat(NESTED_ARGS_PROMPT, &mut history)
+                .prompt(NESTED_ARGS_PROMPT)
+                .conversation_cell(cell.clone())
+                .max_turns(4)
                 .await
-                .expect("nested-args tool chat should succeed");
+                .expect("nested-args tool run should succeed");
 
             assert!(
                 result.contains("SAKURA-77"),
                 "final answer should repeat the tool's confirmation code, got {result:?}"
             );
 
-            let arguments = history
+            let arguments = cell_conversation(&cell)
                 .iter()
                 .find_map(|message| match message {
                     Message::Assistant { content, .. } => {

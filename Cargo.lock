@@ -3882,6 +3882,7 @@ dependencies = [
  "serde_yaml",
  "sha2",
  "syn 2.0.119",
+ "tabit-log",
  "thiserror 2.0.20",
  "tokio",
  "tracing-subscriber",

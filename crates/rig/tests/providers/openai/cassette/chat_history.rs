@@ -3,10 +3,19 @@
 //! Run cassette tests in replay mode by default, or set
 //! `RIG_PROVIDER_TEST_MODE=record` to record against the real provider.
 
+fn test_cell(prompt: &str) -> tabit_log::ConversationCell {
+    std::sync::Arc::new(std::sync::RwLock::new(tabit_log::ContextManager::seeded(
+        vec![Message::user(prompt)],
+    )))
+}
+
+fn cell_conversation(cell: &tabit_log::ConversationCell) -> Vec<Message> {
+    tabit_log::lock::read(cell).messages()
+}
 use std::sync::Arc;
 use std::sync::atomic::AtomicUsize;
 
-use rig::completion::{Chat, Message};
+use rig::completion::Message;
 use rig::prelude::*;
 
 use super::super::support::with_openai_cassette;
@@ -29,16 +38,18 @@ async fn chat_appends_reasoning_tool_turns_to_caller_history() {
                 }))
                 .default_max_turns(2)
                 .build();
-            let mut chat_history = Vec::<Message>::new();
+            let cell = test_cell(reasoning::TOOL_USER_PROMPT);
 
             let result = agent
-                .chat(reasoning::TOOL_USER_PROMPT, &mut chat_history)
+                .prompt(reasoning::TOOL_USER_PROMPT)
+                .conversation_cell(cell.clone())
+                .max_turns(2)
                 .await
-                .expect("[openai] Chat failed before it could update caller-owned history");
+                .expect("[openai] run failed before it could grow the conversation");
 
             reasoning::assert_nonstreaming_universal(&result, &call_count, "openai");
             reasoning::assert_chat_history_preserves_reasoning_tool_roundtrip(
-                &chat_history,
+                &cell_conversation(&cell),
                 &result,
                 "openai",
             );

@@ -742,14 +742,16 @@ async fn assistant_entries_carry_announced_turn_ids_not_provider_ids() {
     let assistant_ids_of = |turn: MockTurn| {
         let prompt = prompt.clone();
         async move {
-            let response = AgentBuilder::new(MockCompletionModel::new([turn]))
+            let cell = parity_cell("prompt");
+            AgentBuilder::new(MockCompletionModel::new([turn]))
                 .build()
                 .runner(prompt)
                 .turn_id_source(parity_turn_ids())
+                .conversation_cell(cell.clone())
                 .run()
                 .await
                 .expect("blocking response");
-            let messages = response.messages.expect("history enabled");
+            let messages = parity_conversation(&cell);
             messages
                 .iter()
                 .filter_map(|message| match message {
@@ -1054,26 +1056,30 @@ async fn prompt_surfaces_reject_second_tool_roundtrip_request_at_budget_one() {
 #[tokio::test]
 async fn run_and_stream_behave_identically_for_a_tool_call() {
     let blocking_hook = RecordingHook::default();
+    let blocking_cell = parity_cell("add 2 and 3");
     let blocking = AgentBuilder::new(blocking_model())
         .tool(MockAddTool)
         .build()
         .runner("add 2 and 3")
         .max_turns(2)
         .turn_id_source(parity_turn_ids())
+        .conversation_cell(blocking_cell.clone())
         .add_hook(blocking_hook.clone())
         .run()
         .await
         .expect("blocking run should succeed");
 
-    // No `.with_history` on either runner — `stream()` must return the final
-    // history just like `run()` returns `messages`.
+    // No `.history` on either runner — the conversation cell carries the
+    // history for both surfaces, and the durable conversations must agree.
     let streaming_hook = RecordingHook::default();
+    let streaming_cell = parity_cell("add 2 and 3");
     let mut stream = AgentBuilder::new(streaming_model())
         .tool(MockAddTool)
         .build()
         .runner("add 2 and 3")
         .max_turns(2)
         .turn_id_source(parity_turn_ids())
+        .conversation_cell(streaming_cell.clone())
         .add_hook(streaming_hook.clone())
         .stream()
         .await;
@@ -1106,15 +1112,10 @@ async fn run_and_stream_behave_identically_for_a_tool_call() {
     assert_eq!(blocking_hook.tool_results(), streaming_hook.tool_results());
     assert_eq!(blocking_hook.tool_results(), vec!["5".to_string()]);
 
-    // Same final message history (compared via serialized form to normalize).
-    let blocking_messages = blocking.messages.expect("blocking messages");
-    let streaming_messages = final_response
-        .messages()
-        .expect("streaming history")
-        .to_vec();
+    // Same durable conversation (compared via serialized form to normalize).
     assert_eq!(
-        serde_json::to_value(&blocking_messages).expect("serialize blocking"),
-        serde_json::to_value(&streaming_messages).expect("serialize streaming"),
+        serde_json::to_value(parity_conversation(&blocking_cell)).expect("serialize blocking"),
+        serde_json::to_value(parity_conversation(&streaming_cell)).expect("serialize streaming"),
     );
 }
 
@@ -1874,7 +1875,8 @@ mod structured_tool_results {
         .expect("two tool calls");
 
         let observer = OutcomeHook::default();
-        let response = AgentBuilder::new(MockCompletionModel::from_turns([
+        let concurrent_cell = super::parity_cell("go");
+        let _response = AgentBuilder::new(MockCompletionModel::from_turns([
             turn,
             MockTurn::text("done"),
         ]))
@@ -1885,6 +1887,7 @@ mod structured_tool_results {
         .runner("go")
         .max_turns(3)
         .tool_concurrency(2)
+        .conversation_cell(concurrent_cell.clone())
         .run()
         .await
         .expect("run should succeed");
@@ -1899,7 +1902,7 @@ mod structured_tool_results {
 
         // The persisted tool results must keep tool-call order regardless of
         // completion timing: `add` (tc_add) before `flaky_tool` (tc_flaky).
-        let messages = response.messages.expect("messages");
+        let messages = super::parity_conversation(&concurrent_cell);
         let tool_result_ids: Vec<String> = messages
             .iter()
             .flat_map(|message| match message {
@@ -2578,7 +2581,7 @@ fn tool_result_json_in_history(messages: &[Message], expected: &serde_json::Valu
 /// driver. (`run()` runs tools with `buffer_unordered` but writes each result
 /// into its original call-index slot, so results still land in call order.)
 #[tokio::test]
-async fn run_and_stream_same_message_history_for_parallel_tool_calls() {
+async fn run_and_stream_same_conversation_for_parallel_tool_calls() {
     let blocking_model = MockCompletionModel::from_turns([
         MockTurn::from_contents([
             tool_call_content("tc1", json!({"x": 2, "y": 3})),
@@ -2587,13 +2590,15 @@ async fn run_and_stream_same_message_history_for_parallel_tool_calls() {
         .expect("two tool calls is a valid turn"),
         MockTurn::text("done"),
     ]);
-    let blocking = AgentBuilder::new(blocking_model)
+    let blocking_cell = parity_cell("add two pairs");
+    let _blocking = AgentBuilder::new(blocking_model)
         .tool(MockAddTool)
         .build()
         .runner("add two pairs")
         .max_turns(3)
         .turn_id_source(parity_turn_ids())
         .tool_concurrency(4)
+        .conversation_cell(blocking_cell.clone())
         .run()
         .await
         .expect("blocking run should succeed");
@@ -2609,12 +2614,14 @@ async fn run_and_stream_same_message_history_for_parallel_tool_calls() {
             MockStreamEvent::final_response_with_total_tokens(0),
         ],
     ]);
+    let streaming_cell = parity_cell("add two pairs");
     let mut stream = AgentBuilder::new(streaming_model)
         .tool(MockAddTool)
         .build()
         .runner("add two pairs")
         .max_turns(3)
         .turn_id_source(parity_turn_ids())
+        .conversation_cell(streaming_cell.clone())
         .stream()
         .await;
     let mut final_response = None;
@@ -2625,16 +2632,11 @@ async fn run_and_stream_same_message_history_for_parallel_tool_calls() {
             final_response = Some(resp);
         }
     }
-    let final_response = final_response.expect("stream should yield a final response");
+    final_response.expect("stream should yield a final response");
 
-    let blocking_messages = blocking.messages.expect("blocking messages");
-    let streaming_messages = final_response
-        .messages()
-        .expect("streaming history")
-        .to_vec();
     assert_eq!(
-        serde_json::to_value(&blocking_messages).expect("serialize blocking"),
-        serde_json::to_value(&streaming_messages).expect("serialize streaming"),
+        serde_json::to_value(parity_conversation(&blocking_cell)).expect("serialize blocking"),
+        serde_json::to_value(parity_conversation(&streaming_cell)).expect("serialize streaming"),
     );
 }
 
@@ -2695,7 +2697,8 @@ async fn run_preserves_tool_call_order_under_out_of_order_completion() {
         .expect("two tool calls is a valid turn"),
         MockTurn::text("done"),
     ]);
-    let response = AgentBuilder::new(model)
+    let cell = parity_cell("go");
+    let _response = AgentBuilder::new(model)
         .tool(OutOfOrderTool {
             gate: Arc::new(tokio::sync::Notify::new()),
             order: Arc::new(AtomicU32::new(0)),
@@ -2704,11 +2707,12 @@ async fn run_preserves_tool_call_order_under_out_of_order_completion() {
         .runner("go")
         .max_turns(3)
         .tool_concurrency(4)
+        .conversation_cell(cell.clone())
         .run()
         .await
         .expect("run should succeed");
 
-    let messages = response.messages.expect("messages");
+    let messages = parity_conversation(&cell);
     let result_ids: Vec<String> = messages
         .iter()
         .flat_map(|message| match message {
@@ -2773,13 +2777,15 @@ async fn stream_and_run_same_message_history_for_parallel_tool_calls_under_concu
         .expect("two tool calls is a valid turn"),
         MockTurn::text("done"),
     ]);
-    let blocking = AgentBuilder::new(blocking_model)
+    let blocking_cell = parity_cell("add two pairs");
+    let _blocking = AgentBuilder::new(blocking_model)
         .tool(MockAddTool)
         .build()
         .runner("add two pairs")
         .max_turns(3)
         .turn_id_source(parity_turn_ids())
         .tool_concurrency(4)
+        .conversation_cell(blocking_cell.clone())
         .run()
         .await
         .expect("blocking run should succeed");
@@ -2795,6 +2801,7 @@ async fn stream_and_run_same_message_history_for_parallel_tool_calls_under_concu
             MockStreamEvent::final_response_with_total_tokens(0),
         ],
     ]);
+    let streaming_cell = parity_cell("add two pairs");
     let stream = AgentBuilder::new(streaming_model)
         .tool(MockAddTool)
         .build()
@@ -2802,18 +2809,14 @@ async fn stream_and_run_same_message_history_for_parallel_tool_calls_under_concu
         .max_turns(3)
         .turn_id_source(parity_turn_ids())
         .tool_concurrency(4)
+        .conversation_cell(streaming_cell.clone())
         .stream()
         .await;
-    let final_response = drive_to_final_response(stream).await;
+    let _final_response = drive_to_final_response(stream).await;
 
-    let blocking_messages = blocking.messages.expect("blocking messages");
-    let streaming_messages = final_response
-        .messages()
-        .expect("streaming history")
-        .to_vec();
     assert_eq!(
-        serde_json::to_value(&blocking_messages).expect("serialize blocking"),
-        serde_json::to_value(&streaming_messages).expect("serialize streaming"),
+        serde_json::to_value(parity_conversation(&blocking_cell)).expect("serialize blocking"),
+        serde_json::to_value(parity_conversation(&streaming_cell)).expect("serialize streaming"),
     );
 }
 
@@ -2835,6 +2838,7 @@ async fn stream_preserves_history_order_under_out_of_order_completion() {
             MockStreamEvent::final_response_with_total_tokens(0),
         ],
     ]);
+    let cell = parity_cell("go");
     let stream = AgentBuilder::new(model)
         .tool(OutOfOrderTool {
             gate: Arc::new(tokio::sync::Notify::new()),
@@ -2845,18 +2849,19 @@ async fn stream_preserves_history_order_under_out_of_order_completion() {
         .max_turns(3)
         .turn_id_source(parity_turn_ids())
         .tool_concurrency(4)
+        .conversation_cell(cell.clone())
         .stream()
         .await;
     // Timeout so a regression to sequential execution fails cleanly instead
     // of hanging (the first call only completes once the second runs).
-    let final_response = tokio::time::timeout(
+    let _final_response = tokio::time::timeout(
         std::time::Duration::from_secs(5),
         drive_to_final_response(stream),
     )
     .await
     .expect("streamed tools must run concurrently, not deadlock on the first call");
 
-    let messages = final_response.messages().expect("history").to_vec();
+    let messages = parity_conversation(&cell);
     // History stays in call order (tc1 then tc2), even though tc2 finished first.
     assert_eq!(
         tool_result_ids(&messages),
@@ -2881,6 +2886,7 @@ async fn stream_emits_tool_results_in_call_order_after_batch_settles_under_concu
             MockStreamEvent::final_response_with_total_tokens(0),
         ],
     ]);
+    let cell = parity_cell("go");
     let mut stream = AgentBuilder::new(model)
         .tool(OutOfOrderTool {
             gate: Arc::new(tokio::sync::Notify::new()),
@@ -2890,6 +2896,7 @@ async fn stream_emits_tool_results_in_call_order_after_batch_settles_under_concu
         .runner("go")
         .max_turns(3)
         .tool_concurrency(4)
+        .conversation_cell(cell.clone())
         .stream()
         .await;
 
@@ -2916,9 +2923,9 @@ async fn stream_emits_tool_results_in_call_order_after_batch_settles_under_concu
         streamed_result_ids,
         vec!["tc1".to_string(), "tc2".to_string()]
     );
-    let final_response = final_response.expect("stream should yield a final response");
+    final_response.expect("stream should yield a final response");
     assert_eq!(
-        tool_result_ids(final_response.messages().expect("history")),
+        tool_result_ids(&parity_conversation(&cell)),
         vec!["tc1".to_string(), "tc2".to_string()]
     );
 }
@@ -3716,6 +3723,7 @@ async fn stream_hook_skip_surfaces_result_without_execution_commit() {
             MockStreamEvent::final_response_with_total_tokens(0),
         ],
     ]);
+    let cell = parity_cell("go");
     let stream = AgentBuilder::new(model)
         .tool(CountingAddTool {
             calls: calls.clone(),
@@ -3724,6 +3732,7 @@ async fn stream_hook_skip_surfaces_result_without_execution_commit() {
         .build()
         .runner("go")
         .max_turns(3)
+        .conversation_cell(cell.clone())
         .stream()
         .await;
 
@@ -3751,9 +3760,9 @@ async fn stream_hook_skip_surfaces_result_without_execution_commit() {
         results, 1,
         "the skip result is still surfaced to the consumer"
     );
-    let final_response = final_response.expect("stream should yield a final response");
+    final_response.expect("stream should yield a final response");
     // The skip result is committed to history (the model sees the reason).
-    let history = final_response.messages().expect("history");
+    let history = parity_conversation(&cell);
     assert!(
         history.iter().any(|m| serde_json::to_string(m)
             .map(|s| s.contains("blocked by policy"))
@@ -4039,6 +4048,19 @@ struct ParityOutcome {
     tool_results: Vec<String>,
 }
 
+/// A standalone cell seeded with the scenario prompt — the parity
+/// harness is a cell-supplying caller (the conversation, not the
+/// response, is the transcript it compares).
+fn parity_cell(prompt: &str) -> tabit_log::ConversationCell {
+    std::sync::Arc::new(std::sync::RwLock::new(tabit_log::ContextManager::seeded(
+        vec![Message::user(prompt)],
+    )))
+}
+
+fn parity_conversation(cell: &tabit_log::ConversationCell) -> Vec<Message> {
+    tabit_log::lock::read(cell).messages()
+}
+
 /// Deterministic announced-id mint for parity runs: both scenarios
 /// restart the same sequence, so assistant entries (which carry the
 /// announced ids — the one-value rule) compare equal across surfaces.
@@ -4053,19 +4075,21 @@ fn parity_turn_ids() -> crate::agent::TurnIdSource {
 async fn run_blocking_scenario(prompt: &'static str, turns: &[ScriptedTurn]) -> ParityOutcome {
     let model = MockCompletionModel::from_turns(turns.iter().map(ScriptedTurn::as_blocking_turn));
     let hook = RecordingHook::default();
+    let cell = parity_cell(prompt);
     let response = AgentBuilder::new(model)
         .tool(MockAddTool)
         .build()
         .runner(prompt)
         .max_turns(8)
         .turn_id_source(parity_turn_ids())
+        .conversation_cell(cell.clone())
         .add_hook(hook.clone())
         .run()
         .await
         .expect("blocking scenario should succeed");
     ParityOutcome {
         output: response.output,
-        messages: response.messages.expect("blocking messages"),
+        messages: parity_conversation(&cell),
         shared_events: hook.shared_events(),
         tool_results: hook.tool_results(),
     }
@@ -4080,12 +4104,14 @@ async fn run_streaming_scenario(
         turns.iter().map(|turn| turn.as_stream_events(shape)),
     );
     let hook = RecordingHook::default();
+    let cell = parity_cell(prompt);
     let mut stream = AgentBuilder::new(model)
         .tool(MockAddTool)
         .build()
         .runner(prompt)
         .max_turns(8)
         .turn_id_source(parity_turn_ids())
+        .conversation_cell(cell.clone())
         .add_hook(hook.clone())
         .stream()
         .await;
@@ -4100,10 +4126,9 @@ async fn run_streaming_scenario(
     let final_response = final_response.expect("streaming scenario should yield a final response");
     ParityOutcome {
         output: final_response.output().to_string(),
-        messages: final_response
-            .messages()
-            .expect("streaming history")
-            .to_vec(),
+        // Parity over the durable conversations the two surfaces fold —
+        // the response carries outcomes only.
+        messages: parity_conversation(&cell),
         shared_events: hook.shared_events(),
         tool_results: hook.tool_results(),
     }
@@ -4262,12 +4287,14 @@ async fn valid_tool_call_skip_parity_across_run_and_stream() {
     let blocking_model =
         MockCompletionModel::from_turns(turns.iter().map(ScriptedTurn::as_blocking_turn));
     let blocking_hook = RecordingHook::default();
+    let blocking_cell = parity_cell("add 2 and 3");
     let blocking = AgentBuilder::new(blocking_model)
         .tool(MockAddTool)
         .build()
         .runner("add 2 and 3")
         .max_turns(3)
         .turn_id_source(parity_turn_ids())
+        .conversation_cell(blocking_cell.clone())
         .add_hook(blocking_hook.clone())
         .add_hook(SkipToolCallHook("skipped by policy"))
         .run()
@@ -4280,12 +4307,14 @@ async fn valid_tool_call_skip_parity_across_run_and_stream() {
             .map(|turn| turn.as_stream_events(StreamShape::Complete)),
     );
     let streaming_hook = RecordingHook::default();
+    let streaming_cell = parity_cell("add 2 and 3");
     let mut stream = AgentBuilder::new(streaming_model)
         .tool(MockAddTool)
         .build()
         .runner("add 2 and 3")
         .max_turns(3)
         .turn_id_source(parity_turn_ids())
+        .conversation_cell(streaming_cell.clone())
         .add_hook(streaming_hook.clone())
         .add_hook(SkipToolCallHook("skipped by policy"))
         .stream()
@@ -4316,19 +4345,14 @@ async fn valid_tool_call_skip_parity_across_run_and_stream() {
         "a skipped tool fires a ToolResult hook with the verbatim skip reason"
     );
 
-    let blocking_messages = blocking.messages.expect("blocking messages");
-    let streaming_messages = final_response
-        .messages()
-        .expect("streaming history")
-        .to_vec();
     assert_eq!(
-        serde_json::to_value(&blocking_messages).expect("serialize blocking"),
-        serde_json::to_value(&streaming_messages).expect("serialize streaming"),
+        serde_json::to_value(parity_conversation(&blocking_cell)).expect("serialize blocking"),
+        serde_json::to_value(parity_conversation(&streaming_cell)).expect("serialize streaming"),
     );
     // Pin the actual reason, not just blocking == streaming: a reason dropped
     // or altered on BOTH paths would still satisfy the equality above.
     assert!(
-        tool_result_text_in_history(&blocking_messages, "skipped by policy"),
+        tool_result_text_in_history(&parity_conversation(&blocking_cell), "skipped by policy"),
         "the verbatim skip reason must be the tool result content in the history"
     );
 }
@@ -4860,12 +4884,14 @@ async fn valid_tool_result_rewrite_parity_across_run_and_stream() {
     let blocking_model =
         MockCompletionModel::from_turns(turns.iter().map(ScriptedTurn::as_blocking_turn));
     let blocking_hook = RecordingHook::default();
+    let blocking_cell = parity_cell("add 2 and 3");
     let blocking = AgentBuilder::new(blocking_model)
         .tool(MockAddTool)
         .build()
         .runner("add 2 and 3")
         .max_turns(3)
         .turn_id_source(parity_turn_ids())
+        .conversation_cell(blocking_cell.clone())
         .add_hook(blocking_hook.clone())
         .add_hook(RewriteToolResultHook("redacted-result"))
         .run()
@@ -4878,12 +4904,14 @@ async fn valid_tool_result_rewrite_parity_across_run_and_stream() {
             .map(|turn| turn.as_stream_events(StreamShape::Complete)),
     );
     let streaming_hook = RecordingHook::default();
+    let streaming_cell = parity_cell("add 2 and 3");
     let mut stream = AgentBuilder::new(streaming_model)
         .tool(MockAddTool)
         .build()
         .runner("add 2 and 3")
         .max_turns(3)
         .turn_id_source(parity_turn_ids())
+        .conversation_cell(streaming_cell.clone())
         .add_hook(streaming_hook.clone())
         .add_hook(RewriteToolResultHook("redacted-result"))
         .stream()
@@ -4908,21 +4936,16 @@ async fn valid_tool_result_rewrite_parity_across_run_and_stream() {
 
     // The model-visible history carries the REWRITTEN result, not "5", and is
     // byte-identical across drivers.
-    let blocking_messages = blocking.messages.expect("blocking messages");
-    let streaming_messages = final_response
-        .messages()
-        .expect("streaming history")
-        .to_vec();
     assert_eq!(
-        serde_json::to_value(&blocking_messages).expect("serialize blocking"),
-        serde_json::to_value(&streaming_messages).expect("serialize streaming"),
+        serde_json::to_value(parity_conversation(&blocking_cell)).expect("serialize blocking"),
+        serde_json::to_value(parity_conversation(&streaming_cell)).expect("serialize streaming"),
     );
     assert!(
-        tool_result_text_in_history(&blocking_messages, "redacted-result"),
+        tool_result_text_in_history(&parity_conversation(&blocking_cell), "redacted-result"),
         "the model-visible tool result must be the hook's replacement"
     );
     assert!(
-        !tool_result_text_in_history(&blocking_messages, "5"),
+        !tool_result_text_in_history(&parity_conversation(&blocking_cell), "5"),
         "the tool's original output must not reach the model after a rewrite"
     );
 }
@@ -4941,17 +4964,19 @@ async fn rewrite_result_is_delivered_verbatim_not_reparsed() {
         ScriptedTurn::Text("done"),
     ];
     let model = MockCompletionModel::from_turns(turns.iter().map(ScriptedTurn::as_blocking_turn));
-    let result = AgentBuilder::new(model)
+    let cell = parity_cell("add 2 and 3");
+    let _result = AgentBuilder::new(model)
         .tool(MockAddTool)
         .build()
         .runner("add 2 and 3")
         .max_turns(3)
+        .conversation_cell(cell.clone())
         .add_hook(RewriteToolResultHook(IMAGE_JSON))
         .run()
         .await
         .expect("run should succeed with a JSON-shaped rewritten result");
 
-    let messages = result.messages.expect("messages");
+    let messages = parity_conversation(&cell);
     assert!(
         tool_result_text_in_history(&messages, IMAGE_JSON),
         "the JSON-shaped replacement must reach history verbatim as text, not be \
@@ -5308,12 +5333,14 @@ async fn human_in_the_loop_approve_deny_edit_parity_across_run_and_stream() {
         MockCompletionModel::from_turns(turns.iter().map(ScriptedTurn::as_blocking_turn));
     let blocking_recorder = RecordingHook::default();
     let blocking_approver = HumanApprovalHook::new(decisions());
+    let blocking_cell = parity_cell("carry out the plan");
     let blocking = AgentBuilder::new(blocking_model)
         .tool(MockAddTool)
         .build()
         .runner("carry out the plan")
         .max_turns(3)
         .turn_id_source(parity_turn_ids())
+        .conversation_cell(blocking_cell.clone())
         .add_hook(blocking_recorder.clone())
         .add_hook(blocking_approver.clone())
         .run()
@@ -5326,6 +5353,7 @@ async fn human_in_the_loop_approve_deny_edit_parity_across_run_and_stream() {
             .map(|turn| turn.as_stream_events(StreamShape::Complete)),
     );
     let streaming_recorder = RecordingHook::default();
+    let streaming_cell = parity_cell("carry out the plan");
     let streaming_approver = HumanApprovalHook::new(decisions());
     let mut stream = AgentBuilder::new(streaming_model)
         .tool(MockAddTool)
@@ -5333,6 +5361,7 @@ async fn human_in_the_loop_approve_deny_edit_parity_across_run_and_stream() {
         .runner("carry out the plan")
         .max_turns(3)
         .turn_id_source(parity_turn_ids())
+        .conversation_cell(streaming_cell.clone())
         .add_hook(streaming_recorder.clone())
         .add_hook(streaming_approver.clone())
         .stream()
@@ -5397,21 +5426,16 @@ async fn human_in_the_loop_approve_deny_edit_parity_across_run_and_stream() {
     // Model-visible history is identical across drivers (compared structurally
     // as serde_json::Value) and carries the denial reason and the edited result
     // 101 (not the model's 1 + 1 = 2).
-    let blocking_messages = blocking.messages.expect("blocking messages");
-    let streaming_messages = final_response
-        .messages()
-        .expect("streaming history")
-        .to_vec();
     assert_eq!(
-        serde_json::to_value(&blocking_messages).expect("serialize blocking"),
-        serde_json::to_value(&streaming_messages).expect("serialize streaming"),
+        serde_json::to_value(parity_conversation(&blocking_cell)).expect("serialize blocking"),
+        serde_json::to_value(parity_conversation(&streaming_cell)).expect("serialize streaming"),
     );
     assert!(
-        tool_result_text_in_history(&blocking_messages, denial),
+        tool_result_text_in_history(&parity_conversation(&blocking_cell), denial),
         "the denial reason must be the denied call's tool result in the history"
     );
     assert!(
-        tool_result_json_in_history(&blocking_messages, &json!(101)),
+        tool_result_json_in_history(&parity_conversation(&blocking_cell), &json!(101)),
         "the edited call must have executed with the rewritten arguments"
     );
 }
@@ -5552,6 +5576,7 @@ async fn approval_policy_allow_list_with_sticky_decisions() {
     let model = MockCompletionModel::from_turns(turns.iter().map(ScriptedTurn::as_blocking_turn));
     let recorder = RecordingHook::default();
     let policy = PolicyHook::new(["add"]);
+    let policy_cell = parity_cell("go");
     let out = AgentBuilder::new(model)
         .tool(MockAddTool)
         .tool(MockSubtractTool)
@@ -5559,6 +5584,7 @@ async fn approval_policy_allow_list_with_sticky_decisions() {
         .runner("go")
         .max_turns(3)
         .add_hook(recorder.clone())
+        .conversation_cell(policy_cell.clone())
         .add_hook(policy.clone())
         .run()
         .await
@@ -5582,7 +5608,7 @@ async fn approval_policy_allow_list_with_sticky_decisions() {
         policy.evaluated(),
         vec!["add".to_string(), "subtract".to_string()]
     );
-    let messages = out.messages.expect("messages");
+    let messages = parity_conversation(&policy_cell);
     assert!(
         tool_result_text_in_history(&messages, "denied by policy: `subtract` not allowed"),
         "the policy denial reason must reach the model as the subtract tool result"

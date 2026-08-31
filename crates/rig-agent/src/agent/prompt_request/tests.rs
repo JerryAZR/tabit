@@ -423,9 +423,11 @@ async fn prompt_request_stops_cleanly_on_empty_terminal_turn() {
     ]);
     let agent = AgentBuilder::new(model.clone()).tool(MockAddTool).build();
 
+    let cell = test_cell("do tool work");
     let response = agent
         .prompt("do tool work")
         .max_turns(3)
+        .conversation_cell(cell.clone())
         .extended_details()
         .await
         .expect("empty terminal turn should not error");
@@ -452,9 +454,7 @@ async fn prompt_request_stops_cleanly_on_empty_terminal_turn() {
         ]
     );
 
-    let history = response
-        .messages
-        .expect("extended response should include history");
+    let history = cell_conversation(&cell);
     assert_eq!(history.len(), 3);
     assert!(matches!(
         history.first(),
@@ -535,16 +535,16 @@ async fn prompt_request_preserves_metadata_only_text_turn_in_history() {
     }))]);
     let agent = AgentBuilder::new(model).build();
 
+    let cell = test_cell("answer with cited metadata");
     let response = agent
         .prompt("answer with cited metadata")
+        .conversation_cell(cell.clone())
         .extended_details()
         .await
         .expect("metadata-only text turn should succeed");
 
     assert!(response.output.is_empty());
-    let history = response
-        .messages
-        .expect("extended response should include history");
+    let history = cell_conversation(&cell);
     assert!(history.iter().any(|message| matches!(
         message,
         Message::Assistant { content, .. }
@@ -555,6 +555,16 @@ async fn prompt_request_preserves_metadata_only_text_turn_in_history() {
                         && text.additional_params.as_ref() == Some(&metadata)
             )
     )));
+}
+
+fn test_cell(prompt: &str) -> tabit_log::ConversationCell {
+    std::sync::Arc::new(std::sync::RwLock::new(tabit_log::ContextManager::seeded(
+        vec![Message::user(prompt)],
+    )))
+}
+
+fn cell_conversation(cell: &tabit_log::ConversationCell) -> Vec<Message> {
+    tabit_log::lock::read(cell).messages()
 }
 
 fn static_document(id: &str, text: &str) -> crate::completion::Document {

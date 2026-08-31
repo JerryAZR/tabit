@@ -1593,7 +1593,6 @@ fn final_response_serializes_completion_calls_with_missing_usage() {
             CompletionCall::new(0, Usage::new(), None),
             CompletionCall::new(1, usage(3, 4), None),
         ],
-        None,
     );
 
     if let MultiTurnStreamItem::FinalResponse(response) = &item {
@@ -1688,6 +1687,16 @@ struct SkipDefaultApiHook;
 
 impl AgentHook for SkipDefaultApiHook {}
 
+fn test_cell(prompt: &str) -> tabit_log::ConversationCell {
+    std::sync::Arc::new(std::sync::RwLock::new(tabit_log::ContextManager::seeded(
+        vec![Message::user(prompt)],
+    )))
+}
+
+fn cell_conversation(cell: &tabit_log::ConversationCell) -> Vec<Message> {
+    tabit_log::lock::read(cell).messages()
+}
+
 fn text_metadata(content: &OneOrMany<AssistantContent>) -> Option<&serde_json::Value> {
     content.iter().find_map(|item| match item {
         AssistantContent::Text(text) => text.additional_params.as_ref(),
@@ -1701,18 +1710,19 @@ async fn stream_prompt_continues_after_tool_call_turn() {
     let recorded = model.clone();
     let agent = AgentBuilder::new(model).tool(MockAddTool).build();
     let empty_history: &[Message] = &[];
+    let cell = test_cell("do tool work");
 
     let mut stream = agent
         .stream_prompt("do tool work")
         .history(empty_history)
         .max_turns(3)
+        .conversation_cell(cell.clone())
         .await;
     let mut saw_tool_call = false;
     let mut saw_tool_result = false;
     let mut saw_final_response = false;
     let mut final_text = String::new();
     let mut final_response_text = None;
-    let mut final_history = None;
 
     while let Some(item) = stream.next().await {
         match item {
@@ -1730,7 +1740,6 @@ async fn stream_prompt_continues_after_tool_call_turn() {
             Ok(MultiTurnStreamItem::FinalResponse(res)) => {
                 saw_final_response = true;
                 final_response_text = Some(res.output().to_owned());
-                final_history = res.messages().map(|history| history.to_vec());
                 break;
             }
             Ok(_) => {}
@@ -1743,7 +1752,7 @@ async fn stream_prompt_continues_after_tool_call_turn() {
     assert!(saw_final_response);
     assert_eq!(final_text, "done");
     assert_eq!(final_response_text.as_deref(), Some("done"));
-    let history = final_history.expect("expected final response history");
+    let history = cell_conversation(&cell);
     assert!(history.iter().any(|message| matches!(
         message,
         Message::Assistant { content, .. }
@@ -2486,9 +2495,11 @@ async fn final_response_history_preserves_structured_text_metadata() {
     let agent = AgentBuilder::new(streaming_cited_text_then_final_model()).build();
 
     let empty_history: &[Message] = &[];
+    let cell = test_cell("answer with citations");
     let mut stream = agent
         .stream_prompt("answer with citations")
         .history(empty_history)
+        .conversation_cell(cell.clone())
         .await;
     let mut final_response = None;
 
@@ -2504,9 +2515,8 @@ async fn final_response_history_preserves_structured_text_metadata() {
     }
 
     let final_response = final_response.expect("expected final response");
-    let history = final_response
-        .messages()
-        .expect("with_history should include final history");
+    let _ = final_response;
+    let history = cell_conversation(&cell);
     let assistant_content = history
         .iter()
         .find_map(|message| match message {
@@ -2684,79 +2694,8 @@ async fn test_span_context_isolation() -> anyhow::Result<()> {
     Ok(())
 }
 
-/// Test that FinalResponse contains the updated chat history when a starting
-/// history is provided via `.history(..)`.
-///
-/// This verifies that:
-/// 1. PromptResponse.messages() returns Some when a starting history was provided
-/// 2. The history contains both the user prompt and assistant response
-#[tokio::test]
-#[ignore = "This requires an API key"]
-async fn test_chat_history_in_final_response() -> anyhow::Result<()> {
-    use rig_core::message::Message;
-
-    let client = anthropic::Client::from_env()?;
-    let agent = client
-        .agent("claude-haiku-4-5")
-        .preamble("You are a helpful assistant. Keep responses brief.")
-        .temperature(0.1)
-        .max_tokens(50)
-        .build();
-
-    // Send streaming request with history
-    let empty_history: &[Message] = &[];
-    let mut stream = agent
-        .stream_prompt("Say 'hello' and nothing else.")
-        .history(empty_history)
-        .await;
-
-    // Consume the stream and collect FinalResponse
-    let mut response_text = String::new();
-    let mut final_history = None;
-    while let Some(item) = stream.next().await {
-        match item {
-            Ok(MultiTurnStreamItem::StreamAssistantItem(StreamedAssistantContent::Text(text))) => {
-                response_text.push_str(&text.text);
-            }
-            Ok(MultiTurnStreamItem::FinalResponse(res)) => {
-                final_history = res.messages().map(|h| h.to_vec());
-                break;
-            }
-            Err(e) => {
-                return Err(e.into());
-            }
-            _ => {}
-        }
-    }
-
-    let history =
-        final_history.ok_or_else(|| anyhow::anyhow!("final response should include history"))?;
-
-    // Should contain at least the user message
-    anyhow::ensure!(
-        history.iter().any(|m| matches!(m, Message::User { .. })),
-        "History should contain the user message"
-    );
-
-    // Should contain the assistant response
-    anyhow::ensure!(
-        history
-            .iter()
-            .any(|m| matches!(m, Message::Assistant { .. })),
-        "History should contain the assistant response"
-    );
-
-    tracing::info!(
-        "History after streaming: {} messages, response: {:?}",
-        history.len(),
-        response_text
-    );
-
-    Ok(())
-}
-
 #[test]
-fn final_response_constructors_surface_content_usage_and_history() {
+fn final_response_constructors_surface_content_and_usage() {
     let item = MultiTurnStreamItem::final_response(
         OneOrMany::one(AssistantContent::text("done")),
         usage(1, 2),
@@ -2766,30 +2705,7 @@ fn final_response_constructors_surface_content_usage_and_history() {
     };
     assert_eq!(response.output(), "done");
     assert_eq!(response.usage(), usage(1, 2));
-    assert_eq!(response.messages(), None);
     assert!(response.completion_calls().is_empty());
-
-    let history = vec![Message::user("hi"), Message::assistant("hello")];
-    let item = MultiTurnStreamItem::final_response_with_history(
-        OneOrMany::one(AssistantContent::text("done")),
-        usage(3, 4),
-        Some(history.clone()),
-    );
-    let MultiTurnStreamItem::FinalResponse(response) = item else {
-        panic!("expected a final response item, got {item:?}");
-    };
-    assert_eq!(response.usage(), usage(3, 4));
-    assert_eq!(response.messages(), Some(&history[..]));
-
-    let item = MultiTurnStreamItem::final_response_with_history(
-        OneOrMany::one(AssistantContent::text("done")),
-        usage(3, 4),
-        None,
-    );
-    let MultiTurnStreamItem::FinalResponse(response) = item else {
-        panic!("expected a final response item, got {item:?}");
-    };
-    assert_eq!(response.messages(), None);
 }
 
 #[tokio::test]

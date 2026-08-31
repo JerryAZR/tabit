@@ -346,14 +346,21 @@ impl Chat for Agent {
         prompt: impl Into<Message> + WasmCompatSend,
         chat_history: &mut Vec<Message>,
     ) -> Result<String, PromptError> {
-        let response = PromptRequest::from_agent(self, prompt)
+        let prompt = prompt.into();
+        let response = PromptRequest::from_agent(self, prompt.clone())
             .history(chat_history.clone())
             .extended_details()
             .await?;
 
-        if let Some(messages) = response.messages {
-            chat_history.extend(messages);
-        }
+        // The caller's mirror grows by this exchange — the prompt and
+        // the final assistant turn. The conversation itself is the
+        // transcript's home (supply a conversation cell to read it
+        // whole); intermediate tool roundtrips do not duplicate here.
+        chat_history.push(prompt);
+        chat_history.push(Message::Assistant {
+            id: None,
+            content: response.content,
+        });
 
         Ok(response.output)
     }

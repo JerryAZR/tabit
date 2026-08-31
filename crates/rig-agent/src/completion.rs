@@ -19,17 +19,11 @@ pub enum PromptError {
     MaxTurnsError {
         /// Configured total model-call budget.
         max_turns: usize,
-        /// Canonical history available when the budget was exhausted.
-        chat_history: Box<Vec<Message>>,
-        /// Prompt for the call that could not be dispatched.
-        prompt: Box<Message>,
     },
 
     /// A prompting loop was cancelled.
     #[error("PromptCancelled: {reason}")]
     PromptCancelled {
-        /// Canonical history available at cancellation.
-        chat_history: Vec<Message>,
         /// Human-readable cancellation reason.
         reason: String,
     },
@@ -66,12 +60,8 @@ impl PromptError {
         }
     }
 
-    pub(crate) fn prompt_cancelled(
-        chat_history: impl IntoIterator<Item = Message>,
-        reason: impl Into<String>,
-    ) -> Self {
+    pub(crate) fn prompt_cancelled(reason: impl Into<String>) -> Self {
         Self::PromptCancelled {
-            chat_history: chat_history.into_iter().collect(),
             reason: reason.into(),
         }
     }
@@ -172,7 +162,6 @@ mod provider_response_tests {
     #[test]
     fn prompt_error_provider_response_helpers_return_none_for_unrelated_variant() {
         let error = PromptError::PromptCancelled {
-            chat_history: vec![Message::user("hi")],
             reason: "cancelled".to_string(),
         };
 

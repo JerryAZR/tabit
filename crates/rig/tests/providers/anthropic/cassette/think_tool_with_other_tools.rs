@@ -1,5 +1,15 @@
 //! Migrated from `examples/anthropic_think_tool_with_other_tools.rs`.
 
+fn test_cell(prompt: &str) -> tabit_log::ConversationCell {
+    std::sync::Arc::new(std::sync::RwLock::new(tabit_log::ContextManager::seeded(
+        vec![rig::message::Message::user(prompt)],
+    )))
+}
+
+fn cell_conversation(cell: &tabit_log::ConversationCell) -> Vec<rig::message::Message> {
+    tabit_log::lock::read(cell).messages()
+}
+
 use std::iter::Peekable;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicUsize, Ordering};
@@ -302,15 +312,16 @@ async fn think_tool_with_other_tools() -> Result<()> {
         .max_tokens(64_000)
         .build();
 
-    let response = agent
-        .prompt(
-            "I ordered 3 units of Product A at $25 each and 2 units of Product B at $40 each. \
+    let prompt = "I ordered 3 units of Product A at $25 each and 2 units of Product B at $40 each. \
              I want to return 1 unit of Product A and exchange the 2 units of Product B for Product C. \
              How much will I get refunded, and is Product C in stock? \
              Also, how much would it cost to ship the exchanged items with express shipping? \
-             Lastly, how much would it cost to buy Product A + 2 Product B with slow (standard) shipping?",
-        )
+             Lastly, how much would it cost to buy Product A + 2 Product B with slow (standard) shipping?";
+    let cell = test_cell(prompt);
+    let response = agent
+        .prompt(prompt)
         .max_turns(10)
+        .conversation_cell(cell.clone())
         .extended_details()
         .await?;
 
@@ -329,9 +340,7 @@ async fn think_tool_with_other_tools() -> Result<()> {
         "database lookup should be invoked for both shipping and inventory"
     );
 
-    let messages = response
-        .messages
-        .ok_or_else(|| anyhow::anyhow!("extended details should include messages"))?;
+    let messages = cell_conversation(&cell);
     let tool_calls = collect_assistant_tool_calls(&messages);
 
     for tool_name in ["think", "calculator", "database_lookup"] {

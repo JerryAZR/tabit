@@ -3,6 +3,16 @@
 //! Run cassette tests in replay mode by default, or set
 //! `RIG_PROVIDER_TEST_MODE=record` to record against the real provider.
 
+fn test_cell(prompt: &str) -> tabit_log::ConversationCell {
+    std::sync::Arc::new(std::sync::RwLock::new(tabit_log::ContextManager::seeded(
+        vec![rig::message::Message::user(prompt)],
+    )))
+}
+
+fn cell_conversation(cell: &tabit_log::ConversationCell) -> Vec<rig::message::Message> {
+    tabit_log::lock::read(cell).messages()
+}
+
 use std::sync::{
     Arc,
     atomic::{AtomicUsize, Ordering},
@@ -209,9 +219,11 @@ async fn prompt_loop_accepts_empty_terminal_turn_after_tool_result() {
                 .tool(Notify::new(call_count.clone()))
                 .build();
 
+            let cell = test_cell(TERMINAL_NOTIFY_PROMPT);
             let response = agent
                 .prompt(TERMINAL_NOTIFY_PROMPT)
                 .max_turns(5)
+                .conversation_cell(cell.clone())
                 .extended_details()
                 .await
                 .expect("agent prompt should not fail on an empty terminal Anthropic turn");
@@ -226,9 +238,7 @@ async fn prompt_loop_accepts_empty_terminal_turn_after_tool_result() {
                 "notify should be called at least once"
             );
 
-            let messages = response
-                .messages
-                .expect("extended details should include history");
+            let messages = cell_conversation(&cell);
             assert!(
                 messages.iter().any(assistant_message_has_notify_tool_call),
                 "expected notify tool call in history, got {:?}",
@@ -260,9 +270,11 @@ async fn prompt_loop_preserves_pre_tool_text_when_terminal_followup_is_empty() {
         .tool(Notify::new(call_count.clone()))
         .build();
 
+    let cell = test_cell(TERMINAL_NOTIFY_PROMPT);
     let response = agent
         .prompt(TERMINAL_NOTIFY_PROMPT)
         .max_turns(5)
+        .conversation_cell(cell.clone())
         .extended_details()
         .await
         .expect("agent prompt should preserve prior-turn text when Anthropic ends empty");
@@ -277,9 +289,7 @@ async fn prompt_loop_preserves_pre_tool_text_when_terminal_followup_is_empty() {
         "notify should be called at least once"
     );
 
-    let messages = response
-        .messages
-        .expect("extended details should include history");
+    let messages = cell_conversation(&cell);
     assert!(
         messages
             .iter()

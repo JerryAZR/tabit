@@ -43,6 +43,7 @@ rig-core = { path = "../rig-core", version = "0.41.0", default-features = false,
 rig-agent = { path = "../rig-agent", version = "0.41.0", default-features = false, features = [
     "test-utils",
 ] }
+tabit-log = { path = "../tabit-log" }
 anyhow = { workspace = true }
 async-stream = { workspace = true }
 base64 = { workspace = true }
