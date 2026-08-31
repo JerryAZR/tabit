@@ -46,6 +46,17 @@ macro_rules! forward_prompt_setters {
             self
         }
 
+        /// Attach the steering source whose queued messages join the run
+        /// at its convergences (surfaced as `Steer` items). A cell-entry
+        /// run's opening message arrives this way.
+        pub fn steering(
+            mut self,
+            steering: ::std::sync::Arc<dyn $crate::agent::runner::SteeringSource>,
+        ) -> Self {
+            self.$recv = self.$recv.steering(steering);
+            self
+        }
+
         /// Override the agent preamble for this request.
         pub fn preamble(mut self, preamble: impl Into<String>) -> Self {
             self.$recv = self.$recv.preamble(preamble);
@@ -163,15 +174,6 @@ macro_rules! forward_prompt_setters {
             self.$recv = self.$recv.using_model_value(model);
             self
         }
-
-        /// Supply the conversation cell the loop folds — the one durable
-        /// manager, whose folds are the run's commits (ENGINE.md, the
-        /// unified conversation). Without one, the run seeds a
-        /// standalone in-memory conversation (nothing persists).
-        pub fn conversation_cell(mut self, cell: ::tabit_log::ConversationCell) -> Self {
-            self.$recv = self.$recv.conversation_cell(cell);
-            self
-        }
     };
 }
 pub(crate) use forward_prompt_setters;
@@ -225,6 +227,16 @@ impl PromptRequest<Standard> {
     pub fn from_agent(agent: &Agent, prompt: impl Into<Message>) -> Self {
         PromptRequest {
             runner: AgentRunner::from_agent(agent, prompt),
+            state: PhantomData,
+        }
+    }
+
+    /// Create a new PromptRequest over the caller's conversation cell —
+    /// the run folds that one durable manager, and the cell IS the
+    /// input (no prompt rides alongside).
+    pub fn from_agent_cell(agent: &Agent, cell: ::tabit_log::ConversationCell) -> Self {
+        PromptRequest {
+            runner: AgentRunner::from_agent_cell(agent, cell),
             state: PhantomData,
         }
     }

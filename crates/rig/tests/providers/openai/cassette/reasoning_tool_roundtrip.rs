@@ -6,7 +6,7 @@
 use std::sync::Arc;
 use std::sync::atomic::AtomicUsize;
 
-use rig::completion::{Chat, Message};
+use rig::completion::Message;
 use rig::prelude::*;
 use rig::streaming::StreamingChat;
 
@@ -64,7 +64,7 @@ async fn nonstreaming() {
                 .build();
 
             let result = agent
-                .chat(reasoning::TOOL_USER_PROMPT, &mut Vec::<Message>::new())
+                .prompt(reasoning::TOOL_USER_PROMPT)
                 .await
                 .expect("[openai] Non-streaming chat failed - likely 400 from dropped reasoning");
 

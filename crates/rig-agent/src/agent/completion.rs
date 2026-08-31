@@ -5,8 +5,8 @@ use super::runner::AgentRunner;
 use crate::{
     agent::prompt_request::streaming::StreamingPromptRequest,
     completion::{
-        Chat, CompletionError, CompletionModel, CompletionRequestBuilder, Document, Message,
-        Prompt, PromptError, ToolDefinition,
+        CompletionError, CompletionModel, CompletionRequestBuilder, Document, Message, Prompt,
+        ToolDefinition,
     },
     streaming::{StreamingChat, StreamingPrompt},
     tool::server::{ToolRegistrySnapshot, ToolServerError, ToolServerHandle},
@@ -262,6 +262,14 @@ impl Agent {
         AgentRunner::from_agent(self, prompt)
     }
 
+    /// As [`Self::runner`], over the caller's conversation cell — the
+    /// run folds that one durable manager, and the cell IS the input:
+    /// no prompt rides alongside (the opening message, if any, arrives
+    /// through the steering drain).
+    pub fn runner_over(&self, cell: tabit_log::ConversationCell) -> AgentRunner {
+        AgentRunner::from_agent_cell(self, cell)
+    }
+
     /// Returns the agent's current default model handle.
     pub fn model_handle(&self) -> &ModelHandle {
         &self.model
@@ -327,6 +335,20 @@ impl Prompt for Agent {
     }
 }
 
+impl Agent {
+    /// Run over the caller's conversation cell — the run folds that one
+    /// durable manager, its folds are the commits, and the cell IS the
+    /// input: no prompt rides alongside (the opening message, if any,
+    /// arrives through the steering drain at the loop's first
+    /// convergence).
+    pub fn prompt_over(
+        &self,
+        cell: tabit_log::ConversationCell,
+    ) -> PromptRequest<prompt_request::Standard> {
+        PromptRequest::from_agent_cell(self, cell)
+    }
+}
+
 #[allow(refining_impl_trait)]
 impl Prompt for &Agent {
     #[tracing::instrument(skip(self, prompt), fields(agent_name = self.name_or_default()))]
@@ -335,34 +357,6 @@ impl Prompt for &Agent {
         prompt: impl Into<Message> + WasmCompatSend,
     ) -> PromptRequest<prompt_request::Standard> {
         PromptRequest::from_agent(self, prompt)
-    }
-}
-
-#[allow(refining_impl_trait)]
-impl Chat for Agent {
-    #[tracing::instrument(skip(self, prompt, chat_history), fields(agent_name = self.name_or_default()))]
-    async fn chat(
-        &self,
-        prompt: impl Into<Message> + WasmCompatSend,
-        chat_history: &mut Vec<Message>,
-    ) -> Result<String, PromptError> {
-        let prompt = prompt.into();
-        let response = PromptRequest::from_agent(self, prompt.clone())
-            .history(chat_history.clone())
-            .extended_details()
-            .await?;
-
-        // The caller's mirror grows by this exchange — the prompt and
-        // the final assistant turn. The conversation itself is the
-        // transcript's home (supply a conversation cell to read it
-        // whole); intermediate tool roundtrips do not duplicate here.
-        chat_history.push(prompt);
-        chat_history.push(Message::Assistant {
-            id: None,
-            content: response.content,
-        });
-
-        Ok(response.output)
     }
 }
 
@@ -382,6 +376,10 @@ impl StreamingChat for Agent {
             self,
             chat_history.into_iter().map(Into::into).collect(),
         )
+    }
+
+    fn stream_over(&self, cell: tabit_log::ConversationCell) -> StreamingPromptRequest {
+        StreamingPromptRequest::from_agent_cell(self, cell)
     }
 }
 

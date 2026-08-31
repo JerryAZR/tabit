@@ -242,6 +242,18 @@ impl StreamingPromptRequest {
         }
     }
 
+    /// Create a streaming request over the caller's conversation cell —
+    /// the run folds that one durable manager, and the cell IS the
+    /// input (no history or prompt rides alongside).
+    pub fn from_agent_cell(
+        agent: &Agent,
+        cell: ::tabit_log::ConversationCell,
+    ) -> StreamingPromptRequest {
+        StreamingPromptRequest {
+            runner: AgentRunner::from_agent_cell(agent, cell),
+        }
+    }
+
     /// Set the total model-call budget, including the initial call and every
     /// retry or continuation. Zero emits no model calls; one permits only the
     /// initial call.
@@ -275,15 +287,6 @@ impl StreamingPromptRequest {
         H: AgentHook + 'static,
     {
         self.runner = self.runner.add_hook(hook);
-        self
-    }
-
-    /// Attach the steering source whose queued user messages join the run at
-    /// tool-use roundtrips and after final model turns (each surfaced as a
-    /// [`Steer`](MultiTurnStreamItem::Steer) item). Messages beyond the
-    /// model-call budget stay queued in the source.
-    pub fn steering(mut self, steering: Arc<dyn crate::agent::runner::SteeringSource>) -> Self {
-        self.runner = self.runner.steering(steering);
         self
     }
 

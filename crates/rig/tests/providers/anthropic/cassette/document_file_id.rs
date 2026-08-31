@@ -2,7 +2,7 @@
 
 use futures::FutureExt;
 use rig::OneOrMany;
-use rig::completion::{Chat, Prompt};
+use rig::completion::Prompt;
 use rig::message::{
     Document, DocumentMediaType, DocumentSourceKind, Message, Text, UserContent as RigUserContent,
 };
@@ -385,6 +385,28 @@ fn document_file_id_wire_assertions_cover_roundtrip_paths() {
     assert_anthropic_wire_file_source(provider_native_roundtrip_message, file_id);
 }
 
+/// One steering message, delivered once at the run's first convergence —
+/// the session's pattern for "answer this over my conversation", local
+/// to this test.
+struct OneShotSteer(std::sync::Mutex<Option<rig::completion::Message>>);
+
+impl OneShotSteer {
+    fn new(message: rig::completion::Message) -> Self {
+        Self(std::sync::Mutex::new(Some(message)))
+    }
+}
+
+impl rig_agent::SteeringSource for OneShotSteer {
+    fn drain(&self) -> Vec<(String, rig::completion::Message)> {
+        self.0
+            .lock()
+            .expect("steer lock")
+            .take()
+            .map(|message| vec![(rig::id::generate(), message)])
+            .unwrap_or_default()
+    }
+}
+
 #[tokio::test]
 async fn messages_document_file_id_roundtrip_live() {
     with_anthropic_files_cassette(
@@ -400,7 +422,9 @@ async fn messages_document_file_id_roundtrip_live() {
                     .preamble(DOCUMENT_PREAMBLE)
                     .max_tokens(64_000)
                     .build();
-                let mut history = Vec::new();
+                let cell = std::sync::Arc::new(std::sync::RwLock::new(
+                    tabit_log::ContextManager::seeded(Vec::new()),
+                ));
 
                 let direct_message = direct_file_id_document_question(&file_id, 2);
                 assert_no_verifier_leaked_into_prompt(&direct_message);
@@ -417,21 +441,32 @@ async fn messages_document_file_id_roundtrip_live() {
                 );
 
                 let response = agent
-                    .chat(provider_native_roundtrip_message, &mut history)
+                    .prompt_over(cell.clone())
+                    .steering(std::sync::Arc::new(OneShotSteer::new(
+                        provider_native_roundtrip_message,
+                    )))
                     .await
                     .expect("Messages API should read uploaded PDF by file_id");
                 assert_verifier_response(&response, PAGE_TWO_VERIFIER);
-                assert_history_preserves_single_file_id(&history, &file_id);
+                assert_history_preserves_single_file_id(
+                    &tabit_log::lock::read(&cell).messages(),
+                    &file_id,
+                );
 
                 let follow_up = agent
-                    .chat(
-                        "Using the same PDF from the conversation history, what verifier token is printed on page 3? Reply with only the exact token.",
-                        &mut history,
-                    )
+                    .prompt_over(cell.clone())
+                    .steering(std::sync::Arc::new(OneShotSteer::new(
+                        rig::completion::Message::user(
+                            "Using the same PDF from the conversation history, what verifier token is printed on page 3? Reply with only the exact token.",
+                        ),
+                    )))
                     .await
                     .expect("Messages API should reuse file_id document from chat history");
                 assert_verifier_response(&follow_up, PAGE_THREE_VERIFIER);
-                assert_history_preserves_single_file_id(&history, &file_id);
+                assert_history_preserves_single_file_id(
+                    &tabit_log::lock::read(&cell).messages(),
+                    &file_id,
+                );
 
                 let direct_prompt = direct_file_id_document_question(&file_id, 1);
                 assert_no_verifier_leaked_into_prompt(&direct_prompt);

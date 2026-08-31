@@ -7,7 +7,7 @@
 //! `RIG_PROVIDER_TEST_MODE=record` to record against the real provider.
 
 use rig::completion::NormalizeCompletionResponse;
-use rig::completion::{Chat, CompletionModel, FinishReason, Message};
+use rig::completion::{CompletionModel, FinishReason, Message};
 use rig::message::AssistantContent;
 use rig::prelude::*;
 use rig::providers::openai::responses_api::ResponseStatus;
@@ -147,16 +147,19 @@ async fn system_messages_as_input_items_mid_conversation() {
                 .agent("gpt-4o")
                 .preamble("You are a concise assistant.")
                 .build();
-            let mut history = vec![
-                Message::user("Hello!"),
-                Message::assistant("Hi! How can I help you today?"),
-                Message::system(
-                    "The user's codename is FALCON-9. Always refer to the user by codename.",
-                ),
-            ];
+            let cell = std::sync::Arc::new(std::sync::RwLock::new(
+                tabit_log::ContextManager::seeded(vec![
+                    Message::user("Hello!"),
+                    Message::assistant("Hi! How can I help you today?"),
+                    Message::system(
+                        "The user's codename is FALCON-9. Always refer to the user by codename.",
+                    ),
+                    Message::user("What is my codename?"),
+                ]),
+            ));
 
             let result = agent
-                .chat("What is my codename?", &mut history)
+                .prompt_over(cell)
                 .await
                 .expect("chat with a mid-conversation system message should succeed");
 

@@ -6,7 +6,7 @@
 use std::sync::Arc;
 use std::sync::atomic::AtomicUsize;
 
-use rig::completion::{Chat, Message};
+use rig::completion::Message;
 use rig::prelude::*;
 use rig::streaming::StreamingChat;
 
@@ -68,12 +68,9 @@ async fn nonstreaming() {
                 .default_max_turns(2)
                 .build();
 
-            let result = agent
-                .chat(reasoning::TOOL_USER_PROMPT, &mut Vec::<Message>::new())
-                .await
-                .expect(
-                    "[anthropic] Non-streaming chat failed - likely 400 from dropped reasoning",
-                );
+            let result = agent.prompt(reasoning::TOOL_USER_PROMPT).await.expect(
+                "[anthropic] Non-streaming chat failed - likely 400 from dropped reasoning",
+            );
 
             reasoning::assert_nonstreaming_universal(&result, &call_count, "anthropic");
         },

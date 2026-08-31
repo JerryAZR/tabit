@@ -2,7 +2,7 @@
 
 use base64::{Engine, prelude::BASE64_STANDARD};
 use rig::completion::message::Image;
-use rig::completion::{Chat, Message, Prompt};
+use rig::completion::{Message, Prompt};
 use rig::message::{DocumentSourceKind, ImageMediaType};
 use rig::prelude::*;
 use rig::streaming::{StreamingChat, StreamingPrompt};
@@ -245,7 +245,7 @@ async fn messages_adaptive_thinking_tool_roundtrip_smoke() {
                 .build();
 
             let result = agent
-                .chat(reasoning::TOOL_USER_PROMPT, &mut Vec::<Message>::new())
+                .prompt(reasoning::TOOL_USER_PROMPT)
                 .await
                 .expect("adaptive thinking tool chat should succeed");
 

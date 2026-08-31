@@ -41,8 +41,7 @@ async fn chat_appends_reasoning_tool_turns_to_caller_history() {
             let cell = test_cell(reasoning::TOOL_USER_PROMPT);
 
             let result = agent
-                .prompt(reasoning::TOOL_USER_PROMPT)
-                .conversation_cell(cell.clone())
+                .prompt_over(cell.clone())
                 .max_turns(2)
                 .await
                 .expect("[openai] run failed before it could grow the conversation");

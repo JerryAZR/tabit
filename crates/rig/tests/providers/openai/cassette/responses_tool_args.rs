@@ -234,8 +234,7 @@ async fn nested_arguments_roundtrip_nonstreaming() {
             let cell = test_cell(NESTED_ARGS_PROMPT);
 
             let result = agent
-                .prompt(NESTED_ARGS_PROMPT)
-                .conversation_cell(cell.clone())
+                .prompt_over(cell.clone())
                 .max_turns(4)
                 .await
                 .expect("nested-args tool run should succeed");

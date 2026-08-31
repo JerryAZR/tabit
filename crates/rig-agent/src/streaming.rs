@@ -22,4 +22,11 @@ pub trait StreamingChat: WasmCompatSend + WasmCompatSync {
     where
         I: IntoIterator<Item = T> + WasmCompatSend,
         T: Into<Message>;
+
+    /// Create a streaming request over the caller's conversation cell —
+    /// the run folds that one durable manager, its folds are the
+    /// commits, and the cell IS the input: no history or prompt rides
+    /// alongside (the opening message, if any, arrives through the
+    /// steering drain at the loop's first convergence).
+    fn stream_over(&self, cell: tabit_log::ConversationCell) -> StreamingPromptRequest;
 }

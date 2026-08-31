@@ -162,15 +162,22 @@ pub(crate) enum RunInput {
     /// context. Retry-ready: the same list can be resent verbatim.
     /// Boxed: conversations are unbounded.
     Conversation(Box<[Message]>),
+    /// The caller's conversation cell — the run folds THIS manager and
+    /// its folds are the durable commits. The cell IS the history:
+    /// no prompt or context rides alongside it (the opening message,
+    /// if any, arrives through the steering drain).
+    Cell(tabit_log::ConversationCell),
 }
 
 impl RunInput {
     /// The message being sent this turn, if any: the prompt, or the
-    /// conversation's final message.
+    /// conversation's final message. A cell input has none — the
+    /// opening message, if any, arrives through the steering drain.
     fn prompt_for_turn(&self) -> Option<&Message> {
         match self {
             RunInput::Prompt(message) => Some(message),
             RunInput::Conversation(messages) => messages.last(),
+            RunInput::Cell(_) => None,
         }
     }
 }
@@ -208,11 +215,6 @@ pub struct AgentRunner {
     /// Queued user input injected at steering points; `None` disables
     /// steering for this request.
     pub(crate) steering: Option<Arc<dyn SteeringSource>>,
-    /// The caller-supplied conversation cell: when set, the loop folds
-    /// THIS manager — its folds are the durable commits (ENGINE.md, the
-    /// unified conversation); when absent, the run seeds a standalone
-    /// in-memory manager over a `NullBuffer`.
-    pub(crate) conversation_cell: Option<tabit_log::ConversationCell>,
     /// Called once per model-call attempt, at the moment the attempt
     /// commits, to mint the turn's announced id. The engine's default is
     /// its short random ids; consumers that key durable records on turn
@@ -239,6 +241,15 @@ impl AgentRunner {
         )
     }
 
+    /// Build a runner over the caller's conversation cell — the run
+    /// folds that one durable manager, and its folds are the commits
+    /// (ENGINE.md, the unified conversation). The cell IS the input: no
+    /// prompt rides alongside (the opening message, if any, arrives
+    /// through the steering drain at the loop's first convergence).
+    pub fn from_agent_cell(agent: &Agent, cell: tabit_log::ConversationCell) -> Self {
+        Self::from_input(agent, RunInput::Cell(cell))
+    }
+
     fn from_input(agent: &Agent, input: RunInput) -> Self {
         Self {
             input,
@@ -259,7 +270,6 @@ impl AgentRunner {
             hooks: agent.hooks.clone(),
             error_usage: None,
             steering: None,
-            conversation_cell: None,
             turn_id_source: Arc::new(rig_core::id::generate),
         }
     }
@@ -270,15 +280,6 @@ impl AgentRunner {
     /// attempt.
     pub fn turn_id_source(mut self, source: TurnIdSource) -> Self {
         self.turn_id_source = source;
-        self
-    }
-
-    /// Supply the conversation cell the loop folds — the one durable
-    /// manager, whose folds are the run's commits (ENGINE.md, the unified
-    /// conversation). Without one, the run seeds a standalone in-memory
-    /// conversation (nothing persists).
-    pub fn conversation_cell(mut self, cell: tabit_log::ConversationCell) -> Self {
-        self.conversation_cell = Some(cell);
         self
     }
 
@@ -487,29 +488,29 @@ impl AgentRunner {
         self.agent_name.as_deref().unwrap_or(UNKNOWN_AGENT_NAME)
     }
 
-    /// Build this runner's conversation cell: the caller-supplied
-    /// durable manager when one was set ([`Self::conversation_cell`]) —
-    /// the loop's folds are the durable commits — else a fresh seeded
-    /// standalone one over a `NullBuffer` (nothing persists), seeded
-    /// from the configured chat history when one exists.
+    /// Build this runner's conversation cell: the caller's durable
+    /// manager when the input IS one ([`RunInput::Cell`]) — the loop's
+    /// folds are the durable commits — else a fresh seeded standalone
+    /// one over a `NullBuffer` (nothing persists), seeded from the
+    /// input conversation.
     pub(crate) fn build_run(&self) -> Result<tabit_log::ConversationCell, PromptError> {
-        if let Some(cell) = &self.conversation_cell {
-            if self.max_turns == 0 {
-                return Err(PromptError::prompt_cancelled(
-                    "max_turns must be at least 1 — a run always executes one turn",
-                ));
-            }
-            // The cell may be empty at entry: the opening message can
-            // arrive through the steering drain at the loop's first
-            // CONVERGE (the session's mailbox — ENGINE.md's
-            // not-pre-joined rule). The non-empty rule lives at the
-            // loop's first decision, after cell and drain have
-            // converged.
-            return Ok(cell.clone());
+        if self.max_turns == 0 {
+            // The entry contract (ENGINE.md): a run executes at least one
+            // turn. A zero budget is configuration error, not a run shape.
+            return Err(PromptError::prompt_cancelled(
+                "max_turns must be at least 1 — a run always executes one turn",
+            ));
         }
         // The run is entered with one already-joined history (ENGINE.md:
         // the request IS the history, no prompt/context split).
         let history = match &self.input {
+            // The cell IS the history. It may be empty at entry: the
+            // opening message can arrive through the steering drain at
+            // the loop's first CONVERGE (the session's mailbox —
+            // ENGINE.md's not-pre-joined rule). The non-empty rule lives
+            // at the loop's first decision, after cell and drain have
+            // converged.
+            RunInput::Cell(cell) => return Ok(cell.clone()),
             RunInput::Prompt(message) => {
                 let mut history = self.chat_history.clone().unwrap_or_default();
                 history.push(message.clone());
@@ -522,13 +523,6 @@ impl AgentRunner {
             // with the contract in the message.
             return Err(PromptError::prompt_cancelled(
                 "empty conversation: stream_chat history must end with the message being sent",
-            ));
-        }
-        if self.max_turns == 0 {
-            // The entry contract (ENGINE.md): a run executes at least one
-            // turn. A zero budget is configuration error, not a run shape.
-            return Err(PromptError::prompt_cancelled(
-                "max_turns must be at least 1 — a run always executes one turn",
             ));
         }
         Ok(std::sync::Arc::new(std::sync::RwLock::new(

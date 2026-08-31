@@ -5,7 +5,7 @@ use crate::agent::prompt_request::tool_result_output;
 use crate::agent::run::streamed::merge_reasoning_blocks;
 use crate::client::AgentClientExt;
 use crate::completion::{CompletionRequest, Prompt, ToolDefinition, Usage};
-use crate::streaming::{StreamingPrompt, ToolCallDeltaContent};
+use crate::streaming::{StreamingChat, StreamingPrompt, ToolCallDeltaContent};
 use crate::test_utils::{
     MockAddTool, MockBarrierTool, MockCompletionModel, MockContextProbeTool, MockError,
     MockStreamEvent, MockToolError, MockTurn, SessionId,
@@ -1709,15 +1709,9 @@ async fn stream_prompt_continues_after_tool_call_turn() {
     let model = streaming_tool_then_text_model();
     let recorded = model.clone();
     let agent = AgentBuilder::new(model).tool(MockAddTool).build();
-    let empty_history: &[Message] = &[];
     let cell = test_cell("do tool work");
 
-    let mut stream = agent
-        .stream_prompt("do tool work")
-        .history(empty_history)
-        .max_turns(3)
-        .conversation_cell(cell.clone())
-        .await;
+    let mut stream = agent.stream_over(cell.clone()).max_turns(3).await;
     let mut saw_tool_call = false;
     let mut saw_tool_result = false;
     let mut saw_final_response = false;
@@ -2494,13 +2488,8 @@ async fn final_response_preserves_structured_text_metadata() {
 async fn final_response_history_preserves_structured_text_metadata() {
     let agent = AgentBuilder::new(streaming_cited_text_then_final_model()).build();
 
-    let empty_history: &[Message] = &[];
     let cell = test_cell("answer with citations");
-    let mut stream = agent
-        .stream_prompt("answer with citations")
-        .history(empty_history)
-        .conversation_cell(cell.clone())
-        .await;
+    let mut stream = agent.stream_over(cell.clone()).await;
     let mut final_response = None;
 
     while let Some(item) = stream.next().await {

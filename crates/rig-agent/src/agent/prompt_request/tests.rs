@@ -425,9 +425,8 @@ async fn prompt_request_stops_cleanly_on_empty_terminal_turn() {
 
     let cell = test_cell("do tool work");
     let response = agent
-        .prompt("do tool work")
+        .prompt_over(cell.clone())
         .max_turns(3)
-        .conversation_cell(cell.clone())
         .extended_details()
         .await
         .expect("empty terminal turn should not error");
@@ -537,8 +536,7 @@ async fn prompt_request_preserves_metadata_only_text_turn_in_history() {
 
     let cell = test_cell("answer with cited metadata");
     let response = agent
-        .prompt("answer with cited metadata")
-        .conversation_cell(cell.clone())
+        .prompt_over(cell.clone())
         .extended_details()
         .await
         .expect("metadata-only text turn should succeed");

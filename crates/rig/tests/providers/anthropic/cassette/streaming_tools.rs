@@ -45,10 +45,7 @@ async fn streaming_tools_smoke() {
                 .build();
 
             let cell = test_cell(STREAMING_TOOLS_PROMPT);
-            let mut stream = agent
-                .stream_prompt(STREAMING_TOOLS_PROMPT)
-                .conversation_cell(cell.clone())
-                .await;
+            let mut stream = agent.stream_over(cell.clone()).await;
             let response = collect_stream_final_response(&mut stream)
                 .await
                 .expect("streaming tool prompt should succeed");
@@ -137,10 +134,9 @@ async fn streaming_tool_concurrency_surfaces_results_in_call_order_after_batch_s
 
         let cell = test_cell(TWO_TOOL_STREAM_PROMPT);
         let mut stream = agent
-            .stream_prompt(TWO_TOOL_STREAM_PROMPT)
+            .stream_over(cell.clone())
             .max_turns(8)
             .tool_concurrency(2)
-            .conversation_cell(cell.clone())
             .await;
         let observation = tokio::time::timeout(
             std::time::Duration::from_secs(5),

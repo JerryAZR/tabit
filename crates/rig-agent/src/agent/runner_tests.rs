@@ -738,28 +738,23 @@ async fn assistant_entries_carry_announced_turn_ids_not_provider_ids() {
     // entry id; provider-assigned message/response ids never enter
     // the history (telemetry metadata only). A provider that assigns
     // either id shape changes nothing here.
-    let prompt = Message::user("prompt");
-    let assistant_ids_of = |turn: MockTurn| {
-        let prompt = prompt.clone();
-        async move {
-            let cell = parity_cell("prompt");
-            AgentBuilder::new(MockCompletionModel::new([turn]))
-                .build()
-                .runner(prompt)
-                .turn_id_source(parity_turn_ids())
-                .conversation_cell(cell.clone())
-                .run()
-                .await
-                .expect("blocking response");
-            let messages = parity_conversation(&cell);
-            messages
-                .iter()
-                .filter_map(|message| match message {
-                    Message::Assistant { id, .. } => Some(id.clone()),
-                    _ => None,
-                })
-                .collect::<Vec<_>>()
-        }
+    let assistant_ids_of = |turn: MockTurn| async move {
+        let cell = parity_cell("prompt");
+        AgentBuilder::new(MockCompletionModel::new([turn]))
+            .build()
+            .runner_over(cell.clone())
+            .turn_id_source(parity_turn_ids())
+            .run()
+            .await
+            .expect("blocking response");
+        let messages = parity_conversation(&cell);
+        messages
+            .iter()
+            .filter_map(|message| match message {
+                Message::Assistant { id, .. } => Some(id.clone()),
+                _ => None,
+            })
+            .collect::<Vec<_>>()
     };
     let with_message_id =
         assistant_ids_of(MockTurn::text("reply").with_message_id("msg_abc")).await;
@@ -1060,10 +1055,9 @@ async fn run_and_stream_behave_identically_for_a_tool_call() {
     let blocking = AgentBuilder::new(blocking_model())
         .tool(MockAddTool)
         .build()
-        .runner("add 2 and 3")
+        .runner_over(blocking_cell.clone())
         .max_turns(2)
         .turn_id_source(parity_turn_ids())
-        .conversation_cell(blocking_cell.clone())
         .add_hook(blocking_hook.clone())
         .run()
         .await
@@ -1076,10 +1070,9 @@ async fn run_and_stream_behave_identically_for_a_tool_call() {
     let mut stream = AgentBuilder::new(streaming_model())
         .tool(MockAddTool)
         .build()
-        .runner("add 2 and 3")
+        .runner_over(streaming_cell.clone())
         .max_turns(2)
         .turn_id_source(parity_turn_ids())
-        .conversation_cell(streaming_cell.clone())
         .add_hook(streaming_hook.clone())
         .stream()
         .await;
@@ -1884,10 +1877,9 @@ mod structured_tool_results {
         .tool(MockFailingTool::new(ToolErrorKind::Timeout))
         .add_hook(observer.clone())
         .build()
-        .runner("go")
+        .runner_over(concurrent_cell.clone())
         .max_turns(3)
         .tool_concurrency(2)
-        .conversation_cell(concurrent_cell.clone())
         .run()
         .await
         .expect("run should succeed");
@@ -2594,11 +2586,10 @@ async fn run_and_stream_same_conversation_for_parallel_tool_calls() {
     let _blocking = AgentBuilder::new(blocking_model)
         .tool(MockAddTool)
         .build()
-        .runner("add two pairs")
+        .runner_over(blocking_cell.clone())
         .max_turns(3)
         .turn_id_source(parity_turn_ids())
         .tool_concurrency(4)
-        .conversation_cell(blocking_cell.clone())
         .run()
         .await
         .expect("blocking run should succeed");
@@ -2618,10 +2609,9 @@ async fn run_and_stream_same_conversation_for_parallel_tool_calls() {
     let mut stream = AgentBuilder::new(streaming_model)
         .tool(MockAddTool)
         .build()
-        .runner("add two pairs")
+        .runner_over(streaming_cell.clone())
         .max_turns(3)
         .turn_id_source(parity_turn_ids())
-        .conversation_cell(streaming_cell.clone())
         .stream()
         .await;
     let mut final_response = None;
@@ -2704,10 +2694,9 @@ async fn run_preserves_tool_call_order_under_out_of_order_completion() {
             order: Arc::new(AtomicU32::new(0)),
         })
         .build()
-        .runner("go")
+        .runner_over(cell.clone())
         .max_turns(3)
         .tool_concurrency(4)
-        .conversation_cell(cell.clone())
         .run()
         .await
         .expect("run should succeed");
@@ -2781,11 +2770,10 @@ async fn stream_and_run_same_message_history_for_parallel_tool_calls_under_concu
     let _blocking = AgentBuilder::new(blocking_model)
         .tool(MockAddTool)
         .build()
-        .runner("add two pairs")
+        .runner_over(blocking_cell.clone())
         .max_turns(3)
         .turn_id_source(parity_turn_ids())
         .tool_concurrency(4)
-        .conversation_cell(blocking_cell.clone())
         .run()
         .await
         .expect("blocking run should succeed");
@@ -2805,11 +2793,10 @@ async fn stream_and_run_same_message_history_for_parallel_tool_calls_under_concu
     let stream = AgentBuilder::new(streaming_model)
         .tool(MockAddTool)
         .build()
-        .runner("add two pairs")
+        .runner_over(streaming_cell.clone())
         .max_turns(3)
         .turn_id_source(parity_turn_ids())
         .tool_concurrency(4)
-        .conversation_cell(streaming_cell.clone())
         .stream()
         .await;
     let _final_response = drive_to_final_response(stream).await;
@@ -2845,11 +2832,10 @@ async fn stream_preserves_history_order_under_out_of_order_completion() {
             order: Arc::new(AtomicU32::new(0)),
         })
         .build()
-        .runner("go")
+        .runner_over(cell.clone())
         .max_turns(3)
         .turn_id_source(parity_turn_ids())
         .tool_concurrency(4)
-        .conversation_cell(cell.clone())
         .stream()
         .await;
     // Timeout so a regression to sequential execution fails cleanly instead
@@ -2893,10 +2879,9 @@ async fn stream_emits_tool_results_in_call_order_after_batch_settles_under_concu
             order: Arc::new(AtomicU32::new(0)),
         })
         .build()
-        .runner("go")
+        .runner_over(cell.clone())
         .max_turns(3)
         .tool_concurrency(4)
-        .conversation_cell(cell.clone())
         .stream()
         .await;
 
@@ -3730,9 +3715,8 @@ async fn stream_hook_skip_surfaces_result_without_execution_commit() {
         })
         .add_hook(SkipHook)
         .build()
-        .runner("go")
+        .runner_over(cell.clone())
         .max_turns(3)
-        .conversation_cell(cell.clone())
         .stream()
         .await;
 
@@ -4079,10 +4063,9 @@ async fn run_blocking_scenario(prompt: &'static str, turns: &[ScriptedTurn]) -> 
     let response = AgentBuilder::new(model)
         .tool(MockAddTool)
         .build()
-        .runner(prompt)
+        .runner_over(cell.clone())
         .max_turns(8)
         .turn_id_source(parity_turn_ids())
-        .conversation_cell(cell.clone())
         .add_hook(hook.clone())
         .run()
         .await
@@ -4108,10 +4091,9 @@ async fn run_streaming_scenario(
     let mut stream = AgentBuilder::new(model)
         .tool(MockAddTool)
         .build()
-        .runner(prompt)
+        .runner_over(cell.clone())
         .max_turns(8)
         .turn_id_source(parity_turn_ids())
-        .conversation_cell(cell.clone())
         .add_hook(hook.clone())
         .stream()
         .await;
@@ -4291,10 +4273,9 @@ async fn valid_tool_call_skip_parity_across_run_and_stream() {
     let blocking = AgentBuilder::new(blocking_model)
         .tool(MockAddTool)
         .build()
-        .runner("add 2 and 3")
+        .runner_over(blocking_cell.clone())
         .max_turns(3)
         .turn_id_source(parity_turn_ids())
-        .conversation_cell(blocking_cell.clone())
         .add_hook(blocking_hook.clone())
         .add_hook(SkipToolCallHook("skipped by policy"))
         .run()
@@ -4311,10 +4292,9 @@ async fn valid_tool_call_skip_parity_across_run_and_stream() {
     let mut stream = AgentBuilder::new(streaming_model)
         .tool(MockAddTool)
         .build()
-        .runner("add 2 and 3")
+        .runner_over(streaming_cell.clone())
         .max_turns(3)
         .turn_id_source(parity_turn_ids())
-        .conversation_cell(streaming_cell.clone())
         .add_hook(streaming_hook.clone())
         .add_hook(SkipToolCallHook("skipped by policy"))
         .stream()
@@ -4888,10 +4868,9 @@ async fn valid_tool_result_rewrite_parity_across_run_and_stream() {
     let blocking = AgentBuilder::new(blocking_model)
         .tool(MockAddTool)
         .build()
-        .runner("add 2 and 3")
+        .runner_over(blocking_cell.clone())
         .max_turns(3)
         .turn_id_source(parity_turn_ids())
-        .conversation_cell(blocking_cell.clone())
         .add_hook(blocking_hook.clone())
         .add_hook(RewriteToolResultHook("redacted-result"))
         .run()
@@ -4908,10 +4887,9 @@ async fn valid_tool_result_rewrite_parity_across_run_and_stream() {
     let mut stream = AgentBuilder::new(streaming_model)
         .tool(MockAddTool)
         .build()
-        .runner("add 2 and 3")
+        .runner_over(streaming_cell.clone())
         .max_turns(3)
         .turn_id_source(parity_turn_ids())
-        .conversation_cell(streaming_cell.clone())
         .add_hook(streaming_hook.clone())
         .add_hook(RewriteToolResultHook("redacted-result"))
         .stream()
@@ -4968,9 +4946,8 @@ async fn rewrite_result_is_delivered_verbatim_not_reparsed() {
     let _result = AgentBuilder::new(model)
         .tool(MockAddTool)
         .build()
-        .runner("add 2 and 3")
+        .runner_over(cell.clone())
         .max_turns(3)
-        .conversation_cell(cell.clone())
         .add_hook(RewriteToolResultHook(IMAGE_JSON))
         .run()
         .await
@@ -5337,10 +5314,9 @@ async fn human_in_the_loop_approve_deny_edit_parity_across_run_and_stream() {
     let blocking = AgentBuilder::new(blocking_model)
         .tool(MockAddTool)
         .build()
-        .runner("carry out the plan")
+        .runner_over(blocking_cell.clone())
         .max_turns(3)
         .turn_id_source(parity_turn_ids())
-        .conversation_cell(blocking_cell.clone())
         .add_hook(blocking_recorder.clone())
         .add_hook(blocking_approver.clone())
         .run()
@@ -5358,10 +5334,9 @@ async fn human_in_the_loop_approve_deny_edit_parity_across_run_and_stream() {
     let mut stream = AgentBuilder::new(streaming_model)
         .tool(MockAddTool)
         .build()
-        .runner("carry out the plan")
+        .runner_over(streaming_cell.clone())
         .max_turns(3)
         .turn_id_source(parity_turn_ids())
-        .conversation_cell(streaming_cell.clone())
         .add_hook(streaming_recorder.clone())
         .add_hook(streaming_approver.clone())
         .stream()
@@ -5581,10 +5556,9 @@ async fn approval_policy_allow_list_with_sticky_decisions() {
         .tool(MockAddTool)
         .tool(MockSubtractTool)
         .build()
-        .runner("go")
+        .runner_over(policy_cell.clone())
         .max_turns(3)
         .add_hook(recorder.clone())
-        .conversation_cell(policy_cell.clone())
         .add_hook(policy.clone())
         .run()
         .await

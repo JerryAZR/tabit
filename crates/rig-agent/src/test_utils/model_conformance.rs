@@ -22,10 +22,9 @@ use crate::{
         ToolCall as ToolCallEvent, ToolCallAction, ToolResultAction, ToolResultEvent,
     },
     completion::{
-        AssistantContent, CompletionError, CompletionModel, Message, Prompt, PromptError,
-        ToolDefinition,
+        AssistantContent, CompletionError, CompletionModel, Message, PromptError, ToolDefinition,
     },
-    streaming::StreamingPrompt,
+    streaming::StreamingChat,
     tool::{Tool, ToolContext},
 };
 use rig_core::message::{ToolChoice, UserContent};
@@ -897,10 +896,7 @@ where
         .default_max_turns(3)
         .build();
     let cell = scenario_cell(PARALLEL_PROMPT);
-    let request = agent
-        .prompt(PARALLEL_PROMPT)
-        .max_turns(3)
-        .conversation_cell(cell.clone());
+    let request = agent.prompt_over(cell.clone()).max_turns(3);
     let response = match tool_concurrency {
         Some(concurrency) => {
             request
@@ -995,9 +991,8 @@ where
     let prompt = "Call the ping tool, then report the exact marker it returns.";
     let cell = scenario_cell(prompt);
     let response = agent
-        .prompt(prompt)
+        .prompt_over(cell.clone())
         .max_turns(2)
-        .conversation_cell(cell.clone())
         .extended_details()
         .await?;
     let messages = conversation_of(&cell);
@@ -1048,9 +1043,8 @@ where
     let prompt = "Call fetch_motto and fetch_config, then summarize both outputs in one sentence.";
     let cell = scenario_cell(prompt);
     let response = agent
-        .prompt(prompt)
+        .prompt_over(cell.clone())
         .max_turns(3)
-        .conversation_cell(cell.clone())
         .extended_details()
         .await?;
     let messages = conversation_of(&cell);
@@ -1128,9 +1122,8 @@ where
     let prompt = "Call store_profile with profile.name exactly `Zoë \\\"Z\\\"`, profile.tags exactly [`rust`, `東京`], mode `careful`, note containing the two lines `line one` and `line two` separated by a newline, and quote exactly `path C:\\\\tmp and \\\"quoted\\\"`. Then confirm it was stored.";
     let cell = scenario_cell(prompt);
     let response = agent
-        .prompt(prompt)
+        .prompt_over(cell.clone())
         .max_turns(3)
-        .conversation_cell(cell.clone())
         .extended_details()
         .await?;
     let observed = lock_recover(&captured).clone();
@@ -1254,12 +1247,7 @@ where
         .tool_choice(ToolChoice::Required)
         .build();
     let cell = scenario_cell(PROMPT);
-    let response = agent
-        .runner(PROMPT)
-        .max_turns(4)
-        .conversation_cell(cell.clone())
-        .run()
-        .await?;
+    let response = agent.runner_over(cell.clone()).max_turns(4).run().await?;
     // Nothing executed: the unregistered name never ran a body.
     if sum_calls.load(Ordering::SeqCst) != 0 {
         return Err(ScenarioError::contract(
@@ -1310,9 +1298,8 @@ where
     let prompt = "Use add once for x=1 and y=1, then report what the tool returns.";
     let cell = scenario_cell(prompt);
     let response = agent
-        .prompt(prompt)
+        .prompt_over(cell.clone())
         .max_turns(3)
-        .conversation_cell(cell.clone())
         .add_hook(RewriteArgument {
             key: "x",
             value: serde_json::json!(7),
@@ -1378,9 +1365,8 @@ where
     let cancelled_prompt = "Use add once to compute x=20 plus y=22.";
     let cancelled_cell = scenario_cell(cancelled_prompt);
     let cancelled = match cancelled_agent
-        .prompt(cancelled_prompt)
+        .prompt_over(cancelled_cell.clone())
         .max_turns(2)
-        .conversation_cell(cancelled_cell.clone())
         .add_hook(StopAfterResult(REASON))
         .await
     {
@@ -1408,9 +1394,8 @@ where
     let max_turn_prompt = "Use add once to compute x=20 plus y=22, then report the result.";
     let max_turn_cell = scenario_cell(max_turn_prompt);
     let max_turn = match max_turn_agent
-        .prompt(max_turn_prompt)
+        .prompt_over(max_turn_cell.clone())
         .max_turns(1)
-        .conversation_cell(max_turn_cell.clone())
         .await
     {
         Err(error) => error,
@@ -1465,11 +1450,7 @@ where
         .build();
     let prompt = "Use the repeat_text tool to repeat the word \"banana\" 3 times, then show me the exact result.";
     let cell = scenario_cell(prompt);
-    let result = agent
-        .prompt(prompt)
-        .conversation_cell(cell.clone())
-        .extended_details()
-        .await?;
+    let result = agent.prompt_over(cell.clone()).extended_details().await?;
     let messages = conversation_of(&cell);
     let response = result.output.clone();
     let tool_calls = calls.load(Ordering::SeqCst);
@@ -1501,11 +1482,7 @@ where
         .build();
     let prompt = "Compute (4 + 6) * 2. First call the add tool, then call the multiply tool on the result. Tell me the final number.";
     let cell = scenario_cell(prompt);
-    let result = agent
-        .prompt(prompt)
-        .conversation_cell(cell.clone())
-        .extended_details()
-        .await?;
+    let result = agent.prompt_over(cell.clone()).extended_details().await?;
     let messages = conversation_of(&cell);
     let response = result.output.clone();
     let add = add_calls.load(Ordering::SeqCst);
@@ -1540,11 +1517,7 @@ where
         .build();
     let prompt = "Use add to calculate 17 + 25, then state the final number.";
     let cell = scenario_cell(prompt);
-    let mut stream = agent
-        .stream_prompt(prompt)
-        .max_turns(4)
-        .conversation_cell(cell.clone())
-        .await;
+    let mut stream = agent.stream_over(cell.clone()).max_turns(4).await;
     let mut final_response = None;
     let mut final_count = 0_usize;
     let mut completion_usage = crate::completion::Usage::new();

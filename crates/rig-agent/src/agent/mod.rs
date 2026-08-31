@@ -32,11 +32,8 @@
 //!     .temperature(0.8)
 //!     .build();
 //!
-//! // Use the agent for chats and prompts
-//! // Generate a chat completion response from a prompt and chat history
-//! let chat_response = agent.chat("Prompt", &mut Vec::<rig_core::completion::Message>::new()).await?;
-//!
-//! // Generate a prompt completion response from a simple prompt
+//! // Use the agent for prompts
+//! // Generate a completion response from a simple prompt
 //! let prompt_response = agent.prompt("Prompt").await?;
 //!
 //! // Per-run overrides stay inside the hook-aware runner.

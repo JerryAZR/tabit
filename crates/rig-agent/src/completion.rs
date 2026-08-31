@@ -76,16 +76,6 @@ pub trait Prompt: WasmCompatSend + WasmCompatSync {
     ) -> impl std::future::IntoFuture<Output = Result<String, PromptError>, IntoFuture: WasmCompatSend>;
 }
 
-/// High-level prompting with caller-owned canonical chat history.
-pub trait Chat: WasmCompatSend + WasmCompatSync {
-    /// Execute one turn and append only committed messages to `chat_history`.
-    fn chat(
-        &self,
-        prompt: impl Into<Message> + WasmCompatSend,
-        chat_history: &mut Vec<Message>,
-    ) -> impl std::future::Future<Output = Result<String, PromptError>> + WasmCompatSend;
-}
-
 #[cfg(test)]
 mod provider_response_tests {
     use rig_core::{ProviderResponseError, http_client};

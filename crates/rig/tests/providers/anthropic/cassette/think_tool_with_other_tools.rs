@@ -15,7 +15,6 @@ use std::sync::Arc;
 use std::sync::atomic::{AtomicUsize, Ordering};
 
 use anyhow::Result;
-use rig::completion::Prompt;
 use rig::message::{AssistantContent, Message};
 use rig::prelude::*;
 use rig::tool::Tool;
@@ -319,9 +318,8 @@ async fn think_tool_with_other_tools() -> Result<()> {
              Lastly, how much would it cost to buy Product A + 2 Product B with slow (standard) shipping?";
     let cell = test_cell(prompt);
     let response = agent
-        .prompt(prompt)
+        .prompt_over(cell.clone())
         .max_turns(10)
-        .conversation_cell(cell.clone())
         .extended_details()
         .await?;
 

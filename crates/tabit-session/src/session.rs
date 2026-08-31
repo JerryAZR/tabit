@@ -853,14 +853,15 @@ impl Session {
         if let Some(hub) = &self.interaction {
             tool_context.insert(hub.capability());
         }
+        // The cell IS the conversation (ENGINE.md, the unified
+        // conversation): the run folds the session's one durable
+        // manager, and the opening message — if any — arrives through
+        // the steering drain at the loop's first convergence.
         let mut request = self
             .agent
-            .stream_chat(Vec::<Message>::new())
+            .stream_over(self.conversation.clone())
             .max_turns(self.max_turns)
-            .tool_concurrency(TOOL_CONCURRENCY)
-            // The cell IS the conversation — the history argument above
-            // is vestigial when one is supplied (build_run ignores it).
-            .conversation_cell(self.conversation.clone());
+            .tool_concurrency(TOOL_CONCURRENCY);
         if let Some(stack) = &self.run_hooks {
             request = request.add_hook(stack.clone());
         }

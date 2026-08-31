@@ -9,7 +9,7 @@ pub use crate::agent::{
     Agent, AgentHook, HookContext, ModelHandle, MultiTurnStreamItem, StreamingResult,
 };
 pub use crate::client::{AgentClientExt, AgentModelExt};
-pub use crate::completion::{Chat, CompletionError, CompletionModel, Message, Prompt, PromptError};
+pub use crate::completion::{CompletionError, CompletionModel, Message, Prompt, PromptError};
 pub use crate::streaming::{StreamingChat, StreamingPrompt};
 pub use crate::tool::{Tool, ToolSet};
 pub use rig_core::client::completion::CompletionClient;

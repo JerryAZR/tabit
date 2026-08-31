@@ -75,7 +75,7 @@ pub mod client {
 /// Low-level completion contracts plus classic prompting traits and errors.
 pub mod completion {
     #[cfg(feature = "agent")]
-    pub use rig_agent::completion::{Chat, Prompt, PromptError};
+    pub use rig_agent::completion::{Prompt, PromptError};
     pub use rig_core::completion::*;
 }
 
@@ -93,7 +93,7 @@ pub mod prelude {
     // pre-split `client.completion_model(m)` / `client.agent(m)` surface.
     #[cfg(feature = "agent")]
     pub use rig_agent::prelude::{
-        Agent, AgentClientExt, AgentModelExt, Chat, MultiTurnStreamItem, Prompt, PromptError,
+        Agent, AgentClientExt, AgentModelExt, MultiTurnStreamItem, Prompt, PromptError,
         StreamingChat, StreamingPrompt, StreamingResult, ToolSet,
     };
     pub use rig_core::prelude::*;

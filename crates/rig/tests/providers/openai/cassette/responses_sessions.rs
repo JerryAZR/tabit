@@ -117,8 +117,7 @@ async fn sequential_tool_calls_nonstreaming() {
             let cell = test_cell(SEQUENTIAL_TOOLS_PROMPT);
 
             let result = agent
-                .prompt(SEQUENTIAL_TOOLS_PROMPT)
-                .conversation_cell(cell.clone())
+                .prompt_over(cell.clone())
                 .max_turns(6)
                 .await
                 .expect("sequential tool run should succeed");
@@ -238,8 +237,7 @@ async fn parallel_tool_calls_single_turn_nonstreaming() {
             let cell = test_cell(TWO_TOOL_STREAM_PROMPT);
 
             let result = agent
-                .prompt(TWO_TOOL_STREAM_PROMPT)
-                .conversation_cell(cell.clone())
+                .prompt_over(cell.clone())
                 .max_turns(5)
                 .await
                 .expect("parallel tool run should succeed");
