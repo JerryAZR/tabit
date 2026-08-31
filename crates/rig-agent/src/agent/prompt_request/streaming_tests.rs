@@ -3021,7 +3021,7 @@ async fn a_steer_during_the_final_turn_exits_and_leaves_the_queue() {
     let steered: Vec<&String> = items
         .iter()
         .filter_map(|item| match item {
-            MultiTurnStreamItem::Steer { text, .. } => Some(text),
+            MultiTurnStreamItem::Steer { batch } => batch.first().map(|(_, text)| text),
             _ => None,
         })
         .collect();

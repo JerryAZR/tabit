@@ -320,20 +320,23 @@ where
                 .map(|steering| steering.drain())
                 .unwrap_or_default();
             if !steers.is_empty() {
-                // Commit first, then announce (ENGINE.md's pseudo-code
-                // order): every suspension the consumer sees must be at
-                // a committed boundary — announcing before the fold
-                // would let an abort drop the run between the two,
-                // leaving a message the frontend saw but the
-                // conversation never kept.
+                // Commit the whole drain, then announce it as one item: the
+                // fold and the yield share one uninterrupted poll, and a
+                // suspension never sits between a commit and its
+                // announcement (ENGINE.md) — an abort can only land where
+                // the batch is still queued (discarded with notice) or
+                // already announced whole.
                 cell_fold_steers(conversation, &steers);
-                for (id, message) in steers.iter() {
-                    if let Some(text) = message.user_text() {
-                        yield Ok(DriveItem::Item(MultiTurnStreamItem::Steer {
-                            id: id.clone(),
-                            text: text.to_string(),
-                        }));
-                    }
+                let batch = steers
+                    .iter()
+                    .filter_map(|(id, message)| {
+                        message
+                            .user_text()
+                            .map(|text| (id.clone(), text.to_string()))
+                    })
+                    .collect::<Vec<_>>();
+                if !batch.is_empty() {
+                    yield Ok(DriveItem::Item(MultiTurnStreamItem::Steer { batch }));
                 }
                 // A steering user is their own circuit breaker.
                 defect_streak = 0;

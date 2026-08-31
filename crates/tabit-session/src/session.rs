@@ -770,7 +770,10 @@ impl Session {
         if let Err(error) = &guard_outcome {
             self.drain_persist_transitions();
             self.fail_before_engine(
-                format!("the session log is undrained and still refuses to flush: {error}"),
+                format!(
+                    "the session log is undrained and still refuses to flush: {error} \
+                     — the message is kept; free the log and retry to answer it"
+                ),
                 &mut sink,
             );
             return RunSummary {
@@ -790,7 +793,13 @@ impl Session {
         // then `run_failed` — the same shape a provider stream error
         // takes.
         if let Err(error) = self.ensure_agent() {
-            self.fail_before_engine(error.to_string(), &mut sink);
+            self.fail_before_engine(
+                format!(
+                    "{error} — the message is kept; switch the model and retry to \
+                     answer it"
+                ),
+                &mut sink,
+            );
             return RunSummary {
                 outcome: RunOutcome::Failed,
                 output: String::new(),
@@ -960,8 +969,13 @@ impl Session {
                         durable: self.buffer_is_clean(),
                     });
                 }
-                Ok(MultiTurnStreamItem::Steer { id, text }) => {
-                    self.note_steer(id, text, sink);
+                Ok(MultiTurnStreamItem::Steer { batch }) => {
+                    // The whole batch is already committed (the fold and
+                    // the yield share one poll); announce every pair in
+                    // one synchronous loop — an abort cannot split it.
+                    for (entry_id, text) in batch {
+                        sink.emit(SessionEvent::UserMessage { text, entry_id });
+                    }
                 }
                 Ok(MultiTurnStreamItem::CompletionCall(call)) => {
                     let turn_id = announce(&current_turn);
@@ -1040,17 +1054,6 @@ impl Session {
             content,
             status,
         });
-    }
-
-    /// A steer drained into history mid-run: one user node under the
-    /// message's born-early id (the id its `message_queued` announced,
-    /// parked by the drain in FIFO order), 1:1 with what the model saw.
-    /// Announce one drained message (opening batch and mid-run steers
-    /// alike): the engine's fold is the durable commit under the
-    /// born-early id the `Steer` item carries; the session only
-    /// emits — the 1:1 acknowledgment.
-    fn note_steer(&self, entry_id: String, text: String, sink: &mut EventSink<'_>) {
-        sink.emit(SessionEvent::UserMessage { text, entry_id });
     }
 
     /// The run's epilogue: exactly one terminal (the fold already emitted

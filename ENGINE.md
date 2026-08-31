@@ -201,12 +201,14 @@ loop {
     exit Failed(stopped);
   }
   steers = mailbox.take_all();
-  for s in steers {
-    conversation.fold(user(s));       // [WRITE] the first iteration's fold
-    events.emit(user_message(s));     // IS the prompt commit
-  }
-  if !steers.is_empty() { defect_streak = 0; provider_streak = 0; }
-                                      // a steering user is their own breaker
+  if !steers.is_empty() {
+    conversation.fold_all(steers);    // [WRITE] commit the whole drain
+    yield Steer(batch);               // ONE item announces the batch — the
+                                      // fold and the yield share one
+                                      // uninterrupted poll, so no abort can
+                                      // split a commit from its announcement
+    defect_streak = 0; provider_streak = 0;
+  }                                   // a steering user is their own breaker
 
   // ── DECIDE ── the one policy site; every loop-or-exit conditional
   //   lives here. The first pass cannot exit on the policy rules:
@@ -284,6 +286,21 @@ attempt that dies leaves its announced id uncommitted.
 roundtrips alike (the old `RoundtripClosed` is deleted: it always
 fired beside `TurnCommitted` and only existed as the session door's
 trigger, and the door is now inline in `fold_all`).
+
+**A suspension never sits between a commit and its announcement**
+(ruled 2026-08, the batched-drain design). Abort takes effect only at
+the consumer's select-poll boundaries, and a poll in flight runs to
+completion — so two writes separated by a yield can always be split
+by an abort, in either order. The loop therefore keeps every
+commit→announce pair inside one uninterrupted poll: the drain folds
+the whole batch and yields one `Steer { batch }` item, the turn folds
+and then yields `TurnCommitted`. The parked states "committed but
+unannounced" and "announced but uncommitted" are unrepresentable at
+drain boundaries; an abort lands where the batch is still queued
+(discarded with notice) or already announced whole. The stream is a
+progress channel — droppable, replay-reconciled; ledger-critical
+emissions (`message_queued`, `messages_discarded`) ride the mailbox's
+notice channel, which the run's death cannot drop.
 
 ### Error taxonomy (what a model turn can fail with)
 

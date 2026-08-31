@@ -143,16 +143,18 @@ pub enum MultiTurnStreamItem {
     /// The final result from the stream: the unified [`PromptResponse`] shared
     /// with the blocking surface.
     FinalResponse(PromptResponse),
-    /// A steering message the loop drained and folded — the opening
-    /// batch and mid-run steers alike (one drain). This is an
-    /// observation event: the message is already folded into the
-    /// conversation under `entry_id` (the born-early id from the
-    /// mailbox); session layers announce it as its own user message.
+    /// One drain's steered messages — the opening batch and mid-run
+    /// steers alike (one drain, one item). Progress, not ledger: the
+    /// whole batch is already folded into the conversation under the
+    /// born-early ids before this item is yielded, and the fold and
+    /// the yield share one uninterrupted poll — a suspension never
+    /// sits between a commit and its announcement (ENGINE.md), so an
+    /// abort can only land where the batch is either still queued or
+    /// already announced whole. Consumers announce each pair as a user
+    /// message.
     Steer {
-        /// The born-early entry id the message folded under.
-        id: String,
-        /// The message text.
-        text: String,
+        /// The drained messages as `(entry id, text)` pairs, drain order.
+        batch: Vec<(String, String)>,
     },
 }
 
