@@ -69,6 +69,7 @@ mod endpoint;
 mod error;
 mod interaction;
 mod model;
+mod notice;
 mod parser;
 mod permission;
 mod prompt;

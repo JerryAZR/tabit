@@ -87,7 +87,7 @@ impl Session {
             conversation: conversation_cell,
             buffer,
             shared_conversation,
-            persist_notices: Arc::new(Mutex::new(None)),
+            persist_notices: Arc::new(std::sync::OnceLock::new()),
             ledger: crate::stats::UsageLedger::default(),
             abort: std::sync::Arc::new(std::sync::Mutex::new(CancellationToken::new())),
             mailbox: Mailbox::default(),

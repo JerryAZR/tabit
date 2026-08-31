@@ -443,7 +443,13 @@ dual-fold clarification) are settled:
   `ModelStats`/`SessionStats` joining the usage ledger in `stats.rs`.
 - **A named notice-channel abstraction** for the ~10 copy-pasted
   weak-sender `EventFrame` emission sites (one documented home for the
-  termination discipline).
+  termination discipline) — done (2026-08): `notice.rs`'s `NoticeSink`
+  (channel + stream stamp as one value) and `NoticeSlot` (the
+  attach-once cell). The mailbox's two-`OnceLock` attach invariant and
+  its `expect` are unrepresentable now, and persist's `Mutex<Option>`
+  died with the verification that no re-attach exists (attach happens
+  exactly once, at worker spawn). The hub's ask keeps its dismissal
+  semantics through `emit`'s liveness return.
 - **One home for the call/result pairing walk** — the same
   every-call-answered-exactly-once verification exists in
   `tabit-log/fold.rs`, `tabit-session/parser.rs`, and

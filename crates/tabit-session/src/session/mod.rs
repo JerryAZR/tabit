@@ -47,9 +47,9 @@ pub(crate) use wire::{result_text, user_text, wire_status};
 
 use crate::context_manager::ContextManager;
 use crate::interaction::InteractionHub;
+use crate::notice::NoticeSlot;
 use crate::stats::{ModelStats, SessionStats, UsageLedger};
 use mailbox::Mailbox;
-use persist::PersistNotices;
 use rig_agent::agent::Agent;
 use rig_agent::completion::{Message, Usage};
 use rig_agent::tool::DynamicTool;
@@ -106,9 +106,9 @@ pub struct Session {
     /// at receive): reads through a lock so a racing checkout sees the
     /// live tree even mid-run — the probes never mutate.
     shared_conversation: SharedConversation,
-    /// The persist-state notice channel (flag 8's degraded/recovered
+    /// The persist-state notice sink (flag 8's degraded/recovered
     /// events), attached by the worker at spawn.
-    persist_notices: PersistNotices,
+    persist_notices: Arc<NoticeSlot>,
     /// The cumulative usage ledger as of load (the parser's fold over
     /// the file's usage facts — usage facts ride records; the ledger
     /// is derived at open, and **deferred after**: the live manager

@@ -45,6 +45,7 @@
 
 use crate::interaction::InteractionHub;
 use crate::lock::lock;
+use crate::notice::NoticeSink;
 use crate::session::{AbortHandle, MailboxHandle, Session};
 use crate::stats::SessionStats;
 use crate::store::SessionStore;
@@ -116,17 +117,13 @@ struct Worker {
     mailbox: MailboxHandle,
     abort_handle: AbortHandle,
     interaction: InteractionHub,
-    /// The event channel and this session's stamp, for the handler's
-    /// own emissions (checkout errors and clears) — a module talking
-    /// to its frontend, not the router's business. Weak, per the
-    /// channel-lifetime discipline (the hub, the mailbox notices): the
-    /// delivery surface lives as long as the host's routing table, and
-    /// a strong sender would keep the event stream open after every
-    /// real producer is gone — the stream ends with the frontend, not
-    /// with the table. A dead channel simply means nobody is left to
-    /// tell.
-    events: mpsc::WeakUnboundedSender<EventFrame>,
-    stream: StreamId,
+    /// The notice sink for the handler's own emissions (checkout
+    /// errors, model answers) — a module talking to its frontend, not
+    /// the router's business. The discipline lives in
+    /// [`crate::notice`]: the delivery surface lives as long as the
+    /// host's routing table, and a dead channel simply means nobody is
+    /// left to tell.
+    notices: NoticeSink,
     /// The read-only entry-id probe — checkout verification at receive
     /// (see [`crate::session::SharedConversation`]).
     entry_probe: crate::session::SharedConversation,
@@ -186,14 +183,9 @@ impl Worker {
                 // receive: a bad target errors immediately — even
                 // mid-run — and nothing else happens.
                 if !self.entry_probe.contains(&entry_id) {
-                    if let Some(events) = self.events.upgrade() {
-                        let _ = events.send(EventFrame {
-                            stream: Some(self.stream.clone()),
-                            event: SessionEvent::error_checkout(format!(
-                                "no entry `{entry_id}` in this session"
-                            )),
-                        });
-                    }
+                    self.notices.emit(SessionEvent::error_checkout(format!(
+                        "no entry `{entry_id}` in this session"
+                    )));
                     return;
                 }
                 // Checkout aborts first (ruled 2026-08: the user
@@ -226,12 +218,7 @@ impl Worker {
                     thinking_level,
                 };
                 if let Err(message) = (self.model_probe)(&selection) {
-                    if let Some(events) = self.events.upgrade() {
-                        let _ = events.send(EventFrame {
-                            stream: Some(self.stream.clone()),
-                            event: SessionEvent::error_model(message),
-                        });
-                    }
+                    self.notices.emit(SessionEvent::error_model(message));
                     return;
                 }
                 // A state write, not pending intent: one register write
@@ -241,9 +228,7 @@ impl Worker {
                 // question: the next run open derives the agent, and
                 // every pass announces the cell.
                 self.model_register.write(selection.clone());
-                if let Some(events) = self.events.upgrade() {
-                    announce_model(&selection, &events, &self.stream);
-                }
+                announce_model(&selection, &self.notices);
             }
             // Lifecycle is not session-scoped — the router forwards
             // those to the lifecycle handler. Unreachable by
@@ -765,8 +750,7 @@ fn spawn_worker(
     let interaction = InteractionHub::new(event_tx.clone(), stream.clone());
     let checkout_slot = Arc::new(Mutex::new(None::<String>));
     let replay_due = Arc::new(std::sync::atomic::AtomicBool::new(false));
-    let worker_events = event_tx.downgrade();
-    let worker_stream = stream.clone();
+    let worker_notices = NoticeSink::new(&event_tx, stream.clone());
     let entry_probe = session.entry_id_probe();
     let model_probe = session.model_probe();
     let model_register = session.model_register();
@@ -779,8 +763,8 @@ fn spawn_worker(
         // event channel, so both exist only here - attach them before
         // the first pump can run.
         session.attach_interaction(task_interaction);
-        session.attach_mailbox_notices(event_tx.clone(), stream.clone());
-        session.attach_persist_notices(event_tx.downgrade(), stream.clone());
+        session.attach_mailbox_notices(&event_tx, stream.clone());
+        session.attach_persist_notices(&event_tx, stream.clone());
         // The resident worker. Ownership never moves: idle is the wait
         // below, running is the pump call - two positions of one loop,
         // not two tasks. One wake (the work signal) serves every
@@ -870,8 +854,7 @@ fn spawn_worker(
             mailbox,
             abort_handle,
             interaction,
-            events: worker_events,
-            stream: worker_stream,
+            notices: worker_notices,
             entry_probe,
             checkout_slot: worker_slot,
             model_register,
@@ -886,18 +869,11 @@ fn spawn_worker(
 /// at every receive-time write (the `model` command's own outcome) and
 /// before every replay pass (a session becoming visible always tells
 /// its model). One construction site, two askers.
-fn announce_model(
-    selection: &ModelSelection,
-    event_tx: &mpsc::UnboundedSender<EventFrame>,
-    stream: &StreamId,
-) {
-    let _ = event_tx.send(EventFrame {
-        stream: Some(stream.clone()),
-        event: SessionEvent::ModelChanged {
-            provider: selection.provider.clone(),
-            model: selection.model.clone(),
-            thinking_level: selection.thinking_level.clone(),
-        },
+fn announce_model(selection: &ModelSelection, notices: &NoticeSink) {
+    notices.emit(SessionEvent::ModelChanged {
+        provider: selection.provider.clone(),
+        model: selection.model.clone(),
+        thinking_level: selection.thinking_level.clone(),
     });
 }
 
@@ -943,7 +919,12 @@ fn execute_checkout(
 /// repeats; replayed history itself never carries `model_changed` (the
 /// register ruling: state is announced live, not reconstructed).
 fn emit_replay(session: &Session, event_tx: &mpsc::UnboundedSender<EventFrame>, stream: &StreamId) {
-    announce_model(&session.selection(), event_tx, stream);
+    // The worker holds the strong end for the pass itself, so this
+    // sink's upgrade cannot fail here.
+    announce_model(
+        &session.selection(),
+        &NoticeSink::new(event_tx, stream.clone()),
+    );
     let events = session.replay_events();
     let total = events.len() as u64;
     let _ = event_tx.send(EventFrame {

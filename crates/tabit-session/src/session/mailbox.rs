@@ -4,6 +4,7 @@
 use super::Session;
 use super::wire::user_text;
 use crate::lock::lock;
+use crate::notice::{NoticeSink, NoticeSlot};
 use rig_agent::completion::Message;
 use tabit_protocol::{EventFrame, SessionEvent, StreamId};
 use tokio_util::sync::CancellationToken;
@@ -45,15 +46,10 @@ pub(crate) struct Mailbox {
     /// worker's beat takes it and starts a run over the existing
     /// conversation with no new message.
     continue_pending: std::sync::Arc<std::sync::atomic::AtomicBool>,
-    /// The event channel for submit-time notices — weak, so holding it
-    /// never keeps the stream alive (the interaction hub's discipline),
-    /// and absent for direct [`Session`] consumers (no frontend, no
-    /// notices). Attached by the resident worker at spawn.
-    notices:
-        std::sync::Arc<std::sync::OnceLock<tokio::sync::mpsc::WeakUnboundedSender<EventFrame>>>,
-    /// The stream stamp for those notices (the session's id), attached
-    /// with the channel.
-    notice_stream: std::sync::Arc<std::sync::OnceLock<StreamId>>,
+    /// The submit-time notice sink, attached by the resident worker at
+    /// spawn (see [`crate::notice`] for the channel discipline). Absent
+    /// for direct [`Session`] consumers: no frontend, no notices.
+    notices: std::sync::Arc<NoticeSlot>,
     /// Wakes the resident worker when work arrives. One permit covers any
     /// number of pushes; the queue itself is the source of truth — the
     /// signal exists only so an empty queue can be waited on.
@@ -65,11 +61,10 @@ impl Mailbox {
     /// worker, at spawn), stamped with the session's stream.
     pub(crate) fn attach_notices(
         &self,
-        events: tokio::sync::mpsc::UnboundedSender<EventFrame>,
+        events: &tokio::sync::mpsc::UnboundedSender<EventFrame>,
         stream: StreamId,
     ) {
-        let _ = self.notices.set(events.downgrade());
-        let _ = self.notice_stream.set(stream);
+        let _ = self.notices.set(NoticeSink::new(events, stream));
     }
 
     /// A pump began: submissions from here until [`Self::run_ended`] are
@@ -104,25 +99,9 @@ impl Mailbox {
     /// Tell the frontend a live-run submission waits. A dead or absent
     /// channel is a no-op (the frontend is gone, or there never was one).
     fn notice_queued(&self, id: String, text: String) {
-        let Some(sender) = self
-            .notices
-            .get()
-            .and_then(tokio::sync::mpsc::WeakUnboundedSender::upgrade)
-        else {
-            return;
-        };
-        // The stamp is attached with the channel; an unset stamp with a
-        // live channel is unreachable (one attach sets both).
-        #[allow(clippy::expect_used)]
-        let stream = self
-            .notice_stream
-            .get()
-            .expect("notice channel and stream attach together")
-            .clone();
-        let _ = sender.send(EventFrame {
-            stream: Some(stream),
-            event: SessionEvent::MessageQueued { id, text },
-        });
+        if let Some(sink) = self.notices.get() {
+            sink.emit(SessionEvent::MessageQueued { id, text });
+        }
     }
 
     pub(crate) fn is_empty(&self) -> bool {
@@ -164,24 +143,8 @@ impl Mailbox {
         if cleared.is_empty() {
             return;
         }
-        let Some(sender) = self
-            .notices
-            .get()
-            .and_then(tokio::sync::mpsc::WeakUnboundedSender::upgrade)
-        else {
-            return;
-        };
-        // The stamp is attached with the channel; an unset stamp with a
-        // live channel is unreachable (one attach sets both).
-        #[allow(clippy::expect_used)]
-        let stream = self
-            .notice_stream
-            .get()
-            .expect("notice channel and stream attach together")
-            .clone();
-        let _ = sender.send(EventFrame {
-            stream: Some(stream),
-            event: SessionEvent::MessagesDiscarded {
+        if let Some(sink) = self.notices.get() {
+            sink.emit(SessionEvent::MessagesDiscarded {
                 messages: cleared
                     .into_iter()
                     .map(|queued| tabit_protocol::DiscardedMessage {
@@ -189,8 +152,8 @@ impl Mailbox {
                         id: queued.id,
                     })
                     .collect(),
-            },
-        });
+            });
+        }
     }
 
     /// The one drain take: everything queued, as id-carrying pairs (the
@@ -320,7 +283,7 @@ impl Session {
     /// alongside [`Self::attach_interaction`].
     pub fn attach_mailbox_notices(
         &self,
-        events: tokio::sync::mpsc::UnboundedSender<EventFrame>,
+        events: &tokio::sync::mpsc::UnboundedSender<EventFrame>,
         stream: StreamId,
     ) {
         self.mailbox.attach_notices(events, stream);

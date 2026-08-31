@@ -27,26 +27,22 @@ use tabit_protocol::{EventFrame, SessionEvent, StreamId};
 
 use crate::ids::new_entry_id;
 use crate::lock::lock;
+use crate::notice::NoticeSink;
 
 /// The hub's shared state.
 struct Inner {
     /// Where requests surface: the worker's event channel (the same one
-    /// every other event rides). **Weak** on purpose: the hub
-    /// participates in the channel but must not own it — the handle and
-    /// command links outlive the worker, so a strong clone would keep
-    /// the channel open past wind-down and the event stream would never
-    /// end (the termination contract). Safety does not rest on sender
-    /// lifetime: a dead receiver surfaces as a failed `send`, and
-    /// post-wind-down upgrades fail, dismissing the asker.
+    /// every other event rides), held as the notice sink — the handle
+    /// and command links outlive the worker, so the weak discipline of
+    /// [`crate::notice`] is what lets the stream end. A dead channel
+    /// fails the emit, dismissing the asker.
     ///
     /// Note: asks bypass `run_one`'s event fold by design — they
     /// originate on tool-chain tasks, not the worker, and reach the
     /// channel directly; ordering with run events is channel send order.
-    events: mpsc::WeakUnboundedSender<EventFrame>,
+    notices: NoticeSink,
     /// Open questions by id: where the answer payload goes.
     pending: std::sync::Mutex<HashMap<String, oneshot::Sender<serde_json::Value>>>,
-    /// The stream stamp for requests (the session's id).
-    stream: StreamId,
 }
 
 /// The session's interaction router. Cheap to clone (one `Arc`).
@@ -61,9 +57,8 @@ impl InteractionHub {
     pub fn new(events: mpsc::UnboundedSender<EventFrame>, stream: StreamId) -> Self {
         Self {
             inner: Arc::new(Inner {
-                events: events.downgrade(),
+                notices: NoticeSink::new(&events, stream),
                 pending: std::sync::Mutex::new(HashMap::new()),
-                stream,
             }),
         }
     }
@@ -107,19 +102,11 @@ impl InteractionHub {
         let (sender, receiver) = oneshot::channel();
         let id = new_entry_id();
         lock(&self.inner.pending).insert(id.clone(), sender);
-        let event = EventFrame {
-            stream: Some(self.inner.stream.clone()),
-            event: SessionEvent::InteractionRequested {
-                id: id.clone(),
-                ui_type: ui_type.to_string(),
-                payload,
-            },
-        };
-        let sent = self
-            .inner
-            .events
-            .upgrade()
-            .is_some_and(|channel| channel.send(event).is_ok());
+        let sent = self.inner.notices.emit(SessionEvent::InteractionRequested {
+            id: id.clone(),
+            ui_type: ui_type.to_string(),
+            payload,
+        });
         if !sent {
             // No pump in flight, or the frontend is already gone: no one
             // will ever answer.
