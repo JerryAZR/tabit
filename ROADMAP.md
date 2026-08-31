@@ -436,7 +436,11 @@ dual-fold clarification) are settled:
 - **Split `tabit-session/src/session.rs`** (~1,850 lines, ten concerns:
   mailbox, abort, steers, the Session core, SharedConversation,
   ModelRegister, EventSink, DriveOutcome, the item→event translation,
-  assembly helpers) into own modules.
+  assembly helpers) into own modules — done (2026-08): `session.rs`
+  became a `session/` directory (`mod.rs` core + `mailbox`, `builder`,
+  `run`, `rewind`, `selection`, `persist`, `assemble`, `wire`), a pure
+  code move with `pub(super)` as the exact pre-split visibility and
+  `ModelStats`/`SessionStats` joining the usage ledger in `stats.rs`.
 - **A named notice-channel abstraction** for the ~10 copy-pasted
   weak-sender `EventFrame` emission sites (one documented home for the
   termination discipline).

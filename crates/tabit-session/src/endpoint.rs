@@ -45,7 +45,8 @@
 
 use crate::interaction::InteractionHub;
 use crate::lock::lock;
-use crate::session::{AbortHandle, MailboxHandle, Session, SessionStats};
+use crate::session::{AbortHandle, MailboxHandle, Session};
+use crate::stats::SessionStats;
 use crate::store::SessionStore;
 use std::collections::HashMap;
 use std::sync::{Arc, Mutex};

@@ -102,10 +102,10 @@ pub use permission::{PERMISSION_ASK_TOOLS, PermissionMemory, permission_gate};
 pub use prompt::build_system_prompt;
 pub use registry::ModelRegistry;
 pub use session::{
-    AbortHandle, DEFAULT_MAX_TURNS, MailboxHandle, ModelStats, RewindSummary, RunOutcome,
-    RunSummary, Session, SessionBuilder, SessionStats, TOOL_CONCURRENCY,
+    AbortHandle, DEFAULT_MAX_TURNS, MailboxHandle, RewindSummary, RunOutcome, RunSummary, Session,
+    SessionBuilder, TOOL_CONCURRENCY,
 };
-pub use stats::{ModelUsage, UsageLedger};
+pub use stats::{ModelStats, ModelUsage, SessionStats, UsageLedger};
 pub use store::{SessionStore, SessionSummary};
 pub use tabit_protocol::{
     ClientFrame, EventFrame, ModelSelection, PROTOCOL_VERSION, ServerControlFrame, ServerFrame,

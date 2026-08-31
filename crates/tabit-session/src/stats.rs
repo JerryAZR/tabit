@@ -81,3 +81,37 @@ impl UsageLedger {
 #[cfg(test)]
 #[path = "stats_tests.rs"]
 mod tests;
+
+/// Per-model token and cost totals for a session.
+#[derive(Debug, Clone, Default, PartialEq)]
+pub struct ModelStats {
+    /// Provider id in effect.
+    pub provider: String,
+    /// Model id in effect.
+    pub model: String,
+    /// Thinking level in effect, when one was set.
+    pub thinking_level: Option<String>,
+    /// Summed usage.
+    pub usage: Usage,
+    /// Cost in USD, when the config carries rates for the model.
+    pub cost: Option<f64>,
+}
+
+impl ModelStats {
+    /// The `provider/model` display key.
+    pub fn key(&self) -> String {
+        format!("{}/{}", self.provider, self.model)
+    }
+}
+
+/// Session-level totals.
+#[derive(Debug, Clone, Default, PartialEq)]
+pub struct SessionStats {
+    /// Usage and cost per model that served this session.
+    pub per_model: Vec<ModelStats>,
+    /// Totals across all models.
+    pub total_usage: Usage,
+    /// Total cost in USD (models without rates contribute tokens but no
+    /// cost).
+    pub total_cost: f64,
+}
