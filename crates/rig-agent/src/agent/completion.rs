@@ -108,7 +108,6 @@ pub(crate) async fn build_prepared_completion_request(
     temperature: Option<f64>,
     max_tokens: Option<u64>,
     additional_params: Option<&serde_json::Value>,
-    record_telemetry_content: bool,
     tool_choice: Option<&ToolChoice>,
     tool_server_handle: &ToolServerHandle,
 ) -> Result<PreparedCompletionRequest, CompletionError> {
@@ -145,7 +144,6 @@ pub(crate) async fn build_prepared_completion_request(
         .temperature_opt(temperature)
         .max_tokens_opt(max_tokens)
         .additional_params_opt(additional_params.cloned())
-        .record_content_telemetry(record_telemetry_content)
         .documents(static_context.to_vec())
         .tools(tooldefs);
 
@@ -213,13 +211,6 @@ pub struct Agent {
     pub(crate) max_tokens: Option<u64>,
     /// Additional parameters to be passed to the model
     pub(crate) additional_params: Option<serde_json::Value>,
-    /// Whether to record sensitive request, response, and tool content on GenAI spans.
-    ///
-    /// Defaults to `false`. Enabling this can expose prompts, retrieved context,
-    /// tool results, model responses, and other sensitive or high-cardinality data
-    /// through OpenTelemetry span attributes, which can increase observability
-    /// backend storage and query costs.
-    pub(crate) record_telemetry_content: bool,
     pub(crate) tool_server_handle: ToolServerHandle,
     /// Whether or not the underlying LLM should be forced to use a tool before providing a response.
     pub(crate) tool_choice: Option<ToolChoice>,

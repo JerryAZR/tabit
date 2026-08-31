@@ -14,7 +14,6 @@ fn missing_max_tokens_defaults_to_64k() {
         max_tokens: None,
         tool_choice: None,
         additional_params: None,
-        record_telemetry_content: false,
     };
 
     let converted = AnthropicCompletionRequest::try_from(AnthropicRequestParams {
@@ -41,7 +40,6 @@ fn automatic_caching_pins_one_top_level_directive_on_the_wire() {
         max_tokens: None,
         tool_choice: None,
         additional_params: None,
-        record_telemetry_content: false,
     };
 
     let converted = AnthropicCompletionRequest::try_from(AnthropicRequestParams {
@@ -515,7 +513,6 @@ fn completion_request_with_tools(
         max_tokens: Some(64),
         tool_choice: None,
         additional_params,
-        record_telemetry_content: false,
     }
 }
 
@@ -533,7 +530,6 @@ fn completion_request_with_history(
         max_tokens: Some(64),
         tool_choice: None,
         additional_params: None,
-        record_telemetry_content: false,
     }
 }
 
@@ -2706,7 +2702,7 @@ fn web_search_response_preserves_raw_blocks_and_citations() {
     let response: CompletionResponse = serde_json::from_value(value).unwrap();
     // The wire response is consumed by the conversion, so read the
     // provider-native text off it first.
-    let raw_text_response = response.get_text_response();
+    let raw_text_response = assistant_text(&response);
     let converted = response.normalize("anthropic").unwrap();
     assert_eq!(converted.choice.len(), 3);
     assert_eq!(
@@ -3061,7 +3057,7 @@ fn provider_text_response_concatenates_text_blocks_without_inserted_newlines() {
     };
 
     assert_eq!(
-        response.get_text_response().as_deref(),
+        assistant_text(&response).as_deref(),
         Some("According to the document, the grass is green and the sky is blue.")
     );
 }
@@ -3492,42 +3488,19 @@ fn sample_usage() -> Usage {
     }
 }
 
-fn sample_completion_response() -> CompletionResponse {
-    CompletionResponse {
-        content: vec![Content::Text {
-            text: "hello".to_string(),
-            citations: Vec::new(),
-            cache_control: None,
-        }],
-        id: "msg_9".to_string(),
-        model: "claude-test".to_string(),
-        role: "assistant".to_string(),
-        stop_reason: Some("end_turn".to_string()),
-        stop_sequence: None,
-        usage: sample_usage(),
-    }
-}
-
-#[test]
-fn provider_response_ext_accessors_expose_id_model_messages_and_usage() {
-    let response = sample_completion_response();
-    assert_eq!(response.get_response_id(), Some("msg_9".to_string()));
-    assert_eq!(
-        response.get_response_model_name(),
-        Some("claude-test".to_string())
-    );
-    assert_eq!(response.get_output_messages(), response.content);
-    let usage = response.get_usage().expect("usage should be reported");
-    assert_eq!(usage.input_tokens, sample_usage().input_tokens);
-    assert_eq!(usage.output_tokens, sample_usage().output_tokens);
-    assert_eq!(
-        usage.cache_read_input_tokens,
-        sample_usage().cache_read_input_tokens
-    );
-    assert_eq!(
-        usage.cache_creation_input_tokens,
-        sample_usage().cache_creation_input_tokens
-    );
+/// The provider-native text of a response: its concatenated `Content::Text`
+/// blocks (the deleted `ProviderResponseExt` accessor's semantics, kept as a
+/// test-local assertion convenience).
+fn assistant_text(response: &CompletionResponse) -> Option<String> {
+    let text: String = response
+        .content
+        .iter()
+        .filter_map(|content| match content {
+            Content::Text { text, .. } => Some(text.as_str()),
+            _ => None,
+        })
+        .collect();
+    (!text.is_empty()).then_some(text)
 }
 
 #[test]
@@ -4428,7 +4401,7 @@ async fn raw_completion_emits_request_and_response_trace_logs() {
         .expect("trace-enabled completion should succeed");
 
     assert_eq!(response.id, "msg_trace");
-    assert_eq!(response.get_text_response().as_deref(), Some("hi"));
+    assert_eq!(assistant_text(&response).as_deref(), Some("hi"));
 }
 
 #[test]

@@ -8,7 +8,6 @@ use rig::prelude::*;
 use rig::providers::anthropic::completion::Citation;
 use rig::providers::anthropic::completion::{self as anthropic_completion};
 use rig::streaming::StreamingPrompt;
-use rig::telemetry::ProviderResponseExt;
 
 use serde_json::json;
 
@@ -84,6 +83,21 @@ fn collect_anthropic_citations(
                 .expect("citations should decode from Anthropic text metadata")
         })
         .collect()
+}
+
+/// The provider-native text of an Anthropic response (the deleted
+/// `ProviderResponseExt` accessor's semantics, kept as an assertion convenience).
+fn anthropic_text(content: &[rig::providers::anthropic::completion::Content]) -> Option<String> {
+    let text: String = content
+        .iter()
+        .filter_map(|c| match c {
+            rig::providers::anthropic::completion::Content::Text { text, .. } => {
+                Some(text.as_str())
+            }
+            _ => None,
+        })
+        .collect();
+    (!text.is_empty()).then_some(text)
 }
 
 #[tokio::test]
@@ -192,7 +206,7 @@ async fn document_citations_followup_preserves_assistant_citation_history() {
                 .raw_completion(first_request)
                 .await
                 .expect("first document citation turn should succeed");
-            let first_turn_raw_text = first_turn_raw.get_text_response();
+            let first_turn_raw_text = anthropic_text(&first_turn_raw.content);
             let first_turn: rig::completion::CompletionResponse = first_turn_raw
                 .normalize(ANTHROPIC_PROVIDER)
                 .expect("first document citation turn should normalize");

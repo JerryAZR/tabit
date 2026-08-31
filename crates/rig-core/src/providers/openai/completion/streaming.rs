@@ -1,4 +1,3 @@
-use crate::telemetry::{CompletionOperation, CompletionSpanBuilder};
 use http::Request;
 use serde::{Deserialize, Serialize};
 use serde_json::json;
@@ -253,8 +252,6 @@ where
         completion_request: CompletionRequest,
     ) -> Result<RawStreamingResult<StreamingCompletionResponse<Ext::StreamingUsage>>, CompletionError>
     {
-        let preamble = completion_request.preamble.clone();
-        let record_telemetry_content = completion_request.record_telemetry_content;
         let options = CompletionModelOptions {
             strict_tools: self.strict_tools,
             tool_result_array_content: self.tool_result_array_content,
@@ -313,13 +310,13 @@ where
             .body(req_body)
             .map_err(|e| CompletionError::HttpError(e.into()))?;
 
-        let span = CompletionSpanBuilder::new(
-            Ext::PROVIDER_NAME,
-            &resolved_model,
-            CompletionOperation::Chat,
-        )
-        .system_instructions(preamble.as_deref(), record_telemetry_content)
-        .build();
+        let span = tracing::info_span!(
+            target: "rig::completions",
+            "chat_streaming",
+            gen_ai.operation.name = "chat_streaming",
+            gen_ai.provider.name = Ext::PROVIDER_NAME,
+            gen_ai.request.model = %resolved_model,
+        );
 
         let client = self.client.clone();
 

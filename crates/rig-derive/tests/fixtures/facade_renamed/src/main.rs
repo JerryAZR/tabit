@@ -35,20 +35,12 @@ fn contextual_agent_path(
     Ok(value)
 }
 
-#[derive(rig_macros::Embed)]
-struct Doc {
-    #[embed]
-    body: String,
-}
-
 fn assert_portable<T: PortableTool>() {}
 fn assert_contextual<T: Tool>() {}
-fn assert_embed<T: rig_facade::core::embeddings::Embed>() {}
 
 fn main() {
     assert_portable::<PortableEcho>();
     assert_contextual::<ContextualEcho>();
     assert_contextual::<ContextualFullyQualified>();
     assert_contextual::<ContextualAgentPath>();
-    assert_embed::<Doc>();
 }

@@ -19,7 +19,6 @@ use crate::streaming::{
     self, MintKind, PartId, RawStreamingChoice, RawStreamingResult, StreamFinal,
     ToolCallDeltaContent, ToolInputEnd, UnparseableToolInput,
 };
-use crate::telemetry::{CompletionOperation, CompletionSpanBuilder, SpanCombinator};
 use crate::wasm_compat::{WasmCompatSend, WasmCompatSync};
 use std::collections::HashMap;
 
@@ -448,9 +447,6 @@ impl WireAdapter for AnthropicAdapter {
                 self.message_id = Some(message.id.clone());
                 self.response_model = Some(message.model.clone());
 
-                let span = tracing::Span::current();
-                span.record("gen_ai.response.id", &message.id);
-                span.record("gen_ai.response.model", &message.model);
                 return;
             }
             StreamingEvent::MessageDelta { delta, usage } => {
@@ -481,8 +477,6 @@ impl WireAdapter for AnthropicAdapter {
                     output_tokens_details: usage.output_tokens_details,
                 };
 
-                let span = tracing::Span::current();
-                span.record_token_usage(&crate::completion::Usage::from(&usage));
                 out.push(Ok(RawStreamingChoice::FinalResponse(
                     StreamingCompletionResponse {
                         usage,
@@ -600,16 +594,13 @@ where
             .model
             .clone()
             .unwrap_or_else(|| self.model.clone());
-        let span = CompletionSpanBuilder::new(
-            Ext::PROVIDER_NAME,
-            &request_model,
-            CompletionOperation::ChatStreaming,
-        )
-        .system_instructions(
-            completion_request.preamble.as_deref(),
-            completion_request.record_telemetry_content,
-        )
-        .build();
+        let span = tracing::info_span!(
+            target: "rig::completions",
+            "chat_streaming",
+            gen_ai.operation.name = "chat_streaming",
+            gen_ai.provider.name = Ext::PROVIDER_NAME,
+            gen_ai.request.model = %request_model,
+        );
         let max_tokens = completion_request
             .max_tokens
             .unwrap_or(super::completion::DEFAULT_MAX_TOKENS);
@@ -1083,7 +1074,6 @@ mod tests {
             max_tokens: Some(64),
             tool_choice: None,
             additional_params: None,
-            record_telemetry_content: false,
         };
 
         let body = create_streaming_request_body(
@@ -1131,7 +1121,6 @@ mod tests {
             max_tokens: Some(64),
             tool_choice: None,
             additional_params: None,
-            record_telemetry_content: false,
         };
 
         let streaming_body = create_streaming_request_body(
@@ -1186,7 +1175,6 @@ mod tests {
             max_tokens: Some(64),
             tool_choice: None,
             additional_params: None,
-            record_telemetry_content: false,
         };
 
         let body = create_streaming_request_body(
@@ -1222,7 +1210,6 @@ mod tests {
             max_tokens: Some(64),
             tool_choice: Some(crate::message::ToolChoice::Auto),
             additional_params: None,
-            record_telemetry_content: false,
         };
 
         let body = create_streaming_request_body(

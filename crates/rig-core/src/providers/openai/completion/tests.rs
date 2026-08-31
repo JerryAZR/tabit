@@ -52,7 +52,6 @@ fn minted_tool_ids_replay_as_a_consistent_pair() {
 
 use super::*;
 use crate::completion::CompletionRequestBuilder;
-use crate::telemetry::ProviderResponseExt;
 use crate::test_utils::MockCompletionModel;
 use std::collections::HashMap;
 
@@ -101,7 +100,6 @@ fn request_with_multi_block_tool_result() -> CoreCompletionRequest {
         max_tokens: None,
         tool_choice: None,
         additional_params: None,
-        record_telemetry_content: false,
     }
 }
 
@@ -266,7 +264,6 @@ fn orphan_tool_result_history_fails_request_conversion() {
         max_tokens: None,
         tool_choice: None,
         additional_params: None,
-        record_telemetry_content: false,
     };
 
     let error = CompletionRequest::try_from(OpenAIRequestParams {
@@ -332,7 +329,6 @@ fn test_openai_request_uses_request_model_override() {
         max_tokens: None,
         tool_choice: None,
         additional_params: None,
-        record_telemetry_content: false,
     };
 
     let openai_request = CompletionRequest::try_from(OpenAIRequestParams {
@@ -360,7 +356,6 @@ fn test_openai_request_uses_default_model_when_override_unset() {
         max_tokens: None,
         tool_choice: None,
         additional_params: None,
-        record_telemetry_content: false,
     };
 
     let openai_request = CompletionRequest::try_from(OpenAIRequestParams {
@@ -409,7 +404,6 @@ fn additional_params_function_tools_merge_and_native_tools_stay() {
                 {"type": "browser_search"}
             ]
         })),
-        record_telemetry_content: false,
     };
 
     let openai_request = CompletionRequest::try_from(OpenAIRequestParams {
@@ -470,7 +464,6 @@ fn additional_params_function_tools_merge_and_native_tools_stay() {
         temperature: None,
         max_tokens: None,
         tool_choice: None,
-        record_telemetry_content: false,
     };
     let openai_request = CompletionRequest::try_from(OpenAIRequestParams {
         model: "gpt-4o-mini".to_string(),
@@ -556,7 +549,6 @@ fn openai_chat_direct_request_keeps_documents_after_system_messages() {
         max_tokens: None,
         tool_choice: None,
         additional_params: None,
-        record_telemetry_content: false,
     };
 
     let openai_request = CompletionRequest::try_from(OpenAIRequestParams {
@@ -682,77 +674,6 @@ fn assistant_reasoning_roundtrips_back_to_rig_message() {
 }
 
 #[test]
-fn provider_response_text_response_reads_assistant_multipart_output() {
-    let response = CompletionResponse {
-        id: "resp_123".to_owned(),
-        object: "chat.completion".to_owned(),
-        created: 0,
-        model: "gpt-4o".to_owned(),
-        system_fingerprint: None,
-        choices: vec![Choice {
-            index: 0,
-            message: Message::Assistant {
-                content: vec![
-                    AssistantContent::Text {
-                        text: "first".to_owned(),
-                    },
-                    AssistantContent::Refusal {
-                        refusal: "second".to_owned(),
-                    },
-                    AssistantContent::Text {
-                        text: "third".to_owned(),
-                    },
-                ],
-                reasoning: Some("hidden".to_owned()),
-                refusal: None,
-                audio: None,
-                name: None,
-                tool_calls: vec![],
-                reasoning_details: vec![],
-                images: vec![],
-            },
-            logprobs: None,
-            finish_reason: "stop".to_owned(),
-        }],
-        usage: None,
-    };
-
-    assert_eq!(
-        response.get_text_response(),
-        Some("first\nsecond\nthird".to_owned())
-    );
-}
-
-#[test]
-fn provider_response_text_response_falls_back_to_assistant_refusal_field() {
-    let response = CompletionResponse {
-        id: "resp_123".to_owned(),
-        object: "chat.completion".to_owned(),
-        created: 0,
-        model: "gpt-4o".to_owned(),
-        system_fingerprint: None,
-        choices: vec![Choice {
-            index: 0,
-            message: Message::Assistant {
-                content: vec![],
-                reasoning: None,
-                refusal: Some("blocked".to_owned()),
-                audio: None,
-                name: None,
-                tool_calls: vec![],
-                reasoning_details: vec![],
-                images: vec![],
-            },
-            logprobs: None,
-            finish_reason: "stop".to_owned(),
-        }],
-        usage: None,
-    };
-
-    assert_eq!(response.get_text_response(), Some("blocked".to_owned()));
-}
-
-#[test]
 fn test_max_tokens_is_forwarded_to_request() {
     let request = crate::completion::CompletionRequest {
         model: None,
@@ -764,7 +685,6 @@ fn test_max_tokens_is_forwarded_to_request() {
         max_tokens: Some(4096),
         tool_choice: None,
         additional_params: None,
-        record_telemetry_content: false,
     };
 
     let openai_request = CompletionRequest::try_from(OpenAIRequestParams {
@@ -792,7 +712,6 @@ fn test_max_tokens_omitted_when_none() {
         max_tokens: None,
         tool_choice: None,
         additional_params: None,
-        record_telemetry_content: false,
     };
 
     let openai_request = CompletionRequest::try_from(OpenAIRequestParams {
@@ -823,7 +742,6 @@ fn request_conversion_errors_when_all_messages_are_filtered() {
         max_tokens: None,
         tool_choice: None,
         additional_params: None,
-        record_telemetry_content: false,
     };
 
     let result = CompletionRequest::try_from(OpenAIRequestParams {
@@ -1306,7 +1224,6 @@ fn core_request(history: Vec<message::Message>) -> CoreCompletionRequest {
         max_tokens: None,
         tool_choice: None,
         additional_params: None,
-        record_telemetry_content: false,
     }
 }
 
@@ -1971,44 +1888,6 @@ fn normalize_maps_refusal_content_to_text() {
 }
 
 #[test]
-fn provider_response_ext_reports_id_model_messages_and_usage() {
-    let response = completion_response_with_message(wire_assistant(vec![AssistantContent::Text {
-        text: "hello".to_string(),
-    }]));
-
-    assert_eq!(response.get_response_id(), Some("chatcmpl-1".to_string()));
-    assert_eq!(
-        response.get_response_model_name(),
-        Some("gpt-4o-mini".to_string())
-    );
-    assert_eq!(response.get_output_messages().len(), 1);
-    assert!(response.get_usage().is_none());
-}
-
-#[test]
-fn text_response_is_none_without_assistant_choices() {
-    let mut response =
-        completion_response_with_message(wire_assistant(vec![AssistantContent::Text {
-            text: "hello".to_string(),
-        }]));
-    response.choices.clear();
-    assert_eq!(response.get_text_response(), None);
-
-    // Non-assistant messages contribute nothing either.
-    let tool_only = completion_response_with_message(Message::ToolResult {
-        tool_call_id: "call_1".to_string(),
-        content: ToolResultContentValue::String("done".to_string()),
-    });
-    assert_eq!(tool_only.get_text_response(), None);
-}
-
-#[test]
-fn text_response_is_none_for_empty_assistant_without_refusal() {
-    let response = completion_response_with_message(wire_assistant(vec![]));
-    assert_eq!(response.get_text_response(), None);
-}
-
-#[test]
 fn usage_display_formats_prompt_and_total_tokens() {
     let usage = Usage {
         prompt_tokens: 12,
@@ -2178,7 +2057,6 @@ fn malformed_additional_params_tools_fail_loudly() {
         temperature: None,
         max_tokens: None,
         tool_choice: None,
-        record_telemetry_content: false,
     };
     let error = match CompletionRequest::try_from(OpenAIRequestParams {
         model: "gpt-4o-mini".to_string(),
@@ -2210,7 +2088,6 @@ fn malformed_additional_params_tools_fail_loudly() {
         temperature: None,
         max_tokens: None,
         tool_choice: None,
-        record_telemetry_content: false,
     };
     let error = match CompletionRequest::try_from(OpenAIRequestParams {
         model: "gpt-4o-mini".to_string(),

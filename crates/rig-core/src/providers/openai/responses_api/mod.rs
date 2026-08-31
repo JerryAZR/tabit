@@ -24,7 +24,6 @@ use crate::message::{
     MimeType, Text,
 };
 use crate::one_or_many::string_or_one_or_many;
-use crate::telemetry::{CompletionOperation, CompletionSpanBuilder};
 
 use crate::wasm_compat::{WasmCompatSend, WasmCompatSync};
 use crate::{OneOrMany, completion, message};
@@ -2423,16 +2422,14 @@ where
         &self,
         completion_request: crate::completion::CompletionRequest,
     ) -> Result<CompletionResponse, CompletionError> {
-        let system_instructions = completion_request.preamble.clone();
-        let record_telemetry_content = completion_request.record_telemetry_content;
         let request = self.create_completion_request(completion_request)?;
-        let span = CompletionSpanBuilder::new(
-            Ext::PROVIDER_NAME,
-            &request.model,
-            CompletionOperation::Chat,
-        )
-        .system_instructions(system_instructions.as_deref(), record_telemetry_content)
-        .build();
+        let span = tracing::info_span!(
+            target: "rig::completions",
+            "chat",
+            gen_ai.operation.name = "chat",
+            gen_ai.provider.name = Ext::PROVIDER_NAME,
+            gen_ai.request.model = %request.model,
+        );
         let body = serde_json::to_vec(&request)?;
 
         if enabled!(Level::TRACE) {
@@ -2455,22 +2452,6 @@ where
             if response.status().is_success() {
                 let t = http_client::text(response).await?;
                 let response = serde_json::from_str::<CompletionResponse>(&t)?;
-                let span = tracing::Span::current();
-                // `gen_ai.response.id` is the response ID (`resp_...`), which is
-                // deliberately *not* the assistant message ID (`msg_...`) that
-                // the normalized response carries.
-                span.record("gen_ai.response.id", &response.id);
-                span.record("gen_ai.response.model", &response.model);
-                if let Some(ref usage) = response.usage {
-                    span.record("gen_ai.usage.output_tokens", usage.output_tokens);
-                    span.record("gen_ai.usage.input_tokens", usage.input_tokens);
-                    let cached_tokens = usage
-                        .input_tokens_details
-                        .as_ref()
-                        .map(|d| d.cached_tokens)
-                        .unwrap_or(0);
-                    span.record("gen_ai.usage.cache_read.input_tokens", cached_tokens);
-                }
                 if enabled!(Level::TRACE) {
                     tracing::trace!(
                         target: "rig::completions",

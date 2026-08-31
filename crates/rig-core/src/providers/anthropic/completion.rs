@@ -9,7 +9,6 @@ use crate::{
     http_client::HttpClientExt,
     message::{self, DocumentMediaType, DocumentSourceKind, MessageError, MimeType, Reasoning},
     one_or_many::string_or_one_or_many,
-    telemetry::{CompletionOperation, CompletionSpanBuilder, ProviderResponseExt, SpanCombinator},
     wasm_compat::*,
 };
 use bytes::Bytes;
@@ -67,43 +66,6 @@ pub(crate) fn map_finish_reason(stop_reason: &str) -> completion::FinishReason {
         // is content filtering.
         "refusal" => completion::FinishReason::ContentFilter,
         other => completion::FinishReason::Other(other.to_owned()),
-    }
-}
-
-impl ProviderResponseExt for CompletionResponse {
-    type OutputMessage = Content;
-    type Usage = Usage;
-
-    fn get_response_id(&self) -> Option<String> {
-        Some(self.id.to_owned())
-    }
-
-    fn get_response_model_name(&self) -> Option<String> {
-        Some(self.model.to_owned())
-    }
-
-    fn get_output_messages(&self) -> Vec<Self::OutputMessage> {
-        self.content.clone()
-    }
-
-    fn get_text_response(&self) -> Option<String> {
-        let res = self
-            .content
-            .iter()
-            .filter_map(|x| {
-                if let Content::Text { text, .. } = x {
-                    Some(text.as_str())
-                } else {
-                    None
-                }
-            })
-            .collect::<String>();
-
-        if res.is_empty() { None } else { Some(res) }
-    }
-
-    fn get_usage(&self) -> Option<Self::Usage> {
-        Some(self.usage.clone())
     }
 }
 
@@ -2406,16 +2368,13 @@ where
             .model
             .clone()
             .unwrap_or_else(|| self.model.clone());
-        let span = CompletionSpanBuilder::new(
-            Ext::PROVIDER_NAME,
-            &request_model,
-            CompletionOperation::Chat,
-        )
-        .system_instructions(
-            completion_request.preamble.as_deref(),
-            completion_request.record_telemetry_content,
-        )
-        .build();
+        let span = tracing::info_span!(
+            target: "rig::completions",
+            "chat",
+            gen_ai.operation.name = "chat",
+            gen_ai.provider.name = Ext::PROVIDER_NAME,
+            gen_ai.request.model = %request_model,
+        );
 
         let request = AnthropicCompletionRequest::try_from(AnthropicRequestParams {
             model: &request_model,
@@ -2463,9 +2422,6 @@ where
 
             match serde_json::from_slice::<ApiResponse<CompletionResponse>>(&body)? {
                 ApiResponse::Message(completion) => {
-                    let span = tracing::Span::current();
-                    span.record_response_metadata(&completion);
-                    span.record_token_usage(&crate::completion::Usage::from(&completion.usage));
                     if enabled!(Level::TRACE) {
                         tracing::trace!(
                             target: "rig::completions",

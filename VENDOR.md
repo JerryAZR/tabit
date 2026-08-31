@@ -328,7 +328,24 @@ Reviewer-round item "vendored-mass policy", resolved in three rulings:
   both provider listers, cassette-covered). Planned consumer: dynamic
   listing merged with local config in the registry (ROADMAP). The call is
   backend-only by construction (credentials + the front/back split).
-- **Telemetry** — separate ruling, recorded with its own commit.
+- **Telemetry — trimmed to bare spans** (ruled 2026-08, same round).
+  Deleted: the 2k-line GenAI semantic-conventions module
+  (`telemetry/`), its `completion_parent_span!` adoption contract and
+  fixtures, `CompletionSpanBuilder`/`SpanCombinator`/`ProviderResponseExt`,
+  `record_model_input/output`, `system_instructions_json`, and the
+  `record_telemetry_content` opt-in plumbing through the completion
+  request builder, agent/runner builders, and both turn sources.
+  Kept: plain `tracing` spans carrying identity only — `invoke_agent`
+  (streaming only; the blocking surface's agent span existed solely as
+  a recording target and died with it), per-turn `chat`/`chat_streaming`
+  (operation/provider/model/agent name), per-tool `execute_tool`
+  (name/id/outcome; argument and result *content* recording died with
+  the flag), and the blocking `follows_from` chain. Reference survey:
+  codex ships local file logs plus opt-in `[otel]` export, opencode's
+  built-in OTel is flag-gated and controversial, pi ships none — none
+  carries a library conventions module. If tabit ever wants
+  observability it comes back app-level and config-gated (a local log
+  file needs only `tracing` + a file subscriber).
 
 ## Cherry-picking from upstream (optional)
 

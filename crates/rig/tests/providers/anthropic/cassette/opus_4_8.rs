@@ -7,7 +7,6 @@ use rig::completion::{
 };
 use rig::message::Text;
 use rig::prelude::*;
-use rig::telemetry::ProviderResponseExt;
 use serde::Deserialize;
 use serde_json::Value;
 use serde_json::json;
@@ -19,6 +18,21 @@ use crate::support::{assert_contains_any_case_insensitive, assistant_text_respon
 const ANTHROPIC_PROVIDER: &str = "anthropic";
 
 const DOCUMENT_GLOBAL_SYSTEM_INSTRUCTION: &str = "Answer in Spanish only. Use one short sentence.";
+
+/// The provider-native text of an Anthropic response (the deleted
+/// `ProviderResponseExt` accessor's semantics, kept as an assertion convenience).
+fn anthropic_text(content: &[rig::providers::anthropic::completion::Content]) -> Option<String> {
+    let text: String = content
+        .iter()
+        .filter_map(|c| match c {
+            rig::providers::anthropic::completion::Content::Text { text, .. } => {
+                Some(text.as_str())
+            }
+            _ => None,
+        })
+        .collect();
+    (!text.is_empty()).then_some(text)
+}
 
 #[tokio::test]
 async fn web_search_with_dynamic_filtering_succeeds() {
@@ -43,7 +57,7 @@ async fn web_search_with_dynamic_filtering_succeeds() {
                 .raw_completion(request)
                 .await
                 .expect("Opus 4.8 dynamic web-search request should succeed");
-            let raw_text = raw.get_text_response();
+            let raw_text = anthropic_text(&raw.content);
             let response: RigCompletionResponse = raw.normalize(ANTHROPIC_PROVIDER)
                 .expect("Opus 4.8 dynamic web-search response should normalize");
 
@@ -88,7 +102,7 @@ async fn documents_keep_leading_system_message_top_level() {
             let raw = model.raw_completion(request).await.expect(
                 "Opus 4.8 request with documents and a leading system message should succeed",
             );
-            let raw_text = raw.get_text_response();
+            let raw_text = anthropic_text(&raw.content);
             let response: RigCompletionResponse = raw.normalize(ANTHROPIC_PROVIDER).expect(
                 "Opus 4.8 response with documents and a leading system message should normalize",
             );

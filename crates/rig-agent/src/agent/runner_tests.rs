@@ -8,8 +8,8 @@ use serde_json::json;
 
 use crate::{
     agent::{
-        AgentBuilder, AgentHook, HookContext, HookStack, ToolCall, ToolCallAction,
-        ToolResultAction, ToolResultEvent,
+        AgentBuilder, AgentHook, HookContext, ToolCall, ToolCallAction, ToolResultAction,
+        ToolResultEvent,
     },
     completion::{CompletionModel, Document, PromptError},
     test_utils::{MockAddTool, MockCompletionModel, MockStreamEvent, MockTurn},
@@ -571,80 +571,6 @@ async fn merge_additional_params_replaces_a_non_object_baseline() {
         Some(json!({"keep": 1})),
         "merging an object into a non-object baseline must replace it wholesale"
     );
-}
-
-#[tokio::test]
-async fn record_content_telemetry_runner_override_completes_the_run() {
-    let response = AgentBuilder::new(MockCompletionModel::text("done"))
-        .build()
-        .runner("question")
-        .record_content_telemetry(true)
-        .run()
-        .await
-        .expect("run should succeed with content telemetry enabled");
-    assert_eq!(response.output, "done");
-}
-
-struct RewriteArgsToForty;
-impl AgentHook for RewriteArgsToForty {
-    async fn on_tool_call(&self, _: &HookContext, _: ToolCall<'_>) -> ToolCallAction {
-        ToolCallAction::rewrite(json!({"x": 2, "y": 40}))
-    }
-}
-
-#[tokio::test]
-async fn content_telemetry_records_effective_args_for_a_proceeding_rewrite() {
-    let model = MockCompletionModel::from_turns([
-        MockTurn::tool_call("tc1", "add", json!({"x": 2, "y": 3})),
-        MockTurn::text("done"),
-    ]);
-
-    let response = AgentBuilder::new(model)
-        .tool(MockAddTool)
-        .record_content_telemetry(true)
-        .add_hook(RewriteArgsToForty)
-        .build()
-        .runner("add")
-        .max_turns(3)
-        .run()
-        .await
-        .expect("rewritten tool run should succeed");
-
-    assert_eq!(response.output, "done");
-}
-
-#[tokio::test]
-async fn content_telemetry_records_effective_args_for_a_skip_rewrite() {
-    // A nested stack that rewrites and then skips surfaces the rewrite as a
-    // salvaged value; the re-record path must still execute.
-    struct SkipToolCalls;
-    impl AgentHook for SkipToolCalls {
-        async fn on_tool_call(&self, _: &HookContext, _: ToolCall<'_>) -> ToolCallAction {
-            ToolCallAction::skip("terminal after rewrite")
-        }
-    }
-
-    let mut inner = HookStack::new();
-    inner.push(RewriteArgsToForty);
-    inner.push(SkipToolCalls);
-
-    let model = MockCompletionModel::from_turns([
-        MockTurn::tool_call("tc1", "add", json!({"x": 2, "y": 3})),
-        MockTurn::text("done"),
-    ]);
-
-    let response = AgentBuilder::new(model)
-        .tool(MockAddTool)
-        .record_content_telemetry(true)
-        .add_hook(inner)
-        .build()
-        .runner("add")
-        .max_turns(3)
-        .run()
-        .await
-        .expect("the skipped tool call feeds back in-band and the run continues");
-
-    assert_eq!(response.output, "done");
 }
 
 use std::sync::atomic::{AtomicU32, Ordering::SeqCst};
@@ -1916,27 +1842,20 @@ mod span_safety_net {
     use std::collections::{HashMap, HashSet};
     use std::sync::{Arc, Mutex};
 
-    use tracing::Instrument;
     use tracing::field::{Field, Visit};
     use tracing::span::{Attributes, Record};
     use tracing::{Id, Subscriber};
     use tracing_subscriber::layer::{Context, SubscriberExt};
     use tracing_subscriber::{Layer, Registry, registry::LookupSpan};
 
-    use crate::agent::{AgentBuilder, HookContext, ToolResultAction, ToolResultEvent};
-    use crate::completion::{
-        CompletionError, CompletionModel, CompletionRequest, CompletionResponse, Prompt, Usage,
-    };
-    use crate::streaming::StreamingCompletionResponse;
+    use crate::agent::AgentBuilder;
+    use crate::completion::Usage;
     use crate::test_utils::{MockAddTool, MockCompletionModel, MockTurn};
-    use crate::tool::{ToolContext, ToolExecutionError};
-    use rig_core::telemetry::{CompletionOperation, CompletionSpanBuilder};
 
     #[derive(Clone)]
     struct CapturedSpan {
         id: u64,
         name: String,
-        target: String,
         field_names: HashSet<String>,
         u64_fields: HashMap<String, u64>,
         string_fields: HashMap<String, Vec<String>>,
@@ -1950,11 +1869,10 @@ mod span_safety_net {
     }
 
     impl Captured {
-        fn insert(&self, id: &Id, name: &str, target: &str) {
+        fn insert(&self, id: &Id, name: &str) {
             self.spans.lock().expect("spans").push(CapturedSpan {
                 id: id.into_u64(),
                 name: name.to_string(),
-                target: target.to_string(),
                 field_names: HashSet::new(),
                 u64_fields: HashMap::new(),
                 string_fields: HashMap::new(),
@@ -2010,8 +1928,7 @@ mod span_safety_net {
         S: Subscriber + for<'l> LookupSpan<'l>,
     {
         fn on_new_span(&self, attrs: &Attributes<'_>, id: &Id, _ctx: Context<'_, S>) {
-            self.captured
-                .insert(id, attrs.metadata().name(), attrs.metadata().target());
+            self.captured.insert(id, attrs.metadata().name());
         }
 
         fn on_record(&self, span: &Id, values: &Record<'_>, _ctx: Context<'_, S>) {
@@ -2070,90 +1987,15 @@ mod span_safety_net {
         ])
     }
 
-    #[derive(Clone)]
-    struct CompletionTelemetryModel {
-        inner: MockCompletionModel,
-    }
-
-    impl CompletionModel for CompletionTelemetryModel {
-        async fn completion(
-            &self,
-            request: CompletionRequest,
-        ) -> Result<CompletionResponse, CompletionError> {
-            let span = CompletionSpanBuilder::new(
-                "fixture-provider",
-                "fixture-model",
-                CompletionOperation::Chat,
-            )
-            .build();
-            self.inner.completion(request).instrument(span).await
-        }
-
-        async fn stream(
-            &self,
-            request: CompletionRequest,
-        ) -> Result<StreamingCompletionResponse, CompletionError> {
-            let span = CompletionSpanBuilder::new(
-                "fixture-provider",
-                "fixture-model",
-                CompletionOperation::ChatStreaming,
-            )
-            .build();
-            self.inner.stream(request).instrument(span).await
-        }
-    }
-
-    /// Register the blocking driver's span callsites against the scoped
-    /// subscriber before asserting, mirroring the streaming usage test's
-    /// interest-cache warm-up (a foreign thread without our subscriber can
-    /// otherwise cache `Interest::never` for these callsites).
     async fn warm_blocking_callsites() {
         let agent = AgentBuilder::new(tool_then_text_model())
-            .record_content_telemetry(true)
             .tool(MockAddTool)
             .build();
         let _ = agent.runner("add 2 and 3").max_turns(3).run().await;
     }
 
-    /// Cross-crate tripwire: the chat span built by `build_chat_span!`
-    /// must statically declare rig-core's full completion-parent contract
-    /// (marker + every required field) plus the agent-specific
-    /// `gen_ai.agent.name`. `Span::record` silently no-ops on undeclared
-    /// fields, so a missing field here would lose that telemetry on every
-    /// adopted completion with no error.
-    #[test]
-    fn chat_span_declares_the_full_completion_parent_contract() {
-        use rig_core::telemetry::{
-            COMPLETION_PARENT_MARKER_FIELD, COMPLETION_PARENT_REQUIRED_FIELDS,
-        };
-
-        let _isolation = crate::test_utils::scoped_tracing_subscriber_guard_blocking();
-        tracing::subscriber::with_default(Registry::default(), || {
-            let agent = AgentBuilder::new(MockCompletionModel::text("done"))
-                .name("contract-agent")
-                .build();
-            let runner = agent.runner("hello");
-            let span = build_chat_span!(runner, None, "chat", "chat");
-            let Some(metadata) = span.metadata() else {
-                panic!("chat span was disabled");
-            };
-            let declared: HashSet<&str> =
-                metadata.fields().iter().map(|field| field.name()).collect();
-            let expected: HashSet<&str> = COMPLETION_PARENT_REQUIRED_FIELDS
-                .iter()
-                .copied()
-                .chain([COMPLETION_PARENT_MARKER_FIELD, "gen_ai.agent.name"])
-                .collect();
-            assert_eq!(declared, expected);
-            // Duplicate field names collapse in a `HashSet`, so also pin
-            // the count: set equality alone cannot catch a field declared
-            // twice (e.g. an extra colliding with a contract field).
-            assert_eq!(metadata.fields().len(), expected.len());
-        });
-    }
-
     #[tokio::test]
-    async fn run_records_usage_and_chains_chat_spans_on_a_created_agent_span() {
+    async fn run_chains_chat_and_tool_spans() {
         let _isolation = crate::test_utils::scoped_tracing_subscriber_guard().await;
         let captured = Captured::default();
         let subscriber = Registry::default().with(CaptureLayer {
@@ -2166,7 +2008,6 @@ mod span_safety_net {
         captured.clear();
 
         let agent = AgentBuilder::new(tool_then_text_model())
-            .record_content_telemetry(true)
             .tool(MockAddTool)
             .build();
         let response = agent
@@ -2185,26 +2026,6 @@ mod span_safety_net {
         assert!(
             spans.iter().all(|s| s.name != "chat_streaming"),
             "blocking driver must not emit chat_streaming spans"
-        );
-
-        // A run with no ambient span creates its own invoke_agent span...
-        let agent_span = spans
-            .iter()
-            .find(|s| s.name == "invoke_agent")
-            .expect("blocking run should create an invoke_agent span");
-
-        // ...and records aggregate usage + completion onto it (created_agent_span).
-        assert_eq!(
-            agent_span.u64_fields.get("gen_ai.usage.input_tokens"),
-            Some(&(7 + 13)),
-        );
-        assert_eq!(
-            agent_span.u64_fields.get("gen_ai.usage.output_tokens"),
-            Some(&(11 + 17)),
-        );
-        assert!(
-            agent_span.field_names.contains("gen_ai.completion"),
-            "the created agent span records the final completion text"
         );
 
         // The blocking driver links chat/tool spans into a linear
@@ -2227,7 +2048,7 @@ mod span_safety_net {
     }
 
     #[tokio::test]
-    async fn classic_completion_parent_is_enriched_without_duplicate_provider_span() {
+    async fn run_adopts_a_caller_supplied_outer_span() {
         let _isolation = crate::test_utils::scoped_tracing_subscriber_guard().await;
         let captured = Captured::default();
         let subscriber = Registry::default().with(CaptureLayer {
@@ -2235,279 +2056,21 @@ mod span_safety_net {
         });
         let _default = tracing::subscriber::set_default(subscriber);
 
-        let warm = AgentBuilder::new(CompletionTelemetryModel {
-            inner: MockCompletionModel::text("warm"),
-        })
-        .build();
-        let _ = warm.prompt("warm").await;
-        tracing::callsite::rebuild_interest_cache();
-        captured.clear();
-
-        let agent = AgentBuilder::new(CompletionTelemetryModel {
-            inner: MockCompletionModel::text("done"),
-        })
-        .build();
-        let response = agent.prompt("hello").await.expect("prompt should succeed");
-        assert_eq!(response, "done");
-
-        let spans = captured.snapshot();
-        let chat_spans = spans
-            .iter()
-            .filter(|span| span.name == "chat")
-            .collect::<Vec<_>>();
-        assert_eq!(chat_spans.len(), 1, "provider telemetry must reuse chat");
-        assert_eq!(chat_spans[0].target, "rig::agent_chat");
-        assert!(
-            spans.iter().all(|span| span.target != "rig::completions"),
-            "an adopted classic completion parent must not gain a provider child"
-        );
-        assert_eq!(
-            chat_spans[0]
-                .string_fields
-                .get("gen_ai.provider.name")
-                .and_then(|values| values.first())
-                .map(String::as_str),
-            Some("fixture-provider")
-        );
-        assert_eq!(
-            chat_spans[0]
-                .string_fields
-                .get("gen_ai.request.model")
-                .and_then(|values| values.first())
-                .map(String::as_str),
-            Some("fixture-model")
-        );
-    }
-
-    #[tokio::test]
-    async fn run_does_not_record_usage_onto_a_caller_supplied_outer_span() {
-        let _isolation = crate::test_utils::scoped_tracing_subscriber_guard().await;
-        let captured = Captured::default();
-        let subscriber = Registry::default().with(CaptureLayer {
-            captured: captured.clone(),
+        let outer = tracing::info_span!("outer");
+        let agent = AgentBuilder::new(MockCompletionModel::text("done")).build();
+        let run = agent.runner("hello").run();
+        outer.in_scope(|| {
+            let _ = futures::executor::block_on(run);
         });
-        let _default = tracing::subscriber::set_default(subscriber);
-
-        warm_blocking_callsites().await;
-        tracing::callsite::rebuild_interest_cache();
-        captured.clear();
-
-        // Declare the fields the guard protects so a regression (recording
-        // onto a caller span) is actually observable rather than a silent
-        // no-op on an undeclared field.
-        let outer = tracing::info_span!(
-            "outer",
-            gen_ai.completion = tracing::field::Empty,
-            gen_ai.usage.input_tokens = tracing::field::Empty,
-            gen_ai.usage.output_tokens = tracing::field::Empty,
-        );
-        async {
-            let agent = AgentBuilder::new(tool_then_text_model())
-                .tool(MockAddTool)
-                .build();
-            agent
-                .runner("add 2 and 3")
-                .max_turns(3)
-                .run()
-                .await
-                .expect("blocking run should succeed");
-        }
-        .instrument(outer)
-        .await;
 
         let spans = captured.snapshot();
-        // Under an ambient span the driver adopts it; no invoke_agent is created.
         assert!(
             spans.iter().all(|s| s.name != "invoke_agent"),
             "an ambient outer span should be adopted, not wrapped in invoke_agent"
         );
-        let outer_span = spans
-            .iter()
-            .find(|s| s.name == "outer")
-            .expect("outer span should be captured");
         assert!(
-            outer_span
-                .field_names
-                .iter()
-                .all(|name| !name.starts_with("gen_ai.usage.")),
-            "run-level usage must not be recorded onto a caller-supplied outer span"
-        );
-        assert!(
-            !outer_span.field_names.contains("gen_ai.completion"),
-            "run-level completion must not be recorded onto a caller-supplied outer span"
-        );
-    }
-
-    // --- Tool-result rewrites preserve raw policy data and redact telemetry ---
-
-    /// A tool that returns a raw marker; a rewrite hook replaces the
-    /// effective model and telemetry presentation.
-    struct RawOutputTool;
-    impl crate::tool::Tool for RawOutputTool {
-        const NAME: &'static str = "raw_output";
-        type Error = rig::tool::ToolExecutionError;
-        type Args = serde_json::Value;
-        type Output = String;
-        fn description(&self) -> String {
-            "returns a raw output marker".to_string()
-        }
-
-        fn parameters(&self) -> serde_json::Value {
-            serde_json::json!({ "type": "object", "properties": {} })
-        }
-        async fn call(
-            &self,
-            _context: &mut ToolContext,
-            _args: Self::Args,
-        ) -> Result<Self::Output, ToolExecutionError> {
-            Ok("RAW_EXECUTION_OUTPUT_42".to_string())
-        }
-    }
-
-    /// Redacts every tool result before the model sees it.
-    struct RedactResultHook;
-    impl crate::agent::AgentHook for RedactResultHook {
-        async fn on_tool_result(
-            &self,
-            _ctx: &HookContext,
-            event: ToolResultEvent<'_>,
-        ) -> ToolResultAction {
-            if let crate::agent::ToolResultEvent { .. } = event {
-                crate::agent::ToolResultAction::rewrite("[REDACTED]")
-            } else {
-                crate::agent::ToolResultAction::keep()
-            }
-        }
-    }
-
-    /// Stops the run after observing a completed tool result.
-    struct StopOnResultHook;
-    impl crate::agent::AgentHook for StopOnResultHook {
-        async fn on_tool_result(
-            &self,
-            _ctx: &HookContext,
-            _event: ToolResultEvent<'_>,
-        ) -> ToolResultAction {
-            ToolResultAction::stop("stop after raw result")
-        }
-    }
-
-    /// Captures every value recorded into the `gen_ai.tool.call.result` span
-    /// field, so tests can assert telemetry follows result-hook policy.
-    #[derive(Default)]
-    struct ResultValueVisitor {
-        values: Vec<String>,
-    }
-    impl Visit for ResultValueVisitor {
-        fn record_str(&mut self, field: &Field, value: &str) {
-            if field.name() == "gen_ai.tool.call.result" {
-                self.values.push(value.to_string());
-            }
-        }
-        fn record_debug(&mut self, field: &Field, value: &dyn std::fmt::Debug) {
-            if field.name() == "gen_ai.tool.call.result" {
-                self.values.push(format!("{value:?}"));
-            }
-        }
-    }
-
-    struct ResultValueLayer {
-        values: Arc<Mutex<Vec<String>>>,
-    }
-    impl<S> Layer<S> for ResultValueLayer
-    where
-        S: Subscriber + for<'l> LookupSpan<'l>,
-    {
-        fn on_record(&self, _span: &Id, values: &Record<'_>, _ctx: Context<'_, S>) {
-            let mut visitor = ResultValueVisitor::default();
-            values.record(&mut visitor);
-            if !visitor.values.is_empty() {
-                self.values.lock().expect("values").extend(visitor.values);
-            }
-        }
-    }
-
-    /// A `ToolResult` rewrite applies to both model presentation and
-    /// telemetry so redaction hooks cannot leak the raw output through spans.
-    #[tokio::test]
-    async fn tool_result_rewrite_redacts_span_output() {
-        let _isolation = crate::test_utils::scoped_tracing_subscriber_guard().await;
-        let values: Arc<Mutex<Vec<String>>> = Arc::new(Mutex::new(Vec::new()));
-        let subscriber = Registry::default().with(ResultValueLayer {
-            values: values.clone(),
-        });
-        let _default = tracing::subscriber::set_default(subscriber);
-
-        // Warm the `execute_tool` result callsite under this subscriber, then
-        // reset — mirroring the usage tests' interest-cache warm-up.
-        warm_blocking_callsites().await;
-        tracing::callsite::rebuild_interest_cache();
-        values.lock().expect("values").clear();
-
-        let model = MockCompletionModel::from_turns([
-            MockTurn::tool_call("tc1", "raw_output", serde_json::json!({})),
-            MockTurn::text("ok"),
-        ]);
-        let response = AgentBuilder::new(model)
-            .record_content_telemetry(true)
-            .tool(RawOutputTool)
-            .add_hook(RedactResultHook)
-            .build()
-            .runner("go")
-            .max_turns(3)
-            .run()
-            .await
-            .expect("run should succeed");
-        assert_eq!(response.output, "ok");
-
-        let captured = values.lock().expect("values").clone();
-        assert!(
-            captured.iter().any(|v| v.contains("[REDACTED]")),
-            "the rewritten presentation must reach telemetry; captured: {captured:?}"
-        );
-        assert!(
-            !captured
-                .iter()
-                .any(|v| v.contains("RAW_EXECUTION_OUTPUT_42")),
-            "the raw tool output must not leak through telemetry; captured: {captured:?}"
-        );
-    }
-
-    /// Stopping from the result hook retains outcome metadata but omits
-    /// potentially sensitive result content from telemetry.
-    #[tokio::test]
-    async fn tool_result_stop_omits_span_output() {
-        let _isolation = crate::test_utils::scoped_tracing_subscriber_guard().await;
-        let values: Arc<Mutex<Vec<String>>> = Arc::new(Mutex::new(Vec::new()));
-        let subscriber = Registry::default().with(ResultValueLayer {
-            values: values.clone(),
-        });
-        let _default = tracing::subscriber::set_default(subscriber);
-
-        warm_blocking_callsites().await;
-        tracing::callsite::rebuild_interest_cache();
-        values.lock().expect("values").clear();
-
-        let result = AgentBuilder::new(MockCompletionModel::from_turns([MockTurn::tool_call(
-            "tc1",
-            "raw_output",
-            serde_json::json!({}),
-        )]))
-        .tool(RawOutputTool)
-        .add_hook(StopOnResultHook)
-        .build()
-        .runner("go")
-        .max_turns(2)
-        .run()
-        .await;
-        assert!(result.is_err(), "the result hook should stop the run");
-
-        let captured = values.lock().expect("values").clone();
-        assert!(
-            !captured
-                .iter()
-                .any(|value| value.contains("RAW_EXECUTION_OUTPUT_42")),
-            "a Stop must not leak raw execution telemetry; captured: {captured:?}"
+            spans.iter().any(|s| s.name == "outer"),
+            "the ambient outer span stays the run's parent"
         );
     }
 }

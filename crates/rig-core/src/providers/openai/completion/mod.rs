@@ -8,9 +8,6 @@ use crate::completion::{CompletionError, CompletionRequest as CoreCompletionRequ
 use crate::http_client::{self, HttpClientExt};
 use crate::message::{AudioMediaType, DocumentSourceKind, ImageDetail, MimeType};
 use crate::one_or_many::string_or_one_or_many;
-use crate::telemetry::{
-    CompletionOperation, CompletionSpanBuilder, ProviderResponseExt, SpanCombinator,
-};
 use crate::wasm_compat::{WasmCompatSend, WasmCompatSync};
 use crate::{OneOrMany, completion, json_utils, message};
 use serde::{Deserialize, Serialize, Serializer};
@@ -1143,71 +1140,6 @@ impl crate::completion::NormalizeCompletionResponse for CompletionResponse {
     }
 }
 
-impl ProviderResponseExt for CompletionResponse {
-    type OutputMessage = Choice;
-    type Usage = Usage;
-
-    fn get_response_id(&self) -> Option<String> {
-        Some(self.id.to_owned())
-    }
-
-    fn get_response_model_name(&self) -> Option<String> {
-        Some(self.model.to_owned())
-    }
-
-    fn get_output_messages(&self) -> Vec<Self::OutputMessage> {
-        self.choices.clone()
-    }
-
-    fn get_text_response(&self) -> Option<String> {
-        let response = self
-            .choices
-            .iter()
-            .filter_map(|choice| assistant_message_text_response(&choice.message))
-            .collect::<Vec<_>>()
-            .join("\n");
-
-        if response.is_empty() {
-            None
-        } else {
-            Some(response)
-        }
-    }
-
-    fn get_usage(&self) -> Option<Self::Usage> {
-        self.usage.clone()
-    }
-}
-
-fn assistant_message_text_response(message: &Message) -> Option<String> {
-    let Message::Assistant {
-        content, refusal, ..
-    } = message
-    else {
-        return None;
-    };
-
-    let mut segments = content
-        .iter()
-        .filter_map(|content| match content {
-            AssistantContent::Text { text, .. } => (!text.is_empty()).then(|| text.clone()),
-            AssistantContent::Refusal { refusal } => (!refusal.is_empty()).then(|| refusal.clone()),
-        })
-        .collect::<Vec<_>>();
-
-    if segments.is_empty()
-        && let Some(refusal) = refusal.as_ref().filter(|refusal| !refusal.is_empty())
-    {
-        segments.push(refusal.clone());
-    }
-
-    if segments.is_empty() {
-        None
-    } else {
-        Some(segments.join("\n"))
-    }
-}
-
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct Choice {
     pub index: usize,
@@ -1388,7 +1320,6 @@ pub trait OpenAICompatibleProvider: crate::client::Provider {
     /// being hardcoded by whichever wire type happens to implement it.
     type Response: serde::de::DeserializeOwned
         + Serialize
-        + crate::telemetry::ProviderResponseExt<Usage: Into<crate::completion::Usage>>
         + crate::completion::NormalizeCompletionResponse
         + WasmCompatSend
         + WasmCompatSync;
@@ -1783,8 +1714,6 @@ where
         &self,
         completion_request: CoreCompletionRequest,
     ) -> Result<Ext::Response, CompletionError> {
-        let system_instructions = completion_request.preamble.clone();
-        let record_telemetry_content = completion_request.record_telemetry_content;
         let options = CompletionModelOptions {
             strict_tools: self.strict_tools,
             tool_result_array_content: self.tool_result_array_content,
@@ -1796,13 +1725,13 @@ where
             options,
         )?;
         self.client.ext().prepare_request(&mut request)?;
-        let span = CompletionSpanBuilder::new(
-            Ext::PROVIDER_NAME,
-            &request.model,
-            CompletionOperation::Chat,
-        )
-        .system_instructions(system_instructions.as_deref(), record_telemetry_content)
-        .build();
+        let span = tracing::info_span!(
+            target: "rig::completions",
+            "chat",
+            gen_ai.operation.name = "chat",
+            gen_ai.provider.name = Ext::PROVIDER_NAME,
+            gen_ai.request.model = %request.model,
+        );
 
         let mut request_body = serde_json::to_value(&request)?;
         self.client
@@ -1836,13 +1765,6 @@ where
 
                 match serde_json::from_str::<ApiResponse<Ext::Response>>(&text)? {
                     ApiResponse::Ok(response) => {
-                        let span = tracing::Span::current();
-                        span.record_response_metadata(&response);
-                        let usage = response
-                            .get_usage()
-                            .map(Into::into)
-                            .unwrap_or_default();
-                        span.record_token_usage(&usage);
                         if enabled!(Level::TRACE) {
                             tracing::trace!(
                                 target: "rig::completions",

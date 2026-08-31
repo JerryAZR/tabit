@@ -7,7 +7,6 @@ use rig::completion::Prompt;
 use rig::message::{AssistantContent, Message, ToolChoice};
 use rig::prelude::*;
 use rig::streaming::StreamingPrompt;
-use rig::telemetry::ProviderResponseExt;
 
 use super::super::support::with_openai_completions_cassette;
 use crate::support::{
@@ -21,6 +20,40 @@ use crate::support::{
     assistant_text_response, collect_raw_stream_observation, collect_stream_observation,
     zero_arg_tool_definition,
 };
+
+/// The provider-native assistant text of a chat-completions response (the
+/// deleted `ProviderResponseExt` accessor's semantics, kept as an assertion
+/// convenience).
+fn completions_text(
+    response: &rig::providers::openai::completion::CompletionResponse,
+) -> Option<String> {
+    use rig::providers::openai::completion::Message as ProviderMessage;
+    let text: String = response
+        .choices
+        .iter()
+        .filter_map(|choice| match &choice.message {
+            ProviderMessage::Assistant {
+                content, refusal, ..
+            } => {
+                let mut parts: Vec<String> = content
+                    .iter()
+                    .filter_map(|c| match c {
+                        rig::providers::openai::completion::AssistantContent::Text { text } => {
+                            Some(text.clone())
+                        }
+                        _ => None,
+                    })
+                    .collect();
+                if let Some(refusal) = refusal {
+                    parts.push(refusal.clone());
+                }
+                Some(parts.join("\n"))
+            }
+            _ => None,
+        })
+        .collect();
+    (!text.is_empty()).then_some(text)
+}
 
 #[tokio::test]
 async fn completions_api_agent_prompt() {
@@ -62,8 +95,7 @@ async fn completions_api_raw_response_text_matches_normalized_choice_text() {
                 .raw_completion(request)
                 .await
                 .expect("raw completions api request should succeed");
-            let raw_text = raw
-                .get_text_response()
+            let raw_text = completions_text(&raw)
                 .expect("raw completions api response should contain assistant text");
 
             let response: rig::completion::CompletionResponse = raw

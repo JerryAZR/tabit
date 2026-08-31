@@ -590,7 +590,6 @@ async fn prompt_request_setters_reach_the_prepared_completion_request() {
         .max_tokens(128)
         .merge_additional_params(params)
         .tool_choice(ToolChoice::Auto)
-        .record_content_telemetry(true)
         .max_turns(1)
         .await
         .expect("run with request-level setters should succeed");

@@ -34,7 +34,7 @@ use super::{
     completion::{Agent, PreparedCompletionRequest},
     drive::{
         DriveItem, DriveStream, PhaseEvent, TurnSource, drive_agent, drive_tool_calls,
-        record_usage_on_span, streaming_error_into_prompt,
+        streaming_error_into_prompt,
     },
     hook::{
         AgentHook, HookContext, HookStack, ToolCall as ToolCallEvent, ToolCallAction,
@@ -71,26 +71,18 @@ use super::UNKNOWN_AGENT_NAME;
 /// The span *name* must be a string literal — `tracing` bakes it into static
 /// metadata — so this is a macro parameterized by the name rather than a
 /// function (the two surfaces keep distinct names, `chat` vs `chat_streaming`,
-/// which dashboards split on). The matching operation value is passed with the
-/// name; every other field is identical across the two surfaces, so it lives
-/// here once instead of being copy-pasted into each `TurnSource::open_chat_span`.
+/// which log consumers split on). Every other field is identical across the
+/// two surfaces, so it lives here once instead of being copy-pasted into each
+/// `TurnSource::open_chat_span`.
 macro_rules! build_chat_span {
-    ($runner:expr, $effective_preamble:expr, $name:literal, $operation:literal) => {{
-        let system_instructions = $crate::core::telemetry::system_instructions_json(
-            $effective_preamble,
-            $runner.record_telemetry_content,
-        );
-        // The core macro is the single source of the completion-parent
-        // contract (marker + required fields); only the agent-specific field
-        // is declared here.
-        $crate::core::telemetry::completion_parent_span!(
+    ($runner:expr, $name:literal, $operation:literal) => {
+        tracing::info_span!(
             target: "rig::agent_chat",
-            name: $name,
-            operation: $operation,
-            system_instructions: system_instructions.as_deref(),
+            $name,
+            gen_ai.operation.name = $operation,
             gen_ai.agent.name = $runner.agent_name_or_default(),
         )
-    }};
+    };
 }
 pub(crate) use build_chat_span;
 
@@ -193,7 +185,6 @@ pub struct AgentRunner {
     pub(crate) temperature: Option<f64>,
     pub(crate) max_tokens: Option<u64>,
     pub(crate) additional_params: Option<serde_json::Value>,
-    pub(crate) record_telemetry_content: bool,
     pub(crate) tool_server_handle: ToolServerHandle,
     /// Typed context cloned freshly for every tool dispatch.
     pub(crate) tool_context: ToolContext,
@@ -251,7 +242,6 @@ impl AgentRunner {
             temperature: agent.temperature,
             max_tokens: agent.max_tokens,
             additional_params: agent.additional_params.clone(),
-            record_telemetry_content: agent.record_telemetry_content,
             tool_server_handle: agent.tool_server_handle.clone(),
             tool_context: ToolContext::new(),
             tool_choice: agent.tool_choice.clone(),
@@ -437,17 +427,6 @@ impl AgentRunner {
     /// Opt in or out of recording sensitive request, response, and tool content
     /// on GenAI telemetry spans for this run.
     ///
-    /// Defaults to the agent's setting, which defaults to `false`. Enabling this
-    /// can expose prompts, retrieved context, tool results, model responses, and
-    /// other sensitive or high-cardinality data through OpenTelemetry span
-    /// attributes, which can increase observability backend storage and query
-    /// costs. Only enable it when content telemetry is acceptable for this run.
-    /// Structural metadata and token usage remain available when disabled.
-    pub fn record_content_telemetry(mut self, enabled: bool) -> Self {
-        self.record_telemetry_content = enabled;
-        self
-    }
-
     /// Execute up to `concurrency` tools at once (1 by default). Applies to
     /// **both** the blocking [`run`](Self::run) and the streaming
     /// [`stream`](Self::stream) paths.
@@ -523,35 +502,17 @@ impl AgentRunner {
 /// Build (or adopt) the top-level `invoke_agent` span for a run, shared by the
 /// blocking and streaming drivers so the run-level span shape is defined once.
 ///
-/// Returns the span plus whether it was newly created. When the caller is
-/// already inside a span we adopt it and report `false`, so the driver can avoid
-/// recording run-level usage onto a span it does not own (see the
-/// `created_agent_span` guard in both drivers' `Done` handling).
-pub(crate) fn acquire_agent_span(
-    agent_name: &str,
-    preamble: Option<&str>,
-    record_content: bool,
-) -> (tracing::Span, bool) {
+/// When the caller is already inside a span we adopt it, so a caller-supplied
+/// outer span stays the run's parent.
+pub(crate) fn acquire_agent_span(agent_name: &str) -> tracing::Span {
     if tracing::Span::current().is_disabled() {
-        let system_instructions =
-            rig_core::telemetry::system_instructions_json(preamble, record_content);
-        let span = info_span!(
+        info_span!(
             "invoke_agent",
             gen_ai.operation.name = "invoke_agent",
             gen_ai.agent.name = agent_name,
-            gen_ai.system_instructions = system_instructions.as_deref(),
-            gen_ai.prompt = tracing::field::Empty,
-            gen_ai.completion = tracing::field::Empty,
-            gen_ai.usage.input_tokens = tracing::field::Empty,
-            gen_ai.usage.output_tokens = tracing::field::Empty,
-            gen_ai.usage.cache_read.input_tokens = tracing::field::Empty,
-            gen_ai.usage.cache_creation.input_tokens = tracing::field::Empty,
-            gen_ai.usage.tool_use_prompt_tokens = tracing::field::Empty,
-            gen_ai.usage.reasoning_tokens = tracing::field::Empty,
-        );
-        (span, true)
+        )
     } else {
-        (tracing::Span::current(), false)
+        tracing::Span::current()
     }
 }
 
@@ -605,7 +566,6 @@ pub(crate) async fn run_single_tool(
 ) -> ToolCallOutcome {
     let hooks = &runner.hooks;
     let tool_context = &runner.tool_context;
-    let record_content = runner.record_telemetry_content;
     let tool_name = &tool_call.function.name;
     // `mut` so a tool-call hook can rewrite the arguments the tool
     // runs with (the model's emitted arguments are otherwise used verbatim).
@@ -614,9 +574,6 @@ pub(crate) async fn run_single_tool(
     let tool_span = tracing::Span::current();
     tool_span.record("gen_ai.tool.name", tool_name);
     tool_span.record("gen_ai.tool.call.id", &tool_call.id);
-    if record_content {
-        tool_span.record("gen_ai.tool.call.arguments", &args);
-    }
 
     // Resolve the `ToolCall` hook chain. A proceeding chain carries any
     // `ToolCallAction::Rewrite` in the action itself (→ `ProceedWith`); a chain that a
@@ -640,9 +597,6 @@ pub(crate) async fn run_single_tool(
     // `ToolResult` reports — and the span reflect the effective arguments.
     if let Some(rewritten) = salvaged_rewrite.as_ref() {
         args = json_utils::serialize_json_value(rewritten);
-        if record_content {
-            tool_span.record("gen_ai.tool.call.arguments", &args);
-        }
         tracing::debug!(
             tool_name = tool_name,
             "tool-call arguments rewritten by a hook"
@@ -670,9 +624,6 @@ pub(crate) async fn run_single_tool(
             // downstream `ToolResult` event, reflect what the tool actually
             // received rather than what the model emitted.
             args = json_utils::serialize_json_value(&replacement);
-            if record_content {
-                tool_span.record("gen_ai.tool.call.arguments", &args);
-            }
             tracing::debug!(
                 tool_name = tool_name,
                 "tool-call arguments rewritten by a hook"
@@ -726,9 +677,6 @@ pub(crate) async fn run_single_tool(
 
     match result_decision {
         ToolResultDecision::Stop(reason) => {
-            if record_content {
-                tool_span.record("gen_ai.tool.call.result", exec.output().render());
-            }
             let content = tool_result_output(
                 tool_call.id.clone(),
                 tool_call.call_id.clone(),
@@ -740,27 +688,15 @@ pub(crate) async fn run_single_tool(
                 stop_reason: Some(reason),
             }
         }
-        ToolResultDecision::Replace(replacement) => {
-            if record_content {
-                tool_span.record("gen_ai.tool.call.result", replacement.render());
-            }
-            ToolCallOutcome {
-                content: with_execution_status(
-                    tool_result_output(
-                        tool_call.id.clone(),
-                        tool_call.call_id.clone(),
-                        replacement,
-                    ),
-                    &exec,
-                ),
-                execution,
-                stop_reason: None,
-            }
-        }
+        ToolResultDecision::Replace(replacement) => ToolCallOutcome {
+            content: with_execution_status(
+                tool_result_output(tool_call.id.clone(), tool_call.call_id.clone(), replacement),
+                &exec,
+            ),
+            execution,
+            stop_reason: None,
+        },
         ToolResultDecision::Keep => {
-            if record_content {
-                tool_span.record("gen_ai.tool.call.result", exec.output().render());
-            }
             let content = tool_result_output(
                 tool_call.id.clone(),
                 tool_call.call_id.clone(),
@@ -806,8 +742,6 @@ pub(crate) fn new_execute_tool_span() -> tracing::Span {
         gen_ai.tool.type = "function",
         gen_ai.tool.name = tracing::field::Empty,
         gen_ai.tool.call.id = tracing::field::Empty,
-        gen_ai.tool.call.arguments = tracing::field::Empty,
-        gen_ai.tool.call.result = tracing::field::Empty,
         gen_ai.tool.call.outcome = tracing::field::Empty,
         gen_ai.tool.error.type = tracing::field::Empty
     )
@@ -828,14 +762,12 @@ pub(crate) struct UnaryTurnSource {
     /// closure capture `&self`, so `&UnaryTurnSource` must be `Send`, i.e.
     /// `UnaryTurnSource: Sync` — which `AtomicU64` provides and `Cell` does not.
     current_span_id: AtomicU64,
-    record_telemetry_content: bool,
 }
 
 impl UnaryTurnSource {
-    pub(crate) fn new(record_telemetry_content: bool) -> Self {
+    pub(crate) fn new() -> Self {
         Self {
             current_span_id: AtomicU64::new(0),
-            record_telemetry_content,
         }
     }
 
@@ -854,22 +786,16 @@ impl UnaryTurnSource {
 }
 
 impl TurnSource for UnaryTurnSource {
-    fn open_chat_span(
-        &self,
-        runner: &AgentRunner,
-        effective_preamble: Option<&str>,
-    ) -> tracing::Span {
-        let chat_span = build_chat_span!(runner, effective_preamble, "chat", "chat");
+    fn open_chat_span(&self, runner: &AgentRunner) -> tracing::Span {
+        let chat_span = build_chat_span!(runner, "chat", "chat");
         self.chain_span(chat_span)
     }
 
     fn run_model_turn<'a>(
         &'a mut self,
-        runner: &'a AgentRunner,
         ledger: &'a mut RunLedger,
         prepared: PreparedCompletionRequest,
         chat_span: tracing::Span,
-        _agent_span: &'a tracing::Span,
     ) -> DriveStream<'a> {
         Box::pin(async_stream::stream! {
             let resp = match prepared.builder.send().instrument(chat_span.clone()).await {
@@ -882,10 +808,6 @@ impl TurnSource for UnaryTurnSource {
 
             let finish_reason = resp.finish_reason();
             ledger.record(resp.usage, finish_reason.clone());
-
-            if runner.record_telemetry_content {
-                rig_core::telemetry::record_model_output(&chat_span, &resp.choice, true);
-            }
 
             yield Ok(PhaseEvent::ModelTurn(Box::new(ModelTurn::new(
                 resp.message_id.clone(),
@@ -918,24 +840,6 @@ impl TurnSource for UnaryTurnSource {
         )
     }
 
-    fn record_run_level_telemetry(
-        &self,
-        agent_span: &tracing::Span,
-        response: &PromptResponse,
-        created_agent_span: bool,
-    ) {
-        // Record run-level completion + usage onto the agent span, but only when
-        // we created it — never pollute a caller-supplied outer span. The usage
-        // fields go through the same recorder the streaming surface uses; the
-        // blocking surface additionally records the final completion text.
-        if created_agent_span {
-            if self.record_telemetry_content {
-                agent_span.record("gen_ai.completion", &response.output);
-            }
-            record_usage_on_span(agent_span, response.usage);
-        }
-    }
-
     fn final_item(&self, _response: &PromptResponse) -> Option<MultiTurnStreamItem> {
         // The blocking surface folds the engine and discards the final item, so
         // building it (an extra full-response clone) is skipped entirely.
@@ -948,27 +852,14 @@ impl AgentRunner {
     /// [`PromptResponse`]. Hooks fire at every observable point; the first hook
     /// to terminate cancels the run.
     pub async fn run(self) -> Result<PromptResponse, PromptError> {
-        let (agent_span, created_agent_span) = acquire_agent_span(
-            self.agent_name_or_default(),
-            self.preamble.as_deref(),
-            self.record_telemetry_content,
-        );
-
         let conversation = self.build_run()?;
 
         // Fold the shared engine to its final response. The blocking surface
         // uses a unary model transport and ignores the intermediate items the
         // engine yields; the engine is driven under the caller's ambient span
-        // (no `instrument`), keeping the agent span detached and the chat/tool
-        // spans on the blocking `follows_from` chain.
-        let record_telemetry_content = self.record_telemetry_content;
-        let driver = drive_agent(
-            self,
-            UnaryTurnSource::new(record_telemetry_content),
-            &conversation,
-            agent_span,
-            created_agent_span,
-        );
+        // (no `instrument`), keeping the chat/tool spans on the blocking
+        // `follows_from` chain.
+        let driver = drive_agent(self, UnaryTurnSource::new(), &conversation);
         futures::pin_mut!(driver);
 
         let mut response = None;
@@ -1002,11 +893,7 @@ impl AgentRunner {
     /// `drive_agent`, so the two behave identically apart from the streamed
     /// delta events.
     pub async fn stream(self) -> StreamingResult {
-        let (agent_span, created_agent_span) = acquire_agent_span(
-            self.agent_name_or_default(),
-            self.preamble.as_deref(),
-            self.record_telemetry_content,
-        );
+        let agent_span = acquire_agent_span(self.agent_name_or_default());
 
         // The conversation cell this run folds (supplied durable
         // manager, or the stream-owned standalone twin); a build
@@ -1023,26 +910,13 @@ impl AgentRunner {
                 ));
             }
         };
-        // The coroutine macro moves whatever its body mentions — hand it
-        // its own span handle so the entry keeps the original.
-        let loop_span = agent_span.clone();
         let stream = async_stream::stream! {
-            let source = StreamingTurnSource::new(
-                self.agent_name_or_default().to_string(),
-                created_agent_span,
-                self.record_telemetry_content,
-            );
+            let source = StreamingTurnSource::new(self.agent_name_or_default().to_string());
 
             // The blocking surface folds this same loop; the streaming surface
             // forwards intermediate items (the final response item is the last
             // one) and ends on `Done`.
-            let driver = drive_agent(
-                self,
-                source,
-                &conversation,
-                loop_span,
-                created_agent_span,
-            );
+            let driver = drive_agent(self, source, &conversation);
             futures::pin_mut!(driver);
             while let Some(item) = driver.next().await {
                 match item {

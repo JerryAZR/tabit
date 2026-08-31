@@ -38,24 +38,6 @@ use crate::{
 };
 use tabit_log::ConversationCell;
 
-pub(crate) fn record_usage_on_span(span: &tracing::Span, usage: crate::completion::Usage) {
-    span.record("gen_ai.usage.input_tokens", usage.input_tokens);
-    span.record("gen_ai.usage.output_tokens", usage.output_tokens);
-    span.record(
-        "gen_ai.usage.cache_read.input_tokens",
-        usage.cached_input_tokens,
-    );
-    span.record(
-        "gen_ai.usage.cache_creation.input_tokens",
-        usage.cache_creation_input_tokens,
-    );
-    span.record(
-        "gen_ai.usage.tool_use_prompt_tokens",
-        usage.tool_use_prompt_tokens,
-    );
-    span.record("gen_ai.usage.reasoning_tokens", usage.reasoning_tokens);
-}
-
 /// A boxed, medium-specific item stream for one loop phase (model turn
 /// or tool batch). Boxed so a generic loop can forward it without the
 /// per-phase future leaking into the loop's own (`Send`) inference.
@@ -122,11 +104,7 @@ pub(crate) enum DriveItem {
 pub(crate) trait TurnSource: WasmCompatSend {
     /// Build this medium's per-turn `chat` span (name + parenting + any
     /// `follows_from` chaining differ between blocking and streaming).
-    fn open_chat_span(
-        &self,
-        runner: &AgentRunner,
-        effective_preamble: Option<&str>,
-    ) -> tracing::Span;
+    fn open_chat_span(&self, runner: &AgentRunner) -> tracing::Span;
 
     /// Run one model turn: issue the provider call, record its
     /// completion call into the ledger, yield every intermediate item,
@@ -134,11 +112,9 @@ pub(crate) trait TurnSource: WasmCompatSend {
     /// terminates the turn (the loop classifies it).
     fn run_model_turn<'a>(
         &'a mut self,
-        runner: &'a AgentRunner,
         ledger: &'a mut RunLedger,
         prepared: PreparedCompletionRequest,
         chat_span: tracing::Span,
-        agent_span: &'a tracing::Span,
     ) -> DriveStream<'a>;
 
     /// Execute a turn's tool calls, yielding intermediate items and
@@ -150,15 +126,6 @@ pub(crate) trait TurnSource: WasmCompatSend {
         calls: Vec<PendingToolCall>,
         tool_snapshot: Arc<ToolRegistrySnapshot>,
     ) -> DriveStream<'a>;
-
-    /// Record run-level telemetry onto the agent span at `Done`. Gated on
-    /// `created_agent_span` so a caller-supplied outer span is never polluted.
-    fn record_run_level_telemetry(
-        &self,
-        agent_span: &tracing::Span,
-        response: &PromptResponse,
-        created_agent_span: bool,
-    );
 
     /// Build the final stream item surfaced at `Done`, or `None` when the
     /// surface discards it (the blocking fold) so the loop skips the work.
@@ -258,8 +225,6 @@ pub(crate) fn drive_agent<'a, S>(
     runner: AgentRunner,
     mut source: S,
     conversation: &'a ConversationCell,
-    agent_span: tracing::Span,
-    created_agent_span: bool,
 ) -> impl Stream<Item = Result<DriveItem, StreamingError>> + 'a
 where
     S: TurnSource + 'a,
@@ -429,9 +394,9 @@ where
                 );
             }
 
-            let chat_span = source.open_chat_span(&runner, runner.preamble.as_deref());
+            let chat_span = source.open_chat_span(&runner);
 
-            let mut prepared = match build_prepared_completion_request(
+            let prepared = match build_prepared_completion_request(
                 &runner.model,
                 &history,
                 runner.preamble.as_deref(),
@@ -439,7 +404,6 @@ where
                 runner.temperature,
                 runner.max_tokens,
                 runner.additional_params.as_ref(),
-                runner.record_telemetry_content,
                 runner.tool_choice.as_ref(),
                 &runner.tool_server_handle,
             )
@@ -456,11 +420,6 @@ where
                 }
             };
             let turn_tool_snapshot = prepared.tool_snapshot.clone();
-            if runner.record_telemetry_content {
-                let input_messages = prepared.builder.messages_for_telemetry();
-                rig_core::telemetry::record_model_input(&chat_span, &input_messages, true);
-                prepared.builder = prepared.builder.record_content_telemetry(false);
-            }
 
             // Announce the turn (ENGINE.md, delta 10): the attempt is
             // irreversible, so this is "the model call begins". Mint the
@@ -478,7 +437,7 @@ where
             // after that, and the conversation stands at a roundtrip
             // boundary.
             let mut turn_stream =
-                source.run_model_turn(&runner, &mut ledger, prepared, chat_span, &agent_span);
+                source.run_model_turn(&mut ledger, prepared, chat_span);
             let mut completed: Option<Box<ModelTurn>> = None;
             let mut turn_error = None;
             let mut turn_protocol_fault: Option<&'static str> = None;
@@ -597,7 +556,6 @@ where
                     max_turns = runner.max_turns,
                     "Agent run finished"
                 );
-                source.record_run_level_telemetry(&agent_span, &response, created_agent_span);
                 if let Some(final_item) = source.final_item(&response) {
                     yield Ok(DriveItem::Item(final_item));
                 }

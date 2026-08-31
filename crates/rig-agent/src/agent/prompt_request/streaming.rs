@@ -3,7 +3,7 @@ use rig_core::{OneOrMany, message::AssistantContent, wasm_compat::WasmBoxedFutur
 use crate::{
     agent::completion::PreparedCompletionRequest,
     agent::drive::PhaseEvent,
-    agent::drive::{DriveStream, TurnSource, drive_tool_calls, record_usage_on_span},
+    agent::drive::{DriveStream, TurnSource, drive_tool_calls},
     agent::hook::{AgentHook, HookContext},
     agent::prompt_request::{assistant_text_from_choice, is_empty_assistant_turn},
     agent::run::{
@@ -313,46 +313,28 @@ pub(crate) struct StreamingTurnSource {
     last_message_id: Option<String>,
     /// Resolved agent name, kept only for the empty-turn diagnostic warning.
     agent_name: String,
-    /// Whether we created the agent span (vs. adopting a caller's ambient span);
-    /// gates recording `gen_ai.completion` onto it, matching the blocking source
-    /// so neither surface pollutes a caller-supplied span.
-    created_agent_span: bool,
-    /// Whether sensitive run-level prompt and completion content may be recorded.
-    record_telemetry_content: bool,
 }
 
 impl StreamingTurnSource {
-    pub(crate) fn new(
-        agent_name: String,
-        created_agent_span: bool,
-        record_telemetry_content: bool,
-    ) -> Self {
+    pub(crate) fn new(agent_name: String) -> Self {
         Self {
             last_final_choice: OneOrMany::one(AssistantContent::text("")),
             last_message_id: None,
             agent_name,
-            created_agent_span,
-            record_telemetry_content,
         }
     }
 }
 
 impl TurnSource for StreamingTurnSource {
-    fn open_chat_span(
-        &self,
-        runner: &AgentRunner,
-        effective_preamble: Option<&str>,
-    ) -> tracing::Span {
-        build_chat_span!(runner, effective_preamble, "chat_streaming", "chat")
+    fn open_chat_span(&self, runner: &AgentRunner) -> tracing::Span {
+        build_chat_span!(runner, "chat_streaming", "chat")
     }
 
     fn run_model_turn<'a>(
         &'a mut self,
-        runner: &'a AgentRunner,
         ledger: &'a mut RunLedger,
         prepared: PreparedCompletionRequest,
         chat_span: tracing::Span,
-        agent_span: &'a tracing::Span,
     ) -> DriveStream<'a> {
         Box::pin(async_stream::stream! {
             let mut stream = match prepared
@@ -392,9 +374,6 @@ impl TurnSource for StreamingTurnSource {
                     let usage = $usage;
                     last_usage = usage;
                     if !completion_call_emitted {
-                        if usage.has_values() {
-                            record_usage_on_span(&chat_span, usage);
-                        }
                         let call = ledger.record(usage, $finish_reason);
                         completion_call_emitted = true;
                         Ok(Some(MultiTurnStreamItem::CompletionCall(call)))
@@ -513,26 +492,6 @@ impl TurnSource for StreamingTurnSource {
             let final_turn_content = stream.choice.clone();
             let streamed_turn = assembler.finish(stream.message_id.clone(), &final_turn_content);
             self.last_message_id = streamed_turn.message_id.clone();
-            // The canonical assistant content: `finish` normalizes
-            // reasoning/text/tool ordering, so this can differ from the raw
-            // `stream.choice` aggregate. The turn settles with the canonical
-            // shape; the raw aggregate is kept in `last_final_choice` for the
-            // raw/final streaming behavior.
-            let canonical_choice = streamed_turn.choice.clone();
-
-            // Only canonical output belongs in content telemetry. Keep
-            // caller-owned spans untouched, matching the blocking source.
-            if self.created_agent_span && self.record_telemetry_content {
-                agent_span.record(
-                    "gen_ai.completion",
-                    assistant_text_from_choice(&canonical_choice),
-                );
-            }
-            rig_core::telemetry::record_model_output(
-                &chat_span,
-                &canonical_choice,
-                runner.record_telemetry_content,
-            );
 
             if let Some(item) = pending_final {
                 yield Ok(PhaseEvent::Item(MultiTurnStreamItem::stream_item(item)));
@@ -565,17 +524,6 @@ impl TurnSource for StreamingTurnSource {
         // The streaming surface chains nothing onto its tool spans, and forwards
         // the ToolCall/ToolResult items to the consumer.
         drive_tool_calls(runner, hook_ctx, calls, tool_snapshot, |span| span, true)
-    }
-
-    fn record_run_level_telemetry(
-        &self,
-        agent_span: &tracing::Span,
-        response: &PromptResponse,
-        created_agent_span: bool,
-    ) {
-        if created_agent_span {
-            record_usage_on_span(agent_span, response.usage);
-        }
     }
 
     fn final_item(&self, response: &PromptResponse) -> Option<MultiTurnStreamItem> {

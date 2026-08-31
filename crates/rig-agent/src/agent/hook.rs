@@ -137,8 +137,8 @@ impl Drop for ToolCallResolutionFrame<'_> {
 /// unified capability map, and the rewrite-chaining frames. Identity
 /// accessors (run id, turn counter, surface, agent name) are
 /// deliberately absent — those identities live where their consumers
-/// are (announced turn ids on events, run/agent names on telemetry
-/// spans), and unconsumed surface is deleted, not kept by inertia
+/// are (announced turn ids on events, run/agent names on spans), and
+/// unconsumed surface is deleted, not kept by inertia
 /// (PROTOCOL.md flag 31 and its follow-up).
 #[derive(Debug)]
 pub struct HookContext {

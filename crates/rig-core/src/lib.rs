@@ -118,5 +118,3 @@ pub use serde_json;
 #[cfg(feature = "derive")]
 #[cfg_attr(docsrs, doc(cfg(feature = "derive")))]
 pub use rig_derive::{rig_tool, rig_tool as tool_macro};
-
-pub mod telemetry;

@@ -12,7 +12,7 @@
 //!
 //! ```
 //! use rig_agent::tool::{Tool, ToolContext};
-//! use serde::Deserialize;
+//! use serde::{Deserialize, Serialize};
 //! use std::convert::Infallible;
 //!
 //! #[derive(Deserialize)]

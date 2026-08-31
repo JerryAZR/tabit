@@ -474,9 +474,12 @@ dual-fold clarification) are settled:
   the engine's folds are the durable commits, the session
   emission-only. The mid-run readability constraint held (brief
   write holds; the checkout probe reads between folds).
-- **rig-core vendored-mass policy** — embeddings, vector stores, model
-  listings, telemetry (~5k lines tabit never calls): trim or record a
-  keep-policy in VENDOR.md.
+- **rig-core vendored-mass policy** — resolved (2026-08, rulings in
+  VENDOR.md "RAG mass removal"): embeddings + vector stores + retrieval
+  plumbing deleted (no consumer, none planned); model listing kept
+  (cassette-covered, the planned registry consumer); telemetry trimmed
+  to bare identity spans (the GenAI conventions module and the
+  content-recording opt-in are gone).
 
 ## Deferred round 2: engine surface trims + test review (2026-08)
 

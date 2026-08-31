@@ -15,7 +15,6 @@ use crate::providers::openai::responses_api::{
 };
 use crate::streaming;
 use crate::streaming::RawStreamingChoice;
-use crate::telemetry::{CompletionOperation, CompletionSpanBuilder};
 use crate::wasm_compat::WasmCompatSend;
 use async_stream::stream;
 use futures::StreamExt;
@@ -1073,11 +1072,6 @@ impl WireAdapter for ResponsesAdapter {
             }
             StreamingCompletionChunk::Response(chunk) => {
                 let ResponseChunk { kind, response, .. } = *chunk;
-                if matches!(kind, ResponseChunkKind::ResponseCompleted) {
-                    let span = tracing::Span::current();
-                    span.record("gen_ai.response.id", response.id.as_str());
-                    span.record("gen_ai.response.model", response.model.as_str());
-                }
                 if let Err(error) = self
                     .accumulator
                     .record_response_chunk(kind, response, &event.raw)
@@ -1361,8 +1355,6 @@ where
         &self,
         completion_request: crate::completion::CompletionRequest,
     ) -> Result<streaming::RawStreamingResult<StreamingCompletionResponse>, CompletionError> {
-        let system_instructions = completion_request.preamble.clone();
-        let record_telemetry_content = completion_request.record_telemetry_content;
         let mut request = self.create_completion_request(completion_request)?;
         request.stream = Some(true);
 
@@ -1382,13 +1374,13 @@ where
             .body(body)
             .map_err(|e| CompletionError::HttpError(e.into()))?;
 
-        let span = CompletionSpanBuilder::new(
-            Ext::PROVIDER_NAME,
-            &request.model,
-            CompletionOperation::ChatStreaming,
-        )
-        .system_instructions(system_instructions.as_deref(), record_telemetry_content)
-        .build();
+        let span = tracing::info_span!(
+            target: "rig::completions",
+            "chat_streaming",
+            gen_ai.operation.name = "chat_streaming",
+            gen_ai.provider.name = Ext::PROVIDER_NAME,
+            gen_ai.request.model = %request.model,
+        );
         let client = self.client.clone();
         let event_source = GenericEventSource::new(client, req);
 

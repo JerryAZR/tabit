@@ -675,25 +675,6 @@ pub struct CompletionRequest {
     pub tool_choice: Option<ToolChoice>,
     /// Additional provider-specific parameters to be sent to the completion model provider
     pub additional_params: Option<serde_json::Value>,
-    /// Whether to record sensitive request, response, and tool content on GenAI
-    /// telemetry spans.
-    ///
-    /// Defaults to `false`. Enabling this can expose prompts, retrieved context,
-    /// tool results, model responses, and other sensitive or high-cardinality data
-    /// through OpenTelemetry span attributes, which can increase observability
-    /// backend storage and query costs. Only enable it when the caller has
-    /// explicitly opted in to content telemetry.
-    ///
-    /// Higher-level agent drivers use this flag for portable input, output, and
-    /// tool-content telemetry. Direct provider calls only forward the policy;
-    /// the exact content fields available there are provider- and
-    /// surface-dependent, especially for streaming responses that are consumed
-    /// after the provider returns.
-    ///
-    /// This is local observability policy and is never serialized into provider
-    /// request payloads.
-    #[serde(skip)]
-    pub record_telemetry_content: bool,
 }
 
 impl CompletionRequest {
@@ -851,7 +832,6 @@ pub struct CompletionRequestBuilder<M: CompletionModel> {
     max_tokens: Option<u64>,
     tool_choice: Option<ToolChoice>,
     additional_params: Option<serde_json::Value>,
-    record_telemetry_content: bool,
 }
 
 impl<M: CompletionModel> CompletionRequestBuilder<M> {
@@ -869,7 +849,6 @@ impl<M: CompletionModel> CompletionRequestBuilder<M> {
             max_tokens: None,
             tool_choice: None,
             additional_params: None,
-            record_telemetry_content: false,
         }
     }
 
@@ -1009,44 +988,6 @@ impl<M: CompletionModel> CompletionRequestBuilder<M> {
         self
     }
 
-    /// Opt in or out of recording sensitive request, response, and tool content
-    /// on GenAI telemetry spans for this request.
-    ///
-    /// Defaults to `false`. Enabling this can expose prompts, retrieved context,
-    /// tool results, model responses, and other sensitive or high-cardinality data
-    /// through OpenTelemetry span attributes, which can increase observability
-    /// backend storage and query costs. Only enable it when content telemetry is
-    /// acceptable for this request. Structural metadata and token
-    /// usage remain available when this is disabled.
-    ///
-    /// This low-level builder only stores the opt-in on the built request. It
-    /// does not guarantee portable input/output message fields for direct model
-    /// calls; exact coverage is provider- and surface-dependent. Agent APIs own
-    /// normalized input/output recording and provide the consistent surface.
-    pub fn record_content_telemetry(mut self, enabled: bool) -> Self {
-        self.record_telemetry_content = enabled;
-        self
-    }
-
-    /// Returns the normalized input messages used by runtime telemetry.
-    pub fn messages_for_telemetry(&self) -> Vec<Message> {
-        let mut chat_history = self.chat_history.clone();
-        if let Some(preamble) = &self.preamble {
-            chat_history.insert(0, Message::system(preamble.clone()));
-        }
-        chat_history.push(self.prompt.clone());
-
-        if let Some(documents) = CompletionRequest::normalized_documents_from(&self.documents) {
-            let insert_at = chat_history
-                .iter()
-                .position(|message| !matches!(message, Message::System { .. }))
-                .unwrap_or(chat_history.len());
-            chat_history.insert(insert_at, documents);
-        }
-
-        chat_history
-    }
-
     /// Builds the completion request.
     pub fn build(self) -> CompletionRequest {
         self.into_model_and_request().1
@@ -1085,7 +1026,6 @@ impl<M: CompletionModel> CompletionRequestBuilder<M> {
             max_tokens: self.max_tokens,
             tool_choice: self.tool_choice,
             additional_params,
-            record_telemetry_content: self.record_telemetry_content,
         };
         (model, request)
     }
@@ -1261,73 +1201,12 @@ mod tests {
     use super::*;
     use crate::test_utils::MockCompletionModel;
 
-    #[test]
-    fn completion_request_content_telemetry_is_opt_in_and_not_serialized() {
-        let default_request =
-            CompletionRequestBuilder::new(MockCompletionModel::default(), "completion prompt")
-                .build();
-        assert!(!default_request.record_telemetry_content);
-
-        let default_json = serde_json::to_value(&default_request).expect("serialize request");
-        assert!(
-            default_json.get("record_telemetry_content").is_none(),
-            "safe default should not serialize the telemetry opt-in field"
-        );
-        let default_roundtrip: CompletionRequest =
-            serde_json::from_value(default_json).expect("deserialize default request");
-        assert!(!default_roundtrip.record_telemetry_content);
-
-        let opt_in_request =
-            CompletionRequestBuilder::new(MockCompletionModel::default(), "completion prompt")
-                .record_content_telemetry(true)
-                .build();
-        assert!(opt_in_request.record_telemetry_content);
-
-        let opt_in_json = serde_json::to_value(&opt_in_request).expect("serialize opt-in request");
-        assert!(
-            opt_in_json.get("record_telemetry_content").is_none(),
-            "local telemetry policy must not be serialized into provider requests"
-        );
-        let legacy_roundtrip: CompletionRequest =
-            serde_json::from_value(opt_in_json).expect("deserialize legacy request");
-        assert!(
-            !legacy_roundtrip.record_telemetry_content,
-            "missing field should deserialize to the safe default"
-        );
-    }
-
     fn test_document(id: &str, text: &str) -> Document {
         Document {
             id: id.to_string(),
             text: text.to_string(),
             additional_props: HashMap::new(),
         }
-    }
-
-    #[test]
-    fn message_telemetry_includes_normalized_documents() {
-        let builder = CompletionRequestBuilder::new(MockCompletionModel::default(), "prompt")
-            .preamble("system".to_string())
-            .message(Message::user("history"))
-            .document(test_document("doc1", "static context secret"));
-
-        let messages = builder.messages_for_telemetry();
-        assert_eq!(messages.len(), 4);
-        assert!(matches!(messages[0], Message::System { .. }));
-        assert!(is_document_message(&messages[1], "doc1"));
-        assert!(matches!(
-            &messages[2],
-            Message::User { content }
-                if matches!(content.first(), UserContent::Text(text) if text.text == "history")
-        ));
-        assert!(matches!(
-            &messages[3],
-            Message::User { content }
-                if matches!(content.first(), UserContent::Text(text) if text.text == "prompt")
-        ));
-
-        let request = builder.build();
-        assert_eq!(messages, request.chat_history_with_documents());
     }
 
     fn is_document_message(message: &Message, expected_id: &str) -> bool {
@@ -1401,7 +1280,6 @@ mod tests {
             max_tokens: None,
             tool_choice: None,
             additional_params: None,
-            record_telemetry_content: false,
         };
 
         let expected = Message::User {
@@ -1433,7 +1311,6 @@ mod tests {
             max_tokens: None,
             tool_choice: None,
             additional_params: None,
-            record_telemetry_content: false,
         };
 
         assert_eq!(request.normalized_documents(), None);
@@ -1558,7 +1435,6 @@ mod tests {
             max_tokens: None,
             tool_choice: None,
             additional_params: None,
-            record_telemetry_content: false,
         };
 
         assert_eq!(request.documents.len(), 1);
@@ -1591,7 +1467,6 @@ mod tests {
             max_tokens: None,
             tool_choice: None,
             additional_params: None,
-            record_telemetry_content: false,
         };
 
         let history = request.chat_history_with_documents();
@@ -1628,7 +1503,6 @@ mod tests {
             max_tokens: None,
             tool_choice: None,
             additional_params: None,
-            record_telemetry_content: false,
         };
 
         let history = request.chat_history_with_documents();
@@ -1812,7 +1686,6 @@ mod tests {
             max_tokens: None,
             tool_choice: None,
             additional_params: None,
-            record_telemetry_content: false,
         }
     }
 

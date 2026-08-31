@@ -279,7 +279,7 @@ machinery, and no pending slot anywhere.
 `Message`'s `id` (minted by the engine from the injected id source,
 announced by `TurnStarted` before the first content byte) is the id
 the loop's own fold commits — the provider-assigned message id never
-enters the tree (it is telemetry metadata only). `TurnStarted { id }
+enters the tree (provider bookkeeping only; tabit's ids are its own). `TurnStarted { id }
 … TurnCommitted { id }` bracket a turn for live and replay alike; an
 attempt that dies leaves its announced id uncommitted.
 **`TurnCommitted` is the sole commit event** — final folds and

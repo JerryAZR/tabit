@@ -1218,7 +1218,7 @@ a resample, and the two must not be conflated.
 ### 22. Discarded-attempt usage never reaches the session log — RESOLVED (shipped: `discarded` side record)
 
 The engine keeps a discarded turn's completion-call usage (the tokens
-were spent; telemetry sees them), but the log recorded nothing —
+were spent; the run ledger counts them), but the log recorded nothing —
 `RecorderHook` fired only at `on_model_turn_finished`, which a
 discarded turn never reaches — so `fold_stats` undercounted real spend
 whenever a retry happened. Live providers bill the defective turn.
@@ -1423,7 +1423,8 @@ architecture, and the reference survey showed why none will: pi's
 run ids exist for hook-replay idempotency (tabit never replays
 hooks), codex's turn ids feed the frontend projection (tabit's
 announced turn ids already do, through the protocol), and the rest
-is telemetry (the spans carry it). `HookContext` is now exactly what
+was dashboard telemetry tabit ruled not to ship (spans carry identity
+only). `HookContext` is now exactly what
 the tool pair consumes: the announced turn id, the unified
 capability map, and the rewrite-chaining frames. Re-addable if a
 consumer ever appears.
