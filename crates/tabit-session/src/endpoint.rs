@@ -228,7 +228,7 @@ impl Worker {
                 // question: the next run open derives the agent, and
                 // every pass announces the cell.
                 self.model_register.write(selection.clone());
-                announce_model(&selection, &self.notices);
+                self.notices.emit(SessionEvent::model_changed(&selection));
             }
             // Lifecycle is not session-scoped — the router forwards
             // those to the lifecycle handler. Unreachable by
@@ -865,18 +865,6 @@ fn spawn_worker(
     )
 }
 
-/// The register announcement: a `model_changed` carrying a selection —
-/// at every receive-time write (the `model` command's own outcome) and
-/// before every replay pass (a session becoming visible always tells
-/// its model). One construction site, two askers.
-fn announce_model(selection: &ModelSelection, notices: &NoticeSink) {
-    notices.emit(SessionEvent::ModelChanged {
-        provider: selection.provider.clone(),
-        model: selection.model.clone(),
-        thinking_level: selection.thinking_level.clone(),
-    });
-}
-
 /// Execute the parked checkout at a pause point: rewind the chain,
 /// announce, re-render. The discard already happened at receive (the
 /// handler's clear); an execution-time failure - the rewind cannot
@@ -912,19 +900,17 @@ fn execute_checkout(
 /// into finalized live events, bracketed. One emission path for its
 /// askers — the transport's replay request, checkout's re-render, and
 /// the open_session boot pass — each led by the register announcement
-/// ([`announce_model`], shared with the applied model switch): a
-/// session becoming visible (boot, open, re-replay, checkout) always
-/// tells the frontend its active selection. Idempotent by
-/// construction — a pass never moves the register, so the value
+/// ([`SessionEvent::model_changed`], shared with the applied model
+/// switch): a session becoming visible (boot, open, re-replay,
+/// checkout) always tells the frontend its active selection. Idempotent
+/// by construction — a pass never moves the register, so the value
 /// repeats; replayed history itself never carries `model_changed` (the
 /// register ruling: state is announced live, not reconstructed).
 fn emit_replay(session: &Session, event_tx: &mpsc::UnboundedSender<EventFrame>, stream: &StreamId) {
-    // The worker holds the strong end for the pass itself, so this
-    // sink's upgrade cannot fail here.
-    announce_model(
-        &session.selection(),
-        &NoticeSink::new(event_tx, stream.clone()),
-    );
+    let _ = event_tx.send(EventFrame {
+        stream: Some(stream.clone()),
+        event: SessionEvent::model_changed(&session.selection()),
+    });
     let events = session.replay_events();
     let total = events.len() as u64;
     let _ = event_tx.send(EventFrame {

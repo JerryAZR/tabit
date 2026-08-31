@@ -361,6 +361,19 @@ impl SessionEvent {
             pending: None,
         }
     }
+
+    /// The register announcement: a `model_changed` carrying a
+    /// selection — at every receive-time write (the `model` command's
+    /// own outcome) and before every replay pass (a session becoming
+    /// visible always tells its model). One construction site for both
+    /// the weak notice path and the worker's strong sends.
+    pub fn model_changed(selection: &ModelSelection) -> Self {
+        Self::ModelChanged {
+            provider: selection.provider.clone(),
+            model: selection.model.clone(),
+            thinking_level: selection.thinking_level.clone(),
+        }
+    }
 }
 
 /// The well-known `error` event kinds. Open on purpose: an unknown kind
