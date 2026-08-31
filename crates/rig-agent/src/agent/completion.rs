@@ -238,10 +238,6 @@ pub struct Agent {
     /// Default hook stack applied to every prompt request and runner created
     /// from this agent. Empty by default.
     pub(crate) hooks: HookStack,
-    /// Optional conversation memory backend that loads/saves history per conversation id.
-    pub(crate) memory: Option<Arc<dyn rig_core::memory::ConversationMemory>>,
-    /// Optional default conversation id used when none is set per-request.
-    pub(crate) default_conversation_id: Option<String>,
 }
 
 impl Agent {

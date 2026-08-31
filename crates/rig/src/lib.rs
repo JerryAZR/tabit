@@ -31,7 +31,7 @@
 //!
 //! Depend on the `rig-core` package directly when you only need the core Rig
 //! implementation crate, including provider abstractions, built-in core
-//! providers, tools, memory traits, and vector-store traits, without the root
+//! providers, tools, and vector-store traits, without the root
 //! facade's companion integration feature surface.
 
 pub use rig_core::*;
@@ -158,11 +158,3 @@ pub use rig_derive::rig_tool;
 #[cfg(feature = "derive")]
 #[cfg_attr(docsrs, doc(cfg(feature = "derive")))]
 pub use rig_derive::rig_tool as tool_macro;
-
-/// Conversation memory APIs.
-///
-/// This module is always available and re-exports the core memory traits and
-/// in-process backend from `rig_core::memory`.
-pub mod memory {
-    pub use rig_core::memory::*;
-}

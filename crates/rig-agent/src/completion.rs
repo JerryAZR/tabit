@@ -2,10 +2,7 @@
 
 use thiserror::Error;
 
-use rig_core::{
-    memory::MemoryError,
-    wasm_compat::{WasmCompatSend, WasmCompatSync},
-};
+use rig_core::wasm_compat::{WasmCompatSend, WasmCompatSync};
 
 pub use rig_core::completion::*;
 
@@ -16,10 +13,6 @@ pub enum PromptError {
     /// A provider completion failed.
     #[error("CompletionError: {0}")]
     CompletionError(#[from] CompletionError),
-
-    /// Conversation memory failed to load or persist history.
-    #[error("MemoryError: {0}")]
-    MemoryError(#[from] MemoryError),
 
     /// The run exhausted its total model-call budget.
     #[error("MaxTurnsError: reached max turns limit: {max_turns}")]

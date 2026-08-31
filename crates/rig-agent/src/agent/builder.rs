@@ -1,8 +1,6 @@
 use std::{collections::HashMap, sync::Arc};
 
-use rig_core::{
-    memory::ConversationMemory, message::ToolChoice, vector_store::VectorStoreIndexDyn,
-};
+use rig_core::{message::ToolChoice, vector_store::VectorStoreIndexDyn};
 
 use crate::{
     agent::hook::{AgentHook, HookStack},
@@ -121,10 +119,6 @@ pub struct AgentBuilder<ToolState = NoToolConfig> {
     tool_state: ToolState,
     /// Default hook stack applied to every prompt request from the built agent.
     hooks: HookStack,
-    /// Optional conversation memory backend that loads/saves history per conversation id.
-    memory: Option<Arc<dyn ConversationMemory>>,
-    /// Optional default conversation id used when none is set per-request.
-    default_conversation_id: Option<String>,
 }
 
 impl<ToolState> AgentBuilder<ToolState> {
@@ -213,30 +207,6 @@ impl<ToolState> AgentBuilder<ToolState> {
         self
     }
 
-    /// Attach a [`ConversationMemory`] backend.
-    ///
-    /// When set, the agent will automatically load prior conversation history before
-    /// each prompt and append the new turn after a successful response. A
-    /// `conversation_id` must be supplied either via [`AgentBuilder::conversation`]
-    /// or per-request via [`crate::agent::prompt_request::PromptRequest::conversation`].
-    /// If neither is set, memory is silently bypassed.
-    pub fn memory<B>(mut self, memory: B) -> Self
-    where
-        B: ConversationMemory + 'static,
-    {
-        self.memory = Some(Arc::new(memory));
-        self
-    }
-
-    /// Set a default conversation id used when none is provided per-request.
-    ///
-    /// Most agents are reused across users or threads; prefer setting the id
-    /// per-request via [`crate::agent::prompt_request::PromptRequest::conversation`].
-    pub fn conversation(mut self, id: impl Into<String>) -> Self {
-        self.default_conversation_id = Some(id.into());
-        self
-    }
-
     /// Attach a default hook to the agent. Each call appends to the agent's hook
     /// stack; hooks run for every prompt request (unless more are added per
     /// request) in registration order. How their results compose is
@@ -282,8 +252,6 @@ impl AgentBuilder<NoToolConfig> {
             default_max_turns: None,
             tool_state: NoToolConfig,
             hooks: HookStack::new(),
-            memory: None,
-            default_conversation_id: None,
         }
     }
 }
@@ -312,8 +280,6 @@ impl AgentBuilder<NoToolConfig> {
             default_max_turns: self.default_max_turns,
             tool_state: WithToolServerHandle { handle },
             hooks: self.hooks,
-            memory: self.memory,
-            default_conversation_id: self.default_conversation_id,
         }
     }
 
@@ -344,8 +310,6 @@ impl AgentBuilder<NoToolConfig> {
                 retrieval_indexes: vec![],
             },
             hooks: self.hooks,
-            memory: self.memory,
-            default_conversation_id: self.default_conversation_id,
         }
     }
 
@@ -382,8 +346,6 @@ impl AgentBuilder<NoToolConfig> {
             tool_choice: self.tool_choice,
             default_max_turns: self.default_max_turns,
             hooks: self.hooks,
-            memory: self.memory,
-            default_conversation_id: self.default_conversation_id,
             tool_state: WithBuilderTools {
                 tools,
                 retrieval_indexes: vec![],
@@ -475,8 +437,6 @@ impl AgentBuilder<NoToolConfig> {
             tool_choice: self.tool_choice,
             default_max_turns: self.default_max_turns,
             hooks: self.hooks,
-            memory: self.memory,
-            default_conversation_id: self.default_conversation_id,
             tool_state: WithBuilderTools {
                 tools: {
                     let mut set = ToolSet::default();
@@ -514,8 +474,6 @@ impl AgentBuilder<NoToolConfig> {
             tool_choice: self.tool_choice,
             default_max_turns: self.default_max_turns,
             hooks: self.hooks,
-            memory: self.memory,
-            default_conversation_id: self.default_conversation_id,
             tool_state: WithBuilderTools {
                 tools,
                 retrieval_indexes: vec![(sample, Arc::new(index))],
@@ -543,8 +501,6 @@ impl AgentBuilder<NoToolConfig> {
             tool_server_handle,
             default_max_turns: self.default_max_turns,
             hooks: self.hooks,
-            memory: self.memory,
-            default_conversation_id: self.default_conversation_id,
         }
     }
 }
@@ -566,8 +522,6 @@ impl AgentBuilder<WithToolServerHandle> {
             tool_server_handle: self.tool_state.handle,
             default_max_turns: self.default_max_turns,
             hooks: self.hooks,
-            memory: self.memory,
-            default_conversation_id: self.default_conversation_id,
         }
     }
 }
@@ -680,8 +634,6 @@ impl AgentBuilder<WithBuilderTools> {
             tool_server_handle,
             default_max_turns: self.default_max_turns,
             hooks: self.hooks,
-            memory: self.memory,
-            default_conversation_id: self.default_conversation_id,
         }
     }
 }

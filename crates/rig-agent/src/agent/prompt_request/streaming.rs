@@ -223,12 +223,6 @@ pub enum StreamingError {
     Prompt(#[from] Box<PromptError>),
 }
 
-impl From<rig_core::memory::MemoryError> for StreamingError {
-    fn from(err: rig_core::memory::MemoryError) -> Self {
-        Self::Prompt(Box::new(PromptError::MemoryError(err)))
-    }
-}
-
 /// A builder for creating prompt requests with customizable options.
 /// Uses generics to track which options have been set during the build process.
 ///

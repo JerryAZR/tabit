@@ -78,17 +78,6 @@
 //!
 //! Indexes can also serve custom architectures that use multiple LLMs or agents.
 //!
-//! ## Conversation memory
-//! Runtimes can load and persist per-conversation history through the
-//! [ConversationMemory](crate::memory::ConversationMemory) trait. The classic
-//! `rig-agent` runtime integrates this portable backend contract.
-//! The default in-process backend
-//! [InMemoryConversationMemory](crate::memory::InMemoryConversationMemory) is suitable
-//! for tests and single-process agents; reusable history-shaping policies (sliding
-//! window, token budget) live in the [`rig-memory`](https://crates.io/crates/rig-memory)
-//! companion crate. See [`examples/agent_with_memory.rs`](https://github.com/0xPlaygrounds/rig/blob/main/examples/agent_with_memory.rs)
-//! for a runnable end-to-end example.
-//!
 //! # Integrations
 //! ## Model Providers
 //! The workspace keeps two provider integrations:
@@ -113,7 +102,6 @@ pub mod id;
 #[doc(hidden)]
 pub mod json_utils;
 pub mod markers;
-pub mod memory;
 pub mod model;
 pub mod one_or_many;
 pub mod prelude;

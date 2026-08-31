@@ -146,23 +146,6 @@ macro_rules! forward_prompt_setters {
             self
         }
 
-        /// Set the conversation id used to load and persist memory for this request.
-        ///
-        /// Overrides any default conversation id set on the agent. If memory is not
-        /// configured on the agent, this has no effect.
-        pub fn conversation(mut self, id: impl Into<String>) -> Self {
-            self.$recv = self.$recv.conversation(id);
-            self
-        }
-
-        /// Disable conversation memory for this request.
-        ///
-        /// History will neither be loaded from nor saved to the agent's memory backend.
-        pub fn without_memory(mut self) -> Self {
-            self.$recv = self.$recv.without_memory();
-            self
-        }
-
         /// Set the default model candidate for this run.
         ///
         /// This does not suppress registered model-selection hooks, which may

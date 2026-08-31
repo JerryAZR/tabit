@@ -30,9 +30,7 @@ use crate::{
             streaming::{MultiTurnStreamItem, StreamingError},
         },
         run::{ModelTurn, PendingToolCall, ProviderErrorClass, RunLedger},
-        runner::{
-            AgentRunner, ToolExecution, append_run_messages, new_execute_tool_span, run_single_tool,
-        },
+        runner::{AgentRunner, ToolExecution, new_execute_tool_span, run_single_tool},
     },
     completion::{CompletionError, Message, PromptError},
     streaming::{StreamedAssistantContent, StreamedUserContent},
@@ -262,7 +260,6 @@ pub(crate) fn drive_agent<'a, S>(
     conversation: &'a ConversationCell,
     agent_span: tracing::Span,
     created_agent_span: bool,
-    memory_handle: Option<(Arc<dyn rig_core::memory::ConversationMemory>, String)>,
 ) -> impl Stream<Item = Result<DriveItem, StreamingError>> + 'a
 where
     S: TurnSource + 'a,
@@ -630,11 +627,6 @@ where
                     "Agent run finished"
                 );
                 source.record_run_level_telemetry(&agent_span, &response, created_agent_span);
-                append_run_messages(
-                    memory_handle.as_ref(),
-                    response.messages.as_deref().unwrap_or_default(),
-                )
-                .await;
                 if let Some(final_item) = source.final_item(&response) {
                     yield Ok(DriveItem::Item(final_item));
                 }

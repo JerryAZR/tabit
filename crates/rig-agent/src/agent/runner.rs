@@ -49,7 +49,6 @@ use super::{
     run::{ModelTurn, PendingToolCall, RunLedger},
 };
 use rig_core::{
-    memory::ConversationMemory,
     message::{ToolCall, ToolChoice, UserContent},
     wasm_compat::{WasmCompatSend, WasmCompatSync},
 };
@@ -204,8 +203,6 @@ pub struct AgentRunner {
     pub(crate) tool_context: ToolContext,
     pub(crate) tool_choice: Option<ToolChoice>,
     pub(crate) concurrency: usize,
-    pub(crate) memory: Option<Arc<dyn ConversationMemory>>,
-    pub(crate) conversation_id: Option<String>,
     pub(crate) hooks: HookStack,
     pub(crate) error_usage: Option<Arc<Mutex<Usage>>>,
     /// Queued user input injected at steering points; `None` disables
@@ -259,8 +256,6 @@ impl AgentRunner {
             tool_context: ToolContext::new(),
             tool_choice: agent.tool_choice.clone(),
             concurrency: 1,
-            memory: agent.memory.clone(),
-            conversation_id: agent.default_conversation_id.clone(),
             hooks: agent.hooks.clone(),
             error_usage: None,
             steering: None,
@@ -488,19 +483,6 @@ impl AgentRunner {
         self
     }
 
-    /// Set the conversation id used to load and persist memory for this run.
-    pub fn conversation(mut self, id: impl Into<String>) -> Self {
-        self.conversation_id = Some(id.into());
-        self
-    }
-
-    /// Disable conversation memory for this run (no load, no save).
-    pub fn without_memory(mut self) -> Self {
-        self.memory = None;
-        self.conversation_id = None;
-        self
-    }
-
     pub(crate) fn agent_name_or_default(&self) -> &str {
         self.agent_name.as_deref().unwrap_or(UNKNOWN_AGENT_NAME)
     }
@@ -508,13 +490,9 @@ impl AgentRunner {
     /// Build this runner's conversation cell: the caller-supplied
     /// durable manager when one was set ([`Self::conversation_cell`]) —
     /// the loop's folds are the durable commits — else a fresh seeded
-    /// standalone one over a `NullBuffer` (nothing persists).
-    /// `history_override` replaces the configured chat history for the
-    /// seeded case only (a supplied cell IS its history).
-    pub(crate) fn build_run(
-        &self,
-        history_override: Option<Vec<Message>>,
-    ) -> Result<tabit_log::ConversationCell, PromptError> {
+    /// standalone one over a `NullBuffer` (nothing persists), seeded
+    /// from the configured chat history when one exists.
+    pub(crate) fn build_run(&self) -> Result<tabit_log::ConversationCell, PromptError> {
         if let Some(cell) = &self.conversation_cell {
             if self.max_turns == 0 {
                 return Err(PromptError::prompt_cancelled(
@@ -534,9 +512,7 @@ impl AgentRunner {
         // the request IS the history, no prompt/context split).
         let history = match &self.input {
             RunInput::Prompt(message) => {
-                let mut history = self
-                    .configured_history(history_override)
-                    .unwrap_or_default();
+                let mut history = self.chat_history.clone().unwrap_or_default();
                 history.push(message.clone());
                 history
             }
@@ -561,18 +537,6 @@ impl AgentRunner {
         Ok(std::sync::Arc::new(std::sync::RwLock::new(
             ContextManager::seeded(history),
         )))
-    }
-
-    /// The run's input history for prompt mode: an override (memory) or
-    /// the configured chat history, if either exists.
-    fn configured_history(&self, history_override: Option<Vec<Message>>) -> Option<Vec<Message>> {
-        history_override.or_else(|| self.chat_history.clone())
-    }
-
-    /// Whether the caller supplied the conversation explicitly (chat
-    /// history or a conversation input): memory is fully bypassed then.
-    pub(crate) fn has_explicit_history(&self) -> bool {
-        self.chat_history.is_some() || matches!(self.input, RunInput::Conversation(_))
     }
 }
 
@@ -608,25 +572,6 @@ pub(crate) fn acquire_agent_span(
         (span, true)
     } else {
         (tracing::Span::current(), false)
-    }
-}
-
-/// Append a finished run's messages to conversation memory, logging and
-/// proceeding on failure. Shared `Done`-arm behavior for both drivers.
-pub(crate) async fn append_run_messages(
-    memory_handle: Option<&(Arc<dyn ConversationMemory>, String)>,
-    messages: &[Message],
-) {
-    // Clone into an owned vec only when there is a backend to append to — the
-    // common no-memory path pays nothing.
-    if let Some((memory, id)) = memory_handle
-        && let Err(err) = memory.append(id, messages.to_vec()).await
-    {
-        tracing::warn!(
-            error = %err,
-            conversation_id = %id,
-            "conversation memory append failed; surfacing final response anyway"
-        );
     }
 }
 
@@ -1035,22 +980,7 @@ impl AgentRunner {
             agent_span.record("gen_ai.prompt", text);
         }
 
-        // When the caller passes explicit history, memory is fully bypassed for
-        // this run (no load AND no save). Otherwise, if a memory backend and
-        // conversation id are both configured, load prior history.
-        let (history_override, memory_handle) = if self.has_explicit_history() {
-            (None, None)
-        } else {
-            match (&self.memory, &self.conversation_id) {
-                (Some(memory), Some(id)) => {
-                    let loaded = memory.load(id).await?;
-                    (Some(loaded), Some((memory.clone(), id.clone())))
-                }
-                _ => (None, None),
-            }
-        };
-
-        let conversation = self.build_run(history_override)?;
+        let conversation = self.build_run()?;
 
         // Fold the shared engine to its final response. The blocking surface
         // uses a unary model transport and ignores the intermediate items the
@@ -1064,7 +994,6 @@ impl AgentRunner {
             &conversation,
             agent_span,
             created_agent_span,
-            memory_handle,
         );
         futures::pin_mut!(driver);
 
@@ -1111,37 +1040,10 @@ impl AgentRunner {
             agent_span.record("gen_ai.prompt", text);
         }
 
-        // When the caller passes explicit history, memory is fully bypassed for
-        // this request (no load AND no save). Otherwise, if a memory backend and
-        // conversation id are both configured, load prior history.
-        let (history_override, memory_handle) = if self.has_explicit_history() {
-            (None, None)
-        } else {
-            match (&self.memory, &self.conversation_id) {
-                (Some(memory), Some(id)) => match memory.load(id).await {
-                    Ok(loaded) => (Some(loaded), Some((memory.clone(), id.clone()))),
-                    Err(err) => {
-                        let stream = async_stream::stream! {
-                            yield Err(StreamingError::from(err));
-                        };
-                        // Instrument under the agent span like the success path so
-                        // a load failure stays tied to invoke_agent.
-                        // (`tracing_futures::Instrument` — the stream trait, not
-                        // the futures-only `tracing::Instrument` above.)
-                        return Box::pin(tracing_futures::Instrument::instrument(
-                            stream,
-                            agent_span.clone(),
-                        ));
-                    }
-                },
-                _ => (None, None),
-            }
-        };
-
         // The conversation cell this run folds (supplied durable
         // manager, or the stream-owned standalone twin); a build
         // failure surfaces as the stream's first and only item.
-        let conversation = match self.build_run(history_override) {
+        let conversation = match self.build_run() {
             Ok(conversation) => conversation,
             Err(err) => {
                 let stream = async_stream::stream! {
@@ -1172,7 +1074,6 @@ impl AgentRunner {
                 &conversation,
                 loop_span,
                 created_agent_span,
-                memory_handle,
             );
             futures::pin_mut!(driver);
             while let Some(item) = driver.next().await {
