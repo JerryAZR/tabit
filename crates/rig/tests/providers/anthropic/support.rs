@@ -34,19 +34,6 @@ where
     cassette.finish_after_test(result).await;
 }
 
-pub(super) async fn with_anthropic_cassette_result<F, Fut, E>(
-    spec: impl Into<CassetteSpec>,
-    test_body: F,
-) -> Result<(), E>
-where
-    F: FnOnce(anthropic::Client) -> Fut,
-    Fut: Future<Output = Result<(), E>>,
-{
-    let (cassette, client) = anthropic_cassette(spec).await;
-    let result = AssertUnwindSafe(test_body(client)).catch_unwind().await;
-    cassette.finish_after_test_result(result).await
-}
-
 pub(super) async fn with_anthropic_files_cassette<F, Fut>(
     spec: impl Into<CassetteSpec>,
     beta_header: &'static str,

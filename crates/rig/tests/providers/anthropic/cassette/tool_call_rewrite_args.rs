@@ -11,7 +11,6 @@
 use std::sync::{Arc, Mutex};
 
 use rig::agent::{AgentHook, ToolCall as ToolCallEvent, ToolCallAction};
-use rig::completion::Prompt;
 use rig::prelude::*;
 use rig::streaming::StreamingPrompt;
 use rig::tool::Tool;
@@ -137,36 +136,6 @@ fn assert_units_were_injected(observations: &[ObservedCall]) {
         &json!({ "units": "celsius" }),
     )
     .expect("portable argument-rewrite contract should hold");
-}
-
-#[tokio::test]
-async fn tool_call_args_rewritten_by_hook_blocking() {
-    let weather = GetWeather::default();
-    let probe = weather.clone();
-
-    with_anthropic_cassette(
-        "tool_call_rewrite_args/tool_call_args_rewritten_by_hook_blocking",
-        move |client| async move {
-            let agent = client
-                .agent("claude-sonnet-4-6")
-                .preamble("You are a weather assistant. Always use the get_weather tool to answer.")
-                .tool(weather)
-                .add_hook(PinUnitsToCelsius)
-                .max_tokens(64_000)
-                .build();
-
-            let response = agent
-                .prompt(WEATHER_PROMPT)
-                .max_turns(5)
-                .await
-                .expect("weather prompt should succeed");
-
-            assert!(!response.is_empty(), "agent should produce a final answer");
-        },
-    )
-    .await;
-
-    assert_units_were_injected(&probe.observations());
 }
 
 #[tokio::test]

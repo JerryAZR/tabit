@@ -381,6 +381,57 @@ pub(crate) fn assert_weather_tool_roundtrip_response(
     );
 }
 
+/// Drive one streaming agent prompt to its assistant text — the facade's
+/// one execution surface, folded for the smoke suites that assert on the
+/// final output.
+pub(crate) async fn prompt_text(
+    agent: &rig::agent::Agent,
+    prompt: impl Into<rig::message::Message> + Send,
+) -> anyhow::Result<String> {
+    use futures::StreamExt;
+    use rig::agent::MultiTurnStreamItem;
+    use rig::prelude::StreamingPrompt as _;
+
+    let mut stream = agent.stream_prompt(prompt).await;
+    while let Some(item) = stream.next().await {
+        if let Ok(MultiTurnStreamItem::FinalResponse(response)) = item {
+            return Ok(response.output);
+        }
+    }
+    anyhow::bail!("internal invariant violated: the agent stream ended without a final response")
+}
+
+/// Fold a configured streaming run over its final response — the one
+/// execution surface, folded for the suites that assert on the outcome.
+pub(crate) async fn fold_response(
+    request: rig::agent::StreamingPromptRequest,
+) -> anyhow::Result<rig::agent::PromptResponse> {
+    use futures::StreamExt;
+    use rig::agent::MultiTurnStreamItem;
+
+    let mut stream = request.await;
+    while let Some(item) = stream.next().await {
+        if let Ok(MultiTurnStreamItem::FinalResponse(response)) = item {
+            return Ok(response);
+        }
+    }
+    anyhow::bail!("internal invariant violated: the agent stream ended without a final response")
+}
+
+/// Drive one streaming agent prompt to its assistant text, under an
+/// explicit model-call budget.
+pub(crate) async fn prompt_text_with_turns(
+    agent: &rig::agent::Agent,
+    prompt: impl Into<rig::message::Message> + Send,
+    max_turns: usize,
+) -> anyhow::Result<String> {
+    fold_response(
+        rig::agent::StreamingPromptRequest::from_agent(agent, prompt).max_turns(max_turns),
+    )
+    .await
+    .map(|response| response.output)
+}
+
 pub(crate) fn assert_nonempty_bytes(bytes: &[u8]) {
     assert!(!bytes.is_empty(), "Expected non-empty bytes.");
 }

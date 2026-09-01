@@ -7,17 +7,7 @@
 //!
 //! Run cassette tests in replay mode by default, or set
 //! `RIG_PROVIDER_TEST_MODE=record` to record against the real provider.
-
-fn test_cell(prompt: &str) -> tabit_log::ConversationCell {
-    std::sync::Arc::new(std::sync::RwLock::new(tabit_log::ContextManager::seeded(
-        vec![Message::user(prompt)],
-    )))
-}
-
-fn cell_conversation(cell: &tabit_log::ConversationCell) -> Vec<Message> {
-    tabit_log::lock::read(cell).messages()
-}
-use rig::completion::{CompletionModel, Message, ToolDefinition};
+use rig::completion::{CompletionModel, ToolDefinition};
 use rig::message::AssistantContent;
 use rig::prelude::*;
 use rig::tool::Tool;
@@ -215,52 +205,6 @@ async fn zero_argument_tool_call_nonstreaming() {
                 json!({}),
                 "zero-argument tool calls should surface empty-object arguments"
             );
-        },
-    )
-    .await;
-}
-
-#[tokio::test]
-async fn nested_arguments_roundtrip_nonstreaming() {
-    with_openai_cassette(
-        "responses_tool_args/nested_arguments_roundtrip_nonstreaming",
-        |client| async move {
-            let agent = client
-                .agent("gpt-4o")
-                .preamble(NESTED_ARGS_PREAMBLE)
-                .tool(PlanTrip)
-                .default_max_turns(4)
-                .build();
-            let cell = test_cell(NESTED_ARGS_PROMPT);
-
-            let result = agent
-                .prompt_over(cell.clone())
-                .max_turns(4)
-                .await
-                .expect("nested-args tool run should succeed");
-
-            assert!(
-                result.contains("SAKURA-77"),
-                "final answer should repeat the tool's confirmation code, got {result:?}"
-            );
-
-            let arguments = cell_conversation(&cell)
-                .iter()
-                .find_map(|message| match message {
-                    Message::Assistant { content, .. } => {
-                        content.iter().find_map(|item| match item {
-                            AssistantContent::ToolCall(tool_call)
-                                if tool_call.function.name == PlanTrip::NAME =>
-                            {
-                                Some(tool_call.function.arguments.clone())
-                            }
-                            _ => None,
-                        })
-                    }
-                    _ => None,
-                })
-                .expect("chat history should record the plan_trip tool call");
-            assert_expected_plan_trip_arguments(&arguments);
         },
     )
     .await;

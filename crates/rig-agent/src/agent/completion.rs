@@ -1,11 +1,10 @@
 use super::hook::HookStack;
 use super::model::ModelHandle;
-use super::prompt_request::{self, PromptRequest};
 use super::runner::AgentRunner;
 use crate::{
     agent::prompt_request::streaming::StreamingPromptRequest,
     completion::{
-        CompletionError, CompletionModel, CompletionRequestBuilder, Document, Message, Prompt,
+        CompletionError, CompletionModel, CompletionRequestBuilder, Document, Message,
         ToolDefinition,
     },
     streaming::{StreamingChat, StreamingPrompt},
@@ -13,8 +12,6 @@ use crate::{
 };
 use rig_core::{message::ToolChoice, wasm_compat::WasmCompatSend};
 use std::{collections::BTreeSet, sync::Arc};
-
-use super::UNKNOWN_AGENT_NAME;
 
 /// A prepared completion request plus the executable Rig tool names advertised
 /// to the provider for this turn.
@@ -179,6 +176,7 @@ pub(crate) async fn build_prepared_completion_request(
 /// use rig_agent::prelude::*;
 /// use rig_core::{client::ProviderClient, providers::openai};
 ///
+/// # use futures::StreamExt;
 /// # async fn run() -> Result<(), Box<dyn std::error::Error>> {
 /// let openai = openai::Client::from_env()?;
 ///
@@ -188,7 +186,13 @@ pub(crate) async fn build_prepared_completion_request(
 ///     .temperature(0.9)
 ///     .build();
 ///
-/// let response = comedian_agent.prompt("Entertain me!").await?;
+/// let mut stream = comedian_agent
+///     .runner("Entertain me!")
+///     .stream()
+///     .await;
+/// while let Some(item) = stream.next().await {
+///     // inspect MultiTurnStreamItems as they arrive
+/// }
 /// # Ok(())
 /// # }
 /// ```
@@ -233,13 +237,10 @@ impl Agent {
         self.description.as_deref()
     }
 
-    pub(crate) fn name_or_default(&self) -> &str {
-        self.name.as_deref().unwrap_or(UNKNOWN_AGENT_NAME)
-    }
-
     /// Build a hook-aware [`AgentRunner`] for this agent, seeded with the
     /// agent's default hook stack. Attach more hooks with
-    /// [`AgentRunner::add_hook`], then call [`AgentRunner::run`].
+    /// [`AgentRunner::add_hook`], then stream it with
+    /// [`AgentRunner::stream`].
     pub fn runner(&self, prompt: impl Into<Message>) -> AgentRunner {
         AgentRunner::from_agent(self, prompt)
     }
@@ -294,48 +295,6 @@ impl Agent {
     /// tool lifecycle hooks remain owned by [`Self::runner`].
     pub async fn tool_definitions(&self) -> Vec<ToolDefinition> {
         self.tool_server_handle.get_tool_defs().await
-    }
-}
-
-// Here, we need to ensure that usage of `.prompt` on agent uses these redefinitions on the opaque
-//  `Prompt` trait so that when `.prompt` is used at the call-site, it'll use the more specific
-//  `PromptRequest` implementation for `Agent`, making the builder's usage fluent.
-//
-// References:
-//  - https://github.com/rust-lang/rust/issues/121718 (refining_impl_trait)
-
-#[allow(refining_impl_trait)]
-impl Prompt for Agent {
-    fn prompt(
-        &self,
-        prompt: impl Into<Message> + WasmCompatSend,
-    ) -> PromptRequest<prompt_request::Standard> {
-        PromptRequest::from_agent(self, prompt)
-    }
-}
-
-impl Agent {
-    /// Run over the caller's conversation cell — the run folds that one
-    /// durable manager, its folds are the commits, and the cell IS the
-    /// input: no prompt rides alongside (the opening message, if any,
-    /// arrives through the steering drain at the loop's first
-    /// convergence).
-    pub fn prompt_over(
-        &self,
-        cell: tabit_log::ConversationCell,
-    ) -> PromptRequest<prompt_request::Standard> {
-        PromptRequest::from_agent_cell(self, cell)
-    }
-}
-
-#[allow(refining_impl_trait)]
-impl Prompt for &Agent {
-    #[tracing::instrument(skip(self, prompt), fields(agent_name = self.name_or_default()))]
-    fn prompt(
-        &self,
-        prompt: impl Into<Message> + WasmCompatSend,
-    ) -> PromptRequest<prompt_request::Standard> {
-        PromptRequest::from_agent(self, prompt)
     }
 }
 
@@ -505,13 +464,21 @@ mod tests {
     /// `&Agent` implements `Prompt` so a borrowed agent builds the same
     /// request as an owned one.
     #[tokio::test]
-    async fn prompt_through_an_agent_reference_runs_the_request() {
+    async fn stream_prompt_through_an_agent_reference_runs_the_request() {
+        use crate::agent::prompt_request::streaming::fold_stream;
+        use crate::streaming::StreamingPrompt;
         use crate::test_utils::MockCompletionModel;
 
-        let agent = crate::AgentBuilder::new(MockCompletionModel::text("ok")).build();
-        let output = crate::completion::Prompt::prompt(&agent, "hi")
+        let agent = crate::AgentBuilder::new(MockCompletionModel::from_stream_turns([[
+            crate::test_utils::MockStreamEvent::text("ok"),
+            crate::test_utils::MockStreamEvent::final_response_with_default_usage(),
+        ]]))
+        .build();
+        let mut stream = StreamingPrompt::stream_prompt(&agent, "hi").await;
+        let output = fold_stream(&mut stream)
             .await
-            .expect("prompt should succeed");
+            .expect("stream prompt should succeed")
+            .output;
         assert_eq!(output, "ok");
     }
 }

@@ -1,46 +1,24 @@
 //! Dedicated Claude Opus 4.7 live smoke tests.
 
 use base64::{Engine, prelude::BASE64_STANDARD};
+use rig::completion::Message;
 use rig::completion::message::Image;
-use rig::completion::{Message, Prompt};
 use rig::message::{DocumentSourceKind, ImageMediaType};
 use rig::prelude::*;
 use rig::streaming::{StreamingChat, StreamingPrompt};
 
 use crate::reasoning::{self, ReasoningRoundtripAgent, WeatherTool};
 use crate::support::{
-    Adder, BASIC_PREAMBLE, BASIC_PROMPT, IMAGE_FIXTURE_PATH, STREAMING_PREAMBLE, STREAMING_PROMPT,
-    STREAMING_TOOLS_PREAMBLE, STREAMING_TOOLS_PROMPT, Subtract, TOOLS_PREAMBLE, TOOLS_PROMPT,
-    assert_contains_any_case_insensitive, assert_mentions_expected_number,
-    assert_nonempty_response, collect_stream_final_response,
+    Adder, IMAGE_FIXTURE_PATH, STREAMING_PREAMBLE, STREAMING_PROMPT, STREAMING_TOOLS_PREAMBLE,
+    STREAMING_TOOLS_PROMPT, Subtract, assert_contains_any_case_insensitive,
+    assert_mentions_expected_number, assert_nonempty_response, assistant_text_response,
+    collect_stream_final_response,
 };
 
 fn opus_4_7_thinking_params() -> serde_json::Value {
     serde_json::json!({
         "thinking": { "type": "adaptive" }
     })
-}
-
-#[tokio::test]
-async fn messages_prompt_smoke() {
-    super::super::support::with_anthropic_cassette(
-        "opus_4_7/messages_prompt_smoke",
-        |client| async move {
-            let agent = client
-                .agent("claude-opus-4-7")
-                .preamble(BASIC_PREAMBLE)
-                .max_tokens(128_000)
-                .build();
-
-            let response = agent
-                .prompt(BASIC_PROMPT)
-                .await
-                .expect("prompt should succeed");
-
-            assert_nonempty_response(&response);
-        },
-    )
-    .await;
 }
 
 #[tokio::test]
@@ -60,31 +38,6 @@ async fn messages_streaming_prompt_smoke() {
                 .expect("streaming prompt should succeed");
 
             assert_nonempty_response(&response);
-        },
-    )
-    .await;
-}
-
-#[tokio::test]
-async fn messages_tools_smoke() {
-    super::super::support::with_anthropic_cassette(
-        "opus_4_7/messages_tools_smoke",
-        |client| async move {
-            let agent = client
-                .agent("claude-opus-4-7")
-                .preamble(TOOLS_PREAMBLE)
-                .tool(Adder)
-                .tool(Subtract)
-                .default_max_turns(2)
-                .max_tokens(128_000)
-                .build();
-
-            let response = agent
-                .prompt(TOOLS_PROMPT)
-                .await
-                .expect("tool prompt should succeed");
-
-            assert_mentions_expected_number(&response, -3);
         },
     )
     .await;
@@ -120,11 +73,7 @@ async fn messages_image_input_smoke() {
     super::super::support::with_anthropic_cassette(
         "opus_4_7/messages_image_input_smoke",
         |client| async move {
-            let agent = client
-                .agent("claude-opus-4-7")
-                .preamble("You are an image describer.")
-                .max_tokens(128_000)
-                .build();
+            let model = client.completion_model("claude-opus-4-7");
             let image_bytes =
                 std::fs::read(IMAGE_FIXTURE_PATH).expect("fixture image should be readable");
             let image = Image {
@@ -133,13 +82,21 @@ async fn messages_image_input_smoke() {
                 ..Default::default()
             };
 
-            let response = agent
-                .prompt(image)
+            let response = model
+                .completion(
+                    model
+                        .completion_request(image)
+                        .preamble("You are an image describer.".to_string())
+                        .max_tokens(128_000)
+                        .build(),
+                )
                 .await
                 .expect("image prompt should succeed");
 
-            assert_nonempty_response(&response);
-            assert_contains_any_case_insensitive(&response, &["ant", "insect"]);
+            let text = assistant_text_response(&response.choice)
+                .expect("image prompt should carry assistant text");
+            assert_nonempty_response(&text);
+            assert_contains_any_case_insensitive(&text, &["ant", "insect"]);
         },
     )
     .await;
@@ -227,32 +184,6 @@ fn assert_turn_two_request_carries_a_signed_thinking_block(scenario: &str) {
         "turn-2 request in {} carries a thinking block with no signature:\n{request}",
         path.display()
     );
-}
-
-#[tokio::test]
-async fn messages_adaptive_thinking_tool_roundtrip_smoke() {
-    let call_count = std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0));
-    super::super::support::with_anthropic_cassette(
-        "opus_4_7/messages_adaptive_thinking_tool_roundtrip_smoke",
-        |client| async move {
-            let agent = client
-                .agent("claude-opus-4-7")
-                .preamble(reasoning::TOOL_SYSTEM_PROMPT)
-                .max_tokens(16384)
-                .tool(WeatherTool::new(call_count.clone()))
-                .additional_params(opus_4_7_thinking_params())
-                .default_max_turns(2)
-                .build();
-
-            let result = agent
-                .prompt(reasoning::TOOL_USER_PROMPT)
-                .await
-                .expect("adaptive thinking tool chat should succeed");
-
-            reasoning::assert_nonstreaming_universal(&result, &call_count, "anthropic");
-        },
-    )
-    .await;
 }
 
 #[tokio::test]

@@ -3,50 +3,44 @@
 //!
 //! The runner owns the side-effecting concerns' inputs — the request
 //! assembly inputs, memory handles, the hook stack — while the loop owns
-//! control flow (ENGINE.md is the design record). Both the blocking
-//! [`PromptRequest`](crate::agent::prompt_request::PromptRequest) and the
+//! control flow (ENGINE.md is the design record). The
 //! [`StreamingPromptRequest`](crate::agent::prompt_request::streaming::StreamingPromptRequest)
-//! APIs are thin wrappers over an `AgentRunner`, and you can build one directly
+//! API is a thin wrapper over an `AgentRunner`, and you can build one directly
 //! to drive an agent with custom, composable hooks:
 //!
 //! ```rust,no_run
+//! # use futures::StreamExt;
 //! # use rig_agent::Agent;
 //! # async fn example(agent: Agent) -> Result<(), Box<dyn std::error::Error>> {
-//! let response = agent
+//! let mut stream = agent
 //!     .runner("What is 2 + 2?")
 //!     .max_turns(3)
-//!     .run()
-//!     .await?;
-//! println!("{}", response.output);
+//!     .stream()
+//!     .await;
+//! while let Some(item) = stream.next().await {
+//!     // inspect MultiTurnStreamItems as they arrive
+//! }
 //! # Ok(())
 //! # }
 //! ```
 
-use std::sync::{
-    Arc, Mutex,
-    atomic::{AtomicU64, Ordering},
-};
+use std::sync::{Arc, Mutex};
 
 use futures::StreamExt;
-use tracing::{Instrument, info_span, span::Id};
+use tracing::info_span;
 
 use super::{
-    completion::{Agent, PreparedCompletionRequest},
-    drive::{
-        DriveItem, DriveStream, PhaseEvent, TurnSource, drive_agent, drive_tool_calls,
-        streaming_error_into_prompt,
-    },
+    completion::Agent,
+    drive::{DriveItem, drive_agent},
     hook::{
         AgentHook, HookContext, HookStack, ToolCall as ToolCallEvent, ToolCallAction,
         ToolResultAction, ToolResultEvent,
     },
     model::ModelHandle,
     prompt_request::{
-        PromptResponse,
-        streaming::{MultiTurnStreamItem, StreamingError, StreamingResult, StreamingTurnSource},
+        streaming::{StreamingError, StreamingResult, StreamingTurnSource},
         tool_result_output,
     },
-    run::{ModelTurn, PendingToolCall, RunLedger},
 };
 use rig_core::{
     message::{ToolCall, ToolChoice, UserContent},
@@ -56,7 +50,7 @@ use rig_core::{
 use tabit_log::ContextManager;
 
 use crate::{
-    completion::{CompletionError, CompletionModel, Document, Message, PromptError, Usage},
+    completion::{CompletionModel, Document, Message, PromptError, Usage},
     json_utils,
     tool::{
         ToolContext, ToolDispatch, ToolOutput, ToolResult,
@@ -747,151 +741,21 @@ pub(crate) fn new_execute_tool_span() -> tracing::Span {
     )
 }
 
-/// [`TurnSource`] for the blocking surface: each turn issues a unary
-/// `model.completion()` request and feeds the whole response into the machine.
-/// Emits no intermediate items (the blocking surface folds the engine to its
-/// final response), but keeps the blocking driver's linear `follows_from` span
-/// chain across chat and tool spans.
-pub(crate) struct UnaryTurnSource {
-    /// Sequences chat and tool spans into a linear `follows_from` chain (the
-    /// streaming surface parents into a tree instead and does not chain).
-    ///
-    /// Atomic rather than `Cell` despite being driven by a single sequential
-    /// task: `run_tool_calls` passes `chain_span` as a closure into
-    /// `drive_tool_calls`, whose returned `DriveStream` is `Send`. That makes the
-    /// closure capture `&self`, so `&UnaryTurnSource` must be `Send`, i.e.
-    /// `UnaryTurnSource: Sync` — which `AtomicU64` provides and `Cell` does not.
-    current_span_id: AtomicU64,
-}
-
-impl UnaryTurnSource {
-    pub(crate) fn new() -> Self {
-        Self {
-            current_span_id: AtomicU64::new(0),
-        }
-    }
-
-    /// Chain `span` onto the previous step's span and record it as the new chain
-    /// head, preserving the blocking driver's linear causal trace.
-    fn chain_span(&self, span: tracing::Span) -> tracing::Span {
-        let span = match self.current_span_id.load(Ordering::Relaxed) {
-            0 => span,
-            id => span.follows_from(Id::from_u64(id)).to_owned(),
-        };
-        if let Some(id) = span.id() {
-            self.current_span_id.store(id.into_u64(), Ordering::Relaxed);
-        }
-        span
-    }
-}
-
-impl TurnSource for UnaryTurnSource {
-    fn open_chat_span(&self, runner: &AgentRunner) -> tracing::Span {
-        let chat_span = build_chat_span!(runner, "chat", "chat");
-        self.chain_span(chat_span)
-    }
-
-    fn run_model_turn<'a>(
-        &'a mut self,
-        ledger: &'a mut RunLedger,
-        prepared: PreparedCompletionRequest,
-        chat_span: tracing::Span,
-    ) -> DriveStream<'a> {
-        Box::pin(async_stream::stream! {
-            let resp = match prepared.builder.send().instrument(chat_span.clone()).await {
-                Ok(resp) => resp,
-                Err(err) => {
-                    yield Err(StreamingError::from(err));
-                    return;
-                }
-            };
-
-            let finish_reason = resp.finish_reason();
-            ledger.record(resp.usage, finish_reason.clone());
-
-            yield Ok(PhaseEvent::ModelTurn(Box::new(ModelTurn::new(
-                resp.message_id.clone(),
-                resp.choice.clone(),
-                resp.usage,
-                finish_reason,
-                prepared.executable_tool_names,
-                prepared.allowed_tool_names,
-            ))));
-        })
-    }
-
-    fn run_tool_calls<'a>(
-        &'a self,
-        runner: &'a AgentRunner,
-        hook_ctx: &'a HookContext,
-        calls: Vec<PendingToolCall>,
-        tool_snapshot: Arc<ToolRegistrySnapshot>,
-    ) -> DriveStream<'a> {
-        // The blocking surface chains tool spans into its linear `follows_from`
-        // sequence (chat -> tool -> chat), and discards the yielded items, so it
-        // skips building them.
-        drive_tool_calls(
-            runner,
-            hook_ctx,
-            calls,
-            tool_snapshot,
-            |span| self.chain_span(span),
-            false,
-        )
-    }
-
-    fn final_item(&self, _response: &PromptResponse) -> Option<MultiTurnStreamItem> {
-        // The blocking surface folds the engine and discards the final item, so
-        // building it (an extra full-response clone) is skipped entirely.
-        None
-    }
-}
-
-impl AgentRunner {
-    /// Drive the agent loop to completion, returning the aggregated
-    /// [`PromptResponse`]. Hooks fire at every observable point; the first hook
-    /// to terminate cancels the run.
-    pub async fn run(self) -> Result<PromptResponse, PromptError> {
-        let conversation = self.build_run()?;
-
-        // Fold the shared engine to its final response. The blocking surface
-        // uses a unary model transport and ignores the intermediate items the
-        // engine yields; the engine is driven under the caller's ambient span
-        // (no `instrument`), keeping the chat/tool spans on the blocking
-        // `follows_from` chain.
-        let driver = drive_agent(self, UnaryTurnSource::new(), &conversation);
-        futures::pin_mut!(driver);
-
-        let mut response = None;
-        while let Some(item) = driver.next().await {
-            match item {
-                Ok(DriveItem::Done(done)) => response = Some(*done),
-                Ok(DriveItem::Item(_)) => {}
-                Err(err) => return Err(streaming_error_into_prompt(err)),
-            }
-        }
-
-        // The engine yields `Done` unless it errored (handled above).
-        response.ok_or_else(|| {
-            PromptError::CompletionError(CompletionError::ResponseError(
-                "internal invariant violated: the agent drive loop finished \
-                 without yielding a final response"
-                    .to_string(),
-            ))
-        })
-    }
-}
-
 impl AgentRunner {
     /// Drive the agent loop, streaming assistant content, tool activity, and a
     /// final response. Hooks fire at every observable point, including streamed
-    /// text and tool-call deltas. Returns the stream after loading any
-    /// configured conversation memory.
-    ///
-    /// Shares the drive loop, run construction, tool execution and fail-closed
-    /// hook handling with the blocking [`run`](AgentRunner::run) via
-    /// `drive_agent`, so the two behave identically apart from the streamed
-    /// delta events.
+    /// text and tool-call deltas.
+    /// The deleted blocking adapter's shape as a test/test-utils
+    /// convenience: fold the streaming run to its outcome. Nothing outside
+    /// cfg(test)/test-utils may call this — the runtime surface is
+    /// streaming only.
+    #[cfg(any(test, feature = "test-utils"))]
+    pub(crate) async fn run(
+        self,
+    ) -> Result<crate::agent::PromptResponse, crate::completion::PromptError> {
+        crate::agent::prompt_request::streaming::fold_stream(&mut self.stream().await).await
+    }
+
     pub async fn stream(self) -> StreamingResult {
         let agent_span = acquire_agent_span(self.agent_name_or_default());
 
@@ -921,7 +785,7 @@ impl AgentRunner {
             while let Some(item) = driver.next().await {
                 match item {
                     Ok(DriveItem::Item(item)) => yield Ok(item),
-                    Ok(DriveItem::Done(_)) => {}
+                    Ok(DriveItem::Done) => {}
                     Err(err) => yield Err(err),
                 }
             }
@@ -931,6 +795,6 @@ impl AgentRunner {
 }
 
 #[cfg(test)]
-#[allow(irrefutable_let_patterns, unreachable_patterns)]
+#[allow(irrefutable_let_patterns, unreachable_patterns, dead_code)]
 #[path = "runner_tests.rs"]
 mod runner_tests;

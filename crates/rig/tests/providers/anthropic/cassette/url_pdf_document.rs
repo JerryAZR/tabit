@@ -6,7 +6,6 @@
 //! See <https://docs.anthropic.com/en/docs/build-with-claude/pdf-support>.
 
 use rig::OneOrMany;
-use rig::completion::Prompt;
 use rig::message::{Message, UserContent};
 use rig::prelude::*;
 
@@ -20,15 +19,10 @@ async fn url_pdf_document_prompt() {
     with_anthropic_cassette(
         "url_pdf_document/url_pdf_document_prompt",
         |client| async move {
-            let agent = client
-                .agent("claude-sonnet-4-6")
-                .preamble("You are a helpful assistant that analyzes documents.")
-                .temperature(0.0)
-                .max_tokens(64_000)
-                .build();
-
-            let response = agent
-                .prompt(Message::User {
+            let model = client.completion_model("claude-sonnet-4-6");
+            let response = model
+                .completion(model.completion_request(
+                Message::User {
                     content: OneOrMany::many(vec![
                         UserContent::document_url(PDF_URL, None),
                         UserContent::text(
@@ -36,12 +30,19 @@ async fn url_pdf_document_prompt() {
                         ),
                     ])
                     .expect("content should be non-empty"),
-                })
+                        })
+                        .preamble("You are a helpful assistant that analyzes documents.".to_string())
+                        .temperature_opt(Some(0.0))
+                        .max_tokens(64_000)
+                        .build(),
+                )
                 .await
                 .expect("URL PDF document prompt should succeed");
 
-            assert_nonempty_response(&response);
-            assert_contains_any_case_insensitive(&response, &["bitcoin"]);
+            let text = crate::support::assistant_text_response(&response.choice)
+                .expect("URL PDF document prompt should carry assistant text");
+            assert_nonempty_response(&text);
+            assert_contains_any_case_insensitive(&text, &["bitcoin"]);
         },
     )
     .await;

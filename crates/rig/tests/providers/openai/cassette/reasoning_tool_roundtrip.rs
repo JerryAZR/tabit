@@ -45,31 +45,3 @@ async fn streaming() {
     })
     .await;
 }
-
-#[tokio::test]
-async fn nonstreaming() {
-    with_openai_cassette(
-        "reasoning_tool_roundtrip/nonstreaming",
-        |client| async move {
-            let call_count = Arc::new(AtomicUsize::new(0));
-            let agent = client
-                .agent("gpt-5.2")
-                .preamble(reasoning::TOOL_SYSTEM_PROMPT)
-                .max_tokens(4096)
-                .tool(WeatherTool::new(call_count.clone()))
-                .additional_params(serde_json::json!({
-                    "reasoning": { "effort": "high" }
-                }))
-                .default_max_turns(2)
-                .build();
-
-            let result = agent
-                .prompt(reasoning::TOOL_USER_PROMPT)
-                .await
-                .expect("[openai] Non-streaming chat failed - likely 400 from dropped reasoning");
-
-            reasoning::assert_nonstreaming_universal(&result, &call_count, "openai");
-        },
-    )
-    .await;
-}

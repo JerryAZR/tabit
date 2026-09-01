@@ -11,7 +11,7 @@ use crate::{
         AssistantContent, CompletionError, CompletionModel, CompletionRequest, CompletionResponse,
         Usage,
     },
-    message::{ToolCall, ToolFunction},
+    message::{ReasoningContent, ToolCall, ToolFunction},
     streaming::StreamingCompletionResponse,
 };
 
@@ -151,6 +151,66 @@ impl MockTurn {
             response.usage = usage;
         }
         self
+    }
+
+    /// This turn as one scripted streaming turn: the same content, usage,
+    /// and identity expressed as stream events, ending in the terminal
+    /// record. The bridge for driving the streaming surface with scenarios
+    /// authored as unary turns; error turns convert to the matching stream
+    /// error event.
+    #[allow(clippy::panic)]
+    pub fn into_stream_events(self) -> Vec<MockStreamEvent> {
+        let response = match self.response {
+            Ok(response) => response,
+            Err(error) => return vec![MockStreamEvent::Error(error)],
+        };
+        let mut events = Vec::new();
+        if let Some(message_id) = response.message_id {
+            events.push(MockStreamEvent::MessageId(message_id));
+        }
+        for content in response.choice {
+            match content {
+                AssistantContent::Text(text) => {
+                    events.push(MockStreamEvent::TextStart {
+                        id: "text-0".to_string(),
+                        additional_params: text.additional_params,
+                    });
+                    events.push(MockStreamEvent::Text(text.text));
+                }
+                AssistantContent::ToolCall(tool_call) => {
+                    events.push(MockStreamEvent::ToolCall {
+                        id: tool_call.id,
+                        name: tool_call.function.name,
+                        arguments: tool_call.function.arguments,
+                        call_id: tool_call.call_id,
+                    });
+                }
+                AssistantContent::Reasoning(reasoning) => {
+                    // The stream-event grammar carries one reasoning block per
+                    // event; a multi-block turn is a test-authoring error.
+                    let [content] = reasoning.content.try_into().unwrap_or_else(
+                        |vec: Vec<ReasoningContent>| {
+                            panic!(
+                                "MockTurn reasoning with {} blocks has no single-event form",
+                                vec.len()
+                            )
+                        },
+                    );
+                    events.push(MockStreamEvent::Reasoning {
+                        id: reasoning.id.unwrap_or_else(|| "reasoning-0".to_string()),
+                        content,
+                    });
+                }
+                other => {
+                    // Image and future variants have no stream-event
+                    // spelling; converting them is a loud error, not a
+                    // silent drop.
+                    panic!("MockTurn content {other:?} has no stream-event form");
+                }
+            }
+        }
+        events.push(MockStreamEvent::final_response(response.usage));
+        events
     }
 
     /// Set a provider-assigned assistant message ID for this turn.

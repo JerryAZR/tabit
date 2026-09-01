@@ -13,9 +13,73 @@ use crate::{
     },
     completion::{CompletionModel, Document, PromptError},
     test_utils::{MockAddTool, MockCompletionModel, MockStreamEvent, MockTurn},
-    tool::{Tool, ToolContext, ToolErrorKind, ToolExecutionError},
+    tool::{Tool, ToolContext, ToolExecutionError},
 };
 use rig_core::message::ToolChoice;
+
+/// A mock model whose streaming surface replays the given unary-turn
+/// scenario: each `MockTurn` becomes one scripted streaming turn
+/// ([`MockTurn::into_stream_events`]). The suite drives the one
+/// execution surface.
+fn stream_model(turns: impl IntoIterator<Item = MockTurn>) -> MockCompletionModel {
+    MockCompletionModel::from_stream_turns(turns.into_iter().map(MockTurn::into_stream_events))
+}
+fn three_tools_first_terminates_streaming_model() -> MockCompletionModel {
+    MockCompletionModel::from_stream_turns([
+        vec![
+            // tc0 (x==0) terminates on its ToolCall hook after the in-flight
+            // sibling starts; tc1 (x==1) is the in-flight sibling (drains);
+            // tc2 (x==2) is beyond the concurrency-2 window (not yet started)
+            // and must be dropped once tc0 terminates.
+            MockStreamEvent::tool_call("tc0", "add", json!({"x": 0, "y": 0})),
+            MockStreamEvent::tool_call("tc1", "add", json!({"x": 1, "y": 1})),
+            MockStreamEvent::tool_call("tc2", "add", json!({"x": 2, "y": 2})),
+            MockStreamEvent::final_response_with_total_tokens(0),
+        ],
+        vec![
+            MockStreamEvent::text("unreachable"),
+            MockStreamEvent::final_response_with_total_tokens(0),
+        ],
+    ])
+}
+
+/// Deterministic announced-id mint for parity runs: both scenarios
+/// restart the same sequence, so assistant entries (which carry the
+/// announced ids — the one-value rule) compare equal across surfaces.
+async fn drive_to_final_response(
+    mut stream: crate::agent::prompt_request::streaming::StreamingResult,
+) -> crate::agent::prompt_request::PromptResponse {
+    let mut final_response = None;
+    while let Some(item) = stream.next().await {
+        if let MultiTurnStreamItem::FinalResponse(resp) =
+            item.unwrap_or_else(|err| panic!("stream item errored: {err}"))
+        {
+            final_response = Some(resp);
+        }
+    }
+    final_response.expect("stream should yield a final response")
+}
+
+fn parity_turn_ids() -> crate::agent::TurnIdSource {
+    let counter = Arc::new(AtomicU32::new(0));
+    Arc::new(move || {
+        let n = counter.fetch_add(1, Ordering::SeqCst) + 1;
+        format!("turn-{n}")
+    })
+}
+
+fn parity_conversation(cell: &tabit_log::ConversationCell) -> Vec<Message> {
+    tabit_log::lock::read(cell).messages()
+}
+
+/// A standalone cell seeded with the scenario prompt — the parity
+/// harness is a cell-supplying caller (the conversation, not the
+/// response, is the transcript it compares).
+fn parity_cell(prompt: &str) -> tabit_log::ConversationCell {
+    std::sync::Arc::new(std::sync::RwLock::new(tabit_log::ContextManager::seeded(
+        vec![Message::user(prompt)],
+    )))
+}
 
 struct MetadataFailingTool;
 
@@ -113,47 +177,23 @@ impl Tool for MetadataFailingTool {
     }
 }
 
-#[derive(Clone, Default)]
-struct Results(Arc<Mutex<Vec<(ToolErrorKind, String, String)>>>);
-
-impl AgentHook for Results {
-    async fn on_tool_result(
-        &self,
-        _ctx: &HookContext,
-        event: ToolResultEvent<'_>,
-    ) -> ToolResultAction {
-        if let Some(error) = event.raw_result.error() {
-            self.0.lock().expect("results").push((
-                error.kind(),
-                event.raw_result.output().render(),
-                event
-                    .tool_context
-                    .result::<String>()
-                    .expect("tool result metadata")
-                    .clone(),
-            ));
-        }
-        ToolResultAction::rewrite("rewritten for model")
-    }
-}
-
 #[test]
 fn agent_exposes_read_only_name_and_description() {
-    let named = AgentBuilder::new(MockCompletionModel::text("done"))
+    let named = AgentBuilder::new(stream_model([MockTurn::text("done")]))
         .name("researcher")
         .description("Finds evidence")
         .build();
     assert_eq!(named.name(), Some("researcher"));
     assert_eq!(named.description(), Some("Finds evidence"));
 
-    let unnamed = AgentBuilder::new(MockCompletionModel::text("done")).build();
+    let unnamed = AgentBuilder::new(stream_model([MockTurn::text("done")])).build();
     assert_eq!(unnamed.name(), None);
     assert_eq!(unnamed.description(), None);
 }
 
 #[tokio::test]
 async fn runner_applies_per_run_request_overrides() {
-    let model = MockCompletionModel::text("done");
+    let model = stream_model([MockTurn::text("done")]);
     AgentBuilder::new(model.clone())
         .preamble("baseline preamble")
         .context("baseline document")
@@ -212,7 +252,7 @@ async fn runner_applies_per_run_request_overrides() {
 
 #[tokio::test]
 async fn runner_can_merge_additional_params_into_the_baseline() {
-    let model = MockCompletionModel::text("done");
+    let model = stream_model([MockTurn::text("done")]);
     AgentBuilder::new(model.clone())
         .additional_params(json!({"baseline": true, "winner": "baseline"}))
         .build()
@@ -239,7 +279,7 @@ async fn runner_can_merge_additional_params_into_the_baseline() {
 
 #[tokio::test]
 async fn runner_can_replace_additional_params_wholesale() {
-    let model = MockCompletionModel::text("done");
+    let model = stream_model([MockTurn::text("done")]);
     AgentBuilder::new(model.clone())
         .additional_params(json!({"baseline": true}))
         .build()
@@ -259,7 +299,7 @@ async fn runner_can_replace_additional_params_wholesale() {
 
 #[tokio::test]
 async fn runner_can_clear_configured_request_defaults() {
-    let model = MockCompletionModel::text("done");
+    let model = stream_model([MockTurn::text("done")]);
     AgentBuilder::new(model.clone())
         .preamble("baseline")
         .temperature(0.1)
@@ -303,7 +343,7 @@ async fn direct_completion_model_requests_are_intentionally_hook_free() {
         }
     }
 
-    let model = MockCompletionModel::text("raw response");
+    let model = MockCompletionModel::from_turns([MockTurn::text("raw response")]);
     let calls = Arc::new(AtomicUsize::new(0));
     let _agent = AgentBuilder::new(model.clone())
         .add_hook(CountToolCalls(calls.clone()))
@@ -317,82 +357,6 @@ async fn direct_completion_model_requests_are_intentionally_hook_free() {
 
     assert_eq!(calls.load(Ordering::SeqCst), 0);
     assert_eq!(model.request_count(), 1);
-}
-
-#[tokio::test]
-async fn blocking_and_streaming_preserve_raw_failure_while_rewriting_presentation() {
-    let blocking = Results::default();
-    let blocking_model = MockCompletionModel::from_turns([
-        MockTurn::tool_call("tc1", "flaky_tool", json!({})),
-        MockTurn::text("done"),
-    ]);
-    AgentBuilder::new(blocking_model.clone())
-        .tool(MetadataFailingTool)
-        .add_hook(blocking.clone())
-        .build()
-        .runner("go")
-        .max_turns(3)
-        .turn_id_source(parity_turn_ids())
-        .run()
-        .await
-        .expect("blocking run");
-
-    let streaming = Results::default();
-    let streaming_model = MockCompletionModel::from_stream_turns([
-        vec![
-            MockStreamEvent::tool_call_name_delta("tc1", "flaky_tool"),
-            MockStreamEvent::tool_call_arguments_delta("tc1", "{}"),
-            MockStreamEvent::tool_call("tc1", "flaky_tool", json!({})),
-            MockStreamEvent::final_response_with_total_tokens(0),
-        ],
-        vec![
-            MockStreamEvent::text("done"),
-            MockStreamEvent::final_response_with_total_tokens(0),
-        ],
-    ]);
-    let mut stream = AgentBuilder::new(streaming_model.clone())
-        .tool(MetadataFailingTool)
-        .add_hook(streaming.clone())
-        .build()
-        .runner("go")
-        .max_turns(3)
-        .turn_id_source(parity_turn_ids())
-        .stream()
-        .await;
-    while let Some(item) = stream.next().await {
-        item.expect("stream item");
-    }
-
-    assert_eq!(*blocking.0.lock().unwrap(), *streaming.0.lock().unwrap());
-    assert_eq!(
-        *blocking.0.lock().unwrap(),
-        vec![(
-            ToolErrorKind::Timeout,
-            "raw timeout failure".into(),
-            "shared-result-metadata".into()
-        )]
-    );
-
-    let blocking_history = serde_json::to_value(
-        &blocking_model
-            .requests()
-            .get(1)
-            .expect("second blocking request")
-            .chat_history,
-    )
-    .unwrap();
-    let streaming_history = serde_json::to_value(
-        &streaming_model
-            .requests()
-            .get(1)
-            .expect("second streaming request")
-            .chat_history,
-    )
-    .unwrap();
-    assert_eq!(blocking_history, streaming_history);
-    let history = blocking_history.to_string();
-    assert!(history.contains("rewritten for model"));
-    assert!(!history.contains("raw timeout failure"));
 }
 
 /// A user tool whose body panics with an out-of-bounds index — the classic
@@ -428,7 +392,7 @@ impl Tool for IndexPanickingTool {
 
 #[tokio::test]
 async fn a_panicking_tool_yields_an_error_result_the_model_sees_and_the_run_recovers() {
-    let model = MockCompletionModel::from_turns([
+    let model = stream_model([
         MockTurn::tool_call("tc1", IndexPanickingTool::NAME, json!({})),
         MockTurn::text("recovered"),
     ]);
@@ -470,7 +434,7 @@ async fn a_panicking_tool_yields_an_error_result_the_model_sees_and_the_run_reco
 
 #[tokio::test]
 async fn a_normal_tool_error_still_flows_to_the_model_unchanged() {
-    let model = MockCompletionModel::from_turns([
+    let model = stream_model([
         MockTurn::tool_call("tc1", "flaky_tool", json!({})),
         MockTurn::text("done"),
     ]);
@@ -511,7 +475,7 @@ async fn agent_dispatch_snapshot_clones_once_and_isolates_tool_mutations() {
     let tool = SnapshotMutatingTool::default();
     let results = SnapshotResults::default();
 
-    AgentBuilder::new(MockCompletionModel::from_turns([
+    AgentBuilder::new(stream_model([
         MockTurn::tool_call("tc1", SnapshotMutatingTool::NAME, json!({})),
         MockTurn::tool_call("tc2", SnapshotMutatingTool::NAME, json!({})),
         MockTurn::text("done"),
@@ -537,8 +501,8 @@ async fn agent_dispatch_snapshot_clones_once_and_isolates_tool_mutations() {
 
 #[tokio::test]
 async fn using_model_value_replaces_the_run_model() {
-    let default_model = MockCompletionModel::text("default answer");
-    let override_model = MockCompletionModel::text("override answer");
+    let default_model = stream_model([MockTurn::text("default answer")]);
+    let override_model = stream_model([MockTurn::text("override answer")]);
 
     let response = AgentBuilder::new(default_model.clone())
         .build()
@@ -555,7 +519,7 @@ async fn using_model_value_replaces_the_run_model() {
 
 #[tokio::test]
 async fn merge_additional_params_replaces_a_non_object_baseline() {
-    let model = MockCompletionModel::text("done");
+    let model = stream_model([MockTurn::text("done")]);
     AgentBuilder::new(model.clone())
         .build()
         .runner("question")
@@ -579,7 +543,7 @@ use tokio::sync::{Barrier, Notify};
 
 use crate::agent::hook::ToolCall as ToolCallEvent;
 use crate::agent::prompt_request::streaming::{MultiTurnStreamItem, StreamingError};
-use crate::completion::{CompletionError, Message, Prompt, Usage};
+use crate::completion::{CompletionError, Message, Usage};
 use crate::streaming::{StreamedAssistantContent, StreamedUserContent, StreamingPrompt};
 use crate::test_utils::{MockBarrierTool, MockOperationArgs, MockSubtractTool, MockToolError};
 use crate::tool::server::{ToolServer, ToolServerHandle};
@@ -596,12 +560,6 @@ struct RecordingHook {
 }
 
 impl RecordingHook {
-    /// Event labels that must be identical across streaming and
-    /// non-streaming — the whole surviving surface.
-    fn shared_events(&self) -> Vec<&'static str> {
-        self.events.lock().expect("events lock").clone()
-    }
-
     fn tool_results(&self) -> Vec<String> {
         self.tool_results.lock().expect("results lock").clone()
     }
@@ -657,7 +615,7 @@ async fn assistant_entries_carry_announced_turn_ids_not_provider_ids() {
     // either id shape changes nothing here.
     let assistant_ids_of = |turn: MockTurn| async move {
         let cell = parity_cell("prompt");
-        AgentBuilder::new(MockCompletionModel::new([turn]))
+        AgentBuilder::new(stream_model([turn]))
             .build()
             .runner_over(cell.clone())
             .turn_id_source(parity_turn_ids())
@@ -799,7 +757,7 @@ async fn visible_item_after_non_emittable_final_is_rejected() {
 }
 
 fn blocking_model() -> MockCompletionModel {
-    MockCompletionModel::from_turns([
+    stream_model([
         MockTurn::tool_call("tc1", "add", json!({"x": 2, "y": 3})),
         MockTurn::text("the answer is 5"),
     ])
@@ -900,7 +858,7 @@ async fn from_agent_preserves_implicit_one_and_explicit_zero_budgets() {
     ));
     assert_eq!(implicit_recorded.request_count(), 1);
 
-    let zero_model = MockCompletionModel::text("should not be requested");
+    let zero_model = stream_model([MockTurn::text("should not be requested")]);
     let zero_recorded = zero_model.clone();
     let zero_agent = AgentBuilder::new(zero_model).default_max_turns(0).build();
     let zero_runner = super::AgentRunner::from_agent(&zero_agent, "do not call");
@@ -924,20 +882,6 @@ async fn from_agent_preserves_implicit_one_and_explicit_zero_budgets() {
 /// boundary identically after executing a tool-producing first turn.
 #[tokio::test]
 async fn prompt_surfaces_reject_second_tool_roundtrip_request_at_budget_one() {
-    let blocking_model = blocking_model();
-    let blocking_recorded = blocking_model.clone();
-    let blocking_agent = AgentBuilder::new(blocking_model).tool(MockAddTool).build();
-    let blocking_err = blocking_agent
-        .prompt("add 2 and 3")
-        .max_turns(1)
-        .await
-        .expect_err("blocking prompt should reject request two");
-    assert!(matches!(
-        blocking_err,
-        PromptError::MaxTurnsError { max_turns: 1, .. }
-    ));
-    assert_eq!(blocking_recorded.request_count(), 1);
-
     let streaming_model = streaming_model();
     let streaming_recorded = streaming_model.clone();
     let streaming_agent = AgentBuilder::new(streaming_model).tool(MockAddTool).build();
@@ -962,79 +906,14 @@ async fn prompt_surfaces_reject_second_tool_roundtrip_request_at_budget_one() {
     assert_eq!(streaming_recorded.request_count(), 1);
 }
 
-/// run() and stream() of the same tool-calling scenario produce the same
-/// final output, the same final message history, the same tool-result
-/// content, and the same medium-independent hook event sequence.
-#[tokio::test]
-async fn run_and_stream_behave_identically_for_a_tool_call() {
-    let blocking_hook = RecordingHook::default();
-    let blocking_cell = parity_cell("add 2 and 3");
-    let blocking = AgentBuilder::new(blocking_model())
-        .tool(MockAddTool)
-        .build()
-        .runner_over(blocking_cell.clone())
-        .max_turns(2)
-        .turn_id_source(parity_turn_ids())
-        .add_hook(blocking_hook.clone())
-        .run()
-        .await
-        .expect("blocking run should succeed");
-
-    // No `.history` on either runner — the conversation cell carries the
-    // history for both surfaces, and the durable conversations must agree.
-    let streaming_hook = RecordingHook::default();
-    let streaming_cell = parity_cell("add 2 and 3");
-    let mut stream = AgentBuilder::new(streaming_model())
-        .tool(MockAddTool)
-        .build()
-        .runner_over(streaming_cell.clone())
-        .max_turns(2)
-        .turn_id_source(parity_turn_ids())
-        .add_hook(streaming_hook.clone())
-        .stream()
-        .await;
-
-    let mut final_response = None;
-    while let Some(item) = stream.next().await {
-        if let Ok(MultiTurnStreamItem::FinalResponse(resp)) =
-            item.map_err(|err| panic!("stream item errored: {err}"))
-        {
-            final_response = Some(resp);
-        }
-    }
-    let final_response = final_response.expect("stream should yield a final response");
-
-    // Same final output.
-    assert_eq!(blocking.output, "the answer is 5");
-    assert_eq!(final_response.output(), blocking.output);
-
-    // Same medium-independent hook event sequence (tool call, tool result).
-    assert_eq!(
-        blocking_hook.shared_events(),
-        streaming_hook.shared_events()
-    );
-    assert_eq!(
-        blocking_hook.shared_events(),
-        vec!["tool_call", "tool_result"]
-    );
-
-    // Same tool-result content seen by the hook.
-    assert_eq!(blocking_hook.tool_results(), streaming_hook.tool_results());
-    assert_eq!(blocking_hook.tool_results(), vec!["5".to_string()]);
-
-    // Same durable conversation (compared via serialized form to normalize).
-    assert_eq!(
-        serde_json::to_value(parity_conversation(&blocking_cell)).expect("serialize blocking"),
-        serde_json::to_value(parity_conversation(&streaming_cell)).expect("serialize streaming"),
-    );
-}
-
 /// Structured tool-execution results reach `ToolResultEvent` as machine
 /// metadata (error/refusal state plus result context), on both the blocking and streaming paths,
 /// so hooks can steer on a classified failure without parsing the result
 /// string.
 mod structured_tool_results {
     use std::sync::{Arc, Mutex};
+
+    use super::stream_model;
 
     use futures::StreamExt;
     use serde_json::json;
@@ -1107,7 +986,7 @@ mod structured_tool_results {
 
     /// A blocking model that calls `tool` once, then answers.
     fn model_one_tool_then_text(tool: &str) -> MockCompletionModel {
-        MockCompletionModel::from_turns([
+        stream_model([
             MockTurn::tool_call("tc1", tool, json!({})),
             MockTurn::text("done"),
         ])
@@ -1179,7 +1058,7 @@ mod structured_tool_results {
         }
 
         let observer = OutcomeHook::default();
-        let err = AgentBuilder::new(MockCompletionModel::from_turns([
+        let err = AgentBuilder::new(stream_model([
             MockTurn::tool_call("tc1", "flaky_tool", json!({})),
             MockTurn::tool_call("tc2", "flaky_tool", json!({})),
             MockTurn::text("unreachable"),
@@ -1587,7 +1466,7 @@ mod structured_tool_results {
     #[tokio::test]
     async fn invalid_args_are_classified_as_invalid_args() {
         let hook = OutcomeHook::default();
-        AgentBuilder::new(MockCompletionModel::from_turns([
+        AgentBuilder::new(stream_model([
             // `add` needs integers; a string is a hard parse failure.
             MockTurn::tool_call("tc1", "add", json!({ "x": "not-a-number", "y": 1 })),
             MockTurn::text("done"),
@@ -1729,41 +1608,6 @@ mod structured_tool_results {
         assert_eq!(observer.results(), vec!["[REDACTED]".to_string()]);
     }
 
-    // (9) The blocking and streaming surfaces observe identical structured
-    // outcomes for the same scenario.
-    #[tokio::test]
-    async fn streaming_and_blocking_outcomes_match() {
-        let blocking = OutcomeHook::default();
-        AgentBuilder::new(model_one_tool_then_text("flaky_tool"))
-            .tool(MockFailingTool::new(ToolErrorKind::Timeout))
-            .add_hook(blocking.clone())
-            .build()
-            .runner("go")
-            .max_turns(3)
-            .run()
-            .await
-            .expect("blocking run should succeed");
-
-        let streaming = OutcomeHook::default();
-        let mut stream = AgentBuilder::new(stream_model_one_tool_then_text("flaky_tool"))
-            .tool(MockFailingTool::new(ToolErrorKind::Timeout))
-            .add_hook(streaming.clone())
-            .build()
-            .runner("go")
-            .max_turns(3)
-            .stream()
-            .await;
-        while let Some(item) = stream.next().await {
-            if let Err(err) = item {
-                panic!("stream item errored: {err}");
-            }
-        }
-
-        assert_eq!(blocking.outcomes(), vec!["error:timeout".to_string()]);
-        assert_eq!(blocking.outcomes(), streaming.outcomes());
-        assert_eq!(blocking.results(), streaming.results());
-    }
-
     // (10) With two tools in one turn at `concurrency > 1`, both structured
     // outcomes are observed and the persisted tool results keep call order.
     #[tokio::test]
@@ -1786,20 +1630,17 @@ mod structured_tool_results {
 
         let observer = OutcomeHook::default();
         let concurrent_cell = super::parity_cell("go");
-        let _response = AgentBuilder::new(MockCompletionModel::from_turns([
-            turn,
-            MockTurn::text("done"),
-        ]))
-        .tool(MockAddTool)
-        .tool(MockFailingTool::new(ToolErrorKind::Timeout))
-        .add_hook(observer.clone())
-        .build()
-        .runner_over(concurrent_cell.clone())
-        .max_turns(3)
-        .tool_concurrency(2)
-        .run()
-        .await
-        .expect("run should succeed");
+        let _response = AgentBuilder::new(stream_model([turn, MockTurn::text("done")]))
+            .tool(MockAddTool)
+            .tool(MockFailingTool::new(ToolErrorKind::Timeout))
+            .add_hook(observer.clone())
+            .build()
+            .runner_over(concurrent_cell.clone())
+            .max_turns(3)
+            .tool_concurrency(2)
+            .run()
+            .await
+            .expect("run should succeed");
 
         // Hook order may interleave under concurrency, so compare as a set.
         let mut outcomes = observer.outcomes();
@@ -1848,9 +1689,9 @@ mod span_safety_net {
     use tracing_subscriber::layer::{Context, SubscriberExt};
     use tracing_subscriber::{Layer, Registry, registry::LookupSpan};
 
+    use super::stream_model;
     use crate::agent::AgentBuilder;
-    use crate::completion::Usage;
-    use crate::test_utils::{MockAddTool, MockCompletionModel, MockTurn};
+    use crate::test_utils::MockTurn;
 
     #[derive(Clone)]
     struct CapturedSpan {
@@ -1969,84 +1810,6 @@ mod span_safety_net {
         }
     }
 
-    fn usage(input: u64, output: u64) -> Usage {
-        Usage {
-            input_tokens: input,
-            output_tokens: output,
-            ..Usage::new()
-        }
-    }
-
-    /// Two-turn tool scenario: the blocking driver emits chat -> execute_tool
-    /// -> chat, exercising the `follows_from` chain.
-    fn tool_then_text_model() -> MockCompletionModel {
-        MockCompletionModel::from_turns([
-            MockTurn::tool_call("tc1", "add", serde_json::json!({"x": 2, "y": 3}))
-                .with_usage(usage(7, 11)),
-            MockTurn::text("the answer is 5").with_usage(usage(13, 17)),
-        ])
-    }
-
-    async fn warm_blocking_callsites() {
-        let agent = AgentBuilder::new(tool_then_text_model())
-            .tool(MockAddTool)
-            .build();
-        let _ = agent.runner("add 2 and 3").max_turns(3).run().await;
-    }
-
-    #[tokio::test]
-    async fn run_chains_chat_and_tool_spans() {
-        let _isolation = crate::test_utils::scoped_tracing_subscriber_guard().await;
-        let captured = Captured::default();
-        let subscriber = Registry::default().with(CaptureLayer {
-            captured: captured.clone(),
-        });
-        let _default = tracing::subscriber::set_default(subscriber);
-
-        warm_blocking_callsites().await;
-        tracing::callsite::rebuild_interest_cache();
-        captured.clear();
-
-        let agent = AgentBuilder::new(tool_then_text_model())
-            .tool(MockAddTool)
-            .build();
-        let response = agent
-            .runner("add 2 and 3")
-            .max_turns(3)
-            .run()
-            .await
-            .expect("blocking run should succeed");
-        assert_eq!(response.output, "the answer is 5");
-
-        let spans = captured.snapshot();
-
-        // The blocking chat span is named "chat" (NOT "chat_streaming").
-        let chat_spans: Vec<&CapturedSpan> = spans.iter().filter(|s| s.name == "chat").collect();
-        assert_eq!(chat_spans.len(), 2, "two model turns -> two chat spans");
-        assert!(
-            spans.iter().all(|s| s.name != "chat_streaming"),
-            "blocking driver must not emit chat_streaming spans"
-        );
-
-        // The blocking driver links chat/tool spans into a linear
-        // follows_from chain (chat#1 -> execute_tool -> chat#2); the
-        // streaming driver does not, so this is a blocking-only invariant the
-        // unification must keep.
-        let tool_span = spans
-            .iter()
-            .find(|s| s.name == "execute_tool")
-            .expect("tool turn should emit an execute_tool span");
-        let edges = captured.follows_edges();
-        assert!(
-            edges.contains(&(tool_span.id, chat_spans[0].id)),
-            "execute_tool should follow_from the first chat span; edges={edges:?}"
-        );
-        assert!(
-            edges.contains(&(chat_spans[1].id, tool_span.id)),
-            "the second chat span should follow_from execute_tool; edges={edges:?}"
-        );
-    }
-
     #[tokio::test]
     async fn run_adopts_a_caller_supplied_outer_span() {
         let _isolation = crate::test_utils::scoped_tracing_subscriber_guard().await;
@@ -2057,7 +1820,7 @@ mod span_safety_net {
         let _default = tracing::subscriber::set_default(subscriber);
 
         let outer = tracing::info_span!("outer");
-        let agent = AgentBuilder::new(MockCompletionModel::text("done")).build();
+        let agent = AgentBuilder::new(stream_model([MockTurn::text("done")])).build();
         let run = agent.runner("hello").run();
         outer.in_scope(|| {
             let _ = futures::executor::block_on(run);
@@ -2101,87 +1864,6 @@ fn tool_result_text_in_history(messages: &[Message], expected: &str) -> bool {
                 ))
         )
     })
-}
-
-/// Whether any tool result in `messages` carries the exact structured JSON value.
-fn tool_result_json_in_history(messages: &[Message], expected: &serde_json::Value) -> bool {
-    messages.iter().any(|message| {
-        matches!(
-            message,
-            Message::User { content }
-                if content.iter().any(|item| matches!(
-                    item,
-                    UserContent::ToolResult(result)
-                        if result.content.iter().any(|content| matches!(
-                            content,
-                            rig_core::message::ToolResultContent::Json { value }
-                                if value == expected
-                        ))
-                ))
-        )
-    })
-}
-
-/// Even with `run()` executing tools concurrently, the tool-result order —
-/// and so the whole message history — matches the sequential streaming
-/// driver. (`run()` runs tools with `buffer_unordered` but writes each result
-/// into its original call-index slot, so results still land in call order.)
-#[tokio::test]
-async fn run_and_stream_same_conversation_for_parallel_tool_calls() {
-    let blocking_model = MockCompletionModel::from_turns([
-        MockTurn::from_contents([
-            tool_call_content("tc1", json!({"x": 2, "y": 3})),
-            tool_call_content("tc2", json!({"x": 10, "y": 20})),
-        ])
-        .expect("two tool calls is a valid turn"),
-        MockTurn::text("done"),
-    ]);
-    let blocking_cell = parity_cell("add two pairs");
-    let _blocking = AgentBuilder::new(blocking_model)
-        .tool(MockAddTool)
-        .build()
-        .runner_over(blocking_cell.clone())
-        .max_turns(3)
-        .turn_id_source(parity_turn_ids())
-        .tool_concurrency(4)
-        .run()
-        .await
-        .expect("blocking run should succeed");
-
-    let streaming_model = MockCompletionModel::from_stream_turns([
-        vec![
-            MockStreamEvent::tool_call("tc1", "add", json!({"x": 2, "y": 3})),
-            MockStreamEvent::tool_call("tc2", "add", json!({"x": 10, "y": 20})),
-            MockStreamEvent::final_response_with_total_tokens(0),
-        ],
-        vec![
-            MockStreamEvent::text("done"),
-            MockStreamEvent::final_response_with_total_tokens(0),
-        ],
-    ]);
-    let streaming_cell = parity_cell("add two pairs");
-    let mut stream = AgentBuilder::new(streaming_model)
-        .tool(MockAddTool)
-        .build()
-        .runner_over(streaming_cell.clone())
-        .max_turns(3)
-        .turn_id_source(parity_turn_ids())
-        .stream()
-        .await;
-    let mut final_response = None;
-    while let Some(item) = stream.next().await {
-        if let Ok(MultiTurnStreamItem::FinalResponse(resp)) =
-            item.map_err(|err| panic!("stream item errored: {err}"))
-        {
-            final_response = Some(resp);
-        }
-    }
-    final_response.expect("stream should yield a final response");
-
-    assert_eq!(
-        serde_json::to_value(parity_conversation(&blocking_cell)).expect("serialize blocking"),
-        serde_json::to_value(parity_conversation(&streaming_cell)).expect("serialize streaming"),
-    );
 }
 
 /// A tool whose first-*called* invocation completes *after* the second, so
@@ -2233,7 +1915,7 @@ impl Tool for OutOfOrderTool {
 /// streaming driver.)
 #[tokio::test]
 async fn run_preserves_tool_call_order_under_out_of_order_completion() {
-    let model = MockCompletionModel::from_turns([
+    let model = stream_model([
         MockTurn::from_contents([
             tool_call_content("tc1", json!({"x": 1, "y": 0})),
             tool_call_content("tc2", json!({"x": 2, "y": 0})),
@@ -2273,22 +1955,6 @@ async fn run_preserves_tool_call_order_under_out_of_order_completion() {
     assert_eq!(result_ids, vec!["tc1".to_string(), "tc2".to_string()]);
 }
 
-/// Drive a stream to completion, panicking on any stream error, and return
-/// its final response.
-async fn drive_to_final_response(
-    mut stream: crate::agent::prompt_request::streaming::StreamingResult,
-) -> crate::agent::prompt_request::PromptResponse {
-    let mut final_response = None;
-    while let Some(item) = stream.next().await {
-        if let MultiTurnStreamItem::FinalResponse(resp) =
-            item.unwrap_or_else(|err| panic!("stream item errored: {err}"))
-        {
-            final_response = Some(resp);
-        }
-    }
-    final_response.expect("stream should yield a final response")
-}
-
 /// Tool-result ids, in history order, across a run's message history.
 fn tool_result_ids(messages: &[Message]) -> Vec<String> {
     messages
@@ -2304,61 +1970,6 @@ fn tool_result_ids(messages: &[Message]) -> Vec<String> {
             _ => Vec::new(),
         })
         .collect()
-}
-
-/// The streaming driver under `tool_concurrency > 1` produces the **same
-/// message history** as the blocking driver: streamed results are surfaced in
-/// call order after the batch settles, and persisted results stay in tool-call
-/// order, so concurrency never reorders the final history.
-#[tokio::test]
-async fn stream_and_run_same_message_history_for_parallel_tool_calls_under_concurrency() {
-    let blocking_model = MockCompletionModel::from_turns([
-        MockTurn::from_contents([
-            tool_call_content("tc1", json!({"x": 2, "y": 3})),
-            tool_call_content("tc2", json!({"x": 10, "y": 20})),
-        ])
-        .expect("two tool calls is a valid turn"),
-        MockTurn::text("done"),
-    ]);
-    let blocking_cell = parity_cell("add two pairs");
-    let _blocking = AgentBuilder::new(blocking_model)
-        .tool(MockAddTool)
-        .build()
-        .runner_over(blocking_cell.clone())
-        .max_turns(3)
-        .turn_id_source(parity_turn_ids())
-        .tool_concurrency(4)
-        .run()
-        .await
-        .expect("blocking run should succeed");
-
-    let streaming_model = MockCompletionModel::from_stream_turns([
-        vec![
-            MockStreamEvent::tool_call("tc1", "add", json!({"x": 2, "y": 3})),
-            MockStreamEvent::tool_call("tc2", "add", json!({"x": 10, "y": 20})),
-            MockStreamEvent::final_response_with_total_tokens(0),
-        ],
-        vec![
-            MockStreamEvent::text("done"),
-            MockStreamEvent::final_response_with_total_tokens(0),
-        ],
-    ]);
-    let streaming_cell = parity_cell("add two pairs");
-    let stream = AgentBuilder::new(streaming_model)
-        .tool(MockAddTool)
-        .build()
-        .runner_over(streaming_cell.clone())
-        .max_turns(3)
-        .turn_id_source(parity_turn_ids())
-        .tool_concurrency(4)
-        .stream()
-        .await;
-    let _final_response = drive_to_final_response(stream).await;
-
-    assert_eq!(
-        serde_json::to_value(parity_conversation(&blocking_cell)).expect("serialize blocking"),
-        serde_json::to_value(parity_conversation(&streaming_cell)).expect("serialize streaming"),
-    );
 }
 
 /// The streaming driver under concurrency persists tool results in **call
@@ -2563,356 +2174,6 @@ async fn stream_emits_model_tool_calls_then_atomic_execution_items() {
     assert_eq!(markers(4).await, expected);
 }
 
-/// Terminates from the `x == 1` tool's result, but only *after* the slow
-/// `x == 2` sibling has signalled it started executing — so that sibling is
-/// genuinely in flight when the terminate fires (not merely not-yet-started).
-struct TerminateAfterSiblingStartedHook {
-    sibling_started: Arc<tokio::sync::Notify>,
-}
-impl AgentHook for TerminateAfterSiblingStartedHook {
-    async fn on_tool_result(
-        &self,
-        _ctx: &HookContext,
-        event: ToolResultEvent<'_>,
-    ) -> ToolResultAction {
-        if let ToolResultEvent { args, .. } = event
-            && serde_json::from_str::<serde_json::Value>(args)
-                .ok()
-                .and_then(|v| v.get("x").and_then(serde_json::Value::as_i64))
-                == Some(1)
-        {
-            self.sibling_started.notified().await;
-            return ToolResultAction::stop("stop after a tool result");
-        }
-        ToolResultAction::keep()
-    }
-}
-
-/// A probe tool for the concurrent drain path: records how many calls
-/// `started` and `completed`. The `x == 2` call signals it has started, then
-/// stays pending across several polls, so it is genuinely in flight — not
-/// merely not-yet-started — when the `x == 1` call's result terminates the
-/// run. A driver that **drains** the concurrent tool stream polls it to
-/// completion (`completed == 2`); one that **cancels** in-flight siblings
-/// would drop it mid-poll (`completed == 1`).
-#[derive(Clone)]
-struct DrainProbeTool {
-    started: Arc<AtomicU32>,
-    completed: Arc<AtomicU32>,
-    slow_started: Arc<tokio::sync::Notify>,
-}
-
-impl Tool for DrainProbeTool {
-    const NAME: &'static str = "add";
-    type Error = MockToolError;
-    type Args = serde_json::Value;
-    type Output = i32;
-
-    fn description(&self) -> String {
-        MockAddTool.description()
-    }
-
-    fn parameters(&self) -> serde_json::Value {
-        MockAddTool.parameters()
-    }
-
-    async fn call(
-        &self,
-        _context: &mut ToolContext,
-        args: Self::Args,
-    ) -> Result<Self::Output, Self::Error> {
-        self.started.fetch_add(1, SeqCst);
-        if args.get("x").and_then(serde_json::Value::as_i64) == Some(2) {
-            // Signal that the slow sibling has started, then stay pending so
-            // it is still executing when the fast call's result terminates.
-            self.slow_started.notify_one();
-            for _ in 0..8 {
-                tokio::task::yield_now().await;
-            }
-        }
-        self.completed.fetch_add(1, SeqCst);
-        Ok(0)
-    }
-}
-
-/// On the concurrent path, a terminate surfaces a `StreamingError`, ends the
-/// run with no final response, and — for a sibling that is **already in
-/// flight** — drains it to completion rather than cancelling it mid-poll (so
-/// no detached task is left running and the deterministic terminate reason
-/// still surfaces). The `x == 2` sibling signals it started before the
-/// `x == 1` result terminates, so `completed == 2` holds only under drain.
-#[tokio::test]
-async fn stream_concurrent_tool_result_terminate_drains_in_flight_siblings() {
-    let started = Arc::new(AtomicU32::new(0));
-    let completed = Arc::new(AtomicU32::new(0));
-    let slow_started = Arc::new(tokio::sync::Notify::new());
-    let model = MockCompletionModel::from_stream_turns([
-        vec![
-            MockStreamEvent::tool_call("tc1", "add", json!({"x": 1, "y": 1})),
-            MockStreamEvent::tool_call("tc2", "add", json!({"x": 2, "y": 2})),
-            MockStreamEvent::final_response_with_total_tokens(0),
-        ],
-        vec![
-            MockStreamEvent::text("done"),
-            MockStreamEvent::final_response_with_total_tokens(0),
-        ],
-    ]);
-    let mut stream = AgentBuilder::new(model)
-        .tool(DrainProbeTool {
-            started: started.clone(),
-            completed: completed.clone(),
-            slow_started: slow_started.clone(),
-        })
-        .build()
-        .runner("add two pairs")
-        .max_turns(3)
-        .tool_concurrency(2)
-        .add_hook(TerminateAfterSiblingStartedHook {
-            sibling_started: slow_started,
-        })
-        .stream()
-        .await;
-
-    let (saw_error, saw_final_response) =
-        tokio::time::timeout(std::time::Duration::from_secs(5), async move {
-            let mut saw_error = false;
-            let mut saw_final_response = false;
-            while let Some(item) = stream.next().await {
-                match item {
-                    Ok(MultiTurnStreamItem::FinalResponse(_)) => saw_final_response = true,
-                    Ok(_) => {}
-                    Err(StreamingError::Prompt(_)) => saw_error = true,
-                    Err(other) => panic!("unexpected streaming error: {other}"),
-                }
-            }
-            (saw_error, saw_final_response)
-        })
-        .await
-        .expect("draining the concurrent tools must not hang");
-
-    assert!(
-        saw_error,
-        "a terminate hook on the concurrent path must surface a StreamingError::Prompt"
-    );
-    assert!(
-        !saw_final_response,
-        "a terminated run must not yield a final response"
-    );
-    // The already-in-flight slow sibling is drained to completion, not
-    // cancelled mid-poll (which would leave `completed == 1`).
-    assert_eq!(
-        started.load(SeqCst),
-        2,
-        "both tools started (both in flight)"
-    );
-    assert_eq!(
-        completed.load(SeqCst),
-        2,
-        "the in-flight sibling must be drained to completion, not cancelled"
-    );
-}
-
-/// A post-result stop with a reason keyed by the call's `x` arg, forcing the
-/// `x == 2` call (tc2) to finish *before* the `x == 1` call (tc1): tc2 opens
-/// the gate after its result, tc1 awaits it first. So completion order (tc2)
-/// differs from call order (tc1) — the batch's collected stop reason must
-/// still pick by call order.
-struct OrderedTerminateHook {
-    gate: Arc<tokio::sync::Notify>,
-}
-
-impl AgentHook for OrderedTerminateHook {
-    async fn on_tool_result(
-        &self,
-        _ctx: &HookContext,
-        event: ToolResultEvent<'_>,
-    ) -> ToolResultAction {
-        if let ToolResultEvent { args, .. } = event {
-            let x = serde_json::from_str::<serde_json::Value>(args)
-                .ok()
-                .and_then(|v| v.get("x").and_then(serde_json::Value::as_i64));
-            match x {
-                Some(2) => {
-                    self.gate.notify_one();
-                    return ToolResultAction::stop("terminated-by-tc2".to_string());
-                }
-                Some(1) => {
-                    self.gate.notified().await;
-                    return ToolResultAction::stop("terminated-by-tc1".to_string());
-                }
-                _ => {}
-            }
-        }
-        ToolResultAction::keep()
-    }
-}
-
-fn two_terminating_tools_blocking_model() -> MockCompletionModel {
-    MockCompletionModel::from_turns([
-        MockTurn::from_contents([
-            tool_call_content("tc1", json!({"x": 1, "y": 1})),
-            tool_call_content("tc2", json!({"x": 2, "y": 2})),
-        ])
-        .expect("two tool calls is non-empty"),
-        MockTurn::text("unreachable"),
-    ])
-}
-
-fn two_terminating_tools_streaming_model() -> MockCompletionModel {
-    MockCompletionModel::from_stream_turns([
-        vec![
-            MockStreamEvent::tool_call("tc1", "add", json!({"x": 1, "y": 1})),
-            MockStreamEvent::tool_call("tc2", "add", json!({"x": 2, "y": 2})),
-            MockStreamEvent::final_response_with_total_tokens(0),
-        ],
-        vec![
-            MockStreamEvent::text("unreachable"),
-            MockStreamEvent::final_response_with_total_tokens(0),
-        ],
-    ])
-}
-
-/// When two tool calls in one turn both post-result stop under
-/// `tool_concurrency > 1`, run() and stream() surface the **same** reason —
-/// the first-called tool's (call order), not whichever finished first. tc2
-/// stops before tc1, so a completion-order pick would surface tc2's reason
-/// and the two drivers would disagree.
-#[tokio::test]
-async fn concurrent_simultaneous_tool_terminations_pick_call_order_on_both_drivers() {
-    let run_err = tokio::time::timeout(
-        std::time::Duration::from_secs(5),
-        AgentBuilder::new(two_terminating_tools_blocking_model())
-            .tool(MockAddTool)
-            .build()
-            .runner("go")
-            .max_turns(3)
-            .tool_concurrency(2)
-            .add_hook(OrderedTerminateHook {
-                gate: Arc::new(tokio::sync::Notify::new()),
-            })
-            .run(),
-    )
-    .await
-    .expect("blocking run must not hang")
-    .expect_err("the run must terminate");
-
-    let mut stream = AgentBuilder::new(two_terminating_tools_streaming_model())
-        .tool(MockAddTool)
-        .build()
-        .runner("go")
-        .max_turns(3)
-        .tool_concurrency(2)
-        .add_hook(OrderedTerminateHook {
-            gate: Arc::new(tokio::sync::Notify::new()),
-        })
-        .stream()
-        .await;
-
-    let stream_err = tokio::time::timeout(std::time::Duration::from_secs(5), async move {
-        while let Some(item) = stream.next().await {
-            if let Err(err) = item {
-                return Some(err);
-            }
-        }
-        None
-    })
-    .await
-    .expect("streamed run must not hang")
-    .expect("the stream must surface a terminate error");
-
-    let run_msg = run_err.to_string();
-    let stream_msg = stream_err.to_string();
-    assert!(
-        run_msg.contains("terminated-by-tc1"),
-        "blocking run should surface the first-called tool's reason, got: {run_msg}"
-    );
-    assert!(
-        stream_msg.contains("terminated-by-tc1"),
-        "stream should surface the first-called tool's reason, got: {stream_msg}"
-    );
-    assert!(
-        !run_msg.contains("terminated-by-tc2") && !stream_msg.contains("terminated-by-tc2"),
-        "neither driver should surface the later-completing tool's reason"
-    );
-}
-
-/// Stops after the result of the first tool only (`x == 1`), letting any
-/// later tool through.
-struct TerminateOnFirstToolHook;
-impl AgentHook for TerminateOnFirstToolHook {
-    async fn on_tool_result(
-        &self,
-        _ctx: &HookContext,
-        event: ToolResultEvent<'_>,
-    ) -> ToolResultAction {
-        if let ToolResultEvent { args, .. } = event
-            && serde_json::from_str::<serde_json::Value>(args)
-                .ok()
-                .and_then(|v| v.get("x").and_then(serde_json::Value::as_i64))
-                == Some(1)
-        {
-            return ToolResultAction::stop("stop".to_string());
-        }
-        ToolResultAction::keep()
-    }
-}
-
-/// Post-result stops never affect the current batch (ENGINE.md, stop
-/// taxonomy): on a multi-tool turn whose first tool's result hook stops the
-/// run, the SEQUENTIAL default (`tool_concurrency` == 1) still executes every
-/// sibling — the batch is a sealed unit — and then the run ends with the
-/// reason. So `calls == 2` on both drivers, which share the tool driver,
-/// and both surface the stop.
-#[tokio::test]
-async fn default_concurrency_post_result_stop_still_runs_remaining_tools_on_both_drivers() {
-    let blocking_calls = Arc::new(AtomicU32::new(0));
-    AgentBuilder::new(two_terminating_tools_blocking_model())
-        .tool(CountingAddTool {
-            calls: blocking_calls.clone(),
-        })
-        .build()
-        .runner("go")
-        .max_turns(3)
-        .add_hook(TerminateOnFirstToolHook)
-        .run()
-        .await
-        .expect_err("the run stops after the batch");
-    assert_eq!(
-        blocking_calls.load(SeqCst),
-        2,
-        "the batch is sealed: both tool bodies run before the stop takes effect"
-    );
-
-    let streaming_calls = Arc::new(AtomicU32::new(0));
-    let mut stream = AgentBuilder::new(two_terminating_tools_streaming_model())
-        .tool(CountingAddTool {
-            calls: streaming_calls.clone(),
-        })
-        .build()
-        .runner("go")
-        .max_turns(3)
-        .add_hook(TerminateOnFirstToolHook)
-        .stream()
-        .await;
-    let mut saw_error = false;
-    while let Some(item) = stream.next().await {
-        if let Err(err) = item {
-            saw_error = true;
-            assert!(
-                err.to_string().contains("stop"),
-                "stream() should surface the stop reason, got: {err}"
-            );
-            break;
-        }
-    }
-    assert!(saw_error, "stream() must surface the stop error");
-    assert_eq!(
-        streaming_calls.load(SeqCst),
-        2,
-        "the batch is sealed: both tool bodies run before the stop takes effect"
-    );
-}
-
 /// Records the `x` arg of every tool call that reaches its body. The `x == 1`
 /// sibling signals it has started (via `sibling_started`) and then stays
 /// pending across several polls, so it is genuinely in flight when the
@@ -2957,25 +2218,6 @@ impl Tool for RecordingArgsTool {
         }
         Ok(0)
     }
-}
-
-fn three_tools_first_terminates_streaming_model() -> MockCompletionModel {
-    MockCompletionModel::from_stream_turns([
-        vec![
-            // tc0 (x==0) terminates on its ToolCall hook after the in-flight
-            // sibling starts; tc1 (x==1) is the in-flight sibling (drains);
-            // tc2 (x==2) is beyond the concurrency-2 window (not yet started)
-            // and must be dropped once tc0 terminates.
-            MockStreamEvent::tool_call("tc0", "add", json!({"x": 0, "y": 0})),
-            MockStreamEvent::tool_call("tc1", "add", json!({"x": 1, "y": 1})),
-            MockStreamEvent::tool_call("tc2", "add", json!({"x": 2, "y": 2})),
-            MockStreamEvent::final_response_with_total_tokens(0),
-        ],
-        vec![
-            MockStreamEvent::text("unreachable"),
-            MockStreamEvent::final_response_with_total_tokens(0),
-        ],
-    ])
 }
 
 /// Stops after the `x == 0` tool's result, but only after the `x == 1`
@@ -3360,7 +2602,7 @@ async fn concurrent_tool_execution_stays_within_the_configured_bound() {
     let max_active = probe.max_active.clone();
 
     // One turn issues four parallel calls to the probe (registered as `add`).
-    let model = MockCompletionModel::from_turns([
+    let model = stream_model([
         MockTurn::from_contents([
             tool_call_content("c1", json!({})),
             tool_call_content("c2", json!({})),
@@ -3398,7 +2640,7 @@ async fn concurrent_tool_execution_stays_within_the_configured_bound() {
 /// sequential `concurrency <= 1` path.
 #[tokio::test]
 async fn tool_concurrency_zero_is_clamped_and_does_not_hang() {
-    let model = MockCompletionModel::from_turns([
+    let model = stream_model([
         MockTurn::tool_call("tc1", "add", json!({"x": 1, "y": 2})),
         MockTurn::text("done"),
     ]);
@@ -3441,46 +2683,6 @@ impl Tool for CountingAddTool {
         self.calls.fetch_add(1, SeqCst);
         MockAddTool.call(_context, args).await
     }
-}
-
-/// Two hooks pushed onto one stack both observe every event (no short-circuit
-/// on `Continue`), and the stack's shared event sequence is identical across
-/// the blocking and streaming drivers.
-#[tokio::test]
-async fn multi_hook_stack_parity_across_run_and_stream() {
-    let a_block = RecordingHook::default();
-    let b_block = RecordingHook::default();
-    let blocking = AgentBuilder::new(blocking_model())
-        .tool(MockAddTool)
-        .build()
-        .runner("add 2 and 3")
-        .max_turns(3)
-        .add_hook(a_block.clone())
-        .add_hook(b_block.clone())
-        .run()
-        .await
-        .expect("blocking run should succeed");
-
-    let a_stream = RecordingHook::default();
-    let b_stream = RecordingHook::default();
-    let mut stream = AgentBuilder::new(streaming_model())
-        .tool(MockAddTool)
-        .build()
-        .runner("add 2 and 3")
-        .max_turns(3)
-        .add_hook(a_stream.clone())
-        .add_hook(b_stream.clone())
-        .stream()
-        .await;
-    while stream.next().await.is_some() {}
-
-    // Both hooks in the stack saw the same events (both ran on every Continue).
-    assert_eq!(a_block.shared_events(), b_block.shared_events());
-    assert_eq!(a_stream.shared_events(), b_stream.shared_events());
-    // The stack's shared event sequence is identical across drivers.
-    assert_eq!(a_block.shared_events(), a_stream.shared_events());
-    assert_eq!(a_block.shared_events(), vec!["tool_call", "tool_result"]);
-    assert_eq!(blocking.output, "the answer is 5");
 }
 
 // ----------------------------------------------------------------------
@@ -3577,182 +2779,12 @@ impl ScriptedTurn {
     }
 }
 
-/// The medium-independent projection of a run that both drivers must agree
-/// on.
-struct ParityOutcome {
-    output: String,
-    messages: Vec<Message>,
-    shared_events: Vec<&'static str>,
-    tool_results: Vec<String>,
-}
-
-/// A standalone cell seeded with the scenario prompt — the parity
-/// harness is a cell-supplying caller (the conversation, not the
-/// response, is the transcript it compares).
-fn parity_cell(prompt: &str) -> tabit_log::ConversationCell {
-    std::sync::Arc::new(std::sync::RwLock::new(tabit_log::ContextManager::seeded(
-        vec![Message::user(prompt)],
-    )))
-}
-
-fn parity_conversation(cell: &tabit_log::ConversationCell) -> Vec<Message> {
-    tabit_log::lock::read(cell).messages()
-}
-
-/// Deterministic announced-id mint for parity runs: both scenarios
-/// restart the same sequence, so assistant entries (which carry the
-/// announced ids — the one-value rule) compare equal across surfaces.
-fn parity_turn_ids() -> crate::agent::TurnIdSource {
-    let counter = Arc::new(AtomicU32::new(0));
-    Arc::new(move || {
-        let n = counter.fetch_add(1, Ordering::SeqCst) + 1;
-        format!("turn-{n}")
-    })
-}
-
-async fn run_blocking_scenario(prompt: &'static str, turns: &[ScriptedTurn]) -> ParityOutcome {
-    let model = MockCompletionModel::from_turns(turns.iter().map(ScriptedTurn::as_blocking_turn));
-    let hook = RecordingHook::default();
-    let cell = parity_cell(prompt);
-    let response = AgentBuilder::new(model)
-        .tool(MockAddTool)
-        .build()
-        .runner_over(cell.clone())
-        .max_turns(8)
-        .turn_id_source(parity_turn_ids())
-        .add_hook(hook.clone())
-        .run()
-        .await
-        .expect("blocking scenario should succeed");
-    ParityOutcome {
-        output: response.output,
-        messages: parity_conversation(&cell),
-        shared_events: hook.shared_events(),
-        tool_results: hook.tool_results(),
-    }
-}
-
-async fn run_streaming_scenario(
-    prompt: &'static str,
-    turns: &[ScriptedTurn],
-    shape: StreamShape,
-) -> ParityOutcome {
-    let model = MockCompletionModel::from_stream_turns(
-        turns.iter().map(|turn| turn.as_stream_events(shape)),
-    );
-    let hook = RecordingHook::default();
-    let cell = parity_cell(prompt);
-    let mut stream = AgentBuilder::new(model)
-        .tool(MockAddTool)
-        .build()
-        .runner_over(cell.clone())
-        .max_turns(8)
-        .turn_id_source(parity_turn_ids())
-        .add_hook(hook.clone())
-        .stream()
-        .await;
-    let mut final_response = None;
-    while let Some(item) = stream.next().await {
-        if let Ok(MultiTurnStreamItem::FinalResponse(resp)) =
-            item.map_err(|err| panic!("stream item errored: {err}"))
-        {
-            final_response = Some(resp);
-        }
-    }
-    let final_response = final_response.expect("streaming scenario should yield a final response");
-    ParityOutcome {
-        output: final_response.output().to_string(),
-        // Parity over the durable conversations the two surfaces fold —
-        // the response carries outcomes only.
-        messages: parity_conversation(&cell),
-        shared_events: hook.shared_events(),
-        tool_results: hook.tool_results(),
-    }
-}
-
-fn assert_outcomes_match(blocking: &ParityOutcome, streaming: &ParityOutcome, label: &str) {
-    assert_eq!(
-        blocking.output, streaming.output,
-        "{label}: final output diverged"
-    );
-    assert_eq!(
-        blocking.shared_events, streaming.shared_events,
-        "{label}: hook event sequence diverged"
-    );
-    assert_eq!(
-        blocking.tool_results, streaming.tool_results,
-        "{label}: tool-result content diverged"
-    );
-    assert_eq!(
-        serde_json::to_value(&blocking.messages).expect("serialize blocking"),
-        serde_json::to_value(&streaming.messages).expect("serialize streaming"),
-        "{label}: message history diverged"
-    );
-}
-
-/// Drive one canonical scenario through `run()` and through `stream()` in
-/// both wire shapes, asserting the medium-independent projection is
-/// identical every way. Because both stream shapes are compared against the
-/// same blocking outcome, they are also transitively equal to each other.
-async fn assert_run_stream_parity(prompt: &'static str, turns: &[ScriptedTurn]) {
-    let blocking = run_blocking_scenario(prompt, turns).await;
-    for (shape, label) in [
-        (StreamShape::Complete, "complete-stream"),
-        (StreamShape::Chunked, "chunked-stream"),
-    ] {
-        let streaming = run_streaming_scenario(prompt, turns, shape).await;
-        assert_outcomes_match(&blocking, &streaming, label);
-    }
-}
-
 fn add_call(id: &'static str, x: i64, y: i64) -> ScriptedToolCall {
     ScriptedToolCall {
         id,
         name: "add",
         args: json!({ "x": x, "y": y }),
     }
-}
-
-#[tokio::test]
-async fn parity_text_only_run() {
-    assert_run_stream_parity("just say hi", &[ScriptedTurn::Text("hi there")]).await;
-}
-
-#[tokio::test]
-async fn parity_single_tool_then_text() {
-    assert_run_stream_parity(
-        "add 2 and 3",
-        &[
-            ScriptedTurn::ToolCalls(vec![add_call("tc1", 2, 3)]),
-            ScriptedTurn::Text("the answer is 5"),
-        ],
-    )
-    .await;
-}
-
-#[tokio::test]
-async fn parity_multiple_tools_in_one_turn() {
-    assert_run_stream_parity(
-        "add two pairs",
-        &[
-            ScriptedTurn::ToolCalls(vec![add_call("tc1", 2, 3), add_call("tc2", 10, 20)]),
-            ScriptedTurn::Text("done"),
-        ],
-    )
-    .await;
-}
-
-#[tokio::test]
-async fn parity_multi_turn_sequential_tools() {
-    assert_run_stream_parity(
-        "chain two additions",
-        &[
-            ScriptedTurn::ToolCalls(vec![add_call("tc1", 1, 1)]),
-            ScriptedTurn::ToolCalls(vec![add_call("tc2", 2, 2)]),
-            ScriptedTurn::Text("chained"),
-        ],
-    )
-    .await;
 }
 
 /// A prompt/runner-level `add_hook` APPENDS to the agent's default hooks
@@ -3792,102 +2824,6 @@ async fn runner_add_hook_appends_to_agent_default_hooks() {
         agent_hook.count("tool_call"),
         runner_hook.count("tool_call"),
         "add_hook appends (both hooks observe every turn); it does not replace"
-    );
-}
-
-/// Skips a *valid* tool call before execution; observes everything else.
-struct SkipToolCallHook(&'static str);
-
-impl AgentHook for SkipToolCallHook {
-    async fn on_tool_call(&self, _ctx: &HookContext, event: ToolCall<'_>) -> ToolCallAction {
-        if let ToolCall { .. } = event {
-            ToolCallAction::skip(self.0)
-        } else {
-            ToolCallAction::run()
-        }
-    }
-}
-
-/// A hook that skips a *valid* tool call (`ToolCallAction::Skip` on `ToolCall`, the
-/// honored-action path — distinct from skipping an *invalid* call) recovers
-/// identically under `run()` and `stream()`: the synthetic skip result enters
-/// the history verbatim without executing the tool, and both drivers reach the
-/// same output, tool-result content and message history.
-#[tokio::test]
-async fn valid_tool_call_skip_parity_across_run_and_stream() {
-    let turns = [
-        ScriptedTurn::ToolCalls(vec![add_call("tc1", 2, 3)]),
-        ScriptedTurn::Text("acknowledged"),
-    ];
-
-    let blocking_model =
-        MockCompletionModel::from_turns(turns.iter().map(ScriptedTurn::as_blocking_turn));
-    let blocking_hook = RecordingHook::default();
-    let blocking_cell = parity_cell("add 2 and 3");
-    let blocking = AgentBuilder::new(blocking_model)
-        .tool(MockAddTool)
-        .build()
-        .runner_over(blocking_cell.clone())
-        .max_turns(3)
-        .turn_id_source(parity_turn_ids())
-        .add_hook(blocking_hook.clone())
-        .add_hook(SkipToolCallHook("skipped by policy"))
-        .run()
-        .await
-        .expect("blocking run should succeed with a skipped tool call");
-
-    let streaming_model = MockCompletionModel::from_stream_turns(
-        turns
-            .iter()
-            .map(|turn| turn.as_stream_events(StreamShape::Complete)),
-    );
-    let streaming_hook = RecordingHook::default();
-    let streaming_cell = parity_cell("add 2 and 3");
-    let mut stream = AgentBuilder::new(streaming_model)
-        .tool(MockAddTool)
-        .build()
-        .runner_over(streaming_cell.clone())
-        .max_turns(3)
-        .turn_id_source(parity_turn_ids())
-        .add_hook(streaming_hook.clone())
-        .add_hook(SkipToolCallHook("skipped by policy"))
-        .stream()
-        .await;
-    let mut final_response = None;
-    while let Some(item) = stream.next().await {
-        if let Ok(MultiTurnStreamItem::FinalResponse(resp)) =
-            item.map_err(|err| panic!("stream item errored: {err}"))
-        {
-            final_response = Some(resp);
-        }
-    }
-    let final_response = final_response.expect("stream should yield a final response");
-
-    assert_eq!(blocking.output, "acknowledged");
-    assert_eq!(final_response.output(), blocking.output);
-    assert_eq!(
-        blocking_hook.shared_events(),
-        streaming_hook.shared_events()
-    );
-    // A skipped valid tool call fires the `ToolResult` hook carrying a
-    // structured `Skipped` outcome (the redesign surfaces the skip to result
-    // hooks), so both drivers record the verbatim skip reason as the result.
-    assert_eq!(blocking_hook.tool_results(), streaming_hook.tool_results());
-    assert_eq!(
-        blocking_hook.tool_results(),
-        vec!["skipped by policy".to_string()],
-        "a skipped tool fires a ToolResult hook with the verbatim skip reason"
-    );
-
-    assert_eq!(
-        serde_json::to_value(parity_conversation(&blocking_cell)).expect("serialize blocking"),
-        serde_json::to_value(parity_conversation(&streaming_cell)).expect("serialize streaming"),
-    );
-    // Pin the actual reason, not just blocking == streaming: a reason dropped
-    // or altered on BOTH paths would still satisfy the equality above.
-    assert!(
-        tool_result_text_in_history(&parity_conversation(&blocking_cell), "skipped by policy"),
-        "the verbatim skip reason must be the tool result content in the history"
     );
 }
 
@@ -4064,21 +3000,6 @@ impl CompletionModel for PausingCompletionModel {
     }
 }
 
-#[test]
-fn one_hook_instance_attaches_to_distinct_completion_models() {
-    #[derive(Clone)]
-    struct ProviderIndependentHook;
-
-    impl AgentHook for ProviderIndependentHook {}
-
-    let hook = ProviderIndependentHook;
-    let _mock_agent = AgentBuilder::new(MockCompletionModel::default())
-        .add_hook(hook.clone())
-        .build();
-    let (other_model, _, _) = PausingCompletionModel::new(MockCompletionModel::default());
-    let _other_agent = AgentBuilder::new(other_model).add_hook(hook).build();
-}
-
 /// `ToolCallAction::Rewrite` resolves to a `ProceedWith` tool-call decision that
 /// carries the replacement arguments, and is named for fail-closed
 /// diagnostics.
@@ -4094,222 +3015,6 @@ fn rewrite_args_resolves_to_proceed_with_for_tool_call() {
         ToolCallAction::try_rewrite(&json!({"x": 1, "y": 2})).expect("serializes"),
         ToolCallAction::rewrite(json!({"x": 1, "y": 2})),
     );
-}
-
-/// A hook that rewrites a *valid* tool call's arguments (`ToolCallAction::Rewrite`
-/// on `ToolCall`) is honored identically under `run()` and `stream()`: the
-/// tool executes with the replacement, so both drivers observe the same
-/// rewritten tool result and reach the same output, tool-result content and
-/// message history. Both drivers share `run_single_tool`, so they stay in
-/// lock-step.
-#[tokio::test]
-async fn valid_tool_call_rewrite_args_parity_across_run_and_stream() {
-    // The model asks to add 2 + 3; the hook rewrites the arguments to 2 + 40,
-    // so the tool returns 42 rather than 5.
-    let turns = [
-        ScriptedTurn::ToolCalls(vec![add_call("tc1", 2, 3)]),
-        ScriptedTurn::Text("acknowledged"),
-    ];
-    let replacement = json!({"x": 2, "y": 40});
-
-    let blocking_model =
-        MockCompletionModel::from_turns(turns.iter().map(ScriptedTurn::as_blocking_turn));
-    let blocking_hook = RecordingHook::default();
-    let blocking = AgentBuilder::new(blocking_model)
-        .tool(MockAddTool)
-        .build()
-        .runner("add 2 and 3")
-        .max_turns(3)
-        .add_hook(blocking_hook.clone())
-        .add_hook(RewriteToolArgsHook(replacement.clone()))
-        .run()
-        .await
-        .expect("blocking run should succeed with rewritten tool arguments");
-
-    let streaming_model = MockCompletionModel::from_stream_turns(
-        turns
-            .iter()
-            .map(|turn| turn.as_stream_events(StreamShape::Complete)),
-    );
-    let streaming_hook = RecordingHook::default();
-    let mut stream = AgentBuilder::new(streaming_model)
-        .tool(MockAddTool)
-        .build()
-        .runner("add 2 and 3")
-        .max_turns(3)
-        .add_hook(streaming_hook.clone())
-        .add_hook(RewriteToolArgsHook(replacement))
-        .stream()
-        .await;
-    let mut final_response = None;
-    while let Some(item) = stream.next().await {
-        if let Ok(MultiTurnStreamItem::FinalResponse(resp)) =
-            item.map_err(|err| panic!("stream item errored: {err}"))
-        {
-            final_response = Some(resp);
-        }
-    }
-    let final_response = final_response.expect("stream should yield a final response");
-
-    // The tool ran with the rewritten arguments (2 + 40 = 42), not the
-    // model's emitted 2 + 3 = 5 — on both drivers.
-    assert_eq!(blocking_hook.tool_results(), vec!["42".to_string()]);
-    assert_eq!(blocking.output, "acknowledged");
-    assert_eq!(final_response.output(), blocking.output);
-    assert_eq!(
-        blocking_hook.shared_events(),
-        streaming_hook.shared_events()
-    );
-    assert_eq!(blocking_hook.tool_results(), streaming_hook.tool_results());
-}
-
-#[tokio::test]
-async fn string_tool_call_without_rewrite_is_canonical_across_run_and_stream() {
-    let turns = [
-        ScriptedTurn::ToolCalls(vec![ScriptedToolCall {
-            id: "tc-string",
-            name: EchoStringArgs::NAME,
-            args: json!("original"),
-        }]),
-        ScriptedTurn::Text("done"),
-    ];
-
-    let blocking_hook = RecordingHook::default();
-    let blocking = AgentBuilder::new(MockCompletionModel::from_turns(
-        turns.iter().map(ScriptedTurn::as_blocking_turn),
-    ))
-    .tool(EchoStringArgs)
-    .build()
-    .runner("echo a string")
-    .max_turns(3)
-    .add_hook(blocking_hook.clone())
-    .run()
-    .await
-    .expect("blocking string call should execute");
-
-    let streaming_hook = RecordingHook::default();
-    let mut stream = AgentBuilder::new(MockCompletionModel::from_stream_turns(
-        turns
-            .iter()
-            .map(|turn| turn.as_stream_events(StreamShape::Complete)),
-    ))
-    .tool(EchoStringArgs)
-    .build()
-    .runner("echo a string")
-    .max_turns(3)
-    .add_hook(streaming_hook.clone())
-    .stream()
-    .await;
-    let mut final_output = None;
-    while let Some(item) = stream.next().await {
-        if let MultiTurnStreamItem::FinalResponse(response) =
-            item.expect("streaming string call should execute")
-        {
-            final_output = Some(response.output().to_string());
-        }
-    }
-
-    assert_eq!(blocking.output, "done");
-    assert_eq!(final_output.as_deref(), Some("done"));
-    assert_eq!(blocking_hook.tool_results(), vec!["original"]);
-    assert_eq!(streaming_hook.tool_results(), vec!["original"]);
-}
-
-#[tokio::test]
-async fn string_tool_call_rewrite_is_canonical_json_across_run_and_stream() {
-    let turns = [
-        ScriptedTurn::ToolCalls(vec![ScriptedToolCall {
-            id: "tc-string",
-            name: EchoStringArgs::NAME,
-            args: json!("original"),
-        }]),
-        ScriptedTurn::Text("done"),
-    ];
-    let replacement = json!("sanitized");
-
-    let blocking_hook = RecordingHook::default();
-    let blocking = AgentBuilder::new(MockCompletionModel::from_turns(
-        turns.iter().map(ScriptedTurn::as_blocking_turn),
-    ))
-    .tool(EchoStringArgs)
-    .build()
-    .runner("echo a string")
-    .max_turns(3)
-    .add_hook(blocking_hook.clone())
-    .add_hook(RewriteToolArgsHook(replacement.clone()))
-    .run()
-    .await
-    .expect("blocking string rewrite should execute");
-
-    let streaming_hook = RecordingHook::default();
-    let mut stream = AgentBuilder::new(MockCompletionModel::from_stream_turns(
-        turns
-            .iter()
-            .map(|turn| turn.as_stream_events(StreamShape::Complete)),
-    ))
-    .tool(EchoStringArgs)
-    .build()
-    .runner("echo a string")
-    .max_turns(3)
-    .add_hook(streaming_hook.clone())
-    .add_hook(RewriteToolArgsHook(replacement))
-    .stream()
-    .await;
-    let mut final_output = None;
-    while let Some(item) = stream.next().await {
-        if let MultiTurnStreamItem::FinalResponse(response) =
-            item.expect("streaming string rewrite should execute")
-        {
-            final_output = Some(response.output().to_string());
-        }
-    }
-
-    assert_eq!(blocking.output, "done");
-    assert_eq!(final_output.as_deref(), Some("done"));
-    assert_eq!(blocking_hook.tool_results(), vec!["sanitized"]);
-    assert_eq!(streaming_hook.tool_results(), vec!["sanitized"]);
-}
-
-#[tokio::test]
-async fn blocking_turn_dispatches_the_registry_generation_it_advertised() {
-    let first_calls = Arc::new(AtomicU32::new(0));
-    let second_calls = Arc::new(AtomicU32::new(0));
-    let handle: ToolServerHandle = ToolServer::new()
-        .tool(FirstGenerationTool(first_calls.clone()))
-        .run();
-    let inner = MockCompletionModel::from_turns([
-        MockTurn::tool_call(
-            "tc-generation",
-            FirstGenerationTool::NAME,
-            json!({"old": "payload"}),
-        ),
-        MockTurn::text("done"),
-    ]);
-    let (model, request_started, release_response) = PausingCompletionModel::new(inner);
-    let runner = AgentBuilder::new(model)
-        .tool_server_handle(handle.clone())
-        .build()
-        .runner("use the generation tool")
-        .max_turns(3);
-
-    let run = runner.run();
-    let replace = async {
-        request_started.notified().await;
-        handle
-            .add_tool(SecondGenerationTool(second_calls.clone()))
-            .await;
-        release_response.notify_one();
-    };
-    let (response, ()) = tokio::time::timeout(std::time::Duration::from_secs(2), async {
-        tokio::join!(run, replace)
-    })
-    .await
-    .expect("in-flight blocking replacement must not hang");
-    let response = response.expect("blocking run should use its pinned tool generation");
-
-    assert_eq!(response.output, "done");
-    assert_eq!(first_calls.load(SeqCst), 1);
-    assert_eq!(second_calls.load(SeqCst), 0);
 }
 
 #[tokio::test]
@@ -4400,88 +3105,6 @@ fn rewrite_result_resolves_to_replace_for_tool_result() {
     }
 }
 
-/// A hook that rewrites a tool's result (`ToolResultAction::Rewrite` on
-/// `ToolResult`) is honored identically under `run()` and `stream()`: the
-/// model-visible history carries the replacement while the `ToolResult` event
-/// still observed the tool's actual output, and both drivers reach the same
-/// output and history. Both share `run_single_tool`, so they stay in
-/// lock-step.
-#[tokio::test]
-async fn valid_tool_result_rewrite_parity_across_run_and_stream() {
-    // The tool computes 2 + 3 = 5; the hook replaces what the model sees with
-    // "redacted-result".
-    let turns = [
-        ScriptedTurn::ToolCalls(vec![add_call("tc1", 2, 3)]),
-        ScriptedTurn::Text("acknowledged"),
-    ];
-
-    let blocking_model =
-        MockCompletionModel::from_turns(turns.iter().map(ScriptedTurn::as_blocking_turn));
-    let blocking_hook = RecordingHook::default();
-    let blocking_cell = parity_cell("add 2 and 3");
-    let blocking = AgentBuilder::new(blocking_model)
-        .tool(MockAddTool)
-        .build()
-        .runner_over(blocking_cell.clone())
-        .max_turns(3)
-        .turn_id_source(parity_turn_ids())
-        .add_hook(blocking_hook.clone())
-        .add_hook(RewriteToolResultHook("redacted-result"))
-        .run()
-        .await
-        .expect("blocking run should succeed with a rewritten tool result");
-
-    let streaming_model = MockCompletionModel::from_stream_turns(
-        turns
-            .iter()
-            .map(|turn| turn.as_stream_events(StreamShape::Complete)),
-    );
-    let streaming_hook = RecordingHook::default();
-    let streaming_cell = parity_cell("add 2 and 3");
-    let mut stream = AgentBuilder::new(streaming_model)
-        .tool(MockAddTool)
-        .build()
-        .runner_over(streaming_cell.clone())
-        .max_turns(3)
-        .turn_id_source(parity_turn_ids())
-        .add_hook(streaming_hook.clone())
-        .add_hook(RewriteToolResultHook("redacted-result"))
-        .stream()
-        .await;
-    let mut final_response = None;
-    while let Some(item) = stream.next().await {
-        if let Ok(MultiTurnStreamItem::FinalResponse(resp)) =
-            item.map_err(|err| panic!("stream item errored: {err}"))
-        {
-            final_response = Some(resp);
-        }
-    }
-    let final_response = final_response.expect("stream should yield a final response");
-
-    assert_eq!(blocking.output, "acknowledged");
-    assert_eq!(final_response.output(), blocking.output);
-
-    // The ToolResult event observes the tool's ACTUAL output (5) on both
-    // drivers — the replacement is applied after the event fires.
-    assert_eq!(blocking_hook.tool_results(), vec!["5".to_string()]);
-    assert_eq!(blocking_hook.tool_results(), streaming_hook.tool_results());
-
-    // The model-visible history carries the REWRITTEN result, not "5", and is
-    // byte-identical across drivers.
-    assert_eq!(
-        serde_json::to_value(parity_conversation(&blocking_cell)).expect("serialize blocking"),
-        serde_json::to_value(parity_conversation(&streaming_cell)).expect("serialize streaming"),
-    );
-    assert!(
-        tool_result_text_in_history(&parity_conversation(&blocking_cell), "redacted-result"),
-        "the model-visible tool result must be the hook's replacement"
-    );
-    assert!(
-        !tool_result_text_in_history(&parity_conversation(&blocking_cell), "5"),
-        "the tool's original output must not reach the model after a rewrite"
-    );
-}
-
 /// A `ToolResultAction::Rewrite` replacement is delivered to the model verbatim, not
 /// re-parsed as structured/multimodal tool output. A JSON-shaped replacement
 /// (here, an image payload that `tool_result_output` would turn into an image
@@ -4495,7 +3118,7 @@ async fn rewrite_result_is_delivered_verbatim_not_reparsed() {
         ScriptedTurn::ToolCalls(vec![add_call("tc1", 2, 3)]),
         ScriptedTurn::Text("done"),
     ];
-    let model = MockCompletionModel::from_turns(turns.iter().map(ScriptedTurn::as_blocking_turn));
+    let model = stream_model(turns.iter().map(ScriptedTurn::as_blocking_turn));
     let cell = parity_cell("add 2 and 3");
     let _result = AgentBuilder::new(model)
         .tool(MockAddTool)
@@ -4702,140 +3325,6 @@ impl AgentHook for HumanApprovalHook {
     }
 }
 
-/// A HITL hook that approves the first tool call, denies the second, and
-/// edits the third's arguments behaves identically under `run()` and
-/// `stream()`: approved/edited tools execute (and the edit takes effect),
-/// the denied tool runs nothing while its reason reaches the model, and the
-/// model-visible history is identical across drivers (compared structurally).
-#[tokio::test]
-async fn human_in_the_loop_approve_deny_edit_parity_across_run_and_stream() {
-    // One turn issues three tool calls; the reviewer decides each differently.
-    let turns = [
-        ScriptedTurn::ToolCalls(vec![
-            add_call("tc1", 2, 3),   // approve -> runs, 2 + 3 = 5
-            add_call("tc2", 10, 20), // deny    -> skipped; model sees the reason
-            add_call("tc3", 1, 1),   // edit    -> runs 1 + 100 = 101, not 1 + 1 = 2
-        ]),
-        ScriptedTurn::Text("done"),
-    ];
-    let denial = "denied by reviewer: amount too large";
-    let decisions = || {
-        vec![
-            Decision::Approve,
-            Decision::Deny(denial),
-            Decision::Edit(json!({"x": 1, "y": 100})),
-        ]
-    };
-
-    let blocking_model =
-        MockCompletionModel::from_turns(turns.iter().map(ScriptedTurn::as_blocking_turn));
-    let blocking_recorder = RecordingHook::default();
-    let blocking_approver = HumanApprovalHook::new(decisions());
-    let blocking_cell = parity_cell("carry out the plan");
-    let blocking = AgentBuilder::new(blocking_model)
-        .tool(MockAddTool)
-        .build()
-        .runner_over(blocking_cell.clone())
-        .max_turns(3)
-        .turn_id_source(parity_turn_ids())
-        .add_hook(blocking_recorder.clone())
-        .add_hook(blocking_approver.clone())
-        .run()
-        .await
-        .expect("blocking HITL run should succeed");
-
-    let streaming_model = MockCompletionModel::from_stream_turns(
-        turns
-            .iter()
-            .map(|turn| turn.as_stream_events(StreamShape::Complete)),
-    );
-    let streaming_recorder = RecordingHook::default();
-    let streaming_cell = parity_cell("carry out the plan");
-    let streaming_approver = HumanApprovalHook::new(decisions());
-    let mut stream = AgentBuilder::new(streaming_model)
-        .tool(MockAddTool)
-        .build()
-        .runner_over(streaming_cell.clone())
-        .max_turns(3)
-        .turn_id_source(parity_turn_ids())
-        .add_hook(streaming_recorder.clone())
-        .add_hook(streaming_approver.clone())
-        .stream()
-        .await;
-    let mut final_response = None;
-    while let Some(item) = stream.next().await {
-        if let Ok(MultiTurnStreamItem::FinalResponse(resp)) =
-            item.map_err(|err| panic!("stream item errored: {err}"))
-        {
-            final_response = Some(resp);
-        }
-    }
-    let final_response = final_response.expect("stream should yield a final response");
-
-    // Approved (5) and edited (101) tools executed, in call order; the denied
-    // call executed nothing but now fires a ToolResult carrying its verbatim
-    // denial reason (structured `Skipped` outcome) — identically on both
-    // drivers.
-    assert_eq!(
-        blocking_recorder.tool_results(),
-        vec![
-            "5".to_string(),
-            "denied by reviewer: amount too large".to_string(),
-            "101".to_string()
-        ]
-    );
-    assert_eq!(
-        blocking_recorder.tool_results(),
-        streaming_recorder.tool_results()
-    );
-
-    // The denied call (10 + 20) never executed, so its result 30 is absent —
-    // the denial reason stands in its place, ruling out deny being silently
-    // treated as approve.
-    assert!(
-        !blocking_recorder.tool_results().contains(&"30".to_string()),
-        "the denied call must not have executed"
-    );
-
-    // The reviewer was consulted for all three calls, in order, identically per
-    // driver — pinning each decision to its call (approve=2+3, deny=10+20,
-    // edit=the third).
-    let reviewed = blocking_approver.reviewed();
-    assert_eq!(reviewed.len(), 3);
-    assert_eq!(reviewed, streaming_approver.reviewed());
-    assert!(
-        reviewed[0].contains('2') && reviewed[0].contains('3'),
-        "first reviewed call should be add(2, 3): {reviewed:?}"
-    );
-    assert!(
-        reviewed[1].contains("10") && reviewed[1].contains("20"),
-        "the denied (second) call should be add(10, 20): {reviewed:?}"
-    );
-
-    assert_eq!(blocking.output, "done");
-    assert_eq!(final_response.output(), blocking.output);
-    assert_eq!(
-        blocking_recorder.shared_events(),
-        streaming_recorder.shared_events()
-    );
-
-    // Model-visible history is identical across drivers (compared structurally
-    // as serde_json::Value) and carries the denial reason and the edited result
-    // 101 (not the model's 1 + 1 = 2).
-    assert_eq!(
-        serde_json::to_value(parity_conversation(&blocking_cell)).expect("serialize blocking"),
-        serde_json::to_value(parity_conversation(&streaming_cell)).expect("serialize streaming"),
-    );
-    assert!(
-        tool_result_text_in_history(&parity_conversation(&blocking_cell), denial),
-        "the denial reason must be the denied call's tool result in the history"
-    );
-    assert!(
-        tool_result_json_in_history(&parity_conversation(&blocking_cell), &json!(101)),
-        "the edited call must have executed with the rewritten arguments"
-    );
-}
-
 /// A HITL hook that aborts a tool call (`Decision::Abort` — the call runs,
 /// then the run ends with the reason at the batch's settle) surfaces the
 /// reason as a `PromptCancelled` error — on both the blocking and streaming
@@ -4849,8 +3338,7 @@ async fn human_in_the_loop_abort_terminates_the_run() {
     const ABORT_REASON: &str = "aborted by the human reviewer";
 
     // Blocking driver: the run resolves to a PromptCancelled error.
-    let blocking_model =
-        MockCompletionModel::from_turns(turns.iter().map(ScriptedTurn::as_blocking_turn));
+    let blocking_model = stream_model(turns.iter().map(ScriptedTurn::as_blocking_turn));
     let err = AgentBuilder::new(blocking_model)
         .tool(MockAddTool)
         .build()
@@ -4969,7 +3457,7 @@ async fn approval_policy_allow_list_with_sticky_decisions() {
         ScriptedTurn::Text("done"),
     ];
 
-    let model = MockCompletionModel::from_turns(turns.iter().map(ScriptedTurn::as_blocking_turn));
+    let model = stream_model(turns.iter().map(ScriptedTurn::as_blocking_turn));
     let recorder = RecordingHook::default();
     let policy = PolicyHook::new(["add"]);
     let policy_cell = parity_cell("go");

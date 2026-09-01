@@ -1,8 +1,31 @@
 use super::{CompletionCall, PromptResponse, PromptResponseRepr};
+
+use crate::agent::prompt_request::streaming::fold_stream;
+use crate::streaming::StreamingPrompt;
+
+/// Fold a streaming request to its outcome — the suite drives the one
+/// execution surface.
+/// A mock model whose streaming surface replays the given unary-turn
+/// scenario — the suite drives the one execution surface.
+fn stream_model(
+    turns: impl IntoIterator<Item = crate::test_utils::MockTurn>,
+) -> crate::test_utils::MockCompletionModel {
+    crate::test_utils::MockCompletionModel::from_stream_turns(
+        turns
+            .into_iter()
+            .map(crate::test_utils::MockTurn::into_stream_events),
+    )
+}
+
+async fn fold(
+    request: crate::agent::prompt_request::streaming::StreamingPromptRequest,
+) -> Result<PromptResponse, crate::completion::PromptError> {
+    fold_stream(&mut request.await).await
+}
 use crate::{
     agent::AgentBuilder,
     completion::{
-        AssistantContent, CompletionError, CompletionRequest, Message, Prompt, PromptError, Usage,
+        AssistantContent, CompletionError, CompletionRequest, Message, PromptError, Usage,
     },
     test_utils::{MockAddTool, MockCompletionModel, MockContextProbeTool, MockTurn, SessionId},
     tool::{Tool, ToolContext},
@@ -196,12 +219,10 @@ fn prompt_response_serialize_and_deserialize_agree_on_wire_shape() {
 
 #[tokio::test]
 async fn prompt_response_records_completion_call_without_reported_usage() {
-    let model = MockCompletionModel::new([MockTurn::text("ok")]);
+    let model = stream_model([MockTurn::text("ok")]);
     let agent = AgentBuilder::new(model).build();
 
-    let response = agent
-        .prompt("say ok")
-        .extended_details()
+    let response = fold(agent.stream_prompt("say ok"))
         .await
         .expect("prompt should succeed");
 
@@ -257,7 +278,7 @@ fn validate_follow_up_tool_history(request: &CompletionRequest) {
 /// threaded all the way to the tool the agent loop executes.
 #[tokio::test]
 async fn tool_context_reaches_tool_through_agent_loop() {
-    let model = MockCompletionModel::new([
+    let model = stream_model([
         MockTurn::tool_call("tool_call_1", "context_probe", json!({})),
         MockTurn::text("done"),
     ]);
@@ -267,12 +288,15 @@ async fn tool_context_reaches_tool_through_agent_loop() {
     let mut context = ToolContext::new();
     context.insert(SessionId("abc-123".to_string()));
 
-    let out = agent
-        .prompt("use the tool")
-        .tool_context(context)
-        .max_turns(3)
-        .await
-        .expect("run succeeds");
+    let out = fold(
+        agent
+            .stream_prompt("use the tool")
+            .tool_context(context)
+            .max_turns(3),
+    )
+    .await
+    .map(|response| response.output)
+    .expect("run succeeds");
 
     assert_eq!(out, "done");
     assert_eq!(probe.observed().as_deref(), Some("session:abc-123"));
@@ -283,7 +307,7 @@ async fn tool_context_reaches_tool_through_agent_loop() {
 /// rounds; both must observe the same injected value, not just the first.
 #[tokio::test]
 async fn tool_context_persists_across_multiple_rounds() {
-    let model = MockCompletionModel::new([
+    let model = stream_model([
         MockTurn::tool_call("c1", "context_probe", json!({})),
         MockTurn::tool_call("c2", "context_probe", json!({})),
         MockTurn::text("done"),
@@ -294,12 +318,15 @@ async fn tool_context_persists_across_multiple_rounds() {
     let mut context = ToolContext::new();
     context.insert(SessionId("abc-123".to_string()));
 
-    let out = agent
-        .prompt("use the tool twice")
-        .tool_context(context)
-        .max_turns(5)
-        .await
-        .expect("run succeeds");
+    let out = fold(
+        agent
+            .stream_prompt("use the tool twice")
+            .tool_context(context)
+            .max_turns(5),
+    )
+    .await
+    .map(|response| response.output)
+    .expect("run succeeds");
 
     assert_eq!(out, "done");
     assert_eq!(
@@ -312,17 +339,16 @@ async fn tool_context_persists_across_multiple_rounds() {
 /// stale value) — the backward-compatible default path.
 #[tokio::test]
 async fn tool_runs_with_empty_context_when_none_supplied() {
-    let model = MockCompletionModel::new([
+    let model = stream_model([
         MockTurn::tool_call("tool_call_1", "context_probe", json!({})),
         MockTurn::text("done"),
     ]);
     let probe = MockContextProbeTool::default();
     let agent = AgentBuilder::new(model).tool(probe.clone()).build();
 
-    let out = agent
-        .prompt("use the tool")
-        .max_turns(3)
+    let out = fold(agent.stream_prompt("use the tool").max_turns(3))
         .await
+        .map(|response| response.output)
         .expect("run succeeds");
 
     assert_eq!(out, "done");
@@ -353,8 +379,7 @@ async fn invalid_specific_tool_choice_fails_before_non_streaming_provider_reques
         })
         .build();
 
-    let err = agent
-        .prompt("use the missing tool")
+    let err = fold(agent.stream_prompt("use the missing tool"))
         .await
         .expect_err("invalid ToolChoice::Specific should fail before provider request");
 
@@ -371,7 +396,7 @@ async fn invalid_specific_tool_choice_fails_before_non_streaming_provider_reques
 
 #[tokio::test]
 async fn allowed_specific_tool_call_executes_normally() {
-    let model = MockCompletionModel::new([
+    let model = stream_model([
         MockTurn::tool_call("tool_call_1", "add", json!({"x": 1, "y": 2})),
         MockTurn::text("done"),
     ]);
@@ -383,10 +408,9 @@ async fn allowed_specific_tool_call_executes_normally() {
         })
         .build();
 
-    let response = agent
-        .prompt("use the allowed tool")
-        .max_turns(3)
+    let response = fold(agent.stream_prompt("use the allowed tool").max_turns(3))
         .await
+        .map(|response| response.output)
         .expect("allowed specific tool should execute");
 
     assert_eq!(response, "done");
@@ -415,7 +439,7 @@ async fn prompt_request_stops_cleanly_on_empty_terminal_turn() {
         tool_use_prompt_tokens: 0,
         reasoning_tokens: 0,
     };
-    let model = MockCompletionModel::new([
+    let model = stream_model([
         MockTurn::tool_call("tool_call_1", "add", json!({"x": 1, "y": 2}))
             .with_call_id("call_1")
             .with_usage(first_call_usage),
@@ -424,12 +448,15 @@ async fn prompt_request_stops_cleanly_on_empty_terminal_turn() {
     let agent = AgentBuilder::new(model.clone()).tool(MockAddTool).build();
 
     let cell = test_cell("do tool work");
-    let response = agent
-        .prompt_over(cell.clone())
-        .max_turns(3)
-        .extended_details()
-        .await
-        .expect("empty terminal turn should not error");
+    let response = fold(
+        crate::agent::prompt_request::streaming::StreamingPromptRequest::from_agent_cell(
+            &agent,
+            cell.clone(),
+        )
+        .max_turns(3),
+    )
+    .await
+    .expect("empty terminal turn should not error");
 
     assert!(response.output.is_empty());
     assert_eq!(
@@ -498,7 +525,7 @@ async fn prompt_request_stops_cleanly_on_empty_terminal_turn() {
 
 #[tokio::test]
 async fn prompt_request_concatenates_text_blocks_without_inserted_newlines() {
-    let model = MockCompletionModel::new([MockTurn::from_contents([
+    let model = stream_model([MockTurn::from_contents([
         AssistantContent::Text(Text::new("According to the document, ")),
         AssistantContent::Text(Text::new("the grass is green")),
         AssistantContent::Text(Text::new(" and the sky is blue.")),
@@ -506,10 +533,10 @@ async fn prompt_request_concatenates_text_blocks_without_inserted_newlines() {
     .expect("mock response should contain text blocks")]);
     let agent = AgentBuilder::new(model).build();
 
-    let response = agent
-        .prompt("answer with cited spans")
+    let response = fold(agent.stream_prompt("answer with cited spans"))
         .await
-        .expect("prompt should succeed");
+        .expect("prompt should succeed")
+        .output;
 
     assert_eq!(
         response,
@@ -528,18 +555,21 @@ async fn prompt_request_preserves_metadata_only_text_turn_in_history() {
             "encrypted_index": "encrypted-reference"
         }]
     });
-    let model = MockCompletionModel::new([MockTurn::from_content(AssistantContent::Text(Text {
+    let model = stream_model([MockTurn::from_content(AssistantContent::Text(Text {
         text: String::new(),
         additional_params: Some(metadata.clone()),
     }))]);
     let agent = AgentBuilder::new(model).build();
 
     let cell = test_cell("answer with cited metadata");
-    let response = agent
-        .prompt_over(cell.clone())
-        .extended_details()
-        .await
-        .expect("metadata-only text turn should succeed");
+    let response = fold(
+        crate::agent::prompt_request::streaming::StreamingPromptRequest::from_agent_cell(
+            &agent,
+            cell.clone(),
+        ),
+    )
+    .await
+    .expect("metadata-only text turn should succeed");
 
     assert!(response.output.is_empty());
     let history = cell_conversation(&cell);
@@ -575,24 +605,27 @@ fn static_document(id: &str, text: &str) -> crate::completion::Document {
 
 #[tokio::test]
 async fn prompt_request_setters_reach_the_prepared_completion_request() {
-    let model = MockCompletionModel::new([MockTurn::text("done"), MockTurn::text("done")]);
+    let model = stream_model([MockTurn::text("done"), MockTurn::text("done")]);
     let recorded = model.clone();
     let agent = AgentBuilder::new(model).preamble("agent preamble").build();
 
     let mut params = serde_json::Map::new();
     params.insert("merged".to_string(), json!(1));
-    let out = agent
-        .prompt("configured run")
-        .preamble("request preamble")
-        .document(static_document("d1", "doc one"))
-        .documents([static_document("d2", "doc two")])
-        .temperature(0.7)
-        .max_tokens(128)
-        .merge_additional_params(params)
-        .tool_choice(ToolChoice::Auto)
-        .max_turns(1)
-        .await
-        .expect("run with request-level setters should succeed");
+    let out = fold(
+        agent
+            .stream_prompt("configured run")
+            .preamble("request preamble")
+            .document(static_document("d1", "doc one"))
+            .documents([static_document("d2", "doc two")])
+            .temperature(0.7)
+            .max_tokens(128)
+            .merge_additional_params(params)
+            .tool_choice(ToolChoice::Auto)
+            .max_turns(1),
+    )
+    .await
+    .map(|response| response.output)
+    .expect("run with request-level setters should succeed");
 
     assert_eq!(out, "done");
     let request = &recorded.requests()[0];
@@ -607,12 +640,15 @@ async fn prompt_request_setters_reach_the_prepared_completion_request() {
     assert_eq!(request.tool_choice, Some(ToolChoice::Auto));
 
     // A later `replace_additional_params` swaps the whole map.
-    let out = agent
-        .prompt("replaced params run")
-        .replace_additional_params(json!({"replaced": true}))
-        .max_turns(1)
-        .await
-        .expect("run with replaced params should succeed");
+    let out = fold(
+        agent
+            .stream_prompt("replaced params run")
+            .replace_additional_params(json!({"replaced": true}))
+            .max_turns(1),
+    )
+    .await
+    .map(|response| response.output)
+    .expect("run with replaced params should succeed");
     assert_eq!(out, "done");
     let request = &recorded.requests()[1];
     assert_eq!(request.additional_params, Some(json!({"replaced": true})));
@@ -620,25 +656,28 @@ async fn prompt_request_setters_reach_the_prepared_completion_request() {
 
 #[tokio::test]
 async fn prompt_request_without_setters_clear_overrides_back_to_none() {
-    let model = MockCompletionModel::new([MockTurn::text("done")]);
+    let model = stream_model([MockTurn::text("done")]);
     let recorded = model.clone();
     let agent = AgentBuilder::new(model).preamble("agent preamble").build();
 
-    let out = agent
-        .prompt("cleared run")
-        .preamble("temporary")
-        .without_preamble()
-        .temperature(0.7)
-        .without_temperature()
-        .max_tokens(128)
-        .without_max_tokens()
-        .replace_additional_params(json!({"k": 1}))
-        .without_additional_params()
-        .tool_choice(ToolChoice::Auto)
-        .without_tool_choice()
-        .max_turns(1)
-        .await
-        .expect("run with cleared setters should succeed");
+    let out = fold(
+        agent
+            .stream_prompt("cleared run")
+            .preamble("temporary")
+            .without_preamble()
+            .temperature(0.7)
+            .without_temperature()
+            .max_tokens(128)
+            .without_max_tokens()
+            .replace_additional_params(json!({"k": 1}))
+            .without_additional_params()
+            .tool_choice(ToolChoice::Auto)
+            .without_tool_choice()
+            .max_turns(1),
+    )
+    .await
+    .map(|response| response.output)
+    .expect("run with cleared setters should succeed");
 
     assert_eq!(out, "done");
     let request = &recorded.requests()[0];
@@ -651,32 +690,38 @@ async fn prompt_request_without_setters_clear_overrides_back_to_none() {
 
 #[tokio::test]
 async fn prompt_request_using_model_value_swaps_the_run_model() {
-    let model = MockCompletionModel::new([MockTurn::text("from agent model")]);
-    let replacement = MockCompletionModel::new([MockTurn::text("from request model")]);
+    let model = stream_model([MockTurn::text("from agent model")]);
+    let replacement = stream_model([MockTurn::text("from request model")]);
     let agent = AgentBuilder::new(model).build();
 
-    let out = agent
-        .prompt("swap the model")
-        .using_model_value(replacement)
-        .max_turns(1)
-        .await
-        .expect("request-level model swap should run");
+    let out = fold(
+        agent
+            .stream_prompt("swap the model")
+            .using_model_value(replacement)
+            .max_turns(1),
+    )
+    .await
+    .map(|response| response.output)
+    .expect("request-level model swap should run");
 
     assert_eq!(out, "from request model");
 }
 
 #[tokio::test]
 async fn prompt_request_using_model_handle_swaps_the_run_model() {
-    let model = MockCompletionModel::new([MockTurn::text("from agent model")]);
-    let replacement = MockCompletionModel::new([MockTurn::text("from handle model")]);
+    let model = stream_model([MockTurn::text("from agent model")]);
+    let replacement = stream_model([MockTurn::text("from handle model")]);
     let agent = AgentBuilder::new(model).build();
 
-    let out = agent
-        .prompt("swap the model via handle")
-        .using_model(crate::agent::ModelHandle::new(replacement))
-        .max_turns(1)
-        .await
-        .expect("request-level model-handle swap should run");
+    let out = fold(
+        agent
+            .stream_prompt("swap the model via handle")
+            .using_model(crate::agent::ModelHandle::new(replacement))
+            .max_turns(1),
+    )
+    .await
+    .map(|response| response.output)
+    .expect("request-level model-handle swap should run");
 
     assert_eq!(out, "from handle model");
 }

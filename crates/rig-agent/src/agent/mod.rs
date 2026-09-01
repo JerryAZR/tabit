@@ -6,9 +6,9 @@
 //! The [Agent] struct is highly configurable, allowing the user to define anything from
 //! a simple bot with a specific system prompt to a complex multi-tool system.
 //!
-//! The [Agent] struct implements the runner-backed [crate::completion::Prompt]
-//! and [crate::completion::Chat] traits. All
-//! agent execution goes through [AgentRunner], so hooks and lifecycle policies
+//! The [Agent] struct implements the runner-backed
+//! [StreamingPrompt](crate::streaming::StreamingPrompt) trait. All agent
+//! execution goes through [AgentRunner], so hooks and lifecycle policies
 //! cannot be bypassed through a raw agent request builder.
 //!
 //! The [AgentBuilder] implements the builder pattern for creating instances of [Agent].
@@ -20,6 +20,7 @@
 //! use rig_agent::prelude::*;
 //! use rig_core::{client::ProviderClient, providers::openai};
 //!
+//! # use futures::StreamExt;
 //! # async fn run() -> Result<(), Box<dyn std::error::Error>> {
 //! let openai = openai::Client::from_env()?;
 //!
@@ -31,12 +32,12 @@
 //!     .temperature(0.8)
 //!     .build();
 //!
-//! // Use the agent for prompts
-//! // Generate a completion response from a simple prompt
-//! let prompt_response = agent.prompt("Prompt").await?;
-//!
-//! // Per-run overrides stay inside the hook-aware runner.
-//! let response = agent.runner("Prompt").temperature(0.9).run().await?;
+//! // Drive the agent over the streaming surface (the one execution
+//! // surface); per-run overrides live on the same builder.
+//! let mut stream = agent.runner("Prompt").temperature(0.9).stream().await;
+//! while let Some(item) = stream.next().await {
+//!     // inspect MultiTurnStreamItems as they arrive
+//! }
 //! # Ok(())
 //! # }
 //! ```
@@ -64,9 +65,7 @@ pub use model::ModelHandle;
 pub use prompt_request::streaming::{
     MultiTurnStreamItem, StreamingError, StreamingPromptRequest, StreamingResult, stream_to_stdout,
 };
-pub use prompt_request::{
-    CompletionCall, Extended, PromptRequest, PromptResponse, PromptType, Standard,
-};
+pub use prompt_request::{CompletionCall, PromptResponse};
 pub use rig_core::message::Text;
 pub use run::{ModelTurn, PendingToolCall, ProviderErrorClass};
 pub use runner::{AgentRunner, SteeringSource, TurnIdSource};

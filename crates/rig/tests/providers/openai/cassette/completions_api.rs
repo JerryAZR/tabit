@@ -3,7 +3,6 @@
 use rig::OneOrMany;
 use rig::completion::CompletionModel;
 use rig::completion::NormalizeCompletionResponse;
-use rig::completion::Prompt;
 use rig::message::{AssistantContent, Message, ToolChoice};
 use rig::prelude::*;
 use rig::streaming::StreamingPrompt;
@@ -60,18 +59,20 @@ async fn completions_api_agent_prompt() {
     with_openai_completions_cassette(
         "completions_api/completions_api_agent_prompt",
         |client| async move {
-            let agent = client
-                .completion_model("gpt-4o")
-                .into_agent_builder()
-                .preamble("You are a helpful assistant.")
-                .build();
-
-            let response = agent
-                .prompt("Hello world!")
+            let model = client.completion_model("gpt-4o");
+            let response = model
+                .completion(
+                    model
+                        .completion_request("Hello world!")
+                        .preamble("You are a helpful assistant.".to_string())
+                        .build(),
+                )
                 .await
                 .expect("completions api prompt should succeed");
 
-            assert_nonempty_response(&response);
+            let text = crate::support::assistant_text_response(&response.choice)
+                .expect("completions api prompt should carry assistant text");
+            assert_nonempty_response(&text);
         },
     )
     .await;

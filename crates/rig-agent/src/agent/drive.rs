@@ -75,10 +75,8 @@ pub(crate) enum PhaseEvent {
 
 /// One item the loop emits to its consumer.
 ///
-/// `Item`s are forwarded to a streaming consumer (and ignored by the
-/// blocking fold); `Done` carries both the canonical [`PromptResponse`]
-/// the blocking surface returns and the medium-specific final stream
-/// item the streaming surface yields.
+/// `Item`s are forwarded to the streaming consumer; `Done` only ends the
+/// stream (the outcome itself arrived as the medium's final `Item`).
 // The large `Item` variant is the per-delta hot path (one per streamed token);
 // boxing it to shrink the variant spread would add an allocation per delta,
 // which the streaming path is specifically tuned to avoid. `Done` is yielded
@@ -87,10 +85,10 @@ pub(crate) enum PhaseEvent {
 pub(crate) enum DriveItem {
     /// An intermediate stream item.
     Item(MultiTurnStreamItem),
-    /// The run finished; carries the canonical response the blocking fold
-    /// returns. The streaming surface has already received the final item
-    /// as the preceding `Item` and ignores this.
-    Done(Box<PromptResponse>),
+    /// The run finished. The outcome itself reaches the streaming consumer
+    /// as the preceding `Item` (the medium's `final_item`); this only ends
+    /// the stream.
+    Done,
 }
 
 /// The per-medium half of the loop: how a turn is fetched from the model,
@@ -559,7 +557,7 @@ where
                 if let Some(final_item) = source.final_item(&response) {
                     yield Ok(DriveItem::Item(final_item));
                 }
-                yield Ok(DriveItem::Done(Box::new(response)));
+                yield Ok(DriveItem::Done);
                 break 'outer;
             }
 

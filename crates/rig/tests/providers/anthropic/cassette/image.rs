@@ -1,7 +1,6 @@
 //! Migrated from `examples/image.rs`.
 
 use base64::{Engine, prelude::BASE64_STANDARD};
-use rig::completion::Prompt;
 use rig::completion::message::Image;
 use rig::message::DocumentSourceKind;
 use rig::message::ImageMediaType;
@@ -16,13 +15,7 @@ use crate::support::{
 #[tokio::test]
 async fn image_prompt_from_fixture() {
     with_anthropic_cassette("image/image_prompt_from_fixture", |client| async move {
-        let agent = client
-            .agent("claude-sonnet-4-6")
-            .preamble("You are an image describer.")
-            .temperature(0.5)
-            .max_tokens(64_000)
-            .build();
-
+        let model = client.completion_model("claude-sonnet-4-6");
         let image_bytes = fs::read(IMAGE_FIXTURE_PATH)
             .await
             .expect("fixture image should be readable");
@@ -32,13 +25,22 @@ async fn image_prompt_from_fixture() {
             ..Default::default()
         };
 
-        let response = agent
-            .prompt(image)
+        let response = model
+            .completion(
+                model
+                    .completion_request(image)
+                    .preamble("You are an image describer.".to_string())
+                    .temperature_opt(Some(0.5))
+                    .max_tokens(64_000)
+                    .build(),
+            )
             .await
             .expect("image prompt should succeed");
 
-        assert_nonempty_response(&response);
-        assert_contains_any_case_insensitive(&response, &["ant", "insect"]);
+        let text = crate::support::assistant_text_response(&response.choice)
+            .expect("image prompt should carry assistant text");
+        assert_nonempty_response(&text);
+        assert_contains_any_case_insensitive(&text, &["ant", "insect"]);
     })
     .await;
 }

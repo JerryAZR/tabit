@@ -2,7 +2,6 @@
 
 use futures::FutureExt;
 use rig::OneOrMany;
-use rig::completion::Prompt;
 use rig::message::{
     Document, DocumentMediaType, DocumentSourceKind, Message, Text, UserContent as RigUserContent,
 };
@@ -232,25 +231,6 @@ fn message_contains_file_id(message: &Message, expected_file_id: &str) -> bool {
     })
 }
 
-fn assert_history_preserves_single_file_id(history: &[Message], expected_file_id: &str) {
-    let mut file_id_message_count = 0;
-
-    for message in history {
-        let json = anthropic_wire_json(message.clone());
-        assert_no_text_file_id_fallback(&json, expected_file_id);
-
-        if message_contains_file_id(message, expected_file_id) {
-            file_id_message_count += 1;
-            assert_wire_json_has_exact_file_source(&json, expected_file_id);
-        }
-    }
-
-    assert_eq!(
-        file_id_message_count, 1,
-        "expected exactly one history message to preserve document file ID {expected_file_id}: {history:?}"
-    );
-}
-
 fn anthropic_wire_json(message: Message) -> Value {
     let anthropic_message: AnthropicMessage = message
         .try_into()
@@ -383,104 +363,6 @@ fn document_file_id_wire_assertions_cover_roundtrip_paths() {
     assert_no_verifier_leaked_into_prompt(&provider_native_roundtrip_message);
     assert_generic_message_has_file_id(&provider_native_roundtrip_message, file_id);
     assert_anthropic_wire_file_source(provider_native_roundtrip_message, file_id);
-}
-
-/// One steering message, delivered once at the run's first convergence —
-/// the session's pattern for "answer this over my conversation", local
-/// to this test.
-struct OneShotSteer(std::sync::Mutex<Option<rig::completion::Message>>);
-
-impl OneShotSteer {
-    fn new(message: rig::completion::Message) -> Self {
-        Self(std::sync::Mutex::new(Some(message)))
-    }
-}
-
-impl rig_agent::SteeringSource for OneShotSteer {
-    fn drain(&self) -> Vec<(String, rig::completion::Message)> {
-        self.0
-            .lock()
-            .expect("steer lock")
-            .take()
-            .map(|message| vec![(rig::id::generate(), message)])
-            .unwrap_or_default()
-    }
-}
-
-#[tokio::test]
-async fn messages_document_file_id_roundtrip_live() {
-    with_anthropic_files_cassette(
-        "document_file_id/messages_document_file_id_roundtrip_live",
-        ANTHROPIC_FILES_BETA,
-        |parts| async move {
-            let client = parts.client;
-            let base_url = parts.base_url;
-            let api_key = parts.api_key;
-            with_uploaded_pdf(&base_url, &api_key, |file_id| async move {
-                let agent = client
-                    .agent("claude-sonnet-4-6")
-                    .preamble(DOCUMENT_PREAMBLE)
-                    .max_tokens(64_000)
-                    .build();
-                let cell = std::sync::Arc::new(std::sync::RwLock::new(
-                    tabit_log::ContextManager::seeded(Vec::new()),
-                ));
-
-                let direct_message = direct_file_id_document_question(&file_id, 2);
-                assert_no_verifier_leaked_into_prompt(&direct_message);
-                assert_anthropic_wire_file_source(direct_message, &file_id);
-
-                let provider_native_content = provider_file_content_as_generic_document(&file_id);
-                let provider_native_roundtrip_message =
-                    document_question(provider_native_content, 2);
-                assert_no_verifier_leaked_into_prompt(&provider_native_roundtrip_message);
-                assert_generic_message_has_file_id(&provider_native_roundtrip_message, &file_id);
-                assert_anthropic_wire_file_source(
-                    provider_native_roundtrip_message.clone(),
-                    &file_id,
-                );
-
-                let response = agent
-                    .prompt_over(cell.clone())
-                    .steering(std::sync::Arc::new(OneShotSteer::new(
-                        provider_native_roundtrip_message,
-                    )))
-                    .await
-                    .expect("Messages API should read uploaded PDF by file_id");
-                assert_verifier_response(&response, PAGE_TWO_VERIFIER);
-                assert_history_preserves_single_file_id(
-                    &tabit_log::lock::read(&cell).messages(),
-                    &file_id,
-                );
-
-                let follow_up = agent
-                    .prompt_over(cell.clone())
-                    .steering(std::sync::Arc::new(OneShotSteer::new(
-                        rig::completion::Message::user(
-                            "Using the same PDF from the conversation history, what verifier token is printed on page 3? Reply with only the exact token.",
-                        ),
-                    )))
-                    .await
-                    .expect("Messages API should reuse file_id document from chat history");
-                assert_verifier_response(&follow_up, PAGE_THREE_VERIFIER);
-                assert_history_preserves_single_file_id(
-                    &tabit_log::lock::read(&cell).messages(),
-                    &file_id,
-                );
-
-                let direct_prompt = direct_file_id_document_question(&file_id, 1);
-                assert_no_verifier_leaked_into_prompt(&direct_prompt);
-                assert_anthropic_wire_file_source(direct_prompt.clone(), &file_id);
-                let direct_response = agent
-                    .prompt(direct_prompt)
-                    .await
-                    .expect("Messages API should read direct generic file_id document");
-                assert_verifier_response(&direct_response, PAGE_ONE_VERIFIER);
-            })
-            .await;
-        },
-    )
-    .await;
 }
 
 #[tokio::test]

@@ -2,8 +2,6 @@
 
 use thiserror::Error;
 
-use rig_core::wasm_compat::{WasmCompatSend, WasmCompatSync};
-
 pub use rig_core::completion::*;
 
 /// Errors from classic agent prompting.
@@ -65,15 +63,6 @@ impl PromptError {
             reason: reason.into(),
         }
     }
-}
-
-/// High-level one-shot prompting for the classic runtime.
-pub trait Prompt: WasmCompatSend + WasmCompatSync {
-    /// Send a prompt and return accepted assistant text after runtime orchestration.
-    fn prompt(
-        &self,
-        prompt: impl Into<Message> + WasmCompatSend,
-    ) -> impl std::future::IntoFuture<Output = Result<String, PromptError>, IntoFuture: WasmCompatSend>;
 }
 
 #[cfg(test)]

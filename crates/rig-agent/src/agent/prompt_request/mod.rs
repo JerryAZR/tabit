@@ -1,28 +1,18 @@
 pub mod streaming;
 
-use super::{Agent, hook::AgentHook, runner::AgentRunner};
 use rig_core::{
     OneOrMany,
     completion::ToolResultStatus,
     message::{AssistantContent, ToolResultContent, UserContent},
-    wasm_compat::WasmBoxedFuture,
 };
 
-use crate::{
-    completion::{Message, PromptError, Usage},
-    tool::{ToolContext, ToolOutput},
-};
+use crate::{completion::Usage, tool::ToolOutput};
 use serde::{Deserialize, Serialize};
-use std::{future::IntoFuture, marker::PhantomData};
 
-/// Generate the request-builder setters that forward verbatim to an inner
-/// receiver — `AgentRunner` for the blocking builder, the wrapped
-/// `PromptRequest` for the typed builder, and the `AgentRunner` for the
-/// streaming builder. Only the setters whose signature *and* documentation are
-/// identical across all three builders live here; `max_turns`, `add_hook`, and
-/// `tool_concurrency`, whose docs are builder-specific, stay hand-written (the
-/// blocking builders share `tool_concurrency` via [`forward_tool_concurrency`]).
-/// `$recv` is the field name to delegate through (`runner` or `inner`).
+/// Generate the request-builder setters that forward verbatim to the inner
+/// `AgentRunner` of the streaming builder. Only the setters whose signature
+/// *and* documentation are identical live here; `max_turns` and `add_hook`,
+/// whose docs are builder-specific, stay hand-written.
 macro_rules! forward_prompt_setters {
     ($recv:ident) => {
         /// Attach a per-call [`ToolContext`] for this request.
@@ -162,152 +152,6 @@ macro_rules! forward_prompt_setters {
     };
 }
 pub(crate) use forward_prompt_setters;
-
-/// Generate the `tool_concurrency` setter for the blocking builders, whose doc
-/// is identical to each other but differs from the streaming builder's (the
-/// streaming version documents how tool items are ordered in the emitted
-/// stream). `$recv` is the field name to delegate through (`runner` or `inner`).
-macro_rules! forward_tool_concurrency {
-    ($recv:ident) => {
-        /// Execute up to `concurrency` of a turn's tool calls at once.
-        ///
-        /// See [`AgentRunner::tool_concurrency`] for ordering guarantees: the tool
-        /// batch commits and surfaces atomically, so persisted history and streamed
-        /// tool results are both in tool-call order (results are surfaced only after
-        /// the whole batch settles successfully).
-        pub fn tool_concurrency(mut self, concurrency: usize) -> Self {
-            self.$recv = self.$recv.tool_concurrency(concurrency);
-            self
-        }
-    };
-}
-
-pub trait PromptType {}
-pub struct Standard;
-pub struct Extended;
-
-impl PromptType for Standard {}
-impl PromptType for Extended {}
-
-/// A builder for creating prompt requests with customizable options.
-/// Uses generics to track which options have been set during the build process.
-///
-/// When the agent has no configured `default_max_turns`, the implicit budget is
-/// one model call. Use [`.max_turns()`](Self::max_turns) to override the agent's
-/// configured or implicit budget; a tool call followed by a model-authored final
-/// answer generally requires at least two model calls.
-pub struct PromptRequest<S>
-where
-    S: PromptType,
-{
-    /// The hook-aware driver this request configures and runs.
-    pub(crate) runner: AgentRunner,
-    /// Phantom data to track the type of the request (Standard vs Extended).
-    state: PhantomData<S>,
-}
-
-impl PromptRequest<Standard> {
-    /// Create a new PromptRequest from an agent, cloning the agent's data and
-    /// default hook stack.
-    pub fn from_agent(agent: &Agent, prompt: impl Into<Message>) -> Self {
-        PromptRequest {
-            runner: AgentRunner::from_agent(agent, prompt),
-            state: PhantomData,
-        }
-    }
-
-    /// Create a new PromptRequest over the caller's conversation cell —
-    /// the run folds that one durable manager, and the cell IS the
-    /// input (no prompt rides alongside).
-    pub fn from_agent_cell(agent: &Agent, cell: ::tabit_log::ConversationCell) -> Self {
-        PromptRequest {
-            runner: AgentRunner::from_agent_cell(agent, cell),
-            state: PhantomData,
-        }
-    }
-}
-
-impl<S> PromptRequest<S>
-where
-    S: PromptType,
-{
-    /// Enable returning extended details for responses (includes aggregated token usage
-    /// and the full message history accumulated during the agent loop).
-    ///
-    /// Note: This changes the type of the response from `.send` to return a `PromptResponse` struct
-    /// instead of a simple `String`. This is useful for tracking token usage across multiple turns
-    /// of conversation and inspecting the full message exchange.
-    pub fn extended_details(self) -> PromptRequest<Extended> {
-        PromptRequest {
-            runner: self.runner,
-            state: PhantomData,
-        }
-    }
-
-    /// Set the total model-call budget, including the initial call and every
-    /// retry or continuation. Zero emits no model calls; one permits only the
-    /// initial call. Exceeding the budget returns
-    /// [`crate::completion::PromptError::MaxTurnsError`].
-    pub fn max_turns(mut self, max_turns: usize) -> Self {
-        self.runner = self.runner.max_turns(max_turns);
-        self
-    }
-
-    /// Append a hook for this request (on top of any the agent already carries).
-    /// Hooks run in registration order; how their results compose is
-    /// event-dependent (model selections and `ToolCall`/`ToolResult` rewrites
-    /// chain, `CompletionCall` request patches accumulate and merge, while
-    /// model-turn steering and observe-only/recovery events use
-    /// first-non-`Continue`-wins). See the [`hook`](crate::agent::hook) module
-    /// docs.
-    pub fn add_hook<H>(mut self, hook: H) -> Self
-    where
-        H: AgentHook + 'static,
-    {
-        self.runner = self.runner.add_hook(hook);
-        self
-    }
-
-    /// Set the source of announced turn ids — see
-    /// [`AgentRunner::turn_id_source`](crate::agent::runner::AgentRunner::turn_id_source).
-    /// On the blocking surface the minted ids still reach hooks (the
-    /// context carries the id of the turn in flight); there are no stream
-    /// items to carry them.
-    pub fn turn_id_source(mut self, source: crate::agent::runner::TurnIdSource) -> Self {
-        self.runner = self.runner.turn_id_source(source);
-        self
-    }
-
-    forward_prompt_setters!(runner);
-    forward_tool_concurrency!(runner);
-}
-
-/// Due to: [RFC 2515](https://github.com/rust-lang/rust/issues/63063), we have to use a `BoxFuture`
-///  for the `IntoFuture` implementation. In the future, we should be able to use `impl Future<...>`
-///  directly via the associated type.
-impl IntoFuture for PromptRequest<Standard> {
-    type Output = Result<String, PromptError>;
-    type IntoFuture = WasmBoxedFuture<'static, Self::Output>;
-
-    fn into_future(self) -> Self::IntoFuture {
-        Box::pin(self.send())
-    }
-}
-
-impl IntoFuture for PromptRequest<Extended> {
-    type Output = Result<PromptResponse, PromptError>;
-    type IntoFuture = WasmBoxedFuture<'static, Self::Output>;
-
-    fn into_future(self) -> Self::IntoFuture {
-        Box::pin(self.send())
-    }
-}
-
-impl PromptRequest<Standard> {
-    async fn send(self) -> Result<String, PromptError> {
-        self.extended_details().send().await.map(|resp| resp.output)
-    }
-}
 
 /// Details for one successfully completed completion request made by an agent run.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -567,12 +411,6 @@ pub(crate) fn assistant_text_from_choice(choice: &OneOrMany<AssistantContent>) -
             _ => None,
         })
         .collect()
-}
-
-impl PromptRequest<Extended> {
-    async fn send(self) -> Result<PromptResponse, PromptError> {
-        self.runner.run().await
-    }
 }
 
 #[cfg(test)]

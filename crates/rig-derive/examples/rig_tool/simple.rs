@@ -1,4 +1,3 @@
-use rig_agent::completion::Prompt;
 use rig_agent::prelude::*;
 use rig_core::client::ProviderClient;
 use rig_core::providers;
@@ -82,6 +81,25 @@ fn sum_numbers(
     Ok(numbers.iter().sum())
 }
 
+/// Drive one streaming prompt to its assistant text - the one-execution-
+/// surface spelling of the old blocking `prompt()` example call.
+async fn prompt_text(agent: &rig_agent::agent::Agent, prompt: &str) -> anyhow::Result<String> {
+    use futures::StreamExt;
+    use rig_agent::agent::MultiTurnStreamItem;
+    use rig_agent::streaming::{StreamedAssistantContent, StreamingPrompt};
+
+    let mut stream = agent.stream_prompt(prompt.to_string()).await;
+    let mut text = String::new();
+    while let Some(item) = stream.next().await {
+        if let Ok(MultiTurnStreamItem::StreamAssistantItem(StreamedAssistantContent::Text(part))) =
+            item
+        {
+            text.push_str(&part.text);
+        }
+    }
+    Ok(text)
+}
+
 #[tokio::main]
 async fn main() -> Result<(), anyhow::Error> {
     tracing_subscriber::fmt().pretty().init();
@@ -106,7 +124,7 @@ async fn main() -> Result<(), anyhow::Error> {
         "Add 100 and 200",
     ] {
         println!("User: {prompt}");
-        println!("Agent: {}", calculator_agent.prompt(prompt).await?);
+        println!("Agent: {}", prompt_text(&calculator_agent, prompt).await?);
     }
 
     Ok(())

@@ -11,7 +11,6 @@
 use std::sync::{Arc, Mutex};
 
 use rig::agent::{AgentHook, ToolResultAction, ToolResultEvent};
-use rig::completion::Prompt;
 use rig::prelude::*;
 use rig::streaming::StreamingPrompt;
 use rig::tool::Tool;
@@ -134,40 +133,6 @@ fn assert_answer_hides_secret(answer: &str, tool_produced_secret: bool) {
         SECRET_SSN,
     )
     .expect("portable result-redaction contract should hold");
-}
-
-#[tokio::test]
-async fn tool_result_redacted_by_hook_blocking() {
-    let tool = GetUserRecord::default();
-    let probe = tool.clone();
-
-    with_anthropic_cassette(
-        "tool_result_rewrite/tool_result_redacted_by_hook_blocking",
-        move |client| async move {
-            let execution_probe = tool.clone();
-            let agent = client
-                .agent("claude-sonnet-4-6")
-                .preamble(PREAMBLE)
-                .tool(tool)
-                .add_hook(RedactSsnFromResult)
-                .max_tokens(64_000)
-                .build();
-
-            let response = agent
-                .prompt(LOOKUP_PROMPT)
-                .max_turns(5)
-                .await
-                .expect("blocking lookup should succeed");
-
-            assert_answer_hides_secret(&response, execution_probe.produced_secret());
-        },
-    )
-    .await;
-
-    assert!(
-        probe.produced_secret(),
-        "the tool itself should have produced the secret SSN that the hook redacted"
-    );
 }
 
 #[tokio::test]

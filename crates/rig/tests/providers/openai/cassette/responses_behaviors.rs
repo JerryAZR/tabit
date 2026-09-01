@@ -142,30 +142,31 @@ async fn system_messages_as_input_items_mid_conversation() {
             // `with_system_instructions_as_messages`, the preamble and the
             // mid-conversation system message are sent as `system` input
             // items instead of the top-level `instructions` field.
-            let agent = client
+            let model = client
                 .with_system_instructions_as_messages()
-                .agent("gpt-4o")
-                .preamble("You are a concise assistant.")
-                .build();
-            let cell = std::sync::Arc::new(std::sync::RwLock::new(
-                tabit_log::ContextManager::seeded(vec![
-                    Message::user("Hello!"),
-                    Message::assistant("Hi! How can I help you today?"),
-                    Message::system(
-                        "The user's codename is FALCON-9. Always refer to the user by codename.",
-                    ),
-                    Message::user("What is my codename?"),
-                ]),
-            ));
-
-            let result = agent
-                .prompt_over(cell)
+                .completion_model("gpt-4o");
+            let response = model
+                .completion(
+                    model
+                        .completion_request(Message::user("What is my codename?"))
+                        .preamble("You are a concise assistant.".to_string())
+                        .messages(vec![
+                            Message::user("Hello!"),
+                            Message::assistant("Hi! How can I help you today?"),
+                            Message::system(
+                                "The user's codename is FALCON-9. Always refer to the user by codename.",
+                            ),
+                        ])
+                        .build(),
+                )
                 .await
                 .expect("chat with a mid-conversation system message should succeed");
 
+            let text = crate::support::assistant_text_response(&response.choice)
+                .expect("response should carry assistant text");
             assert!(
-                result.contains("FALCON-9"),
-                "the mid-conversation system message must reach the model, got {result:?}"
+                text.contains("FALCON-9"),
+                "the mid-conversation system message must reach the model, got {text:?}"
             );
         },
     )

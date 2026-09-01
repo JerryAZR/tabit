@@ -509,14 +509,19 @@ unification; ruled to wait until the discussion series concludes:
   (`drive_agent`); blocking/streaming differ only in `TurnSource`, so
   the parity family guards the adapter seam, not a duplicated loop —
   no collapse available there. The lens does catch two things:
-  1. **The blocking surface has zero tabit consumers** — sessions run
-     streaming only (`open_run` → `stream_chat`); the blocking
-     `Prompt` surface exists for the vendored facade. Half the parity
-     family exists to guard it. Feed this into the rig-core
-     vendored-mass-policy item below: whether the blocking surface
-     stays decides how much parity surface stays.
+  1. **The blocking surface has zero tabit consumers** — resolved the
+     deletion way (2026-08): the `Prompt` trait, `PromptRequest`
+     typestate, `AgentRunner::run`, `UnaryTurnSource` + the blocking
+     `follows_from` chain, and the facade re-exports are deleted; the
+     streaming surface is the one execution surface (`fold_stream` is
+     the outcome fold for in-crate consumers; `MockTurn::
+     into_stream_events` bridges unary-scripted mock scenarios onto
+     it). `PromptError` stays — it is the streaming error payload the
+     session wraps. Cassette suites followed the same split: blocking
+     twins deleted with their recordings (the cassette-safety check
+     enumerated every orphan); single-turn wire-mapping smokes now
+     drive the unary provider path directly (same cassettes, same
+     request bodies).
   2. The ~8 ad-hoc blocking/streaming builder pairs in
-     `runner_tests.rs` hand-roll what
-     `run_blocking_scenario`/`run_streaming_scenario` already
-     abstract — a mechanical consolidation whenever those files are
-     next touched; low priority.
+     `runner_tests.rs` — moot: the pairs and their parity family died
+     with the blocking surface.

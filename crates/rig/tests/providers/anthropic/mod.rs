@@ -2,7 +2,6 @@ mod support;
 
 mod cassette {
     mod agent;
-    mod default_max_turns;
     mod document_file_id;
     mod empty_end_turn;
     mod image;
@@ -22,8 +21,6 @@ mod cassette {
     mod streaming;
     mod streaming_grammar;
     mod streaming_tools;
-    mod think_tool;
-    mod think_tool_with_other_tools;
     mod tool_call_rewrite_args;
     mod tool_result_rewrite;
     mod url_pdf_document;

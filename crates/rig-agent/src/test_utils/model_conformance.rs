@@ -16,6 +16,19 @@ use futures::StreamExt;
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 
+/// A mock model whose streaming surface replays the given unary-turn
+/// scenario — the harness drives the one execution surface.
+#[cfg(test)]
+fn stream_model(
+    turns: impl IntoIterator<Item = crate::test_utils::MockTurn>,
+) -> crate::test_utils::MockCompletionModel {
+    crate::test_utils::MockCompletionModel::from_stream_turns(
+        turns
+            .into_iter()
+            .map(crate::test_utils::MockTurn::into_stream_events),
+    )
+}
+
 use crate::{
     agent::{
         AgentBuilder, AgentHook, HookContext, MultiTurnStreamItem, NoToolConfig, StreamingError,
@@ -896,16 +909,16 @@ where
         .default_max_turns(3)
         .build();
     let cell = scenario_cell(PARALLEL_PROMPT);
-    let request = agent.prompt_over(cell.clone()).max_turns(3);
-    let response = match tool_concurrency {
-        Some(concurrency) => {
-            request
-                .tool_concurrency(concurrency)
-                .extended_details()
-                .await?
-        }
-        None => request.extended_details().await?,
-    };
+    let mut request =
+        crate::agent::prompt_request::streaming::StreamingPromptRequest::from_agent_cell(
+            &agent,
+            cell.clone(),
+        )
+        .max_turns(3);
+    if let Some(concurrency) = tool_concurrency {
+        request = request.tool_concurrency(concurrency);
+    }
+    let response = crate::agent::prompt_request::streaming::fold_stream(&mut request.await).await?;
     let scenario = if tool_concurrency == Some(1) {
         "parallel_tools_serial_execution"
     } else {
@@ -990,11 +1003,12 @@ where
         .build();
     let prompt = "Call the ping tool, then report the exact marker it returns.";
     let cell = scenario_cell(prompt);
-    let response = agent
-        .prompt_over(cell.clone())
-        .max_turns(2)
-        .extended_details()
-        .await?;
+    let request = crate::agent::prompt_request::streaming::StreamingPromptRequest::from_agent_cell(
+        &agent,
+        cell.clone(),
+    )
+    .max_turns(2);
+    let response = crate::agent::prompt_request::streaming::fold_stream(&mut request.await).await?;
     let messages = conversation_of(&cell);
     validate_tool_correlation(SCENARIO, &messages)?;
     let values = messages
@@ -1042,11 +1056,12 @@ where
         .build();
     let prompt = "Call fetch_motto and fetch_config, then summarize both outputs in one sentence.";
     let cell = scenario_cell(prompt);
-    let response = agent
-        .prompt_over(cell.clone())
-        .max_turns(3)
-        .extended_details()
-        .await?;
+    let request = crate::agent::prompt_request::streaming::StreamingPromptRequest::from_agent_cell(
+        &agent,
+        cell.clone(),
+    )
+    .max_turns(3);
+    let response = crate::agent::prompt_request::streaming::fold_stream(&mut request.await).await?;
     let messages = conversation_of(&cell);
     validate_tool_correlation(SCENARIO, &messages)?;
     let values = messages
@@ -1121,11 +1136,12 @@ where
         .build();
     let prompt = "Call store_profile with profile.name exactly `Zoë \\\"Z\\\"`, profile.tags exactly [`rust`, `東京`], mode `careful`, note containing the two lines `line one` and `line two` separated by a newline, and quote exactly `path C:\\\\tmp and \\\"quoted\\\"`. Then confirm it was stored.";
     let cell = scenario_cell(prompt);
-    let response = agent
-        .prompt_over(cell.clone())
-        .max_turns(3)
-        .extended_details()
-        .await?;
+    let request = crate::agent::prompt_request::streaming::StreamingPromptRequest::from_agent_cell(
+        &agent,
+        cell.clone(),
+    )
+    .max_turns(3);
+    let response = crate::agent::prompt_request::streaming::fold_stream(&mut request.await).await?;
     let observed = lock_recover(&captured).clone();
     if calls.load(Ordering::SeqCst) != 1 || observed.as_ref() != Some(&expected) {
         return Err(ScenarioError::contract(
@@ -1297,22 +1313,23 @@ where
         .build();
     let prompt = "Use add once for x=1 and y=1, then report what the tool returns.";
     let cell = scenario_cell(prompt);
-    let response = agent
-        .prompt_over(cell.clone())
-        .max_turns(3)
-        .add_hook(RewriteArgument {
-            key: "x",
-            value: serde_json::json!(7),
-        })
-        .add_hook(RewriteArgument {
-            key: "y",
-            value: serde_json::json!(8),
-        })
-        .add_hook(observed)
-        .add_hook(ReplaceResult("portable-redacted"))
-        .add_hook(WrapResult)
-        .extended_details()
-        .await?;
+    let request = crate::agent::prompt_request::streaming::StreamingPromptRequest::from_agent_cell(
+        &agent,
+        cell.clone(),
+    )
+    .max_turns(3)
+    .add_hook(RewriteArgument {
+        key: "x",
+        value: serde_json::json!(7),
+    })
+    .add_hook(RewriteArgument {
+        key: "y",
+        value: serde_json::json!(8),
+    })
+    .add_hook(observed)
+    .add_hook(ReplaceResult("portable-redacted"))
+    .add_hook(WrapResult);
+    let response = crate::agent::prompt_request::streaming::fold_stream(&mut request.await).await?;
     let observations = lock_recover(&observed_probe.0).clone();
     validate_rewritten_arguments(
         SCENARIO,
@@ -1364,20 +1381,25 @@ where
         .build();
     let cancelled_prompt = "Use add once to compute x=20 plus y=22.";
     let cancelled_cell = scenario_cell(cancelled_prompt);
-    let cancelled = match cancelled_agent
-        .prompt_over(cancelled_cell.clone())
+    let cancelled_request =
+        crate::agent::prompt_request::streaming::StreamingPromptRequest::from_agent_cell(
+            &cancelled_agent,
+            cancelled_cell.clone(),
+        )
         .max_turns(2)
-        .add_hook(StopAfterResult(REASON))
-        .await
-    {
-        Err(error) => error,
-        Ok(output) => {
-            return Err(ScenarioError::contract(
-                SCENARIO,
-                format!("result cancellation unexpectedly completed: {output:?}"),
-            ));
-        }
-    };
+        .add_hook(StopAfterResult(REASON));
+    let cancelled =
+        match crate::agent::prompt_request::streaming::fold_stream(&mut cancelled_request.await)
+            .await
+        {
+            Err(error) => error,
+            Ok(output) => {
+                return Err(ScenarioError::contract(
+                    SCENARIO,
+                    format!("result cancellation unexpectedly completed: {output:?}"),
+                ));
+            }
+        };
     validate_cancelled_failure(
         &cancelled,
         REASON,
@@ -1393,19 +1415,24 @@ where
         .build();
     let max_turn_prompt = "Use add once to compute x=20 plus y=22, then report the result.";
     let max_turn_cell = scenario_cell(max_turn_prompt);
-    let max_turn = match max_turn_agent
-        .prompt_over(max_turn_cell.clone())
-        .max_turns(1)
-        .await
-    {
-        Err(error) => error,
-        Ok(output) => {
-            return Err(ScenarioError::contract(
-                SCENARIO,
-                format!("one-turn budget unexpectedly completed: {output:?}"),
-            ));
-        }
-    };
+    let max_turn_request =
+        crate::agent::prompt_request::streaming::StreamingPromptRequest::from_agent_cell(
+            &max_turn_agent,
+            max_turn_cell.clone(),
+        )
+        .max_turns(1);
+    let max_turn =
+        match crate::agent::prompt_request::streaming::fold_stream(&mut max_turn_request.await)
+            .await
+        {
+            Err(error) => error,
+            Ok(output) => {
+                return Err(ScenarioError::contract(
+                    SCENARIO,
+                    format!("one-turn budget unexpectedly completed: {output:?}"),
+                ));
+            }
+        };
     validate_max_turns_failure(&max_turn, 1, &conversation_of(&max_turn_cell))?;
     let cancelled_count = cancelled_calls.load(Ordering::SeqCst);
     let max_turn_count = max_turn_calls.load(Ordering::SeqCst);
@@ -1450,7 +1477,11 @@ where
         .build();
     let prompt = "Use the repeat_text tool to repeat the word \"banana\" 3 times, then show me the exact result.";
     let cell = scenario_cell(prompt);
-    let result = agent.prompt_over(cell.clone()).extended_details().await?;
+    let request = crate::agent::prompt_request::streaming::StreamingPromptRequest::from_agent_cell(
+        &agent,
+        cell.clone(),
+    );
+    let result = crate::agent::prompt_request::streaming::fold_stream(&mut request.await).await?;
     let messages = conversation_of(&cell);
     let response = result.output.clone();
     let tool_calls = calls.load(Ordering::SeqCst);
@@ -1482,7 +1513,11 @@ where
         .build();
     let prompt = "Compute (4 + 6) * 2. First call the add tool, then call the multiply tool on the result. Tell me the final number.";
     let cell = scenario_cell(prompt);
-    let result = agent.prompt_over(cell.clone()).extended_details().await?;
+    let request = crate::agent::prompt_request::streaming::StreamingPromptRequest::from_agent_cell(
+        &agent,
+        cell.clone(),
+    );
+    let result = crate::agent::prompt_request::streaming::fold_stream(&mut request.await).await?;
     let messages = conversation_of(&cell);
     let response = result.output.clone();
     let add = add_calls.load(Ordering::SeqCst);
@@ -1756,7 +1791,7 @@ mod tests {
         ])
         .map_err(|error| ScenarioError::contract("test_fixture", error.to_string()))?;
         let report = parallel_tools(
-            MockCompletionModel::new([first, MockTurn::text("7 and 8")]),
+            stream_model([first, MockTurn::text("7 and 8")]),
             |builder| builder,
             Some(1),
         )
@@ -1769,7 +1804,7 @@ mod tests {
     #[tokio::test]
     async fn zero_argument_and_output_serialization_contracts_pass() -> Result<(), ScenarioError> {
         let zero = zero_argument_tool(
-            MockCompletionModel::new([
+            stream_model([
                 MockTurn::tool_call("ping_call", "ping", serde_json::json!({})),
                 MockTurn::text(PING_OUTPUT),
             ]),
@@ -1784,7 +1819,7 @@ mod tests {
         ])
         .map_err(|error| ScenarioError::contract("test_fixture", error.to_string()))?;
         let serialized = tool_output_serialization(
-            MockCompletionModel::new([first, MockTurn::text("summary")]),
+            stream_model([first, MockTurn::text("summary")]),
             |builder| builder,
         )
         .await?;
@@ -1801,7 +1836,7 @@ mod tests {
             "quote": "path C:\\tmp and \"quoted\""
         });
         let report = complex_tool_arguments(
-            MockCompletionModel::new([
+            stream_model([
                 MockTurn::tool_call("profile_call", "store_profile", arguments),
                 MockTurn::text("stored"),
             ]),
@@ -1837,7 +1872,7 @@ mod tests {
     #[tokio::test]
     async fn invalid_recovery_paths_do_not_execute_tools() -> Result<(), ScenarioError> {
         let report = invalid_tool_recovery(
-            MockCompletionModel::new([
+            stream_model([
                 MockTurn::tool_call("invalid-add", "add", serde_json::json!({ "x": 2, "y": 3 })),
                 MockTurn::text("understood, done"),
             ]),
@@ -1851,7 +1886,7 @@ mod tests {
     #[tokio::test]
     async fn hook_rewrites_chain_across_hooks() -> Result<(), ScenarioError> {
         let report = hook_rewrites(
-            MockCompletionModel::new([
+            stream_model([
                 MockTurn::tool_call("hook-add", "add", serde_json::json!({ "x": 1, "y": 1 })),
                 MockTurn::text("[portable-redacted]"),
             ]),
@@ -1865,7 +1900,7 @@ mod tests {
     #[tokio::test]
     async fn cancellation_and_max_turn_controls_retain_diagnostics() -> Result<(), ScenarioError> {
         let report = cancellation_and_max_turns(
-            MockCompletionModel::new([
+            stream_model([
                 MockTurn::tool_call("cancel-add", "add", serde_json::json!({ "x": 20, "y": 22 })),
                 MockTurn::tool_call("budget-add", "add", serde_json::json!({ "x": 20, "y": 22 })),
             ]),
@@ -2279,7 +2314,9 @@ mod tests {
     #[tokio::test]
     async fn buffered_streaming_parity_contract_passes_with_mocks() -> Result<(), ScenarioError> {
         let model = BufferedAndStreamMock {
-            buffered: MockCompletionModel::new([MockTurn::text("Paris").with_usage(usage(3, 1))]),
+            buffered: MockCompletionModel::from_turns([
+                MockTurn::text("Paris").with_usage(usage(3, 1))
+            ]),
             streaming: MockCompletionModel::from_stream_turns([vec![
                 MockStreamEvent::text("Paris"),
                 MockStreamEvent::FinalResponse(mock_final(usage(3, 1))),
@@ -2315,7 +2352,7 @@ mod tests {
         ])
         .map_err(|error| ScenarioError::contract("test_fixture", error.to_string()))?;
         let report = parallel_tools(
-            MockCompletionModel::new([first, MockTurn::text("7 and 8")]),
+            stream_model([first, MockTurn::text("7 and 8")]),
             |builder| builder,
             None,
         )
@@ -2327,7 +2364,7 @@ mod tests {
     #[tokio::test]
     async fn optional_argument_contract_defaults_repetitions() -> Result<(), ScenarioError> {
         let report = optional_argument(
-            MockCompletionModel::new([
+            stream_model([
                 MockTurn::tool_call(
                     "repeat_call",
                     "repeat_text",
@@ -2345,7 +2382,7 @@ mod tests {
     #[tokio::test]
     async fn sequential_tools_contract_computes_chained_arithmetic() -> Result<(), ScenarioError> {
         let report = sequential_tools(
-            MockCompletionModel::new([
+            stream_model([
                 MockTurn::tool_call("add_call", "add", serde_json::json!({"a": 4, "b": 6})),
                 MockTurn::tool_call(
                     "multiply_call",
@@ -2384,7 +2421,7 @@ mod tests {
         let single = MockTurn::tool_call("only_add", "add", serde_json::json!({"x": 3, "y": 4}));
         assert!(matches!(
             parallel_tools(
-                MockCompletionModel::new([single, MockTurn::text("7")]),
+                stream_model([single, MockTurn::text("7")]),
                 |builder| builder,
                 None,
             )
@@ -2400,7 +2437,7 @@ mod tests {
         .expect("fixture");
         assert!(matches!(
             parallel_tools(
-                MockCompletionModel::new([wrong_names, MockTurn::text("done")]),
+                stream_model([wrong_names, MockTurn::text("done")]),
                 |builder| builder,
                 None,
             )
@@ -2416,7 +2453,7 @@ mod tests {
         .expect("fixture");
         assert!(matches!(
             parallel_tools(
-                MockCompletionModel::new([wrong_results, MockTurn::text("done")]),
+                stream_model([wrong_results, MockTurn::text("done")]),
                 |builder| builder,
                 None,
             )
@@ -2430,9 +2467,10 @@ mod tests {
         // The tool is never invoked: history has no correlated call/result
         // round trip to validate.
         assert!(matches!(
-            zero_argument_tool(MockCompletionModel::text("answered directly"), |builder| {
-                builder
-            },)
+            zero_argument_tool(
+                stream_model([MockTurn::text("answered directly")]),
+                |builder| { builder },
+            )
             .await,
             Err(ScenarioError::Contract { .. })
         ));
@@ -2445,7 +2483,7 @@ mod tests {
         .expect("fixture");
         assert!(matches!(
             zero_argument_tool(
-                MockCompletionModel::new([twice, MockTurn::text(PING_OUTPUT)]),
+                stream_model([twice, MockTurn::text(PING_OUTPUT)]),
                 |builder| builder,
             )
             .await,
@@ -2458,7 +2496,7 @@ mod tests {
         let first = MockTurn::tool_call("motto_call", "fetch_motto", serde_json::json!({}));
         assert!(matches!(
             tool_output_serialization(
-                MockCompletionModel::new([first, MockTurn::text("motto only")]),
+                stream_model([first, MockTurn::text("motto only")]),
                 |builder| builder,
             )
             .await,
@@ -2478,10 +2516,9 @@ mod tests {
             }),
         );
         assert!(matches!(
-            complex_tool_arguments(
-                MockCompletionModel::new([wrong, MockTurn::text("stored")]),
-                |builder| builder,
-            )
+            complex_tool_arguments(stream_model([wrong, MockTurn::text("stored")]), |builder| {
+                builder
+            },)
             .await,
             Err(ScenarioError::Contract { .. })
         ));
@@ -2492,7 +2529,7 @@ mod tests {
         // The tool is never invoked, so there are no rewritten arguments to
         // observe.
         assert!(matches!(
-            hook_rewrites(MockCompletionModel::text("no tool used"), |builder| {
+            hook_rewrites(stream_model([MockTurn::text("no tool used")]), |builder| {
                 builder
             },)
             .await,
@@ -2501,7 +2538,7 @@ mod tests {
 
         // Rewrites are observed, but the extra call breaks the single-call and
         // two-completion-call invariants.
-        let twice = MockCompletionModel::new([
+        let twice = stream_model([
             MockTurn::tool_call("hook-add-1", "add", serde_json::json!({"x": 1, "y": 1})),
             MockTurn::tool_call("hook-add-2", "add", serde_json::json!({"x": 1, "y": 1})),
             MockTurn::text("[portable-redacted]"),
@@ -2516,12 +2553,13 @@ mod tests {
     async fn cancellation_contract_rejects_unexpectedly_completing_runs() {
         // The stop hook never fires: the cancelled sub-run answers directly.
         assert!(matches!(
-            cancellation_and_max_turns(MockCompletionModel::text("42"), |builder| builder).await,
+            cancellation_and_max_turns(stream_model([MockTurn::text("42")]), |builder| builder)
+                .await,
             Err(ScenarioError::Contract { .. })
         ));
         // Cancellation works, but the one-turn budget completes because the
         // second sub-run's model also answers immediately.
-        let mixed = MockCompletionModel::new([
+        let mixed = stream_model([
             MockTurn::tool_call("cancel-add", "add", serde_json::json!({"x": 20, "y": 22})),
             MockTurn::text("42"),
         ]);
@@ -2578,7 +2616,9 @@ mod tests {
     #[tokio::test]
     async fn parity_contract_rejects_disagreeing_surfaces() {
         let model = BufferedAndStreamMock {
-            buffered: MockCompletionModel::new([MockTurn::text("London").with_usage(usage(3, 1))]),
+            buffered: MockCompletionModel::from_turns([
+                MockTurn::text("London").with_usage(usage(3, 1))
+            ]),
             streaming: MockCompletionModel::from_stream_turns([vec![
                 MockStreamEvent::text("London"),
                 MockStreamEvent::FinalResponse(mock_final(usage(3, 1))),
@@ -2593,7 +2633,7 @@ mod tests {
     #[tokio::test]
     async fn optional_argument_contract_rejects_direct_answers() {
         assert!(matches!(
-            optional_argument(MockCompletionModel::text("banana"), |builder| builder).await,
+            optional_argument(stream_model([MockTurn::text("banana")]), |builder| builder).await,
             Err(ScenarioError::Contract { .. })
         ));
     }
@@ -2601,7 +2641,7 @@ mod tests {
     #[tokio::test]
     async fn sequential_tools_contract_rejects_direct_answers() {
         assert!(matches!(
-            sequential_tools(MockCompletionModel::text("20"), |builder| builder).await,
+            sequential_tools(stream_model([MockTurn::text("20")]), |builder| builder).await,
             Err(ScenarioError::Contract { .. })
         ));
     }
@@ -2652,7 +2692,7 @@ mod tests {
         .expect("fixture");
         assert!(matches!(
             parallel_tools(
-                MockCompletionModel::new([batch, MockTurn::text("7 and 8 <tool_call>")]),
+                stream_model([batch, MockTurn::text("7 and 8 <tool_call>")]),
                 |builder| builder,
                 None,
             )
@@ -2674,7 +2714,7 @@ mod tests {
         .expect("fixture");
         assert!(matches!(
             parallel_tools(
-                MockCompletionModel::new([
+                stream_model([
                     batch,
                     MockTurn::tool_call("extra_add", "add", serde_json::json!({"x": 1, "y": 1})),
                     MockTurn::text("done"),
@@ -2695,7 +2735,7 @@ mod tests {
         ])
         .expect("fixture");
         let model = BufferedAndStreamMock {
-            buffered: MockCompletionModel::new([buffered_turn.with_usage(usage(3, 1))]),
+            buffered: MockCompletionModel::from_turns([buffered_turn.with_usage(usage(3, 1))]),
             streaming: MockCompletionModel::from_stream_turns([vec![
                 MockStreamEvent::tool_call("parity_call", "alpha", serde_json::json!({"value": 1})),
                 MockStreamEvent::text("Paris"),
@@ -2713,7 +2753,9 @@ mod tests {
     #[tokio::test]
     async fn parity_contract_rejects_streams_without_final_metadata() {
         let model = BufferedAndStreamMock {
-            buffered: MockCompletionModel::new([MockTurn::text("Paris").with_usage(usage(3, 1))]),
+            buffered: MockCompletionModel::from_turns([
+                MockTurn::text("Paris").with_usage(usage(3, 1))
+            ]),
             streaming: MockCompletionModel::from_stream_turns([vec![MockStreamEvent::text(
                 "Paris",
             )]]),

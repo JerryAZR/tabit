@@ -21,6 +21,7 @@ proc-macro = true
 
 [dev-dependencies]
 anyhow = { workspace = true }
+futures = { workspace = true }
 rig-core = { path = "../rig-core" }
 rig-agent = { path = "../rig-agent" }
 schemars = { workspace = true }

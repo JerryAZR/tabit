@@ -3960,6 +3960,7 @@ version = "0.41.0"
 dependencies = [
  "anyhow",
  "convert_case",
+ "futures",
  "proc-macro-crate",
  "proc-macro2",
  "quote",

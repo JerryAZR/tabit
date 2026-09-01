@@ -3,7 +3,7 @@
 //! and Anthropic Messages, plus one agent-loop turn. Not part of the offline
 //! suite — run by hand: `cargo run -p rig-agent --example local_probe`.
 
-use rig_agent::completion::Prompt;
+use futures::StreamExt;
 use rig_core::client::CompletionClient;
 use rig_core::completion::CompletionModel;
 use rig_core::providers::{anthropic, openai};
@@ -79,7 +79,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         .await?;
     show("anthropic", &response);
 
-    // 4. Streaming through one surface (responses), via the agent Prompt trait
+    // 4. Streaming through the agent's one execution surface
     let client = openai::Client::builder()
         .base_url(BASE_OPENAI)
         .api_key("lm-studio")
@@ -87,8 +87,16 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let agent = rig_agent::AgentBuilder::new(client.completion_model(MODEL))
         .preamble("You reply with one word.")
         .build();
-    let out = agent.prompt("Reply with exactly: STREAM-OK").await?;
-    println!("[agent-prompt] {:?}", out);
+    let mut stream = agent.runner("Reply with exactly: STREAM-OK").stream().await;
+    while let Some(item) = stream.next().await {
+        if let Ok(rig_agent::agent::MultiTurnStreamItem::StreamAssistantItem(
+            rig_core::streaming::StreamedAssistantContent::Text(text),
+        )) = item
+        {
+            print!("{}", text.text);
+        }
+    }
+    println!();
 
     Ok(())
 }

@@ -1,8 +1,8 @@
 //! Migrated from `examples/anthropic_plaintext_document.rs`.
 
 use rig::OneOrMany;
+use rig::completion::CompletionModel;
 use rig::completion::NormalizeCompletionResponse;
-use rig::completion::{CompletionModel, Prompt};
 use rig::message::{Document, DocumentMediaType, DocumentSourceKind, Message, UserContent};
 use rig::prelude::*;
 use rig::providers::anthropic::completion::Citation;
@@ -105,25 +105,30 @@ async fn plaintext_document_prompt() {
     super::super::support::with_anthropic_cassette(
         "plaintext_document/plaintext_document_prompt",
         |client| async move {
-            let agent = client
-                .agent("claude-sonnet-4-6")
-                .preamble("You are a helpful assistant that analyzes documents.")
-                .temperature(0.5)
-                .max_tokens(64_000)
-                .build();
-
+            let model = client.completion_model("claude-sonnet-4-6");
             let document = Document {
                 data: DocumentSourceKind::String(rust_document()),
                 media_type: Some(DocumentMediaType::TXT),
                 additional_params: None,
             };
-            let response = agent
-                .prompt(document)
+            let response = model
+                .completion(
+                    model
+                        .completion_request(document)
+                        .preamble(
+                            "You are a helpful assistant that analyzes documents.".to_string(),
+                        )
+                        .temperature_opt(Some(0.5))
+                        .max_tokens(64_000)
+                        .build(),
+                )
                 .await
                 .expect("document prompt should succeed");
 
-            assert_nonempty_response(&response);
-            assert_contains_any_case_insensitive(&response, &["safety", "speed", "concurrency"]);
+            let text = crate::support::assistant_text_response(&response.choice)
+                .expect("document prompt should carry assistant text");
+            assert_nonempty_response(&text);
+            assert_contains_any_case_insensitive(&text, &["safety", "speed", "concurrency"]);
         },
     )
     .await;
@@ -134,27 +139,38 @@ async fn plaintext_document_with_instruction() {
     super::super::support::with_anthropic_cassette(
         "plaintext_document/plaintext_document_with_instruction",
         |client| async move {
-            let agent = client
-                .agent("claude-sonnet-4-6")
-                .preamble("You are a helpful assistant that analyzes documents.")
-                .temperature(0.5)
-                .max_tokens(64_000)
-                .build();
-
-            let response = agent
-                .prompt(Message::User {
-                    content: OneOrMany::many(vec![
-                        UserContent::document(rust_document(), Some(DocumentMediaType::TXT)),
-                        UserContent::text(
-                            "List the three main goals of Rust mentioned in this document.",
-                        ),
-                    ])
-                    .expect("content should be non-empty"),
-                })
+            let model = client.completion_model("claude-sonnet-4-6");
+            let response = model
+                .completion(
+                    model
+                        .completion_request(Message::User {
+                            content: OneOrMany::many(vec![
+                                UserContent::document(
+                                    rust_document(),
+                                    Some(DocumentMediaType::TXT),
+                                ),
+                                UserContent::text(
+                                    "List the three main goals of Rust mentioned in this document.",
+                                ),
+                            ])
+                            .expect("content should be non-empty"),
+                        })
+                        .preamble(
+                            "You are a helpful assistant that analyzes documents.".to_string(),
+                        )
+                        .temperature_opt(Some(0.5))
+                        .max_tokens(64_000)
+                        .build(),
+                )
                 .await
                 .expect("instruction prompt should succeed");
+            let response_text = crate::support::assistant_text_response(&response.choice)
+                .expect("instruction prompt should carry assistant text");
 
-            assert_contains_any_case_insensitive(&response, &["safety", "speed", "concurrency"]);
+            assert_contains_any_case_insensitive(
+                &response_text,
+                &["safety", "speed", "concurrency"],
+            );
         },
     )
     .await;

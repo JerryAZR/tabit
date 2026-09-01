@@ -50,30 +50,3 @@ async fn streaming() {
     })
     .await;
 }
-
-#[tokio::test]
-async fn nonstreaming() {
-    with_anthropic_cassette(
-        "reasoning_tool_roundtrip/nonstreaming",
-        |client| async move {
-            let call_count = Arc::new(AtomicUsize::new(0));
-            let agent = client
-                .agent("claude-sonnet-4-6")
-                .preamble(reasoning::TOOL_SYSTEM_PROMPT)
-                .max_tokens(16384)
-                .tool(WeatherTool::new(call_count.clone()))
-                .additional_params(serde_json::json!({
-                    "thinking": { "type": "adaptive" }
-                }))
-                .default_max_turns(2)
-                .build();
-
-            let result = agent.prompt(reasoning::TOOL_USER_PROMPT).await.expect(
-                "[anthropic] Non-streaming chat failed - likely 400 from dropped reasoning",
-            );
-
-            reasoning::assert_nonstreaming_universal(&result, &call_count, "anthropic");
-        },
-    )
-    .await;
-}

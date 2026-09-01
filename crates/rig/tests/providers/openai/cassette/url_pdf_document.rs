@@ -7,8 +7,8 @@
 //! See <https://platform.openai.com/docs/guides/pdf-files>.
 
 use rig::OneOrMany;
-use rig::client::AgentClientExt;
-use rig::completion::Prompt;
+use rig::client::CompletionClient;
+use rig::completion::CompletionModel;
 use rig::message::{DocumentMediaType, Message, UserContent};
 
 use super::super::support::with_openai_cassette;
@@ -21,27 +21,30 @@ async fn url_pdf_document_prompt() {
     with_openai_cassette(
         "url_pdf_document/url_pdf_document_prompt",
         |client| async move {
-            let agent = client
-                .agent("gpt-4o")
-                .preamble("You are a helpful assistant that analyzes documents.")
-                .temperature(0.0)
-                .build();
-
-            let response = agent
-                .prompt(Message::User {
-                    content: OneOrMany::many(vec![
-                        UserContent::document_url(PDF_URL, Some(DocumentMediaType::PDF)),
-                        UserContent::text(
-                            "What is the title of this paper? Answer in one short sentence.",
-                        ),
-                    ])
-                    .expect("content should be non-empty"),
-                })
+            let model = client.completion_model("gpt-4o");
+            let response = model
+                .completion(
+                    model
+                        .completion_request(Message::User {
+                            content: OneOrMany::many(vec![
+                                UserContent::document_url(PDF_URL, Some(DocumentMediaType::PDF)),
+                                UserContent::text(
+                                    "What is the title of this paper? Answer in one short sentence.",
+                                ),
+                            ])
+                            .expect("content should be non-empty"),
+                        })
+                        .preamble("You are a helpful assistant that analyzes documents.".to_string())
+                        .temperature_opt(Some(0.0))
+                        .build(),
+                )
                 .await
                 .expect("URL PDF document prompt should succeed");
 
-            assert_nonempty_response(&response);
-            assert_contains_any_case_insensitive(&response, &["bitcoin"]);
+            let text = crate::support::assistant_text_response(&response.choice)
+                .expect("URL PDF document prompt should carry assistant text");
+            assert_nonempty_response(&text);
+            assert_contains_any_case_insensitive(&text, &["bitcoin"]);
         },
     )
     .await;

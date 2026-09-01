@@ -2,7 +2,8 @@ use std::sync::Arc;
 
 use crate::{
     agent::Agent,
-    completion::Prompt,
+    agent::prompt_request::streaming::fold_stream,
+    streaming::StreamingPrompt,
     tool::{DynamicTool, ToolExecutionError, ToolOutput},
 };
 use schemars::{JsonSchema, schema_for};
@@ -53,11 +54,13 @@ impl Agent {
                     ))
                     .with_source(error)
                 })?;
-                agent
-                    .prompt(args.prompt)
+                let mut stream = agent
+                    .stream_prompt(args.prompt)
                     .tool_context(inherited_context)
+                    .await;
+                fold_stream(&mut stream)
                     .await
-                    .map(ToolOutput::text)
+                    .map(|response| ToolOutput::text(response.output))
                     .map_err(ToolExecutionError::from_error)
             })
         })
@@ -72,9 +75,20 @@ impl From<Agent> for DynamicTool {
 
 #[cfg(test)]
 mod tests {
+
+    /// A mock model whose streaming surface replays the given unary-turn
+    /// scenario — the suite drives the one execution surface.
+    fn stream_model(
+        turns: impl IntoIterator<Item = MockTurn>,
+    ) -> crate::test_utils::MockCompletionModel {
+        crate::test_utils::MockCompletionModel::from_stream_turns(
+            turns.into_iter().map(MockTurn::into_stream_events),
+        )
+    }
+
     use super::*;
     use crate::agent::AgentBuilder;
-    use crate::test_utils::{MockCompletionModel, MockContextProbeTool, MockTurn, SessionId};
+    use crate::test_utils::{MockContextProbeTool, MockTurn, SessionId};
     use crate::tool::ToolContext;
 
     /// A `ToolContext` set on the outer run propagates into a sub-agent
@@ -83,7 +97,7 @@ mod tests {
     async fn context_propagates_into_sub_agent() {
         // Inner agent: calls a context-probing tool, then answers.
         let probe = MockContextProbeTool::default();
-        let inner_model = MockCompletionModel::new([
+        let inner_model = stream_model([
             MockTurn::tool_call("c1", "context_probe", json!({})),
             MockTurn::text("inner done"),
         ]);
@@ -94,7 +108,7 @@ mod tests {
 
         // Outer agent: delegates to the inner agent (registered as the
         // "researcher" tool), then answers.
-        let outer_model = MockCompletionModel::new([
+        let outer_model = stream_model([
             MockTurn::tool_call("c2", "researcher", json!({"prompt": "do research"})),
             MockTurn::text("outer done"),
         ]);
@@ -105,12 +119,16 @@ mod tests {
         let mut context = ToolContext::new();
         context.insert(SessionId("abc-123".to_string()));
 
-        let out = outer
-            .prompt("start")
-            .tool_context(context)
-            .max_turns(5)
-            .await
-            .expect("run succeeds");
+        let out = crate::agent::prompt_request::streaming::fold_stream(
+            &mut outer
+                .stream_prompt("start")
+                .tool_context(context)
+                .max_turns(5)
+                .await,
+        )
+        .await
+        .expect("run succeeds")
+        .output;
 
         assert_eq!(out, "outer done");
         assert_eq!(probe.observed().as_deref(), Some("session:abc-123"));
@@ -123,13 +141,13 @@ mod tests {
     /// `From<Agent> for DynamicTool`, pinning that conversion seam too.
     #[tokio::test]
     async fn invalid_agent_tool_arguments_fail_without_reaching_the_sub_agent() {
-        let inner_model = MockCompletionModel::text("inner done");
+        let inner_model = stream_model([MockTurn::text("inner done")]);
         let inner = AgentBuilder::new(inner_model.clone())
             .name("researcher")
             .build();
         let tool: DynamicTool = inner.into();
 
-        let outer_model = MockCompletionModel::new([
+        let outer_model = stream_model([
             // `prompt` is missing; deserialization inside the tool closure
             // must reject this before the sub-agent runs.
             MockTurn::tool_call("bad", "researcher", json!({"not_prompt": true})),
@@ -137,11 +155,12 @@ mod tests {
         ]);
         let outer = AgentBuilder::new(outer_model).dynamic_tool(tool).build();
 
-        let out = outer
-            .prompt("start")
-            .max_turns(3)
-            .await
-            .expect("invalid tool args are model-visible feedback, not fatal");
+        let out = crate::agent::prompt_request::streaming::fold_stream(
+            &mut outer.stream_prompt("start").max_turns(3).await,
+        )
+        .await
+        .expect("invalid tool args are model-visible feedback, not fatal")
+        .output;
 
         assert_eq!(out, "recovered");
         assert_eq!(

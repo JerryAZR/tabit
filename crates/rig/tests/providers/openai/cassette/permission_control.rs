@@ -3,7 +3,6 @@ use rig::agent::{
     AgentHook, ToolCall as ToolCallEvent, ToolCallAction, ToolResultAction, ToolResultEvent,
     stream_to_stdout,
 };
-use rig::completion::Prompt;
 use rig::prelude::*;
 use rig::streaming::StreamingPrompt;
 use rig::tool::Tool;
@@ -163,51 +162,6 @@ impl AgentHook for PermissionHook {
         *self.last_result.lock().expect("lock last_result") = Some(normalized);
         ToolResultAction::keep()
     }
-}
-
-#[tokio::test]
-async fn permission_control_prompt_example() -> Result<()> {
-    with_openai_cassette_result(
-        "permission_control/permission_control_prompt_example",
-        |client| async move {
-            let cleanup = FileCleanup::new("blocking")?;
-
-            let agent = client
-                .agent("gpt-4o-mini")
-                .preamble(
-                    "You are a helpful assistant that can read files using different methods.",
-                )
-                .tool(ReadFileHead {
-                    path: cleanup.path().to_path_buf(),
-                })
-                .tool(ReadFileTail {
-                    path: cleanup.path().to_path_buf(),
-                })
-                .build();
-
-            let call_count = Arc::new(AtomicUsize::new(0));
-            let last_result = Arc::new(Mutex::new(None));
-            let hook = PermissionHook {
-                call_count: call_count.clone(),
-                last_result: last_result.clone(),
-            };
-
-            let _response = agent
-                .prompt(
-                    "Use the available tools to read test.txt now. \
-                 Do not ask any follow-up questions; just read the file and report its content.",
-                )
-                .max_turns(5)
-                .add_hook(hook)
-                .await?;
-
-            let last = last_result.lock().expect("lock last_result").clone();
-            anyhow::ensure!(last.as_deref() == Some("hello world"));
-            anyhow::ensure!(call_count.load(Ordering::SeqCst) == 2);
-            Ok(())
-        },
-    )
-    .await
 }
 
 #[tokio::test]

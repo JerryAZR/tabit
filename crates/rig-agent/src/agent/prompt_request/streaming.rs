@@ -542,6 +542,34 @@ impl TurnSource for StreamingTurnSource {
     }
 }
 
+/// Drive a run's stream to completion and return the folded outcome —
+/// the run's [`FinalResponse`](MultiTurnStreamItem::FinalResponse) as a
+/// [`PromptResponse`]. The one fold over the streaming surface: the
+/// agent-as-tool adapter and in-crate tests both consume the outcome form,
+/// never a second execution surface.
+pub(crate) async fn fold_stream(
+    stream: &mut StreamingResult,
+) -> Result<PromptResponse, crate::completion::PromptError> {
+    use crate::agent::drive::streaming_error_into_prompt;
+    let mut final_res = None;
+    while let Some(item) = stream.next().await {
+        match item {
+            Ok(MultiTurnStreamItem::FinalResponse(res)) => final_res = Some(res),
+            Err(err) => return Err(streaming_error_into_prompt(err)),
+            _ => {}
+        }
+    }
+    final_res.ok_or_else(|| {
+        crate::completion::PromptError::CompletionError(
+            crate::completion::CompletionError::ResponseError(
+                "internal invariant violated: the agent stream ended \
+                 without a final response"
+                    .to_string(),
+            ),
+        )
+    })
+}
+
 impl IntoFuture for StreamingPromptRequest {
     type Output = StreamingResult; // what `.await` returns
     type IntoFuture = WasmBoxedFuture<'static, Self::Output>;
