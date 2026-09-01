@@ -30,7 +30,10 @@ Current workspace layout:
   `#[rig_tool]` PortableTools, erasable to DynamicTools (native only)
 - `crates/tabit-gui` — the egui frontend (`tabit-gui` binary; the
   `tabit` launcher detach-spawns it; reducer/view contract in ROADMAP
-  item 7)
+  item 7). Its `CHANGELOG.md` is the frontend protocol's changelog —
+  every `PROTOCOL_VERSION` bump or frontend-observable change (wire
+  or behavior) gets an entry in the same commit; FRONTEND.md stays
+  the frozen contract)
 - `crates/tabit` — the `tabit` binary: bare `tabit [path]` is the
   launcher mode (detach-spawns the GUI and exits — the supported
   entry point), print mode (`-p <PROMPT>`, `--rewind <n>`) and JSON
