@@ -264,21 +264,26 @@ mod windows {
         #[test]
         fn spawn_probe_classifies_clean_broken_and_hung() {
             // PowerShell stands in for the probe's program: an OS
-            // component always present on the test machine.
+            // component always present on the test machine. The
+            // deadlines on the classification cases are bounds, not
+            // behavior — a cold CLR start on a loaded CI runner takes
+            // several seconds, so they get margin; only the hung case
+            // exercises the deadline path, and it stays tight.
+            let bound = Duration::from_secs(15);
             assert!(spawn_probe(
                 Path::new("powershell"),
                 &["-NoProfile", "-Command", "exit 0"],
-                Duration::from_secs(2)
+                bound
             ));
             assert!(!spawn_probe(
                 Path::new("powershell"),
                 &["-NoProfile", "-Command", "exit 3"],
-                Duration::from_secs(2)
+                bound
             ));
             assert!(!spawn_probe(
                 Path::new("definitely-not-a-program-xyz"),
                 &[],
-                Duration::from_secs(2)
+                bound
             ));
             // A short deadline keeps the hung case fast; the sleep runs
             // inside the probed process, so the kill leaves no orphan.
