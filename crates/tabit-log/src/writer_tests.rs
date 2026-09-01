@@ -206,9 +206,7 @@ fn an_unborn_session_survives_every_flush_without_a_file() {
     writer.prequeue(&model_change_record());
     // The exit-time flush (what the worker calls at wind-down): an
     // outbox of birth lines with no file is a no-op.
-    writer
-        .flush_on_exit()
-        .expect("the exit flush never fails here");
+    writer.enqueue(&[]).expect("an empty enqueue never fails");
     assert!(
         !path.exists(),
         "no file + no user message: the flush materializes nothing"
@@ -242,6 +240,28 @@ fn a_degraded_unborn_session_still_leaves_no_file() {
     let (mut writer, _blocker) = blocked_writer("unborn-degraded");
     writer.prequeue(&model_change_record());
     let path = writer.path().to_path_buf();
-    let _ = writer.flush_on_exit();
+    let _ = writer.enqueue(&[]);
     assert!(!path.exists(), "degraded ≠ born: still no orphan");
+}
+
+#[test]
+fn a_commit_failure_on_a_blocked_disk_marks_the_transition() {
+    // Ground truth for the session-level flow: born commit, dead disk
+    // → Err + transition pending; next successful enqueue clears it.
+    let (mut writer, blocker) = blocked_writer("transition-check");
+    let path = writer.path().to_path_buf();
+    let outcome = writer.enqueue(&[user_record("a", None)]);
+    assert!(outcome.is_err(), "the dead disk refuses: {outcome:?}");
+    assert_eq!(
+        writer.take_degraded_transition(),
+        Some(true),
+        "the degrade is pending for the session's notice"
+    );
+    assert!(!path.exists(), "nothing materialized");
+    std::fs::remove_file(&blocker).expect("unblock");
+    std::fs::create_dir(&blocker).expect("dir");
+    let outcome = writer.enqueue(&[user_record("b", Some("a"))]);
+    assert!(outcome.is_ok(), "the repaired disk accepts: {outcome:?}");
+    assert_eq!(writer.take_degraded_transition(), Some(false));
+    std::fs::remove_dir_all(blocker.parent().expect("base")).ok();
 }

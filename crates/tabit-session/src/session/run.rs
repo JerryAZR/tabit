@@ -150,9 +150,13 @@ impl Session {
         };
         let mut sink = EventSink::new(on_event);
         // The degraded-buffer guard (flag 8's second amendment): retry
-        // whatever lines a previous failure stuck in the outbox; a
-        // still-refusing buffer blocks this start (the first failed
-        // drain ran in memory; no run proceeds twice on it).
+        // the buffered log before anything drains in — a still-refusing
+        // flush blocks this start (the first failed drain ran in
+        // memory; no run proceeds twice on it). An unborn session's
+        // probe skips under the no-orphan gate: nothing was ever owed
+        // to the disk, so there is nothing to recover — the trade the
+        // gate buys (a fresh session's first turn runs against a full
+        // disk and degrades at its own commit instead).
         let guard_outcome = crate::lock::lock(&self.buffer).enqueue(&[]);
         if let Err(error) = &guard_outcome {
             self.drain_persist_transitions();

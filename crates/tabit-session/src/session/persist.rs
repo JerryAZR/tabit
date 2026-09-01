@@ -43,7 +43,7 @@ impl Session {
     /// anything queued (the writer's Drop also flushes; this rides the
     /// endpoint's explicit close path).
     pub(crate) fn flush_log(&self) {
-        if let Err(error) = crate::lock::lock(&self.buffer).flush_on_exit() {
+        if let Err(error) = crate::lock::lock(&self.buffer).enqueue(&[]) {
             tracing::warn!(%error, "the clean-exit flush failed; lines stay queued");
         }
     }

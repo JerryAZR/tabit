@@ -2644,18 +2644,22 @@ async fn abort_then_checkout_composes_at_the_pause_point() {
 
 #[tokio::test]
 async fn a_blocked_store_blocks_starts_and_recovers() {
-    // The degraded-buffer guard (flag 8's second amendment): the
-    // session's store directory is a regular file, so the first
-    // drain fails — the start blocks (the guard retries the stuck
-    // outbox and fails), the degrade is announced. Repair and the
-    // next start's retry drains, the recovery is announced, and the
-    // run happens.
+    // The degraded-buffer guard (flag 8's second amendment) under the
+    // no-orphan gate: the session's store directory is a regular
+    // file, so every write fails. A FRESH session's probe skips
+    // (nothing owed to the disk — the gate's trade: one free turn
+    // against a dead disk), so the first message's turn RUNS in
+    // memory and its commit fails — the degrade is announced at the
+    // commit, not the guard. The second message's start finds a
+    // stuck real commit: the guard retries, still refuses, and the
+    // start blocks. Repair and the next start's retry drains
+    // everything, the recovery is announced, and the run happens.
     let base = temp_store("guard-blocked");
     let blocked = base.dir().join("blocker");
     std::fs::create_dir_all(base.dir()).expect("base dir");
     std::fs::write(&blocked, b"not a directory").expect("blocker");
     let store = SessionStore::new(&blocked);
-    let factory = Factory::new(vec![text_turn("a")]);
+    let factory = Factory::new(vec![text_turn("a"), text_turn("b")]);
     let session = factory
         .clone()
         .into_builder(store.clone())
@@ -2664,11 +2668,41 @@ async fn a_blocked_store_blocks_starts_and_recovers() {
     let mut handle = SessionHost::spawn(session, Vec::new(), plain_wiring(&base));
     let id = boot_id(&handle);
 
-    // The start's guard retries the opening model_change's stuck
-    // write and fails: the run refuses before any turn, and the
-    // degrade is announced (the notice rides the guard).
-    handle.message(&id, "blocked");
+    // The free turn: the fresh session's probe skips under the gate,
+    // the turn runs in memory, and its commit's failed write
+    // announces the degrade.
+    handle.message(&id, "runs in memory");
     let mut frames = Vec::new();
+    collect_until(&mut handle, &mut frames, |event| {
+        matches!(event, SessionEvent::RunFinished { .. })
+    })
+    .await;
+    // The degrade notice rides after the terminal in the stream
+    // (conclude emits the terminal, then the notice) — collect it.
+    collect_until(&mut handle, &mut frames, |event| {
+        matches!(event, SessionEvent::Error { .. })
+    })
+    .await;
+    assert!(
+        frames.iter().any(|frame| matches!(
+            &frame.event,
+            SessionEvent::RunFinished { output, .. } if output == "a"
+        )),
+        "the gate's trade: the first turn runs against the dead disk: {frames:?}"
+    );
+    assert!(
+        frames.iter().any(|frame| matches!(
+            &frame.event,
+            SessionEvent::Error { kind, .. }
+                if kind == tabit_protocol::ErrorKind::PERSIST_DEGRADED
+        )),
+        "the commit's failed write announced the degrade"
+    );
+
+    // The second start finds the stuck commit: the guard retries the
+    // buffered log, still refuses, and the start blocks before any
+    // turn.
+    handle.message(&id, "blocked");
     collect_until(&mut handle, &mut frames, |event| {
         matches!(event, SessionEvent::RunFailed { .. })
     })
@@ -2679,14 +2713,6 @@ async fn a_blocked_store_blocks_starts_and_recovers() {
             SessionEvent::RunFailed { message } if message.contains("undrained")
         )),
         "the start blocked on the stuck buffer: {frames:?}"
-    );
-    assert!(
-        frames.iter().any(|frame| matches!(
-            &frame.event,
-            SessionEvent::Error { kind, .. }
-                if kind == tabit_protocol::ErrorKind::PERSIST_DEGRADED
-        )),
-        "the degradation was announced"
     );
 
     // Repair: the next start's retry drains everything, the recovery
@@ -2707,9 +2733,9 @@ async fn a_blocked_store_blocks_starts_and_recovers() {
     assert!(
         frames.iter().any(|frame| matches!(
             &frame.event,
-            SessionEvent::RunFinished { output, .. } if output == "a"
+            SessionEvent::RunFinished { output, .. } if output == "b"
         )),
-        "the repaired run proceeded"
+        "the repaired run proceeded (the free turn took the first script;          the blocked start consumed none)"
     );
     let _ = std::fs::remove_dir_all(base.dir());
 }

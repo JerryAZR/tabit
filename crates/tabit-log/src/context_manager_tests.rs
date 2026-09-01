@@ -38,10 +38,6 @@ impl WriteBuffer for BufferTap {
         self.0.lock().expect("tap lock").push(vec![record.clone()]);
     }
 
-    fn flush_on_exit(&mut self) -> Result<(), LogError> {
-        Ok(())
-    }
-
     fn pending(&self) -> usize {
         self.0.lock().expect("tap lock").len()
     }
