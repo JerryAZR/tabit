@@ -31,7 +31,14 @@ Defensive ("unreachable") arms follow a stricter rule:
 - The whole suite runs offline (cassette replay + test doubles). Doctests
   are NOT included in these numbers (`llvm-cov` was run without
   `--doctests`); they are gated by the same CI run.
-- Current state: **93.36% lines / 94.08% regions** (4,037 of 60,818
+- Current state: **93.26% lines / 92.08% regions** (2,629 of 39,012
+  lines; re-measured after the tool round — the RAG mass, telemetry,
+  and the blocking surface deletions shrank the base ~22k lines while
+  the tool round added read/write/edit/bash with their suites. The
+  ratio holds: deleted code carried roughly its share of covered
+  lines. New-code residue classified in "Coding tools (2026-09)"
+  below; five gaps found there were filled in the same round.
+  Before that: **93.36% lines / 94.08% regions** (4,037 of 60,818
   lines; re-measured after the loop refactor — the turn state machine
   became the ENGINE.md coroutine over a handler-owned ContextManager,
   the recorder dissolved into tabit-log, hooks went observe-only, and
@@ -115,6 +122,46 @@ Dead code found during the passes was deleted rather than tested: the
 streaming-conformance scenario grid and suite macro, `MockImageGeneratorTool`,
 unused `MockHttpResponse::Error` machinery, and various dead `#[cfg(test)]`
 helpers (see git history).
+
+## Coding tools (2026-09)
+
+The read/write/edit/bash round (`tabit-tools`) was measured with the
+tool suites in place; six gaps found in the review were filled in the
+same round (UTF-32 BOM naming, read's byte-truncation reason, big
+directory listings, edit's empty-edits and empty-file arms, bash's
+one-huge-line notice). Remaining residue, classified:
+
+**Justified — environmental, not exercisable offline:**
+
+- `shell.rs` — the *absence* branches: `Shell::Powershell` resolution
+  (the no-Git-Bash machine), the broken-candidate probe fallthrough,
+  the `where.exe`-spawn failure arm. The dev machine (and CI) has a
+  positively identified Git Bash; the absence paths need a controlled
+  PATH/registry sandbox or a test seam the design deliberately does
+  not have (resolution is process-global by OnceLock, once).
+- `lib.rs` (bash core) — the spawn-failure arm (`cannot start`), the
+  cancellation-mid-run arm (races a fast scheduler; the pre-cancelled
+  door IS tested), the wait-error arm, pipe-missing arms (a
+  process-wrap internal failure), the spill-write failure arm. All
+  need filesystem/process fault injection the suite does not have.
+- `file_io.rs` — the fault arms: `create_dir_all` failure, parent
+  metadata error, plain-write failure, temp-stage/write/persist
+  failures. Same fault-injection class.
+- `lib.rs` (`ask_user`) — the malformed-answer arm (`the user's
+  answer could not be read`): the scripted interaction double returns
+  canned outcomes; a malformed payload is a frontend defect, not a
+  reachable external error in practice. Dies with ask_user's
+  pre-shipping removal (owner ruling, ROADMAP item 4).
+
+**Deferred — live-verification candidates, not CI:**
+
+- `lib.rs` (`dynamic` / `dynamic_contextual`) — the `map_error` /
+  `into_tool_output` arms inside the erasure closures: exercised end
+  to end only through a real model driving a session (the direct
+  ToolSet tests cover the success path and the invalid-args arm).
+- `main.rs` (tabit) stays the known outlier (48.95%): CLI assembly,
+  process-spawn, and live-provider glue — the deferred class since
+  the CLI's first measurement, unchanged by this round.
 
 ## Justified residue
 

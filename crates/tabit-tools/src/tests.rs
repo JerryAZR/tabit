@@ -907,3 +907,95 @@ async fn edit_counts_occurrences_in_lf_space_for_crlf_files() {
     assert!(out.contains("1 of 2"), "the multi-line match lands: {out}");
     fs::remove_dir_all(&dir).ok();
 }
+
+// --- coverage fills (the post-tool coverage round) ---
+
+#[tokio::test]
+async fn read_names_utf32_encodings() {
+    let dir = temp_dir("read-utf32");
+    let le = dir.join("le.txt");
+    fs::write(&le, [0xff, 0xfe, 0x00, 0x00, 0x41, 0x00, 0x00, 0x00]).expect("write");
+    let error = err_text(read(le.to_string_lossy().to_string(), None, None).await);
+    assert!(error.contains("UTF-32 LE"), "{error}");
+
+    let be = dir.join("be.txt");
+    fs::write(&be, [0x00, 0x00, 0xfe, 0xff, 0x00, 0x00, 0x00, 0x41]).expect("write");
+    let error = err_text(read(be.to_string_lossy().to_string(), None, None).await);
+    assert!(error.contains("UTF-32 BE"), "{error}");
+    fs::remove_dir_all(&dir).ok();
+}
+
+#[tokio::test]
+async fn read_byte_truncation_says_so() {
+    let dir = temp_dir("read-bytecap");
+    let path = dir.join("dense.txt");
+    // Few lines, huge bytes: the 50 KiB byte limit hits before the line
+    // limit, and the notice must name it.
+    let line = "x".repeat(truncate::MAX_BYTES / 4);
+    let body = (0..4).map(|_| line.clone()).collect::<Vec<_>>().join("\n");
+    fs::write(&path, body).expect("write");
+    let out = read(path.to_string_lossy().to_string(), None, None)
+        .await
+        .expect("read");
+    assert!(
+        out.contains("(50 KiB limit)"),
+        "byte-limit reason: ...{out}"
+    );
+    fs::remove_dir_all(&dir).ok();
+}
+
+#[tokio::test]
+async fn read_big_directory_listing_is_truncated_with_a_notice() {
+    let dir = temp_dir("read-bigdir");
+    for i in 0..(truncate::MAX_LINES + 50) {
+        fs::write(dir.join(format!("f{i:05}.txt")), "x").expect("write");
+    }
+    let out = read(dir.to_string_lossy().to_string(), None, None)
+        .await
+        .expect("directory read");
+    assert!(out.contains("entries shown"), "{out}");
+    fs::remove_dir_all(&dir).ok();
+}
+
+#[tokio::test]
+async fn edit_rejects_an_empty_edits_list() {
+    let (dir, path) = seed("edit-noedits", "f.txt", "content\n");
+    let error = err_text(edit_core(&path.to_string_lossy(), &[]));
+    assert!(error.contains("at least one replacement"), "{error}");
+    assert_eq!(body(&path), "content\n");
+    fs::remove_dir_all(&dir).ok();
+}
+
+#[tokio::test]
+async fn edit_of_an_empty_file_points_at_write() {
+    let (dir, path) = seed("edit-emptyfile", "f.txt", "");
+    let error = err_text(edit_core(&path.to_string_lossy(), &[rep("x", "y")]));
+    assert!(error.contains("empty"), "{error}");
+    assert!(error.contains("write"), "{error}");
+    fs::remove_dir_all(&dir).ok();
+}
+
+#[tokio::test]
+async fn bash_one_huge_line_gets_the_honest_notice() {
+    if !bash_dialect_available() {
+        eprintln!("skipped: no verified Git Bash on this machine");
+        return;
+    }
+    // One line over the whole byte budget (minified-style output): the
+    // notice names the line, not "1 of 1 lines".
+    let out = bash(
+        &mut ctx(),
+        "head -c 60000 /dev/zero | tr '\\0' 'x'".to_string(),
+        None,
+    )
+    .await
+    .expect("bash");
+    assert!(out.contains("the final line is"), "{out}");
+    assert!(out.contains("Full output:"), "{out}");
+    let spill = out
+        .split("Full output: ")
+        .nth(1)
+        .expect("spill path")
+        .trim_end_matches(']');
+    fs::remove_file(spill).ok();
+}
