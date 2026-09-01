@@ -224,11 +224,9 @@ impl SessionWriter {
         if self.outbox.is_empty() {
             return Ok(());
         }
-        // The no-orphan gate, universal: no user message ever
-        // enqueued and no file — nothing to write, ever. (The
-        // guard's probe of an unborn session skips the same way:
-        // there is no stuck content to recover.)
-        if self.file.is_none() && !self.born {
+        // The no-orphan gate, universal: no user message was ever
+        // enqueued and no file exists — no write, at every call site.
+        if !self.born && self.file.is_none() {
             return Ok(());
         }
         self.materialize()?;
@@ -309,11 +307,13 @@ impl WriteBuffer for SessionWriter {
                 panic!("session record failed to serialize: {error}");
             }
         }
-        // The first non-empty enqueue is the session's first real
-        // commit — a user message is now enqueued: set the sticky
-        // bit. Its drain always attempts (the gate passes with
-        // content), so the bit implies the file from here on.
-        if !records.is_empty() {
+        // The sticky bit is a user message arriving — exactly that,
+        // not "any record": side records (model changes, aborted
+        // marks, checkouts) flush only when a file already exists or
+        // ride along with the first user message's commit. Its drain
+        // always attempts (the gate passes with content), so the bit
+        // implies the file from here on.
+        if records.iter().any(FileRecord::is_user_message) {
             self.born = true;
         }
         let outcome = self.drain();

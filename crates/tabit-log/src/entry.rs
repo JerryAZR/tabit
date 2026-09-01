@@ -69,6 +69,21 @@ pub enum FileRecord {
     Side(SideRecord),
 }
 
+impl FileRecord {
+    /// Whether this record is a user message — the record class that
+    /// makes a session real (the no-orphan gate: a file materializes
+    /// only once one of these has been enqueued).
+    pub fn is_user_message(&self) -> bool {
+        matches!(
+            self,
+            FileRecord::Node(SessionEntry {
+                kind: EntryKind::UserMessage { .. },
+                ..
+            })
+        )
+    }
+}
+
 /// One conversation node: a parent-linked entry in the tree.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]

@@ -265,3 +265,35 @@ fn a_commit_failure_on_a_blocked_disk_marks_the_transition() {
     assert_eq!(writer.take_degraded_transition(), Some(false));
     std::fs::remove_dir_all(blocker.parent().expect("base")).ok();
 }
+
+#[test]
+fn non_message_records_never_bring_a_session_into_existence() {
+    // The rule, exactly: only enqueuing a USER MESSAGE sets the bit —
+    // any number of anything else (a second model change, an aborted
+    // mark, a checkout) never triggers a drain of a new session.
+    let path = temp_path("never-born");
+    let mut writer = SessionWriter::create(path.clone(), header());
+    writer.prequeue(&model_change_record());
+    // Enqueued (not just prequeued) side records, repeatedly: the
+    // drain attempt happens, the gate refuses, no file.
+    writer
+        .enqueue(&[model_change_record()])
+        .expect("the enqueue itself never fails");
+    writer
+        .enqueue(&[FileRecord::Side(crate::entry::SideRecord {
+            timestamp: "t".to_string(),
+            kind: crate::entry::SideKind::Aborted,
+        })])
+        .expect("nor does a second kind");
+    assert!(!path.exists(), "no user message — no file, ever");
+    // The first user message flushes everything queued with it.
+    writer
+        .enqueue(&[user_record("a", None)])
+        .expect("a healthy disk accepts the batch");
+    let raw = std::fs::read_to_string(&path).expect("read");
+    assert_eq!(
+        raw.lines().count(),
+        5,
+        "header + 3 side records + the user message: {raw}"
+    );
+}

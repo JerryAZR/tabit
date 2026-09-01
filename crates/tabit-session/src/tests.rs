@@ -1288,10 +1288,18 @@ async fn thinking_level_changes_are_validated_and_recorded() -> Result<(), Sessi
         }
         other => panic!("expected config error, got {:?}", other.err()),
     }
-    // Every accepted switch left a model_change side record in the
-    // log — and the superseded opening register (still pending, the
-    // session never ran) rode no barrier, so it never landed: the
-    // first durable register is the first explicit switch.
+    // Every accepted switch left a model_change record in the live
+    // register — but a session with no user message has no file (the
+    // no-orphan gate is exactly this: model changes, any number, never
+    // create one), so the register's durability rides the first real
+    // commit, and the pending opening register is superseded
+    // (last-write-wins) before then.
+    assert!(
+        !session.path().exists(),
+        "model changes alone never materialize a session file"
+    );
+    let summary = session.prompt_with("hello", &mut |_| {}).await;
+    assert!(matches!(summary.outcome, crate::RunOutcome::Completed));
     let changes = load_records(session.path())
         .into_iter()
         .filter(|r| {
