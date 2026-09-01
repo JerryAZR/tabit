@@ -164,6 +164,29 @@ through bash (`ls` deleted with the ruling). Shipped so far: `read`,
 Permission/approval rides on the existing hook system (as a first-party
 extension — see item 9).
 
+**Read + truncation rulings (2026-09, after surveying pi):** one shared
+truncation module (dual limits — 2000 lines / 50 KiB, whole lines only —
+head policy for read, tail for bash). **Read pages, never spills** — the
+file is already on disk; `offset`/`limit` plus continuation notices
+carrying the next offset are the mechanism. **Bash keeps the tail and
+spills the full output** to a never-deleted `%TMP%\tabit-bash-*.log`
+(notice points at it) — the dropped head is unrecoverable without
+re-running a command that may be slow or side-effecting; that
+unrecoverability is where spill pays, and it lives in the tool, not a
+result hook (the policy is dialect-specific; a generic engine-level
+backstop cap becomes justified only when third-party extension tools
+exist — noted at item 9). Read's other rulings: directories list inline
+(header + sorted names, `/` on dirs — no size/mtime columns); UTF-16/32
+BOMs are named in the error (Windows tooling writes them), binaries
+rejected loudly (pi silently lossy-decodes — not copied); UTF-8 BOM
+stripped (what read shows is what edit will match); empty files say so;
+paths stay verbatim. **The caps are a dial, not doctrine**: 50 KiB ≈
+12k tokens is the per-call budget today; 64/128 KiB is sanctioned
+growth as contexts grow. **Image reads are a committed follow-up, not a
+maybe** (owner: real coding need — frontend/GUI work wants vision;
+video and other media when models support them); they will bypass the
+text truncation entirely.
+
 **Shell ruling (2026-09, correctness over coverage):** the shell tool is
 decided once per process at registration — `bash` only where a
 Git-for-Windows install is *positively identified*: the `git.exe` on PATH

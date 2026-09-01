@@ -66,33 +66,45 @@ use rig_derive::rig_tool;
 use std::time::{Duration, Instant};
 
 mod shell;
+mod truncate;
 
-/// Maximum bytes of a file the `read` tool returns.
-pub const READ_CAP_BYTES: usize = 256 * 1024;
-/// Maximum bytes of combined output the `bash` tool returns.
-pub const OUTPUT_CAP_BYTES: usize = 128 * 1024;
 /// Default seconds a `bash` command may run.
 pub const DEFAULT_TIMEOUT_SECS: u64 = 30;
 /// Maximum seconds a `bash` command may run.
 pub const MAX_TIMEOUT_SECS: u64 = 600;
 
-/// Read a UTF-8 text file. Output is capped at
-/// [`READ_CAP_BYTES`] with an explicit truncation notice.
-#[rig_tool(
-    description = "Read a UTF-8 text file from an absolute or relative path. \
-                   Returns the file contents; large files are truncated with a notice."
-)]
-pub async fn read(path: String) -> Result<String, ToolExecutionError> {
+/// Read a UTF-8 text file page by page. Truncation keeps whole lines
+/// (2000 lines / 50 KiB, whichever hits first — [`truncate`]) and every
+/// truncation notice carries the offset that continues the read: large
+/// files are paged, never spilled (the file is already on disk).
+/// Directories list their entries inline. Binary and UTF-16/32 files are
+/// rejected loudly. Image reads are a committed follow-up (ROADMAP item
+/// 4) — they will bypass the text truncation entirely.
+#[rig_tool(description = "Read a UTF-8 text file (absolute or relative path). \
+                   Output is capped at 2000 lines / 50 KiB, whole lines; the \
+                   truncation notice carries the offset to continue from. \
+                   Optional offset (1-indexed line number) and limit (line \
+                   count) page large files. Reading a directory lists its \
+                   entries.")]
+pub async fn read(
+    path: String,
+    offset: Option<usize>,
+    limit: Option<usize>,
+) -> Result<String, ToolExecutionError> {
     let meta = std::fs::metadata(&path)
         .map_err(|e| ToolExecutionError::other(format!("cannot read `{path}`: {e}")))?;
     if meta.is_dir() {
-        return Err(ToolExecutionError::other(format!(
-            "`{path}` is a directory; use the bash tool to list it (ls)"
-        )));
+        return list_directory(&path);
     }
     let bytes = std::fs::read(&path)
         .map_err(|e| ToolExecutionError::other(format!("cannot read `{path}`: {e}")))?;
-    let text = match String::from_utf8(bytes) {
+    if let Some(encoding) = non_utf8_bom(&bytes) {
+        return Err(ToolExecutionError::other(format!(
+            "`{path}` is {encoding}-encoded; this tool reads UTF-8 only — \
+             re-save the file as UTF-8 or inspect it with the shell tool"
+        )));
+    }
+    let mut text = match String::from_utf8(bytes) {
         Ok(text) => text,
         Err(error) => {
             return Err(ToolExecutionError::other(format!(
@@ -102,7 +114,115 @@ pub async fn read(path: String) -> Result<String, ToolExecutionError> {
             )));
         }
     };
-    cap_text(text, READ_CAP_BYTES, "file")
+    // Strip a UTF-8 BOM: what read shows must be exactly what edit will
+    // match later — one file-reading convention for the text tools.
+    if text.starts_with('\u{feff}') {
+        text.replace_range(..'\u{feff}'.len_utf8(), "");
+    }
+    if text.is_empty() {
+        return Ok("(file is empty)".to_string());
+    }
+
+    let lines = truncate::split_lines(&text);
+    let total_lines = lines.len();
+    // 1-indexed input, 0-indexed slicing; offset 0 reads as 1.
+    let start = offset.unwrap_or(1).saturating_sub(1);
+    if start >= total_lines {
+        return Err(ToolExecutionError::other(format!(
+            "offset {} is beyond the end of `{path}` ({total_lines} lines)",
+            start + 1
+        )));
+    }
+    let end = limit
+        .map(|l| start.saturating_add(l).min(total_lines))
+        .unwrap_or(total_lines);
+    let selected = lines
+        .get(start..end)
+        .ok_or_else(|| ToolExecutionError::other(format!("empty line range {start}..{end}")))?
+        .join("\n");
+
+    let trunc = truncate::truncate_head(&selected);
+    if trunc.first_line_exceeds_limit {
+        let line_no = start + 1;
+        return Ok(format!(
+            "[Line {line_no} of `{path}` alone exceeds the 50 KiB output \
+             limit. Use the shell tool to extract a slice of it (bash: \
+             sed -n '{line_no}p' \"{path}\" | head -c 51200).]"
+        ));
+    }
+    let mut out = trunc.content;
+    if trunc.truncated {
+        let last_shown = start + trunc.output_lines;
+        let reason = if trunc.truncated_by == Some(truncate::TruncatedBy::Bytes) {
+            " (50 KiB limit)"
+        } else {
+            ""
+        };
+        out.push_str(&format!(
+            "\n\n[Showing lines {}-{last_shown} of {total_lines}{reason}. \
+             Use offset={} to continue.]",
+            start + 1,
+            last_shown + 1
+        ));
+    } else if end < total_lines {
+        out.push_str(&format!(
+            "\n\n[{} more lines in `{path}`. Use offset={} to continue.]",
+            total_lines - end,
+            end + 1
+        ));
+    }
+    Ok(out)
+}
+
+/// A UTF-16/32 byte-order mark, if present — Windows tooling (PowerShell
+/// redirects) writes these; naming the encoding beats a bare
+/// invalid-UTF-8 report.
+fn non_utf8_bom(bytes: &[u8]) -> Option<&'static str> {
+    match bytes {
+        [0xff, 0xfe, 0x00, 0x00, ..] => Some("UTF-32 LE"),
+        [0x00, 0x00, 0xfe, 0xff, ..] => Some("UTF-32 BE"),
+        [0xff, 0xfe, ..] => Some("UTF-16 LE"),
+        [0xfe, 0xff, ..] => Some("UTF-16 BE"),
+        _ => None,
+    }
+}
+
+/// Inline directory listing: a header naming the directory, then sorted
+/// entry names with `/` on directories — lean on purpose (no size/mtime
+/// columns; bash `ls -la` covers metadata). Capped through the shared
+/// truncation.
+fn list_directory(path: &str) -> Result<String, ToolExecutionError> {
+    let entries = std::fs::read_dir(path)
+        .map_err(|e| ToolExecutionError::other(format!("cannot list `{path}`: {e}")))?;
+    let mut names: Vec<String> = Vec::new();
+    for entry in entries {
+        let entry =
+            entry.map_err(|e| ToolExecutionError::other(format!("listing `{path}`: {e}")))?;
+        let mut name = entry.file_name().to_string_lossy().into_owned();
+        if entry.file_type().map(|t| t.is_dir()).unwrap_or(false) {
+            name.push('/');
+        }
+        names.push(name);
+    }
+    names.sort();
+    let mut listing = format!("{path} is a directory:\n");
+    if names.is_empty() {
+        listing.push_str("(empty directory)");
+    } else {
+        listing.push_str(&names.join("\n"));
+    }
+    let trunc = truncate::truncate_head(&listing);
+    let mut out = trunc.content;
+    if trunc.truncated {
+        // The header rides line 1 of the listing; entries follow.
+        let shown = trunc.output_lines.saturating_sub(1);
+        out.push_str(&format!(
+            "\n\n[{shown} of {} entries shown; use the shell tool to page \
+             the full listing]",
+            names.len()
+        ));
+    }
+    Ok(out)
 }
 
 /// Ask the user a question and return their answer — the whole body is
@@ -276,9 +396,32 @@ async fn run_shell(
         combined.push_str("\n--- stderr ---\n");
         combined.push_str(&String::from_utf8_lossy(&output.stderr));
     }
-    let combined = cap_text(combined, OUTPUT_CAP_BYTES, "command output")?;
+    // Keep the tail (errors and final results live at the end); when the
+    // head is dropped, spill the full output to a temp file — the dropped
+    // bytes are unrecoverable without re-running the command, which may
+    // be slow or side-effecting. Spill files are never deleted by us: the
+    // path was promised to the model; OS temp hygiene owns it.
+    let trunc = truncate::truncate_tail(&combined);
+    let mut visible = trunc.content;
+    if trunc.truncated {
+        let spill = spill_full_output(&combined)?;
+        let detail = if trunc.last_line_partial {
+            // One line over the whole budget (minified output): say that,
+            // not "1 of 1 lines".
+            format!(
+                "the final line is {} bytes; showing its last {}",
+                trunc.total_bytes, trunc.output_bytes
+            )
+        } else {
+            format!(
+                "showing the last {} of {} lines ({} of {} bytes)",
+                trunc.output_lines, trunc.total_lines, trunc.output_bytes, trunc.total_bytes
+            )
+        };
+        visible.push_str(&format!("\n\n[{detail}. Full output: {}]", spill.display()));
+    }
     if output.status.success() {
-        Ok(combined)
+        Ok(visible)
     } else {
         // The exit status rides structure too (the protocol's
         // `failed { exit_code }`): numeric codes pass through as
@@ -286,7 +429,7 @@ async fn run_shell(
         // parsing the prose. Signal kills have no code — the prose
         // already says "abnormal termination".
         let mut error = ToolExecutionError::other(format!(
-            "command exited with {}:\n{combined}",
+            "command exited with {}:\n{visible}",
             exit_description(&output.status)
         ));
         if let Some(code) = output.status.code() {
@@ -294,6 +437,22 @@ async fn run_shell(
         }
         Err(error)
     }
+}
+
+/// Write oversized command output to a temp file. Ids are pid + a
+/// monotonic counter — unique per process, no randomness dependency.
+fn spill_full_output(full: &str) -> Result<std::path::PathBuf, ToolExecutionError> {
+    use std::sync::atomic::{AtomicU64, Ordering};
+    static SPILL_COUNT: AtomicU64 = AtomicU64::new(0);
+    let n = SPILL_COUNT.fetch_add(1, Ordering::Relaxed);
+    let path = std::env::temp_dir().join(format!("tabit-bash-{}-{n}.log", std::process::id()));
+    std::fs::write(&path, full).map_err(|e| {
+        ToolExecutionError::other(format!(
+            "cannot save full output to {}: {e}",
+            path.display()
+        ))
+    })?;
+    Ok(path)
 }
 
 struct CapturedOutput {
@@ -413,24 +572,6 @@ where
 
 fn join_reader(handle: ReaderJoin) -> Vec<u8> {
     handle.and_then(|h| h.join().ok()).unwrap_or_default()
-}
-
-/// Truncate `text` to `cap` bytes on a char boundary, appending an explicit
-/// notice.
-fn cap_text(text: String, cap: usize, what: &str) -> Result<String, ToolExecutionError> {
-    if text.len() <= cap {
-        return Ok(text);
-    }
-    let mut cut = cap;
-    while cut > 0 && !text.is_char_boundary(cut) {
-        cut -= 1;
-    }
-    let mut truncated = String::from(&text[..cut]);
-    truncated.push_str(&format!(
-        "\n... [{what} truncated: showed {cut} of {} bytes] ...\n",
-        text.len()
-    ));
-    Ok(truncated)
 }
 
 /// Erase any [`PortableTool`] into a [`DynamicTool`] so sessions (which

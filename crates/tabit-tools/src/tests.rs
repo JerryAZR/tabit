@@ -45,46 +45,158 @@ async fn read_returns_file_contents() {
     let dir = temp_dir("read-ok");
     let path = dir.join("note.txt");
     fs::write(&path, "first\nsecond\n").expect("write");
-    let out = read(path.to_string_lossy().to_string())
+    let out = read(path.to_string_lossy().to_string(), None, None)
         .await
         .expect("read");
-    assert_eq!(out, "first\nsecond\n");
+    // Line-paged output carries no trailing newline (pi behaves the same).
+    assert_eq!(out, "first\nsecond");
     fs::remove_dir_all(&dir).ok();
 }
 
 #[tokio::test]
 async fn read_errors_are_clear_about_what_and_why() {
     let dir = temp_dir("read-err");
-    let missing = err_text(read(dir.join("nope.txt").to_string_lossy().to_string()).await);
+    let missing = err_text(
+        read(
+            dir.join("nope.txt").to_string_lossy().to_string(),
+            None,
+            None,
+        )
+        .await,
+    );
     assert!(missing.contains("nope.txt"), "{missing}");
     assert!(missing.contains("cannot read"), "{missing}");
 
-    fs::create_dir(dir.join("adir")).expect("dir");
-    let is_dir = err_text(read(dir.join("adir").to_string_lossy().to_string()).await);
-    assert!(is_dir.contains("directory"), "{is_dir}");
-
     let bin = dir.join("blob.bin");
     fs::write(&bin, [0xff, 0xfe, 0x00, 0x01]).expect("binary");
-    let not_utf8 = err_text(read(bin.to_string_lossy().to_string()).await);
+    // FF FE is the UTF-16 LE mark — the error names the encoding.
+    let utf16 = err_text(read(bin.to_string_lossy().to_string(), None, None).await);
+    assert!(utf16.contains("UTF-16"), "{utf16}");
+
+    let raw = dir.join("blob2.bin");
+    fs::write(&raw, [0x89, 0x50, 0x4e, 0x47, 0x00, 0x01]).expect("binary");
+    let not_utf8 = err_text(read(raw.to_string_lossy().to_string(), None, None).await);
     assert!(not_utf8.contains("UTF-8"), "{not_utf8}");
+
+    let beyond = err_text(read("Cargo.toml".to_string(), Some(10_000), None).await);
+    assert!(beyond.contains("beyond the end"), "{beyond}");
     fs::remove_dir_all(&dir).ok();
 }
 
 #[tokio::test]
-async fn read_truncates_large_files_with_a_notice() {
+async fn read_pages_with_offset_and_limit() {
+    let dir = temp_dir("read-page");
+    let path = dir.join("lines.txt");
+    let body: String = (1..=10).map(|i| format!("line-{i}\n")).collect();
+    fs::write(&path, body).expect("write");
+
+    let page = read(path.to_string_lossy().to_string(), Some(3), Some(2))
+        .await
+        .expect("page");
+    assert_eq!(
+        page,
+        "line-3\nline-4\n\n[6 more lines in `...`. Use offset=5 to continue.]"
+            .replace("...", &path.to_string_lossy())
+    );
+
+    // 1-indexed offset, and offset=0 reads as 1.
+    let first = read(path.to_string_lossy().to_string(), Some(0), Some(1))
+        .await
+        .expect("first");
+    assert_eq!(
+        first,
+        "line-1\n\n[9 more lines in `...`. Use offset=2 to continue.]"
+            .replace("...", &path.to_string_lossy())
+    );
+    fs::remove_dir_all(&dir).ok();
+}
+
+#[tokio::test]
+async fn read_truncates_on_whole_lines_with_a_continuation_offset() {
     let dir = temp_dir("read-cap");
     let path = dir.join("big.txt");
-    let body = "x".repeat(READ_CAP_BYTES + 1024);
-    fs::write(&path, &body).expect("write");
-    let out = read(path.to_string_lossy().to_string())
+    let body: String = (1..=truncate::MAX_LINES + 100)
+        .map(|i| format!("row-{i}\n"))
+        .collect();
+    fs::write(&path, body).expect("write");
+
+    let out = read(path.to_string_lossy().to_string(), None, None)
         .await
         .expect("read");
-    assert!(out.len() > READ_CAP_BYTES, "notice appended");
     assert!(
-        out.contains("[file truncated: showed"),
-        "truncation is explicit: {}...",
-        &out[out.len() - 120..]
+        out.contains(&format!(
+            "[Showing lines 1-{} of {}. Use offset={} to continue.]",
+            truncate::MAX_LINES,
+            truncate::MAX_LINES + 100,
+            truncate::MAX_LINES + 1
+        )),
+        "notice carries the next offset: ...{}",
+        &out[out.len().saturating_sub(140)..]
     );
+    // Whole lines only: the shown content is a prefix of the file.
+    assert!(out.starts_with("row-1\nrow-2\n"));
+    assert!(out.contains(&format!("row-{}\n", truncate::MAX_LINES)));
+    assert!(!out.contains(&format!("row-{}", truncate::MAX_LINES + 1)));
+    fs::remove_dir_all(&dir).ok();
+}
+
+#[tokio::test]
+async fn read_of_a_minified_line_points_at_the_shell() {
+    let dir = temp_dir("read-minified");
+    let path = dir.join("min.js");
+    fs::write(&path, "x".repeat(truncate::MAX_BYTES + 1)).expect("write");
+    let out = read(path.to_string_lossy().to_string(), None, None)
+        .await
+        .expect("read");
+    assert!(
+        out.contains("exceeds the 50 KiB output limit"),
+        "the model is told why there is no content: {out}"
+    );
+    assert!(out.contains("shell tool"), "{out}");
+    fs::remove_dir_all(&dir).ok();
+}
+
+#[tokio::test]
+async fn read_lists_directories_inline() {
+    let dir = temp_dir("read-dir");
+    fs::write(dir.join("a.txt"), "a").expect("write");
+    fs::create_dir(dir.join("sub")).expect("subdir");
+
+    let out = read(dir.to_string_lossy().to_string(), None, None)
+        .await
+        .expect("directory reads list entries");
+    assert!(out.contains("is a directory"), "{out}");
+    assert!(out.contains("a.txt"), "{out}");
+    assert!(out.contains("sub/"), "directories carry a slash: {out}");
+    let a = out.find("a.txt").expect("a.txt");
+    let s = out.find("sub/").expect("sub/");
+    assert!(a < s, "entries sorted: {out}");
+
+    let empty = temp_dir("read-dir-empty");
+    let out = read(empty.to_string_lossy().to_string(), None, None)
+        .await
+        .expect("empty directory");
+    assert!(out.contains("(empty directory)"), "{out}");
+    fs::remove_dir_all(&dir).ok();
+    fs::remove_dir_all(&empty).ok();
+}
+
+#[tokio::test]
+async fn read_names_empty_files_and_strips_the_bom() {
+    let dir = temp_dir("read-empty-bom");
+    let empty = dir.join("empty.txt");
+    fs::write(&empty, "").expect("write");
+    let out = read(empty.to_string_lossy().to_string(), None, None)
+        .await
+        .expect("empty read");
+    assert_eq!(out, "(file is empty)");
+
+    let bom = dir.join("bom.txt");
+    fs::write(&bom, "\u{feff}content\n").expect("write");
+    let out = read(bom.to_string_lossy().to_string(), None, None)
+        .await
+        .expect("bom read");
+    assert_eq!(out, "content", "BOM stripped: {out:?}");
     fs::remove_dir_all(&dir).ok();
 }
 
@@ -263,24 +375,66 @@ async fn dynamic_tool_executes_the_portable_body() {
 }
 
 #[tokio::test]
-async fn read_truncates_on_a_character_boundary() {
-    let dir = temp_dir("read-utf8-cap");
-    let path = dir.join("wide.txt");
-    // Two-byte characters past the boundary: the byte cap lands mid-char.
-    let body = "x".repeat(READ_CAP_BYTES - 5) + "\u{e9}".repeat(10).as_str();
-    debug_assert!(body.len() > READ_CAP_BYTES);
-    fs::write(&path, body).expect("write");
-    let out = read(path.to_string_lossy().to_string())
-        .await
-        .expect("read");
-    assert!(out.contains("[file truncated"), "notice present");
-    // The truncated text must itself be valid UTF-8 (it was produced from a
-    // String, but the guarantee is the point of the boundary walk).
+async fn bash_overflow_keeps_the_tail_and_spills_the_full_output() {
+    if !bash_dialect_available() {
+        eprintln!("skipped: no verified Git Bash on this machine");
+        return;
+    }
+    // 6000 rows: over the 2000-line cap, far under the byte cap.
+    let out = bash(
+        &mut ctx(),
+        "for i in $(seq 1 6000); do echo \"row-$i\"; done".to_string(),
+        None,
+    )
+    .await
+    .expect("bash");
     assert!(
-        out.chars()
-            .all(|c| !c.is_ascii_control() || c == '\n' || c == '\r')
+        out.contains("Full output:"),
+        "notice points at the spill: ...{out}"
     );
-    fs::remove_dir_all(&dir).ok();
+    // The visible window is the tail — late rows present, early rows gone.
+    assert!(
+        out.starts_with("row-4001"),
+        "tail window: {}...",
+        &out[..40]
+    );
+    assert!(out.contains("row-6000"));
+    assert!(
+        !out.contains("\nrow-42\n"),
+        "dropped head must stay dropped"
+    );
+
+    let spill = out
+        .split("Full output: ")
+        .nth(1)
+        .expect("spill path")
+        .trim_end_matches(']');
+    let full = fs::read_to_string(spill).expect("spill file exists");
+    assert!(full.starts_with("row-1\n"), "spill holds the full stream");
+    assert!(full.contains("row-6000"));
+    fs::remove_file(spill).ok();
+}
+
+#[cfg(windows)]
+#[tokio::test]
+async fn powershell_overflow_keeps_the_tail_and_spills_the_full_output() {
+    let out = powershell(
+        &mut ctx(),
+        "1..6000 | ForEach-Object { \"row-$_\" }".to_string(),
+        None,
+    )
+    .await
+    .expect("powershell");
+    assert!(out.contains("Full output:"), "...{out}");
+    assert!(out.contains("row-6000"));
+    let spill = out
+        .split("Full output: ")
+        .nth(1)
+        .expect("spill path")
+        .trim_end_matches(']');
+    let full = fs::read_to_string(spill).expect("spill file exists");
+    assert!(full.contains("row-1"), "spill holds the full stream");
+    fs::remove_file(spill).ok();
 }
 
 #[tokio::test]
