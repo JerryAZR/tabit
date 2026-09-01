@@ -4789,7 +4789,6 @@ name = "tabit-tools"
 version = "0.41.0"
 dependencies = [
  "futures",
- "humantime",
  "process-wrap",
  "rig-agent",
  "rig-core",

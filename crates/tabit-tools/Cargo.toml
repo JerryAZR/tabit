@@ -3,7 +3,7 @@ name = "tabit-tools"
 version.workspace = true
 edition.workspace = true
 license = "MIT"
-description = "Tabit coding tools: read, ls, and shell execution as PortableTools."
+description = "Tabit coding tools: file reading and shell execution as PortableTools."
 
 [lints]
 workspace = true
@@ -16,7 +16,6 @@ doctest = true
 [dependencies]
 rig-agent = { path = "../rig-agent", version = "0.41.0", default-features = false, features = ["derive"] }
 rig-derive = { path = "../rig-derive", version = "0.41.0" }
-humantime = { workspace = true }
 process-wrap = { version = "9", features = ["std", "job-object", "process-group"] }
 rig-core = { path = "../rig-core", version = "0.41.0", default-features = false }
 serde = { workspace = true, features = ["derive"] }

@@ -10,10 +10,10 @@
         clippy::unwrap_used
     )
 )]
-//! Tabit's coding tools: file reading, directory listing, and shell
-//! execution, implemented as [`PortableTool`]s via `#[rig_tool]` (the
-//! workspace's canonical tool surface) and erasable into [`DynamicTool`]s
-//! for session registration.
+//! Tabit's coding tools: file reading and shell execution, implemented
+//! as [`PortableTool`]s via `#[rig_tool]` (the workspace's canonical
+//! tool surface) and erasable into [`DynamicTool`]s for session
+//! registration.
 //!
 //! All paths are taken verbatim from the model; relative paths resolve
 //! against the process working directory. Errors are user-facing (external
@@ -87,7 +87,7 @@ pub async fn read(path: String) -> Result<String, ToolExecutionError> {
         .map_err(|e| ToolExecutionError::other(format!("cannot read `{path}`: {e}")))?;
     if meta.is_dir() {
         return Err(ToolExecutionError::other(format!(
-            "`{path}` is a directory; use the ls tool for directories"
+            "`{path}` is a directory; use the bash tool to list it (ls)"
         )));
     }
     let bytes = std::fs::read(&path)
@@ -103,46 +103,6 @@ pub async fn read(path: String) -> Result<String, ToolExecutionError> {
         }
     };
     cap_text(text, READ_CAP_BYTES, "file")
-}
-
-/// List a directory's entries: type, size, and modification time.
-#[rig_tool(
-    description = "List a directory's entries with type, size, and modified time. \
-                   Defaults to the current directory."
-)]
-pub async fn ls(path: Option<String>) -> Result<String, ToolExecutionError> {
-    let dir = path.as_deref().unwrap_or(".");
-    let entries = std::fs::read_dir(dir)
-        .map_err(|e| ToolExecutionError::other(format!("cannot list `{dir}`: {e}")))?;
-    let mut rows: Vec<(String, &'static str, u64, String)> = Vec::new();
-    for entry in entries {
-        let entry =
-            entry.map_err(|e| ToolExecutionError::other(format!("listing `{dir}`: {e}")))?;
-        let name = entry.file_name().to_string_lossy().to_string();
-        let meta = entry
-            .metadata()
-            .map_err(|e| ToolExecutionError::other(format!("`{dir}/{name}`: {e}")))?;
-        let kind = if meta.is_dir() { "dir" } else { "file" };
-        let size = if meta.is_dir() { 0 } else { meta.len() };
-        let modified = meta
-            .modified()
-            .ok()
-            .and_then(|t| t.duration_since(std::time::UNIX_EPOCH).ok())
-            .map(|d| {
-                humantime::format_rfc3339_seconds(std::time::SystemTime::UNIX_EPOCH + d).to_string()
-            })
-            .unwrap_or_else(|| "-".to_string());
-        rows.push((name, kind, size, modified));
-    }
-    rows.sort();
-    let mut out = String::new();
-    for (name, kind, size, modified) in rows {
-        out.push_str(&format!("{kind:>4} {size:>10}  {modified}  {name}\n"));
-    }
-    if out.is_empty() {
-        out.push_str("(empty directory)\n");
-    }
-    Ok(out)
 }
 
 /// Ask the user a question and return their answer — the whole body is

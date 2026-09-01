@@ -89,38 +89,6 @@ async fn read_truncates_large_files_with_a_notice() {
 }
 
 #[tokio::test]
-async fn ls_lists_entries_with_kinds() {
-    let dir = temp_dir("ls-ok");
-    fs::write(dir.join("a.txt"), "a").expect("write");
-    fs::write(dir.join("b.txt"), "bb").expect("write");
-    fs::create_dir(dir.join("sub")).expect("subdir");
-
-    let out = ls(Some(dir.to_string_lossy().to_string()))
-        .await
-        .expect("ls");
-    assert!(out.contains("a.txt"), "{out}");
-    assert!(out.contains("b.txt"), "{out}");
-    assert!(out.contains("sub"), "{out}");
-    assert!(out.contains("dir"), "{out}");
-    // rows are sorted
-    let a = out.find("a.txt").expect("a");
-    let b = out.find("b.txt").expect("b");
-    let s = out.find("sub").expect("sub");
-    assert!(a < b && b < s, "sorted: {out}");
-
-    let empty = temp_dir("ls-empty");
-    let out = ls(Some(empty.to_string_lossy().to_string()))
-        .await
-        .expect("ls");
-    assert_eq!(out, "(empty directory)\n");
-
-    let missing = err_text(ls(Some("definitely/not/here".to_string())).await);
-    assert!(missing.contains("cannot list"), "{missing}");
-    fs::remove_dir_all(&dir).ok();
-    fs::remove_dir_all(&empty).ok();
-}
-
-#[tokio::test]
 async fn bash_runs_a_command_and_captures_output() {
     if !bash_dialect_available() {
         eprintln!("skipped: no verified Git Bash on this machine");
@@ -226,7 +194,6 @@ async fn powershell_missing_program_is_a_clear_error() {
 #[tokio::test]
 async fn portable_structs_are_named_and_erased_correctly() {
     assert_eq!(<Read as PortableTool>::NAME, "read");
-    assert_eq!(<Ls as PortableTool>::NAME, "ls");
     // bash is contextual (it takes the cancellation-bearing ToolContext).
     assert_eq!(<Bash as rig_agent::tool::Tool>::NAME, "bash");
     #[cfg(windows)]

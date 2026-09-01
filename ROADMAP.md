@@ -159,7 +159,7 @@ The application-level conversation layer pi builds over its agent loop:
 The standard toolset as `#[rig_tool]` implementations, via the
 PortableTool→DynamicTool erasure. **Toolset ruled to pi's four — read,
 write, edit, bash** (2026-09): no glob/grep/ls — the model reaches those
-through bash. Shipped so far: `read`, `ls` (dying with the ruling),
+through bash (`ls` deleted with the ruling). Shipped so far: `read`,
 `bash`, `ask_user`. Still to add: write, edit (with diff preview).
 Permission/approval rides on the existing hook system (as a first-party
 extension — see item 9).
