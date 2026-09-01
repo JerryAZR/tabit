@@ -156,12 +156,29 @@ The application-level conversation layer pi builds over its agent loop:
 
 ### 4. Coding tools
 
-The standard toolset as `#[rig_tool]` implementations. **Started:
-`crates/tabit-tools` ships `read`, `ls`, and `bash`** (timeout, output
-caps, Git Bash preferred on Windows with PowerShell fallback, via the
-PortableTool→DynamicTool erasure). Still to add: edit (with diff preview),
-glob, grep, write. Permission/approval rides on the existing hook system
-(as a first-party extension — see item 9).
+The standard toolset as `#[rig_tool]` implementations, via the
+PortableTool→DynamicTool erasure. **Toolset ruled to pi's four — read,
+write, edit, bash** (2026-09): no glob/grep/ls — the model reaches those
+through bash. Shipped so far: `read`, `ls` (dying with the ruling),
+`bash`, `ask_user`. Still to add: write, edit (with diff preview).
+Permission/approval rides on the existing hook system (as a first-party
+extension — see item 9).
+
+**Shell ruling (2026-09, correctness over coverage):** the shell tool is
+decided once per process at registration — `bash` only where a
+Git-for-Windows install is *positively identified*: the `git.exe` on PATH
+in Git-for-Windows placements (`<root>\cmd\git.exe`,
+`<root>\mingw64\bin\git.exe`), the installer's
+`SOFTWARE\GitForWindows` registry declaration (HKCU before HKLM — the
+authoritative system-vs-user answer), or the installer's default
+directories; the surviving candidate is spawn-probed (`bash -c "exit 0"`,
+2s cap) before acceptance. Every miss registers the `powershell` tool
+instead — a wrong bash (WSL's `System32\bash.exe` launcher, a
+Cygwin/MSYS2 root with different path mapping) is worse than no bash, so
+there is deliberately no bare-`bash.exe`-on-PATH source. Each tool's
+description names the dialect the model is writing in; the old
+per-invocation `where bash` first-hit often spawned WSL bash while the
+tool described itself as bash.
 
 ### 5. Native subagents
 

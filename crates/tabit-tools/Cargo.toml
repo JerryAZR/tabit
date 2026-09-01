@@ -24,6 +24,9 @@ serde_json = { workspace = true }
 tabit-protocol = { path = "../tabit-protocol" }
 tokio-util = { version = "0.7", default-features = false }
 
+[target.'cfg(windows)'.dependencies]
+windows-registry = "0.6"
+
 [dev-dependencies]
 futures = { workspace = true }
 tokio = { workspace = true, features = ["rt-multi-thread", "macros"] }

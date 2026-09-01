@@ -4799,6 +4799,7 @@ dependencies = [
  "tabit-protocol",
  "tokio",
  "tokio-util",
+ "windows-registry",
 ]
 
 [[package]]

@@ -30,6 +30,16 @@ fn err(result: Result<String, ToolExecutionError>) -> ToolExecutionError {
     }
 }
 
+/// Whether the `bash` tool's dialect is usable here: every Unix, Windows
+/// only with a positively identified Git Bash. POSIX-syntax tests gate on
+/// it — on a Windows machine without one, the shell tool is `powershell`.
+fn bash_dialect_available() -> bool {
+    #[cfg(windows)]
+    return matches!(shell::resolved(), shell::Shell::Bash(_));
+    #[cfg(not(windows))]
+    return true;
+}
+
 #[tokio::test]
 async fn read_returns_file_contents() {
     let dir = temp_dir("read-ok");
@@ -112,6 +122,10 @@ async fn ls_lists_entries_with_kinds() {
 
 #[tokio::test]
 async fn bash_runs_a_command_and_captures_output() {
+    if !bash_dialect_available() {
+        eprintln!("skipped: no verified Git Bash on this machine");
+        return;
+    }
     let out = bash(&mut ctx(), "echo tabit-smoke".to_string(), None)
         .await
         .expect("bash");
@@ -123,35 +137,61 @@ async fn bash_runs_a_command_and_captures_output() {
 
 #[tokio::test]
 async fn bash_reports_nonzero_exits_with_output() {
+    if !bash_dialect_available() {
+        eprintln!("skipped: no verified Git Bash on this machine");
+        return;
+    }
     let failure = err(bash(&mut ctx(), "exit 3".to_string(), None).await);
     let error = failure.to_string();
-    // PowerShell has no `exit 3` semantics as a command line; the fallback
-    // path only exists where bash is missing. This machine has Git Bash.
-    if interpreter().argv0.ends_with("bash.exe") || interpreter().argv0 == "bash" {
-        assert!(error.contains("status 3"), "{error}");
-        assert_eq!(
-            failure.code(),
-            Some("3"),
-            "the exit status rides structure (the protocol's exit_code), \
-             not just prose"
-        );
-    }
+    assert!(error.contains("status 3"), "{error}");
+    assert_eq!(
+        failure.code(),
+        Some("3"),
+        "the exit status rides structure (the protocol's exit_code), \
+         not just prose"
+    );
+}
+
+#[cfg(windows)]
+#[tokio::test]
+async fn powershell_reports_nonzero_exits_with_output() {
+    let failure = err(powershell(&mut ctx(), "exit 3".to_string(), None).await);
+    let error = failure.to_string();
+    assert!(error.contains("status 3"), "{error}");
+    assert_eq!(
+        failure.code(),
+        Some("3"),
+        "the exit status rides structure (the protocol's exit_code), \
+         not just prose"
+    );
 }
 
 #[tokio::test]
 async fn bash_kills_commands_that_exceed_their_timeout() {
-    let sleep_cmd = if cfg!(windows) && interpreter().argv0.eq_ignore_ascii_case("powershell") {
-        "Start-Sleep -Seconds 30"
-    } else {
-        "sleep 30"
-    };
-    let error = err_text(bash(&mut ctx(), sleep_cmd.to_string(), Some(1)).await);
+    if !bash_dialect_available() {
+        eprintln!("skipped: no verified Git Bash on this machine");
+        return;
+    }
+    let error = err_text(bash(&mut ctx(), "sleep 30".to_string(), Some(1)).await);
+    assert!(error.contains("timeout"), "{error}");
+    assert!(error.contains("killed"), "{error}");
+}
+
+#[cfg(windows)]
+#[tokio::test]
+async fn powershell_kills_commands_that_exceed_their_timeout() {
+    let error =
+        err_text(powershell(&mut ctx(), "Start-Sleep -Seconds 30".to_string(), Some(1)).await);
     assert!(error.contains("timeout"), "{error}");
     assert!(error.contains("killed"), "{error}");
 }
 
 #[tokio::test]
 async fn bash_missing_program_is_a_clear_error() {
+    if !bash_dialect_available() {
+        eprintln!("skipped: no verified Git Bash on this machine");
+        return;
+    }
     let error = err_text(
         bash(
             &mut ctx(),
@@ -161,8 +201,25 @@ async fn bash_missing_program_is_a_clear_error() {
         .await,
     );
     assert!(
+        error.contains("command exited"),
+        "failure surfaces the shell's own diagnosis: {error}"
+    );
+}
+
+#[cfg(windows)]
+#[tokio::test]
+async fn powershell_missing_program_is_a_clear_error() {
+    let error = err_text(
+        powershell(
+            &mut ctx(),
+            "this-command-does-not-exist-xyz".to_string(),
+            None,
+        )
+        .await,
+    );
+    assert!(
         error.contains("command exited") || error.contains("not recognized"),
-        "failure surfaces the platform's own diagnosis: {error}"
+        "failure surfaces the shell's own diagnosis: {error}"
     );
 }
 
@@ -172,6 +229,8 @@ async fn portable_structs_are_named_and_erased_correctly() {
     assert_eq!(<Ls as PortableTool>::NAME, "ls");
     // bash is contextual (it takes the cancellation-bearing ToolContext).
     assert_eq!(<Bash as rig_agent::tool::Tool>::NAME, "bash");
+    #[cfg(windows)]
+    assert_eq!(<Powershell as rig_agent::tool::Tool>::NAME, "powershell");
 
     let mut set = rig_agent::tool::ToolSet::default();
     set.add_dynamic_tool(dynamic(Read));
@@ -187,6 +246,33 @@ async fn portable_structs_are_named_and_erased_correctly() {
         "timeout_secs must be optional: {:?}",
         required
     );
+}
+
+/// The registration decision is total: exactly one shell tool, named for
+/// the dialect this machine resolved (never a `bash` tool that secretly
+/// runs PowerShell).
+#[tokio::test]
+async fn shell_tool_registers_the_resolved_dialect() {
+    let mut set = rig_agent::tool::ToolSet::default();
+    set.add_dynamic_tool(shell_tool());
+    let defs = set.get_tool_definitions();
+    assert_eq!(defs.len(), 1, "one shell tool, not a set: {defs:?}");
+
+    #[cfg(windows)]
+    let expected = match shell::resolved() {
+        shell::Shell::Bash(_) => "bash",
+        shell::Shell::Powershell => "powershell",
+    };
+    #[cfg(not(windows))]
+    let expected = "bash";
+    assert_eq!(defs[0].name, expected);
+
+    // The description must name the dialect the model is writing in.
+    if expected == "powershell" {
+        assert!(defs[0].description.contains("PowerShell"));
+    } else {
+        assert!(defs[0].description.contains("bash"));
+    }
 }
 
 #[tokio::test]
@@ -232,6 +318,10 @@ async fn read_truncates_on_a_character_boundary() {
 
 #[tokio::test]
 async fn pre_cancelled_bash_never_runs() {
+    if !bash_dialect_available() {
+        eprintln!("skipped: no verified Git Bash on this machine");
+        return;
+    }
     let token = tokio_util::sync::CancellationToken::new();
     token.cancel();
     let mut context = rig_agent::tool::ToolContext::new();

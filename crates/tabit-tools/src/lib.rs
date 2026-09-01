@@ -65,6 +65,8 @@ use rig_core::tool::{IntoToolOutput, PortableTool, ToolExecutionError};
 use rig_derive::rig_tool;
 use std::time::{Duration, Instant};
 
+mod shell;
+
 /// Maximum bytes of a file the `read` tool returns.
 pub const READ_CAP_BYTES: usize = 256 * 1024;
 /// Maximum bytes of combined output the `bash` tool returns.
@@ -189,19 +191,67 @@ pub async fn ask_user(
     )
 }
 
-/// Run a shell command. On Windows the tool prefers `bash` on PATH (Git
-/// Bash) so commands keep POSIX syntax; it falls back to PowerShell only
-/// when no bash exists. Combined output (stdout, then stderr) is capped at
-/// [`OUTPUT_CAP_BYTES`]; commands that exceed their timeout, or are
-/// cancelled through the run's cancellation token, are killed — process
-/// tree included (see the crate-level cancellation contract).
+/// Run a shell command through bash. On Windows this tool is registered
+/// only where a Git-for-Windows install was positively identified at
+/// registration ([`shell`]): correctness over coverage — a wrong bash
+/// (WSL's launcher, a Cygwin root) is worse than none, so nothing is
+/// guessed from a bare `bash.exe` on PATH. Combined output (stdout, then
+/// stderr) is capped at [`OUTPUT_CAP_BYTES`]; commands that exceed their
+/// timeout, or are cancelled through the run's cancellation token, are
+/// killed — process tree included (see the crate-level cancellation
+/// contract).
 #[rig_tool(description = "Run a shell command and return its combined output. \
-                   Commands run through bash (on Windows: Git Bash when on PATH, \
-                   else PowerShell). Non-zero exits report the exit code. \
-                   Output is capped at 128 KiB; commands time out after 30 seconds \
+                   Commands run through bash (POSIX syntax; on Windows this is \
+                   Git Bash). Non-zero exits report the exit code. Output is \
+                   capped at 128 KiB; commands time out after 30 seconds \
                    unless timeout_secs says otherwise.")]
 pub async fn bash(
     #[rig(context)] context: &mut ToolContext,
+    command: String,
+    timeout_secs: Option<u64>,
+) -> Result<String, ToolExecutionError> {
+    let interpreter = shell::bash().map_err(ToolExecutionError::other)?;
+    run_shell(&interpreter, context, command, timeout_secs).await
+}
+
+/// The PowerShell-dialect counterpart of [`bash`], registered on Windows
+/// machines with no verified Git Bash — the model always gets a shell
+/// whose dialect matches the tool's description.
+#[cfg(windows)]
+#[rig_tool(description = "Run a shell command and return its combined output. \
+                   Commands run through Windows PowerShell — write PowerShell \
+                   syntax (Get-ChildItem, $env:NAME, Select-String, ...). \
+                   Non-zero exits report the exit code. Output is capped at \
+                   128 KiB; commands time out after 30 seconds unless \
+                   timeout_secs says otherwise.")]
+pub async fn powershell(
+    #[rig(context)] context: &mut ToolContext,
+    command: String,
+    timeout_secs: Option<u64>,
+) -> Result<String, ToolExecutionError> {
+    run_shell(&shell::powershell(), context, command, timeout_secs).await
+}
+
+/// The shell tool this machine registers: `bash` where a Git-for-Windows
+/// install is positively identified (probe-verified absolute `bash.exe`),
+/// `powershell` otherwise on Windows, `bash` on Unix. One decision site —
+/// the assembly never branches on the platform's shell itself.
+pub fn shell_tool() -> DynamicTool {
+    #[cfg(windows)]
+    return match shell::resolved() {
+        shell::Shell::Bash(_) => dynamic_contextual(Bash),
+        shell::Shell::Powershell => dynamic_contextual(Powershell),
+    };
+    #[cfg(not(windows))]
+    return dynamic_contextual(Bash);
+}
+
+/// The shared execution core of the shell tools: spawn under the resolved
+/// interpreter, tree-kill discipline, both deadlines (command timeout +
+/// cancellation token), combined output, cap.
+async fn run_shell(
+    interpreter: &shell::Interpreter,
+    context: &mut ToolContext,
     command: String,
     timeout_secs: Option<u64>,
 ) -> Result<String, ToolExecutionError> {
@@ -220,7 +270,6 @@ pub async fn bash(
             "command was interrupted before starting — it did not run".to_string(),
         ));
     }
-    let interpreter = interpreter();
     let mut wrapped = process_wrap::std::CommandWrap::with_new(&interpreter.argv0, |cmd| {
         cmd.args(interpreter.args)
             .arg(&command)
@@ -284,51 +333,6 @@ pub async fn bash(
             error = error.with_code(code.to_string());
         }
         Err(error)
-    }
-}
-
-/// The interpreter `bash` runs through on this platform.
-struct Interpreter {
-    argv0: String,
-    /// Flags before the command text (`["-lc"]` for login-path bash,
-    /// `["-NoProfile", "-Command"]` for PowerShell).
-    args: &'static [&'static str],
-}
-
-#[cfg(windows)]
-fn interpreter() -> Interpreter {
-    // Git Bash puts bash.exe on PATH; prefer it so commands keep POSIX
-    // syntax. `where` prints one match per line.
-    let found = std::process::Command::new("where")
-        .arg("bash")
-        .output()
-        .ok()
-        .filter(|o| o.status.success())
-        .and_then(|o| String::from_utf8(o.stdout).ok())
-        .and_then(|s| {
-            s.lines()
-                .next()
-                .map(str::trim)
-                .filter(|l| !l.is_empty())
-                .map(str::to_string)
-        });
-    match found {
-        Some(bash_path) => Interpreter {
-            argv0: bash_path,
-            args: &["-c"],
-        },
-        None => Interpreter {
-            argv0: "powershell".to_string(),
-            args: &["-NoProfile", "-Command"],
-        },
-    }
-}
-
-#[cfg(not(windows))]
-fn interpreter() -> Interpreter {
-    Interpreter {
-        argv0: "bash".to_string(),
-        args: &["-c"],
     }
 }
 
