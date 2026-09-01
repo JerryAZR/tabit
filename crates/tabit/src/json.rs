@@ -882,12 +882,36 @@ id = "m"
             &frames[1],
             ServerFrame::Control(ServerControlFrame::InitializeAck { .. })
         ));
-        match &frames[2] {
-            ServerFrame::Control(ServerControlFrame::ProtocolError { message }) => {
-                assert!(message.contains("already initialized"), "{message}");
-            }
-            other => panic!("expected protocol_error, got {other:?}"),
-        }
+        // Past the ack the ordering is genuinely concurrent: the
+        // reader's protocol_error for the second initialize races the
+        // host's session_opened through the forwarder. Assert the
+        // multiset, not positions.
+        let protocol_errors: Vec<&str> = frames
+            .iter()
+            .filter_map(|frame| match frame {
+                ServerFrame::Control(ServerControlFrame::ProtocolError { message }) => {
+                    Some(message.as_str())
+                }
+                _ => None,
+            })
+            .collect();
+        assert_eq!(protocol_errors.len(), 2, "{frames:?}");
+        assert!(
+            protocol_errors
+                .iter()
+                .any(|m| m.contains("already initialized")),
+            "{protocol_errors:?}"
+        );
+        assert!(
+            frames.iter().any(|frame| matches!(
+                frame,
+                ServerFrame::Event(EventFrame {
+                    event: tabit_session::SessionEvent::SessionOpened { .. },
+                    ..
+                })
+            )),
+            "the boot's session_opened arrives too: {frames:?}"
+        );
     }
 
     /// A reader that panics on first use — the bridge treats a dead
