@@ -201,6 +201,113 @@ async fn read_names_empty_files_and_strips_the_bom() {
 }
 
 #[tokio::test]
+async fn write_creates_new_files_and_names_parents() {
+    let dir = temp_dir("write-new");
+    let target = dir.join("a").join("b").join("f.rs");
+    let out = write(
+        target.to_string_lossy().to_string(),
+        "fn main() {}\n".to_string(),
+        None,
+    )
+    .await
+    .expect("write");
+    assert!(out.starts_with("Created "), "{out}");
+    assert!(out.contains("created 2 parent dirs"), "{out}");
+    assert_eq!(
+        fs::read_to_string(&target).expect("read back"),
+        "fn main() {}\n"
+    );
+    fs::remove_dir_all(&dir).ok();
+}
+
+#[tokio::test]
+async fn write_refuses_an_existing_file_without_the_flag() {
+    let dir = temp_dir("write-refuse");
+    let target = dir.join("keep.txt");
+    fs::write(&target, "precious").expect("seed");
+
+    // No flag and false both refuse; the file is untouched.
+    for flag in [None, Some(false)] {
+        let error = err_text(
+            write(
+                target.to_string_lossy().to_string(),
+                "gone".to_string(),
+                flag,
+            )
+            .await,
+        );
+        assert!(error.contains("already exists (8 bytes)"), "{error}");
+        assert!(error.contains("overwrite: true"), "{error}");
+        assert_eq!(fs::read_to_string(&target).expect("untouched"), "precious");
+    }
+
+    let out = write(
+        target.to_string_lossy().to_string(),
+        "replacement".to_string(),
+        Some(true),
+    )
+    .await
+    .expect("overwrite");
+    assert_eq!(
+        out,
+        format!("Overwrote {} (11 bytes, was 8 bytes)", target.display())
+    );
+    assert_eq!(
+        fs::read_to_string(&target).expect("read back"),
+        "replacement"
+    );
+    fs::remove_dir_all(&dir).ok();
+}
+
+#[tokio::test]
+async fn write_fails_loudly_on_directory_and_file_parent() {
+    let dir = temp_dir("write-kinds");
+    let sub = dir.join("subdir");
+    fs::create_dir(&sub).expect("dir");
+    let error = err_text(write(sub.to_string_lossy().to_string(), "x".to_string(), None).await);
+    assert!(error.contains("is a directory"), "{error}");
+
+    let blocker = dir.join("blocker");
+    fs::write(&blocker, "file").expect("seed");
+    let target = blocker.join("child.txt");
+    let error = err_text(write(target.to_string_lossy().to_string(), "x".to_string(), None).await);
+    assert!(error.contains("not a directory"), "{error}");
+    fs::remove_dir_all(&dir).ok();
+}
+
+#[tokio::test]
+async fn writes_to_one_path_serialize_through_the_lock() {
+    let dir = temp_dir("write-serial");
+    let target = dir.join("contended.txt");
+    // With the flag off, an overwrite must fail — so if N concurrent
+    // writes all target one path and the lock serializes them, exactly
+    // one wins and N-1 fail cleanly. Without the lock the interleavings
+    // are racy; with it, the outcome is deterministic.
+    let mut handles = Vec::new();
+    for i in 0..4 {
+        let path = target.to_string_lossy().to_string();
+        handles.push(tokio::spawn(async move {
+            write(path, format!("winner-{i}"), None).await
+        }));
+    }
+    let mut ok = 0;
+    let mut refused = 0;
+    for h in handles {
+        match h.await.expect("join") {
+            Ok(_) => ok += 1,
+            Err(e) => {
+                assert!(e.to_string().contains("already exists"), "{e}");
+                refused += 1;
+            }
+        }
+    }
+    assert_eq!((ok, refused), (1, 3), "exactly one writer wins one path");
+    let content = fs::read_to_string(&target).expect("read back");
+    assert!(content.starts_with("winner-"), "{content}");
+    fs::remove_dir_all(&dir).ok();
+}
+
+#[tokio::test]
 async fn bash_runs_a_command_and_captures_output() {
     if !bash_dialect_available() {
         eprintln!("skipped: no verified Git Bash on this machine");

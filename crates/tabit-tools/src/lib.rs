@@ -65,6 +65,7 @@ use rig_core::tool::{IntoToolOutput, PortableTool, ToolExecutionError};
 use rig_derive::rig_tool;
 use std::time::{Duration, Instant};
 
+mod file_io;
 mod shell;
 mod truncate;
 
@@ -223,6 +224,54 @@ fn list_directory(path: &str) -> Result<String, ToolExecutionError> {
         ));
     }
     Ok(out)
+}
+
+/// Write bytes to a path: create new files freely; overwrite only when
+/// the model said so (`overwrite: true`). The intent is expressed, never
+/// inferred (owner ruling). Parent directories are created as needed and
+/// named in the result. Mutations serialize through [`file_io`]'s
+/// per-path lock; overwrites are atomic (temp-file + rename) so readers
+/// never see a torn file. For targeted changes to existing files, use
+/// edit.
+#[rig_tool(
+    description = "Write a file (absolute or relative path). Creates new files; \
+                   overwrites an existing file only with overwrite: true — say \
+                   so explicitly when replacing content. Parent directories are \
+                   created as needed. To modify an existing file, prefer edit."
+)]
+pub async fn write(
+    path: String,
+    content: String,
+    overwrite: Option<bool>,
+) -> Result<String, ToolExecutionError> {
+    let path = std::path::PathBuf::from(&path);
+    let display = path.display().to_string();
+    let _guard = file_io::lock(&path).await;
+    if path.is_dir() {
+        return Err(ToolExecutionError::other(format!(
+            "`{display}` is a directory — write needs a file path"
+        )));
+    }
+    if path.exists() && overwrite != Some(true) {
+        let size = std::fs::metadata(&path).map(|m| m.len()).unwrap_or(0);
+        return Err(ToolExecutionError::other(format!(
+            "`{display}` already exists ({size} bytes). Pass overwrite: true \
+             to replace it, or use edit for a targeted change."
+        )));
+    }
+    let outcome = file_io::store(&path, content.as_bytes()).await?;
+    let bytes = content.len();
+    let parents = if outcome.parents_created > 0 {
+        format!(", created {} parent dirs", outcome.parents_created)
+    } else {
+        String::new()
+    };
+    match outcome.previous_len {
+        Some(was) => Ok(format!(
+            "Overwrote {display} ({bytes} bytes, was {was} bytes{parents})"
+        )),
+        None => Ok(format!("Created {display} ({bytes} bytes{parents})")),
+    }
 }
 
 /// Ask the user a question and return their answer — the whole body is
