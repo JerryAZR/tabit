@@ -232,6 +232,7 @@ fn sampled_event_variants_survive_the_frame_envelope() {
                 internal_call_id: "i1".to_string(),
                 content: String::new(),
                 status: crate::ToolResultStatus::Success,
+                details: None,
             },
         },
         EventFrame {

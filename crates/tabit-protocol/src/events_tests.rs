@@ -48,6 +48,34 @@ fn events_round_trip_through_json() {
             internal_call_id: "i1".to_string(),
             content: "0".to_string(),
             status: ToolResultStatus::Success,
+            details: None,
+        },
+        // The same event with presentation cargo (the edit tool's
+        // shape) — details round-trips like every other field.
+        SessionEvent::ToolResult {
+            turn_id: TURN.to_string(),
+            entry_id: "0192uuidv7entry2".to_string(),
+            name: "edit".to_string(),
+            internal_call_id: "i2".to_string(),
+            content: "Edited f.txt (1 of 1 blocks applied; +1/-1 lines, first change at line 2)"
+                .to_string(),
+            status: ToolResultStatus::Success,
+            details: Some(serde_json::json!({
+                "diff": {
+                    "first_changed_line": 2,
+                    "hunks": [{
+                        "old_start": 1, "old_lines": 3,
+                        "new_start": 1, "new_lines": 3,
+                        "lines": [
+                            { "kind": "context", "text": "alpha" },
+                            { "kind": "removed", "text": "beta" },
+                            { "kind": "added", "text": "BETA" },
+                            { "kind": "context", "text": "gamma" }
+                        ]
+                    }]
+                },
+                "outcomes": [{ "index": 0, "applied": true }]
+            })),
         },
         SessionEvent::TurnRetried {
             turn_id: TURN.to_string(),

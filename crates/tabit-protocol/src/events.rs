@@ -113,6 +113,16 @@ pub enum SessionEvent {
         /// lives in `content` (a detail field would fork the truth and
         /// drift).
         status: ToolResultStatus,
+        /// Derived presentation cargo, when the tool produced any:
+        /// structured facts computed once where the file is (today: the
+        /// edit tool's unified diff + per-edit outcomes). The shape is
+        /// owned by the tool named in this event — dispatch on `name`;
+        /// absent or unknown `details` degrades to `content` rendering.
+        /// Never model-facing: `content` remains the faithful copy, and
+        /// `details` duplicates no prose — it structures what `content`
+        /// already states.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        details: Option<serde_json::Value>,
     },
     /// A completed model turn was rejected by a hook and will be retried;
     /// any provisional output for that turn should be discarded.

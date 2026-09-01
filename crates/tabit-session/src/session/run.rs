@@ -3,7 +3,7 @@
 //! fan-out every emission goes through.
 
 use super::mailbox::SessionSteers;
-use super::wire::{result_text, user_text, wire_status, wire_usage};
+use super::wire::{result_details, result_text, user_text, wire_status, wire_usage};
 use super::{Session, TOOL_CONCURRENCY};
 use crate::entry::{FileRecord, SideKind, SideRecord};
 use crate::error::SessionError;
@@ -427,6 +427,7 @@ impl Session {
         sink: &mut EventSink<'_>,
     ) {
         let content = result_text(&tool_result);
+        let details = result_details(&tool_result);
         let status = wire_status(&tool_result.status);
         // The entry id rides the result item (born-early at settlement;
         // the fold_all at BatchResults reuses it, so live and replay
@@ -441,6 +442,7 @@ impl Session {
             internal_call_id,
             content,
             status,
+            details,
         });
     }
 

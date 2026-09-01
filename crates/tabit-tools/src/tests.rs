@@ -15,17 +15,23 @@ fn ctx() -> rig_agent::tool::ToolContext {
     rig_agent::tool::ToolContext::new()
 }
 
-fn err_text(result: Result<String, ToolExecutionError>) -> String {
+fn err_text<T>(result: Result<T, ToolExecutionError>) -> String
+where
+    T: std::fmt::Debug,
+{
     match result {
-        Ok(text) => panic!("expected an error, got output: {text}"),
+        Ok(value) => panic!("expected an error, got output: {value:?}"),
         Err(e) => e.to_string(),
     }
 }
 
 /// The error behind a failing result, for structure assertions.
-fn err(result: Result<String, ToolExecutionError>) -> ToolExecutionError {
+fn err<T>(result: Result<T, ToolExecutionError>) -> ToolExecutionError
+where
+    T: std::fmt::Debug,
+{
     match result {
-        Ok(text) => panic!("expected an error, got output: {text}"),
+        Ok(value) => panic!("expected an error, got output: {value:?}"),
         Err(e) => e,
     }
 }
@@ -652,10 +658,16 @@ fn body(path: &std::path::Path) -> String {
     fs::read_to_string(path).expect("read back")
 }
 
+/// The model-facing report of an edit outcome (the faithful copy; the
+/// details cargo is asserted separately).
+fn report(outcome: EditOutcome) -> String {
+    outcome.report
+}
+
 #[tokio::test]
 async fn edit_replaces_one_unique_match() {
     let (dir, path) = seed("edit-basic", "f.txt", "alpha\nbeta\ngamma\n");
-    let out = edit_core(&path.to_string_lossy(), &[rep("beta", "BETA")]).expect("edit");
+    let out = report(edit_core(&path.to_string_lossy(), &[rep("beta", "BETA")]).expect("edit"));
     assert!(out.starts_with("Edited "), "{out}");
     assert!(out.contains("1 block"), "{out}");
     assert_eq!(body(&path), "alpha\nBETA\ngamma\n");
@@ -665,11 +677,13 @@ async fn edit_replaces_one_unique_match() {
 #[tokio::test]
 async fn edit_reports_line_deltas() {
     let (dir, path) = seed("edit-delta", "f.txt", "one\ntwo\nthree\n");
-    let out = edit_core(
-        &path.to_string_lossy(),
-        &[rep("two", "two\ntwo-and-a-half")],
-    )
-    .expect("edit");
+    let out = report(
+        edit_core(
+            &path.to_string_lossy(),
+            &[rep("two", "two\ntwo-and-a-half")],
+        )
+        .expect("edit"),
+    );
     assert!(out.contains("+1"), "line delta in the result: {out}");
     assert!(out.contains("-0"), "removals named too: {out}");
     // The first changed line is reported so the model can page a re-read.
@@ -680,8 +694,9 @@ async fn edit_reports_line_deltas() {
 #[tokio::test]
 async fn edit_applies_disjoint_edits_against_the_original() {
     let (dir, path) = seed("edit-multi", "f.txt", "a1\nb2\nc3\nd4\n");
-    let out =
-        edit_core(&path.to_string_lossy(), &[rep("b2", "B2"), rep("d4", "D4")]).expect("edit");
+    let out = report(
+        edit_core(&path.to_string_lossy(), &[rep("b2", "B2"), rep("d4", "D4")]).expect("edit"),
+    );
     assert!(out.contains("2 blocks"), "{out}");
     assert_eq!(body(&path), "a1\nB2\nc3\nD4\n");
     fs::remove_dir_all(&dir).ok();
@@ -694,16 +709,18 @@ async fn edit_is_partial_by_design_and_names_failures() {
         "f.txt",
         "keep-one\ntwice\ntwice\nkeep-two\n",
     );
-    let out = edit_core(
-        &path.to_string_lossy(),
-        &[
-            rep("keep-one", "KEEP-ONE"), // applies
-            rep("missing", "x"),         // not found
-            rep("twice", "x"),           // duplicate
-            rep("keep-two", "KEEP-TWO"), // applies
-        ],
-    )
-    .expect("partial application is a result, not an error");
+    let out = report(
+        edit_core(
+            &path.to_string_lossy(),
+            &[
+                rep("keep-one", "KEEP-ONE"), // applies
+                rep("missing", "x"),         // not found
+                rep("twice", "x"),           // duplicate
+                rep("keep-two", "KEEP-TWO"), // applies
+            ],
+        )
+        .expect("partial application is a result, not an error"),
+    );
     assert!(out.contains("2 of 4"), "{out}");
     assert!(out.contains("edit[1]"), "failed edit indexed: {out}");
     assert!(out.contains("not found"), "{out}");
@@ -730,11 +747,13 @@ async fn edit_with_no_successes_is_an_error_and_touches_nothing() {
 #[tokio::test]
 async fn edit_empty_old_text_is_rejected() {
     let (dir, path) = seed("edit-empty", "f.txt", "content\n");
-    let out = edit_core(
-        &path.to_string_lossy(),
-        &[rep("", "x"), rep("content", "CONTENT")],
-    )
-    .expect("partial: the empty one fails, the other applies");
+    let out = report(
+        edit_core(
+            &path.to_string_lossy(),
+            &[rep("", "x"), rep("content", "CONTENT")],
+        )
+        .expect("partial: the empty one fails, the other applies"),
+    );
     assert!(out.contains("edit[0]"), "{out}");
     assert!(out.contains("empty"), "{out}");
     assert_eq!(body(&path), "CONTENT\n");
@@ -746,7 +765,7 @@ async fn edit_normalizes_crlf_and_preserves_the_files_endings() {
     let (dir, path) = seed("edit-crlf", "win.txt", "alpha\r\nbeta\r\ngamma\r\n");
     // The model supplies LF old_text (from read, which shows LF); the
     // file is CRLF. The match must land, and the file must stay CRLF.
-    let out = edit_core(&path.to_string_lossy(), &[rep("beta", "BETA")]).expect("edit");
+    let out = report(edit_core(&path.to_string_lossy(), &[rep("beta", "BETA")]).expect("edit"));
     assert!(out.contains("1 block"), "{out}");
     assert_eq!(body(&path), "alpha\r\nBETA\r\ngamma\r\n");
     fs::remove_dir_all(&dir).ok();
@@ -755,7 +774,9 @@ async fn edit_normalizes_crlf_and_preserves_the_files_endings() {
 #[tokio::test]
 async fn edit_preserves_crlf_even_when_the_replacement_introduces_lf_lines() {
     let (dir, path) = seed("edit-crlf-new", "win.txt", "start\r\nend\r\n");
-    let out = edit_core(&path.to_string_lossy(), &[rep("start", "start\ninserted")]).expect("edit");
+    let out = report(
+        edit_core(&path.to_string_lossy(), &[rep("start", "start\ninserted")]).expect("edit"),
+    );
     assert!(out.contains("1 block"), "{out}");
     // New lines from the replacement take the file's dominant ending.
     assert_eq!(body(&path), "start\r\ninserted\r\nend\r\n");
@@ -765,7 +786,7 @@ async fn edit_preserves_crlf_even_when_the_replacement_introduces_lf_lines() {
 #[tokio::test]
 async fn edit_preserves_the_bom() {
     let (dir, path) = seed("edit-bom", "bom.txt", "\u{feff}alpha\nbeta\n");
-    let out = edit_core(&path.to_string_lossy(), &[rep("beta", "BETA")]).expect("edit");
+    let out = report(edit_core(&path.to_string_lossy(), &[rep("beta", "BETA")]).expect("edit"));
     assert!(out.contains("1 block"), "{out}");
     let bytes = fs::read(&path).expect("read back");
     assert!(
@@ -782,7 +803,7 @@ async fn edit_never_matches_across_the_bom() {
     // is invisible to read, so it is invisible to edit (matching runs on
     // the BOM-stripped text).
     let (dir, path) = seed("edit-bom-match", "bom.txt", "\u{feff}alpha\n");
-    let out = edit_core(&path.to_string_lossy(), &[rep("alpha", "ALPHA")]).expect("edit");
+    let out = report(edit_core(&path.to_string_lossy(), &[rep("alpha", "ALPHA")]).expect("edit"));
     assert!(out.contains("1 block"), "{out}");
     fs::remove_dir_all(&dir).ok();
 }
@@ -813,14 +834,16 @@ async fn edit_accepts_identical_overlaps_as_agreement() {
     // context, or an LLM emitting a duplicate block) agrees on the
     // shared region by construction: both apply, the change lands once.
     let (dir, path) = seed("edit-compat", "f.txt", "one two three four\n");
-    let out = edit_core(
-        &path.to_string_lossy(),
-        &[
-            rep("one two three", "one TWO three"),
-            rep("one two three", "one TWO three"),
-        ],
-    )
-    .expect("identical overlap applies");
+    let out = report(
+        edit_core(
+            &path.to_string_lossy(),
+            &[
+                rep("one two three", "one TWO three"),
+                rep("one two three", "one TWO three"),
+            ],
+        )
+        .expect("identical overlap applies"),
+    );
     assert!(out.contains("2 of 2"), "{out}");
     assert_eq!(body(&path), "one TWO three four\n");
     fs::remove_dir_all(&dir).ok();
@@ -883,11 +906,13 @@ async fn edit_matches_spanning_multiple_lines() {
         "f.txt",
         "fn main() {\n    old_call();\n}\n",
     );
-    let out = edit_core(
-        &path.to_string_lossy(),
-        &[rep("    old_call();\n}", "    new_call();\n    log();\n}")],
-    )
-    .expect("edit");
+    let out = report(
+        edit_core(
+            &path.to_string_lossy(),
+            &[rep("    old_call();\n}", "    new_call();\n    log();\n}")],
+        )
+        .expect("edit"),
+    );
     assert!(out.contains("1 block"), "{out}");
     assert_eq!(body(&path), "fn main() {\n    new_call();\n    log();\n}\n");
     fs::remove_dir_all(&dir).ok();
@@ -898,11 +923,13 @@ async fn edit_counts_occurrences_in_lf_space_for_crlf_files() {
     // "x" appears twice in a CRLF file — the duplicate count must see
     // both, i.e. matching runs on the normalized content.
     let (dir, path) = seed("edit-crlf-dup", "win.txt", "x\r\nx\r\n");
-    let out = edit_core(
-        &path.to_string_lossy(),
-        &[rep("x", "y"), rep("x\r\nx", "y")],
-    )
-    .expect("partial report");
+    let out = report(
+        edit_core(
+            &path.to_string_lossy(),
+            &[rep("x", "y"), rep("x\r\nx", "y")],
+        )
+        .expect("partial report"),
+    );
     assert!(out.contains("2 occurrences"), "{out}");
     assert!(out.contains("1 of 2"), "the multi-line match lands: {out}");
     fs::remove_dir_all(&dir).ok();
@@ -998,4 +1025,151 @@ async fn bash_one_huge_line_gets_the_honest_notice() {
         .expect("spill path")
         .trim_end_matches(']');
     fs::remove_file(spill).ok();
+}
+
+// --- tool_result.details: the edit tool's presentation cargo ---
+
+/// The edit tool's full content parts: report text plus the details
+/// JSON when anything applied.
+async fn edit_parts(
+    path: &std::path::Path,
+    edits: Vec<EditReplacement>,
+) -> Result<Vec<rig_core::message::ToolResultContent>, ToolExecutionError> {
+    let one_or_many = edit(path.to_string_lossy().into_owned(), edits).await?;
+    Ok(one_or_many.into_iter().collect())
+}
+
+#[tokio::test]
+async fn edit_emits_report_text_plus_details_json() {
+    let (dir, path) = seed("edit-details", "f.txt", "alpha\nbeta\ngamma\n");
+    let parts = edit_parts(&path, vec![rep("beta", "BETA")])
+        .await
+        .expect("edit");
+    // Text first (the faithful copy), then the details part.
+    let texts: Vec<&str> = parts.iter().filter_map(|c| c.as_text()).collect();
+    assert_eq!(texts.len(), 1, "one text part: {texts:?}");
+    assert!(texts[0].starts_with("Edited "), "{}", texts[0]);
+    let details: Vec<&serde_json::Value> = parts.iter().filter_map(|c| c.as_json()).collect();
+    assert_eq!(details.len(), 1, "one details part");
+    fs::remove_dir_all(&dir).ok();
+}
+
+#[tokio::test]
+async fn edit_details_carries_the_unified_diff_with_context() {
+    let (dir, path) = seed(
+        "edit-details-diff",
+        "f.txt",
+        "l1\nl2\nl3\nl4\nl5\nl6\nl7\nl8\nl9\nl10\n",
+    );
+    let parts = edit_parts(&path, vec![rep("l5", "L5")])
+        .await
+        .expect("edit");
+    let details = parts
+        .iter()
+        .find_map(|c| c.as_json())
+        .expect("details")
+        .clone();
+    let diff = &details["diff"];
+    assert_eq!(diff["first_changed_line"], 5);
+    let hunks = diff["hunks"].as_array().expect("hunks");
+    assert_eq!(hunks.len(), 1);
+    let hunk = &hunks[0];
+    assert_eq!(hunk["old_start"], 1, "context pulls the hunk to line 1");
+    assert_eq!(hunk["new_start"], 1);
+    // 4 lines of context each side: l1..l4 context, l5 removed, L5
+    // added, l6..l9 context (l10 falls outside the window).
+    let kinds: Vec<&str> = hunk["lines"]
+        .as_array()
+        .expect("lines")
+        .iter()
+        .map(|l| l["kind"].as_str().expect("kind"))
+        .collect();
+    assert_eq!(
+        kinds,
+        vec![
+            "context", "context", "context", "context", "removed", "added", "context", "context",
+            "context", "context"
+        ]
+    );
+    let texts: Vec<&str> = hunk["lines"]
+        .as_array()
+        .expect("lines")
+        .iter()
+        .map(|l| l["text"].as_str().expect("text"))
+        .collect();
+    assert!(texts.contains(&"l5"), "removed line present: {texts:?}");
+    assert!(texts.contains(&"L5"), "added line present: {texts:?}");
+    assert!(!texts.contains(&"l10"), "outside the context window");
+    fs::remove_dir_all(&dir).ok();
+}
+
+#[tokio::test]
+async fn edit_details_marks_applied_and_rejected_outcomes() {
+    let (dir, path) = seed("edit-details-outcomes", "f.txt", "keep\ntwice\ntwice\n");
+    let parts = edit_parts(
+        &path,
+        vec![rep("keep", "KEEP"), rep("missing", "x"), rep("twice", "x")],
+    )
+    .await
+    .expect("partial application");
+    let details = parts
+        .iter()
+        .find_map(|c| c.as_json())
+        .expect("details")
+        .clone();
+    let outcomes = details["outcomes"].as_array().expect("outcomes");
+    assert_eq!(outcomes.len(), 3);
+    assert_eq!(outcomes[0]["index"], 0);
+    assert_eq!(outcomes[0]["applied"], true);
+    assert!(outcomes[0].get("reason").is_none());
+    assert_eq!(outcomes[1]["applied"], false);
+    assert!(
+        outcomes[1]["reason"]
+            .as_str()
+            .expect("reason")
+            .contains("not found"),
+        "{}",
+        outcomes[1]
+    );
+    assert_eq!(outcomes[2]["applied"], false);
+    assert!(
+        outcomes[2]["reason"]
+            .as_str()
+            .expect("reason")
+            .contains("2 occurrences"),
+        "{}",
+        outcomes[2]
+    );
+    // The report still names the failures — details duplicates the same
+    // strings, structured.
+    let report = parts.iter().find_map(|c| c.as_text()).expect("report");
+    assert!(report.contains("edit[1]"), "{report}");
+    fs::remove_dir_all(&dir).ok();
+}
+
+#[tokio::test]
+async fn edit_all_fail_emits_no_details() {
+    let (dir, path) = seed("edit-details-none", "f.txt", "same\nsame\n");
+    let result = edit_parts(&path, vec![rep("same", "x")]).await;
+    let error = result.expect_err("all-fail is an error");
+    assert!(error.to_string().contains("occurrences"), "{error}");
+    fs::remove_dir_all(&dir).ok();
+}
+
+#[tokio::test]
+async fn edit_details_merge_adjacent_hunks() {
+    let (dir, path) = seed("edit-details-merge", "f.txt", "a\nb\nc\nd\ne\nf\ng\nh\n");
+    // Two changes 3 lines apart: their 4-line context windows overlap,
+    // so they render as ONE hunk.
+    let parts = edit_parts(&path, vec![rep("a", "A"), rep("e", "E")])
+        .await
+        .expect("edit");
+    let details = parts
+        .iter()
+        .find_map(|c| c.as_json())
+        .expect("details")
+        .clone();
+    let hunks = details["diff"]["hunks"].as_array().expect("hunks");
+    assert_eq!(hunks.len(), 1, "overlapping context merges: {hunks:?}");
+    fs::remove_dir_all(&dir).ok();
 }

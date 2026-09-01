@@ -65,6 +65,7 @@ use rig_core::tool::{IntoToolOutput, PortableTool, ToolExecutionError};
 use rig_derive::rig_tool;
 use std::time::{Duration, Instant};
 
+mod diff;
 mod file_io;
 mod shell;
 mod truncate;
@@ -291,9 +292,21 @@ pub async fn write(
                    (whitespace included; LF/CRLF differences are normalized). \
                    Overlapping edits apply only if their shared content agrees."
 )]
-pub async fn edit(path: String, edits: Vec<EditReplacement>) -> Result<String, ToolExecutionError> {
+pub async fn edit(
+    path: String,
+    edits: Vec<EditReplacement>,
+) -> Result<rig_core::OneOrMany<rig_core::message::ToolResultContent>, ToolExecutionError> {
     let _guard = file_io::lock(std::path::Path::new(&path)).await;
-    edit_core(&path, &edits)
+    let outcome = edit_core(&path, &edits)?;
+    let mut parts = vec![rig_core::message::ToolResultContent::Text(
+        outcome.report.into(),
+    )];
+    if let Some(details) = outcome.details {
+        parts.push(rig_core::message::ToolResultContent::Json { value: details });
+    }
+    // Invariant: one part minimum by construction above (the report).
+    #[allow(clippy::expect_used)]
+    Ok(rig_core::OneOrMany::many(parts).expect("the report part is always present"))
 }
 
 /// One targeted replacement: `old_text` must occur exactly once in the
@@ -306,6 +319,15 @@ pub struct EditReplacement {
     pub old_text: String,
     /// Replacement text.
     pub new_text: String,
+}
+
+/// What one edit call produced: the model-facing report (the faithful
+/// copy) and, when anything applied, the presentation cargo for
+/// `tool_result.details` (the same facts, structured).
+#[derive(Debug)]
+struct EditOutcome {
+    report: String,
+    details: Option<serde_json::Value>,
 }
 
 /// The matching + application core, decoupled from the tool wrapper so
@@ -322,7 +344,7 @@ pub struct EditReplacement {
 /// - a call where nothing applies is an error (nothing was edited);
 /// - the store rides [`file_io`]: per-path lock across read→match→store,
 ///   atomic persist.
-fn edit_core(path: &str, edits: &[EditReplacement]) -> Result<String, ToolExecutionError> {
+fn edit_core(path: &str, edits: &[EditReplacement]) -> Result<EditOutcome, ToolExecutionError> {
     if edits.is_empty() {
         return Err(ToolExecutionError::other(
             "edits must contain at least one replacement".to_string(),
@@ -447,6 +469,7 @@ fn edit_core(path: &str, edits: &[EditReplacement]) -> Result<String, ToolExecut
         new_content.replace_range(m.start..m.end, &m.new_text);
     }
 
+    let after = new_content.clone();
     let stored = if is_crlf {
         new_content.replace('\n', "\r\n")
     } else {
@@ -466,7 +489,30 @@ fn edit_core(path: &str, edits: &[EditReplacement]) -> Result<String, ToolExecut
     for (i, reason) in &failures {
         out.push_str(&format!(" edit[{i}]: {reason}."));
     }
-    Ok(out)
+
+    // --- presentation cargo: the diff of the LF-space before/after plus
+    //     every edit's outcome (the same facts the report carries,
+    //     structured — one production site for the reason strings) ---
+    let outcomes: Vec<diff::Outcome> = (0..edits.len())
+        .map(|i| {
+            if accepted.iter().any(|m| m.index == i) {
+                diff::Outcome::Applied
+            } else {
+                let reason = failures
+                    .iter()
+                    .find(|(fi, _)| *fi == i)
+                    .map(|(_, r)| r.clone())
+                    .unwrap_or_else(|| "rejected".to_string());
+                diff::Outcome::Rejected(reason)
+            }
+        })
+        .collect();
+    let details = diff::edit_details(&lf, &after, outcomes);
+
+    Ok(EditOutcome {
+        report: out,
+        details: Some(details),
+    })
 }
 
 /// A uniquely-matched edit: where it landed in the LF-normalized file

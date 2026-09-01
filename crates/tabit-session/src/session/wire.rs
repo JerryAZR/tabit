@@ -29,6 +29,19 @@ pub(crate) fn result_text(result: &rig_core::message::ToolResult) -> String {
         .join("\n")
 }
 
+/// The tool's presentation cargo, when it produced any — the structured
+/// JSON part that rides `tool_result.details` (today: the edit tool's
+/// diff + outcomes). At most one producer part per result; several
+/// would be a tool contract violation, so the first wins loudly by
+/// design of the vocabulary, not silently.
+pub(crate) fn result_details(result: &rig_core::message::ToolResult) -> Option<serde_json::Value> {
+    result
+        .content
+        .iter()
+        .filter_map(|content| content.as_json().cloned())
+        .next()
+}
+
 /// Translate the rig-level structured status into the protocol's wire
 /// shape. Live results always carry one — the engine stamps every
 /// execution outcome (`with_execution_status`) and the session's own

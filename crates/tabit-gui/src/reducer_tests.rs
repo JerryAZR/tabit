@@ -136,6 +136,7 @@ fn tools_and_reasoning_fold_into_the_turn() {
         internal_call_id: "i1".to_string(),
         content: "3 files".to_string(),
         status: tabit_protocol::ToolResultStatus::Success,
+        details: None,
     }));
     state.reduce(delta("done"));
 
@@ -167,6 +168,7 @@ fn segments_render_in_arrival_order() {
         internal_call_id: "i".to_string(),
         content: String::new(),
         status: tabit_protocol::ToolResultStatus::Success,
+        details: None,
     }));
     state.reduce(delta("Found three files."));
     state.reduce(event(SessionEvent::ToolCall {
@@ -601,6 +603,7 @@ fn tool_results_land_on_their_calls_with_content_and_failure() {
         internal_call_id: "i1".to_string(),
         content: "command exited with status 3:\nboom".to_string(),
         status: tabit_protocol::ToolResultStatus::Failed { exit_code: Some(3) },
+        details: None,
     }));
 
     let Some(Group::Turn(turn)) = state.transcript.last() else {

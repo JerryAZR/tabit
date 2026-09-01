@@ -266,6 +266,26 @@ histories).
   Riding along: the tool side promotes structure out of prose (bash
   currently formats its exit code into the text) through the
   internal `ToolResult`.
+- **`tool_result.details` is the presentation-cargo field** (ruled
+  2026-09, after the diff-view discussion): an optional JSON object
+  whose shape is owned by the tool named in the event — dispatch on
+  `name`, never parse-before-route. `content` stays the faithful
+  copy (exactly what the model saw); `details` duplicates no prose —
+  it structures what `content` already states, computed once where
+  the file is. First and only producer today: the edit tool, whose
+  details carry the unified diff (hunks with context/removed/added
+  lines mirroring `similar`'s change model — the crate ROADMAP item
+  7 already picked for the GUI's viewer) plus per-edit
+  accept/reject outcomes with reasons (the same strings the report
+  carries — one production site). Absent or unknown `details`
+  degrades to `content`/fragment rendering; a per-tool-event
+  taxonomy (a `tool_diff` event, new events per tool) was
+  explicitly rejected as non-scaling. Transport: the tool returns
+  the report as a text part plus the details as a
+  `ToolResultContent::Json` part (the wire vocabulary's existing
+  "structured JSON supplied explicitly by the tool runtime" slot);
+  the session projects text → `content`, JSON → `details`, live
+  and replay alike.
 - **The tool-event taxonomy — the rest is named and deferred.** v1's
   `tool_call` fires args-complete, pre-execution; declare/delta
   (`tool_declare`/`tool_delta`) exist only when argument

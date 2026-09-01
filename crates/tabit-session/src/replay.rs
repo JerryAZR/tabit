@@ -23,7 +23,7 @@
 //! this module (the chain walk already excluded them).
 
 use crate::entry::{EntryKind, SessionEntry};
-use crate::session::{result_text, user_text, wire_status};
+use crate::session::{result_details, result_text, user_text, wire_status};
 use rig_core::message::{AssistantContent, Message};
 use std::collections::HashMap;
 use tabit_protocol::SessionEvent;
@@ -195,6 +195,7 @@ impl Projection {
             internal_call_id: call_id,
             content: result_text(result),
             status,
+            details: result_details(result),
         });
     }
 }
