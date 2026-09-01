@@ -631,3 +631,279 @@ async fn ask_user_without_a_frontend_fails_in_band() {
         "the error must tell the model why: {message}"
     );
 }
+
+// --- edit: the contract, written before the implementation ---
+
+fn rep(old_text: &str, new_text: &str) -> EditReplacement {
+    EditReplacement {
+        old_text: old_text.to_string(),
+        new_text: new_text.to_string(),
+    }
+}
+
+fn seed(tag: &str, name: &str, content: &str) -> (std::path::PathBuf, std::path::PathBuf) {
+    let dir = temp_dir(tag);
+    let path = dir.join(name);
+    fs::write(&path, content).expect("seed");
+    (dir, path)
+}
+
+fn body(path: &std::path::Path) -> String {
+    fs::read_to_string(path).expect("read back")
+}
+
+#[tokio::test]
+async fn edit_replaces_one_unique_match() {
+    let (dir, path) = seed("edit-basic", "f.txt", "alpha\nbeta\ngamma\n");
+    let out = edit_core(&path.to_string_lossy(), &[rep("beta", "BETA")]).expect("edit");
+    assert!(out.starts_with("Edited "), "{out}");
+    assert!(out.contains("1 block"), "{out}");
+    assert_eq!(body(&path), "alpha\nBETA\ngamma\n");
+    fs::remove_dir_all(&dir).ok();
+}
+
+#[tokio::test]
+async fn edit_reports_line_deltas() {
+    let (dir, path) = seed("edit-delta", "f.txt", "one\ntwo\nthree\n");
+    let out = edit_core(
+        &path.to_string_lossy(),
+        &[rep("two", "two\ntwo-and-a-half")],
+    )
+    .expect("edit");
+    assert!(out.contains("+1"), "line delta in the result: {out}");
+    assert!(out.contains("-0"), "removals named too: {out}");
+    // The first changed line is reported so the model can page a re-read.
+    assert!(out.contains("line 2"), "{out}");
+    fs::remove_dir_all(&dir).ok();
+}
+
+#[tokio::test]
+async fn edit_applies_disjoint_edits_against_the_original() {
+    let (dir, path) = seed("edit-multi", "f.txt", "a1\nb2\nc3\nd4\n");
+    let out =
+        edit_core(&path.to_string_lossy(), &[rep("b2", "B2"), rep("d4", "D4")]).expect("edit");
+    assert!(out.contains("2 blocks"), "{out}");
+    assert_eq!(body(&path), "a1\nB2\nc3\nD4\n");
+    fs::remove_dir_all(&dir).ok();
+}
+
+#[tokio::test]
+async fn edit_is_partial_by_design_and_names_failures() {
+    let (dir, path) = seed(
+        "edit-partial",
+        "f.txt",
+        "keep-one\ntwice\ntwice\nkeep-two\n",
+    );
+    let out = edit_core(
+        &path.to_string_lossy(),
+        &[
+            rep("keep-one", "KEEP-ONE"), // applies
+            rep("missing", "x"),         // not found
+            rep("twice", "x"),           // duplicate
+            rep("keep-two", "KEEP-TWO"), // applies
+        ],
+    )
+    .expect("partial application is a result, not an error");
+    assert!(out.contains("2 of 4"), "{out}");
+    assert!(out.contains("edit[1]"), "failed edit indexed: {out}");
+    assert!(out.contains("not found"), "{out}");
+    assert!(out.contains("edit[2]"), "{out}");
+    assert!(out.contains("2 occurrences"), "{out}");
+    assert_eq!(body(&path), "KEEP-ONE\ntwice\ntwice\nKEEP-TWO\n");
+    fs::remove_dir_all(&dir).ok();
+}
+
+#[tokio::test]
+async fn edit_with_no_successes_is_an_error_and_touches_nothing() {
+    let (dir, path) = seed("edit-allfail", "f.txt", "same\nsame\n");
+    let before = body(&path);
+    let error = err_text(edit_core(
+        &path.to_string_lossy(),
+        &[rep("same", "x"), rep("nope", "y")],
+    ));
+    assert!(error.contains("edit[0]"), "{error}");
+    assert!(error.contains("edit[1]"), "{error}");
+    assert_eq!(body(&path), before, "no partial writes on total failure");
+    fs::remove_dir_all(&dir).ok();
+}
+
+#[tokio::test]
+async fn edit_empty_old_text_is_rejected() {
+    let (dir, path) = seed("edit-empty", "f.txt", "content\n");
+    let out = edit_core(
+        &path.to_string_lossy(),
+        &[rep("", "x"), rep("content", "CONTENT")],
+    )
+    .expect("partial: the empty one fails, the other applies");
+    assert!(out.contains("edit[0]"), "{out}");
+    assert!(out.contains("empty"), "{out}");
+    assert_eq!(body(&path), "CONTENT\n");
+    fs::remove_dir_all(&dir).ok();
+}
+
+#[tokio::test]
+async fn edit_normalizes_crlf_and_preserves_the_files_endings() {
+    let (dir, path) = seed("edit-crlf", "win.txt", "alpha\r\nbeta\r\ngamma\r\n");
+    // The model supplies LF old_text (from read, which shows LF); the
+    // file is CRLF. The match must land, and the file must stay CRLF.
+    let out = edit_core(&path.to_string_lossy(), &[rep("beta", "BETA")]).expect("edit");
+    assert!(out.contains("1 block"), "{out}");
+    assert_eq!(body(&path), "alpha\r\nBETA\r\ngamma\r\n");
+    fs::remove_dir_all(&dir).ok();
+}
+
+#[tokio::test]
+async fn edit_preserves_crlf_even_when_the_replacement_introduces_lf_lines() {
+    let (dir, path) = seed("edit-crlf-new", "win.txt", "start\r\nend\r\n");
+    let out = edit_core(&path.to_string_lossy(), &[rep("start", "start\ninserted")]).expect("edit");
+    assert!(out.contains("1 block"), "{out}");
+    // New lines from the replacement take the file's dominant ending.
+    assert_eq!(body(&path), "start\r\ninserted\r\nend\r\n");
+    fs::remove_dir_all(&dir).ok();
+}
+
+#[tokio::test]
+async fn edit_preserves_the_bom() {
+    let (dir, path) = seed("edit-bom", "bom.txt", "\u{feff}alpha\nbeta\n");
+    let out = edit_core(&path.to_string_lossy(), &[rep("beta", "BETA")]).expect("edit");
+    assert!(out.contains("1 block"), "{out}");
+    let bytes = fs::read(&path).expect("read back");
+    assert!(
+        bytes.starts_with(&[0xEF, 0xBB, 0xBF]),
+        "BOM preserved: {bytes:?}"
+    );
+    assert_eq!(String::from_utf8_lossy(&bytes), "\u{feff}alpha\nBETA\n");
+    fs::remove_dir_all(&dir).ok();
+}
+
+#[tokio::test]
+async fn edit_never_matches_across_the_bom() {
+    // old_text containing the BOM char should not be required — the BOM
+    // is invisible to read, so it is invisible to edit (matching runs on
+    // the BOM-stripped text).
+    let (dir, path) = seed("edit-bom-match", "bom.txt", "\u{feff}alpha\n");
+    let out = edit_core(&path.to_string_lossy(), &[rep("alpha", "ALPHA")]).expect("edit");
+    assert!(out.contains("1 block"), "{out}");
+    fs::remove_dir_all(&dir).ok();
+}
+
+#[tokio::test]
+async fn edit_rejects_conflicting_overlaps_as_a_pair() {
+    let (dir, path) = seed("edit-conflict", "f.txt", "aa bb cc dd\n");
+    // Nothing applies (the whole call conflicts), so the report rides
+    // the error — still naming both edits.
+    let error = err_text(edit_core(
+        &path.to_string_lossy(),
+        &[rep("aa bb cc", "AA BB CC"), rep("bb cc dd", "different")],
+    ));
+    assert!(error.contains("edit[0]"), "{error}");
+    assert!(error.contains("edit[1]"), "{error}");
+    assert!(error.contains("conflict"), "{error}");
+    assert_eq!(
+        body(&path),
+        "aa bb cc dd\n",
+        "neither side of a conflict lands"
+    );
+    fs::remove_dir_all(&dir).ok();
+}
+
+#[tokio::test]
+async fn edit_accepts_identical_overlaps_as_agreement() {
+    // The same replacement stated twice (a model retrying a padded
+    // context, or an LLM emitting a duplicate block) agrees on the
+    // shared region by construction: both apply, the change lands once.
+    let (dir, path) = seed("edit-compat", "f.txt", "one two three four\n");
+    let out = edit_core(
+        &path.to_string_lossy(),
+        &[
+            rep("one two three", "one TWO three"),
+            rep("one two three", "one TWO three"),
+        ],
+    )
+    .expect("identical overlap applies");
+    assert!(out.contains("2 of 2"), "{out}");
+    assert_eq!(body(&path), "one TWO three four\n");
+    fs::remove_dir_all(&dir).ok();
+}
+
+#[tokio::test]
+async fn edit_no_change_is_an_error() {
+    let (dir, path) = seed("edit-noop", "f.txt", "same\n");
+    let error = err(edit_core(&path.to_string_lossy(), &[rep("same", "same")]));
+    assert!(error.to_string().contains("no change"), "{error}");
+    fs::remove_dir_all(&dir).ok();
+}
+
+#[tokio::test]
+async fn edit_missing_file_and_directory_fail_loudly() {
+    let dir = temp_dir("edit-kinds");
+    let missing = err_text(edit_core(
+        &dir.join("nope.txt").to_string_lossy(),
+        &[rep("x", "y")],
+    ));
+    assert!(
+        missing.contains("cannot read") || missing.contains("not found"),
+        "{missing}"
+    );
+
+    let sub = dir.join("adir");
+    fs::create_dir(&sub).expect("dir");
+    let is_dir = err_text(edit_core(&sub.to_string_lossy(), &[rep("x", "y")]));
+    assert!(is_dir.contains("directory"), "{is_dir}");
+    fs::remove_dir_all(&dir).ok();
+}
+
+#[tokio::test]
+async fn edit_rejects_binary_files() {
+    let (dir, path) = seed("edit-binary", "blob.bin", "ok");
+    fs::write(&path, [0x89, 0x50, 0x00, 0xff]).expect("binary");
+    let error = err_text(edit_core(&path.to_string_lossy(), &[rep("x", "y")]));
+    assert!(error.contains("UTF-8"), "{error}");
+    fs::remove_dir_all(&dir).ok();
+}
+
+#[tokio::test]
+async fn edit_serializes_concurrent_calls_on_one_path() {
+    let (dir, path) = seed("edit-serial", "f.txt", "alpha\nbeta\ngamma\ndelta\n");
+    let p = || path.to_string_lossy().to_string();
+    let (r1, r2) = tokio::join!(
+        edit(p(), vec![rep("beta", "BETA")]),
+        edit(p(), vec![rep("delta", "DELTA")]),
+    );
+    assert!(r1.is_ok(), "{r1:?}");
+    assert!(r2.is_ok(), "{r2:?}");
+    assert_eq!(body(&path), "alpha\nBETA\ngamma\nDELTA\n");
+    fs::remove_dir_all(&dir).ok();
+}
+
+#[tokio::test]
+async fn edit_matches_spanning_multiple_lines() {
+    let (dir, path) = seed(
+        "edit-multiline",
+        "f.txt",
+        "fn main() {\n    old_call();\n}\n",
+    );
+    let out = edit_core(
+        &path.to_string_lossy(),
+        &[rep("    old_call();\n}", "    new_call();\n    log();\n}")],
+    )
+    .expect("edit");
+    assert!(out.contains("1 block"), "{out}");
+    assert_eq!(body(&path), "fn main() {\n    new_call();\n    log();\n}\n");
+    fs::remove_dir_all(&dir).ok();
+}
+
+#[tokio::test]
+async fn edit_counts_occurrences_in_lf_space_for_crlf_files() {
+    // "x" appears twice in a CRLF file — the duplicate count must see
+    // both, i.e. matching runs on the normalized content.
+    let (dir, path) = seed("edit-crlf-dup", "win.txt", "x\r\nx\r\n");
+    let out = edit_core(
+        &path.to_string_lossy(),
+        &[rep("x", "y"), rep("x\r\nx", "y")],
+    )
+    .expect("partial report");
+    assert!(out.contains("2 occurrences"), "{out}");
+    assert!(out.contains("1 of 2"), "the multi-line match lands: {out}");
+    fs::remove_dir_all(&dir).ok();
+}

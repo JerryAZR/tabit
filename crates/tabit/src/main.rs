@@ -395,6 +395,7 @@ fn assemble_session(
     .preamble(preamble)
     .dynamic_tool(dynamic(tabit_tools::Read))
     .dynamic_tool(dynamic(tabit_tools::Write))
+    .dynamic_tool(dynamic(tabit_tools::Edit))
     .dynamic_tool(tabit_tools::shell_tool())
     .dynamic_tool(dynamic_contextual(tabit_tools::AskUser))
     .model_factory(registry.factory())

@@ -274,6 +274,225 @@ pub async fn write(
     }
 }
 
+/// Edit a file by exact text replacement: every edit is matched against
+/// the file's current bytes (in LF space — the one sanctioned
+/// normalization; the file's line endings and BOM are preserved on
+/// write). Edits apply **independently** — those that match are applied,
+/// those that don't are reported by index with the reason, so the model
+/// fixes and resends only the failed ones. Overlapping edits apply only
+/// when their shared region agrees; a conflicting pair is rejected
+/// together. No fuzzy matching beyond line endings: a miss means the
+/// model's view of the file is stale — read it fresh.
+#[rig_tool(
+    description = "Edit a file with exact text replacements. Each edit is \
+                   independent: those whose old_text matches a unique spot are \
+                   applied, the rest are reported by index — fix and resend only \
+                   the failed ones. old_text must match the file exactly \
+                   (whitespace included; LF/CRLF differences are normalized). \
+                   Overlapping edits apply only if their shared content agrees."
+)]
+pub async fn edit(path: String, edits: Vec<EditReplacement>) -> Result<String, ToolExecutionError> {
+    let _guard = file_io::lock(std::path::Path::new(&path)).await;
+    edit_core(&path, &edits)
+}
+
+/// One targeted replacement: `old_text` must occur exactly once in the
+/// file (LF-normalized); `new_text` replaces it.
+#[derive(serde::Deserialize, rig_core::schemars::JsonSchema)]
+#[serde(crate = "rig_core::serde")]
+#[schemars(crate = "rig_core::schemars")]
+pub struct EditReplacement {
+    /// Exact text to replace (must occur exactly once in the file).
+    pub old_text: String,
+    /// Replacement text.
+    pub new_text: String,
+}
+
+/// The matching + application core, decoupled from the tool wrapper so
+/// tests drive it directly. Contract (asserted by the test suite):
+///
+/// - match in LF-normalized space; restore the file's dominant line
+///   ending and BOM on store;
+/// - per-edit independence: matched edits apply, failures are reported
+///   by index (empty old_text / not found / N occurrences / conflicting
+///   overlap) — the applied set never shifts another edit's offsets
+///   (application runs in reverse-offset order);
+/// - overlapping edits apply only when their shared region agrees;
+///   a conflicting pair rejects both;
+/// - a call where nothing applies is an error (nothing was edited);
+/// - the store rides [`file_io`]: per-path lock across read→match→store,
+///   atomic persist.
+fn edit_core(path: &str, edits: &[EditReplacement]) -> Result<String, ToolExecutionError> {
+    if edits.is_empty() {
+        return Err(ToolExecutionError::other(
+            "edits must contain at least one replacement".to_string(),
+        ));
+    }
+    let display = path.to_string();
+    let path = std::path::Path::new(path);
+    let meta = std::fs::metadata(path)
+        .map_err(|e| ToolExecutionError::other(format!("cannot read `{display}`: {e}")))?;
+    if meta.is_dir() {
+        return Err(ToolExecutionError::other(format!(
+            "`{display}` is a directory — edit needs a file path"
+        )));
+    }
+    let bytes = std::fs::read(path)
+        .map_err(|e| ToolExecutionError::other(format!("cannot read `{display}`: {e}")))?;
+    if bytes.is_empty() {
+        return Err(ToolExecutionError::other(format!(
+            "`{display}` is empty — nothing to match against; use write"
+        )));
+    }
+    let raw = match String::from_utf8(bytes) {
+        Ok(text) => text,
+        Err(error) => {
+            return Err(ToolExecutionError::other(format!(
+                "`{display}` is not valid UTF-8 ({} bytes); binary files are \
+                 not supported by this tool ({error})",
+                error.utf8_error().valid_up_to()
+            )));
+        }
+    };
+    // The BOM is invisible to read, so it is invisible to matching; it is
+    // re-attached on store.
+    let (bom, content) = match raw.strip_prefix('\u{feff}') {
+        Some(rest) => ("\u{feff}", rest),
+        None => ("", raw.as_str()),
+    };
+    let lf = content.replace("\r\n", "\n");
+    let is_crlf = lf.len() != content.len();
+
+    // --- match each edit independently in LF space ---
+    let mut matched: Vec<Match> = Vec::new();
+    let mut failures: Vec<(usize, String)> = Vec::new();
+    for (i, edit) in edits.iter().enumerate() {
+        let old = edit.old_text.replace("\r\n", "\n");
+        if old.is_empty() {
+            failures.push((i, "old_text is empty".to_string()));
+            continue;
+        }
+        let occurrences: Vec<usize> = lf.match_indices(&old).map(|(at, _)| at).collect();
+        match occurrences.as_slice() {
+            [] => failures.push((
+                i,
+                "not found — the file may have changed; read it fresh".to_string(),
+            )),
+            [start] => {
+                if edit.new_text == edit.old_text {
+                    failures.push((i, "no change — old_text equals new_text".to_string()));
+                } else {
+                    matched.push(Match {
+                        index: i,
+                        start: *start,
+                        end: start + old.len(),
+                        new_text: edit.new_text.replace("\r\n", "\n"),
+                    });
+                }
+            }
+            many => failures.push((
+                i,
+                format!(
+                    "{} occurrences — provide more context to make it unique",
+                    many.len()
+                ),
+            )),
+        }
+    }
+
+    // --- overlapping pairs: identical replacements are compatible
+    //     (the shared region agrees — applying both yields the same
+    //     result as one); anything else conflicts and rejects both.
+    //     Equality is the check, not application-order simulation: two
+    //     different replacements whose simulations agree can still
+    //     scramble each other's span.
+    matched.sort_by_key(|m| m.start);
+    let mut accepted: Vec<Match> = Vec::new();
+    for m in matched.into_iter() {
+        if let Some(prev) = accepted.last_mut().filter(|prev| m.start < prev.end) {
+            let compatible =
+                prev.start == m.start && prev.end == m.end && prev.new_text == m.new_text;
+            if compatible {
+                accepted.push(m);
+            } else {
+                for (loser, other) in [(prev.index, m.index), (m.index, prev.index)] {
+                    failures.push((
+                        loser,
+                        format!(
+                            "conflicts with edit[{other}] on the overlapping \
+                             region — merge them into one edit"
+                        ),
+                    ));
+                }
+                accepted.pop();
+            }
+            continue;
+        }
+        accepted.push(m);
+    }
+
+    if accepted.is_empty() {
+        let mut report = format!("No edits applied to {display}.");
+        for (i, reason) in &failures {
+            report.push_str(&format!(" edit[{i}]: {reason}."));
+        }
+        return Err(ToolExecutionError::other(report));
+    }
+
+    // --- apply in reverse-offset order so earlier offsets stay valid ---
+    let mut new_content = lf.clone();
+    let mut accepted_rev: Vec<&Match> = accepted.iter().collect();
+    accepted_rev.sort_by_key(|m| std::cmp::Reverse(m.start));
+    for m in accepted_rev {
+        new_content.replace_range(m.start..m.end, &m.new_text);
+    }
+
+    let stored = if is_crlf {
+        new_content.replace('\n', "\r\n")
+    } else {
+        new_content
+    };
+    let stored = format!("{bom}{stored}");
+    file_io::store_sync(path, stored.as_bytes())?;
+
+    // --- report ---
+    let (added, removed, first_line) = line_stats(&lf, &accepted);
+    let mut out = format!(
+        "Edited {display} ({} of {} block{} applied; +{added}/-{removed} lines, first change at line {first_line})",
+        accepted.len(),
+        edits.len(),
+        if accepted.len() == 1 { "" } else { "s" },
+    );
+    for (i, reason) in &failures {
+        out.push_str(&format!(" edit[{i}]: {reason}."));
+    }
+    Ok(out)
+}
+
+/// A uniquely-matched edit: where it landed in the LF-normalized file
+/// and what replaces the matched span.
+struct Match {
+    /// The edit's index in the call (for failure reports).
+    index: usize,
+    start: usize,
+    end: usize,
+    new_text: String,
+}
+
+/// (added, removed, first changed 1-indexed line) for the applied edits.
+fn line_stats(lf: &str, accepted: &[Match]) -> (usize, usize, usize) {
+    let mut added = 0usize;
+    let mut removed = 0usize;
+    let mut first_byte = usize::MAX;
+    for m in accepted {
+        removed += lf[m.start..m.end].matches('\n').count();
+        added += m.new_text.matches('\n').count();
+        first_byte = first_byte.min(m.start);
+    }
+    let first_line = lf[..first_byte].matches('\n').count() + 1;
+    (added, removed, first_line)
+}
+
 /// Ask the user a question and return their answer — the whole body is
 /// one interaction roundtrip over the session's
 /// [`UserInteraction`](rig_agent::tool::interaction::UserInteraction)

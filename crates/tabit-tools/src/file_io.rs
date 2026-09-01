@@ -50,6 +50,20 @@ pub(crate) struct StoreOutcome {
     pub(crate) parents_created: usize,
 }
 
+/// Synchronous store of already-decided bytes over an existing file:
+/// temp-file + rename, no existence policy (the caller — edit — has
+/// already established what the file is inside its lock). The plain
+/// counterpart of [`store`].
+pub(crate) fn store_sync(path: &Path, content: &[u8]) -> Result<(), crate::ToolExecutionError> {
+    if std::fs::metadata(path).is_ok_and(|m| m.is_file()) {
+        atomic_replace(path, content)
+    } else {
+        std::fs::write(path, content).map_err(|e| {
+            crate::ToolExecutionError::other(format!("cannot write `{}`: {e}", path.display()))
+        })
+    }
+}
+
 /// Store `content` at `path`, creating parents as needed. Non-atomic in
 /// the filesystem sense only for one case: this is a plain create when
 /// the path does not exist; when it does, the bytes go through a
