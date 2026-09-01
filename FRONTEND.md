@@ -464,11 +464,11 @@ chains may hold several open requests at once; answer them in any
 order.
 
 ```
-← {"type":"interaction_request","stream":"019…","id":"019…","ui_type":"native:confirm",
+← {"type":"interaction_request","stream":"019…","id":"019…","ui_type":"native:select_one",
    "payload":{"title":"Run command?","body":"rm -rf target",
      "options":[{"label":"Allow"},{"label":"Always allow"},{"label":"Deny"}],"free_text":true}}
 → {"type":"interaction_response","session":"019…","id":"019…",
-   "payload":{"option":"Deny","text":"never delete build dirs"}}
+   "payload":{"selected":["Deny"],"text":"never delete build dirs"}}
 ```
 
 - `interaction_request { id, ui_type, payload }` — an event, stamped
@@ -484,13 +484,24 @@ order.
   types: report, don't swallow** — surface a notice, never fabricate
   an answer.
 - **Templates** (`tabit-protocol::templates` owns the names and
-  payload schemas; they are prebuilt asks, not core types):
-  `native:confirm` — request `{ title, body, options:
-  [{ label, description? }], free_text }`, answer `{ option?,
-  text? }` with at least one present; `native:ask` — request
-  `{ prompt }`, answer `{ text? }`. The permission gate's three-button
-  card and ask-the-user tools consume these exactly as an extension
-  would.
+  payload schemas; they are prebuilt asks, not core types). Two
+  widgets cover the native surface (2026-09 ruling — there is no
+  separate confirm or ask card; both were special cases of these and
+  keeping them named would mislead future developers into believing
+  in a special UI that does not exist):
+  - `native:select_one` — given multiple choices, select exactly
+    one, with optional free text. Request `{ title, body, options:
+    [{ label, description? }], free_text }`, answer `{ selected:
+    [label], text? }`. The permission gate's allow/always/deny card
+    is this template with its own labels.
+  - `native:select_any` — given multiple choices, select zero or
+    more, with optional free text. Request `{ title, body, options:
+    [{ label, description? }], free_text }`, answer `{ selected:
+    [label, ...], text? }` (0..n). With zero options given this is
+    the old free-text ask.
+  Both share the one `SelectAnswer` shape: `selected` echoes the
+  chosen labels (exactly one for select_one), `text` carries the
+  free-text answer when invited.
 - A `free_text` answer is delivered to the model when present (a
   denial reason shapes the retry), not just logged.
 

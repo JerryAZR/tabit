@@ -429,7 +429,7 @@ fn interaction_cards_open_in_order_and_close_on_answer() {
     ] {
         state.reduce(event(SessionEvent::InteractionRequested {
             id: id.to_string(),
-            ui_type: tabit_protocol::templates::ui::CONFIRM.to_string(),
+            ui_type: tabit_protocol::templates::ui::SELECT_ONE.to_string(),
             payload: serde_json::json!({
                 "title": title,
                 "body": "body",
@@ -471,8 +471,8 @@ fn every_run_terminal_closes_all_open_cards() {
         state.reduce(user("go"));
         state.reduce(event(SessionEvent::InteractionRequested {
             id: "i1".to_string(),
-            ui_type: tabit_protocol::templates::ui::ASK.to_string(),
-            payload: serde_json::json!({"prompt": "rm -rf target?"}),
+            ui_type: tabit_protocol::templates::ui::SELECT_ANY.to_string(),
+            payload: serde_json::json!({"title": "Question", "body": "rm -rf target?", "options": [], "free_text": true}),
         }));
         state.reduce(event(terminal));
         assert!(
@@ -1072,7 +1072,7 @@ fn cards_survive_a_view_switch_and_route_by_their_own_session() {
     }));
     state.reduce(event(SessionEvent::InteractionRequested {
         id: "ask-1".to_string(),
-        ui_type: tabit_protocol::templates::ui::CONFIRM.to_string(),
+        ui_type: tabit_protocol::templates::ui::SELECT_ONE.to_string(),
         payload: serde_json::json!({
             "title": "Run command?",
             "body": "rm -rf target",
@@ -1119,7 +1119,7 @@ fn a_background_question_raises_attention_and_dies_with_its_run() {
         "s2",
         SessionEvent::InteractionRequested {
             id: "ask-2".to_string(),
-            ui_type: tabit_protocol::templates::ui::CONFIRM.to_string(),
+            ui_type: tabit_protocol::templates::ui::SELECT_ONE.to_string(),
             payload: serde_json::json!({
                 "title": "Run command?",
                 "body": "cargo test",
@@ -1262,7 +1262,7 @@ fn unknown_and_malformed_interaction_widgets_surface_as_notices_not_cards() {
     // treatment — a notice, not a broken card.
     state.reduce(event(SessionEvent::InteractionRequested {
         id: "i2".to_string(),
-        ui_type: tabit_protocol::templates::ui::CONFIRM.to_string(),
+        ui_type: tabit_protocol::templates::ui::SELECT_ONE.to_string(),
         payload: serde_json::json!({"unexpected": true}),
     }));
     match state.transcript.last() {

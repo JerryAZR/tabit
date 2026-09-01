@@ -51,27 +51,27 @@ mod permission_labels {
     pub const DENY: &str = "Deny";
 }
 
-/// Build the permission ask: the `native:confirm` template with this
-/// gate's three buttons and free text on (a denial reason is delivered
+/// Build the permission ask: the `native:select_one` template with this
+/// gate's three options and free text on (a denial reason is delivered
 /// to the model). An ordinary template consumer — the core
 /// never knows these labels.
 #[allow(clippy::expect_used)] // sanctioned crash: pure-data serialization (AGENTS.md doctrine)
 pub(crate) fn permission_ask(tool: &str, args: &str) -> (&'static str, serde_json::Value) {
-    let card = tabit_protocol::templates::ConfirmCard {
+    let card = tabit_protocol::templates::SelectOneCard {
         title: format!("Allow `{tool}` to run?"),
         body: args.to_string(),
         options: vec![
-            tabit_protocol::templates::ConfirmOption::new(permission_labels::ALLOW),
-            tabit_protocol::templates::ConfirmOption {
+            tabit_protocol::templates::SelectOption::new(permission_labels::ALLOW),
+            tabit_protocol::templates::SelectOption {
                 label: permission_labels::ALWAYS_ALLOW.to_string(),
                 description: Some("skip prompts for this tool until the session ends".to_string()),
             },
-            tabit_protocol::templates::ConfirmOption::new(permission_labels::DENY),
+            tabit_protocol::templates::SelectOption::new(permission_labels::DENY),
         ],
         free_text: true,
     };
     (
-        tabit_protocol::templates::ui::CONFIRM,
+        tabit_protocol::templates::ui::SELECT_ONE,
         serde_json::to_value(card).expect("template payloads always serialize"),
     )
 }
@@ -116,23 +116,23 @@ async fn gate(
     let (ui_type, payload) = permission_ask(tool_name, args);
     let reply = match hub.request(ui_type, payload).await {
         rig_agent::tool::interaction::InteractionOutcome::Answered(payload) => {
-            match serde_json::from_value::<tabit_protocol::templates::ConfirmAnswer>(payload) {
+            match serde_json::from_value::<tabit_protocol::templates::SelectAnswer>(payload) {
                 Ok(answer) => answer,
                 // A malformed answer is a frontend defect, not a user
                 // decision — fail closed, but leave the trace so the
                 // protocol break is not recast silently as a denial.
                 Err(error) => {
-                    tracing::warn!(%error, tool = tool_name, "malformed confirm answer — failing closed");
-                    tabit_protocol::templates::ConfirmAnswer::default()
+                    tracing::warn!(%error, tool = tool_name, "malformed select answer — failing closed");
+                    tabit_protocol::templates::SelectAnswer::default()
                 }
             }
         }
         // Dismissed — the gate fails closed.
         rig_agent::tool::interaction::InteractionOutcome::Dismissed => {
-            tabit_protocol::templates::ConfirmAnswer::default()
+            tabit_protocol::templates::SelectAnswer::default()
         }
     };
-    match reply.option.as_deref() {
+    match reply.selected.first().map(String::as_str) {
         Some(permission_labels::ALLOW) => ToolCallAction::run(),
         Some(permission_labels::ALWAYS_ALLOW) => {
             memory.insert(tool_name);
@@ -188,8 +188,14 @@ mod tests {
             panic!("expected an interaction request");
         };
         match respond(id.clone()) {
-            Some(answer) => {
-                hub.respond(&id, serde_json::json!(answer));
+            Some((option, reason)) => {
+                hub.respond(
+                    &id,
+                    serde_json::json!(tabit_protocol::templates::SelectAnswer {
+                        selected: option.into_iter().collect(),
+                        text: reason,
+                    }),
+                );
                 let action = decision.await.expect("the asker resolves after an answer");
                 (action, memory, rx)
             }
@@ -277,8 +283,8 @@ mod tests {
     #[test]
     fn permission_asks_with_the_confirm_template() {
         let (ui_type, payload) = permission_ask("bash", "{\"command\":\"ls\"}");
-        assert_eq!(ui_type, tabit_protocol::templates::ui::CONFIRM);
-        let card: tabit_protocol::templates::ConfirmCard =
+        assert_eq!(ui_type, tabit_protocol::templates::ui::SELECT_ONE);
+        let card: tabit_protocol::templates::SelectOneCard =
             serde_json::from_value(payload).expect("the template payload parses");
         assert!(card.free_text);
         assert_eq!(

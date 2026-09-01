@@ -190,14 +190,15 @@ impl TabitApp {
         };
         match card {
             crate::reducer::InteractionCard::Confirm { .. } => {
-                serde_json::to_value(tabit_protocol::templates::ConfirmAnswer {
-                    option: clean(option, false),
+                serde_json::to_value(tabit_protocol::templates::SelectAnswer {
+                    selected: clean(option, false).into_iter().collect(),
                     text: clean(text, true),
                 })
                 .expect("template payloads always serialize")
             }
             crate::reducer::InteractionCard::Ask { .. } => {
-                serde_json::to_value(tabit_protocol::templates::AskAnswer {
+                serde_json::to_value(tabit_protocol::templates::SelectAnswer {
+                    selected: Vec::new(),
                     text: clean(text, true),
                 })
                 .expect("template payloads always serialize")

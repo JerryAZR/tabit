@@ -6,11 +6,18 @@
 //! command carry `ui_type` + an opaque payload, and an extension
 //! asking with its own shape is every bit as first-class as these.
 //!
-//! - `native:confirm` — a card with heading, content under review,
-//!   button-style options, and an optional free-text line (the
-//!   permission gate's three-button card is this template with its
-//!   own option labels).
-//! - `native:ask` — a free-text question.
+//! Two widgets cover the native surface (2026-09 ruling — there is no
+//! separate confirm or ask card; both were special cases of these and
+//! keeping them named would mislead future developers into believing
+//! in a special UI that does not exist):
+//!
+//! - `native:select_one` — given multiple choices, select exactly one,
+//!   with optional free text. The permission gate's
+//!   allow/always/deny card is this template with its own option
+//!   labels (what used to be `native:confirm`).
+//! - `native:select_any` — given multiple choices, select zero or
+//!   more, with optional free text. With zero options given this is
+//!   the old free-text ask (what used to be `native:ask`).
 //!
 //! The `native:` prefix names the renderer's obligation (every
 //! conforming frontend renders it), not the ship vehicle — extension
@@ -21,23 +28,23 @@ use serde::{Deserialize, Serialize};
 
 /// The well-known widget type names.
 pub mod ui {
-    /// The confirm card ([`ConfirmCard`]/[`ConfirmAnswer`]).
-    pub const CONFIRM: &str = "native:confirm";
-    /// The free-text ask ([`AskCard`]/[`AskAnswer`]).
-    pub const ASK: &str = "native:ask";
+    /// The select-one card ([`SelectOneCard`]/[`SelectAnswer`]).
+    pub const SELECT_ONE: &str = "native:select_one";
+    /// The select-any card ([`SelectAnyCard`]/[`SelectAnswer`]).
+    pub const SELECT_ANY: &str = "native:select_any";
 }
 
-/// One button-style option on a `native:confirm` card.
+/// One choice on a select card.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub struct ConfirmOption {
-    /// The option's label; the answer echoes it in `option`.
+pub struct SelectOption {
+    /// The option's label; the answer echoes it in `selected`.
     pub label: String,
     /// Display hint, when present.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub description: Option<String>,
 }
 
-impl ConfirmOption {
+impl SelectOption {
     /// A bare labeled option.
     pub fn new(label: impl Into<String>) -> Self {
         Self {
@@ -47,41 +54,45 @@ impl ConfirmOption {
     }
 }
 
-/// The `native:confirm` request payload.
+/// The `native:select_one` request payload: select exactly one option,
+/// with optional free text.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub struct ConfirmCard {
+pub struct SelectOneCard {
     /// Short card heading.
     pub title: String,
     /// The question or the content under review.
     pub body: String,
-    /// Button-style options; empty for pure free-text cards.
-    pub options: Vec<ConfirmOption>,
+    /// The choices; empty only for a pure free-text card.
+    pub options: Vec<SelectOption>,
     /// Whether an optional free-text answer/explanation is invited.
     pub free_text: bool,
 }
 
-/// The `native:confirm` answer payload.
-#[derive(Debug, Clone, PartialEq, Eq, Default, Serialize, Deserialize)]
-pub struct ConfirmAnswer {
-    /// The chosen option label, when answered by button.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub option: Option<String>,
-    /// The free-text answer or explanation, when invited.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub text: Option<String>,
-}
-
-/// The `native:ask` request payload.
+/// The `native:select_any` request payload: select zero or more
+/// options, with optional free text. Zero options plus `free_text`
+/// is the old free-text ask.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub struct AskCard {
-    /// The question.
-    pub prompt: String,
+pub struct SelectAnyCard {
+    /// Short card heading.
+    pub title: String,
+    /// The question or the content under review.
+    pub body: String,
+    /// The choices; empty for a pure free-text card.
+    pub options: Vec<SelectOption>,
+    /// Whether an optional free-text answer/explanation is invited.
+    pub free_text: bool,
 }
 
-/// The `native:ask` answer payload.
+/// The answer payload for both select cards: `selected` echoes the
+/// chosen option labels (exactly one for `select_one`; zero or more
+/// for `select_any`), `text` carries the free-text answer when
+/// invited.
 #[derive(Debug, Clone, PartialEq, Eq, Default, Serialize, Deserialize)]
-pub struct AskAnswer {
-    /// The free-text answer.
+pub struct SelectAnswer {
+    /// The chosen option labels.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub selected: Vec<String>,
+    /// The free-text answer or explanation, when invited.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub text: Option<String>,
 }

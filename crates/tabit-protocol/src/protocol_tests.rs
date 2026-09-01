@@ -266,17 +266,17 @@ fn sampled_event_variants_survive_the_frame_envelope() {
             stream: Some(StreamId::new("s1")),
             event: SessionEvent::InteractionRequested {
                 id: "0199".to_string(),
-                ui_type: crate::templates::ui::CONFIRM.to_string(),
-                payload: serde_json::to_value(crate::templates::ConfirmCard {
+                ui_type: crate::templates::ui::SELECT_ONE.to_string(),
+                payload: serde_json::to_value(crate::templates::SelectOneCard {
                     title: "Run command?".to_string(),
                     body: "rm -rf target".to_string(),
                     options: vec![
-                        crate::templates::ConfirmOption::new("Allow"),
-                        crate::templates::ConfirmOption {
+                        crate::templates::SelectOption::new("Allow"),
+                        crate::templates::SelectOption {
                             label: "Always allow".to_string(),
                             description: Some("for this session".to_string()),
                         },
-                        crate::templates::ConfirmOption::new("Deny"),
+                        crate::templates::SelectOption::new("Deny"),
                     ],
                     free_text: true,
                 })

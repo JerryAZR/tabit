@@ -170,7 +170,7 @@ mod tests {
         let asker = tokio::spawn(async move {
             capability
                 .request(
-                    tabit_protocol::templates::ui::ASK,
+                    tabit_protocol::templates::ui::SELECT_ANY,
                     serde_json::json!({"prompt": "which file?"}),
                 )
                 .await
@@ -181,7 +181,7 @@ mod tests {
         let frame = rx.recv().await.expect("request emitted");
         assert_eq!(frame.stream.as_ref().map(StreamId::as_str), Some("s"));
         let (id, ui_type, payload) = request_from(&frame);
-        assert_eq!(ui_type, tabit_protocol::templates::ui::ASK);
+        assert_eq!(ui_type, tabit_protocol::templates::ui::SELECT_ANY);
         assert_eq!(payload, serde_json::json!({"prompt": "which file?"}));
 
         assert!(hub.respond(&id, serde_json::json!({"text": "main.rs"})));
@@ -205,7 +205,10 @@ mod tests {
         let hub = InteractionHub::new(tx, StreamId::new("s")); // the only strong sender drops here
         assert_eq!(
             hub.capability()
-                .request(tabit_protocol::templates::ui::ASK, serde_json::json!({}))
+                .request(
+                    tabit_protocol::templates::ui::SELECT_ANY,
+                    serde_json::json!({})
+                )
                 .await,
             InteractionOutcome::Dismissed
         );
@@ -217,7 +220,10 @@ mod tests {
         let capability = hub.capability();
         let asker = tokio::spawn(async move {
             capability
-                .request(tabit_protocol::templates::ui::ASK, serde_json::json!({}))
+                .request(
+                    tabit_protocol::templates::ui::SELECT_ANY,
+                    serde_json::json!({}),
+                )
                 .await
         });
         let frame = rx.recv().await.expect("request emitted");

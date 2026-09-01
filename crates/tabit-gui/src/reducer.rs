@@ -756,8 +756,8 @@ impl GuiState {
     fn open_card(&mut self, stream: &str, id: String, ui_type: String, payload: serde_json::Value) {
         use tabit_protocol::templates;
         match ui_type.as_str() {
-            templates::ui::CONFIRM => {
-                match serde_json::from_value::<templates::ConfirmCard>(payload) {
+            templates::ui::SELECT_ONE => {
+                match serde_json::from_value::<templates::SelectOneCard>(payload) {
                     Ok(card) => self.interactions.push(InteractionCard::Confirm {
                         session: stream.to_string(),
                         id,
@@ -772,17 +772,19 @@ impl GuiState {
                     ),
                 }
             }
-            templates::ui::ASK => match serde_json::from_value::<templates::AskCard>(payload) {
-                Ok(card) => self.interactions.push(InteractionCard::Ask {
-                    session: stream.to_string(),
-                    id,
-                    prompt: card.prompt,
-                }),
-                Err(_) => self.push_notice(
-                    format!("a {ui_type} card arrived in a shape this frontend cannot read"),
-                    true,
-                ),
-            },
+            templates::ui::SELECT_ANY => {
+                match serde_json::from_value::<templates::SelectAnyCard>(payload) {
+                    Ok(card) => self.interactions.push(InteractionCard::Ask {
+                        session: stream.to_string(),
+                        id,
+                        prompt: card.body,
+                    }),
+                    Err(_) => self.push_notice(
+                        format!("a {ui_type} card arrived in a shape this frontend cannot read"),
+                        true,
+                    ),
+                }
+            }
             other => self.push_notice(
                 format!("unsupported interaction widget `{other}` — not answered"),
                 true,
