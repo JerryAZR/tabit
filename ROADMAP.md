@@ -159,10 +159,46 @@ The application-level conversation layer pi builds over its agent loop:
 The standard toolset as `#[rig_tool]` implementations, via the
 PortableTool→DynamicTool erasure. **Toolset ruled to pi's four — read,
 write, edit, bash** (2026-09): no glob/grep/ls — the model reaches those
-through bash (`ls` deleted with the ruling). Shipped so far: `read`,
-`bash`, `ask_user`. Still to add: write, edit (with diff preview).
-Permission/approval rides on the existing hook system (as a first-party
-extension — see item 9).
+through bash (`ls` deleted with the ruling). **All four shipped**
+(2026-09) — `read` (paging + truncation module), `write` (overwrite
+flag, parent creation, atomic store), `edit` (exact-match, partial
+application, tests-first), `bash` (registration-time Git-for-Windows
+detection, tail-truncate + spill). `ask_user` rides along as frontend
+interaction-test scaffolding — **removed before shipping** (owner
+ruling: it exists to exercise the interaction capability, not as a
+product tool). Permission/approval rides on the existing hook system
+(as a first-party extension — see item 9).
+
+**Write rulings (2026-09):** `write(path, content, overwrite?)` —
+creates freely; overwrites only with `overwrite: true` (the model
+expresses intent, never inferred). A missing path always writes
+(overwrite governs existing paths only — a false overwrite must not
+veto a create); an existing path without the flag fails with the
+file's size and both ways forward. Results name the branch (`Created`
+vs `Overwrote (N bytes, was M bytes)`) plus `created K parent dirs`.
+No read-before-write enforcement (Claude-Code-only quirk; pi has none).
+Mutations serialize through `file_io`: a process-wide per-path lock
+registry (the engine's tool phase is concurrency-bounded by design —
+ENGINE.md — so same-path calls can interleave; the runner ships
+`concurrency: 1` by vendored default, not by ruling) and an atomic
+store (temp-file + `tempfile::NamedTempFile::persist` for overwrites;
+readers never lock — the atomic store is what makes a torn read
+impossible). Read-before-*edit* likewise stays prompt-level.
+
+**Edit rulings (2026-09, built tests-first):** `edit(path, edits[])`
+with pi's multi-edit shape — every edit matched against the file's
+current bytes in LF space (the one sanctioned normalization; LLMs read
+bytes, not visuals — a miss means a stale view), dominant line ending
+and BOM preserved on store, no other fuzzy matching. Edits apply
+**independently**: matched ones land, failures are reported by index
+(empty / not found / N occurrences / conflict) so the model resends
+only the failures — pi's all-or-nothing rejected. No `replace_all`
+(the duplicate count is the guidance; intentional global renames go
+through write or bash). Overlapping edits: identical replacements are
+agreement (both apply, the change lands once); anything else
+conflicts and rejects both as a named pair — equality is the check,
+order-simulation can agree while scrambling spans. All-fail calls are
+an error naming every failure; nothing is written.
 
 **Read + truncation rulings (2026-09, after surveying pi):** one shared
 truncation module (dual limits — 2000 lines / 50 KiB, whole lines only —
