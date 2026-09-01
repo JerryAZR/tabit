@@ -19,11 +19,6 @@
 //! The first surviving candidate is spawn-probed: a present-but-broken
 //! bash registers `powershell` instead of a tool that fails every call.
 
-/// Flags before the command text for the bash dialect.
-const BASH_ARGS: &[&str] = &["-c"];
-/// Flags for the PowerShell dialect: no profile, one command text.
-const POWERSHELL_ARGS: &[&str] = &["-NoProfile", "-Command"];
-
 /// The interpreter a shell-tool invocation runs through.
 pub(crate) struct Interpreter {
     pub(crate) argv0: String,
@@ -37,6 +32,11 @@ mod windows {
     use std::path::{Path, PathBuf};
     use std::sync::OnceLock;
     use std::time::{Duration, Instant};
+
+    /// Flags before the command text for the bash dialect.
+    const BASH_ARGS: &[&str] = &["-c"];
+    /// Flags for the PowerShell dialect: no profile, one command text.
+    const POWERSHELL_ARGS: &[&str] = &["-NoProfile", "-Command"];
 
     /// Cap on the registration-time spawn probe: a bash that cannot say
     /// `exit 0` within two seconds is not a bash worth registering.
@@ -327,6 +327,9 @@ pub(crate) use windows::{Shell, bash, powershell, resolved};
 #[cfg(not(windows))]
 mod unix {
     use super::*;
+
+    /// Flags before the command text for the bash dialect.
+    const BASH_ARGS: &[&str] = &["-c"];
 
     /// Unix assumes bash outright: it is a hard dependency of the POSIX
     /// world, and a missing one fails loudly per invocation rather than
