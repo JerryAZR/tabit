@@ -120,20 +120,24 @@ async fn startup_degradations_are_the_workers_first_frames() {
     handle.message(&id, "go");
     let frames = drain(&mut handle).await;
 
-    // The degradation is the first frame the frontend sees — ahead of
-    // the catalog and any run event — as a `model`-kind error
-    // (external errors ride the channel; stderr is not a frontend
-    // concern).
-    match frames.first().map(|f| &f.event) {
+    // The boot's session_opened leads (every session becoming visible
+    // is announced the same way), then the degradation as a
+    // `model`-kind error (external errors ride the channel; stderr is
+    // not a frontend concern), ahead of the catalog and any run event.
+    assert!(matches!(
+        frames.first().map(|f| &f.event),
+        Some(SessionEvent::SessionOpened { .. })
+    ));
+    match frames.get(1).map(|f| &f.event) {
         Some(SessionEvent::Error { kind, message, .. }) => {
             assert_eq!(kind, tabit_protocol::ErrorKind::MODEL);
             assert!(message.contains("default_model"), "{message}");
         }
-        other => panic!("the degradation must lead the stream, got {other:?}"),
+        other => panic!("the degradation must follow session_opened, got {other:?}"),
     }
     // The catalog follows the notes, ahead of any run event.
     assert!(matches!(
-        frames.get(1).map(|f| &f.event),
+        frames.get(2).map(|f| &f.event),
         Some(SessionEvent::SessionsAvailable { .. })
     ));
     assert!(
@@ -301,17 +305,21 @@ async fn abort_while_idle_discards_queued_messages() {
     let frames = drain(&mut handle).await;
     // No run ever happened — and nothing user-authored leaves
     // silently (flag 6): both queued pairs come back as one
-    // `messages_discarded`, after the catalog.
+    // `messages_discarded`, after session_opened and the catalog.
     let types: Vec<&str> = frames
         .iter()
         .map(|f| match &f.event {
+            SessionEvent::SessionOpened { .. } => "session_opened",
             SessionEvent::SessionsAvailable { .. } => "sessions_available",
             SessionEvent::MessagesDiscarded { .. } => "messages_discarded",
             _ => "other",
         })
         .collect();
-    assert_eq!(types, vec!["sessions_available", "messages_discarded"]);
-    let texts: Vec<String> = match &frames[1].event {
+    assert_eq!(
+        types,
+        vec!["session_opened", "sessions_available", "messages_discarded"]
+    );
+    let texts: Vec<String> = match &frames[2].event {
         SessionEvent::MessagesDiscarded { messages } => {
             messages.iter().map(|m| m.text.clone()).collect()
         }
@@ -664,10 +672,12 @@ async fn open_session_loads_a_stored_session_and_replays_it() {
         "the unmaterialized boot session is not"
     );
 
-    // open_session loads it and answers with the register announcement
-    // and the pass — stamped with the opened id, carrying the stored
-    // history whole (the model_changed the loop sees is the
-    // announcement; history itself carries none).
+    // open_session loads it and answers with the session_opened
+    // announcement (every session becoming visible is announced the
+    // same way), the register announcement, and the pass — stamped
+    // with the opened id, carrying the stored history whole (the
+    // model_changed the loop sees is the announcement; history
+    // itself carries none).
     handle.command_link().send(SessionCommand::OpenSession {
         id: stored_id.clone(),
     });
@@ -692,6 +702,7 @@ async fn open_session_loads_a_stored_session_and_replays_it() {
     assert_eq!(
         pass,
         vec![
+            "session_opened",
             "model_changed",
             "user_message",
             "turn_started",
@@ -699,7 +710,7 @@ async fn open_session_loads_a_stored_session_and_replays_it() {
             "completion_call",
             "turn_committed",
         ],
-        "the stored chain replays whole"
+        "the announcement leads; the stored chain replays whole"
     );
 
     // The opened session is a live worker now: a message runs on it.
@@ -808,9 +819,12 @@ async fn a_replay_request_streams_the_pass_onto_the_event_channel() {
             .await
             .expect("the worker answers a replay request");
         match frame.event {
-            // The startup catalog precedes the pass; session-level
-            // announcements are not pass content.
-            SessionEvent::SessionsAvailable { .. } | SessionEvent::SessionCreated { .. } => {}
+            // The boot's announcement and the startup catalog precede
+            // the pass; session-level announcements are not pass
+            // content.
+            SessionEvent::SessionOpened { .. }
+            | SessionEvent::SessionsAvailable { .. }
+            | SessionEvent::SessionCreated { .. } => {}
             SessionEvent::ReplayStarted { .. } => pass.push("started".to_string()),
             SessionEvent::ReplayDone => {
                 pass.push("done".to_string());
@@ -847,6 +861,7 @@ async fn a_replay_request_streams_the_pass_onto_the_event_channel() {
 
 fn kind_of(event: &SessionEvent) -> String {
     match event {
+        SessionEvent::SessionOpened { .. } => "session_opened".to_string(),
         SessionEvent::ModelChanged { .. } => "model_changed".to_string(),
         SessionEvent::UserMessage { .. } => "user_message".to_string(),
         SessionEvent::TurnStarted { .. } => "turn_started".to_string(),

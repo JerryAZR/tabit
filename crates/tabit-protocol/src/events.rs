@@ -222,11 +222,34 @@ pub enum SessionEvent {
         /// Every stored session, newest first.
         sessions: Vec<AvailableSession>,
     },
+    /// A session became visible in this backend: the boot session
+    /// (emitted at spawn, ahead of the catalog and any replay), a
+    /// `new_session` (the same facts `session_created` always
+    /// carried), or an `open_session`. One announcement shape for
+    /// every path (2026-09 ruling — the handshake ack shrank to
+    /// protocol-level facts so the boot session is announced exactly
+    /// like every other; a frontend keeps ONE "session became
+    /// visible" handler). Stamped with the session's own stream.
+    SessionOpened {
+        /// The session id (its event stream stamp).
+        id: String,
+        /// The session's file path (materializes at its first user
+        /// message for a fresh session).
+        path: String,
+        /// The session's active selection.
+        model: ModelSelection,
+        /// Whether the session continues an existing chain.
+        resumed: bool,
+    },
     /// A `new_session` command succeeded: a fresh session exists in
     /// this backend, empty (nothing replays). Unstamped,
     /// backend-level — the payload carries the new session's id (the
     /// optional-stream ruling); its selection notes, if any, follow
-    /// stamped with the new session's id.
+    /// stamped with the new session's id. **Superseded by
+    /// `session_opened`** (2026-09: one "session became visible"
+    /// shape for every path — new sessions are announced with
+    /// `resumed: false`); kept for one version for in-flight
+    /// frontends, then deleted.
     SessionCreated {
         /// The new session's id.
         id: String,

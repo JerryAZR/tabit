@@ -41,6 +41,12 @@ pub trait WriteBuffer: Send {
     /// register must not be the orphan-maker either).
     fn prequeue(&mut self, record: &FileRecord);
 
+    /// The incidental flush (clean exit): attempt the outbox, but an
+    /// unborn session — no file, nothing but birth lines — is left
+    /// alone rather than manufactured into an orphan. The only flush
+    /// allowed to skip; commits and the guard's retry always attempt.
+    fn flush_on_exit(&mut self) -> Result<(), LogError>;
+
     /// How many lines sit in the outbox (the persist-degraded count,
     /// and the `durable` verdict: zero means every commit reached the
     /// disk).
@@ -83,6 +89,13 @@ pub struct SessionWriter {
     /// emission points; at most one is pending (a transition that has
     /// not been observed still happened).
     transition: Option<bool>,
+    /// Birth lines: the header plus anything prequeued before the
+    /// first real commit (the opening `model_change`). An outbox
+    /// holding only these is an unborn session — it has no user
+    /// message, and a flush must not materialize it (the no-orphan
+    /// gate: a session that never gets a user message leaves nothing
+    /// behind, not even a model change).
+    birth_lines: usize,
 }
 
 impl SessionWriter {
@@ -105,6 +118,7 @@ impl SessionWriter {
             durable_offset: 0,
             degraded: false,
             transition: None,
+            birth_lines: 1,
         }
     }
 
@@ -119,6 +133,15 @@ impl SessionWriter {
         #[allow(clippy::expect_used)]
         let line = serde_json::to_string(record).expect("a session record always serializes");
         self.outbox.push_back(line);
+        self.birth_lines += 1;
+    }
+
+    /// Whether the outbox holds anything beyond the birth lines —
+    /// the exit-flush gate: a session with no file and no committed
+    /// content is unborn, and flushing it would only manufacture an
+    /// orphan (header + model_change, no user message).
+    pub fn has_committed_content(&self) -> bool {
+        self.outbox.len() > self.birth_lines
     }
 
     /// Re-open an existing session file for appending. The durable
@@ -140,6 +163,7 @@ impl SessionWriter {
             durable_offset,
             degraded: false,
             transition: None,
+            birth_lines: 0,
         })
     }
 
@@ -203,8 +227,18 @@ impl SessionWriter {
     /// truncated back to the durable offset (whatever bytes a partial
     /// write left are a torn tail, gone) and the lines stay queued, so
     /// a retried write can never splice into torn bytes.
-    fn drain(&mut self) -> Result<(), LogError> {
+    ///
+    /// `skip_unborn` is the no-orphan gate, and only the incidental
+    /// flushes (clean-exit, Drop) pass it: an unborn session leaves
+    /// nothing behind. Every *chosen* flush — a commit, the guard's
+    /// retry — always attempts: silently skipping would tell the
+    /// caller the disk was asked when it was not, and the degrade /
+    /// recovery machinery lives on the honest attempt.
+    fn drain(&mut self, skip_unborn: bool) -> Result<(), LogError> {
         if self.outbox.is_empty() {
+            return Ok(());
+        }
+        if skip_unborn && self.file.is_none() && !self.has_committed_content() {
             return Ok(());
         }
         self.materialize()?;
@@ -285,7 +319,14 @@ impl WriteBuffer for SessionWriter {
                 panic!("session record failed to serialize: {error}");
             }
         }
-        let outcome = self.drain();
+        // The first non-empty enqueue is the session's first real
+        // commit: the outbox now holds content (a user message or
+        // beyond), and the birth lines ride this drain legitimately.
+        // An empty enqueue (the clean-exit flush) marks nothing.
+        if !records.is_empty() {
+            self.birth_lines = 0;
+        }
+        let outcome = self.drain(false);
         match &outcome {
             Ok(()) if self.degraded => {
                 self.degraded = false;
@@ -304,6 +345,10 @@ impl WriteBuffer for SessionWriter {
         SessionWriter::prequeue(self, record);
     }
 
+    fn flush_on_exit(&mut self) -> Result<(), LogError> {
+        self.drain(true)
+    }
+
     fn pending(&self) -> usize {
         SessionWriter::pending(self)
     }
@@ -319,7 +364,7 @@ impl Drop for SessionWriter {
     /// committed leaves nothing behind, not even by dropping).
     fn drop(&mut self) {
         if self.file.is_some() {
-            let _ = self.drain();
+            let _ = self.drain(true);
         }
     }
 }
@@ -331,6 +376,10 @@ impl Drop for SessionWriter {
 pub struct NullBuffer;
 
 impl WriteBuffer for NullBuffer {
+    fn flush_on_exit(&mut self) -> Result<(), LogError> {
+        Ok(())
+    }
+
     fn enqueue(&mut self, _records: &[FileRecord]) -> Result<(), LogError> {
         Ok(())
     }

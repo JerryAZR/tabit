@@ -38,7 +38,9 @@ sections — unstamped host facts, `ui_type` + opaque payloads).
   leaves nothing on disk; `--list` reads a missing sessions directory as
   empty.
 - **Handshake only at a serialized edge**: `initialize` →
-  `initialize_ack` (session facts) or `initialize_rejected` + exit 1;
+  `initialize_ack` (protocol-level facts only — the version and the
+  boot session's id; the session's facts arrive as `session_opened`,
+  2026-09 ruling) or `initialize_rejected` + exit 1;
   unparseable lines / premature commands → `protocol_error`, connection
   stays. Tagged JSON lines, not JSON-RPC 2.0.
 - **Termination contract (ruled 2026-08: the core dies with the

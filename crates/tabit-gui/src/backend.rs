@@ -151,17 +151,9 @@ pub fn spawn(
                 match serde_json::from_str::<ServerFrame>(&line) {
                     Ok(ServerFrame::Control(ServerControlFrame::InitializeAck {
                         session_id,
-                        session_path,
-                        model,
-                        resumed,
                         ..
                     })) => {
-                        let _ = tx.send(InMsg::Ack {
-                            session_id,
-                            session_path,
-                            model,
-                            resumed,
-                        });
+                        let _ = tx.send(InMsg::Ack { session_id });
                     }
                     Ok(ServerFrame::Control(ServerControlFrame::InitializeRejected { reason })) => {
                         let _ = tx.send(InMsg::Rejected(reason));

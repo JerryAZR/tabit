@@ -10,7 +10,6 @@
 //! attribute concurrent producers.
 
 use crate::events::SessionEvent;
-use crate::model::ModelSelection;
 use serde::{Deserialize, Serialize};
 
 /// The protocol version this build speaks. Clients declare theirs in
@@ -201,21 +200,18 @@ fn is_false(value: &bool) -> bool {
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(tag = "type", rename_all = "snake_case")]
 pub enum ServerControlFrame {
-    /// The handshake succeeded; the session facts follow.
+    /// The handshake succeeded. Protocol-level facts only (2026-09
+    /// ruling): the boot session is announced by a `session_opened`
+    /// event like every other session becoming visible — the ack
+    /// carrying session facts made the boot a special case and
+    /// forked the frontend's session-init handling.
     InitializeAck {
         /// The version the server settled on.
         protocol_version: u32,
-        /// The session id.
+        /// The boot session's id — needed so the client can name the
+        /// session in commands that follow the ack (every other id
+        /// arrives by event).
         session_id: String,
-        /// The session file path.
-        session_path: String,
-        /// The active model selection.
-        model: ModelSelection,
-        /// Whether the session continues an existing chain. `false`
-        /// after a `--continue` that found nothing means the backend
-        /// started fresh instead — an absorbed miss, not an error (the
-        /// pinned startup contract).
-        resumed: bool,
     },
     /// The handshake failed (version mismatch); the connection closes.
     InitializeRejected {

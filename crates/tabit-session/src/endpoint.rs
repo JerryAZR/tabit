@@ -318,10 +318,21 @@ impl SessionHost {
 
         // The host's synchronous startup emissions, ordered ahead of
         // any worker frame by construction (one sender, sent before
-        // the worker task exists): the boot session's selection
+        // the worker task exists): the boot session's "became
+        // visible" announcement (the same shape every other session
+        // gets — the boot is not a special case), then its selection
         // degradations, then the catalog. A listing failure is the
         // carrier in place of the announcement — no catalog follows
         // (ruled: external errors ride the channel; PROTOCOL.md v3).
+        let _ = event_tx.send(EventFrame {
+            stream: Some(boot_stream.clone()),
+            event: SessionEvent::SessionOpened {
+                id: info.session_id.clone(),
+                path: info.session_path.clone(),
+                model: info.model.clone(),
+                resumed: info.resumed,
+            },
+        });
         for note in startup_notes {
             let _ = event_tx.send(EventFrame {
                 stream: Some(boot_stream.clone()),
@@ -684,6 +695,15 @@ impl HostLoop {
                 event: SessionEvent::error_model(note),
             });
         }
+        let _ = self.event_tx.send(EventFrame {
+            stream: Some(stream.clone()),
+            event: SessionEvent::SessionOpened {
+                id: id.clone(),
+                path: session.path().display().to_string(),
+                model: session.selection(),
+                resumed: session.resumed(),
+            },
+        });
         self.add_worker(id, session);
     }
 
@@ -708,6 +728,15 @@ impl HostLoop {
             }
         };
         let stream = StreamId::new(id.to_string());
+        let _ = self.event_tx.send(EventFrame {
+            stream: Some(stream.clone()),
+            event: SessionEvent::SessionOpened {
+                id: id.to_string(),
+                path: session.path().display().to_string(),
+                model: session.selection(),
+                resumed: session.resumed(),
+            },
+        });
         for note in notes {
             let _ = self.event_tx.send(EventFrame {
                 stream: Some(stream.clone()),

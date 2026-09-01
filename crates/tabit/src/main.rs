@@ -343,7 +343,9 @@ fn print_event(event: &SessionEvent) {
         | SessionEvent::ModelChanged { .. } => {}
         // The host's session catalog and creations are frontend
         // concerns; print mode is a single-session consumer.
-        SessionEvent::SessionsAvailable { .. } | SessionEvent::SessionCreated { .. } => {}
+        SessionEvent::SessionsAvailable { .. }
+        | SessionEvent::SessionCreated { .. }
+        | SessionEvent::SessionOpened { .. } => {}
         // Non-terminal error conditions (startup degradations,
         // persistence): stderr is the human surface in print mode —
         // stdout stays the answer channel.

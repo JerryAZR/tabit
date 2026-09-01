@@ -23,15 +23,10 @@ use tabit_protocol::{EventFrame, ModelSelection, SessionEvent, Usage};
 /// lifecycle fact (the child exited).
 #[derive(Debug, Clone, PartialEq)]
 pub enum InMsg {
-    /// `initialize_ack` — the session facts.
-    Ack {
-        session_id: String,
-        session_path: String,
-        model: ModelSelection,
-        /// False after a `--continue` that found nothing: the backend
-        /// started fresh (absorbed, not an error).
-        resumed: bool,
-    },
+    /// `initialize_ack` — protocol-level facts only (2026-09: the
+    /// session's facts arrive as the `session_opened` event, like
+    /// every session becoming visible).
+    Ack { session_id: String },
     /// `initialize_rejected` — the connection is over.
     Rejected(String),
     /// `protocol_error` — display-only; the connection stays.
@@ -266,29 +261,12 @@ impl GuiState {
     /// Fold one backend message into the state.
     pub fn reduce(&mut self, msg: InMsg) {
         match msg {
-            InMsg::Ack {
-                session_id,
-                session_path,
-                model,
-                resumed,
-            } => {
-                self.facts = Some(Facts {
-                    session_id: session_id.clone(),
-                    session_path,
-                    model,
-                    resumed,
-                });
+            InMsg::Ack { session_id } => {
                 // The boot session's stream is its id; the transcript
-                // renders it.
+                // renders it. Facts arrive with the session_opened
+                // event (one announcement shape for every session).
                 self.active = session_id;
                 self.phase = Phase::Live;
-                // The GUI always spawns with `--continue`; a fresh
-                // start behind that ask gets one muted note (the pinned
-                // startup contract: an empty store is not an error, but
-                // it is not silent either).
-                if !resumed {
-                    self.push_notice("no sessions to resume — started fresh".to_string(), false);
-                }
             }
             InMsg::Rejected(reason) => {
                 // The full reason (a setup guide on a fresh install)
@@ -465,7 +443,32 @@ impl GuiState {
             Some(stream) => stream.as_str().to_string(),
             None => return self.reduce_backend_event(frame.event),
         };
-        match frame.event {
+        match &frame.event {
+            // The "session became visible" announcement — the boot
+            // included (2026-09: the ack carries protocol-level facts
+            // only; every session is announced the same way). Facts
+            // and the fresh-start note land here, one handler for
+            // every path.
+            SessionEvent::SessionOpened {
+                id,
+                path,
+                model,
+                resumed,
+            } => {
+                self.facts = Some(Facts {
+                    session_id: id.clone(),
+                    session_path: path.clone(),
+                    model: model.clone(),
+                    resumed: *resumed,
+                });
+                // The GUI always spawns with `--continue`; a fresh
+                // start behind that ask gets one muted note (the
+                // pinned startup contract: an empty store is not an
+                // error, but it is not silent either).
+                if !resumed {
+                    self.push_notice("no sessions to resume — started fresh".to_string(), false);
+                }
+            }
             // Pass brackets, on any stream: everything between them is
             // history being rebuilt, never liveness (a pass carries
             // `user_message`s but no terminal — an unguarded fold
@@ -714,9 +717,11 @@ impl GuiState {
                     item: item.to_string(),
                 });
             }
-            // Consumed by the backend-level fold; unreachable on a
-            // stream path.
-            SessionEvent::SessionsAvailable { .. } | SessionEvent::SessionCreated { .. } => {}
+            // Consumed by the backend-level fold / the pre-dispatch arm;
+            // unreachable on the active-stream path.
+            SessionEvent::SessionsAvailable { .. }
+            | SessionEvent::SessionCreated { .. }
+            | SessionEvent::SessionOpened { .. } => {}
         }
     }
 

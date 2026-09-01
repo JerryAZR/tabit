@@ -139,9 +139,6 @@ fn read_loop<R: BufRead>(
                         ServerControlFrame::InitializeAck {
                             protocol_version: PROTOCOL_VERSION,
                             session_id: info.session_id.clone(),
-                            session_path: info.session_path.clone(),
-                            model: info.model.clone(),
-                            resumed: info.resumed,
                         },
                     );
                     // The ack is queued ahead of anything the forwarder
@@ -608,20 +605,35 @@ id = "m"
         .await;
         assert_eq!(code, 0);
         let frames = parse_frames(&lines);
-        // The ack comes first and carries the session facts.
+        // The ack comes first and carries protocol-level facts only —
+        // the session's facts arrive as the session_opened event.
         match &frames[0] {
             ServerFrame::Control(ServerControlFrame::InitializeAck {
                 protocol_version,
                 session_id,
-                model,
-                ..
             }) => {
                 assert_eq!(*protocol_version, tabit_session::PROTOCOL_VERSION);
                 assert!(!session_id.is_empty());
-                assert_eq!(*model, ModelSelection::new("p", "m"));
             }
             other => panic!("expected initialize_ack, got {other:?}"),
         }
+        let boot_id = match &frames[0] {
+            ServerFrame::Control(ServerControlFrame::InitializeAck { session_id, .. }) => {
+                session_id.clone()
+            }
+            _ => unreachable!("checked above"),
+        };
+        let opened = frames.iter().find_map(|frame| match frame {
+            ServerFrame::Event(EventFrame {
+                event: tabit_session::SessionEvent::SessionOpened { id, model, .. },
+                ..
+            }) => Some((id.clone(), model.clone())),
+            _ => None,
+        });
+        let (opened_id, opened_model) =
+            opened.expect("the boot session announces itself by session_opened");
+        assert_eq!(opened_id, boot_id);
+        assert_eq!(opened_model, ModelSelection::new("p", "m"));
         assert_eq!(texts(&frames, "user"), vec!["hi"]);
         assert_eq!(texts(&frames, "delta"), vec!["hello"]);
         assert!(matches!(
@@ -669,9 +681,10 @@ id = "m"
         assert_eq!(code, 0);
 
         let frames = parse_frames(&read_lines(&out));
-        // The ack is the first frame; the degradation follows it and
-        // precedes every run event — the gate holds even though the
-        // worker emitted the note at spawn, before the handshake.
+        // The ack is the first frame; session_opened and the
+        // degradation follow it and precede every run event — the
+        // gate holds even though the worker emitted the note at
+        // spawn, before the handshake.
         assert!(matches!(
             frames.first(),
             Some(ServerFrame::Control(
@@ -690,7 +703,10 @@ id = "m"
                 )
             })
             .expect("the degradation frame");
-        assert_eq!(degraded_at, 1, "the note lands immediately after the ack");
+        assert_eq!(
+            degraded_at, 2,
+            "session_opened, then the note, both ahead of any run event"
+        );
         let first_user = frames
             .iter()
             .position(|frame| {
@@ -1049,9 +1065,10 @@ id = "m"
                 ServerControlFrame::InitializeAck { .. }
             ))
         ));
-        // The v3 startup announcement: the catalog lands between the
-        // ack's control frame and the replay pass — and it lists the
-        // resumed session itself.
+        // The v3 startup announcement: the boot's session_opened leads
+        // (every session becoming visible is announced the same way),
+        // then the catalog — listing the resumed session itself —
+        // lands between it and the replay pass.
         let catalog_at = frames
             .iter()
             .position(|frame| {
@@ -1064,7 +1081,10 @@ id = "m"
                 )
             })
             .expect("sessions_available listing the boot session");
-        assert_eq!(catalog_at, 1, "the catalog is the first event frame");
+        assert_eq!(
+            catalog_at, 2,
+            "session_opened, then the catalog, then the pass"
+        );
         let types: Vec<&str> = frames
             .iter()
             .filter_map(|frame| match frame {
@@ -1081,6 +1101,7 @@ id = "m"
                     tabit_session::SessionEvent::SessionsAvailable { .. } => {
                         Some("sessions_available")
                     }
+                    tabit_session::SessionEvent::SessionOpened { .. } => Some("session_opened"),
                     _ => Some("other"),
                 },
                 _ => None,
@@ -1089,6 +1110,7 @@ id = "m"
         assert_eq!(
             types,
             vec![
+                "session_opened",
                 "sessions_available",
                 // The register announcement precedes the bracket (the
                 // pass itself carries no model_changed — state is

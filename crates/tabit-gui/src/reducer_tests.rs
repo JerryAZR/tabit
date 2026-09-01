@@ -32,10 +32,17 @@ fn backend(event: SessionEvent) -> InMsg {
 fn ack() -> InMsg {
     InMsg::Ack {
         session_id: BOOT.to_string(),
-        session_path: "sessions/s1.jsonl".to_string(),
-        model: tabit_protocol::ModelSelection::new("local", "m"),
-        resumed: true,
     }
+}
+
+/// The boot's facts, announced the way every session's are.
+fn opened(resumed: bool) -> InMsg {
+    event(SessionEvent::SessionOpened {
+        id: BOOT.to_string(),
+        path: "sessions/s1.jsonl".to_string(),
+        model: tabit_protocol::ModelSelection::new("local", "m"),
+        resumed,
+    })
 }
 
 fn user(text: &str) -> InMsg {
@@ -72,6 +79,7 @@ fn segments(state: &GuiState) -> Vec<String> {
 fn handshake_facts_and_live_phase() {
     let mut state = GuiState::default();
     state.reduce(ack());
+    state.reduce(opened(true));
     assert_eq!(state.phase, Phase::Live);
     let facts = state.facts.as_ref().unwrap();
     assert_eq!(facts.session_id, "s1");
@@ -82,6 +90,7 @@ fn handshake_facts_and_live_phase() {
 fn a_run_lifecycle_from_message_to_terminal() {
     let mut state = GuiState::default();
     state.reduce(ack());
+    state.reduce(opened(true));
     state.message_sent("who are you?".to_string());
     assert_eq!(state.pending.len(), 0, "idle send never queues");
     state.reduce(user("who are you?"));
@@ -111,6 +120,7 @@ fn a_run_lifecycle_from_message_to_terminal() {
 fn tools_and_reasoning_fold_into_the_turn() {
     let mut state = GuiState::default();
     state.reduce(ack());
+    state.reduce(opened(true));
     state.reduce(user("list files"));
     state.reduce(event(SessionEvent::ReasoningDelta {
         turn_id: "t1".to_string(),
@@ -152,6 +162,7 @@ fn segments_render_in_arrival_order() {
     // first. The turn must preserve the wire's interleaving.
     let mut state = GuiState::default();
     state.reduce(ack());
+    state.reduce(opened(true));
     state.reduce(user("check"));
     state.reduce(delta("Let me look. "));
     state.reduce(event(SessionEvent::ToolCall {
@@ -194,6 +205,7 @@ fn segments_render_in_arrival_order() {
 fn a_second_turn_opens_a_new_group() {
     let mut state = GuiState::default();
     state.reduce(ack());
+    state.reduce(opened(true));
     state.reduce(user("a"));
     state.reduce(delta("first"));
     state.reduce(event(SessionEvent::ToolCall {
@@ -245,6 +257,7 @@ fn a_second_turn_opens_a_new_group() {
 fn turn_retried_drops_the_provisional_turn() {
     let mut state = GuiState::default();
     state.reduce(ack());
+    state.reduce(opened(true));
     state.reduce(user("a"));
     state.reduce(delta("poisoned"));
     state.reduce(event(SessionEvent::TurnRetried {
@@ -259,6 +272,7 @@ fn turn_retried_drops_the_provisional_turn() {
 fn run_failure_and_abort_end_the_run() {
     let mut state = GuiState::default();
     state.reduce(ack());
+    state.reduce(opened(true));
     state.reduce(user("a"));
     state.reduce(event(SessionEvent::RunFailed {
         message: "provider died".to_string(),
@@ -286,6 +300,7 @@ fn idle_sends_never_queue() {
     // acknowledgment.
     let mut state = GuiState::default();
     state.reduce(ack());
+    state.reduce(opened(true));
     state.message_sent("hello".to_string());
     assert!(state.pending.is_empty(), "idle send does not wait");
     state.reduce(user("hello"));
@@ -301,6 +316,7 @@ fn steers_wait_and_pair_by_fifo() {
     // v1 heuristic: identical steers pair in order.
     let mut state = GuiState::default();
     state.reduce(ack());
+    state.reduce(opened(true));
     state.reduce(user("start"));
     state.message_sent("same".to_string());
     state.message_sent("same".to_string());
@@ -315,6 +331,7 @@ fn steers_wait_and_pair_by_fifo() {
 fn backend_exit_classifies_clean_vs_crash() {
     let mut state = GuiState::default();
     state.reduce(ack());
+    state.reduce(opened(true));
     state.reduce(user("a"));
     state.reduce(delta("mid"));
     state.reduce(InMsg::BackendExited { code: Some(101) });
@@ -328,6 +345,7 @@ fn backend_exit_classifies_clean_vs_crash() {
 
     let mut idle = GuiState::default();
     idle.reduce(ack());
+    idle.reduce(opened(true));
     idle.reduce(InMsg::BackendExited { code: Some(0) });
     assert!(matches!(idle.phase, Phase::Exited { clean: true, .. }));
 
@@ -335,6 +353,7 @@ fn backend_exit_classifies_clean_vs_crash() {
     // report is the payload the user must send back.
     let mut idle_crash = GuiState::default();
     idle_crash.reduce(ack());
+    idle_crash.reduce(opened(true));
     idle_crash.reduce(InMsg::BackendExited { code: Some(101) });
     match &idle_crash.phase {
         Phase::Exited { clean, reason } => {
@@ -349,6 +368,7 @@ fn backend_exit_classifies_clean_vs_crash() {
 fn protocol_error_is_a_notice_and_the_connection_survives() {
     let mut state = GuiState::default();
     state.reduce(ack());
+    state.reduce(opened(true));
     state.reduce(InMsg::ProtocolError("bad line".to_string()));
     assert_eq!(state.phase, Phase::Live);
     assert!(matches!(
@@ -363,11 +383,9 @@ fn an_absorbed_continue_miss_announces_the_fresh_start() {
     // started fresh — one muted note, and the connection is Live.
     let mut state = GuiState::default();
     state.reduce(InMsg::Ack {
-        session_id: "s".to_string(),
-        session_path: "s.jsonl".to_string(),
-        model: tabit_protocol::ModelSelection::new("local", "m"),
-        resumed: false,
+        session_id: BOOT.to_string(),
     });
+    state.reduce(opened(false));
     assert_eq!(state.phase, Phase::Live);
     match state.transcript.first() {
         Some(Group::Notice { text, error: false }) => {
@@ -422,6 +440,7 @@ fn startup_exit_is_not_mid_run() {
 fn interaction_cards_open_in_order_and_close_on_answer() {
     let mut state = GuiState::default();
     state.reduce(ack());
+    state.reduce(opened(true));
     state.reduce(user("go"));
     for (id, title) in [
         ("i1", "Allow `bash` to run?"),
@@ -468,6 +487,7 @@ fn every_run_terminal_closes_all_open_cards() {
     ] {
         let mut state = GuiState::default();
         state.reduce(ack());
+        state.reduce(opened(true));
         state.reduce(user("go"));
         state.reduce(event(SessionEvent::InteractionRequested {
             id: "i1".to_string(),
@@ -487,6 +507,7 @@ fn every_run_terminal_closes_all_open_cards() {
 fn turn_truncated_is_a_non_error_notice_and_the_run_continues() {
     let mut state = GuiState::default();
     state.reduce(ack());
+    state.reduce(opened(true));
     state.reduce(user("a"));
     state.reduce(delta("partial answer"));
     state.reduce(event(SessionEvent::TurnTruncated {
@@ -515,6 +536,7 @@ fn abort_clears_pending_steers_with_the_cards() {
     // never be acknowledged and must not pair with the next run.
     let mut state = GuiState::default();
     state.reduce(ack());
+    state.reduce(opened(true));
     state.reduce(user("a"));
     state.reduce(delta("working"));
     // A mid-run send enters the waiting display (steer queued).
@@ -530,6 +552,7 @@ fn abort_clears_pending_steers_with_the_cards() {
 fn pending_rows_resolve_by_id_not_position() {
     let mut state = GuiState::default();
     state.reduce(ack());
+    state.reduce(opened(true));
     state.reduce(user("first message"));
     state.running = true;
 
@@ -570,6 +593,7 @@ fn pending_rows_resolve_by_id_not_position() {
 fn replay_brackets_are_inert_and_model_changed_updates_the_facts() {
     let mut state = GuiState::default();
     state.reduce(ack());
+    state.reduce(opened(true));
     let before = state.facts.as_ref().expect("facts").model.clone();
     state.reduce(event(SessionEvent::ReplayStarted { total: 3 }));
     state.reduce(event(SessionEvent::ModelChanged {
@@ -588,6 +612,7 @@ fn replay_brackets_are_inert_and_model_changed_updates_the_facts() {
 fn tool_results_land_on_their_calls_with_content_and_failure() {
     let mut state = GuiState::default();
     state.reduce(ack());
+    state.reduce(opened(true));
     state.reduce(user("run it"));
     state.reduce(event(SessionEvent::ToolCall {
         turn_id: "t1".to_string(),
@@ -622,6 +647,7 @@ fn tool_results_land_on_their_calls_with_content_and_failure() {
 fn the_startup_catalog_populates_the_switcher() {
     let mut state = GuiState::default();
     state.reduce(ack());
+    state.reduce(opened(true));
     state.reduce(backend(SessionEvent::SessionsAvailable {
         sessions: vec![
             tabit_protocol::AvailableSession {
@@ -650,6 +676,7 @@ fn the_startup_catalog_populates_the_switcher() {
 fn background_events_update_liveness_but_never_the_transcript() {
     let mut state = GuiState::default();
     state.reduce(ack());
+    state.reduce(opened(true));
     state.reduce(backend(SessionEvent::SessionsAvailable {
         sessions: vec![tabit_protocol::AvailableSession {
             id: "s2".to_string(),
@@ -751,6 +778,7 @@ fn background_events_update_liveness_but_never_the_transcript() {
 fn switching_is_optimistic_and_the_replay_pass_rebuilds() {
     let mut state = GuiState::default();
     state.reduce(ack());
+    state.reduce(opened(true));
     state.reduce(user("first question"));
     state.reduce(delta("first answer"));
     state.reduce(backend(SessionEvent::SessionsAvailable {
@@ -804,6 +832,7 @@ fn switching_is_optimistic_and_the_replay_pass_rebuilds() {
 fn session_created_switches_to_the_empty_new_session() {
     let mut state = GuiState::default();
     state.reduce(ack());
+    state.reduce(opened(true));
     state.reduce(user("work in the boot session"));
 
     // Honest shape: the creation frame is backend-level (no stamp;
@@ -844,6 +873,7 @@ fn a_replay_bracket_resets_the_view_structurally() {
     // rebuild point: prior view content cannot survive it.
     let mut state = GuiState::default();
     state.reduce(ack());
+    state.reduce(opened(true));
     state.reduce(user("one"));
     state.reduce(delta("answer one"));
     state.reduce(event(SessionEvent::ReplayStarted { total: 1 }));
@@ -864,6 +894,7 @@ fn a_new_session_lands_even_while_the_current_one_runs() {
     // show on its row.
     let mut state = GuiState::default();
     state.reduce(ack());
+    state.reduce(opened(true));
     state.reduce(backend(SessionEvent::SessionsAvailable {
         sessions: vec![tabit_protocol::AvailableSession {
             id: BOOT.to_string(),
@@ -928,6 +959,7 @@ fn an_active_sessions_run_state_is_mirrored_onto_its_row() {
     // the active/background split).
     let mut state = GuiState::default();
     state.reduce(ack());
+    state.reduce(opened(true));
     state.reduce(backend(SessionEvent::SessionsAvailable {
         sessions: vec![tabit_protocol::AvailableSession {
             id: BOOT.to_string(),
@@ -955,6 +987,7 @@ fn a_replay_pass_never_marks_the_session_running() {
     // button, 10 Hz repaint spin, sends misread as steers).
     let mut state = GuiState::default();
     state.reduce(ack());
+    state.reduce(opened(true));
     state.reduce(backend(SessionEvent::SessionsAvailable {
         sessions: vec![tabit_protocol::AvailableSession {
             id: "s2".to_string(),
@@ -1026,6 +1059,7 @@ fn a_background_pass_after_a_fast_switch_does_not_poison_the_row() {
     // non-viewed stream — its content must not mark B running.
     let mut state = GuiState::default();
     state.reduce(ack());
+    state.reduce(opened(true));
     state.reduce(backend(SessionEvent::SessionsAvailable {
         sessions: vec![tabit_protocol::AvailableSession {
             id: "s2".to_string(),
@@ -1063,6 +1097,7 @@ fn cards_survive_a_view_switch_and_route_by_their_own_session() {
     // active one).
     let mut state = GuiState::default();
     state.reduce(ack());
+    state.reduce(opened(true));
     state.reduce(backend(SessionEvent::SessionsAvailable {
         sessions: vec![tabit_protocol::AvailableSession {
             id: "s2".to_string(),
@@ -1101,6 +1136,7 @@ fn cards_survive_a_view_switch_and_route_by_their_own_session() {
 fn a_background_question_raises_attention_and_dies_with_its_run() {
     let mut state = GuiState::default();
     state.reduce(ack());
+    state.reduce(opened(true));
     state.reduce(backend(SessionEvent::SessionsAvailable {
         sessions: vec![tabit_protocol::AvailableSession {
             id: "s2".to_string(),
@@ -1158,6 +1194,7 @@ fn a_background_question_raises_attention_and_dies_with_its_run() {
 fn a_checkout_pass_rebuilds_the_transcript_and_liveness_stays_settled() {
     let mut state = GuiState::default();
     state.reduce(ack());
+    state.reduce(opened(true));
     state.reduce(user("one"));
     state.reduce(delta("first answer"));
     state.reduce(event(SessionEvent::RunFinished {
@@ -1216,6 +1253,7 @@ fn a_checkout_pass_rebuilds_the_transcript_and_liveness_stays_settled() {
 fn a_failed_checkout_surfaces_as_an_error_notice() {
     let mut state = GuiState::default();
     state.reduce(ack());
+    state.reduce(opened(true));
     state.reduce(user("one"));
     state.reduce(event(SessionEvent::RunFinished {
         output: String::new(),
@@ -1242,6 +1280,7 @@ fn a_failed_checkout_surfaces_as_an_error_notice() {
 fn unknown_and_malformed_interaction_widgets_surface_as_notices_not_cards() {
     let mut state = GuiState::default();
     state.reduce(ack());
+    state.reduce(opened(true));
     // An extension widget this frontend cannot render: reported, never
     // answered, never a card.
     state.reduce(event(SessionEvent::InteractionRequested {
@@ -1282,6 +1321,7 @@ fn unknown_and_malformed_interaction_widgets_surface_as_notices_not_cards() {
 fn a_catalog_reannouncement_preserves_liveness_and_attention() {
     let mut state = GuiState::default();
     state.reduce(ack());
+    state.reduce(opened(true));
     let catalog = || {
         backend(SessionEvent::SessionsAvailable {
             sessions: vec![tabit_protocol::AvailableSession {
@@ -1330,6 +1370,7 @@ fn a_catalog_reannouncement_preserves_liveness_and_attention() {
 fn a_backend_only_queued_notice_tracks_by_id_until_resolved() {
     let mut state = GuiState::default();
     state.reduce(ack());
+    state.reduce(opened(true));
     state.reduce(user("go"));
     // No local echo for this one — the notice itself must open the row.
     state.reduce(event(SessionEvent::MessageQueued {
@@ -1362,6 +1403,7 @@ fn a_backend_only_queued_notice_tracks_by_id_until_resolved() {
 fn a_provider_native_item_folds_as_its_own_row() {
     let mut state = GuiState::default();
     state.reduce(ack());
+    state.reduce(opened(true));
     state.reduce(user("search"));
     state.reduce(delta("checking "));
     assert_eq!(segments(&state), vec!["text:checking "]);
@@ -1388,6 +1430,7 @@ fn a_provider_native_item_folds_as_its_own_row() {
 fn a_signal_death_is_reported_as_a_kill_not_an_exit_code() {
     let mut state = GuiState::default();
     state.reduce(ack());
+    state.reduce(opened(true));
     state.reduce(InMsg::BackendExited { code: None });
     let Phase::Exited { clean, reason } = &state.phase else {
         panic!("the exit settled the phase");

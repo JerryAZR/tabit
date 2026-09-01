@@ -76,7 +76,8 @@ size limit** — tool output can be large; buffer accordingly.
 
 ```
 → {"type":"initialize","protocol_version":4,"replay":true}
-← {"type":"initialize_ack","protocol_version":4,"session_id":"019…","session_path":"…",
+← {"type":"initialize_ack","protocol_version":4,"session_id":"019…"}
+← {"type":"session_opened","stream":"019…","id":"019…","path":"…",
    "model":{"provider":"…","model":"…","thinking_level":null},"resumed":true}
 ← {"type":"sessions_available","sessions":[
      {"id":"019…","created_at":"2026-08-22T…","entry_count":14}, … ]}
@@ -125,9 +126,13 @@ value, switch on `type` when recognized) and log the rest.
 
 1. Your **first line** must be
    `initialize { protocol_version, replay? }` (`replay` defaults to
-   `false`). Match → `initialize_ack` with the session facts (id,
-   path, active model, `resumed`), then — if you asked — the replay
-   pass, then live traffic. `resumed: false` after you asked the
+   `false`). Match → `initialize_ack` with **protocol-level facts
+   only** (the version and the boot session's id — everything else
+   arrives by event, 2026-09 ruling: the boot session is announced
+   exactly like every other). The next frame is `session_opened`
+   with the boot's facts (id, path, active model, `resumed`), then
+   the catalog, then — if you asked — the replay pass, then live
+   traffic. `resumed: false` after you asked the
    backend to resume means the store was empty and the backend
    **started fresh — an absorbed miss, not an error**; show a small
    note. Mismatch → `initialize_rejected { reason }` and the
@@ -282,7 +287,8 @@ dead structure ahead of the data.
 | event | payload | when |
 |---|---|---|
 | `sessions_available` | `sessions: [{ id, created_at, entry_count }]` | once, right after the ack's startup notes: every stored session, newest first. **Unstamped, backend-level.** Minimal by ruling — a plain object, fields grow when needed. A brand-new session has no file yet and is absent until it records. |
-| `session_created` | `id`, `path`, `model` | a `new_session` succeeded — **unstamped, backend-level** (the payload carries the id; no faked stamp). Its selection notes, if any, follow stamped with the new session's id. Nothing replays (the session is empty). |
+| `session_opened` | `id`, `path`, `model`, `resumed` | a session became visible in this backend — the boot (at spawn, right after the ack), a `new_session`, or an `open_session`. **One announcement shape for every path** (2026-09 ruling — the ack carries protocol-level facts only; the boot is not a special case). Stamped with the session's own stream. Selection notes, if any, follow on the same stream. |
+| `session_created` | `id`, `path`, `model` | a `new_session` succeeded — **unstamped, backend-level** (the payload carries the id; no faked stamp). Its selection notes, if any, follow stamped with the new session's id. Nothing replays (the session is empty). **Superseded by `session_opened`** (kept one version for in-flight frontends, then deleted). |
 | `checked_out` | `entry_id`, `base_id` | checkout succeeded. `base_id` is `null` today: drop everything and rebuild from the replay pass that follows. A non-null `base_id` is the reserved suffix mode (keep through `base_id`, apply the pass) — treat any non-null value as "rebuild from the pass" and you stay correct. |
 | `model_changed` | `provider`, `model`, `thinking_level` | the session's **active model** — a session preference: the file's last `model_change`, latest in time wins (a rewind never moves it). Announced live whenever the session becomes visible: ahead of every replay pass (boot, `open_session`, re-replay, after `checked_out`) — idempotent, the value repeats — and at every `model` command (a state write at receive; §5). **Never inside a pass** (state is announced, not reconstructed). The ack's `model` is the boot session's register. |
 

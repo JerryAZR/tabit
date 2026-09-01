@@ -185,3 +185,63 @@ fn dropping_a_committed_writer_flushes_its_tail() {
     assert_eq!(raw.lines().count(), 3, "the drop flush wrote the tail");
     std::fs::remove_dir_all(path.parent().unwrap()).ok();
 }
+
+fn model_change_record() -> FileRecord {
+    FileRecord::Side(crate::entry::SideRecord {
+        timestamp: "t".to_string(),
+        kind: crate::entry::SideKind::ModelChange {
+            provider: "p".to_string(),
+            model: "m".to_string(),
+            thinking_level: None,
+        },
+    })
+}
+
+#[test]
+fn an_unborn_session_survives_every_flush_without_a_file() {
+    let path = temp_path("unborn-flush");
+    let mut writer = SessionWriter::create(path.clone(), header());
+    // Birth lines only — the opening model_change (a selection, not a
+    // user message: opening a tab and changing model stays off disk).
+    writer.prequeue(&model_change_record());
+    // The exit-time flush (what the worker calls at wind-down): an
+    // outbox of birth lines with no file is a no-op.
+    writer
+        .flush_on_exit()
+        .expect("the exit flush never fails here");
+    assert!(
+        !path.exists(),
+        "no file + no user message: the flush materializes nothing"
+    );
+    // The drop path agrees.
+    drop(writer);
+    assert!(!path.exists(), "drop manufactures no orphan either");
+}
+
+#[test]
+fn the_first_commit_flushes_the_birth_lines_with_it() {
+    let path = temp_path("born-flush");
+    let mut writer = SessionWriter::create(path.clone(), header());
+    writer.prequeue(&model_change_record());
+    writer
+        .enqueue(&[user_record("a", None)])
+        .expect("a healthy disk accepts the batch");
+    let raw = std::fs::read_to_string(&path).expect("read");
+    assert_eq!(
+        raw.lines().count(),
+        3,
+        "header + opening model_change + the user message: {raw}"
+    );
+    assert!(raw.contains("model_change"), "the register landed: {raw}");
+}
+
+#[test]
+fn a_degraded_unborn_session_still_leaves_no_file() {
+    // The disk is dead from the start: the flush attempt must not
+    // create the file even while the outbox grows.
+    let (mut writer, _blocker) = blocked_writer("unborn-degraded");
+    writer.prequeue(&model_change_record());
+    let path = writer.path().to_path_buf();
+    let _ = writer.flush_on_exit();
+    assert!(!path.exists(), "degraded ≠ born: still no orphan");
+}
