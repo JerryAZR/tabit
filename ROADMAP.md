@@ -310,14 +310,14 @@ The known deviation from pi's subprocess model:
   unlinked child would keep spending tokens). `bash` is the reference
   body shape.
 - **Memory is generic, not permission-shaped** (ruled 2026-09): the
-  permission gate is a built-in extension, not a core concept — its
-  "Always allow" state becomes a session-scoped entry in the unified
-  capability map (hooks and tools already share it), registered by the
-  assembly like any extension's memory; `PermissionMemory` the public
-  type dissolves into the gate's private state. Children inherit by
-  cloning entry handles. Open implementation rulings: entry keying
-  (typed vs named) and the durability boundary (session-scoped state
-  here; "always allow globally" belongs to user config).
+  permission gate is a built-in extension, not a core concept, and its
+  "Always allow" state is generic session-scoped extension memory —
+  such a thing exists, any tool/extension can register one, and a
+  subagent session can share the parent's by handle. The exact shape
+  is **deferred to item 9** (it is the extension registration surface);
+  until then `PermissionMemory` stays as the gate's private state and
+  subagent v1 is unblocked — parent-proxy covers correctness, and an
+  interim child simply mounts its own gate.
 
 ### 6. Compaction + overflow recovery
 
@@ -523,6 +523,13 @@ The known deviation from pi's subprocess model:
   hook points, informed by opencode's extension/plugin design.
 - Settings surface: layered config (user > workspace > flags) already partly
   from item 1; extensions register tools, hooks, and prompt contributions.
+- **Session-scoped extension memory** (shape designed here, deferred from
+  the subagent rulings): generic state a tool or extension registers,
+  shareable with subagent sessions by handle; the permission gate's
+  "Always allow" set is the first consumer (today the ad-hoc
+  `PermissionMemory`). Open rulings: entry keying (typed vs named) and
+  the durability split (session-scoped state in the map; "always allow
+  globally" belongs to user config).
 
 ### 10. Prompt caching (required before release)
 
