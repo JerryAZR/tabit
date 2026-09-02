@@ -63,7 +63,7 @@
 //!   returns output that looks like a completed run.
 
 use rig_agent::tool::{DynamicTool, ToolContext};
-use rig_core::tool::{IntoToolOutput, ToolExecutionError};
+use rig_core::tool::{ToolExecutionError, ToolOutput};
 use rig_derive::rig_tool;
 use std::time::{Duration, Instant};
 
@@ -130,12 +130,12 @@ pub async fn read(
     path: String,
     offset: Option<usize>,
     limit: Option<usize>,
-) -> Result<rig_core::OneOrMany<rig_core::message::ToolResultContent>, ToolExecutionError> {
+) -> Result<ToolOutput, ToolExecutionError> {
     let resolved = resolve(context, &path);
     let meta = std::fs::metadata(&resolved)
         .map_err(|e| ToolExecutionError::other(format!("cannot read `{path}`: {e}")))?;
     if meta.is_dir() {
-        return report_text(list_directory(&resolved, &path)?);
+        return Ok(ToolOutput::text(list_directory(&resolved, &path)?));
     }
     let bytes = std::fs::read(&resolved)
         .map_err(|e| ToolExecutionError::other(format!("cannot read `{path}`: {e}")))?;
@@ -147,7 +147,7 @@ pub async fn read(
             offset.is_some() || limit.is_some(),
         );
     }
-    report_text(read_text(&path, &bytes, offset, limit)?)
+    Ok(ToolOutput::text(read_text(&path, &bytes, offset, limit)?))
 }
 
 /// The largest image read returns, raw bytes. The provider ceiling is
@@ -194,7 +194,7 @@ fn image_read(
     bytes: &[u8],
     media_type: rig_core::message::ImageMediaType,
     paged_args: bool,
-) -> Result<rig_core::OneOrMany<rig_core::message::ToolResultContent>, ToolExecutionError> {
+) -> Result<ToolOutput, ToolExecutionError> {
     if paged_args {
         return Err(ToolExecutionError::other(
             "images are read whole — offset/limit apply to text files only",
@@ -226,16 +226,8 @@ fn image_read(
     ];
     // Two parts by construction.
     #[allow(clippy::expect_used)]
-    Ok(rig_core::OneOrMany::many(parts).expect("the parts vector is non-empty"))
-}
-
-/// Wrap one text report as the tool's content parts (every text-only
-/// result is a single part).
-fn report_text(
-    report: String,
-) -> Result<rig_core::OneOrMany<rig_core::message::ToolResultContent>, ToolExecutionError> {
-    Ok(rig_core::OneOrMany::one(
-        rig_core::message::ToolResultContent::Text(report.into()),
+    Ok(ToolOutput::content(
+        rig_core::OneOrMany::many(parts).expect("the parts vector is non-empty"),
     ))
 }
 
@@ -446,28 +438,11 @@ pub async fn edit(
     #[rig(context)] context: &mut ToolContext,
     path: String,
     edits: Vec<EditReplacement>,
-) -> Result<rig_core::OneOrMany<rig_core::message::ToolResultContent>, ToolExecutionError> {
+) -> Result<ToolOutput, ToolExecutionError> {
     let resolved = resolve(context, &path);
     let _guard = file_io::lock(&resolved).await;
     let outcome = edit_core(&resolved.to_string_lossy(), &edits)?;
-    report_with_details(outcome.report, outcome.details)
-}
-
-/// One tool result's content parts: the model-facing report text first,
-/// then the structured details JSON when the tool produced any — the
-/// session projects text → `content`, JSON → `tool_result.details`.
-/// Every multi-part tool result (edit, the shell tools) is built here.
-fn report_with_details(
-    report: String,
-    details: Option<serde_json::Value>,
-) -> Result<rig_core::OneOrMany<rig_core::message::ToolResultContent>, ToolExecutionError> {
-    let mut parts = vec![rig_core::message::ToolResultContent::Text(report.into())];
-    if let Some(details) = details {
-        parts.push(rig_core::message::ToolResultContent::Json { value: details });
-    }
-    // Invariant: one part minimum by construction above (the report).
-    #[allow(clippy::expect_used)]
-    Ok(rig_core::OneOrMany::many(parts).expect("the report part is always present"))
+    rig_core::tool::content_parts(outcome.report, outcome.details)
 }
 
 /// One targeted replacement: `old_text` must occur exactly once in the
@@ -773,7 +748,7 @@ pub async fn bash(
     #[rig(context)] context: &mut ToolContext,
     command: String,
     timeout_secs: Option<u64>,
-) -> Result<rig_core::OneOrMany<rig_core::message::ToolResultContent>, ToolExecutionError> {
+) -> Result<ToolOutput, ToolExecutionError> {
     let interpreter = shell::bash().map_err(ToolExecutionError::other)?;
     run_shell(&interpreter, context, command, timeout_secs).await
 }
@@ -792,7 +767,7 @@ pub async fn powershell(
     #[rig(context)] context: &mut ToolContext,
     command: String,
     timeout_secs: Option<u64>,
-) -> Result<rig_core::OneOrMany<rig_core::message::ToolResultContent>, ToolExecutionError> {
+) -> Result<ToolOutput, ToolExecutionError> {
     run_shell(&shell::powershell(), context, command, timeout_secs).await
 }
 
@@ -820,7 +795,7 @@ async fn run_shell(
     context: &mut ToolContext,
     command: String,
     timeout_secs: Option<u64>,
-) -> Result<rig_core::OneOrMany<rig_core::message::ToolResultContent>, ToolExecutionError> {
+) -> Result<ToolOutput, ToolExecutionError> {
     let timeout = Duration::from_secs(
         timeout_secs
             .unwrap_or(DEFAULT_TIMEOUT_SECS)
@@ -924,7 +899,7 @@ async fn run_shell(
         }));
     }
     if output.status.success() {
-        report_with_details(visible, details)
+        rig_core::tool::content_parts(visible, details)
     } else {
         // The exit status rides structure too (the protocol's
         // `failed { exit_code }`): numeric codes pass through as
@@ -1077,38 +1052,11 @@ fn join_reader(handle: ReaderJoin) -> Vec<u8> {
     handle.and_then(|h| h.join().ok()).unwrap_or_default()
 }
 
-/// Erase a contextual `#[rig_tool]` (one taking `#[rig(context)]
-/// &mut ToolContext`) into a [`DynamicTool`] so sessions (which rebuild
-/// their agent on model switches) can hold mixed tool sets in one
-/// vector. Every tabit tool is contextual — they read the session cwd
-/// and the run token from the per-run context.
-pub fn dynamic_contextual<T>(tool: T) -> DynamicTool
-where
-    T: rig_agent::tool::Tool + Send + Sync + 'static,
-{
-    // One shared instance per call site; contextual tools are stateless
-    // (`call` takes `&self`), so no per-call clone is needed.
-    let tool = std::sync::Arc::new(tool);
-    let name = <T as rig_agent::tool::Tool>::NAME.to_string();
-    let description = tool.description();
-    let parameters = tool.parameters();
-    DynamicTool::new(
-        name,
-        description,
-        parameters,
-        move |ctx: &mut ToolContext, args: serde_json::Value| {
-            let tool = tool.clone();
-            Box::pin(async move {
-                let typed: <T as rig_agent::tool::Tool>::Args = serde_json::from_value(args)
-                    .map_err(|e| ToolExecutionError::other(format!("invalid arguments: {e}")))?;
-                let output = <T as rig_agent::tool::Tool>::call(tool.as_ref(), ctx, typed)
-                    .await
-                    .map_err(|e| tool.map_error(e))?;
-                output.into_tool_output()
-            })
-        },
-    )
-}
+/// The contextual-tool erasure (every tabit tool is contextual — they
+/// read the session cwd and the run token from the per-run
+/// [`ToolContext`]). The implementation lives with its types in
+/// rig-agent; re-exported here as the tools crate's registration door.
+pub use rig_agent::tool::dynamic_contextual;
 
 #[cfg(test)]
 mod tests;

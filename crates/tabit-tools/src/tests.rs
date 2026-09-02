@@ -15,9 +15,8 @@ fn ctx() -> rig_agent::tool::ToolContext {
 }
 
 /// The (text, details) split of a successful multi-part tool result.
-fn split_parts(
-    result: rig_core::OneOrMany<rig_core::message::ToolResultContent>,
-) -> (String, Option<serde_json::Value>) {
+fn split_parts(result: rig_core::tool::ToolOutput) -> (String, Option<serde_json::Value>) {
+    let result = result.into_content();
     let mut text = String::new();
     let mut details = None;
     for part in result {
@@ -1057,6 +1056,7 @@ async fn read_returns_an_image_content_part() {
     let parts: Vec<_> = read(&mut ctx(), path.to_string_lossy().to_string(), None, None)
         .await
         .expect("image read")
+        .into_content()
         .into_iter()
         .collect();
     assert_eq!(parts.len(), 2, "report text + image: {parts:?}");
@@ -1319,8 +1319,8 @@ async fn edit_parts(
     path: &std::path::Path,
     edits: Vec<EditReplacement>,
 ) -> Result<Vec<rig_core::message::ToolResultContent>, ToolExecutionError> {
-    let one_or_many = edit(&mut ctx(), path.to_string_lossy().into_owned(), edits).await?;
-    Ok(one_or_many.into_iter().collect())
+    let output = edit(&mut ctx(), path.to_string_lossy().into_owned(), edits).await?;
+    Ok(output.into_content().into_iter().collect())
 }
 
 #[tokio::test]

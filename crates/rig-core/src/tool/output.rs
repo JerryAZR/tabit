@@ -239,6 +239,27 @@ impl IntoToolOutput for ToolOutput {
     }
 }
 
+/// The standard multi-part tool result: the model-facing report text
+/// first, then the structured details JSON when the tool produced any
+/// (a runtime like tabit's projects text → content, JSON → a
+/// details/presentation-cargo channel). Every multi-part tool result
+/// is built here — one shape, one invariant (the report part is always
+/// present, so the parts never come back empty).
+pub fn content_parts(
+    report: String,
+    details: Option<serde_json::Value>,
+) -> Result<ToolOutput, ToolExecutionError> {
+    let mut parts = vec![ToolResultContent::text(report)];
+    if let Some(details) = details {
+        parts.push(ToolResultContent::Json { value: details });
+    }
+    // One part minimum by construction above.
+    #[allow(clippy::expect_used)]
+    Ok(ToolOutput::content(
+        OneOrMany::many(parts).expect("the report part is always present"),
+    ))
+}
+
 #[cfg(test)]
 mod tests {
     use crate::message::{DocumentSourceKind, ImageMediaType};

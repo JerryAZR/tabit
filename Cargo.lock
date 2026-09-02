@@ -4772,6 +4772,7 @@ dependencies = [
  "humantime",
  "rig-agent",
  "rig-core",
+ "rig-derive",
  "serde",
  "serde_json",
  "tabit-config",
@@ -4788,6 +4789,7 @@ dependencies = [
 name = "tabit-tools"
 version = "0.41.0"
 dependencies = [
+ "base64",
  "futures",
  "process-wrap",
  "rig-agent",

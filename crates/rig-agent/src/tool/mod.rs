@@ -1592,6 +1592,38 @@ mod tests {
     }
 }
 
+/// Erase a contextual [`Tool`] (an `#[rig_tool]` taking
+/// `#[rig(context)] &mut ToolContext`) into a [`DynamicTool`], so
+/// assemblies can hold mixed tool sets in one vector. The canonical
+/// erasure — one implementation, every caller.
+pub fn dynamic_contextual<T>(tool: T) -> DynamicTool
+where
+    T: Tool + Send + Sync + 'static,
+{
+    // One shared instance per call site; contextual tools are stateless
+    // (`call` takes `&self`), so no per-call clone is needed.
+    let tool = std::sync::Arc::new(tool);
+    let name = <T as Tool>::NAME.to_string();
+    let description = tool.description();
+    let parameters = tool.parameters();
+    DynamicTool::new(
+        name,
+        description,
+        parameters,
+        move |ctx: &mut ToolContext, args: serde_json::Value| {
+            let tool = tool.clone();
+            Box::pin(async move {
+                let typed: <T as Tool>::Args = serde_json::from_value(args)
+                    .map_err(|e| ToolExecutionError::other(format!("invalid arguments: {e}")))?;
+                let output = <T as Tool>::call(tool.as_ref(), ctx, typed)
+                    .await
+                    .map_err(|e| tool.map_error(e))?;
+                output.into_tool_output()
+            })
+        },
+    )
+}
+
 #[cfg(test)]
 mod migrated_tests {
     use crate::test_utils::{
