@@ -1046,7 +1046,7 @@ id = "m"
                 .create("C:/w")
                 .unwrap();
             session.prompt("hello").await;
-            session.path().to_path_buf()
+            session.path().expect("file-backed").to_path_buf()
         };
         let session = history_session("second answer", store)
             .resume(&path)

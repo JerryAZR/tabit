@@ -6,7 +6,6 @@ use super::mailbox::Mailbox;
 use super::{Session, SharedConversation};
 use crate::context_manager::ContextManager;
 use crate::error::SessionError;
-use crate::writer::SessionWriter;
 use rig_agent::agent::{Agent, AgentBuilder};
 use rig_agent::tool::DynamicTool;
 use std::path::PathBuf;
@@ -40,7 +39,9 @@ impl Session {
 
     pub(super) fn assemble(
         builder: SessionBuilder,
-        writer: SessionWriter,
+        buffer: crate::writer::SharedBuffer,
+        path: Option<PathBuf>,
+        id: String,
         cwd: PathBuf,
         resumed: bool,
     ) -> Result<Self, SessionError> {
@@ -55,10 +56,6 @@ impl Session {
                     .to_string(),
             });
         }
-        let path = writer.path().to_path_buf();
-        let id = writer.session_id().to_string();
-        let buffer: crate::writer::SharedBuffer =
-            std::sync::Arc::new(std::sync::Mutex::new(writer));
         let conversation_cell: Arc<std::sync::RwLock<ContextManager>> = Arc::new(
             std::sync::RwLock::new(ContextManager::empty(buffer.clone())),
         );

@@ -116,10 +116,23 @@ impl SessionBuilder {
     /// the opening model selection recorded right after the header)
     /// materializes at the first user message, so a session that never
     /// runs leaves nothing behind — not a header-only orphan.
+    /// Create a fresh session. Nothing touches the disk: the file (with
+    /// the opening model selection recorded right after the header)
+    /// materializes at the first user message, so a session that never
+    /// runs leaves nothing behind — not a header-only orphan.
     pub fn create(self, cwd: &str) -> Result<Session, SessionError> {
         let writer = self.store.create(cwd);
         let selection = self.selection.clone();
-        let session = Session::assemble(self, writer, PathBuf::from(cwd), false)?;
+        let id = writer.session_id().to_string();
+        let path = writer.path().to_path_buf();
+        let session = Session::assemble(
+            self,
+            std::sync::Arc::new(std::sync::Mutex::new(writer)),
+            Some(path),
+            id,
+            PathBuf::from(cwd),
+            false,
+        )?;
         // The opening model_change enqueues at once: write-behind — it
         // lands with the session's first drain, and a session that
         // never runs materializes nothing (the writer's no-orphan
@@ -127,6 +140,26 @@ impl SessionBuilder {
         // model_change wins).
         crate::lock::lock(&session.buffer).prequeue(&register_record(&selection));
         Ok(session)
+    }
+
+    /// Create an **ephemeral** session: in memory only, over the
+    /// disk-unplugged [`NullBuffer`](crate::writer::NullBuffer) —
+    /// everything folds and grows, nothing persists. No file ever
+    /// materializes (there is no orphan to gate), so there is nothing
+    /// to resume, replay, or list; the id is still real (the stream
+    /// stamp and the prompt-cache key). The subagent scratch child;
+    /// also a cheap test session.
+    pub fn ephemeral(self, cwd: &str) -> Result<Session, SessionError> {
+        let buffer: crate::writer::SharedBuffer =
+            std::sync::Arc::new(std::sync::Mutex::new(crate::writer::NullBuffer));
+        Session::assemble(
+            self,
+            buffer,
+            None,
+            crate::ids::new_session_id(),
+            PathBuf::from(cwd),
+            false,
+        )
     }
 
     /// Resume the session stored at `path`: parse it once (the tree, the
@@ -146,9 +179,17 @@ impl SessionBuilder {
         };
         validate_selection(&self.selection, &self.config)?;
         let id = parsed.header.id.clone();
-        let writer = SessionWriter::append_to(&parsed.path, id, parsed.file_len)?;
+        let file_path = parsed.path.clone();
+        let writer = SessionWriter::append_to(&parsed.path, id.clone(), parsed.file_len)?;
         let cwd = PathBuf::from(parsed.header.cwd.clone());
-        let mut session = Session::assemble(self, writer, cwd, true)?;
+        let mut session = Session::assemble(
+            self,
+            std::sync::Arc::new(std::sync::Mutex::new(writer)),
+            Some(file_path),
+            id,
+            cwd,
+            true,
+        )?;
         session.ledger = parsed.stats.clone();
         // The conversation's owner is born from the parsed tree over
         // the session's one buffer (from_tree is the only preloaded

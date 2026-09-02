@@ -873,7 +873,7 @@ async fn a_replay_request_streams_the_pass_onto_the_event_channel() {
             .create("C:/w")
             .expect("session");
         session.prompt("hello").await;
-        session.path().to_path_buf()
+        session.path().expect("file-backed").to_path_buf()
     };
     let session = Factory::new(vec![text_turn("second answer")])
         .into_builder(store.clone())

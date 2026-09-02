@@ -17,6 +17,13 @@ use std::sync::{Arc, Mutex};
 use tabit_config::TabitConfig;
 use tabit_protocol::{ModelSelection, SessionEvent};
 
+/// The file path of a file-backed session (tests here always build
+/// persisted sessions; the ephemeral suite asserts `path().is_none()`
+/// directly).
+fn file_path(session: &crate::Session) -> &std::path::Path {
+    session.path().expect("file-backed")
+}
+
 pub(crate) fn temp_store(tag: &str) -> SessionStore {
     let dir = std::env::temp_dir()
         .join("tabit-session-tests")
@@ -284,7 +291,7 @@ async fn a_fresh_session_materializes_at_the_first_user_message() -> Result<(), 
 
     // Created, never run: nothing on disk (no header-only orphans), and
     // the session still knows the path it would materialize at.
-    let path = session.path().to_path_buf();
+    let path = session.path().expect("file-backed").to_path_buf();
     assert!(!path.exists(), "no file before the first message");
     assert!(store.list()?.is_empty(), "nothing to list yet");
 
@@ -313,9 +320,9 @@ async fn single_turn_prompt_persists_and_projects() -> Result<(), SessionError> 
     );
 
     // Log: initial model change, user message, assistant turn with usage.
-    let records = load_records(session.path());
+    let records = load_records(file_path(&session));
     assert_eq!(records.len(), 3);
-    let nodes = file_nodes(session.path());
+    let nodes = file_nodes(file_path(&session));
     assert_eq!(nodes.len(), 2);
     assert!(matches!(&nodes[0].kind, EntryKind::UserMessage { .. }));
     // Usage facts are deferred (the ruling): the assistant entry
@@ -351,7 +358,7 @@ async fn tool_roundtrip_is_recorded_and_events_name_the_tool() -> Result<(), Ses
     let run = session.prompt("echo x").await;
     assert_eq!(run.output, "did it");
 
-    let kinds = record_kinds(session.path());
+    let kinds = record_kinds(file_path(&session));
     assert_eq!(
         kinds,
         vec!["model", "user", "assistant", "tool_result", "assistant"]
@@ -399,7 +406,7 @@ async fn tool_roundtrip_is_recorded_and_events_name_the_tool() -> Result<(), Ses
         })
         .expect("a tool result event");
     assert_eq!(status, tabit_protocol::ToolResultStatus::Success);
-    let logged = file_nodes(session.path())
+    let logged = file_nodes(file_path(&session))
         .into_iter()
         .find_map(|e| match &e.kind {
             EntryKind::ToolResult { result } => Some(crate::session::result_text(result)),
@@ -463,7 +470,7 @@ async fn failing_tool_results_carry_status_and_content() -> Result<(), SessionEr
         "the numeric error code rides structure as the exit code"
     );
     assert!(!content.is_empty(), "the failure detail is the content");
-    let logged = file_nodes(session.path())
+    let logged = file_nodes(file_path(&session))
         .into_iter()
         .find_map(|e| match &e.kind {
             EntryKind::ToolResult { result } => Some(crate::session::result_text(result)),
@@ -524,7 +531,7 @@ async fn announced_turn_ids_are_the_log_entry_ids() -> Result<(), SessionError> 
     );
 
     // The announced ids are exactly the committed assistant entries' ids.
-    let assistant_ids: Vec<String> = file_nodes(session.path())
+    let assistant_ids: Vec<String> = file_nodes(file_path(&session))
         .into_iter()
         .filter_map(|e| match &e.kind {
             EntryKind::AssistantMessage { .. } => Some(e.id.clone()),
@@ -560,7 +567,7 @@ async fn announced_turn_ids_are_the_log_entry_ids() -> Result<(), SessionError> 
         })
         .expect("one tool result event");
     assert_eq!(&result_turn, first, "the result belongs to the call's turn");
-    let log_result_ids: Vec<String> = file_nodes(session.path())
+    let log_result_ids: Vec<String> = file_nodes(file_path(&session))
         .into_iter()
         .filter_map(|e| match &e.kind {
             EntryKind::ToolResult { .. } => Some(e.id.clone()),
@@ -639,7 +646,7 @@ async fn resumed_reflects_create_vs_resume() -> Result<(), SessionError> {
     let mut first = factory.into_builder(store.clone()).create("C:/w")?;
     assert!(!first.resumed(), "a created session is fresh");
     first.prompt("hi").await;
-    let path = first.path().to_path_buf();
+    let path = first.path().expect("file-backed").to_path_buf();
     drop(first);
 
     let (second, _report) = Factory::new(vec![text_turn("b")])
@@ -655,7 +662,7 @@ async fn resume_continues_the_log_and_reports_the_model() -> Result<(), SessionE
     let factory = Factory::new(vec![text_turn("one"), text_turn("two")]);
     let mut first = factory.into_builder(store.clone()).create("C:/w")?;
     first.prompt("first question").await;
-    let path = first.path().to_path_buf();
+    let path = first.path().expect("file-backed").to_path_buf();
     drop(first);
 
     let (second, report) = Factory::new(vec![text_turn("two")])
@@ -767,7 +774,7 @@ async fn failed_run_still_records_the_user_message() -> Result<(), SessionError>
         run.events
     );
 
-    let records = load_records(session.path());
+    let records = load_records(file_path(&session));
     assert!(matches!(
         records.get(1),
         Some(crate::entry::FileRecord::Node(crate::entry::SessionEntry {
@@ -818,7 +825,7 @@ async fn malformed_tool_call_exhaustion_fails_the_run_and_leaves_the_session_ali
     // model change and the user message; the two attempts record
     // nothing until the usage discussion returns.
     assert_eq!(
-        load_records(session.path()).len(),
+        load_records(file_path(&session)).len(),
         2,
         "model change + the user message; discards are deferred"
     );
@@ -842,7 +849,7 @@ async fn set_model_records_the_change_and_splits_stats() -> Result<(), SessionEr
 
     assert_eq!(session.selection().provider, "q");
 
-    let changes = load_records(session.path())
+    let changes = load_records(file_path(&session))
         .into_iter()
         .filter(|r| {
             matches!(
@@ -1060,7 +1067,7 @@ async fn resume_uses_the_builder_selection_and_records_the_switch() -> Result<()
     session
         .set_model(ModelSelection::new("q", "m2"))
         .expect("switch");
-    let path = session.path().to_path_buf();
+    let path = session.path().expect("file-backed").to_path_buf();
     drop(session);
 
     let requested = Arc::new(Mutex::new(Vec::<(String, String)>::new()));
@@ -1261,9 +1268,9 @@ async fn persistence_failure_fails_the_run_loudly() -> Result<(), SessionError> 
         crate::session::RunOutcome::Completed,
         "memory is authoritative: the run itself is unaffected: {run:?}"
     );
-    assert!(!session.path().exists() || session.path().is_file());
-    let reload = store.open_path(session.path());
-    if !session.path().exists() {
+    assert!(!file_path(&session).exists() || file_path(&session).is_file());
+    let reload = store.open_path(file_path(&session));
+    if !file_path(&session).exists() {
         assert!(matches!(reload, Err(SessionError::Io { .. })));
     }
     let _ = std::fs::remove_dir_all(store.dir());
@@ -1295,12 +1302,12 @@ async fn thinking_level_changes_are_validated_and_recorded() -> Result<(), Sessi
     // commit, and the pending opening register is superseded
     // (last-write-wins) before then.
     assert!(
-        !session.path().exists(),
+        !file_path(&session).exists(),
         "model changes alone never materialize a session file"
     );
     let summary = session.prompt_with("hello", &mut |_| {}).await;
     assert!(matches!(summary.outcome, crate::RunOutcome::Completed));
-    let changes = load_records(session.path())
+    let changes = load_records(file_path(&session))
         .into_iter()
         .filter(|r| {
             matches!(
@@ -1344,7 +1351,7 @@ async fn abort_mid_run_records_marker_and_stays_resumable() -> Result<(), Sessio
     // `create` records the opening model_change; the aborted run adds the
     // prompt and the marker, nothing partial.
     assert_eq!(
-        record_kinds(session.path()),
+        record_kinds(file_path(&session)),
         vec!["model", "user", "aborted"]
     );
 
@@ -1387,7 +1394,7 @@ async fn steering_during_a_run_is_recorded_one_to_one() -> Result<(), SessionErr
             .count(),
         1
     );
-    let steers: Vec<crate::SessionEntry> = file_nodes(session.path())
+    let steers: Vec<crate::SessionEntry> = file_nodes(file_path(&session))
         .into_iter()
         .filter(|e| matches!(&e.kind, EntryKind::UserMessage { message } if message.user_text().as_deref() == Some("also this")))
         .collect();
@@ -1497,7 +1504,7 @@ async fn messages_queued_before_pump_all_join_the_first_run() -> Result<(), Sess
         })
         .collect();
     assert_eq!(event_ids.len(), 2);
-    let log_ids: Vec<String> = file_nodes(session.path())
+    let log_ids: Vec<String> = file_nodes(file_path(&session))
         .into_iter()
         .filter(|e| matches!(&e.kind, EntryKind::UserMessage { .. }))
         .map(|e| e.id.clone())
@@ -1529,7 +1536,7 @@ async fn messages_queued_before_pump_all_join_the_first_run() -> Result<(), Sess
     );
     // One entry per message: the log keeps 1:1 fidelity.
     assert_eq!(
-        load_records(session.path()).len(),
+        load_records(file_path(&session)).len(),
         4,
         "model + two users + assistant"
     );
@@ -1561,7 +1568,7 @@ async fn a_message_landing_after_the_last_drain_runs_as_the_next_prompt() -> Res
         })
         .await;
     assert_eq!(finished, 2, "the late message ran as the next prompt");
-    let late: Vec<crate::SessionEntry> = file_nodes(session.path())
+    let late: Vec<crate::SessionEntry> = file_nodes(file_path(&session))
         .into_iter()
         .filter(|e| {
             matches!(&e.kind, EntryKind::UserMessage { message } if message.user_text().as_deref() == Some("arrived too late to steer"))
@@ -1711,7 +1718,7 @@ async fn a_post_tool_stop_discards_the_pending_queue() -> Result<(), SessionErro
     // The discarded steer is gone from the durable log too: only the
     // opening message landed as a user entry.
     let log_user_texts: Vec<String> = {
-        let messages: Vec<Message> = file_nodes(session.path())
+        let messages: Vec<Message> = file_nodes(file_path(&session))
             .into_iter()
             .filter_map(|entry| match entry.kind {
                 EntryKind::UserMessage { message } => Some(message),
@@ -1774,7 +1781,7 @@ async fn rewind_drops_the_last_turn_and_branches_the_next_prompt() -> Result<(),
 
     // The checkout record is the last line; the dropped nodes stay in
     // the file, off-branch but present.
-    let records = load_records(session.path());
+    let records = load_records(file_path(&session));
     assert!(matches!(
         records.last(),
         Some(crate::entry::FileRecord::Side(crate::entry::SideRecord {
@@ -1783,13 +1790,13 @@ async fn rewind_drops_the_last_turn_and_branches_the_next_prompt() -> Result<(),
         }))
     ));
     assert_eq!(records.len(), 6, "nothing was deleted");
-    let nodes = file_nodes(session.path());
+    let nodes = file_nodes(file_path(&session));
     assert_eq!(nodes.len(), 4, "two full turns stay in the file");
     let first_answer_id = nodes[1].id.clone();
 
     // The next prompt branches from the branch point.
     session.prompt("question two, revised").await;
-    let branched = file_nodes(session.path())
+    let branched = file_nodes(file_path(&session))
         .into_iter()
         .rev()
         .find(|entry| matches!(entry.kind, EntryKind::UserMessage { .. }))
@@ -1825,7 +1832,7 @@ async fn rewind_rejects_zero_and_more_than_the_chain_holds() -> Result<(), Sessi
 
     // Nothing was written by the failed attempts.
     assert!(matches!(
-        load_records(session.path()).last(),
+        load_records(file_path(&session)).last(),
         Some(crate::entry::FileRecord::Node(crate::entry::SessionEntry {
             kind: EntryKind::AssistantMessage { .. },
             ..
@@ -1871,7 +1878,7 @@ async fn a_rewind_never_moves_the_model_register() -> Result<(), SessionError> {
     // from the chain — while the builder's explicit selection (the
     // caller's answer) continues and, differing from the register, is
     // recorded as the newest turn of the knob.
-    let path = session.path().to_path_buf();
+    let path = session.path().expect("file-backed").to_path_buf();
     drop(session);
     let (session, report) = Factory::new(vec![text_turn("answer three")])
         .into_builder(store.clone())
@@ -1907,7 +1914,7 @@ async fn promptless_rewind_survives_reopen() -> Result<(), SessionError> {
         session.prompt("question one").await;
         session.prompt("question two").await;
         session.rewind(1).expect("rewind");
-        session.path().to_path_buf()
+        session.path().expect("file-backed").to_path_buf()
     };
 
     let (session, _report) = Factory::new(vec![text_turn("continued")])
@@ -2118,7 +2125,11 @@ async fn rewinding_to_an_unknown_entry_changes_nothing() -> Result<(), SessionEr
         .rewind_to_entry("no-such-entry")
         .expect_err("unknown");
     assert!(error.to_string().contains("not in this session"), "{error}");
-    assert_eq!(load_records(session.path()).len(), 3, "nothing was written");
+    assert_eq!(
+        load_records(file_path(&session)).len(),
+        3,
+        "nothing was written"
+    );
     std::fs::remove_dir_all(store.dir()).ok();
     Ok(())
 }
@@ -2362,7 +2373,7 @@ async fn replay_re_emits_the_chain_with_live_ids_and_whole_texts() -> Result<(),
         .create("C:/w")?;
     let run = session.prompt("echo x").await;
     assert_eq!(run.output, "all done");
-    let path = session.path().to_path_buf();
+    let path = session.path().expect("file-backed").to_path_buf();
     drop(session);
 
     // What the live run put on the wire: announced turn ids, entry ids,
@@ -2476,7 +2487,7 @@ async fn resumed_sessions_probe_ids_from_earlier_processes() -> Result<(), Sessi
     session.prompt("one").await;
     session.prompt("two").await;
     // The second exchange's user node — about to go off-branch.
-    let off_chain = file_nodes(session.path())
+    let off_chain = file_nodes(file_path(&session))
         .into_iter()
         .find_map(|entry| match &entry.kind {
             EntryKind::UserMessage { message } if crate::session::user_text(message) == "two" => {
@@ -2485,7 +2496,7 @@ async fn resumed_sessions_probe_ids_from_earlier_processes() -> Result<(), Sessi
             _ => None,
         })
         .expect("the second user node");
-    let path = session.path().to_path_buf();
+    let path = session.path().expect("file-backed").to_path_buf();
     session.rewind(1)?;
     drop(session);
 
@@ -2547,12 +2558,67 @@ async fn a_resumed_session_adopts_its_recorded_cwd() {
             .expect("session");
         // The first commit materializes the file (the no-orphan gate).
         session.prompt("hello").await;
-        session.path().to_path_buf()
+        session.path().expect("file-backed").to_path_buf()
     };
     let (resumed, _) = Factory::new(vec![text_turn("two")])
         .into_builder(store.clone())
         .resume(&path)
         .expect("resume");
     assert_eq!(resumed.cwd(), Path::new("E:/recorded/cwd"));
+    std::fs::remove_dir_all(store.dir()).ok();
+}
+
+// --- ephemeral sessions: everything folds, nothing persists ---
+
+#[tokio::test]
+async fn an_ephemeral_session_runs_whole_and_leaves_no_file() {
+    let store = temp_store("ephemeral-run");
+    let mut session = Factory::new(vec![text_turn("scratch answer")])
+        .into_builder(store.clone())
+        .ephemeral("C:/w")
+        .expect("ephemeral session");
+    assert!(session.path().is_none(), "no file, ever");
+    assert_eq!(session.cwd(), Path::new("C:/w"));
+
+    let mut events = Vec::new();
+    let summary = session
+        .prompt_with("look at this", &mut |event| events.push(event))
+        .await;
+    assert_eq!(summary.output, "scratch answer");
+    // The run happened live and whole: user message, terminal, the lot.
+    assert!(
+        events
+            .iter()
+            .any(|e| matches!(e, SessionEvent::UserMessage { text, .. } if text == "look at this"))
+    );
+    assert!(events.iter().any(
+        |e| matches!(e, SessionEvent::RunFinished { output, .. } if output == "scratch answer")
+    ));
+    // The context grew in memory.
+    assert_eq!(session.context().len(), 2);
+
+    // Nothing materialized anywhere in the store directory — not even
+    // the directory itself (it is created lazily by the first real
+    // session's drain; the ephemeral run never triggers it).
+    let leftovers: Vec<_> = std::fs::read_dir(store.dir())
+        .map(|entries| entries.filter_map(|e| e.ok()).collect())
+        .unwrap_or_default();
+    assert!(leftovers.is_empty(), "no orphan files: {leftovers:?}");
+    std::fs::remove_dir_all(store.dir()).ok();
+}
+
+#[tokio::test]
+async fn an_ephemeral_session_conversates_across_runs() {
+    // Multi-turn memory without a file: the second run's mock answer
+    // depends on the conversation carrying the first exchange.
+    let store = temp_store("ephemeral-multi");
+    let mut session = Factory::new(vec![text_turn("first"), text_turn("second")])
+        .into_builder(store.clone())
+        .ephemeral("C:/w")
+        .expect("ephemeral session");
+    session.prompt("one").await;
+    let summary = session.prompt("two").await;
+    assert_eq!(summary.output, "second");
+    assert_eq!(session.context().len(), 4, "both exchanges in context");
     std::fs::remove_dir_all(store.dir()).ok();
 }

@@ -123,7 +123,12 @@ pub struct Session {
     /// (see [`Session::submit`]); drained by [`Session::pump`] and by the
     /// engine's turn-boundary steering.
     mailbox: Mailbox,
-    path: PathBuf,
+    /// The session file, when the session is file-backed. `None` for
+    /// an **ephemeral** session ([`SessionBuilder::ephemeral`]): it
+    /// lives in memory only (a `NullBuffer` underneath — everything
+    /// folds and grows; nothing persists), so there is nothing to
+    /// resume, replay, or list. The subagent scratch child.
+    path: Option<PathBuf>,
     /// The working directory this session runs in — recorded in the
     /// header, mounted into every run's tool context as
     /// [`SessionCwd`](rig_agent::tool::SessionCwd) so relative tool
@@ -179,9 +184,20 @@ impl Session {
         &self.id
     }
 
-    /// The session file.
-    pub fn path(&self) -> &Path {
-        &self.path
+    /// The session file, when file-backed; `None` for an ephemeral
+    /// session (nothing to resume or list).
+    pub fn path(&self) -> Option<&Path> {
+        self.path.as_deref()
+    }
+
+    /// The path as the wire carries it — the empty string for an
+    /// ephemeral session (a frontend treats empty as "no file"; the
+    /// v5 changelog states it).
+    pub(crate) fn wire_path(&self) -> String {
+        self.path
+            .as_ref()
+            .map(|p| p.display().to_string())
+            .unwrap_or_default()
     }
 
     /// The working directory this session runs in.

@@ -371,7 +371,11 @@ fn print_banner(session: &Session) {
             session.context().len()
         );
     } else {
-        eprintln!("session {} started", session.path().display());
+        let where_ = session
+            .path()
+            .map(|p| p.display().to_string())
+            .unwrap_or_else(|| "in memory".to_string());
+        eprintln!("session {where_} started");
     }
 }
 

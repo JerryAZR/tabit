@@ -298,7 +298,7 @@ impl SessionHost {
     pub fn spawn(boot: Session, startup_notes: Vec<String>, wiring: SessionHostWiring) -> Self {
         let info = SessionInfo {
             session_id: boot.id().to_string(),
-            session_path: boot.path().display().to_string(),
+            session_path: boot.wire_path(),
             model: boot.selection(),
             resumed: boot.resumed(),
         };
@@ -685,7 +685,7 @@ impl HostLoop {
             stream: None,
             event: SessionEvent::SessionCreated {
                 id: id.clone(),
-                path: session.path().display().to_string(),
+                path: session.wire_path(),
                 model: session.selection(),
             },
         });
@@ -699,7 +699,7 @@ impl HostLoop {
             stream: Some(stream.clone()),
             event: SessionEvent::SessionOpened {
                 id: id.clone(),
-                path: session.path().display().to_string(),
+                path: session.wire_path(),
                 model: session.selection(),
                 resumed: session.resumed(),
             },
@@ -732,7 +732,7 @@ impl HostLoop {
             stream: Some(stream.clone()),
             event: SessionEvent::SessionOpened {
                 id: id.to_string(),
-                path: session.path().display().to_string(),
+                path: session.wire_path(),
                 model: session.selection(),
                 resumed: session.resumed(),
             },
