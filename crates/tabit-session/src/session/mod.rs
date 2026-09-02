@@ -146,6 +146,16 @@ pub struct Session {
     /// the permission gate fails closed and ask-the-user tools report
     /// no frontend, in-band.
     interaction: Option<InteractionHub>,
+    /// Subagent support, when the assembly mounted it
+    /// ([`SessionBuilder::subagents`]): the process-wide parts; the
+    /// per-run capability is minted at run open.
+    subagent_parts: Option<Arc<crate::subagent::SubagentParts>>,
+    /// The frontend channel's weak end for child-event forwarding
+    /// (the subagent tap), attached by the worker at spawn — the same
+    /// attach-once discipline the notice slots keep.
+    subagent_events: Arc<
+        std::sync::OnceLock<tokio::sync::mpsc::WeakUnboundedSender<tabit_protocol::EventFrame>>,
+    >,
 }
 
 /// The receive-time view of the conversation (checkout validation at
@@ -177,6 +187,16 @@ impl Session {
     /// which exists only there.
     pub fn attach_interaction(&mut self, hub: InteractionHub) {
         self.interaction = Some(hub);
+    }
+
+    /// Attach the channel subagent child events forward through.
+    /// Called once by the session worker at spawn; the weak end keeps
+    /// the notice discipline (the stream ends with the frontend).
+    pub fn attach_subagent_channel(
+        &mut self,
+        events: &tokio::sync::mpsc::UnboundedSender<tabit_protocol::EventFrame>,
+    ) {
+        let _ = self.subagent_events.set(events.downgrade());
     }
 
     /// The session id.

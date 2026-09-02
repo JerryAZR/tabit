@@ -234,12 +234,20 @@ pub enum SessionEvent {
         /// The session id (its event stream stamp).
         id: String,
         /// The session's file path (materializes at its first user
-        /// message for a fresh session).
+        /// message for a fresh session). **Empty for an ephemeral
+        /// session** — in memory only, nothing to open or replay.
         path: String,
         /// The session's active selection.
         model: ModelSelection,
         /// Whether the session continues an existing chain.
         resumed: bool,
+        /// The parent session's id when this session is a subagent
+        /// child (v5): a child announces through the same door, and a
+        /// frontend branches on this — parent sessions update their
+        /// facts, children render nested or not at all. Absent for
+        /// every user-facing session.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        parent: Option<String>,
     },
     /// A `new_session` command succeeded: a fresh session exists in
     /// this backend, empty (nothing replays). Unstamped,

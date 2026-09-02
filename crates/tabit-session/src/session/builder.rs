@@ -25,6 +25,7 @@ pub struct SessionBuilder {
     pub(super) max_turns: usize,
     pub(super) model_factory: ModelFactory,
     pub(super) run_hooks: Option<rig_agent::agent::HookStack>,
+    pub(super) subagent_parts: Option<Arc<crate::subagent::SubagentParts>>,
 }
 
 /// Builds the model behind a selection: `(provider, model, cache_key)`
@@ -71,7 +72,17 @@ impl SessionBuilder {
             max_turns: DEFAULT_MAX_TURNS,
             model_factory: default_factory,
             run_hooks: None,
+            subagent_parts: None,
         })
+    }
+
+    /// Mount subagent support: the process-wide parts every child is
+    /// built from (see [`crate::subagent`]). The parts' toolset is the
+    /// child toolset — it must exclude the subagent tool itself
+    /// (recursion depth is enforced by omission).
+    pub fn subagents(mut self, parts: Arc<crate::subagent::SubagentParts>) -> Self {
+        self.subagent_parts = Some(parts);
+        self
     }
 
     /// The system preamble hoisted into every request.

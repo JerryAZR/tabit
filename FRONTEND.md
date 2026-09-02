@@ -75,8 +75,8 @@ arrive as events. Input tolerance: blank lines are skipped, a trailing
 size limit** — tool output can be large; buffer accordingly.
 
 ```
-→ {"type":"initialize","protocol_version":4,"replay":true}
-← {"type":"initialize_ack","protocol_version":4,"session_id":"019…"}
+→ {"type":"initialize","protocol_version":5,"replay":true}
+← {"type":"initialize_ack","protocol_version":5,"session_id":"019…"}
 ← {"type":"session_opened","stream":"019…","id":"019…","path":"…",
    "model":{"provider":"…","model":"…","thinking_level":null},"resumed":true}
 ← {"type":"sessions_available","sessions":[
@@ -287,7 +287,7 @@ dead structure ahead of the data.
 | event | payload | when |
 |---|---|---|
 | `sessions_available` | `sessions: [{ id, created_at, entry_count }]` | once, right after the ack's startup notes: every stored session, newest first. **Unstamped, backend-level.** Minimal by ruling — a plain object, fields grow when needed. A brand-new session has no file yet and is absent until it records. |
-| `session_opened` | `id`, `path`, `model`, `resumed` | a session became visible in this backend — the boot (at spawn, right after the ack), a `new_session`, or an `open_session`. **One announcement shape for every path** (2026-09 ruling — the ack carries protocol-level facts only; the boot is not a special case). Stamped with the session's own stream. Selection notes, if any, follow on the same stream. |
+| `session_opened` | `id`, `path`, `model`, `resumed`, `parent?` | a session became visible in this backend — the boot (at spawn, right after the ack), a `new_session`, an `open_session`, **or a subagent child** (v5). **One announcement shape for every path** (2026-09 ruling — the ack carries protocol-level facts only; the boot is not a special case). Stamped with the session's own stream. Selection notes, if any, follow on the same stream. v5: `path` is **empty for an ephemeral session** (in memory only — nothing to open or replay; subagent children are ephemeral today), and `parent` names the spawning session for a subagent child — absent for every user-facing session. A frontend branches on `parent`: user sessions update their session facts, children render nested (or not at all) — a child announcement must never overwrite the active session's facts. The child's whole run (its `user_message`, deltas, `tool_call`s, terminal) streams on its own stamp; the spawner's transcript sees only the subagent `tool_call`/`tool_result` pair. |
 | `session_created` | `id`, `path`, `model` | a `new_session` succeeded — **unstamped, backend-level** (the payload carries the id; no faked stamp). Its selection notes, if any, follow stamped with the new session's id. Nothing replays (the session is empty). **Superseded by `session_opened`** (kept one version for in-flight frontends, then deleted). |
 | `checked_out` | `entry_id`, `base_id` | checkout succeeded. `base_id` is `null` today: drop everything and rebuild from the replay pass that follows. A non-null `base_id` is the reserved suffix mode (keep through `base_id`, apply the pass) — treat any non-null value as "rebuild from the pass" and you stay correct. |
 | `model_changed` | `provider`, `model`, `thinking_level` | the session's **active model** — a session preference: the file's last `model_change`, latest in time wins (a rewind never moves it). Announced live whenever the session becomes visible: ahead of every replay pass (boot, `open_session`, re-replay, after `checked_out`) — idempotent, the value repeats — and at every `model` command (a state write at receive; §5). **Never inside a pass** (state is announced, not reconstructed). The ack's `model` is the boot session's register. |

@@ -391,6 +391,22 @@ fn assemble_session(
     // Built once per process: the prompt must stay byte-stable for the
     // provider's prompt cache (see the prompt module docs).
     let preamble = build_system_prompt(&cwd).map_err(|e| e.to_string())?;
+
+    // Subagent support (ROADMAP item 5): the process-wide parts, whose
+    // toolset is the child toolset — the parent's minus the subagent
+    // tool itself, so children cannot spawn children (recursion depth
+    // is enforced by omission).
+    let children = child_tools();
+    let subagents = std::sync::Arc::new(tabit_session::subagent::SubagentParts {
+        config: registry.config().clone(),
+        auth: registry.auth().clone(),
+        store: store.clone(),
+        tools: children.clone(),
+        base_preamble: preamble.clone(),
+        max_turns: args.max_turns.unwrap_or(tabit_session::DEFAULT_MAX_TURNS),
+        model_factory: registry.factory(),
+    });
+
     let mut builder = SessionBuilder::new(
         store,
         registry.config().clone(),
@@ -399,13 +415,6 @@ fn assemble_session(
     )
     .map_err(|e| e.to_string())?
     .preamble(preamble)
-    // All coding tools are contextual: they read the session cwd and
-    // the run token from the per-run ToolContext.
-    .dynamic_tool(dynamic_contextual(tabit_tools::Read))
-    .dynamic_tool(dynamic_contextual(tabit_tools::Write))
-    .dynamic_tool(dynamic_contextual(tabit_tools::Edit))
-    .dynamic_tool(tabit_tools::shell_tool())
-    .dynamic_tool(dynamic_contextual(tabit_tools::AskUser))
     .model_factory(registry.factory())
     // The dev-time permission gate, mounted by the assembly (the
     // tool-gate seam): session-scoped "Always allow" memory captured
@@ -414,7 +423,15 @@ fn assemble_session(
     // mount (EXTENSIONS.md).
     .hooks(tabit_session::permission_gate(
         tabit_session::PermissionMemory::default(),
-    ));
+    ))
+    .subagents(subagents);
+    // The parent's toolset: the child tools plus the subagent tool.
+    for tool in children
+        .into_iter()
+        .chain(std::iter::once(tabit_session::subagent::subagent_tool()))
+    {
+        builder = builder.dynamic_tool(tool);
+    }
     if let Some(max_turns) = args.max_turns {
         builder = builder.max_turns(max_turns);
     }
@@ -426,6 +443,19 @@ fn assemble_session(
         let cwd = cwd.display().to_string();
         builder.create(&cwd).map_err(|e| e.to_string())
     }
+}
+
+/// The toolset a subagent child runs: every coding tool (contextual —
+/// they read the session cwd and the run token from the per-run
+/// ToolContext) except the subagent tool.
+fn child_tools() -> Vec<rig_agent::tool::DynamicTool> {
+    vec![
+        dynamic_contextual(tabit_tools::Read),
+        dynamic_contextual(tabit_tools::Write),
+        dynamic_contextual(tabit_tools::Edit),
+        tabit_tools::shell_tool(),
+        dynamic_contextual(tabit_tools::AskUser),
+    ]
 }
 
 /// The `tabit-gui` executable: explicit override, else the sibling of

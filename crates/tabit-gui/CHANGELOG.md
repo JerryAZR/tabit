@@ -18,7 +18,28 @@ software/hardware contract, not just the encodings):
 Every `PROTOCOL_VERSION` bump — and every additive change a frontend
 could observe — gets an entry here in the same commit.
 
-## v4 (current)
+## v5 (current)
+
+### wire: `session_opened.parent` — subagent children announce through the same door (2026-09)
+
+Protocol version 5. `session_opened` gains an optional `parent`
+(the spawning session's id), present only for subagent children —
+one "session became visible" shape stays the truth for every path.
+Two more facts ride along: `path` is **empty for an ephemeral
+session** (subagent children are in-memory only today — nothing to
+open or replay), and a child's whole run streams on **its own stream
+stamp** (`user_message`, deltas, `tool_call`s, terminal) while the
+spawner's transcript carries only the subagent `tool_call` /
+`tool_result` pair. The tool result's `details` for
+`name == "subagent"` carry `{ child_id, outcome, turns, usage }`.
+*Migration:* the reducer now branches on `parent` — a child
+announcement must never overwrite the active session's Facts (the
+bridge is in; a nested-transcript view is future GUI work, and child
+streams drop like any unknown background stream until then). The ack
+carries `protocol_version: 5`.
+
+## v4
+
 
 ### wire: the shell tools are `details` producers; shell cap drops to 16 KiB (2026-09)
 

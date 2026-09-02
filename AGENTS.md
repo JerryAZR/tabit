@@ -30,11 +30,16 @@ Current workspace layout:
   stamped events, handshake frames; `FRONTEND.md` is the contract)
 - `crates/tabit-config` — provider/model configuration (see `ROADMAP.md`)
 - `crates/tabit-session` — persistent sessions over the outer loop (native
-  only: filesystem-backed; the rig crates keep wasm support)
-- `crates/tabit-tools` — coding tools (`read`, `bash` — chosen at
-  registration: verified Git Bash, else PowerShell on Windows;
-  `ask_user` — the body is one interaction roundtrip) as
-  `#[rig_tool]` PortableTools, erasable to DynamicTools (native only)
+  only: filesystem-backed; the rig crates keep wasm support), plus
+  native subagents (`subagent.rs`: a child session driven inside a
+  parent tool call — ephemeral v1, parent-proxy interaction,
+  ROADMAP item 5)
+- `crates/tabit-tools` — coding tools (`read`, `write`, `edit`, `bash`
+  — chosen at registration: verified Git Bash, else PowerShell on
+  Windows; `ask_user` — the body is one interaction roundtrip) as
+  contextual `#[rig_tool]`s (they read the session cwd and run token
+  from the per-run `ToolContext`), erasable to DynamicTools (native
+  only)
 - `crates/tabit-gui` — the egui frontend (`tabit-gui` binary; the
   `tabit` launcher detach-spawns it; reducer/view contract in ROADMAP
   item 7). Its `CHANGELOG.md` is the frontend protocol's changelog —
@@ -86,15 +91,19 @@ Current workspace layout:
    you must hand-roll, document why. Internal errors fail hard and loud;
    external errors fail gracefully and clearly; never swallow an error
    or substitute a default that masks the real cause.
-8. **Canonical surfaces.** Tabit tools implement `PortableTool`
-   (`#[rig_tool]`); the contextual `Tool`/`ToolContext` is the runtime-side
-   consumption contract reached via the blanket bridge. OpenAI code targets
+8. **Canonical surfaces.** Tabit's tools are contextual
+   `#[rig_tool]`s (they take `#[rig(context)] &mut ToolContext` —
+   the session cwd, the run token, capabilities); `PortableTool`
+   remains rig-core's surface for non-contextual tools. Erasure into
+   `DynamicTool` goes through `rig_agent::tool::dynamic_contextual`
+   (one implementation). OpenAI code targets
    the Responses API; chat completions is the compat-gateway wire format.
    Tool-call arguments parse strictly — truncated JSON is an error, never a
    silent partial call. Tool cancellation is token-and-detach (ENGINE.md's
    execution substrate): bodies poll on the sidecar runtime, abort detaches
    the task and the token is the ask — drop is no longer the mechanism;
-   `bash` is the reference implementation.
+   `bash` is the reference implementation, `subagent` follows its shape
+   (the child's leash is the parent's token).
 9. **Fighting the architecture is a stop signal.** If the work feels like
    fighting the design — wrestling the borrow checker, reaching for an
    unintuitive workaround for a recurring error, or ping-ponging between

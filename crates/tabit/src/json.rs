@@ -466,6 +466,14 @@ id = "m"
         }
     }
 
+    /// An `initialize` wire line carrying the live protocol version.
+    fn init_line() -> String {
+        format!(
+            r#"{{"protocol_version":{}}}"#,
+            tabit_session::PROTOCOL_VERSION
+        )
+    }
+
     /// A `message` wire line for `session`.
     fn message_line(session: &str, text: &str) -> String {
         format!(r#"{{"type":"message","session":"{session}","text":"{text}"}}"#)
@@ -493,7 +501,7 @@ id = "m"
             out.clone(),
         ));
 
-        tx_in.send(r#"{"protocol_version":4}"#.to_string()).unwrap();
+        tx_in.send(init_line()).unwrap();
         let session_id = ack_session_id(&out).await;
         tx_in.send(message_line(&session_id, "hi")).unwrap();
 
@@ -597,7 +605,7 @@ id = "m"
     async fn handshake_then_round_trip_over_memory_buffers() {
         let (code, lines) = bridge_live(
             "roundtrip",
-            r#"{"protocol_version":4}"#,
+            &init_line(),
             |session| vec![message_line(session, "hi")],
             vec![script("hello")],
             |lines| lines.iter().any(|l| l.contains("run_finished")),
@@ -663,7 +671,7 @@ id = "m"
             },
             out.clone(),
         ));
-        tx_in.send(r#"{"protocol_version":4}"#.to_string()).unwrap();
+        tx_in.send(init_line()).unwrap();
         let session_id = ack_session_id(&out).await;
         tx_in.send(message_line(&session_id, "hi")).unwrap();
         tokio::time::timeout(std::time::Duration::from_secs(5), async {
@@ -760,7 +768,7 @@ id = "m"
             .send(r#"{"type":"abort","session":"any"}"#.to_string())
             .unwrap();
         await_line(&out, "protocol_error").await;
-        tx_in.send(r#"{"protocol_version":4}"#.to_string()).unwrap();
+        tx_in.send(init_line()).unwrap();
         let session_id = ack_session_id(&out).await;
         tx_in.send(message_line(&session_id, "real")).unwrap();
         tokio::time::timeout(std::time::Duration::from_secs(5), async {
@@ -824,7 +832,7 @@ id = "m"
             out.clone(),
         ));
 
-        tx_in.send(r#"{"protocol_version":4}"#.to_string()).unwrap();
+        tx_in.send(init_line()).unwrap();
         let session_id = ack_session_id(&out).await;
         tx_in.send(message_line(&session_id, "slow one")).unwrap();
 
@@ -867,7 +875,7 @@ id = "m"
         // initialize is a protocol error, not a restart.
         let (code, frames) = bridge(
             "garbage",
-            "this is not json\n\n{\"protocol_version\":4}\n{\"protocol_version\":4}\n",
+            &format!("this is not json\n\n{}\n{}\n", init_line(), init_line()),
             vec![script("x")],
         )
         .await;
@@ -993,7 +1001,7 @@ id = "m"
         );
         let code = serve(
             handle,
-            Cursor::new(b"{\"protocol_version\":4}\n".to_vec()),
+            Cursor::new(format!("{}\n", init_line()).into_bytes()),
             FailingWriter,
         )
         .await;
@@ -1065,7 +1073,10 @@ id = "m"
             out.clone(),
         ));
         tx_in
-            .send(r#"{"protocol_version":4,"replay":true}"#.to_string())
+            .send(format!(
+                r#"{{"protocol_version":{},"replay":true}}"#,
+                tabit_session::PROTOCOL_VERSION
+            ))
             .unwrap();
         let session_id = ack_session_id(&out).await;
         tx_in.send(message_line(&session_id, "again")).unwrap();
@@ -1172,12 +1183,7 @@ id = "m"
 
     #[tokio::test]
     async fn initialize_without_replay_gets_no_pass() {
-        let (code, frames) = bridge(
-            "no-replay",
-            r#"{"protocol_version":4}"#,
-            vec![script("hello")],
-        )
-        .await;
+        let (code, frames) = bridge("no-replay", &init_line(), vec![script("hello")]).await;
         assert_eq!(code, 0);
         assert!(
             !frames.iter().any(|frame| matches!(
@@ -1272,7 +1278,7 @@ id = "m"
 
         // Handshake, then one live round trip so the boot session
         // materializes on disk (the catalog lists stored files only).
-        tx_in.send(r#"{"protocol_version":4}"#.to_string()).unwrap();
+        tx_in.send(init_line()).unwrap();
         let boot = ack_session_id(&out).await;
         tx_in.send(message_line(&boot, "hello")).unwrap();
         await_line(&out, "run_finished").await;
@@ -1348,7 +1354,7 @@ id = "m"
             },
             out.clone(),
         ));
-        tx_in.send(r#"{"protocol_version":4}"#.to_string()).unwrap();
+        tx_in.send(init_line()).unwrap();
         let session_id = ack_session_id(&out).await;
         tx_in.send(message_line(&session_id, "hi")).unwrap();
         drop(tx_in);
@@ -1373,7 +1379,7 @@ id = "m"
     async fn a_message_for_an_unknown_session_is_a_session_error() {
         let (code, lines) = bridge_live(
             "unknown-session",
-            r#"{"protocol_version":4}"#,
+            &init_line(),
             |session| {
                 vec![
                     message_line("no-such-session", "lost?"),
@@ -1425,7 +1431,7 @@ id = "m"
             out.clone(),
         ));
 
-        tx_in.send(r#"{"protocol_version":4}"#.to_string()).unwrap();
+        tx_in.send(init_line()).unwrap();
         let session_id = ack_session_id(&out).await;
         tx_in.send(message_line(&session_id, "hi")).unwrap();
         await_line(&out, "run_finished").await;

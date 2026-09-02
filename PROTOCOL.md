@@ -182,6 +182,19 @@ minimal** (a plain object — fields are cheap to add when needed);
 **one connection per backend process** for now. Design in the v3
 section below.
 
+**Shipped v1 (2026-09, protocol v5)**: native subagents — a child
+session driven inside a parent tool call. Ephemeral children only
+(in memory; the builder's `NullBuffer` entrance); the child announces
+`session_opened` with `parent` set and `path` empty, its whole run
+streams on its own stamp, the spawner's transcript sees only the
+subagent `tool_call`/`tool_result` pair, interaction is parent-proxy
+(the parent's own hub — cards on the parent's stream, existing
+routing), the result carries `{child_id, outcome, turns, usage}` in
+`details`, and the parent's run token aborts the child (the body
+selects on both, `bash`-style). Recursion depth is enforced by
+omission (children lack the subagent tool). The design rulings live
+in ROADMAP item 5.
+
 ## v2 — ruled (2026-08; research recorded herein)
 
 **Slice 1 shipped** (2026-08; vocabulary + ids, commits 7406a38..f5372ce):

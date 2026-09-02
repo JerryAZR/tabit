@@ -448,12 +448,16 @@ impl GuiState {
             // included (2026-09: the ack carries protocol-level facts
             // only; every session is announced the same way). Facts
             // and the fresh-start note land here, one handler for
-            // every path.
+            // every path — except subagent children (v5: `parent` is
+            // set), which never touch the active facts; their events
+            // ride their own stream and this frontend drops them
+            // until a nested-transcript view exists.
             SessionEvent::SessionOpened {
                 id,
                 path,
                 model,
                 resumed,
+                parent: None,
             } => {
                 self.facts = Some(Facts {
                     session_id: id.clone(),
@@ -469,6 +473,9 @@ impl GuiState {
                     self.push_notice("no sessions to resume — started fresh".to_string(), false);
                 }
             }
+            SessionEvent::SessionOpened {
+                parent: Some(_), ..
+            } => {}
             // Pass brackets, on any stream: everything between them is
             // history being rebuilt, never liveness (a pass carries
             // `user_message`s but no terminal — an unguarded fold

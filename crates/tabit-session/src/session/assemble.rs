@@ -95,6 +95,8 @@ impl Session {
             id,
             resumed,
             interaction: None,
+            subagent_parts: builder.subagent_parts,
+            subagent_events: Arc::new(std::sync::OnceLock::new()),
         };
         Ok(session)
     }

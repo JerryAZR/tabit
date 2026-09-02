@@ -319,6 +319,20 @@ The known deviation from pi's subprocess model:
   subagent v1 is unblocked — parent-proxy covers correctness, and an
   interim child simply mounts its own gate.
 
+**Shipped v1 (2026-09):** the above landed. `SessionCwd` (every
+session carries a working directory; the coding tools are contextual
+and resolve against it), the builder's `ephemeral` entrance
+(`NullBuffer` — in-memory sessions; `Session.path` is `Option`), and
+`tabit-session::subagent` (the tool, the `SubagentParts` assembly
+capability, the child tap, parent-proxy interaction, token-linked
+abort, results with `{child_id, outcome, turns, usage}` details).
+Protocol v5 (`session_opened.parent`, empty path = ephemeral).
+Deferred with the design's own notes: persisted (inspectable)
+children via the `parent_session` header field + catalog grouping;
+per-child model/cwd overrides; the subagent result cap refinement
+(the child's own `max_tokens` bounds v1); nested-transcript GUI
+rendering (the GUI bridge drops child streams for now).
+
 ### 6. Compaction + overflow recovery
 
 - Context compaction: summarize old turns when approaching the context

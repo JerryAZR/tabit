@@ -78,6 +78,7 @@ pub(crate) mod replay;
 mod session;
 mod stats;
 mod store;
+pub mod subagent;
 
 // The durable-conversation layer, extracted to tabit-log (2026-08):
 // re-exposed as modules so internal `crate::` paths and the public
@@ -117,3 +118,6 @@ pub use writer::{SessionWriter, SharedBuffer, WriteBuffer};
 
 #[cfg(test)]
 mod tests;
+
+#[cfg(test)]
+mod subagent_tests;

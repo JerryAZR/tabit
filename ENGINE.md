@@ -469,7 +469,11 @@ runtime, and the chain awaits the completion handle: harness
 responsiveness — abort preemption, interaction routing, sibling
 chains, event flow — is structural, never borrowed from tool-body
 behavior. A body may block (it occupies a sidecar worker) or hang
-(it leaks a sidecar task); the harness is unaffected either way.
+(it leaks a sidecar task); the harness is unaffected either way —
+a body may even drive whole nested sessions (the subagent: a child
+pump awaited inside a tool body; still just a body — the flow
+machine neither knows nor cares, and the parent's token is the
+child's leash, the `bash` shape).
 Cancellation follows three layers: **the token is the ask** — abort
 detaches the sidecar task (its result lands nowhere) and the body's
 token observation or timeout ends it; drop is no longer the

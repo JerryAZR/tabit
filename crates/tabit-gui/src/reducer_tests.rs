@@ -42,6 +42,7 @@ fn opened(resumed: bool) -> InMsg {
         path: "sessions/s1.jsonl".to_string(),
         model: tabit_protocol::ModelSelection::new("local", "m"),
         resumed,
+        parent: None,
     })
 }
 

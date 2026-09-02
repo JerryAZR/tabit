@@ -331,6 +331,7 @@ impl SessionHost {
                 path: info.session_path.clone(),
                 model: info.model.clone(),
                 resumed: info.resumed,
+                parent: None,
             },
         });
         for note in startup_notes {
@@ -702,6 +703,7 @@ impl HostLoop {
                 path: session.wire_path(),
                 model: session.selection(),
                 resumed: session.resumed(),
+                parent: None,
             },
         });
         self.add_worker(id, session);
@@ -735,6 +737,7 @@ impl HostLoop {
                 path: session.wire_path(),
                 model: session.selection(),
                 resumed: session.resumed(),
+                parent: None,
             },
         });
         for note in notes {
@@ -794,6 +797,7 @@ fn spawn_worker(
         session.attach_interaction(task_interaction);
         session.attach_mailbox_notices(&event_tx, stream.clone());
         session.attach_persist_notices(&event_tx, stream.clone());
+        session.attach_subagent_channel(&event_tx);
         // The resident worker. Ownership never moves: idle is the wait
         // below, running is the pump call - two positions of one loop,
         // not two tasks. One wake (the work signal) serves every

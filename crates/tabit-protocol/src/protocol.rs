@@ -15,7 +15,7 @@ use serde::{Deserialize, Serialize};
 /// The protocol version this build speaks. Clients declare theirs in
 /// [`ClientFrame::Initialize`]; a mismatch rejects the connection at the
 /// handshake.
-pub const PROTOCOL_VERSION: u32 = 4;
+pub const PROTOCOL_VERSION: u32 = 5;
 
 /// Which session produced an event. The stamp is the session id
 /// itself (v3: the `"main"` alias is retired — one name per session);

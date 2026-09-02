@@ -245,6 +245,19 @@ impl Session {
         if let Some(hub) = &self.interaction {
             tool_context.insert(hub.capability());
         }
+        // Subagent support, when mounted: the per-run capability is the
+        // parts plus THIS parent's identity and channels, snapshot at
+        // open (a mid-run model switch reaches the next run's children).
+        if let Some(parts) = &self.subagent_parts {
+            tool_context.insert(std::sync::Arc::new(crate::subagent::SubagentAssembly::new(
+                parts.clone(),
+                self.id.clone(),
+                self.selection(),
+                self.cwd.clone(),
+                self.interaction.clone(),
+                self.subagent_events.get().cloned(),
+            )));
+        }
         // The cell IS the conversation (ENGINE.md, the unified
         // conversation): the run folds the session's one durable
         // manager, and the opening message — if any — arrives through
