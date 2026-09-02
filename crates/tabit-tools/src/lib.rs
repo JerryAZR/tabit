@@ -75,38 +75,150 @@ pub const DEFAULT_TIMEOUT_SECS: u64 = 30;
 /// Maximum seconds a `bash` command may run.
 pub const MAX_TIMEOUT_SECS: u64 = 600;
 
-/// Read a UTF-8 text file page by page. Output is capped at 50 KiB of
-/// whole lines ([`truncate`]) and every truncation notice carries the
-/// offset that continues the read: large files are paged, never
-/// spilled (the file is already on disk).
-/// Directories list their entries inline. Binary and UTF-16/32 files are
-/// rejected loudly. Image reads are a committed follow-up (ROADMAP item
-/// 4) — they will bypass the text truncation entirely.
-#[rig_tool(description = "Read a UTF-8 text file (absolute or relative path). \
-                   Output is capped at 50 KiB, whole lines; the \
-                   truncation notice carries the offset to continue from. \
-                   Optional offset (1-indexed line number) and limit (line \
-                   count) page large files. Reading a directory lists its \
-                   entries.")]
+/// Read a UTF-8 text file page by page, or an image whole. Text output
+/// is capped at 50 KiB of whole lines ([`truncate`]) and every
+/// truncation notice carries the offset that continues the read: large
+/// files are paged, never spilled (the file is already on disk).
+/// Images (PNG/JPEG/GIF/WebP, by magic bytes) bypass the text cap
+/// entirely and ride as image content parts, capped at
+/// [`IMAGE_MAX_BYTES`] — no resize in v1, so oversized images are
+/// rejected with guidance (downscaling is a dependency decision,
+/// deferred). Directories list their entries inline. Binary and
+/// UTF-16/32 text files are rejected loudly.
+#[rig_tool(description = "Read a file (absolute or relative path). Text \
+                   files: UTF-8, output capped at 50 KiB in whole lines, \
+                   the truncation notice carries the offset to continue \
+                   from; optional offset (1-indexed line number) and limit \
+                   (line count) page large files. Images (PNG, JPEG, GIF, \
+                   WebP): sent to the model as an image, up to 3 MiB. \
+                   Reading a directory lists its entries.")]
 pub async fn read(
     path: String,
     offset: Option<usize>,
     limit: Option<usize>,
-) -> Result<String, ToolExecutionError> {
+) -> Result<rig_core::OneOrMany<rig_core::message::ToolResultContent>, ToolExecutionError> {
     let meta = std::fs::metadata(&path)
         .map_err(|e| ToolExecutionError::other(format!("cannot read `{path}`: {e}")))?;
     if meta.is_dir() {
-        return list_directory(&path);
+        return report_text(list_directory(&path)?);
     }
     let bytes = std::fs::read(&path)
         .map_err(|e| ToolExecutionError::other(format!("cannot read `{path}`: {e}")))?;
-    if let Some(encoding) = non_utf8_bom(&bytes) {
+    if let Some(media_type) = image_media_type(&bytes) {
+        return image_read(
+            &path,
+            &bytes,
+            media_type,
+            offset.is_some() || limit.is_some(),
+        );
+    }
+    report_text(read_text(&path, &bytes, offset, limit)?)
+}
+
+/// The largest image read returns, raw bytes. The provider ceiling is
+/// ~5 MiB of base64 (~3.75 MiB raw, Anthropic's per-image limit); 3 MiB
+/// keeps headroom. v1 has no resize — an image over the cap is rejected
+/// with guidance instead of silently downgraded.
+pub(crate) const IMAGE_MAX_BYTES: usize = 3 * 1024 * 1024;
+
+/// The image formats every provider carries (magic-byte detected);
+/// matches pi's native set. HEIC/HEIF/SVG stay text-path files.
+fn image_media_type(bytes: &[u8]) -> Option<rig_core::message::ImageMediaType> {
+    use rig_core::message::ImageMediaType;
+    match bytes {
+        [0x89, b'P', b'N', b'G', 0x0d, 0x0a, 0x1a, 0x0a, ..] => Some(ImageMediaType::PNG),
+        [0xff, 0xd8, 0xff, ..] => Some(ImageMediaType::JPEG),
+        [b'G', b'I', b'F', b'8', b'7', b'a', ..] | [b'G', b'I', b'F', b'8', b'9', b'a', ..] => {
+            Some(ImageMediaType::GIF)
+        }
+        // RIFF container: the bytes at 8..12 name the codec.
+        [
+            b'R',
+            b'I',
+            b'F',
+            b'F',
+            _,
+            _,
+            _,
+            _,
+            b'W',
+            b'E',
+            b'B',
+            b'P',
+            ..,
+        ] => Some(ImageMediaType::WEBP),
+        _ => None,
+    }
+}
+
+/// One image, whole: a text part naming the read plus the image part
+/// itself (base64 — the session log and the provider wire both carry
+/// base64; raw bytes would serialize as a JSON number array).
+fn image_read(
+    path: &str,
+    bytes: &[u8],
+    media_type: rig_core::message::ImageMediaType,
+    paged_args: bool,
+) -> Result<rig_core::OneOrMany<rig_core::message::ToolResultContent>, ToolExecutionError> {
+    if paged_args {
+        return Err(ToolExecutionError::other(
+            "images are read whole — offset/limit apply to text files only",
+        ));
+    }
+    if bytes.len() > IMAGE_MAX_BYTES {
+        return Err(ToolExecutionError::other(format!(
+            "`{path}` is {} bytes; images are capped at {} bytes ({} KiB). \
+             Downscale or crop it first, or extract a region with the shell tool",
+            bytes.len(),
+            IMAGE_MAX_BYTES,
+            IMAGE_MAX_BYTES / 1024
+        )));
+    }
+    use base64::Engine as _;
+    use rig_core::message::ToolResultContent;
+    let mime = rig_core::completion::message::MimeType::to_mime_type(&media_type).to_string();
+    let report = format!("Read image `{path}` ({mime}, {} bytes)", bytes.len());
+    let parts = vec![
+        ToolResultContent::Text(report.into()),
+        ToolResultContent::Image(rig_core::message::Image {
+            data: rig_core::message::DocumentSourceKind::Base64(
+                base64::engine::general_purpose::STANDARD.encode(bytes),
+            ),
+            media_type: Some(media_type),
+            detail: None,
+            additional_params: None,
+        }),
+    ];
+    // Two parts by construction.
+    #[allow(clippy::expect_used)]
+    Ok(rig_core::OneOrMany::many(parts).expect("the parts vector is non-empty"))
+}
+
+/// Wrap one text report as the tool's content parts (every text-only
+/// result is a single part).
+fn report_text(
+    report: String,
+) -> Result<rig_core::OneOrMany<rig_core::message::ToolResultContent>, ToolExecutionError> {
+    Ok(rig_core::OneOrMany::one(
+        rig_core::message::ToolResultContent::Text(report.into()),
+    ))
+}
+
+/// The text path, unchanged from the days `read` returned a bare
+/// string: encoding checks, paging, truncation notices.
+fn read_text(
+    path: &str,
+    bytes: &[u8],
+    offset: Option<usize>,
+    limit: Option<usize>,
+) -> Result<String, ToolExecutionError> {
+    if let Some(encoding) = non_utf8_bom(bytes) {
         return Err(ToolExecutionError::other(format!(
             "`{path}` is {encoding}-encoded; this tool reads UTF-8 only — \
              re-save the file as UTF-8 or inspect it with the shell tool"
         )));
     }
-    let mut text = match String::from_utf8(bytes) {
+    let mut text = match String::from_utf8(bytes.to_vec()) {
         Ok(text) => text,
         Err(error) => {
             return Err(ToolExecutionError::other(format!(

@@ -32,6 +32,11 @@ fn split_parts(
     (text, details)
 }
 
+/// The text of a successful `read` (text reads are single-part).
+async fn read_out(path: String, offset: Option<usize>, limit: Option<usize>) -> String {
+    split_parts(read(path, offset, limit).await.expect("read")).0
+}
+
 fn err_text<T>(result: Result<T, ToolExecutionError>) -> String
 where
     T: std::fmt::Debug,
@@ -68,9 +73,7 @@ async fn read_returns_file_contents() {
     let dir = temp_dir("read-ok");
     let path = dir.join("note.txt");
     fs::write(&path, "first\nsecond\n").expect("write");
-    let out = read(path.to_string_lossy().to_string(), None, None)
-        .await
-        .expect("read");
+    let out = read_out(path.to_string_lossy().to_string(), None, None).await;
     // Line-paged output carries no trailing newline (pi behaves the same).
     assert_eq!(out, "first\nsecond");
     fs::remove_dir_all(&dir).ok();
@@ -115,16 +118,12 @@ async fn read_pages_with_offset_and_limit() {
 
     // The promise: the page's content, and a continuation offset that
     // is exactly the next unshown line — wording stays delivery.
-    let page = read(path.to_string_lossy().to_string(), Some(3), Some(2))
-        .await
-        .expect("page");
+    let page = read_out(path.to_string_lossy().to_string(), Some(3), Some(2)).await;
     assert!(page.starts_with("line-3\nline-4"), "{page}");
     assert!(page.contains("offset=5"), "continuation offset: {page}");
 
     // 1-indexed offset, and offset=0 reads as 1.
-    let first = read(path.to_string_lossy().to_string(), Some(0), Some(1))
-        .await
-        .expect("first");
+    let first = read_out(path.to_string_lossy().to_string(), Some(0), Some(1)).await;
     assert!(first.starts_with("line-1"), "{first}");
     assert!(first.contains("offset=2"), "{first}");
     fs::remove_dir_all(&dir).ok();
@@ -141,9 +140,7 @@ async fn read_truncates_on_whole_lines_with_a_continuation_offset() {
     let body: String = (1..=rows).map(|i| format!("r{i:04}\n")).collect();
     fs::write(&path, body).expect("write");
 
-    let out = read(path.to_string_lossy().to_string(), None, None)
-        .await
-        .expect("read");
+    let out = read_out(path.to_string_lossy().to_string(), None, None).await;
     let shown = truncate::READ_MAX_BYTES / 6;
     assert!(
         out.contains(&format!(
@@ -165,9 +162,7 @@ async fn read_of_a_minified_line_points_at_the_shell() {
     let dir = temp_dir("read-minified");
     let path = dir.join("min.js");
     fs::write(&path, "x".repeat(truncate::READ_MAX_BYTES + 1)).expect("write");
-    let out = read(path.to_string_lossy().to_string(), None, None)
-        .await
-        .expect("read");
+    let out = read_out(path.to_string_lossy().to_string(), None, None).await;
     assert!(
         out.contains("exceeds the 50 KiB output limit"),
         "the model is told why there is no content: {out}"
@@ -182,9 +177,7 @@ async fn read_lists_directories_inline() {
     fs::write(dir.join("a.txt"), "a").expect("write");
     fs::create_dir(dir.join("sub")).expect("subdir");
 
-    let out = read(dir.to_string_lossy().to_string(), None, None)
-        .await
-        .expect("directory reads list entries");
+    let out = read_out(dir.to_string_lossy().to_string(), None, None).await;
     assert!(out.contains("is a directory"), "{out}");
     assert!(out.contains("a.txt"), "{out}");
     assert!(out.contains("sub/"), "directories carry a slash: {out}");
@@ -193,9 +186,7 @@ async fn read_lists_directories_inline() {
     assert!(a < s, "entries sorted: {out}");
 
     let empty = temp_dir("read-dir-empty");
-    let out = read(empty.to_string_lossy().to_string(), None, None)
-        .await
-        .expect("empty directory");
+    let out = read_out(empty.to_string_lossy().to_string(), None, None).await;
     assert!(out.contains("(empty directory)"), "{out}");
     fs::remove_dir_all(&dir).ok();
     fs::remove_dir_all(&empty).ok();
@@ -206,16 +197,12 @@ async fn read_names_empty_files_and_strips_the_bom() {
     let dir = temp_dir("read-empty-bom");
     let empty = dir.join("empty.txt");
     fs::write(&empty, "").expect("write");
-    let out = read(empty.to_string_lossy().to_string(), None, None)
-        .await
-        .expect("empty read");
+    let out = read_out(empty.to_string_lossy().to_string(), None, None).await;
     assert_eq!(out, "(file is empty)");
 
     let bom = dir.join("bom.txt");
     fs::write(&bom, "\u{feff}content\n").expect("write");
-    let out = read(bom.to_string_lossy().to_string(), None, None)
-        .await
-        .expect("bom read");
+    let out = read_out(bom.to_string_lossy().to_string(), None, None).await;
     assert_eq!(out, "content", "BOM stripped: {out:?}");
     fs::remove_dir_all(&dir).ok();
 }
@@ -1010,9 +997,7 @@ async fn read_byte_truncation_says_so() {
     let line = "x".repeat(truncate::READ_MAX_BYTES / 4);
     let body = (0..4).map(|_| line.clone()).collect::<Vec<_>>().join("\n");
     fs::write(&path, body).expect("write");
-    let out = read(path.to_string_lossy().to_string(), None, None)
-        .await
-        .expect("read");
+    let out = read_out(path.to_string_lossy().to_string(), None, None).await;
     assert!(out.contains("Showing lines"), "{out}");
     assert!(out.contains("Use offset="), "continuation offset: {out}");
     fs::remove_dir_all(&dir).ok();
@@ -1026,11 +1011,106 @@ async fn read_big_directory_listing_is_truncated_with_a_notice() {
     for i in 0..1400 {
         fs::write(dir.join(format!("f{i:032}x.txt")), "x").expect("write");
     }
-    let out = read(dir.to_string_lossy().to_string(), None, None)
-        .await
-        .expect("directory read");
+    let out = read_out(dir.to_string_lossy().to_string(), None, None).await;
     assert!(out.contains("entries shown"), "{out}");
     fs::remove_dir_all(&dir).ok();
+}
+
+// --- image reads: whole-file image content parts ---
+
+/// The canonical 1x1 transparent PNG.
+const TINY_PNG: &[u8] = &[
+    0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a, 0x00, 0x00, 0x00, 0x0d, 0x49, 0x48, 0x44, 0x52,
+    0x00, 0x00, 0x00, 0x01, 0x00, 0x00, 0x00, 0x01, 0x08, 0x06, 0x00, 0x00, 0x00, 0x1f, 0x15, 0xc4,
+    0x89, 0x00, 0x00, 0x00, 0x0d, 0x49, 0x44, 0x41, 0x54, 0x78, 0x9c, 0x62, 0x00, 0x01, 0x00, 0x00,
+    0x05, 0x00, 0x01, 0x0d, 0x0a, 0x2d, 0xb4, 0x00, 0x00, 0x00, 0x00, 0x49, 0x45, 0x4e, 0x44, 0xae,
+    0x42, 0x60, 0x82,
+];
+
+#[tokio::test]
+async fn read_returns_an_image_content_part() {
+    let dir = temp_dir("read-image");
+    let path = dir.join("dot.png");
+    fs::write(&path, TINY_PNG).expect("write");
+    let parts: Vec<_> = read(path.to_string_lossy().to_string(), None, None)
+        .await
+        .expect("image read")
+        .into_iter()
+        .collect();
+    assert_eq!(parts.len(), 2, "report text + image: {parts:?}");
+    assert!(
+        parts[0]
+            .as_text()
+            .is_some_and(|t| t.contains("image/png") && t.contains("dot.png")),
+        "the text part names the read: {:?}",
+        parts[0].as_text()
+    );
+    match &parts[1] {
+        rig_core::message::ToolResultContent::Image(image) => {
+            assert_eq!(
+                image.media_type,
+                Some(rig_core::message::ImageMediaType::PNG)
+            );
+            let rig_core::message::DocumentSourceKind::Base64(data) = &image.data else {
+                panic!(
+                    "the image part is base64, never raw bytes (the log would bloat as a JSON number array)"
+                );
+            };
+            let decoded = {
+                use base64::Engine as _;
+                base64::engine::general_purpose::STANDARD
+                    .decode(data)
+                    .expect("valid base64")
+            };
+            assert_eq!(decoded, TINY_PNG, "the bytes round-trip whole");
+        }
+        other => panic!("the second part is the image: {other:?}"),
+    }
+    fs::remove_dir_all(&dir).ok();
+}
+
+#[tokio::test]
+async fn read_rejects_oversized_images_with_guidance() {
+    let dir = temp_dir("read-image-huge");
+    let path = dir.join("huge.png");
+    let mut bytes = TINY_PNG.to_vec();
+    bytes.resize(IMAGE_MAX_BYTES + 1, b'x');
+    fs::write(&path, &bytes).expect("write");
+    let error = err_text(read(path.to_string_lossy().to_string(), None, None).await);
+    assert!(error.contains("capped at"), "{error}");
+    assert!(error.contains("Downscale"), "{error}");
+    fs::remove_dir_all(&dir).ok();
+}
+
+#[tokio::test]
+async fn read_rejects_paging_args_on_images() {
+    let dir = temp_dir("read-image-page");
+    let path = dir.join("dot.png");
+    fs::write(&path, TINY_PNG).expect("write");
+    let error = err_text(read(path.to_string_lossy().to_string(), Some(1), None).await);
+    assert!(error.contains("whole"), "{error}");
+    fs::remove_dir_all(&dir).ok();
+}
+
+#[test]
+fn image_magic_detection_covers_the_provider_set() {
+    use rig_core::message::ImageMediaType;
+    assert_eq!(image_media_type(TINY_PNG), Some(ImageMediaType::PNG));
+    assert_eq!(
+        image_media_type(&[0xff, 0xd8, 0xff, 0xe0]),
+        Some(ImageMediaType::JPEG)
+    );
+    assert_eq!(image_media_type(b"GIF89a..."), Some(ImageMediaType::GIF));
+    assert_eq!(
+        image_media_type(&[b'R', b'I', b'F', b'F', 0, 0, 0, 0, b'W', b'E', b'B', b'P']),
+        Some(ImageMediaType::WEBP)
+    );
+    // RIFF, but not WebP (an AVI): not an image read.
+    assert_eq!(
+        image_media_type(&[b'R', b'I', b'F', b'F', 0, 0, 0, 0, b'A', b'V', b'I', b' ']),
+        None
+    );
+    assert_eq!(image_media_type(b"plain text"), None);
 }
 
 #[tokio::test]

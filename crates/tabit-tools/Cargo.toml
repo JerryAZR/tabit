@@ -14,6 +14,7 @@ path = "src/lib.rs"
 doctest = true
 
 [dependencies]
+base64 = { workspace = true }
 rig-agent = { path = "../rig-agent", version = "0.41.0", default-features = false, features = ["derive"] }
 rig-derive = { path = "../rig-derive", version = "0.41.0" }
 process-wrap = { version = "9", features = ["std", "job-object", "process-group"] }
