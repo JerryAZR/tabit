@@ -11,12 +11,14 @@
     )
 )]
 //! Tabit's coding tools: file reading and shell execution, implemented
-//! as [`PortableTool`]s via `#[rig_tool]` (the workspace's canonical
-//! tool surface) and erasable into [`DynamicTool`]s for session
+//! as contextual `#[rig_tool]`s (every tool reads the per-run
+//! [`ToolContext`]) and erasable into [`DynamicTool`]s for session
 //! registration.
 //!
 //! All paths are taken verbatim from the model; relative paths resolve
-//! against the process working directory. Errors are user-facing (external
+//! against the session's working directory (the `SessionCwd`
+//! capability — absent it, the process working directory, the same
+//! bytes the OS would resolve). Errors are user-facing (external
 //! errors): clear, graceful, and never a panic.
 //!
 //! Native only: these tools touch the filesystem and spawn processes.
@@ -61,7 +63,7 @@
 //!   returns output that looks like a completed run.
 
 use rig_agent::tool::{DynamicTool, ToolContext};
-use rig_core::tool::{IntoToolOutput, PortableTool, ToolExecutionError};
+use rig_core::tool::{IntoToolOutput, ToolExecutionError};
 use rig_derive::rig_tool;
 use std::time::{Duration, Instant};
 
@@ -75,6 +77,35 @@ pub const DEFAULT_TIMEOUT_SECS: u64 = 30;
 /// Maximum seconds a `bash` command may run.
 pub const MAX_TIMEOUT_SECS: u64 = 600;
 
+/// Resolve a model-given path for this run: absolute paths pass
+/// through; relative paths join the session's working directory (the
+/// [`SessionCwd`](rig_agent::tool::SessionCwd) capability, mounted by
+/// the run's opener), falling back to the process cwd for standalone
+/// tool use — the same bytes the OS would resolve today.
+fn resolve(context: &ToolContext, path: &str) -> std::path::PathBuf {
+    let given = std::path::Path::new(path);
+    if given.is_absolute() {
+        return given.to_path_buf();
+    }
+    match context
+        .get::<rig_agent::tool::SessionCwd>()
+        .map(|cwd| cwd.0.clone())
+    {
+        Some(cwd) => cwd.join(given),
+        // No session scope: a bare relative path, resolved against the
+        // process cwd by the OS itself — today's semantics.
+        None => std::path::PathBuf::from(path),
+    }
+}
+
+/// The session's working directory for spawned commands, when the run
+/// is session-scoped.
+fn session_cwd(context: &ToolContext) -> Option<std::path::PathBuf> {
+    context
+        .get::<rig_agent::tool::SessionCwd>()
+        .map(|cwd| cwd.0.clone())
+}
+
 /// Read a UTF-8 text file page by page, or an image whole. Text output
 /// is capped at 50 KiB of whole lines ([`truncate`]) and every
 /// truncation notice carries the offset that continues the read: large
@@ -84,25 +115,29 @@ pub const MAX_TIMEOUT_SECS: u64 = 600;
 /// [`IMAGE_MAX_BYTES`] — no resize in v1, so oversized images are
 /// rejected with guidance (downscaling is a dependency decision,
 /// deferred). Directories list their entries inline. Binary and
-/// UTF-16/32 text files are rejected loudly.
-#[rig_tool(description = "Read a file (absolute or relative path). Text \
-                   files: UTF-8, output capped at 50 KiB in whole lines, \
+/// UTF-16/32 text files are rejected loudly. Relative paths resolve
+/// against the session's working directory.
+#[rig_tool(description = "Read a file (absolute or relative path; relative \
+                   paths resolve against the session's working directory). \
+                   Text files: UTF-8, output capped at 50 KiB in whole lines, \
                    the truncation notice carries the offset to continue \
                    from; optional offset (1-indexed line number) and limit \
                    (line count) page large files. Images (PNG, JPEG, GIF, \
                    WebP): sent to the model as an image, up to 3 MiB. \
                    Reading a directory lists its entries.")]
 pub async fn read(
+    #[rig(context)] context: &mut ToolContext,
     path: String,
     offset: Option<usize>,
     limit: Option<usize>,
 ) -> Result<rig_core::OneOrMany<rig_core::message::ToolResultContent>, ToolExecutionError> {
-    let meta = std::fs::metadata(&path)
+    let resolved = resolve(context, &path);
+    let meta = std::fs::metadata(&resolved)
         .map_err(|e| ToolExecutionError::other(format!("cannot read `{path}`: {e}")))?;
     if meta.is_dir() {
-        return report_text(list_directory(&path)?);
+        return report_text(list_directory(&resolved, &path)?);
     }
-    let bytes = std::fs::read(&path)
+    let bytes = std::fs::read(&resolved)
         .map_err(|e| ToolExecutionError::other(format!("cannot read `{path}`: {e}")))?;
     if let Some(media_type) = image_media_type(&bytes) {
         return image_read(
@@ -299,14 +334,15 @@ fn non_utf8_bom(bytes: &[u8]) -> Option<&'static str> {
 /// Inline directory listing: a header naming the directory, then sorted
 /// entry names with `/` on directories — lean on purpose (no size/mtime
 /// columns; bash `ls -la` covers metadata). Capped through the shared
-/// truncation.
-fn list_directory(path: &str) -> Result<String, ToolExecutionError> {
-    let entries = std::fs::read_dir(path)
-        .map_err(|e| ToolExecutionError::other(format!("cannot list `{path}`: {e}")))?;
+/// truncation. I/O runs on the resolved path; the header shows the
+/// model-given one.
+fn list_directory(resolved: &std::path::Path, display: &str) -> Result<String, ToolExecutionError> {
+    let entries = std::fs::read_dir(resolved)
+        .map_err(|e| ToolExecutionError::other(format!("cannot list `{display}`: {e}")))?;
     let mut names: Vec<String> = Vec::new();
     for entry in entries {
         let entry =
-            entry.map_err(|e| ToolExecutionError::other(format!("listing `{path}`: {e}")))?;
+            entry.map_err(|e| ToolExecutionError::other(format!("listing `{display}`: {e}")))?;
         let mut name = entry.file_name().to_string_lossy().into_owned();
         if entry.file_type().map(|t| t.is_dir()).unwrap_or(false) {
             name.push('/');
@@ -314,7 +350,7 @@ fn list_directory(path: &str) -> Result<String, ToolExecutionError> {
         names.push(name);
     }
     names.sort();
-    let mut listing = format!("{path} is a directory:\n");
+    let mut listing = format!("{display} is a directory:\n");
     if names.is_empty() {
         listing.push_str("(empty directory)");
     } else {
@@ -340,34 +376,38 @@ fn list_directory(path: &str) -> Result<String, ToolExecutionError> {
 /// named in the result. Mutations serialize through [`file_io`]'s
 /// per-path lock; overwrites are atomic (temp-file + rename) so readers
 /// never see a torn file. For targeted changes to existing files, use
-/// edit.
+/// edit. Relative paths resolve against the session's working
+/// directory.
 #[rig_tool(
-    description = "Write a file (absolute or relative path). Creates new files; \
-                   overwrites an existing file only with overwrite: true — say \
-                   so explicitly when replacing content. Parent directories are \
-                   created as needed. To modify an existing file, prefer edit."
+    description = "Write a file (absolute or relative path; relative paths \
+                   resolve against the session's working directory). Creates \
+                   new files; overwrites an existing file only with \
+                   overwrite: true — say so explicitly when replacing \
+                   content. Parent directories are created as needed. To \
+                   modify an existing file, prefer edit."
 )]
 pub async fn write(
+    #[rig(context)] context: &mut ToolContext,
     path: String,
     content: String,
     overwrite: Option<bool>,
 ) -> Result<String, ToolExecutionError> {
-    let path = std::path::PathBuf::from(&path);
-    let display = path.display().to_string();
-    let _guard = file_io::lock(&path).await;
-    if path.is_dir() {
+    let resolved = resolve(context, &path);
+    let display = path;
+    let _guard = file_io::lock(&resolved).await;
+    if resolved.is_dir() {
         return Err(ToolExecutionError::other(format!(
             "`{display}` is a directory — write needs a file path"
         )));
     }
-    if path.exists() && overwrite != Some(true) {
-        let size = std::fs::metadata(&path).map(|m| m.len()).unwrap_or(0);
+    if resolved.exists() && overwrite != Some(true) {
+        let size = std::fs::metadata(&resolved).map(|m| m.len()).unwrap_or(0);
         return Err(ToolExecutionError::other(format!(
             "`{display}` already exists ({size} bytes). Pass overwrite: true \
              to replace it, or use edit for a targeted change."
         )));
     }
-    let outcome = file_io::store(&path, content.as_bytes()).await?;
+    let outcome = file_io::store(&resolved, content.as_bytes()).await?;
     let bytes = content.len();
     let parents = if outcome.parents_created > 0 {
         format!(", created {} parent dirs", outcome.parents_created)
@@ -390,21 +430,26 @@ pub async fn write(
 /// fixes and resends only the failed ones. Overlapping edits apply only
 /// when their shared region agrees; a conflicting pair is rejected
 /// together. No fuzzy matching beyond line endings: a miss means the
-/// model's view of the file is stale — read it fresh.
+/// model's view of the file is stale — read it fresh. Relative paths
+/// resolve against the session's working directory.
 #[rig_tool(
     description = "Edit a file with exact text replacements. Each edit is \
                    independent: those whose old_text matches a unique spot are \
                    applied, the rest are reported by index — fix and resend only \
                    the failed ones. old_text must match the file exactly \
                    (whitespace included; LF/CRLF differences are normalized). \
-                   Overlapping edits apply only if their shared content agrees."
+                   Overlapping edits apply only if their shared content agrees. \
+                   Relative paths resolve against the session's working \
+                   directory."
 )]
 pub async fn edit(
+    #[rig(context)] context: &mut ToolContext,
     path: String,
     edits: Vec<EditReplacement>,
 ) -> Result<rig_core::OneOrMany<rig_core::message::ToolResultContent>, ToolExecutionError> {
-    let _guard = file_io::lock(std::path::Path::new(&path)).await;
-    let outcome = edit_core(&path, &edits)?;
+    let resolved = resolve(context, &path);
+    let _guard = file_io::lock(&resolved).await;
+    let outcome = edit_core(&resolved.to_string_lossy(), &edits)?;
     report_with_details(outcome.report, outcome.details)
 }
 
@@ -797,6 +842,12 @@ async fn run_shell(
             .stdout(std::process::Stdio::piped())
             .stderr(std::process::Stdio::piped())
             .stdin(std::process::Stdio::null());
+        // A session-scoped run works from the session's directory (the
+        // subagent ruling); absent the capability the child inherits
+        // the process cwd — today's semantics.
+        if let Some(cwd) = session_cwd(context) {
+            cmd.current_dir(cwd);
+        }
     });
     // Tree kill: the process group dies with its leader on Unix; the job
     // object takes the whole tree down on Windows. The drop guard below is
@@ -1026,36 +1077,11 @@ fn join_reader(handle: ReaderJoin) -> Vec<u8> {
     handle.and_then(|h| h.join().ok()).unwrap_or_default()
 }
 
-/// Erase any [`PortableTool`] into a [`DynamicTool`] so sessions (which
-/// rebuild their agent on model switches) can hold mixed tool sets in one
-/// vector.
-pub fn dynamic<T>(tool: T) -> DynamicTool
-where
-    T: PortableTool + Send + Sync + 'static,
-{
-    let tool = std::sync::Arc::new(tool);
-    DynamicTool::new(
-        <T as PortableTool>::NAME.to_string(),
-        tool.description(),
-        tool.parameters(),
-        move |_ctx: &mut ToolContext, args: serde_json::Value| {
-            let tool = tool.clone();
-            Box::pin(async move {
-                let typed: <T as PortableTool>::Args = serde_json::from_value(args)
-                    .map_err(|e| ToolExecutionError::other(format!("invalid arguments: {e}")))?;
-                let output = <T as PortableTool>::call(tool.as_ref(), typed)
-                    .await
-                    .map_err(|e| tool.map_error(e))?;
-                output.into_tool_output()
-            })
-        },
-    )
-}
-
 /// Erase a contextual `#[rig_tool]` (one taking `#[rig(context)]
-/// &mut ToolContext`) into a [`DynamicTool`], cloning the tool per call so
-/// the context stays per-dispatch. The contextual counterpart of
-/// [`dynamic`].
+/// &mut ToolContext`) into a [`DynamicTool`] so sessions (which rebuild
+/// their agent on model switches) can hold mixed tool sets in one
+/// vector. Every tabit tool is contextual — they read the session cwd
+/// and the run token from the per-run context.
 pub fn dynamic_contextual<T>(tool: T) -> DynamicTool
 where
     T: rig_agent::tool::Tool + Send + Sync + 'static,

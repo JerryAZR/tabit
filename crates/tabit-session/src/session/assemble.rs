@@ -9,6 +9,7 @@ use crate::error::SessionError;
 use crate::writer::SessionWriter;
 use rig_agent::agent::{Agent, AgentBuilder};
 use rig_agent::tool::DynamicTool;
+use std::path::PathBuf;
 use std::sync::{Arc, Mutex};
 use tabit_config::TabitConfig;
 use tabit_protocol::ModelSelection;
@@ -40,6 +41,7 @@ impl Session {
     pub(super) fn assemble(
         builder: SessionBuilder,
         writer: SessionWriter,
+        cwd: PathBuf,
         resumed: bool,
     ) -> Result<Self, SessionError> {
         if builder.max_turns == 0 {
@@ -92,6 +94,7 @@ impl Session {
             abort: std::sync::Arc::new(std::sync::Mutex::new(CancellationToken::new())),
             mailbox: Mailbox::default(),
             path,
+            cwd,
             id,
             resumed,
             interaction: None,

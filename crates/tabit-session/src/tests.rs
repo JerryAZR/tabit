@@ -2498,3 +2498,61 @@ async fn resumed_sessions_probe_ids_from_earlier_processes() -> Result<(), Sessi
     std::fs::remove_dir_all(store.dir()).ok();
     Ok(())
 }
+
+// --- the session cwd: recorded at create, adopted at resume, mounted
+// --- into every run's tool context ---
+
+#[tokio::test]
+async fn a_runs_tools_see_the_session_cwd() {
+    let store = temp_store("session-cwd");
+    let seen: Arc<Mutex<Option<std::path::PathBuf>>> = Arc::new(Mutex::new(None));
+    let probe_seen = seen.clone();
+    let probe = DynamicTool::new(
+        "cwd_probe",
+        "Returns the session cwd",
+        json!({"type":"object","properties":{}}),
+        move |ctx, _args| {
+            let seen = probe_seen.clone();
+            Box::pin(async move {
+                *seen.lock().expect("probe lock") = ctx
+                    .get::<rig_agent::tool::SessionCwd>()
+                    .map(|cwd| cwd.0.clone());
+                Ok(rig_agent::tool::ToolOutput::text("probed"))
+            })
+        },
+    );
+    let mut session = Factory::new(vec![tool_turn("c1", "cwd_probe"), text_turn("done")])
+        .into_builder(store.clone())
+        .dynamic_tool(probe)
+        .create("D:/the/session/dir")
+        .expect("session");
+    assert_eq!(session.cwd(), Path::new("D:/the/session/dir"));
+
+    session.prompt("go").await;
+    assert_eq!(
+        *seen.lock().expect("probe lock"),
+        Some(std::path::PathBuf::from("D:/the/session/dir")),
+        "the run's tool context carried the session cwd"
+    );
+    std::fs::remove_dir_all(store.dir()).ok();
+}
+
+#[tokio::test]
+async fn a_resumed_session_adopts_its_recorded_cwd() {
+    let store = temp_store("session-cwd-resume");
+    let path = {
+        let mut session = Factory::new(vec![text_turn("one")])
+            .into_builder(store.clone())
+            .create("E:/recorded/cwd")
+            .expect("session");
+        // The first commit materializes the file (the no-orphan gate).
+        session.prompt("hello").await;
+        session.path().to_path_buf()
+    };
+    let (resumed, _) = Factory::new(vec![text_turn("two")])
+        .into_builder(store.clone())
+        .resume(&path)
+        .expect("resume");
+    assert_eq!(resumed.cwd(), Path::new("E:/recorded/cwd"));
+    std::fs::remove_dir_all(store.dir()).ok();
+}

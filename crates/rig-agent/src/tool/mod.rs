@@ -146,7 +146,7 @@ compile_error!(
 pub mod rmcp;
 pub mod server;
 
-pub use extensions::{MissingToolContext, ToolContext};
+pub use extensions::{MissingToolContext, SessionCwd, ToolContext};
 pub use rig_core::tool::{
     IntoToolOutput, PortableDynamicTool, ToolErrorKind, ToolExecutionError, ToolOutput, ToolResult,
 };

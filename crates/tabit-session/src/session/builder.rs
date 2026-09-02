@@ -10,7 +10,7 @@ use crate::store::SessionStore;
 use crate::writer::SessionWriter;
 use rig_agent::agent::ModelHandle;
 use rig_agent::tool::DynamicTool;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use tabit_config::{AuthConfig, TabitConfig};
 use tabit_protocol::ModelSelection;
@@ -119,7 +119,7 @@ impl SessionBuilder {
     pub fn create(self, cwd: &str) -> Result<Session, SessionError> {
         let writer = self.store.create(cwd);
         let selection = self.selection.clone();
-        let session = Session::assemble(self, writer, false)?;
+        let session = Session::assemble(self, writer, PathBuf::from(cwd), false)?;
         // The opening model_change enqueues at once: write-behind — it
         // lands with the session's first drain, and a session that
         // never runs materializes nothing (the writer's no-orphan
@@ -147,7 +147,8 @@ impl SessionBuilder {
         validate_selection(&self.selection, &self.config)?;
         let id = parsed.header.id.clone();
         let writer = SessionWriter::append_to(&parsed.path, id, parsed.file_len)?;
-        let mut session = Session::assemble(self, writer, true)?;
+        let cwd = PathBuf::from(parsed.header.cwd.clone());
+        let mut session = Session::assemble(self, writer, cwd, true)?;
         session.ledger = parsed.stats.clone();
         // The conversation's owner is born from the parsed tree over
         // the session's one buffer (from_tree is the only preloaded

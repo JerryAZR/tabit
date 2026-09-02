@@ -124,6 +124,12 @@ pub struct Session {
     /// engine's turn-boundary steering.
     mailbox: Mailbox,
     path: PathBuf,
+    /// The working directory this session runs in — recorded in the
+    /// header, mounted into every run's tool context as
+    /// [`SessionCwd`](rig_agent::tool::SessionCwd) so relative tool
+    /// paths and spawned commands resolve against it, not the process
+    /// cwd (the subagent ruling: a child may scope elsewhere).
+    cwd: PathBuf,
     id: String,
     /// Whether this session continues an existing chain (`resume`) or
     /// started fresh (`create`) — reported in the handshake so a
@@ -176,6 +182,11 @@ impl Session {
     /// The session file.
     pub fn path(&self) -> &Path {
         &self.path
+    }
+
+    /// The working directory this session runs in.
+    pub fn cwd(&self) -> &Path {
+        &self.cwd
     }
 
     /// Whether this session continues an existing chain or started

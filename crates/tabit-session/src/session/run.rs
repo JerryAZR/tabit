@@ -241,6 +241,7 @@ impl Session {
     async fn open_run(&self, run_token: &CancellationToken) -> rig_agent::agent::StreamingResult {
         let mut tool_context = rig_agent::tool::ToolContext::new();
         tool_context.insert(run_token.clone());
+        tool_context.insert(rig_agent::tool::SessionCwd(self.cwd.clone()));
         if let Some(hub) = &self.interaction {
             tool_context.insert(hub.capability());
         }

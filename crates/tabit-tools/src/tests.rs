@@ -1,5 +1,4 @@
 use super::*;
-use rig_core::tool::PortableTool;
 use std::fs;
 
 fn temp_dir(tag: &str) -> std::path::PathBuf {
@@ -34,7 +33,7 @@ fn split_parts(
 
 /// The text of a successful `read` (text reads are single-part).
 async fn read_out(path: String, offset: Option<usize>, limit: Option<usize>) -> String {
-    split_parts(read(path, offset, limit).await.expect("read")).0
+    split_parts(read(&mut ctx(), path, offset, limit).await.expect("read")).0
 }
 
 fn err_text<T>(result: Result<T, ToolExecutionError>) -> String
@@ -84,6 +83,7 @@ async fn read_errors_are_clear_about_what_and_why() {
     let dir = temp_dir("read-err");
     let missing = err_text(
         read(
+            &mut ctx(),
             dir.join("nope.txt").to_string_lossy().to_string(),
             None,
             None,
@@ -96,15 +96,15 @@ async fn read_errors_are_clear_about_what_and_why() {
     let bin = dir.join("blob.bin");
     fs::write(&bin, [0xff, 0xfe, 0x00, 0x01]).expect("binary");
     // FF FE is the UTF-16 LE mark — the error names the encoding.
-    let utf16 = err_text(read(bin.to_string_lossy().to_string(), None, None).await);
+    let utf16 = err_text(read(&mut ctx(), bin.to_string_lossy().to_string(), None, None).await);
     assert!(utf16.contains("UTF-16"), "{utf16}");
 
     let raw = dir.join("blob2.bin");
     fs::write(&raw, [0x89, 0x50, 0x4e, 0x47, 0x00, 0x01]).expect("binary");
-    let not_utf8 = err_text(read(raw.to_string_lossy().to_string(), None, None).await);
+    let not_utf8 = err_text(read(&mut ctx(), raw.to_string_lossy().to_string(), None, None).await);
     assert!(not_utf8.contains("UTF-8"), "{not_utf8}");
 
-    let beyond = err_text(read("Cargo.toml".to_string(), Some(10_000), None).await);
+    let beyond = err_text(read(&mut ctx(), "Cargo.toml".to_string(), Some(10_000), None).await);
     assert!(beyond.contains("beyond the end"), "{beyond}");
     fs::remove_dir_all(&dir).ok();
 }
@@ -212,6 +212,7 @@ async fn write_creates_new_files_and_names_parents() {
     let dir = temp_dir("write-new");
     let target = dir.join("a").join("b").join("f.rs");
     let out = write(
+        &mut ctx(),
         target.to_string_lossy().to_string(),
         "fn main() {}\n".to_string(),
         None,
@@ -237,6 +238,7 @@ async fn write_refuses_an_existing_file_without_the_flag() {
     for flag in [None, Some(false)] {
         let error = err_text(
             write(
+                &mut ctx(),
                 target.to_string_lossy().to_string(),
                 "gone".to_string(),
                 flag,
@@ -249,6 +251,7 @@ async fn write_refuses_an_existing_file_without_the_flag() {
     }
 
     let out = write(
+        &mut ctx(),
         target.to_string_lossy().to_string(),
         "replacement".to_string(),
         Some(true),
@@ -270,13 +273,29 @@ async fn write_fails_loudly_on_directory_and_file_parent() {
     let dir = temp_dir("write-kinds");
     let sub = dir.join("subdir");
     fs::create_dir(&sub).expect("dir");
-    let error = err_text(write(sub.to_string_lossy().to_string(), "x".to_string(), None).await);
+    let error = err_text(
+        write(
+            &mut ctx(),
+            sub.to_string_lossy().to_string(),
+            "x".to_string(),
+            None,
+        )
+        .await,
+    );
     assert!(error.contains("is a directory"), "{error}");
 
     let blocker = dir.join("blocker");
     fs::write(&blocker, "file").expect("seed");
     let target = blocker.join("child.txt");
-    let error = err_text(write(target.to_string_lossy().to_string(), "x".to_string(), None).await);
+    let error = err_text(
+        write(
+            &mut ctx(),
+            target.to_string_lossy().to_string(),
+            "x".to_string(),
+            None,
+        )
+        .await,
+    );
     assert!(error.contains("not a directory"), "{error}");
     fs::remove_dir_all(&dir).ok();
 }
@@ -293,7 +312,7 @@ async fn writes_to_one_path_serialize_through_the_lock() {
     for i in 0..4 {
         let path = target.to_string_lossy().to_string();
         handles.push(tokio::spawn(async move {
-            write(path, format!("winner-{i}"), None).await
+            write(&mut ctx(), path, format!("winner-{i}"), None).await
         }));
     }
     let mut ok = 0;
@@ -421,14 +440,15 @@ async fn powershell_missing_program_is_a_clear_error() {
 
 #[tokio::test]
 async fn portable_structs_are_named_and_erased_correctly() {
-    assert_eq!(<Read as PortableTool>::NAME, "read");
-    // bash is contextual (it takes the cancellation-bearing ToolContext).
+    // All four coding tools are contextual now (they read the session
+    // cwd from the run's ToolContext).
+    assert_eq!(<Read as rig_agent::tool::Tool>::NAME, "read");
     assert_eq!(<Bash as rig_agent::tool::Tool>::NAME, "bash");
     #[cfg(windows)]
     assert_eq!(<Powershell as rig_agent::tool::Tool>::NAME, "powershell");
 
     let mut set = rig_agent::tool::ToolSet::default();
-    set.add_dynamic_tool(dynamic(Read));
+    set.add_dynamic_tool(dynamic_contextual(Read));
     set.add_dynamic_tool(dynamic_contextual(Bash));
     let defs = set.get_tool_definitions();
     let read_def = defs.iter().find(|d| d.name == "read").expect("read def");
@@ -471,9 +491,9 @@ async fn shell_tool_registers_the_resolved_dialect() {
 }
 
 #[tokio::test]
-async fn dynamic_tool_executes_the_portable_body() {
+async fn dynamic_tool_executes_the_contextual_body() {
     let mut set = rig_agent::tool::ToolSet::default();
-    set.add_dynamic_tool(dynamic(Read));
+    set.add_dynamic_tool(dynamic_contextual(Read));
     let dir = temp_dir("dyn-read");
     fs::write(dir.join("f.txt"), "via-dynamic").expect("write");
     let mut ctx = ToolContext::default();
@@ -912,9 +932,11 @@ async fn edit_rejects_binary_files() {
 async fn edit_serializes_concurrent_calls_on_one_path() {
     let (dir, path) = seed("edit-serial", "f.txt", "alpha\nbeta\ngamma\ndelta\n");
     let p = || path.to_string_lossy().to_string();
+    let mut c1 = ctx();
+    let mut c2 = ctx();
     let (r1, r2) = tokio::join!(
-        edit(p(), vec![rep("beta", "BETA")]),
-        edit(p(), vec![rep("delta", "DELTA")]),
+        edit(&mut c1, p(), vec![rep("beta", "BETA")]),
+        edit(&mut c2, p(), vec![rep("delta", "DELTA")]),
     );
     assert!(r1.is_ok(), "{r1:?}");
     assert!(r2.is_ok(), "{r2:?}");
@@ -965,12 +987,12 @@ async fn read_names_utf32_encodings() {
     let dir = temp_dir("read-utf32");
     let le = dir.join("le.txt");
     fs::write(&le, [0xff, 0xfe, 0x00, 0x00, 0x41, 0x00, 0x00, 0x00]).expect("write");
-    let error = err_text(read(le.to_string_lossy().to_string(), None, None).await);
+    let error = err_text(read(&mut ctx(), le.to_string_lossy().to_string(), None, None).await);
     assert!(error.contains("UTF-32 LE"), "{error}");
 
     let be = dir.join("be.txt");
     fs::write(&be, [0x00, 0x00, 0xfe, 0xff, 0x00, 0x00, 0x00, 0x41]).expect("write");
-    let error = err_text(read(be.to_string_lossy().to_string(), None, None).await);
+    let error = err_text(read(&mut ctx(), be.to_string_lossy().to_string(), None, None).await);
     assert!(error.contains("UTF-32 BE"), "{error}");
     fs::remove_dir_all(&dir).ok();
 }
@@ -982,7 +1004,7 @@ async fn read_names_utf16_be() {
     let dir = temp_dir("read-utf16be");
     let path = dir.join("be.txt");
     fs::write(&path, [0xfe, 0xff, 0x00, 0x41]).expect("write");
-    let error = err_text(read(path.to_string_lossy().to_string(), None, None).await);
+    let error = err_text(read(&mut ctx(), path.to_string_lossy().to_string(), None, None).await);
     assert!(error.contains("UTF-16 BE"), "{error}");
     fs::remove_dir_all(&dir).ok();
 }
@@ -1032,7 +1054,7 @@ async fn read_returns_an_image_content_part() {
     let dir = temp_dir("read-image");
     let path = dir.join("dot.png");
     fs::write(&path, TINY_PNG).expect("write");
-    let parts: Vec<_> = read(path.to_string_lossy().to_string(), None, None)
+    let parts: Vec<_> = read(&mut ctx(), path.to_string_lossy().to_string(), None, None)
         .await
         .expect("image read")
         .into_iter()
@@ -1076,7 +1098,7 @@ async fn read_rejects_oversized_images_with_guidance() {
     let mut bytes = TINY_PNG.to_vec();
     bytes.resize(IMAGE_MAX_BYTES + 1, b'x');
     fs::write(&path, &bytes).expect("write");
-    let error = err_text(read(path.to_string_lossy().to_string(), None, None).await);
+    let error = err_text(read(&mut ctx(), path.to_string_lossy().to_string(), None, None).await);
     assert!(error.contains("capped at"), "{error}");
     assert!(error.contains("Downscale"), "{error}");
     fs::remove_dir_all(&dir).ok();
@@ -1087,8 +1109,137 @@ async fn read_rejects_paging_args_on_images() {
     let dir = temp_dir("read-image-page");
     let path = dir.join("dot.png");
     fs::write(&path, TINY_PNG).expect("write");
-    let error = err_text(read(path.to_string_lossy().to_string(), Some(1), None).await);
+    let error = err_text(
+        read(
+            &mut ctx(),
+            path.to_string_lossy().to_string(),
+            Some(1),
+            None,
+        )
+        .await,
+    );
     assert!(error.contains("whole"), "{error}");
+    fs::remove_dir_all(&dir).ok();
+}
+
+// --- the session cwd: relative paths resolve against it ---
+
+/// A context scoped to `dir`.
+fn ctx_in(dir: &std::path::Path) -> rig_agent::tool::ToolContext {
+    let mut context = ctx();
+    context.insert(rig_agent::tool::SessionCwd(dir.to_path_buf()));
+    context
+}
+
+#[tokio::test]
+async fn relative_paths_resolve_against_the_session_cwd() {
+    let dir = temp_dir("cwd-resolve");
+    fs::write(dir.join("note.txt"), "scoped\n").expect("write");
+
+    // read: a bare relative name lands inside the session directory.
+    let out = split_parts(
+        read(&mut ctx_in(&dir), "note.txt".to_string(), None, None)
+            .await
+            .expect("read"),
+    )
+    .0;
+    assert_eq!(out, "scoped");
+
+    // write: a relative path with parents lands inside it too.
+    write(
+        &mut ctx_in(&dir),
+        "sub/f.txt".to_string(),
+        "made".to_string(),
+        None,
+    )
+    .await
+    .expect("write");
+    assert_eq!(
+        fs::read_to_string(dir.join("sub/f.txt")).expect("read back"),
+        "made"
+    );
+
+    // edit: matches and stores through the resolved path; the report
+    // names the model-given path.
+    let (text, _) = split_parts(
+        edit(
+            &mut ctx_in(&dir),
+            "sub/f.txt".to_string(),
+            vec![EditReplacement {
+                old_text: "made".to_string(),
+                new_text: "edited".to_string(),
+            }],
+        )
+        .await
+        .expect("edit"),
+    );
+    assert!(
+        text.contains("sub/f.txt"),
+        "the report shows the given path: {text}"
+    );
+    assert_eq!(
+        fs::read_to_string(dir.join("sub/f.txt")).expect("read back"),
+        "edited"
+    );
+    fs::remove_dir_all(&dir).ok();
+}
+
+#[tokio::test]
+async fn absolute_paths_ignore_the_session_cwd() {
+    let dir = temp_dir("cwd-absolute");
+    fs::write(dir.join("abs.txt"), "absolute\n").expect("write");
+    let elsewhere = temp_dir("cwd-elsewhere");
+    let out = split_parts(
+        read(
+            &mut ctx_in(&elsewhere),
+            dir.join("abs.txt").to_string_lossy().to_string(),
+            None,
+            None,
+        )
+        .await
+        .expect("read"),
+    )
+    .0;
+    assert_eq!(out, "absolute");
+    fs::remove_dir_all(&dir).ok();
+    fs::remove_dir_all(&elsewhere).ok();
+}
+
+#[tokio::test]
+async fn without_a_session_cwd_relative_paths_stay_process_relative() {
+    // Standalone tool use (no capability): a bare relative path behaves
+    // exactly as before — resolved against the process cwd by the OS.
+    // Cargo.toml sits at the process cwd during tests.
+    let out = split_parts(
+        read(&mut ctx(), "Cargo.toml".to_string(), Some(1), Some(1))
+            .await
+            .expect("read"),
+    )
+    .0;
+    assert!(out.starts_with("["), "first line of the manifest: {out}");
+}
+
+#[tokio::test]
+async fn bash_runs_in_the_session_cwd() {
+    if !bash_dialect_available() {
+        eprintln!("skipped: no verified Git Bash on this machine");
+        return;
+    }
+    // A marker file is the dialect-robust probe: `pwd` prints MSYS-style
+    // mounts under Git Bash, but `ls` sees the session directory's
+    // contents either way.
+    let dir = temp_dir("cwd-bash");
+    fs::write(dir.join("cwd-marker.txt"), "x").expect("marker");
+    let out = split_parts(
+        bash(&mut ctx_in(&dir), "ls".to_string(), None)
+            .await
+            .expect("bash"),
+    )
+    .0;
+    assert!(
+        out.contains("cwd-marker.txt"),
+        "ls sees the session dir: {out}"
+    );
     fs::remove_dir_all(&dir).ok();
 }
 
@@ -1168,7 +1319,7 @@ async fn edit_parts(
     path: &std::path::Path,
     edits: Vec<EditReplacement>,
 ) -> Result<Vec<rig_core::message::ToolResultContent>, ToolExecutionError> {
-    let one_or_many = edit(path.to_string_lossy().into_owned(), edits).await?;
+    let one_or_many = edit(&mut ctx(), path.to_string_lossy().into_owned(), edits).await?;
     Ok(one_or_many.into_iter().collect())
 }
 

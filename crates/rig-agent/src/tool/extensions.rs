@@ -159,6 +159,14 @@ pub struct ToolContext {
     result: TypeMap,
 }
 
+/// The working directory the executing session runs in — the base
+/// relative tool paths resolve against and spawned commands inherit.
+/// Inserted by the run's opener when the runner is session-scoped;
+/// absent for standalone tool use (tools fall back to the process
+/// working directory, which is then also correct).
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct SessionCwd(pub std::path::PathBuf);
+
 impl ToolContext {
     /// Create an empty context.
     pub const fn new() -> Self {

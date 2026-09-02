@@ -41,7 +41,7 @@ use tabit_session::{
     ModelRegistry, ModelSelection, Session, SessionBuilder, SessionHost, SessionHostWiring,
     SessionStore, build_system_prompt,
 };
-use tabit_tools::{dynamic, dynamic_contextual};
+use tabit_tools::dynamic_contextual;
 
 #[derive(Debug, Clone)]
 struct Args {
@@ -395,9 +395,11 @@ fn assemble_session(
     )
     .map_err(|e| e.to_string())?
     .preamble(preamble)
-    .dynamic_tool(dynamic(tabit_tools::Read))
-    .dynamic_tool(dynamic(tabit_tools::Write))
-    .dynamic_tool(dynamic(tabit_tools::Edit))
+    // All coding tools are contextual: they read the session cwd and
+    // the run token from the per-run ToolContext.
+    .dynamic_tool(dynamic_contextual(tabit_tools::Read))
+    .dynamic_tool(dynamic_contextual(tabit_tools::Write))
+    .dynamic_tool(dynamic_contextual(tabit_tools::Edit))
     .dynamic_tool(tabit_tools::shell_tool())
     .dynamic_tool(dynamic_contextual(tabit_tools::AskUser))
     .model_factory(registry.factory())
