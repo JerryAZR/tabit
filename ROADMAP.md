@@ -193,8 +193,9 @@ vs `Overwrote (N bytes, was M bytes)`) plus `created K parent dirs`.
 No read-before-write enforcement (Claude-Code-only quirk; pi has none).
 Mutations serialize through `file_io`: a process-wide per-path lock
 registry (the engine's tool phase is concurrency-bounded by design —
-ENGINE.md — so same-path calls can interleave; the runner ships
-`concurrency: 1` by vendored default, not by ruling) and an atomic
+ENGINE.md — so same-path calls can interleave; the session wires
+`TOOL_CONCURRENCY = 4`, rig's library default of 1 never applies to
+tabit) and an atomic
 store (temp-file + `tempfile::NamedTempFile::persist` for overwrites;
 readers never lock — the atomic store is what makes a torn read
 impossible). Read-before-*edit* likewise stays prompt-level.
@@ -233,10 +234,15 @@ rejected loudly (pi silently lossy-decodes — not copied); UTF-8 BOM
 stripped (what read shows is what edit will match); empty files say so;
 paths stay verbatim. **The caps are a dial, not doctrine**: 50 KiB ≈
 12k tokens is the per-call budget today; 64/128 KiB is sanctioned
-growth as contexts grow. **Image reads are a committed follow-up, not a
-maybe** (owner: real coding need — frontend/GUI work wants vision;
-video and other media when models support them); they will bypass the
-text truncation entirely.
+growth as contexts grow. **Image reads shipped (2026-09)** (owner:
+real coding need — frontend/GUI work wants vision): PNG/JPEG/GIF/WebP
+by magic bytes, whole-file image content parts (base64; both
+providers' tool-result wires carry them, and the session log persists
+the parts — replay reconstructs exactly what the model saw), capped
+at 3 MiB raw (the ~5 MiB base64 provider ceiling; over-cap is a loud
+rejection with guidance). No resize/conversion in v1 — that needs an
+image-processing dependency, deferred until a consumer asks.
+Video and other media when models support them.
 
 **Shell ruling (2026-09, correctness over coverage):** the shell tool is
 decided once per process at registration — `bash` only where a

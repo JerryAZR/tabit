@@ -521,7 +521,8 @@ histories).
 
 Folded v2 work items — flags 8 (write-behind durability), 9 (the
 stopped-kind taxonomy replacing the `PromptCancelled` umbrella), 14
-(`run_failed` kinds), 16 (structural ack-before-events), 19 (the
+(`run_failed` kinds), 16 (structural ack-before-events — resolved
+with the JSON bridge's handshake gate), 19 (the
 FRONTEND.md exit table as the one law); each flag's entry carries the
 settled shape.
 
@@ -1145,14 +1146,17 @@ bug, and breaching the cap fails loud (internal error, panic per
 doctrine) instead of growing memory forever. What a legitimately slow
 consumer should experience remains deferred to the GUI milestone.
 
-### 16. Ack-before-events ordering — decided (structural), implementation pending
+### 16. Ack-before-events ordering — RESOLVED (structural, shipped with the JSON bridge)
 
-The forwarder starts only after the handshake completes; rides the
-v2 JSON-mode touch.
-
-The bridge holds because the reader sends the ack before any command; a
-reordered line breaks it silently. Structural fix: the forwarder starts
-only after the handshake completes.
+The forwarder starts only after the handshake completes. Shipped in
+the bridge (`tabit/json.rs`): the event forwarder is gated on a
+watch channel the reader thread opens only after the ack is queued
+on the same ordered writer channel the ack rode — an event cannot
+land ahead of it, structurally. A rejected handshake drops the gate
+sender; the forwarder ends without forwarding anything (the
+rejection is the only frame). Pinned by the json tests' `frames[0]`
+assertions (the ack leads every event stream, including the
+startup announcements queued at spawn).
 
 ### 17. Mid-run test staging needs real sleeps — deferred (ruled)
 
