@@ -160,11 +160,6 @@ impl SessionWriter {
         self.outbox.len()
     }
 
-    /// Whether the outbox holds records a flush could not place.
-    pub fn degraded(&self) -> bool {
-        self.degraded
-    }
-
     /// The pending persist transition, if any (true = entered
     /// degraded, false = recovered), taken once.
     pub fn take_degraded_transition(&mut self) -> Option<bool> {

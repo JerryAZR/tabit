@@ -142,17 +142,12 @@ fn unified(before: &str, after: &str) -> DiffDetails {
     let mut new_line = 1usize;
     let mut cursor = 0usize;
     for (start, end) in ranges {
-        // Advance counters through the gap before this hunk.
-        for (tag, _) in changes.get(cursor..start).unwrap_or(&[]) {
-            match tag {
-                ChangeTag::Equal => {
-                    old_line += 1;
-                    new_line += 1;
-                }
-                ChangeTag::Delete => old_line += 1,
-                ChangeTag::Insert => new_line += 1,
-            }
-        }
+        // Advance counters through the gap before this hunk. The gap is
+        // all-equal by construction — every changed index lies inside
+        // some hunk's range — so both counters advance by its length.
+        let gap = start - cursor;
+        old_line += gap;
+        new_line += gap;
         let hunk_old_start = old_line;
         let hunk_new_start = new_line;
         let mut lines = Vec::new();
