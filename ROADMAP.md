@@ -270,6 +270,55 @@ The known deviation from pi's subprocess model:
 - Isolation boundaries: which tools a subagent may use, recursion depth,
   context accounting so child output can't silently blow the parent budget.
 
+**Design rulings (2026-09, the session-surface review):**
+
+- **Subagents are sessions** — the `SessionBuilder` surface (selection,
+  preamble, toolset vec, max_turns, hooks, model factory) already carries
+  every per-child knob; nothing touches the engine or ENGINE.md. Toolset
+  restriction is a shorter vec; recursion depth is enforced by omitting
+  the subagent tool from children.
+- **Two persistence modes, one builder.** Ephemeral children (reference-
+  project style: in-memory only) ride `NullBuffer` — the disk-unplugged
+  contract already exists; the gap is a builder entrance and id/path
+  semantics. Persisted children are ordinary session files — inspectable,
+  replayable via `open_session`, lineage through the dormant
+  `parent_session` header field.
+- **Per-session cwd** via a per-run capability (the pattern the run token
+  and interaction hub already use): `read`/`write`/`edit` become
+  contextual tools resolving relative paths against the session cwd;
+  `bash` sets `.current_dir`. Scoping, not sandboxing — absolute paths
+  and `cd /` still go anywhere (v1 accepts this, like every reference).
+- **Child events reach the frontend through an event-tap capability** —
+  the InteractionHub's weak-sender pattern again: the tool body's
+  `prompt_with` callback stamps child events with the child's `StreamId`.
+  Ruled: children announce via **`session_opened` + an optional `parent`
+  field** (one announcement truth — a subagent *is* a session; a second
+  announcement event was rejected). Wire change → protocol v5 with the
+  GUI changelog entry; the reducer must learn the parent branch (its
+  `session_opened` handler currently sets Facts unconditionally).
+- **Interaction default: parent-proxy** (ruled). The child's tool
+  context receives the parent's `Arc<dyn UserInteraction>` — cards pop
+  on the parent's stream and answers route through the existing rails,
+  zero endpoint changes. Deny-all remains a policy option.
+- **The result is a capped tool result** — child output truncated (or
+  spilled, bash-style) at a subagent budget; abort never looks like
+  success; usage/audit ride `tool_result.details`
+  (`{child_id, outcome, turns, usage, truncated}`) — the same
+  presentation-cargo channel edit and bash already use.
+- **Abort linkage is required plumbing**: the body selects on the child
+  pump vs the parent run token (abort detaches the sidecar task; an
+  unlinked child would keep spending tokens). `bash` is the reference
+  body shape.
+- **Memory is generic, not permission-shaped** (ruled 2026-09): the
+  permission gate is a built-in extension, not a core concept — its
+  "Always allow" state becomes a session-scoped entry in the unified
+  capability map (hooks and tools already share it), registered by the
+  assembly like any extension's memory; `PermissionMemory` the public
+  type dissolves into the gate's private state. Children inherit by
+  cloning entry handles. Open implementation rulings: entry keying
+  (typed vs named) and the durability boundary (session-scoped state
+  here; "always allow globally" belongs to user config).
+
 ### 6. Compaction + overflow recovery
 
 - Context compaction: summarize old turns when approaching the context
