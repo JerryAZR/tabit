@@ -11,6 +11,13 @@ tabit's code now** — change, extend, or delete any of it wherever that makes
 sense. `VENDOR.md` is the historical record of the initial vendoring (what was
 trimmed and why), not a constraint on future edits.
 
+Positioning (owner ruling 2026-09): tabit is a **study/research project in
+agent architecture, not a pi competitor**. pi is the feature reference and
+survey source, never the target — don't chase parity for its own sake, and
+don't add machinery because pi has it. The reasons to exist: the native Rust
+stack, the egui GUI as a first-class frontend, planned in-process subagents,
+and a design we fully own.
+
 Current workspace layout:
 
 - `crates/rig-core` — provider API clients, streaming, tools (providers kept:

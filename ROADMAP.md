@@ -1,7 +1,21 @@
 # ROADMAP
 
-What we have, and what to build to reach feature parity with pi
-(reference: `~/Projects/agents/pi`; also opencode, crush, codex, yaca).
+What we have, and what to build. tabit is a **study/research project in
+clean, solid, flexible agent architecture — not a "better pi"** (owner
+ruling 2026-09, after re-surveying pi). pi (`~/Projects/agents/pi`;
+also opencode, crush, codex, yaca) stays the feature reference and
+survey source, not the target.
+
+The founding premise — pi's core too minimal, extending it to real
+needs hard — was true when the project was planned (mid-2026, writing
+pi extensions hit the friction) but expired fast: pi's extension API,
+CBOR wire protocol + headless server/client, session-repo backends,
+harness v2, and skills all landed 2026-06 → 2026-08, right around the
+founding. What remains tabit's own, and the reasons to keep building:
+the native Rust stack (single binary, no Node), the egui GUI as a
+first-class frontend over a frozen protocol, planned **in-process**
+subagents (pi still only spawns subprocesses), and full ownership of
+the design — its pace, its discipline, its failure modes.
 
 ## Where we are
 
