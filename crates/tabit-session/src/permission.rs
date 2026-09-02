@@ -279,6 +279,38 @@ mod tests {
         assert!(message.contains("did not run"), "{message}");
     }
 
+    #[tokio::test]
+    async fn a_malformed_answer_fails_closed_with_a_trace() {
+        // A frontend answering in a shape SelectAnswer cannot parse is
+        // a protocol defect, not a user decision — the gate fails
+        // closed (and warns; the defect must not be recast silently as
+        // a denial).
+        let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
+        let hub = InteractionHub::new(tx.clone(), tabit_protocol::StreamId::new("s"));
+        // The strong sender outlives the ask (see decide_with).
+        let _worker_sender = tx;
+        let asker = hub.clone();
+        let memory = PermissionMemory::default();
+        let decision = tokio::spawn(async move {
+            gate("bash", "{\"command\":\"ls\"}", Some(&asker), &memory).await
+        });
+        let frame = tokio::time::timeout(Duration::from_secs(5), rx.recv())
+            .await
+            .expect("the gate must open its card within 5s");
+        let SessionEvent::InteractionRequested { id, .. } = frame.expect("a card").event else {
+            panic!("expected an interaction request");
+        };
+        // A known field with the wrong type: serde defaults only cover
+        // absence, not garbage.
+        hub.respond(&id, serde_json::json!({"selected": "Allow"}));
+        let action = decision.await.expect("the asker resolves");
+        let ToolCallAction::Skip(message) = action else {
+            panic!("a malformed answer must not run the call");
+        };
+        assert!(message.contains("denied"), "{message}");
+        assert!(message.contains("did not run"), "{message}");
+    }
+
     #[test]
     fn permission_asks_with_the_confirm_template() {
         let (ui_type, payload) = permission_ask("bash", "{\"command\":\"ls\"}");

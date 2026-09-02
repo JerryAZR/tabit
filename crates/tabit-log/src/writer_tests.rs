@@ -50,6 +50,62 @@ fn blocked_writer(tag: &str) -> (SessionWriter, PathBuf) {
 }
 
 #[test]
+fn append_to_a_missing_file_is_a_typed_error() {
+    let path = temp_path("append-missing");
+    // append_to opens without create: a missing file refuses, naming
+    // the path.
+    let error = SessionWriter::append_to(&path, "sid".to_string(), 0)
+        .err()
+        .expect("a missing file cannot be appended to");
+    assert!(
+        error.to_string().contains("session.jsonl"),
+        "the error names the file: {error}"
+    );
+    std::fs::remove_dir_all(path.parent().unwrap()).ok();
+}
+
+#[test]
+fn a_stray_partial_file_is_removed_and_the_commit_retries() {
+    // A previous materialize that died mid-blob left a partial file:
+    // create_new refuses it, the orphan is removed, the lines stay
+    // queued (nothing is lost), and the next attempt writes them whole.
+    let path = temp_path("stray-partial");
+    let mut writer = SessionWriter::create(path.clone(), header());
+    std::fs::write(&path, "torn tail").expect("the stray partial");
+
+    let error = writer
+        .enqueue(&[user_record("a", None)])
+        .err()
+        .expect("create_new refuses the stray");
+    assert!(error.to_string().contains("session.jsonl"), "{error}");
+    assert!(
+        !path.exists(),
+        "the orphan is removed so the retry can proceed"
+    );
+    assert_eq!(writer.pending(), 2, "header and record stay queued");
+    assert_eq!(writer.take_degraded_transition(), Some(true));
+
+    writer.enqueue(&[]).expect("the retry materializes");
+    assert_eq!(writer.take_degraded_transition(), Some(false));
+    let raw = std::fs::read_to_string(&path).expect("read");
+    assert!(!raw.contains("torn"), "no torn bytes survived: {raw}");
+    assert!(raw.contains("\"version\""), "the header landed: {raw}");
+    assert!(raw.contains("\"kind\":\"user_message\""), "{raw}");
+    std::fs::remove_dir_all(path.parent().unwrap()).ok();
+}
+
+#[test]
+fn the_null_buffer_takes_everything_and_stores_nothing() {
+    let mut buffer = NullBuffer;
+    buffer.prequeue(&user_record("a", None));
+    buffer
+        .enqueue(&[user_record("b", Some("a"))])
+        .expect("the null buffer never fails");
+    assert_eq!(buffer.pending(), 0, "nothing queues");
+    assert_eq!(buffer.take_degraded_transition(), None);
+}
+
+#[test]
 fn a_fresh_writer_touches_nothing_until_the_first_enqueue() {
     let path = temp_path("orphan-gate");
     let mut writer = SessionWriter::create(path.clone(), header());

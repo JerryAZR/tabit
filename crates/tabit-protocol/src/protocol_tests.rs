@@ -10,6 +10,36 @@ where
 }
 
 #[test]
+fn the_replay_flag_serializes_only_when_set() {
+    // `replay: false` is the default and stays off the wire; `true`
+    // round-trips, and an absent flag parses back as false.
+    let bare = serde_json::to_string(&ClientFrame::Initialize {
+        protocol_version: PROTOCOL_VERSION,
+        replay: false,
+    })
+    .expect("serialize");
+    assert!(!bare.contains("replay"), "false is omitted: {bare}");
+    let parsed: ClientFrame = serde_json::from_str(&bare).expect("parse");
+    assert_eq!(
+        parsed,
+        ClientFrame::Initialize {
+            protocol_version: PROTOCOL_VERSION,
+            replay: false,
+        }
+    );
+    assert_eq!(
+        round_trip(&ClientFrame::Initialize {
+            protocol_version: PROTOCOL_VERSION,
+            replay: true,
+        }),
+        ClientFrame::Initialize {
+            protocol_version: PROTOCOL_VERSION,
+            replay: true,
+        }
+    );
+}
+
+#[test]
 fn commands_round_trip_with_snake_case_tags() {
     let commands = vec![
         SessionCommand::Message {

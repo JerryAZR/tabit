@@ -757,6 +757,79 @@ async fn open_session_loads_a_stored_session_and_replays_it() {
 }
 
 #[tokio::test]
+async fn open_session_emits_its_model_notes_ahead_of_the_replay() {
+    // The open source's notes (e.g. the stored model no longer
+    // configures cleanly) announce on the opened session's stream right
+    // after session_opened, ahead of the replay pass — same order as
+    // the boot path.
+    let store = temp_store("endpoint-open-notes");
+    let stored_id = {
+        let mut session = Factory::new(vec![text_turn("stored answer")])
+            .into_builder(store.clone())
+            .create("C:/w")
+            .expect("session");
+        session.prompt("hello").await;
+        session.id().to_string()
+    };
+    let boot_session = Factory::new(vec![text_turn("boot answer")])
+        .into_builder(store.clone())
+        .create("C:/w")
+        .expect("session");
+    let open_store = store.clone();
+    let wiring = SessionHostWiring {
+        store: store.clone(),
+        create: std::sync::Arc::new(|| Err("not driven".to_string())),
+        open: std::sync::Arc::new(move |id: &str| {
+            let path = open_store
+                .list()
+                .map_err(|error| error.to_string())?
+                .into_iter()
+                .find(|summary| summary.id == id)
+                .ok_or_else(|| format!("no stored session with id `{id}`"))?
+                .path;
+            Factory::new(vec![text_turn("reopened answer")])
+                .into_builder(open_store.clone())
+                .resume(&path)
+                .map(|(session, _)| {
+                    (
+                        session,
+                        vec!["the stored model is not configured".to_string()],
+                    )
+                })
+                .map_err(|error| error.to_string())
+        }),
+    };
+    let mut handle = SessionHost::spawn(boot_session, Vec::new(), wiring);
+    boot_id(&handle);
+
+    handle.command_link().send(SessionCommand::OpenSession {
+        id: stored_id.clone(),
+    });
+    let note = until_event(
+        &mut handle,
+        |event| matches!(event, SessionEvent::Error { kind, .. } if kind == "model"),
+    )
+    .await;
+    assert_eq!(
+        note.stream.as_ref().map(StreamId::as_str),
+        Some(stored_id.as_str()),
+        "the note rides the opened session's stream"
+    );
+    assert!(
+        matches!(&note.event, SessionEvent::Error { message, .. } if message.contains("not configured")),
+        "the note text passes through: {:?}",
+        note.event
+    );
+    // And the pass still follows, whole.
+    until_event(&mut handle, |event| {
+        matches!(event, SessionEvent::ReplayDone)
+    })
+    .await;
+    drain(&mut handle).await;
+    std::fs::remove_dir_all(store.dir()).ok();
+}
+
+#[tokio::test]
 async fn an_unknown_session_target_is_a_backend_level_session_error() {
     let store = temp_store("endpoint-unknown");
     let session = Factory::new(vec![text_turn("ok")])
@@ -2583,6 +2656,76 @@ async fn a_continue_starts_a_run_over_the_existing_conversation() {
             .iter()
             .any(|frame| matches!(frame.event, SessionEvent::UserMessage { .. })),
         "a continue enters no message"
+    );
+    std::fs::remove_dir_all(store.dir()).ok();
+}
+
+#[tokio::test]
+async fn a_continue_on_an_empty_conversation_is_a_noop() {
+    // Nothing to continue: the pump breaks before any run. The message
+    // sent right behind the continue orders the proof — a phantom
+    // continue run would emit its turn events ahead of the message's
+    // user_message.
+    let store = temp_store("endpoint-continue-empty");
+    let session = Factory::new(vec![text_turn("answer")])
+        .into_builder(store.clone())
+        .create("C:/w")
+        .expect("session");
+    let mut handle = SessionHost::spawn(session, Vec::new(), plain_wiring(&store));
+    let id = boot_id(&handle);
+
+    handle.continue_run(&id);
+    handle.message(&id, "go");
+    let mut frames = Vec::new();
+    collect_until(&mut handle, &mut frames, terminal).await;
+    let user_at = frames
+        .iter()
+        .position(|frame| matches!(frame.event, SessionEvent::UserMessage { .. }))
+        .expect("the message was acknowledged");
+    let turn_at = frames
+        .iter()
+        .position(|frame| matches!(frame.event, SessionEvent::TurnStarted { .. }))
+        .expect("the message's turn ran");
+    assert!(
+        user_at < turn_at,
+        "the first turn belongs to the message — no phantom continue run"
+    );
+    drain(&mut handle).await;
+    std::fs::remove_dir_all(store.dir()).ok();
+}
+
+#[tokio::test]
+async fn a_replay_parked_at_close_is_served_before_wind_down() {
+    // Idle session, replay requested and close right behind it: the
+    // parked pass is served at the shutdown beat, ahead of the
+    // wind-down — close is not a barrier that discards parked work.
+    let store = temp_store("endpoint-replay-close");
+    let session = Factory::new(vec![text_turn("one")])
+        .into_builder(store.clone())
+        .create("C:/w")
+        .expect("session");
+    let mut handle = SessionHost::spawn(session, Vec::new(), plain_wiring(&store));
+    let id = boot_id(&handle);
+
+    handle.message(&id, "go");
+    let mut frames = Vec::new();
+    collect_until(&mut handle, &mut frames, terminal).await;
+    // Let the worker settle back into its idle wait, then park the
+    // replay with the close right behind it (no yield between them, so
+    // the parked pass can only be served at the shutdown beat).
+    tokio::task::yield_now().await;
+    tokio::task::yield_now().await;
+    handle.replay(&id);
+    let rest = drain(&mut handle).await;
+    assert!(
+        rest.iter()
+            .any(|frame| matches!(frame.event, SessionEvent::ReplayStarted { .. })),
+        "the parked replay was served ahead of the wind-down"
+    );
+    assert!(
+        rest.iter()
+            .any(|frame| matches!(frame.event, SessionEvent::ReplayDone)),
+        "and completed before the stream ended"
     );
     std::fs::remove_dir_all(store.dir()).ok();
 }

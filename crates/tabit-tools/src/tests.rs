@@ -989,6 +989,18 @@ async fn read_names_utf32_encodings() {
 }
 
 #[tokio::test]
+async fn read_names_utf16_be() {
+    // FE FF is the UTF-16 big-endian mark — named, not a bare
+    // invalid-UTF-8 report.
+    let dir = temp_dir("read-utf16be");
+    let path = dir.join("be.txt");
+    fs::write(&path, [0xfe, 0xff, 0x00, 0x41]).expect("write");
+    let error = err_text(read(path.to_string_lossy().to_string(), None, None).await);
+    assert!(error.contains("UTF-16 BE"), "{error}");
+    fs::remove_dir_all(&dir).ok();
+}
+
+#[tokio::test]
 async fn read_byte_truncation_says_so() {
     let dir = temp_dir("read-bytecap");
     let path = dir.join("dense.txt");
@@ -1213,4 +1225,54 @@ async fn edit_details_merge_adjacent_hunks() {
     let hunks = details["diff"]["hunks"].as_array().expect("hunks");
     assert_eq!(hunks.len(), 1, "overlapping context merges: {hunks:?}");
     fs::remove_dir_all(&dir).ok();
+}
+
+#[tokio::test]
+async fn edit_details_separate_distant_hunks_with_correct_starts() {
+    // Changes at lines 5 and 35 of 40: two hunks. The second hunk's
+    // start line is computed by advancing the line counters through the
+    // all-equal gap between the ranges.
+    let body: String = (1..=40).map(|i| format!("l{i}\n")).collect();
+    let (dir, path) = seed("edit-details-distant", "f.txt", &body);
+    let parts = edit_parts(&path, vec![rep("l5", "L5"), rep("l35", "L35")])
+        .await
+        .expect("edit");
+    let details = parts
+        .iter()
+        .find_map(|c| c.as_json())
+        .expect("details")
+        .clone();
+    let hunks = details["diff"]["hunks"].as_array().expect("hunks");
+    assert_eq!(hunks.len(), 2, "distant changes never merge: {hunks:?}");
+    assert_eq!(hunks[1]["new_start"], 31, "line 35 minus 4 context lines");
+    assert_eq!(hunks[1]["old_start"], 31);
+    fs::remove_dir_all(&dir).ok();
+}
+
+#[tokio::test]
+async fn edit_details_mark_a_pure_deletions_first_change() {
+    // A deletion-only diff has no inserted line to anchor
+    // first_changed_line on; the fallback points at where content
+    // vanished.
+    let (dir, path) = seed("edit-details-del", "f.txt", "a\nb\nc\n");
+    let parts = edit_parts(&path, vec![rep("b\n", "")]).await.expect("edit");
+    let details = parts
+        .iter()
+        .find_map(|c| c.as_json())
+        .expect("details")
+        .clone();
+    assert!(
+        details["diff"]["first_changed_line"].is_number(),
+        "a pure deletion still locates the first change: {details}"
+    );
+    fs::remove_dir_all(&dir).ok();
+}
+
+#[test]
+fn edit_details_with_no_changes_has_no_hunks() {
+    // The base case the edit caller's invariant makes unreachable (an
+    // applied edit always changes the file): before == after is empty.
+    let details = diff::edit_details("same\n", "same\n", Vec::new());
+    assert!(details["diff"]["first_changed_line"].is_null());
+    assert_eq!(details["diff"]["hunks"].as_array().expect("hunks").len(), 0);
 }

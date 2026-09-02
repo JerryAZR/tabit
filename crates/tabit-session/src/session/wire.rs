@@ -81,3 +81,27 @@ pub(crate) fn wire_usage(usage: &rig_core::completion::Usage) -> tabit_protocol:
         cache_creation_input_tokens: usage.cache_creation_input_tokens,
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn user_text_reads_only_the_text_parts_of_user_messages() {
+        // A non-user message carries no user text.
+        let assistant = Message::Assistant {
+            id: None,
+            content: rig_core::OneOrMany::one(rig_core::message::AssistantContent::text("hi")),
+        };
+        assert!(user_text(&assistant).is_empty());
+        // Non-text parts contribute nothing; text parts join.
+        let message = Message::User {
+            content: rig_core::OneOrMany::many(vec![
+                rig_core::message::UserContent::image_base64("aGk=", None, None),
+                rig_core::message::UserContent::text("the text"),
+            ])
+            .expect("two parts"),
+        };
+        assert_eq!(user_text(&message), "the text");
+    }
+}

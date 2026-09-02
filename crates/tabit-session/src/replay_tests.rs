@@ -193,6 +193,31 @@ fn multiple_text_items_and_reasoning_blocks_project_to_one_text_and_per_block_de
 }
 
 #[test]
+fn an_empty_reasoning_block_projects_no_delta() {
+    // A recorded reasoning block with no displayable text emits
+    // nothing — no empty reasoning row.
+    let chain = vec![entry(
+        "t1",
+        assistant(
+            vec![
+                AssistantContent::reasoning(""),
+                AssistantContent::text("body"),
+            ],
+            Usage::new(),
+        ),
+    )];
+    let events = project_events(&chain);
+    assert!(
+        !events
+            .iter()
+            .any(|e| matches!(e, SessionEvent::ReasoningDelta { .. })),
+        "an empty block projects no delta: {events:?}"
+    );
+    assert!(events.iter().any(|e| matches!(e,
+        SessionEvent::TextDelta { text, .. } if text == "body")));
+}
+
+#[test]
 fn an_empty_branch_projects_to_nothing() {
     // v3: bookkeeping lives in side records that never enter a branch,
     // so there is nothing to skip — an empty branch is simply empty.

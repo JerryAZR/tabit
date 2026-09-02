@@ -31,7 +31,13 @@ Defensive ("unreachable") arms follow a stricter rule:
 - The whole suite runs offline (cassette replay + test doubles). Doctests
   are NOT included in these numbers (`llvm-cov` was run without
   `--doctests`); they are gated by the same CI run.
-- Current state: **93.26% lines / 92.08% regions** (2,629 of 39,012
+- Current state: **93.59% lines / 92.24% regions** (2,518 of 39,269
+  lines; re-measured after the frontend-protocol v4 + no-orphan-gate
+  round — `tool_result.details` with its edit/shell producers, the
+  select widgets, `session_opened`, and the born-bit gate. The
+  review filled thirteen gaps and deleted two provably-dead arms;
+  see the dedicated section below. Before that: **93.26% lines /
+  92.08% regions** (2,629 of 39,012
   lines; re-measured after the tool round — the RAG mass, telemetry,
   and the blocking surface deletions shrank the base ~22k lines while
   the tool round added read/write/edit/bash with their suites. The
@@ -162,6 +168,82 @@ one-huge-line notice). Remaining residue, classified:
 - `main.rs` (tabit) stays the known outlier (48.95%): CLI assembly,
   process-spawn, and live-provider glue — the deferred class since
   the CLI's first measurement, unchanged by this round.
+
+## Frontend protocol v4 + the no-orphan gate (2026-09)
+
+The `tool_result.details` / select-widgets / `session_opened` /
+no-orphan-gate round (tabit-protocol, tabit-session, tabit-log,
+tabit-tools, the tabit binary), measured with its suites in place.
+Filled in this review:
+
+- `wire.rs` (session): `user_text`'s non-user and non-text-part arms
+  (a direct unit test).
+- `protocol.rs`: the `replay` flag's skip-when-false serialization
+  (round-trip) — the file is now fully covered.
+- `truncate.rs`: the mid-character head cut (3-byte chars land the
+  half budget inside a codepoint).
+- `diff.rs`: distant-hunk line-counter advance, a pure deletion's
+  `first_changed_line`, and the no-change base case. The gap-advance
+  loop's Delete/Insert arms were **provably dead** — every changed
+  index lies inside some hunk's range, so a gap between hunks is
+  all-equal — deleted; the loop is arithmetic now, the proof in the
+  deleting commit.
+- `writer.rs`: `append_to` on a missing file (typed error naming the
+  path), and the stray-partial-file recovery — `create_new` refuses
+  the orphan, removes it, keeps the lines queued, the retry writes
+  them whole. The `degraded()` getter was dead (nothing reads the
+  flag; the transition channel carries the reports) — deleted.
+- `NullBuffer`'s trait methods (takes everything, stores nothing).
+- `read`'s UTF-16 BE naming.
+- The permission gate's malformed-answer arm (a wrong-typed field
+  fails the parse; the gate fails closed with a trace).
+- Replay's empty-reasoning-block skip.
+- Endpoint: a continue on an empty conversation is a no-op (no
+  phantom run), `open_session` emits its model notes ahead of the
+  replay, and a replay parked at close is served at the shutdown
+  beat ahead of wind-down.
+
+Remaining residue, classified:
+
+**Justified — environmental or defensive, not exercisable offline:**
+
+- `writer.rs` — the write-fault family: `write_all` failure (+
+  `truncate_to`, its rollback helper), `materialize`'s remaining open
+  faults (the stageable one — the stray file — is now a test),
+  `serialize`/`rollback_to_mark` (reachable only from an
+  unconstructible serde failure; the enqueue panic is the sanctioned
+  crash), the drain-without-file internal-invariant error.
+- `endpoint.rs` — the two `unreachable!` routing arms (sanctioned
+  crashes), the checkout execution-time failure (receive-time
+  verification covers the stageable causes; what remains is the
+  environmental class), the `event_tx.closed()` arm (pre-existing
+  classification, unchanged).
+- `run.rs` — the abort-record flush-failure warn (the blocked-store
+  fault family) and the engine-driven stream-item passthrough arms
+  (the pre-existing family; `ToolExecutionCommitted` and the turn
+  brackets now enumerated).
+- `replay.rs` — the non-assistant recorded-message arm (corruption
+  the parser rejects earlier) and the `AssistantContent` catch arm
+  (no producer emits other variants).
+- `json.rs` — `forward_events`' `None`-stream arm (`serve` calls
+  `take_events` exactly once; `None` would be API misuse), plus the
+  usual test-module assertion arms and test-double trait methods
+  (classes 1/3).
+- `shell.rs` / `lib.rs` (tools) — the platform-absence and fault arms
+  carried from the coding-tools classification, unchanged by the cap
+  split and the details production; ask_user's malformed-answer arm
+  still dies with the tool's pre-shipping removal.
+- `permission.rs` / `interaction.rs` — test-side assertion arms
+  (class 1).
+
+**Deferred — owned by the GUI worktree:**
+
+- `tabit-gui` reducer arms (the crash-mid-run exit tail, bare
+  `TurnStarted`/`TurnCommitted` grouping, the `CompletionCall`
+  no-op, the malformed select-card notice): fillable through reducer
+  tests, but the reducer is the parallel GUI effort's active surface
+  (ROADMAP item 7) — classified with the walking-skeleton section
+  until that lands.
 
 ## Justified residue
 

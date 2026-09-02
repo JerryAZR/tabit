@@ -306,6 +306,20 @@ mod tests {
     }
 
     #[test]
+    fn head_tail_backs_the_head_cut_off_a_mid_char_budget() {
+        // 3-byte chars: the half budget (8192) lands mid-character, so
+        // the head cut must walk back to a boundary — no replacement
+        // chars at either cut.
+        let huge = "€".repeat(SHELL_MAX_BYTES);
+        let t = truncate_head_tail(&huge);
+        assert!(t.truncated && t.single_line_split);
+        assert!(
+            t.content.chars().all(|c| c == '€' || c.is_ascii()),
+            "both cuts land on char boundaries"
+        );
+    }
+
+    #[test]
     fn trailing_newline_does_not_open_a_phantom_line() {
         assert_eq!(split_lines("a\nb\n"), vec!["a", "b"]);
         assert_eq!(split_lines("a\nb"), vec!["a", "b"]);
