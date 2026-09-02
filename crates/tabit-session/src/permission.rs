@@ -262,10 +262,11 @@ mod tests {
         let ToolCallAction::Skip(message) = action else {
             panic!("a denied call must not run");
         };
-        assert_eq!(
-            message, "the user denied `bash`: too risky — the call did not run",
-            "the model sees the denial and its reason, verbatim"
-        );
+        // The promise: the model learns it was denied, why, and that
+        // the call did not run — the sentence is delivery.
+        assert!(message.contains("denied"), "{message}");
+        assert!(message.contains("too risky"), "the reason rides: {message}");
+        assert!(message.contains("did not run"), "{message}");
     }
 
     #[tokio::test]
@@ -274,10 +275,8 @@ mod tests {
         let ToolCallAction::Skip(message) = action else {
             panic!("a dismissed ask must not run the call");
         };
-        assert_eq!(
-            message, "the user denied `bash` — the call did not run",
-            "dismissal is a denial without a reason"
-        );
+        assert!(message.contains("denied"), "{message}");
+        assert!(message.contains("did not run"), "{message}");
     }
 
     #[test]

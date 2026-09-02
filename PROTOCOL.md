@@ -259,7 +259,7 @@ histories).
 - **`tool_result` carries the result** (ruled after the first GUI
   pass): the event gains `content` — exactly the text the model saw —
   plus `status`. `content` is the faithful copy: the tools cap output
-  at the source (read's byte cap, bash's 128 KiB), failure text
+  at the source (both tools cap at 50 KiB, whole lines), failure text
   included, so the frontend never needs a second channel and never
   sees more than the model did. `status` is structure only, never
   prose: `success | failed { exit_code? }` — bash's exit code rides

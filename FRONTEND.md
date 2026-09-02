@@ -253,7 +253,7 @@ those connection-level).
 | `reasoning_delta` | `turn_id`, `id`, `reasoning` | model reasoning; `id` correlates blocks within the turn (several may interleave; same-id deltas append). Full-text once per block id in replay. |
 | `tool_call` | `turn_id`, `name`, `call_id`, `internal_call_id`, `arguments` | the model issued a complete tool call, before execution. `arguments` is the raw JSON string, or `null` when unparseable. |
 | `interaction_request` | `id`, `ui_type`, `payload` | a tool gate (permission) or a tool body asks the user; `ui_type` names the widget and `payload` is its cargo (§8 templates own the shapes). Several may be open at once. Answer with `interaction_response`; a run terminal closes the unanswered (§8). |
-| `tool_result` | `turn_id`, `entry_id`, `name`, `internal_call_id`, `content`, `status` | one tool body finished; its result committed. `content` is exactly the text the model saw — already capped at the source, failure text included; render it verbatim. `status` is structure only: `success` or `failed { exit_code? }`; the detail is in `content`, not `status`. |
+| `tool_result` | `turn_id`, `entry_id`, `name`, `internal_call_id`, `content`, `status`, `details?` | one tool body finished; its result committed. `content` is exactly the text the model saw — already capped at the source, failure text included; render it verbatim. `status` is structure only: `success` or `failed { exit_code? }`; the detail is in `content`, not `status`. `details`, when present, is derived presentation cargo owned by the tool named in `name` (today: the edit tool's unified diff + per-edit outcomes) — dispatch on `name`, degrade to `content` when absent or unknown. |
 | `completion_call` | `turn_id`, `input_tokens`, `output_tokens` | one model request finished; usage is final for it. |
 | `turn_truncated` | `turn_id` | the committed turn ended truncated: the provider cut generation at its output limit (`finish_reason: length`). Informational, never a failure — the run continues exactly as usual (steers drain into the next turn; the run may end normally). Show it as a note; a steer is how the user asks the model to go on. |
 | `turn_committed` | `id` | the turn is durable history. Same id as `turn_started`. |
@@ -304,20 +304,23 @@ report (§3.5); you never mine it for user-facing meaning.
 | `model` | — | model configuration degraded: a startup preference (stale `default_model`, a resumed session's model gone) fell back. A warning — the session continues, with the fallback named in the message. (`model`-command failures join this kind when the command ships, stage 3.) |
 | `session` | — | a session command failed: `open_session` named an unknown id or an unreadable file, a command targeted an unknown session, `new_session` could not build, or the startup listing failed. **Unstamped, backend-level** — every `session`-kind error is (the failure belongs to no session; the message names the id). |
 | `checkout` | — | the checkout target does not exist in the session (§7). Stamped — it names an entry inside a real session. |
-| `persist_degraded` | `pending` | the write-behind log could not flush: `pending` entries are committed in memory but not on disk (disk full is the usual cause). Every later commit retries; nothing is lost unless the process is force-stopped while degraded (then the pending entries go — model output and steer records, never a prompt: the barrier refuses to run a turn on memory-only input and hands the batch back as drafts). Nag about disk space. |
+| `persist_degraded` | `pending` | the write-behind log could not flush: `pending` entries are committed in memory but not on disk (disk full is the usual cause). Every later commit retries; nothing is lost unless the process is force-stopped while degraded (then the pending entries go — model output and register records; a stuck start's own messages come back as drafts when the run is refused). Nag about disk space. |
 | `persist_recovered` | — | the pending entries reached the disk. |
 
 **Write-behind persistence (shipped, PROTOCOL.md flag 8).** Commits are
 memory-first: the resident state (tree, head, context) is the
 in-session truth and the file is its write-behind mirror — always a
-clean prefix of commit order. The prompt barrier guards every run's
-opening input — a turn never starts on a message that exists only in
-memory; if the flush fails at drain, the batch comes back as drafts
-(`messages_discarded` + `persist_degraded`), never held. `model_change`
-and the `checkout`/`aborted` side records ride the buffer (the marker
-classification ruling): durable no later than the next turn's prompt,
-and a hard death in the window loses them — hand-redoable, and resume
-announces whichever register survived.
+clean prefix of commit order. Entering a run, the buffer retries
+whatever a previous failure stuck; a still-refusing flush blocks the
+start (`run_failed`, the mailbox's messages handed back as drafts) —
+no turn runs twice on a memory-only write. The gate's one accepted
+trade: a session with no user message yet has nothing owed to the
+disk, so its first turn runs in memory against a dead disk and the
+degrade announces at the turn's own commit. `model_change` and the
+`checkout`/`aborted` side records ride the buffer (the marker
+classification ruling): durable no later than the next user message's
+commit, and a hard death in the window loses them — hand-redoable,
+and resume announces whichever register survived.
 
 **Replay** (brackets; content is finalized events from the catalog
 above — full-text deltas, same ids as live)

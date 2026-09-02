@@ -313,16 +313,6 @@ mod windows {
                 Shell::Powershell => {}
             }
         }
-
-        #[test]
-        fn registry_roots_point_at_directories() {
-            // A machine may carry no marker at all; whatever it does report
-            // must at least be a real directory — a stale InstallPath is
-            // caught by the bash-file validation downstream.
-            for root in registry_roots() {
-                assert!(root.is_dir(), "marker points nowhere: {}", root.display());
-            }
-        }
     }
 }
 

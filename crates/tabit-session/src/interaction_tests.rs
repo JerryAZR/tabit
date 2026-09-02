@@ -190,11 +190,13 @@ async fn a_permission_denial_skips_the_tool_in_band() {
         SessionEvent::ToolResult { name, content, .. } if name == "bash" => Some(content.clone()),
         _ => None,
     });
-    assert_eq!(
-        result.as_deref(),
-        Some("the user denied `bash`: never in tests — the call did not run"),
-        "Deny replaces the body's output with the in-band denial"
+    let result = result.expect("a denial replaces the body's output");
+    assert!(result.contains("denied"), "{result}");
+    assert!(
+        result.contains("never in tests"),
+        "the reason rides: {result}"
     );
+    assert!(result.contains("did not run"), "{result}");
     assert_eq!(
         finished_outputs(&frames),
         vec!["understood, not running it"]

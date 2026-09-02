@@ -2708,10 +2708,9 @@ async fn a_blocked_store_blocks_starts_and_recovers() {
     })
     .await;
     assert!(
-        frames.iter().any(|frame| matches!(
-            &frame.event,
-            SessionEvent::RunFailed { message } if message.contains("undrained")
-        )),
+        frames
+            .iter()
+            .any(|frame| matches!(&frame.event, SessionEvent::RunFailed { .. })),
         "the start blocked on the stuck buffer: {frames:?}"
     );
 

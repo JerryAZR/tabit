@@ -200,18 +200,19 @@ conflicts and rejects both as a named pair — equality is the check,
 order-simulation can agree while scrambling spans. All-fail calls are
 an error naming every failure; nothing is written.
 
-**Read + truncation rulings (2026-09, after surveying pi):** one shared
-truncation module (dual limits — 2000 lines / 50 KiB, whole lines only —
-head policy for read, tail for bash). **Read pages, never spills** — the
-file is already on disk; `offset`/`limit` plus continuation notices
-carrying the next offset are the mechanism. **Bash keeps the tail and
-spills the full output** to a never-deleted `%TMP%\tabit-bash-*.log`
-(notice points at it) — the dropped head is unrecoverable without
-re-running a command that may be slow or side-effecting; that
-unrecoverability is where spill pays, and it lives in the tool, not a
-result hook (the policy is dialect-specific; a generic engine-level
-backstop cap becomes justified only when third-party extension tools
-exist — noted at item 9). Read's other rulings: directories list inline
+**Read + truncation rulings (2026-09, after surveying pi; amended
+2026-09 to a single size cap):** one shared truncation module — 50
+KiB, whole lines only; no line cap ("lines" mean nothing to a model —
+a newline is just another byte). Two mechanisms, one per tool family:
+**read pages** — the head plus continuation notices carrying the next
+offset (the file is already on disk; never spilled); **bash keeps both
+ends** — first and last lines with the middle omitted — **and spills
+the full output** to a never-deleted `%TMP%\tabit-bash-*.log` (notice
+points at it), because the dropped middle is unrecoverable without
+re-running a command that may be slow or side-effecting. The spill
+lives in the tool, not a result hook (the policy is dialect-specific;
+a generic engine-level backstop cap becomes justified only when
+third-party extension tools exist — noted at item 9). Read's other rulings: directories list inline
 (header + sorted names, `/` on dirs — no size/mtime columns); UTF-16/32
 BOMs are named in the error (Windows tooling writes them), binaries
 rejected loudly (pi silently lossy-decodes — not copied); UTF-8 BOM

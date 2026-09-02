@@ -1,30 +1,30 @@
-//! Shared tool-output truncation: dual limits (lines and bytes, whichever
-//! hits first), whole lines only, two policies — [`truncate_head`] (read:
-//! the beginning plus a continuation offset) and [`truncate_tail`] (bash:
-//! the end, where errors and final results live). One policy site for
-//! every tool; pi's `truncate.ts` is the reference. Image results (when
+//! Shared tool-output truncation: one limit — bytes, whole lines only —
+//! and two mechanisms, one per tool family (owner ruling 2026-09:
+//! read and bash are *different* mechanisms, and "lines" mean nothing
+//! to a model — a newline is just another byte, so there is no line
+//! cap):
+//!
+//! - [`truncate_head`] — read: the beginning of the file plus a
+//!   continuation offset; the rest is paged, never spilled.
+//! - [`truncate_head_tail`] — bash: the first lines *and* the last
+//!   lines with the middle omitted; the rest is unrecoverable without
+//!   re-running, so the caller spills the full output to a file.
+//!
+//! One policy site for every tool; pi's `truncate.ts` was the
+//! reference for the limits, not the mechanisms. Image results (when
 //! they arrive) bypass this module — it is text-only by design.
 
-/// Line limit per tool result. The caps are a dial, not doctrine: raising
-/// them to 64/128 KiB as contexts grow is sanctioned (owner ruling).
-pub(crate) const MAX_LINES: usize = 2000;
-/// Byte limit per tool result (~12k tokens at 4 bytes/token).
+/// Byte limit per tool result (~12k tokens at 4 bytes/token). The cap
+/// is a dial, not doctrine: raising it to 64/128 KiB as contexts grow
+/// is sanctioned (owner ruling).
 pub(crate) const MAX_BYTES: usize = 50 * 1024;
-
-/// Which limit ended the output.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub(crate) enum TruncatedBy {
-    Lines,
-    Bytes,
-}
 
 #[derive(Debug)]
 pub(crate) struct Truncation {
-    /// The truncated content (whole lines; the tail policy may carry a
-    /// partial final line — see `last_line_partial`).
+    /// The truncated content (whole lines, except where a single line
+    /// alone exceeds the budget — see the flags).
     pub(crate) content: String,
     pub(crate) truncated: bool,
-    pub(crate) truncated_by: Option<TruncatedBy>,
     pub(crate) total_lines: usize,
     pub(crate) output_lines: usize,
     pub(crate) total_bytes: usize,
@@ -33,10 +33,10 @@ pub(crate) struct Truncation {
     /// a minified file) — no whole line fits, the caller points at a
     /// shell fallback.
     pub(crate) first_line_exceeds_limit: bool,
-    /// Tail policy only: the output is one line over [`MAX_BYTES`] and the
-    /// returned content is its final [`MAX_BYTES`] bytes, cut on a char
-    /// boundary.
-    pub(crate) last_line_partial: bool,
+    /// Head-tail policy only: the output is one line over [`MAX_BYTES`]
+    /// and both ends of the returned content are partial cuts of that
+    /// line, made on char boundaries.
+    pub(crate) single_line_split: bool,
 }
 
 /// Split into lines the way the counters see them: a trailing newline
@@ -55,27 +55,26 @@ pub(crate) fn split_lines(content: &str) -> Vec<&str> {
 fn fits(content: &str) -> Option<Truncation> {
     let total_lines = split_lines(content).len();
     let total_bytes = content.len();
-    (total_lines <= MAX_LINES && total_bytes <= MAX_BYTES).then(|| Truncation {
+    (total_bytes <= MAX_BYTES).then(|| Truncation {
         content: content.to_string(),
         truncated: false,
-        truncated_by: None,
         total_lines,
         output_lines: total_lines,
         total_bytes,
         output_bytes: total_bytes,
         first_line_exceeds_limit: false,
-        last_line_partial: false,
+        single_line_split: false,
     })
 }
 
-/// Keep the first lines/bytes that fit — the read policy: the beginning of
-/// a file plus a continuation offset is the recoverable paging unit.
+/// Keep the first whole lines that fit the byte budget — the read
+/// policy: the beginning of a file plus a continuation offset is the
+/// recoverable paging unit.
 pub(crate) fn truncate_head(content: &str) -> Truncation {
     if let Some(fit) = fits(content) {
         return fit;
     }
     let lines = split_lines(content);
-    let total_lines = lines.len();
 
     // A single line over the byte budget (minified files): no whole line
     // fits; report it so the caller can point at a shell fallback.
@@ -83,23 +82,20 @@ pub(crate) fn truncate_head(content: &str) -> Truncation {
         return Truncation {
             content: String::new(),
             truncated: true,
-            truncated_by: Some(TruncatedBy::Bytes),
-            total_lines,
+            total_lines: lines.len(),
             output_lines: 0,
-            output_bytes: 0,
             total_bytes: content.len(),
+            output_bytes: 0,
             first_line_exceeds_limit: true,
-            last_line_partial: false,
+            single_line_split: false,
         };
     }
 
     let mut kept: Vec<&str> = Vec::new();
     let mut bytes = 0usize;
-    let mut truncated_by = TruncatedBy::Lines;
-    for (i, line) in lines.iter().enumerate().take(MAX_LINES) {
+    for (i, line) in lines.iter().enumerate() {
         let line_bytes = line.len() + usize::from(i > 0); // +1 newline
         if bytes + line_bytes > MAX_BYTES {
-            truncated_by = TruncatedBy::Bytes;
             break;
         }
         kept.push(line);
@@ -111,69 +107,104 @@ pub(crate) fn truncate_head(content: &str) -> Truncation {
         output_bytes: content.len(),
         content,
         truncated: true,
-        truncated_by: Some(truncated_by),
-        total_lines,
+        total_lines: lines.len(),
         output_lines: kept.len(),
         total_bytes,
         first_line_exceeds_limit: false,
-        last_line_partial: false,
+        single_line_split: false,
     }
 }
 
-/// Keep the last lines/bytes that fit — the bash policy: errors and final
-/// results live at the end. One edge: a final line alone over
-/// [`MAX_BYTES`] yields its final bytes, cut on a char boundary.
-pub(crate) fn truncate_tail(content: &str) -> Truncation {
+/// Keep the first *and* last whole lines, each up to half the byte
+/// budget, with the middle omitted — the bash policy: a command's
+/// output starts with context and ends with results, and both ends
+/// beat a one-ended window. The marker between the halves names the
+/// omitted span; the caller attaches the spill path for the full
+/// output.
+pub(crate) fn truncate_head_tail(content: &str) -> Truncation {
     if let Some(fit) = fits(content) {
         return fit;
     }
     let lines = split_lines(content);
     let total_lines = lines.len();
     let total_bytes = content.len();
+    let half = MAX_BYTES / 2;
 
-    let mut kept: Vec<&str> = Vec::new(); // reversed; fixed below
-    let mut bytes = 0usize;
-    let mut truncated_by = TruncatedBy::Lines;
-    let mut last_line_partial = false;
-    for line in lines.iter().rev() {
-        if kept.len() >= MAX_LINES {
-            break;
-        }
-        let line_bytes = line.len() + usize::from(!kept.is_empty()); // +1 newline
-        if bytes + line_bytes > MAX_BYTES {
-            truncated_by = TruncatedBy::Bytes;
-            if kept.is_empty() {
-                // The final line alone is over the budget: its final
-                // MAX_BYTES bytes, on a char boundary.
-                let start = floor_char_boundary(line, MAX_BYTES);
-                kept.push(&line[start..]);
-                last_line_partial = true;
-            }
-            break;
-        }
-        kept.push(line);
-        bytes += line_bytes;
+    // One line over the whole budget (minified output): both halves are
+    // cuts of that line, on char boundaries.
+    if let Some(line) = lines.first().filter(|l| l.len() > MAX_BYTES) {
+        let head_end = floor_char_boundary_from_start(line, half);
+        let tail_start = ceil_char_boundary_from_end(line, half);
+        let split = format!(
+            "{}\n\n[... middle of the line omitted ...]\n\n{}",
+            &line[..head_end],
+            &line[tail_start..]
+        );
+        return Truncation {
+            output_bytes: split.len(),
+            content: split,
+            truncated: true,
+            total_lines,
+            output_lines: 1,
+            total_bytes,
+            first_line_exceeds_limit: false,
+            single_line_split: true,
+        };
     }
-    kept.reverse();
-    let content = kept.join("\n");
+
+    let mut head: Vec<&str> = Vec::new();
+    let mut head_bytes = 0usize;
+    for (i, line) in lines.iter().enumerate() {
+        let line_bytes = line.len() + usize::from(i > 0);
+        if head_bytes + line_bytes > half {
+            break;
+        }
+        head.push(line);
+        head_bytes += line_bytes;
+    }
+
+    let mut tail: Vec<&str> = Vec::new(); // reversed; fixed below
+    let mut tail_bytes = 0usize;
+    for line in lines.iter().skip(head.len()).rev() {
+        let line_bytes = line.len() + usize::from(!tail.is_empty());
+        if tail_bytes + line_bytes > half {
+            break;
+        }
+        tail.push(line);
+        tail_bytes += line_bytes;
+    }
+    tail.reverse();
+
+    let omitted = total_lines - head.len() - tail.len();
+    let mut out = head.join("\n");
+    out.push_str(&format!("\n\n[... {omitted} lines omitted ...]\n\n"));
+    out.push_str(&tail.join("\n"));
     Truncation {
-        output_bytes: content.len(),
-        content,
+        output_bytes: out.len(),
+        output_lines: head.len() + tail.len(),
+        content: out,
         truncated: true,
-        truncated_by: Some(truncated_by),
         total_lines,
-        output_lines: kept.len(),
         total_bytes,
         first_line_exceeds_limit: false,
-        last_line_partial,
+        single_line_split: false,
     }
 }
 
-/// The largest index <= `from_bytes_back` that starts a char, so a slice
-/// `[start..]` never cuts a multi-byte character. `from_bytes_back` counts
-/// from the end of `text`.
-fn floor_char_boundary(text: &str, from_bytes_back: usize) -> usize {
-    let mut start = text.len().saturating_sub(from_bytes_back);
+/// The largest index <= `budget` that ends on a char boundary, so a
+/// head cut never splits a multi-byte character.
+fn floor_char_boundary_from_start(text: &str, budget: usize) -> usize {
+    let mut end = budget.min(text.len());
+    while end > 0 && !text.is_char_boundary(end) {
+        end -= 1;
+    }
+    end
+}
+
+/// The smallest index >= `text.len() - budget` that starts on a char
+/// boundary, so a tail cut never splits a multi-byte character.
+fn ceil_char_boundary_from_end(text: &str, budget: usize) -> usize {
+    let mut start = text.len().saturating_sub(budget);
     while start < text.len() && !text.is_char_boundary(start) {
         start += 1;
     }
@@ -189,41 +220,37 @@ mod tests {
         let t = truncate_head("one\ntwo\n");
         assert!(!t.truncated);
         assert_eq!(t.content, "one\ntwo\n");
-        assert_eq!(t.output_lines, 2);
-        let t = truncate_tail("one\ntwo\n");
+        let t = truncate_head_tail("one\ntwo\n");
         assert!(!t.truncated);
         assert_eq!(t.content, "one\ntwo\n");
     }
 
     #[test]
-    fn head_stops_on_whole_lines() {
-        let many: String = (0..MAX_LINES + 500)
+    fn there_is_no_line_cap() {
+        // 10,000 tiny lines (~40 KiB): under the byte cap, far over the
+        // old 2000-line dial — the line count must not truncate.
+        let many: String = (0..10_000)
             .map(|i| i.to_string())
             .collect::<Vec<_>>()
             .join("\n");
         let t = truncate_head(&many);
-        assert!(t.truncated);
-        assert_eq!(t.truncated_by, Some(TruncatedBy::Lines));
-        assert_eq!(t.output_lines, MAX_LINES);
-        assert_eq!(t.total_lines, MAX_LINES + 500);
-        // Whole lines only: the output is a prefix of the input lines.
-        assert!(many.starts_with(&t.content));
-        assert!(!t.content.ends_with('\n'));
+        assert!(!t.truncated, "bytes are the only cap");
+        let t = truncate_head_tail(&many);
+        assert!(!t.truncated);
     }
 
     #[test]
-    fn head_stops_on_bytes_without_splitting_a_line() {
-        // Few lines, huge bytes: the byte limit must win, on a line edge.
-        let mut lines: Vec<String> = Vec::new();
-        for i in 0..10 {
-            lines.push("x".repeat(MAX_BYTES / 8) + &i.to_string());
-        }
+    fn head_stops_on_whole_lines() {
+        // Few lines, huge bytes: whole lines only, from the top.
+        let lines: Vec<String> = (0..10)
+            .map(|i| "x".repeat(MAX_BYTES / 4) + &i.to_string())
+            .collect();
         let content = lines.join("\n");
         let t = truncate_head(&content);
         assert!(t.truncated);
-        assert_eq!(t.truncated_by, Some(TruncatedBy::Bytes));
-        assert!(t.output_lines < 10);
-        assert!(t.content.lines().all(|l| content.contains(l)));
+        assert_eq!(t.output_lines, 3, "three whole lines fit the budget");
+        assert!(content.starts_with(&t.content));
+        assert!(!t.content.ends_with('\n'));
     }
 
     #[test]
@@ -235,29 +262,40 @@ mod tests {
     }
 
     #[test]
-    fn tail_keeps_the_end() {
-        let many: String = (0..MAX_LINES + 500)
-            .map(|i| i.to_string())
-            .collect::<Vec<_>>()
-            .join("\n");
-        let t = truncate_tail(&many);
+    fn head_tail_keeps_both_ends_and_marks_the_omission() {
+        let lines: Vec<String> = (0..10)
+            .map(|i| "x".repeat(MAX_BYTES / 6) + &format!("row-{i}"))
+            .collect();
+        let content = lines.join("\n");
+        let t = truncate_head_tail(&content);
         assert!(t.truncated);
-        assert_eq!(t.truncated_by, Some(TruncatedBy::Lines));
-        assert_eq!(t.output_lines, MAX_LINES);
-        assert!(many.ends_with(&t.content));
+        assert!(t.content.starts_with(&lines[0]), "head kept");
+        assert!(t.content.ends_with("row-9"), "tail kept");
+        assert!(
+            t.content.contains("lines omitted"),
+            "the omission is marked: {}",
+            &t.content[t.content.len() / 2..t.content.len() / 2 + 60]
+        );
+        // Whole lines at both ends.
+        assert!(t.content.contains("row-0"));
+        assert!(!t.content.contains("row-5\n"), "the middle is gone");
     }
 
     #[test]
-    fn tail_cuts_one_huge_line_on_a_char_boundary() {
+    fn head_tail_splits_one_huge_line_on_char_boundaries() {
         let mut huge = "é".repeat(MAX_BYTES); // 2-byte chars: over budget
         huge.push('x');
-        let t = truncate_tail(&huge);
+        let t = truncate_head_tail(&huge);
         assert!(t.truncated);
-        assert!(t.last_line_partial);
-        assert!(t.output_bytes <= MAX_BYTES);
-        // Valid UTF-8 by construction — and the cut kept whole chars.
+        assert!(t.single_line_split);
+        assert!(t.content.starts_with('é'));
         assert!(t.content.ends_with('x'));
-        assert!(t.content.chars().all(|c| c == 'é' || c == 'x'));
+        assert!(t.content.contains("middle of the line omitted"));
+        assert!(
+            t.content
+                .chars()
+                .all(|c| c == 'é' || c == 'x' || c.is_ascii())
+        );
     }
 
     #[test]
@@ -268,7 +306,7 @@ mod tests {
     }
 
     #[test]
-    fn limits_are_the_dial_not_the_doctrine() {
+    fn the_cap_is_a_dial_not_doctrine() {
         // 50 KiB today; 64/128 KiB is sanctioned growth (owner ruling).
         assert_eq!(MAX_BYTES, 50 * 1024);
     }

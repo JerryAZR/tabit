@@ -75,15 +75,15 @@ pub const DEFAULT_TIMEOUT_SECS: u64 = 30;
 /// Maximum seconds a `bash` command may run.
 pub const MAX_TIMEOUT_SECS: u64 = 600;
 
-/// Read a UTF-8 text file page by page. Truncation keeps whole lines
-/// (2000 lines / 50 KiB, whichever hits first — [`truncate`]) and every
-/// truncation notice carries the offset that continues the read: large
-/// files are paged, never spilled (the file is already on disk).
+/// Read a UTF-8 text file page by page. Output is capped at 50 KiB of
+/// whole lines ([`truncate`]) and every truncation notice carries the
+/// offset that continues the read: large files are paged, never
+/// spilled (the file is already on disk).
 /// Directories list their entries inline. Binary and UTF-16/32 files are
 /// rejected loudly. Image reads are a committed follow-up (ROADMAP item
 /// 4) — they will bypass the text truncation entirely.
 #[rig_tool(description = "Read a UTF-8 text file (absolute or relative path). \
-                   Output is capped at 2000 lines / 50 KiB, whole lines; the \
+                   Output is capped at 50 KiB, whole lines; the \
                    truncation notice carries the offset to continue from. \
                    Optional offset (1-indexed line number) and limit (line \
                    count) page large files. Reading a directory lists its \
@@ -155,13 +155,8 @@ pub async fn read(
     let mut out = trunc.content;
     if trunc.truncated {
         let last_shown = start + trunc.output_lines;
-        let reason = if trunc.truncated_by == Some(truncate::TruncatedBy::Bytes) {
-            " (50 KiB limit)"
-        } else {
-            ""
-        };
         out.push_str(&format!(
-            "\n\n[Showing lines {}-{last_shown} of {total_lines}{reason}. \
+            "\n\n[Showing lines {}-{last_shown} of {total_lines}. \
              Use offset={} to continue.]",
             start + 1,
             last_shown + 1
@@ -596,15 +591,17 @@ pub async fn ask_user(
 /// registration ([`shell`]): correctness over coverage — a wrong bash
 /// (WSL's launcher, a Cygwin root) is worse than none, so nothing is
 /// guessed from a bare `bash.exe` on PATH. Combined output (stdout, then
-/// stderr) is capped at [`OUTPUT_CAP_BYTES`]; commands that exceed their
-/// timeout, or are cancelled through the run's cancellation token, are
-/// killed — process tree included (see the crate-level cancellation
-/// contract).
+/// stderr) is capped at 50 KiB — oversized output keeps both ends with
+/// the middle omitted and the full text spilled to a file; commands
+/// that exceed their timeout, or are cancelled through the run's
+/// cancellation token, are killed — process tree included (see the
+/// crate-level cancellation contract).
 #[rig_tool(description = "Run a shell command and return its combined output. \
                    Commands run through bash (POSIX syntax; on Windows this is \
                    Git Bash). Non-zero exits report the exit code. Output is \
-                   capped at 128 KiB; commands time out after 30 seconds \
-                   unless timeout_secs says otherwise.")]
+                   capped at 50 KiB; oversized output saves to a file. \
+                   Commands time out after 30 seconds unless timeout_secs \
+                   says otherwise.")]
 pub async fn bash(
     #[rig(context)] context: &mut ToolContext,
     command: String,
@@ -622,8 +619,8 @@ pub async fn bash(
                    Commands run through Windows PowerShell — write PowerShell \
                    syntax (Get-ChildItem, $env:NAME, Select-String, ...). \
                    Non-zero exits report the exit code. Output is capped at \
-                   128 KiB; commands time out after 30 seconds unless \
-                   timeout_secs says otherwise.")]
+                   50 KiB; oversized output saves to a file. Commands time \
+                   out after 30 seconds unless timeout_secs says otherwise.")]
 pub async fn powershell(
     #[rig(context)] context: &mut ToolContext,
     command: String,
@@ -716,25 +713,24 @@ async fn run_shell(
         combined.push_str("\n--- stderr ---\n");
         combined.push_str(&String::from_utf8_lossy(&output.stderr));
     }
-    // Keep the tail (errors and final results live at the end); when the
-    // head is dropped, spill the full output to a temp file — the dropped
-    // bytes are unrecoverable without re-running the command, which may
-    // be slow or side-effecting. Spill files are never deleted by us: the
-    // path was promised to the model; OS temp hygiene owns it.
-    let trunc = truncate::truncate_tail(&combined);
+    // Keep both ends (context starts at the top, results end at the
+    // bottom — the first/last-lines mechanism, owner ruling); the
+    // middle is dropped, so spill the full output to a temp file —
+    // the dropped bytes are unrecoverable without re-running the
+    // command, which may be slow or side-effecting. Spill files are
+    // never deleted by us: the path was promised to the model; OS
+    // temp hygiene owns it.
+    let trunc = truncate::truncate_head_tail(&combined);
     let mut visible = trunc.content;
     if trunc.truncated {
         let spill = spill_full_output(&combined)?;
-        let detail = if trunc.last_line_partial {
-            // One line over the whole budget (minified output): say that,
-            // not "1 of 1 lines".
-            format!(
-                "the final line is {} bytes; showing its last {}",
-                trunc.total_bytes, trunc.output_bytes
-            )
+        let detail = if trunc.single_line_split {
+            // One line over the whole budget (minified output): say
+            // that, not "1 of 1 lines".
+            format!("one line of {} bytes, showing both ends", trunc.total_bytes)
         } else {
             format!(
-                "showing the last {} of {} lines ({} of {} bytes)",
+                "showing {} of {} lines from both ends ({} of {} bytes)",
                 trunc.output_lines, trunc.total_lines, trunc.output_bytes, trunc.total_bytes
             )
         };
