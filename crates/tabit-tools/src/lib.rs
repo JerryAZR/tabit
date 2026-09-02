@@ -293,10 +293,19 @@ pub async fn edit(
 ) -> Result<rig_core::OneOrMany<rig_core::message::ToolResultContent>, ToolExecutionError> {
     let _guard = file_io::lock(std::path::Path::new(&path)).await;
     let outcome = edit_core(&path, &edits)?;
-    let mut parts = vec![rig_core::message::ToolResultContent::Text(
-        outcome.report.into(),
-    )];
-    if let Some(details) = outcome.details {
+    report_with_details(outcome.report, outcome.details)
+}
+
+/// One tool result's content parts: the model-facing report text first,
+/// then the structured details JSON when the tool produced any — the
+/// session projects text → `content`, JSON → `tool_result.details`.
+/// Every multi-part tool result (edit, the shell tools) is built here.
+fn report_with_details(
+    report: String,
+    details: Option<serde_json::Value>,
+) -> Result<rig_core::OneOrMany<rig_core::message::ToolResultContent>, ToolExecutionError> {
+    let mut parts = vec![rig_core::message::ToolResultContent::Text(report.into())];
+    if let Some(details) = details {
         parts.push(rig_core::message::ToolResultContent::Json { value: details });
     }
     // Invariant: one part minimum by construction above (the report).
@@ -591,22 +600,23 @@ pub async fn ask_user(
 /// registration ([`shell`]): correctness over coverage — a wrong bash
 /// (WSL's launcher, a Cygwin root) is worse than none, so nothing is
 /// guessed from a bare `bash.exe` on PATH. Combined output (stdout, then
-/// stderr) is capped at 50 KiB — oversized output keeps both ends with
-/// the middle omitted and the full text spilled to a file; commands
+/// stderr) is capped at 16 KiB — oversized output keeps both ends with
+/// the middle omitted and the full text spilled to a file (the spill
+/// path rides the notice and `tool_result.details.spill_path`); commands
 /// that exceed their timeout, or are cancelled through the run's
 /// cancellation token, are killed — process tree included (see the
 /// crate-level cancellation contract).
 #[rig_tool(description = "Run a shell command and return its combined output. \
                    Commands run through bash (POSIX syntax; on Windows this is \
                    Git Bash). Non-zero exits report the exit code. Output is \
-                   capped at 50 KiB; oversized output saves to a file. \
+                   capped at 16 KiB; oversized output saves to a file. \
                    Commands time out after 30 seconds unless timeout_secs \
                    says otherwise.")]
 pub async fn bash(
     #[rig(context)] context: &mut ToolContext,
     command: String,
     timeout_secs: Option<u64>,
-) -> Result<String, ToolExecutionError> {
+) -> Result<rig_core::OneOrMany<rig_core::message::ToolResultContent>, ToolExecutionError> {
     let interpreter = shell::bash().map_err(ToolExecutionError::other)?;
     run_shell(&interpreter, context, command, timeout_secs).await
 }
@@ -619,13 +629,13 @@ pub async fn bash(
                    Commands run through Windows PowerShell — write PowerShell \
                    syntax (Get-ChildItem, $env:NAME, Select-String, ...). \
                    Non-zero exits report the exit code. Output is capped at \
-                   50 KiB; oversized output saves to a file. Commands time \
+                   16 KiB; oversized output saves to a file. Commands time \
                    out after 30 seconds unless timeout_secs says otherwise.")]
 pub async fn powershell(
     #[rig(context)] context: &mut ToolContext,
     command: String,
     timeout_secs: Option<u64>,
-) -> Result<String, ToolExecutionError> {
+) -> Result<rig_core::OneOrMany<rig_core::message::ToolResultContent>, ToolExecutionError> {
     run_shell(&shell::powershell(), context, command, timeout_secs).await
 }
 
@@ -645,13 +655,15 @@ pub fn shell_tool() -> DynamicTool {
 
 /// The shared execution core of the shell tools: spawn under the resolved
 /// interpreter, tree-kill discipline, both deadlines (command timeout +
-/// cancellation token), combined output, cap.
+/// cancellation token), combined output, cap. A truncated success is
+/// multi-part: the visible report text plus the structured details (the
+/// spill path and the counts) for `tool_result.details`.
 async fn run_shell(
     interpreter: &shell::Interpreter,
     context: &mut ToolContext,
     command: String,
     timeout_secs: Option<u64>,
-) -> Result<String, ToolExecutionError> {
+) -> Result<rig_core::OneOrMany<rig_core::message::ToolResultContent>, ToolExecutionError> {
     let timeout = Duration::from_secs(
         timeout_secs
             .unwrap_or(DEFAULT_TIMEOUT_SECS)
@@ -722,6 +734,7 @@ async fn run_shell(
     // temp hygiene owns it.
     let trunc = truncate::truncate_head_tail(&combined);
     let mut visible = trunc.content;
+    let mut details = None;
     if trunc.truncated {
         let spill = spill_full_output(&combined)?;
         let detail = if trunc.single_line_split {
@@ -735,9 +748,20 @@ async fn run_shell(
             )
         };
         visible.push_str(&format!("\n\n[{detail}. Full output: {}]", spill.display()));
+        // The same facts the notice carries, structured: details.spill_path
+        // is enough for the frontend — it reads or displays the spill
+        // file itself (owner ruling).
+        details = Some(serde_json::json!({
+            "truncated": true,
+            "output_lines": trunc.output_lines,
+            "total_lines": trunc.total_lines,
+            "omitted_lines": trunc.total_lines - trunc.output_lines,
+            "total_bytes": trunc.total_bytes,
+            "spill_path": spill.display().to_string(),
+        }));
     }
     if output.status.success() {
-        Ok(visible)
+        report_with_details(visible, details)
     } else {
         // The exit status rides structure too (the protocol's
         // `failed { exit_code }`): numeric codes pass through as

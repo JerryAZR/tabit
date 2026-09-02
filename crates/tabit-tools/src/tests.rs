@@ -15,6 +15,23 @@ fn ctx() -> rig_agent::tool::ToolContext {
     rig_agent::tool::ToolContext::new()
 }
 
+/// The (text, details) split of a successful multi-part tool result.
+fn split_parts(
+    result: rig_core::OneOrMany<rig_core::message::ToolResultContent>,
+) -> (String, Option<serde_json::Value>) {
+    let mut text = String::new();
+    let mut details = None;
+    for part in result {
+        if let Some(t) = part.as_text() {
+            text.push_str(t);
+        }
+        if let Some(j) = part.as_json() {
+            details = Some(j.clone());
+        }
+    }
+    (text, details)
+}
+
 fn err_text<T>(result: Result<T, ToolExecutionError>) -> String
 where
     T: std::fmt::Debug,
@@ -119,15 +136,15 @@ async fn read_truncates_on_whole_lines_with_a_continuation_offset() {
     let path = dir.join("big.txt");
     // Rows well past the byte cap, all identical width so the boundary
     // line is computable: 6-byte rows ("row-N\n"), so the cap holds
-    // MAX_BYTES/6 whole rows.
-    let rows = truncate::MAX_BYTES / 3;
+    // READ_MAX_BYTES/6 whole rows.
+    let rows = truncate::READ_MAX_BYTES / 3;
     let body: String = (1..=rows).map(|i| format!("r{i:04}\n")).collect();
     fs::write(&path, body).expect("write");
 
     let out = read(path.to_string_lossy().to_string(), None, None)
         .await
         .expect("read");
-    let shown = truncate::MAX_BYTES / 6;
+    let shown = truncate::READ_MAX_BYTES / 6;
     assert!(
         out.contains(&format!(
             "[Showing lines 1-{shown} of {rows}. Use offset={} to continue.]",
@@ -147,7 +164,7 @@ async fn read_truncates_on_whole_lines_with_a_continuation_offset() {
 async fn read_of_a_minified_line_points_at_the_shell() {
     let dir = temp_dir("read-minified");
     let path = dir.join("min.js");
-    fs::write(&path, "x".repeat(truncate::MAX_BYTES + 1)).expect("write");
+    fs::write(&path, "x".repeat(truncate::READ_MAX_BYTES + 1)).expect("write");
     let out = read(path.to_string_lossy().to_string(), None, None)
         .await
         .expect("read");
@@ -315,13 +332,16 @@ async fn bash_runs_a_command_and_captures_output() {
         eprintln!("skipped: no verified Git Bash on this machine");
         return;
     }
-    let out = bash(&mut ctx(), "echo tabit-smoke".to_string(), None)
-        .await
-        .expect("bash");
+    let (out, details) = split_parts(
+        bash(&mut ctx(), "echo tabit-smoke".to_string(), None)
+            .await
+            .expect("bash"),
+    );
     assert!(
         out.trim().contains("tabit-smoke"),
         "echo output captured: {out}"
     );
+    assert!(details.is_none(), "no truncation, no details part");
 }
 
 #[tokio::test]
@@ -489,15 +509,16 @@ async fn bash_overflow_keeps_both_ends_and_spills_the_full_output() {
         eprintln!("skipped: no verified Git Bash on this machine");
         return;
     }
-    // 6000 rows, ~46 KiB — under the byte cap, so nothing truncates:
-    // the loop must produce enough to exceed 50 KiB.
-    let out = bash(
-        &mut ctx(),
-        "for i in $(seq 1 9000); do echo \"row-$i\"; done".to_string(),
-        None,
-    )
-    .await
-    .expect("bash");
+    // 9000 rows, ~70 KiB — well over the 16 KiB shell cap.
+    let (out, details) = split_parts(
+        bash(
+            &mut ctx(),
+            "for i in $(seq 1 9000); do echo \"row-$i\"; done".to_string(),
+            None,
+        )
+        .await
+        .expect("bash"),
+    );
     assert!(
         out.contains("Full output:"),
         "notice points at the spill: ...{out}"
@@ -509,13 +530,11 @@ async fn bash_overflow_keeps_both_ends_and_spills_the_full_output() {
         out.contains("lines omitted"),
         "the omission is marked: {out}"
     );
-    let first = out.find("row-2\n").expect("row-2");
     let mid_marker = out.find("lines omitted").expect("marker");
     assert!(
         !out[mid_marker..].contains("row-42\n"),
         "the middle stays dropped"
     );
-    let _ = first;
 
     let spill = out
         .split("Full output: ")
@@ -525,19 +544,32 @@ async fn bash_overflow_keeps_both_ends_and_spills_the_full_output() {
     let full = fs::read_to_string(spill).expect("spill file exists");
     assert!(full.starts_with("row-1\n"), "spill holds the full stream");
     assert!(full.contains("row-9000"));
+
+    // details carries the same facts, structured: the spill path is the
+    // frontend's handle on the full output (owner ruling).
+    let details = details.expect("truncated output carries details");
+    assert_eq!(details["truncated"], true);
+    assert_eq!(details["spill_path"], spill);
+    assert_eq!(details["total_lines"], 9000);
+    assert_eq!(
+        details["omitted_lines"],
+        details["total_lines"].as_u64().unwrap() - details["output_lines"].as_u64().unwrap()
+    );
     fs::remove_file(spill).ok();
 }
 
 #[cfg(windows)]
 #[tokio::test]
 async fn powershell_overflow_keeps_both_ends_and_spills_the_full_output() {
-    let out = powershell(
-        &mut ctx(),
-        "1..9000 | ForEach-Object { \"row-$_\" }".to_string(),
-        None,
-    )
-    .await
-    .expect("powershell");
+    let (out, details) = split_parts(
+        powershell(
+            &mut ctx(),
+            "1..9000 | ForEach-Object { \"row-$_\" }".to_string(),
+            None,
+        )
+        .await
+        .expect("powershell"),
+    );
     assert!(out.contains("Full output:"), "...{out}");
     // PowerShell emits CRLF — the head is kept either way.
     assert!(out.starts_with("row-1"), "head kept: {}...", &out[..40]);
@@ -549,6 +581,8 @@ async fn powershell_overflow_keeps_both_ends_and_spills_the_full_output() {
         .trim_end_matches(']');
     let full = fs::read_to_string(spill).expect("spill file exists");
     assert!(full.contains("row-1"), "spill holds the full stream");
+    let details = details.expect("truncated output carries details");
+    assert_eq!(details["spill_path"], spill);
     fs::remove_file(spill).ok();
 }
 
@@ -961,7 +995,7 @@ async fn read_byte_truncation_says_so() {
     // Few lines, huge bytes: the cap truncates, and the notice carries
     // the continuation offset — the only promise now that bytes are
     // the single limit.
-    let line = "x".repeat(truncate::MAX_BYTES / 4);
+    let line = "x".repeat(truncate::READ_MAX_BYTES / 4);
     let body = (0..4).map(|_| line.clone()).collect::<Vec<_>>().join("\n");
     fs::write(&path, body).expect("write");
     let out = read(path.to_string_lossy().to_string(), None, None)
@@ -1013,13 +1047,15 @@ async fn bash_one_huge_line_gets_the_honest_notice() {
     }
     // One line over the whole byte budget (minified-style output): both
     // ends of the line are shown, and the notice says so.
-    let out = bash(
-        &mut ctx(),
-        "head -c 60000 /dev/zero | tr '\\0' 'x'".to_string(),
-        None,
-    )
-    .await
-    .expect("bash");
+    let (out, details) = split_parts(
+        bash(
+            &mut ctx(),
+            "head -c 60000 /dev/zero | tr '\\0' 'x'".to_string(),
+            None,
+        )
+        .await
+        .expect("bash"),
+    );
     assert!(out.contains("middle of the line omitted"), "{out}");
     assert!(out.contains("Full output:"), "{out}");
     let spill = out
@@ -1027,6 +1063,8 @@ async fn bash_one_huge_line_gets_the_honest_notice() {
         .nth(1)
         .expect("spill path")
         .trim_end_matches(']');
+    let details = details.expect("truncated output carries details");
+    assert_eq!(details["spill_path"], spill);
     fs::remove_file(spill).ok();
 }
 

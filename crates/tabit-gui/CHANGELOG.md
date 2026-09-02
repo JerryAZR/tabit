@@ -20,6 +20,24 @@ could observe — gets an entry here in the same commit.
 
 ## v4 (current)
 
+### wire: the shell tools are `details` producers; shell cap drops to 16 KiB (2026-09)
+
+Second `details` producer: a truncated `bash` / `powershell`
+`tool_result` now carries
+`{ truncated, output_lines, total_lines, omitted_lines, total_bytes, spill_path }`
+alongside the faithful-copy `content` (which still ends with the
+`Full output: <path>` notice — frontends without details support
+degrade to it). `spill_path` is the whole contract: the frontend reads
+or displays that file itself; it lives in the backend machine's temp
+dir and is never deleted by us. Details appear only when the output
+truncated. The shell output cap also tightens from 50 KiB to 16 KiB
+(read keeps 50) — legitimate command output past that is mostly noise,
+and the full text survives in the spill file.
+*Migration:* the truncated-output card dispatches on
+`name == "bash" | "powershell"`; offer the spill file via
+`details.spill_path` when present, fall back to the `content` notice
+when absent.
+
 ### wire: `tool_result.details` — presentation cargo (2026-09, 8c6ca84)
 
 `tool_result` gains an optional `details` object: derived, structured

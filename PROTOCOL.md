@@ -259,7 +259,9 @@ histories).
 - **`tool_result` carries the result** (ruled after the first GUI
   pass): the event gains `content` — exactly the text the model saw —
   plus `status`. `content` is the faithful copy: the tools cap output
-  at the source (both tools cap at 50 KiB, whole lines), failure text
+  at the source (read caps at 50 KiB, the shell tools at 16 KiB —
+  legitimate command output past that is mostly noise; whole lines
+  either way), failure text
   included, so the frontend never needs a second channel and never
   sees more than the model did. `status` is structure only, never
   prose: `success | failed { exit_code? }` — bash's exit code rides
@@ -274,12 +276,15 @@ histories).
   `name`, never parse-before-route. `content` stays the faithful
   copy (exactly what the model saw); `details` duplicates no prose —
   it structures what `content` already states, computed once where
-  the file is. First and only producer today: the edit tool, whose
+  the file is. Producers today: the edit tool, whose
   details carry the unified diff (hunks with context/removed/added
   lines mirroring `similar`'s change model — the crate ROADMAP item
   7 already picked for the GUI's viewer) plus per-edit
   accept/reject outcomes with reasons (the same strings the report
-  carries — one production site). Absent or unknown `details`
+  carries — one production site); and the shell tools (bash /
+  powershell), whose truncated-output details carry `spill_path`
+  plus the line/byte counts — the path is enough, the frontend
+  reads or displays the spill file itself. Absent or unknown `details`
   degrades to `content`/fragment rendering; a per-tool-event
   taxonomy (a `tool_diff` event, new events per tool) was
   explicitly rejected as non-scaling. Transport: the tool returns
