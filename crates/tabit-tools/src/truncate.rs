@@ -1,23 +1,30 @@
-//! Shared tool-output truncation: one limit — bytes, whole lines only —
-//! and two mechanisms, one per tool family (owner ruling 2026-09:
-//! read and bash are *different* mechanisms, and "lines" mean nothing
-//! to a model — a newline is just another byte, so there is no line
-//! cap):
+//! Shared tool-output truncation: one limit kind — bytes, whole lines
+//! only — and two mechanisms with their own dials, one per tool family
+//! (owner ruling 2026-09: read and bash are *different* mechanisms, and
+//! "lines" mean nothing to a model — a newline is just another byte, so
+//! there is no line cap):
 //!
 //! - [`truncate_head`] — read: the beginning of the file plus a
-//!   continuation offset; the rest is paged, never spilled.
+//!   continuation offset; the rest is paged, never spilled. 50 KiB —
+//!   a read's budget is rarely wasted, so it can be generous.
 //! - [`truncate_head_tail`] — bash: the first lines *and* the last
 //!   lines with the middle omitted; the rest is unrecoverable without
-//!   re-running, so the caller spills the full output to a file.
+//!   re-running, so the caller spills the full output to a file. 16 KiB —
+//!   legitimate command output past that is mostly noise (owner ruling).
 //!
 //! One policy site for every tool; pi's `truncate.ts` was the
 //! reference for the limits, not the mechanisms. Image results (when
 //! they arrive) bypass this module — it is text-only by design.
 
-/// Byte limit per tool result (~12k tokens at 4 bytes/token). The cap
-/// is a dial, not doctrine: raising it to 64/128 KiB as contexts grow
-/// is sanctioned (owner ruling).
-pub(crate) const MAX_BYTES: usize = 50 * 1024;
+/// Byte limit for one `read` result (~12k tokens at 4 bytes/token). The
+/// caps are dials, not doctrine: raising them as contexts grow is
+/// sanctioned (owner ruling).
+pub(crate) const READ_MAX_BYTES: usize = 50 * 1024;
+
+/// Byte limit for one shell result (~4k tokens): command output is
+/// mostly noise past this, and the full text survives in the spill
+/// file, so the visible window can be tighter than read's.
+pub(crate) const SHELL_MAX_BYTES: usize = 16 * 1024;
 
 #[derive(Debug)]
 pub(crate) struct Truncation {
@@ -29,11 +36,11 @@ pub(crate) struct Truncation {
     pub(crate) output_lines: usize,
     pub(crate) total_bytes: usize,
     pub(crate) output_bytes: usize,
-    /// Head policy only: the first line alone exceeds [`MAX_BYTES`] (e.g.
+    /// Head policy only: the first line alone exceeds the budget (e.g.
     /// a minified file) — no whole line fits, the caller points at a
     /// shell fallback.
     pub(crate) first_line_exceeds_limit: bool,
-    /// Head-tail policy only: the output is one line over [`MAX_BYTES`]
+    /// Head-tail policy only: the output is one line over the budget
     /// and both ends of the returned content are partial cuts of that
     /// line, made on char boundaries.
     pub(crate) single_line_split: bool,
@@ -52,10 +59,10 @@ pub(crate) fn split_lines(content: &str) -> Vec<&str> {
     lines
 }
 
-fn fits(content: &str) -> Option<Truncation> {
+fn fits(content: &str, max_bytes: usize) -> Option<Truncation> {
     let total_lines = split_lines(content).len();
     let total_bytes = content.len();
-    (total_bytes <= MAX_BYTES).then(|| Truncation {
+    (total_bytes <= max_bytes).then(|| Truncation {
         content: content.to_string(),
         truncated: false,
         total_lines,
@@ -71,14 +78,14 @@ fn fits(content: &str) -> Option<Truncation> {
 /// policy: the beginning of a file plus a continuation offset is the
 /// recoverable paging unit.
 pub(crate) fn truncate_head(content: &str) -> Truncation {
-    if let Some(fit) = fits(content) {
+    if let Some(fit) = fits(content, READ_MAX_BYTES) {
         return fit;
     }
     let lines = split_lines(content);
 
     // A single line over the byte budget (minified files): no whole line
     // fits; report it so the caller can point at a shell fallback.
-    if lines.first().is_some_and(|l| l.len() > MAX_BYTES) {
+    if lines.first().is_some_and(|l| l.len() > READ_MAX_BYTES) {
         return Truncation {
             content: String::new(),
             truncated: true,
@@ -95,7 +102,7 @@ pub(crate) fn truncate_head(content: &str) -> Truncation {
     let mut bytes = 0usize;
     for (i, line) in lines.iter().enumerate() {
         let line_bytes = line.len() + usize::from(i > 0); // +1 newline
-        if bytes + line_bytes > MAX_BYTES {
+        if bytes + line_bytes > READ_MAX_BYTES {
             break;
         }
         kept.push(line);
@@ -122,17 +129,17 @@ pub(crate) fn truncate_head(content: &str) -> Truncation {
 /// omitted span; the caller attaches the spill path for the full
 /// output.
 pub(crate) fn truncate_head_tail(content: &str) -> Truncation {
-    if let Some(fit) = fits(content) {
+    if let Some(fit) = fits(content, SHELL_MAX_BYTES) {
         return fit;
     }
     let lines = split_lines(content);
     let total_lines = lines.len();
     let total_bytes = content.len();
-    let half = MAX_BYTES / 2;
+    let half = SHELL_MAX_BYTES / 2;
 
     // One line over the whole budget (minified output): both halves are
     // cuts of that line, on char boundaries.
-    if let Some(line) = lines.first().filter(|l| l.len() > MAX_BYTES) {
+    if let Some(line) = lines.first().filter(|l| l.len() > SHELL_MAX_BYTES) {
         let head_end = floor_char_boundary_from_start(line, half);
         let tail_start = ceil_char_boundary_from_end(line, half);
         let split = format!(
@@ -227,9 +234,9 @@ mod tests {
 
     #[test]
     fn there_is_no_line_cap() {
-        // 10,000 tiny lines (~40 KiB): under the byte cap, far over the
-        // old 2000-line dial — the line count must not truncate.
-        let many: String = (0..10_000)
+        // 3,000 tiny lines (~14 KiB): under both byte caps, far over
+        // the old 2000-line dial — the line count must not truncate.
+        let many: String = (0..3_000)
             .map(|i| i.to_string())
             .collect::<Vec<_>>()
             .join("\n");
@@ -243,7 +250,7 @@ mod tests {
     fn head_stops_on_whole_lines() {
         // Few lines, huge bytes: whole lines only, from the top.
         let lines: Vec<String> = (0..10)
-            .map(|i| "x".repeat(MAX_BYTES / 4) + &i.to_string())
+            .map(|i| "x".repeat(READ_MAX_BYTES / 4) + &i.to_string())
             .collect();
         let content = lines.join("\n");
         let t = truncate_head(&content);
@@ -255,7 +262,7 @@ mod tests {
 
     #[test]
     fn head_flags_a_first_line_over_the_budget() {
-        let minified = "x".repeat(MAX_BYTES + 1);
+        let minified = "x".repeat(READ_MAX_BYTES + 1);
         let t = truncate_head(&minified);
         assert!(t.first_line_exceeds_limit);
         assert!(t.content.is_empty());
@@ -264,7 +271,7 @@ mod tests {
     #[test]
     fn head_tail_keeps_both_ends_and_marks_the_omission() {
         let lines: Vec<String> = (0..10)
-            .map(|i| "x".repeat(MAX_BYTES / 6) + &format!("row-{i}"))
+            .map(|i| "x".repeat(SHELL_MAX_BYTES / 6) + &format!("row-{i}"))
             .collect();
         let content = lines.join("\n");
         let t = truncate_head_tail(&content);
@@ -283,7 +290,7 @@ mod tests {
 
     #[test]
     fn head_tail_splits_one_huge_line_on_char_boundaries() {
-        let mut huge = "é".repeat(MAX_BYTES); // 2-byte chars: over budget
+        let mut huge = "é".repeat(SHELL_MAX_BYTES); // 2-byte chars: over budget
         huge.push('x');
         let t = truncate_head_tail(&huge);
         assert!(t.truncated);
@@ -306,8 +313,9 @@ mod tests {
     }
 
     #[test]
-    fn the_cap_is_a_dial_not_doctrine() {
-        // 50 KiB today; 64/128 KiB is sanctioned growth (owner ruling).
-        assert_eq!(MAX_BYTES, 50 * 1024);
+    fn the_caps_are_dials_not_doctrine() {
+        // 50/16 KiB today; growth is sanctioned (owner ruling).
+        assert_eq!(READ_MAX_BYTES, 50 * 1024);
+        assert_eq!(SHELL_MAX_BYTES, 16 * 1024);
     }
 }
