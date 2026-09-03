@@ -559,7 +559,12 @@ rendering (the GUI bridge drops child streams for now).
     turns; reads are 0.1x and refresh free under either TTL.
   - OpenAI Responses: caching is server-side automatic; we only pin
     routing — `prompt_cache_key` = the session's stable id (the
-    codex/pi/opencode pattern; subagents will share the parent's key).
+    codex/pi/opencode pattern). **Subagents get their own keys**
+    (ruled 2026-09): a child's context shares only the base prompt
+    with its parent, so a shared key buys little without an inherit
+    mode while concentrating every child's divergent suffix on one
+    cache route; if an inherit-conversation mode ever lands, key
+    sharing is its design question, priced then.
     Per-model `with_cache_key` in rig-core, clamped to 64 code points,
     explicit request-level `additional_params` wins.
   - Chat-completions gateway: no key (third parties vary in what they

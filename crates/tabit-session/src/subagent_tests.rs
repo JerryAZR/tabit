@@ -20,13 +20,14 @@ fn plain_wiring(store: &crate::store::SessionStore) -> SessionHostWiring {
     }
 }
 
-/// A factory that answers every model request with the same one-turn
+/// A factory that answers every model request with the same turn
 /// script — the child model.
-fn child_factory(answer: &str) -> crate::session::ModelFactory {
-    let answer = answer.to_string();
+fn child_factory(
+    turns: Vec<Vec<rig_agent::test_utils::MockStreamEvent>>,
+) -> crate::session::ModelFactory {
     Arc::new(move |_provider: &str, _model: &str, _cache_key: &str| {
         Ok(ModelHandle::new(MockCompletionModel::from_stream_turns(
-            vec![text_turn(&answer)],
+            turns.clone(),
         )))
     })
 }
@@ -46,8 +47,11 @@ fn subagent_call_turn() -> Vec<rig_agent::test_utils::MockStreamEvent> {
     ]
 }
 
-/// The parts, over a child factory that answers `answer`.
-fn parts(store: &crate::store::SessionStore, answer: &str) -> Arc<SubagentParts> {
+/// The parts, over a child factory running `turns` per child.
+fn parts(
+    store: &crate::store::SessionStore,
+    turns: Vec<Vec<rig_agent::test_utils::MockStreamEvent>>,
+) -> Arc<SubagentParts> {
     let config = crate::tests::test_config();
     Arc::new(SubagentParts {
         config: config.clone(),
@@ -56,7 +60,7 @@ fn parts(store: &crate::store::SessionStore, answer: &str) -> Arc<SubagentParts>
         tools: vec![crate::tests::echo_tool()],
         base_preamble: "You are a test agent.".to_string(),
         max_turns: 8,
-        model_factory: child_factory(answer),
+        model_factory: child_factory(turns),
     })
 }
 
@@ -80,7 +84,7 @@ async fn a_subagent_answers_as_the_tools_result_and_streams_its_own_events() {
     let parent = subagent_parent(
         &store,
         vec![subagent_call_turn(), text_turn("parent wrap-up")],
-        parts(&store, "three files"),
+        parts(&store, vec![text_turn("three files")]),
     );
     let mut handle = SessionHost::spawn(parent, Vec::new(), plain_wiring(&store));
     let parent_id = handle.info().session_id.clone();
@@ -307,11 +311,184 @@ fn the_child_toolset_excludes_the_subagent_tool() {
     // Recursion depth is enforced by omission — the parts the assembly
     // builds (mirrored here) never carry the subagent tool.
     let store = temp_store("subagent-norecursion");
-    let parts = parts(&store, "x");
+    let parts = parts(&store, vec![text_turn("x")]);
     let names: Vec<&str> = parts.tools.iter().map(|t| t.name()).collect();
     assert!(
         !names.contains(&"subagent"),
         "children cannot spawn children: {names:?}"
     );
+    std::fs::remove_dir_all(store.dir()).ok();
+}
+
+#[tokio::test]
+async fn a_child_tool_call_dispatches_through_the_sidecar_inside_the_parent_body() {
+    // The nesting question: the child's own tool phase dispatches from
+    // inside a parent body that is itself on the sidecar runtime. The
+    // child calls echo, sees its result, and answers — the whole nest
+    // must complete, not deadlock.
+    let store = temp_store("subagent-nested-tool");
+    let parent = subagent_parent(
+        &store,
+        vec![subagent_call_turn(), text_turn("parent wrap-up")],
+        parts(
+            &store,
+            vec![
+                crate::tests::tool_turn("k1", "echo"),
+                text_turn("child done after tool"),
+            ],
+        ),
+    );
+    let mut handle = SessionHost::spawn(parent, Vec::new(), plain_wiring(&store));
+    let parent_id = handle.info().session_id.clone();
+    handle.message(&parent_id, "go");
+    let mut frames = Vec::new();
+    loop {
+        let frame = tokio::time::timeout(std::time::Duration::from_secs(10), handle.next_event())
+            .await
+            .expect("frames keep coming")
+            .expect("the stream stays open");
+        let done = matches!(&frame.event, SessionEvent::RunFinished { output, .. } if output == "parent wrap-up");
+        frames.push(frame);
+        if done {
+            break;
+        }
+    }
+
+    let child_stream = frames.iter().find_map(|f| match &f.event {
+        SessionEvent::SessionOpened {
+            id,
+            parent: Some(_),
+            ..
+        } => Some(id.clone()),
+        _ => None,
+    });
+    let child_id = child_stream.expect("the child announced");
+    let child = |want: fn(&SessionEvent) -> bool| {
+        frames
+            .iter()
+            .any(|f| f.stream.as_ref().is_some_and(|s| s.as_str() == child_id) && want(&f.event))
+    };
+    assert!(
+        child(|e| matches!(e, SessionEvent::ToolCall { name, .. } if name == "echo")),
+        "the child called its own tool"
+    );
+    assert!(
+        child(|e| matches!(e, SessionEvent::ToolResult { name, .. } if name == "echo")),
+        "and got its result"
+    );
+    // The parent's subagent result carries the post-tool answer.
+    let result = frames
+        .iter()
+        .find_map(|f| match &f.event {
+            SessionEvent::ToolResult { name, content, .. } if name == "subagent" => {
+                Some(content.clone())
+            }
+            _ => None,
+        })
+        .expect("the parent's subagent result");
+    assert!(
+        result.contains("child done after tool"),
+        "the child finished after its tool: {result}"
+    );
+    handle.close_commands();
+    std::fs::remove_dir_all(store.dir()).ok();
+}
+
+#[tokio::test]
+async fn aborting_the_parent_leashes_the_child_promptly() {
+    // The cancellation contract: the parent's run token is the child's
+    // leash. The child parks on a five-second tool; the parent's abort
+    // must bring BOTH runs to their aborted terminals in milliseconds,
+    // not after the tool elapses.
+    use std::time::Instant;
+
+    let slow = rig_agent::tool::DynamicTool::new(
+        "slow",
+        "Sleeps five seconds",
+        json!({"type":"object","properties":{}}),
+        |_ctx, _args| {
+            Box::pin(async move {
+                tokio::time::sleep(std::time::Duration::from_secs(5)).await;
+                Ok(rig_agent::tool::ToolOutput::text("finally"))
+            })
+        },
+    );
+    let store = temp_store("subagent-abort");
+    let config = crate::tests::test_config();
+    let parts = Arc::new(SubagentParts {
+        config,
+        auth: crate::tests::test_auth(),
+        store: store.clone(),
+        tools: vec![slow],
+        base_preamble: "You are a test agent.".to_string(),
+        max_turns: 4,
+        model_factory: child_factory(vec![
+            crate::tests::tool_turn("s1", "slow"),
+            text_turn("never reached"),
+        ]),
+    });
+    let parent = subagent_parent(&store, vec![subagent_call_turn()], parts);
+    let mut handle = SessionHost::spawn(parent, Vec::new(), plain_wiring(&store));
+    let parent_id = handle.info().session_id.clone();
+
+    handle.message(&parent_id, "go");
+    // Wait until the child is parked on its slow tool, then abort.
+    let mut child_id = None;
+    loop {
+        let frame = tokio::time::timeout(std::time::Duration::from_secs(10), handle.next_event())
+            .await
+            .expect("frames keep coming")
+            .expect("the stream stays open");
+        match &frame.event {
+            SessionEvent::SessionOpened {
+                id,
+                parent: Some(_),
+                ..
+            } => {
+                child_id = Some(id.clone());
+            }
+            SessionEvent::ToolCall { name, .. } if name == "slow" => break,
+            _ => {}
+        }
+    }
+    let child_id = child_id.expect("the child announced");
+    let started = Instant::now();
+    handle.abort(&parent_id);
+
+    // Both aborted terminals arrive promptly — the leash, not the
+    // five-second tool.
+    let mut parent_aborted = false;
+    let mut child_aborted = false;
+    loop {
+        let frame = tokio::time::timeout(std::time::Duration::from_secs(3), handle.next_event())
+            .await
+            .expect("the terminals arrive within the leash budget")
+            .expect("the stream stays open while the host lives");
+        if let SessionEvent::RunAborted { .. } = &frame.event {
+            if frame
+                .stream
+                .as_ref()
+                .is_some_and(|s| s.as_str() == parent_id)
+            {
+                parent_aborted = true;
+            }
+            if frame
+                .stream
+                .as_ref()
+                .is_some_and(|s| s.as_str() == child_id)
+            {
+                child_aborted = true;
+            }
+        }
+        if parent_aborted && child_aborted {
+            break;
+        }
+    }
+    assert!(
+        started.elapsed() < std::time::Duration::from_secs(3),
+        "both runs aborted in {:?} — the leash, not the tool",
+        started.elapsed()
+    );
+    handle.close_commands();
     std::fs::remove_dir_all(store.dir()).ok();
 }
