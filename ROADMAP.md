@@ -319,6 +319,27 @@ The known deviation from pi's subprocess model:
   subagent v1 is unblocked — parent-proxy covers correctness, and an
   interim child simply mounts its own gate.
 
+**Framework-first (ruled 2026-09):** the delivery is the FRAMEWORK —
+session spawning made easy — and the `subagent` tool is one
+opinionated model-facing shape extensions are expected to override.
+The split (shipped): the standard `SessionBuilder` flow IS the child
+API (per-agent preamble — the caller builds it for the child's own
+cwd; toolset as whatever Vec the caller builds — allow-lists,
+deny-lists, empty; model, budget, hooks all per-child), plus exactly
+two new mechanics a worker normally provides: `SpawnContext::announce`
+(the parent-carrying session_opened) and `SpawnContext::drive` (event
+forwarding under the abort leash — the one recipe extensions must not
+hand-roll). The example tool adds: `model` ("provider/model" or bare
+id), `cwd` (scoped: its tools AND its prompt follow), `tools`
+(allow-list; unknown names error loudly), recursion by omission.
+**Subprocess children are a first-class second substrate, not
+dismissed** (owner ruling): the OS enforces the cwd instead of a
+convention every tool author must follow, plus hard isolation and
+free persisted children (`--session`); the JSON stdio protocol is the
+wire, the parent bridges (re-stamped events, parent-field
+announcement, interaction relay, tree-kill abort). No extension-
+substrate assumptions (item 9 owns that).
+
 **Shipped v1 (2026-09):** the above landed. `SessionCwd` (every
 session carries a working directory; the coding tools are contextual
 and resolve against it), the builder's `ephemeral` entrance

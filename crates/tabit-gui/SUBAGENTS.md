@@ -8,6 +8,12 @@ not. Reference implementation of the assertions: the e2e test
 `a_subagent_answers_as_the_tools_result_and_streams_its_own_events`
 (tabit-session, `subagent_tests.rs`).
 
+The model-facing tool takes optional `model` ("provider/model"),
+`cwd` (scope the child elsewhere — its tools *and* its instructions
+follow), and `tools` (an allow-list; e.g. `["read", "bash"]` for a
+read-only researcher). All three ride the `tool_call` arguments when
+present — render them in the call row if you show arguments.
+
 ## The shape of a subagent run
 
 A subagent is a **second session** running inside the parent's tool

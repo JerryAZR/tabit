@@ -7,7 +7,9 @@ use crate::subagent::{SubagentParts, subagent_tool};
 use crate::tests::{Factory, temp_store, text_turn};
 use crate::{Session, SessionHost, SessionHostWiring};
 use rig_agent::agent::ModelHandle;
+use rig_agent::completion::Message;
 use rig_agent::test_utils::MockCompletionModel;
+use rig_core::message::UserContent;
 use serde_json::json;
 use std::sync::Arc;
 use tabit_protocol::{SessionEvent, StreamId};
@@ -58,7 +60,6 @@ fn parts(
         auth: crate::tests::test_auth(),
         store: store.clone(),
         tools: vec![crate::tests::echo_tool()],
-        base_preamble: "You are a test agent.".to_string(),
         max_turns: 8,
         model_factory: child_factory(turns),
     })
@@ -211,7 +212,6 @@ async fn a_failing_child_is_an_error_result_not_a_fake_answer() {
         auth: crate::tests::test_auth(),
         store: store.clone(),
         tools: vec![],
-        base_preamble: "You are a test agent.".to_string(),
         max_turns: 4,
         model_factory: failing,
     });
@@ -420,7 +420,6 @@ async fn aborting_the_parent_leashes_the_child_promptly() {
         auth: crate::tests::test_auth(),
         store: store.clone(),
         tools: vec![slow],
-        base_preamble: "You are a test agent.".to_string(),
         max_turns: 4,
         model_factory: child_factory(vec![
             crate::tests::tool_turn("s1", "slow"),
@@ -488,6 +487,377 @@ async fn aborting_the_parent_leashes_the_child_promptly() {
         started.elapsed() < std::time::Duration::from_secs(3),
         "both runs aborted in {:?} — the leash, not the tool",
         started.elapsed()
+    );
+    handle.close_commands();
+    std::fs::remove_dir_all(store.dir()).ok();
+}
+
+// --- the framework split: overrides, allow-lists, and extension-style
+// --- spawners driving children without the example tool ---
+
+/// A tool that reports the session cwd it runs under — the probe for
+/// cwd scoping.
+fn cwd_probe_tool() -> rig_agent::tool::DynamicTool {
+    rig_agent::tool::DynamicTool::new(
+        "cwd_probe",
+        "Reports the session cwd",
+        json!({"type":"object","properties":{}}),
+        |ctx, _args| {
+            Box::pin(async move {
+                let cwd = ctx
+                    .get::<rig_agent::tool::SessionCwd>()
+                    .map(|c| c.0.display().to_string())
+                    .unwrap_or_else(|| "(no session cwd)".to_string());
+                Ok(rig_agent::tool::ToolOutput::text(cwd))
+            })
+        },
+    )
+}
+
+/// A factory that records every (provider, model) request and keeps
+/// the models, so tests can read back what the child actually sent.
+type Recording = (
+    crate::session::ModelFactory,
+    Arc<std::sync::Mutex<Vec<(String, String)>>>,
+    Arc<std::sync::Mutex<Vec<MockCompletionModel>>>,
+);
+
+fn recording_child_factory(turns: Vec<Vec<rig_agent::test_utils::MockStreamEvent>>) -> Recording {
+    let requested = Arc::new(std::sync::Mutex::new(Vec::new()));
+    let models = Arc::new(std::sync::Mutex::new(Vec::new()));
+    let factory: crate::session::ModelFactory = {
+        let requested = requested.clone();
+        let models = models.clone();
+        Arc::new(move |provider: &str, model: &str, _cache_key: &str| {
+            requested
+                .lock()
+                .expect("requested")
+                .push((provider.to_string(), model.to_string()));
+            let mock = MockCompletionModel::from_stream_turns(turns.clone());
+            models.lock().expect("models").push(mock.clone());
+            Ok(ModelHandle::new(mock))
+        })
+    };
+    (factory, requested, models)
+}
+
+/// Drive `parent` (whose script ends with a `wrap_up` answer) and
+/// collect frames through that terminal.
+async fn drive_to_wrap_up(
+    handle: &mut SessionHost,
+    parent_id: &str,
+    wrap_up: &str,
+) -> Vec<tabit_protocol::EventFrame> {
+    handle.message(parent_id, "go");
+    let mut frames = Vec::new();
+    loop {
+        let frame = tokio::time::timeout(std::time::Duration::from_secs(10), handle.next_event())
+            .await
+            .expect("frames keep coming")
+            .expect("the stream stays open");
+        let done =
+            matches!(&frame.event, SessionEvent::RunFinished { output, .. } if output == wrap_up);
+        frames.push(frame);
+        if done {
+            return frames;
+        }
+    }
+}
+
+/// The system message the child's first request rode — its preamble.
+fn child_preamble(models: &Arc<std::sync::Mutex<Vec<MockCompletionModel>>>) -> String {
+    let requests = models
+        .lock()
+        .expect("models")
+        .last()
+        .expect("the child requested")
+        .requests();
+    // OneOrMany is never empty; `first()` is total.
+    match requests[0].chat_history.first() {
+        Message::System { content } => content.clone(),
+        other => panic!("the preamble rides as the leading system message: {other:?}"),
+    }
+}
+
+#[tokio::test]
+async fn model_and_cwd_overrides_reach_the_child_and_its_preamble() {
+    let store = temp_store("subagent-overrides");
+    let scope = std::env::temp_dir().join("tabit-subagent-scope");
+    std::fs::create_dir_all(&scope).expect("scope dir");
+
+    let (factory, requested, models) = recording_child_factory(vec![
+        crate::tests::tool_turn("p1", "cwd_probe"),
+        text_turn("scoped answer"),
+    ]);
+    // The child's config must define the override model.
+    let config = Arc::new(
+        tabit_config::TabitConfig::from_toml_str(
+            r#"
+[providers.p]
+base_url = "http://127.0.0.1:9999/v1"
+api = "openai-completions"
+
+[[providers.p.models]]
+id = "m"
+
+[[providers.p.models]]
+id = "cheap"
+"#,
+            std::path::Path::new("providers.toml"),
+        )
+        .expect("config"),
+    );
+    let parts = Arc::new(SubagentParts {
+        config,
+        auth: crate::tests::test_auth(),
+        store: store.clone(),
+        tools: vec![cwd_probe_tool()],
+        max_turns: 8,
+        model_factory: factory,
+    });
+
+    use rig_agent::test_utils::MockStreamEvent;
+    let call = vec![
+        MockStreamEvent::ToolCall {
+            id: "c1".to_string(),
+            name: "subagent".to_string(),
+            arguments: json!({
+                "task": "study the reference project",
+                "model": "p/cheap",
+                "cwd": scope.display().to_string(),
+            }),
+            call_id: None,
+        },
+        MockStreamEvent::final_response_with_default_usage(),
+    ];
+    let parent = Factory::new(vec![call, text_turn("parent wrap-up")])
+        .into_builder(store.clone())
+        .preamble("You are a test agent.".to_string())
+        .dynamic_tool(subagent_tool())
+        .subagents(parts)
+        .create("C:/w")
+        .expect("parent session");
+    let mut handle = SessionHost::spawn(parent, Vec::new(), plain_wiring(&store));
+    let parent_id = handle.info().session_id.clone();
+    let frames = drive_to_wrap_up(&mut handle, &parent_id, "parent wrap-up").await;
+
+    // The model override reached the factory, and the announcement.
+    assert!(
+        requested
+            .lock()
+            .expect("requested")
+            .contains(&("p".to_string(), "cheap".to_string())),
+        "the child was built for p/cheap: {:?}",
+        requested.lock().expect("requested")
+    );
+    let (_, child_model) = frames
+        .iter()
+        .find_map(|f| match &f.event {
+            SessionEvent::SessionOpened {
+                model,
+                parent: Some(_),
+                ..
+            } => Some((f, model.clone())),
+            _ => None,
+        })
+        .expect("the child announced");
+    assert_eq!(child_model.model, "cheap");
+
+    // The cwd override reached the child's tools…
+    let probe = frames
+        .iter()
+        .find_map(|f| match &f.event {
+            SessionEvent::ToolResult { name, content, .. } if name == "cwd_probe" => {
+                Some(content.clone())
+            }
+            _ => None,
+        })
+        .expect("the probe ran");
+    assert!(
+        probe.contains("tabit-subagent-scope"),
+        "the child's tools resolve against the override cwd: {probe}"
+    );
+    // …and its preamble says where it is (the per-agent truthfulness).
+    let preamble = child_preamble(&models);
+    assert!(
+        preamble.contains("tabit-subagent-scope"),
+        "the child's prompt names its own cwd: {}…",
+        &preamble[..preamble.len().min(400)]
+    );
+    handle.close_commands();
+    std::fs::remove_dir_all(store.dir()).ok();
+    std::fs::remove_dir_all(&scope).ok();
+}
+
+#[tokio::test]
+async fn an_allow_list_restricts_the_child_toolset() {
+    // The allow-list keeps `echo` and drops `cwd_probe`; the child's
+    // scripted call to the dropped tool fails in-band, loudly.
+    let store = temp_store("subagent-allowlist");
+    let (factory, _requested, models) = recording_child_factory(vec![
+        crate::tests::tool_turn("a1", "cwd_probe"),
+        text_turn("after the refusal"),
+    ]);
+    let parts = Arc::new(SubagentParts {
+        config: crate::tests::test_config(),
+        auth: crate::tests::test_auth(),
+        store: store.clone(),
+        tools: vec![crate::tests::echo_tool(), cwd_probe_tool()],
+        max_turns: 8,
+        model_factory: factory,
+    });
+    use rig_agent::test_utils::MockStreamEvent;
+    let call = vec![
+        MockStreamEvent::ToolCall {
+            id: "c1".to_string(),
+            name: "subagent".to_string(),
+            arguments: json!({
+                "task": "read-only work",
+                "tools": ["echo"],
+            }),
+            call_id: None,
+        },
+        MockStreamEvent::final_response_with_default_usage(),
+    ];
+    let parent = Factory::new(vec![call, text_turn("parent wrap-up")])
+        .into_builder(store.clone())
+        .preamble("You are a test agent.".to_string())
+        .dynamic_tool(subagent_tool())
+        .subagents(parts)
+        .create("C:/w")
+        .expect("parent session");
+    let mut handle = SessionHost::spawn(parent, Vec::new(), plain_wiring(&store));
+    let id = handle.info().session_id.clone();
+    let _frames = drive_to_wrap_up(&mut handle, &id, "parent wrap-up").await;
+
+    // The dropped tool was called and answered IN-BAND: the engine
+    // folds an unknown-tool error into the model-facing result (no
+    // wire tool_result event for never-registered tools), so the
+    // proof is the model's own next request carrying the error.
+    let requests = models
+        .lock()
+        .expect("models")
+        .last()
+        .expect("the child requested")
+        .requests();
+    let history = &requests[1].chat_history;
+    let in_band = history.iter().any(|message| match message {
+        Message::User { content } => content.iter().any(|part| match part {
+            UserContent::ToolResult(result) => result.content.iter().any(|c| {
+                c.as_text()
+                    .is_some_and(|t| t.contains("cwd_probe") && t.contains("not offered"))
+            }),
+            _ => false,
+        }),
+        _ => false,
+    });
+    assert!(
+        in_band,
+        "the dropped tool's call came back as an in-band error: {:?}",
+        history
+    );
+    handle.close_commands();
+    std::fs::remove_dir_all(store.dir()).ok();
+}
+
+#[tokio::test]
+async fn extension_style_spawners_drive_children_through_the_framework() {
+    // The separation proof: a tool that is NOT the example `subagent`
+    // builds a child with its own policy (its own preamble, no gate)
+    // and drives it through the SpawnContext alone.
+    let (factory, _requested, models) =
+        recording_child_factory(vec![text_turn("from the custom spawner")]);
+    let spawner = rig_agent::tool::DynamicTool::new(
+        "research",
+        "The extension's own subagent shape",
+        json!({"type":"object","properties":{"topic":{"type":"string"}}}),
+        |ctx, args| {
+            let topic = args
+                .get("topic")
+                .and_then(|v| v.as_str())
+                .unwrap_or("")
+                .to_string();
+            Box::pin(async move {
+                use rig_agent::tool::ToolExecutionError;
+                let spawn = ctx
+                    .get::<Arc<crate::subagent::SpawnContext>>()
+                    .cloned()
+                    .ok_or_else(|| ToolExecutionError::other("no spawn context"))?;
+                let parts = spawn.parts();
+                // The extension's policy: its own preamble, no gate, an
+                // empty toolset, the parent's model and cwd.
+                let mut child = crate::SessionBuilder::new(
+                    parts.store.clone(),
+                    parts.config.clone(),
+                    parts.auth.clone(),
+                    spawn.parent_selection().clone(),
+                )
+                .map_err(|e| ToolExecutionError::other(e.to_string()))?
+                .preamble(format!("CUSTOM BRIEF: research {topic} thoroughly."))
+                .max_turns(parts.max_turns)
+                .model_factory(parts.model_factory.clone())
+                .ephemeral(&spawn.parent_cwd().display().to_string())
+                .map_err(|e| ToolExecutionError::other(e.to_string()))?;
+                if let Some(hub) = spawn.parent_hub() {
+                    child.attach_interaction(hub.clone());
+                }
+                spawn.announce(&child);
+                let token = ctx.get::<tokio_util::sync::CancellationToken>().cloned();
+                let summary = spawn.drive(&mut child, Message::user(topic), token).await;
+                Ok(rig_agent::tool::ToolOutput::text(summary.output))
+            })
+        },
+    );
+
+    let store = temp_store("subagent-extension");
+    let parts = Arc::new(SubagentParts {
+        config: crate::tests::test_config(),
+        auth: crate::tests::test_auth(),
+        store: store.clone(),
+        tools: vec![],
+        max_turns: 8,
+        model_factory: factory,
+    });
+    use rig_agent::test_utils::MockStreamEvent;
+    let call = vec![
+        MockStreamEvent::ToolCall {
+            id: "c1".to_string(),
+            name: "research".to_string(),
+            arguments: json!({"topic": "history of rust"}),
+            call_id: None,
+        },
+        MockStreamEvent::final_response_with_default_usage(),
+    ];
+    let parent = Factory::new(vec![call, text_turn("parent wrap-up")])
+        .into_builder(store.clone())
+        .preamble("You are a test agent.".to_string())
+        .dynamic_tool(spawner)
+        .subagents(parts)
+        .create("C:/w")
+        .expect("parent session");
+    let mut handle = SessionHost::spawn(parent, Vec::new(), plain_wiring(&store));
+    let id = handle.info().session_id.clone();
+    let frames = drive_to_wrap_up(&mut handle, &id, "parent wrap-up").await;
+
+    // The extension's tool got the child's answer…
+    let result = frames
+        .iter()
+        .find_map(|f| match &f.event {
+            SessionEvent::ToolResult { name, content, .. } if name == "research" => {
+                Some(content.clone())
+            }
+            _ => None,
+        })
+        .expect("the extension tool's result");
+    assert_eq!(result, "from the custom spawner");
+    // …the child announced with the parent field…
+    assert!(frames.iter().any(|f| matches!(&f.event,
+            SessionEvent::SessionOpened { parent: Some(p), .. } if p == &id)));
+    // …and the child's preamble was the EXTENSION's composition.
+    let preamble = child_preamble(&models);
+    assert!(
+        preamble.starts_with("CUSTOM BRIEF"),
+        "the extension owns the policy: {preamble:?}"
     );
     handle.close_commands();
     std::fs::remove_dir_all(store.dir()).ok();

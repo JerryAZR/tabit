@@ -249,7 +249,7 @@ impl Session {
         // parts plus THIS parent's identity and channels, snapshot at
         // open (a mid-run model switch reaches the next run's children).
         if let Some(parts) = &self.subagent_parts {
-            tool_context.insert(std::sync::Arc::new(crate::subagent::SubagentAssembly::new(
+            tool_context.insert(std::sync::Arc::new(crate::subagent::SpawnContext::new(
                 parts.clone(),
                 self.id.clone(),
                 self.selection(),

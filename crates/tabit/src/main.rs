@@ -402,7 +402,6 @@ fn assemble_session(
         auth: registry.auth().clone(),
         store: store.clone(),
         tools: children.clone(),
-        base_preamble: preamble.clone(),
         max_turns: args.max_turns.unwrap_or(tabit_session::DEFAULT_MAX_TURNS),
         model_factory: registry.factory(),
     });
