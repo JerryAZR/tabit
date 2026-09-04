@@ -30,10 +30,10 @@ Current workspace layout:
   stamped events, handshake frames; `FRONTEND.md` is the contract)
 - `crates/tabit-config` — provider/model configuration (see `ROADMAP.md`)
 - `crates/tabit-session` — persistent sessions over the outer loop (native
-  only: filesystem-backed; the rig crates keep wasm support), plus
-  native subagents (`subagent.rs`: a child session driven inside a
-  parent tool call — ephemeral v1, parent-proxy interaction,
-  ROADMAP item 5)
+  only: filesystem-backed; the rig crates keep wasm support), plus the
+  subagent framework (`subagent.rs`: `SpawnContext` — announce/drive over
+  the standard `SessionBuilder` spawn; the `subagent` tool is the
+  opinionated example shape extensions override — ROADMAP item 5)
 - `crates/tabit-tools` — coding tools (`read`, `write`, `edit`, `bash`
   — chosen at registration: verified Git Bash, else PowerShell on
   Windows; `ask_user` — the body is one interaction roundtrip) as
