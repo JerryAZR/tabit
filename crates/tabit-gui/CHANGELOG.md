@@ -36,7 +36,9 @@ spawner's transcript carries only the subagent `tool_call` /
 announcement must never overwrite the active session's Facts (the
 bridge is in; a nested-transcript view is future GUI work, and child
 streams drop like any unknown background stream until then). The ack
-carries `protocol_version: 5`.
+carries `protocol_version: 5`. The full event walkthrough — safe and
+unsafe assumptions, the `details` shape, abort behavior — is
+`SUBAGENTS.md` in this crate.
 
 ## v4
 
