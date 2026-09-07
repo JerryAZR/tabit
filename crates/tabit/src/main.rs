@@ -53,6 +53,12 @@ struct Args {
     max_turns: Option<usize>,
     rewind: Option<usize>,
     json: bool,
+    /// Child-role flags (the subagent bridge spawns `--json` with
+    /// these): the parent to announce, the tool allow-list, and the
+    /// in-memory boot session.
+    parent: Option<String>,
+    tools: Option<String>,
+    ephemeral: bool,
     /// Positional project path — selects GUI mode (`tabit <path>`).
     path: Option<PathBuf>,
 }
@@ -64,6 +70,10 @@ usage: tabit -p <PROMPT>                  print mode: one prompt, one run
        tabit --continue --rewind <n>      rewind n user messages, then exit;
                                          add -p <PROMPT> to branch with it
        tabit --json [session flags]       JSON protocol on stdio (scriptable)
+                                         child role adds: --parent <id> (the
+                                         spawning session), --tools <a,b,..>
+                                         (an allow-list), --ephemeral (no
+                                         file) — the subagent bridge's flags
        tabit --list                      list this project's sessions
 
 bare `tabit` or `tabit <path>` launches the GUI detached (vscode-style:
@@ -146,6 +156,9 @@ fn validate_mode(args: &Args) -> Result<Mode, String> {
             "--continue",
             "--model",
             "--max-turns",
+            "--parent",
+            "--tools",
+            "--ephemeral",
         ],
         Mode::Print => &[
             "-p/--print",
@@ -186,6 +199,9 @@ where
         max_turns: None,
         rewind: None,
         json: false,
+        parent: None,
+        tools: None,
+        ephemeral: false,
         path: None,
     };
     let mut it = args;
@@ -228,6 +244,19 @@ where
                         .map_err(|_| format!("--max-turns: `{value}` is not a number"))?,
                 );
             }
+            "--parent" => {
+                let value = it
+                    .next()
+                    .ok_or("--parent needs a session id (see --help)")?;
+                parsed.parent = Some(value);
+            }
+            "--tools" => {
+                let value = it
+                    .next()
+                    .ok_or("--tools needs a comma-separated list (see --help)")?;
+                parsed.tools = Some(value);
+            }
+            "--ephemeral" => parsed.ephemeral = true,
             other if other.starts_with('-') => {
                 return Err(format!("unknown flag `{other}`\n{USAGE}"));
             }
@@ -243,6 +272,13 @@ where
     }
     // The selected mode's flag set must cover everything present.
     validate_mode(&parsed)?;
+    // The ephemeral child has nothing to resume: the two persistence
+    // entrances and the in-memory one are mutually exclusive.
+    if parsed.ephemeral && (parsed.session.is_some() || parsed.continue_newest) {
+        return Err(format!(
+            "--ephemeral cannot combine with --session or --continue — an in-memory session resumes nothing\n{USAGE}"
+        ));
+    }
     Ok(parsed)
 }
 
@@ -288,7 +324,7 @@ fn print_event(event: &SessionEvent) {
         }
         // Cards render on stderr in the event loop; stdout stays the
         // answer channel.
-        SessionEvent::InteractionRequested { .. } => {}
+        SessionEvent::InteractionRequest { .. } => {}
         SessionEvent::RunAborted { .. } => {
             let _ = writeln!(
                 out,
@@ -379,6 +415,61 @@ fn print_banner(session: &Session) {
     }
 }
 
+/// The process-wide child registry — one table per process by design
+/// (the host routes through it, subagent spawns register into it), so
+/// a `OnceLock` is the honest shape rather than threading an `Arc`
+/// through every assembly site.
+fn child_router() -> std::sync::Arc<tabit_session::ChildRouter> {
+    static ROUTER: std::sync::OnceLock<std::sync::Arc<tabit_session::ChildRouter>> =
+        std::sync::OnceLock::new();
+    ROUTER
+        .get_or_init(tabit_session::ChildRouter::shared)
+        .clone()
+}
+
+/// The tabit executable subprocess children spawn: the `TABIT_BIN` dev
+/// override, else this very binary (the pi self-spawn pattern).
+fn tabit_exe() -> Result<PathBuf, String> {
+    if let Ok(path) = std::env::var("TABIT_BIN") {
+        return Ok(PathBuf::from(path));
+    }
+    std::env::current_exe().map_err(|e| format!("cannot resolve the tabit executable: {e}"))
+}
+
+/// Restrict the child toolset to an allow-list (the `--tools` flag). A
+/// typo'd name is a loud startup error listing what exists — a
+/// silently-emptied toolset would look like a broken child.
+fn filter_child_tools(
+    tools: Vec<rig_agent::tool::DynamicTool>,
+    spec: &str,
+) -> Result<Vec<rig_agent::tool::DynamicTool>, String> {
+    let wanted: Vec<&str> = spec
+        .split(',')
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+        .collect();
+    let mut chosen = Vec::with_capacity(wanted.len());
+    let mut missing = Vec::new();
+    for name in &wanted {
+        match tools.iter().find(|tool| tool.name() == *name) {
+            Some(tool) => chosen.push(tool.clone()),
+            None => missing.push(name.to_string()),
+        }
+    }
+    if !missing.is_empty() {
+        return Err(format!(
+            "--tools: unknown tools {} — this child offers: {}",
+            missing.join(", "),
+            tools
+                .iter()
+                .map(|tool| tool.name())
+                .collect::<Vec<_>>()
+                .join(", ")
+        ));
+    }
+    Ok(chosen)
+}
+
 fn assemble_session(
     args: &Args,
     registry: ModelRegistry,
@@ -395,8 +486,12 @@ fn assemble_session(
     // Subagent support (ROADMAP item 5): the process-wide parts, whose
     // toolset is the child toolset — the parent's minus the subagent
     // tool itself, so children cannot spawn children (recursion depth
-    // is enforced by omission).
-    let children = child_tools();
+    // is enforced by omission). A child-role process (`--parent`)
+    // mounts that toolset only: it does not spawn.
+    let mut children = child_tools();
+    if let Some(spec) = &args.tools {
+        children = filter_child_tools(children, spec)?;
+    }
     let subagents = std::sync::Arc::new(tabit_session::subagent::SubagentParts {
         config: registry.config().clone(),
         auth: registry.auth().clone(),
@@ -404,6 +499,8 @@ fn assemble_session(
         tools: children.clone(),
         max_turns: args.max_turns.unwrap_or(tabit_session::DEFAULT_MAX_TURNS),
         model_factory: registry.factory(),
+        router: child_router(),
+        exe: tabit_exe()?,
     });
 
     let mut builder = SessionBuilder::new(
@@ -424,11 +521,17 @@ fn assemble_session(
         tabit_session::PermissionMemory::default(),
     ))
     .subagents(subagents);
-    // The parent's toolset: the child tools plus the subagent tool.
-    for tool in children
-        .into_iter()
-        .chain(std::iter::once(tabit_session::subagent::subagent_tool()))
-    {
+    // The parent's toolset: the child tools plus the subagent tool —
+    // except in a child-role process, where recursion stays omitted.
+    let mounted: Vec<_> = if args.parent.is_some() {
+        children
+    } else {
+        children
+            .into_iter()
+            .chain(std::iter::once(tabit_session::subagent::subagent_tool()))
+            .collect()
+    };
+    for tool in mounted {
         builder = builder.dynamic_tool(tool);
     }
     if let Some(max_turns) = args.max_turns {
@@ -440,7 +543,13 @@ fn assemble_session(
         Ok(session)
     } else {
         let cwd = cwd.display().to_string();
-        builder.create(&cwd).map_err(|e| e.to_string())
+        if args.ephemeral {
+            // The child role's in-memory boot: nothing on disk, the
+            // process's lifetime is the session's.
+            builder.ephemeral(&cwd).map_err(|e| e.to_string())
+        } else {
+            builder.create(&cwd).map_err(|e| e.to_string())
+        }
     }
 }
 
@@ -756,7 +865,7 @@ fn print_mode(args: &Args, registry: &ModelRegistry) -> Result<i32, String> {
                         // A terminal closes every card (FRONTEND.md §8).
                         lock_armed(&armed).clear();
                     }
-                    SessionEvent::InteractionRequested {
+                    SessionEvent::InteractionRequest {
                         id,
                         ui_type,
                         payload,
@@ -994,6 +1103,10 @@ fn host_wiring(args: &Args, registry: &ModelRegistry, store: SessionStore) -> Se
     let fresh_args = Args {
         session: None,
         continue_newest: false,
+        // A new session is a user session of this process: no parent
+        // to announce, a file behind it.
+        parent: None,
+        ephemeral: false,
         ..args.clone()
     };
     let fresh_registry = registry.clone();
@@ -1003,6 +1116,8 @@ fn host_wiring(args: &Args, registry: &ModelRegistry, store: SessionStore) -> Se
     let open_store = store.clone();
     SessionHostWiring {
         store,
+        children: child_router(),
+        boot_parent: args.parent.clone(),
         create: Arc::new(move || {
             assemble(
                 &fresh_args,

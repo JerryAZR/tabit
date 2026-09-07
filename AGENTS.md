@@ -33,7 +33,12 @@ Current workspace layout:
   only: filesystem-backed; the rig crates keep wasm support), plus the
   subagent framework (`subagent.rs`: `SpawnContext` — announce/drive over
   the standard `SessionBuilder` spawn; the `subagent` tool is the
-  opinionated example shape extensions override — ROADMAP item 5)
+  opinionated example shape extensions override — ROADMAP item 5),
+  child routing (`routing.rs`: the ChildRouter — route-all command
+  delivery, learned tables, abort's subtree broadcast), and the
+  subprocess substrate (`subprocess.rs`: the bridge — self-spawn in
+  `--json` child role, the OS-enforced cwd, abort as a courtesy with
+  a reap deadline)
 - `crates/tabit-tools` — coding tools (`read`, `write`, `edit`, `bash`
   — chosen at registration: verified Git Bash, else PowerShell on
   Windows; `ask_user` — the body is one interaction roundtrip) as

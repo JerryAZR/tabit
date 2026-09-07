@@ -1530,6 +1530,46 @@ ACP's agents through that adapter, not natively): an optional
 reach and never a constraint on the core. Until the re-evaluation,
 nothing in this contract bends toward it.
 
+### 33. Child routing and the subprocess substrate — RESOLVED (2026-09: route-all, learned tables, subtree abort)
+
+The subprocess substrate's design round (ROADMAP item 5's second
+execution substrate) forced the routing question: the frontend
+addresses sessions by id, children are sessions, deep trees exist —
+who routes, and how deep? Rulings, in order:
+
+- **Routing is the framework, not the tool** (owner ruling). The
+  host's worker map resolves its own sessions; a shared child
+  registry (one per process, shared between the host wiring and
+  `SubagentParts`) is routing's second table. Extensions overriding
+  the `subagent` tool inherit routing by construction —
+  `SpawnContext::announce` registers in-process children at the
+  "exists visibly" moment, `drive` unregisters at its end; the
+  subprocess bridge registers at spawn, the reaper unregisters at
+  exit.
+- **Route all commands, no filters** (owner ruling: "`interaction_response` isn't a special command at the agent layer"). The router never decides — the target consumes or rejects. In-process children (worker-less, driven by a tool body) serve message (mailbox steer), abort (handle + cascade), and interaction answers (hub by request id); checkout/model/continue reject on the child's own stream — a stamped consumption rejection, a new nuance beside the unstamped routing failure. Subprocess children are full hosts: everything consumes.
+- **Deep trees route by learning** (the Ethernet-switch model, owner-approved). Each bridge snoops the frames it forwards; a frame's stamp teaches which child subtree owns the id. Flat stamps survive (no wire change, no wrap/unwrap); hop-by-hop walks reach leaves; an id that never emitted is unroutable — and moot, because `session_opened` is the first unconditional emission (a child that never announced is dead on arrival, owner observation). Rejected alternatives: layered/source-routed ids (a wire change mid-redesign for structure the `parent`-chained announcements already carry) and flooding (conflates delivery with the semantic abort cascade, and cannot produce unknown-id errors).
+- **Abort is a subtree stop** (owner ruling: "after the target consumes it, broadcast it to all children… stops all work inside a subtree; doesn't destroy the session instances"). Consumption at every node: cancel (the existing drop-all-pending-intent) + broadcast to registered children, recursively. In-process children cascade through registered handles here; subprocess children receive the routed command and cascade inside their own process, through this same router — the recursion crosses process boundaries as a routed command. The run-token leash remains the in-run fast path (double coverage is idempotent).
+- **Abort forwarding to a subprocess child is a courtesy with a deadline** (owner ruling, after the re-discussion). On leash cancel: forward `abort`, close stdin (the child aborts, flushes, exits on its own — the write-behind flush is the one thing the graceful window buys, for persisted children), return `Aborted` immediately; a reaper bounds the exit with the tree kill (Job Object on Windows / process group elsewhere — the child's bash descendants must not orphan). Force-kill stays correct at handshake failure and on a second abort.
+
+The substrate itself: `tabit --json` in child role (`--parent <id>`,
+`--tools <csv>`, `--ephemeral`, or the ordinary `--session`/
+`--continue`/`--model`/`--max-turns`), spawned with the child's cwd
+as the process cwd — the OS enforces the scope instead of a
+convention every tool author must follow (the ruling that made the
+substrate first-class). The bridge forwards the child's stamped
+frames as-is (stamps are already session ids) and consumes its
+backend-level frames (handshake, catalog) — they would collide with
+the parent's connection-level fold. The example tool's
+`execution` argument selects substrates (`in_process` default —
+zero regression while the new substrate hardens; the flip is a later
+ruling).
+
+A same-round contract fix, found by the TUI spike: the interaction
+event's variant was `InteractionRequested`, deriving the wire tag
+`interaction_requested` against FRONTEND.md's `interaction_request` —
+renamed to the contract's name, protocol v6, the typed GUI none the
+wiser (matched pairs never see the tag).
+
 ## Resolved
 
 - **1 — Resident loop** (supersedes 4, 5, 7, 12): one worker task owns

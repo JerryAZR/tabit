@@ -86,7 +86,10 @@ pub type OpenSessionSource =
     Arc<dyn Fn(&str) -> Result<(Session, Vec<String>), String> + Send + Sync>;
 
 /// Everything the host needs beyond the boot session: the store (the
-/// startup catalog) and the two session builders.
+/// startup catalog), the two session builders, the child router
+/// (routing's second table — see [`crate::routing`]), and the boot
+/// announcement's `parent` (a `--parent` child process names its
+/// spawner; `None` for every user-facing host).
 pub struct SessionHostWiring {
     /// The sessions directory the catalog lists.
     pub store: SessionStore,
@@ -94,6 +97,13 @@ pub struct SessionHostWiring {
     pub create: SessionSource,
     /// Load a stored session by id (`open_session`).
     pub open: OpenSessionSource,
+    /// The child registry: session addresses the workers don't own
+    /// resolve here (route-all — the router delivers, the target
+    /// consumes).
+    pub children: Arc<crate::routing::ChildRouter>,
+    /// The `parent` field on the boot session's announcement — the
+    /// child-role flag speaking at the source of truth.
+    pub boot_parent: Option<String>,
 }
 
 /// A command on its way to the host loop: a wire command, or a
@@ -114,6 +124,9 @@ enum HostCommand {
 /// then batches messages.
 #[derive(Clone)]
 struct Worker {
+    /// The worker's own session id — abort's broadcast names its
+    /// children by parent, and this is the parent's name.
+    id: String,
     mailbox: MailboxHandle,
     abort_handle: AbortHandle,
     interaction: InteractionHub,
@@ -146,6 +159,9 @@ struct Worker {
     /// A parked replay request (idempotent read — one flag collapses
     /// any number of requests; the beat serves it before batching).
     replay_due: Arc<std::sync::atomic::AtomicBool>,
+    /// The shared child registry — abort's tree broadcast (routing's
+    /// deliveries go through the host loop, not the worker).
+    children: Arc<crate::routing::ChildRouter>,
 }
 
 impl Worker {
@@ -160,9 +176,16 @@ impl Worker {
     /// already done — abort has nothing to say about them.
     /// The cancel itself (the run's abort plus its immediate
     /// `messages_discarded` notice) lives in the handle.
+    /// Abort consumption also **broadcasts to this session's
+    /// registered children** (the tree rule): stop all work in the
+    /// subtree, never destroy the instances. In-run children are
+    /// already leash-cancelled by the token; this walk reaches them
+    /// again (idempotently) and anything else registered under this
+    /// session.
     fn abort(&self) {
         lock(&self.checkout_slot).take();
         self.abort_handle.abort();
+        self.children.broadcast_abort(&self.id);
     }
 
     /// Deliver a session-scoped command — the handler at the dequeue
@@ -331,7 +354,7 @@ impl SessionHost {
                 path: info.session_path.clone(),
                 model: info.model.clone(),
                 resumed: info.resumed,
-                parent: None,
+                parent: wiring.boot_parent.clone(),
             },
         });
         for note in startup_notes {
@@ -371,6 +394,7 @@ impl SessionHost {
             event_tx.clone(),
             worker_shutdown.clone(),
             closing_stats.clone(),
+            wiring.children.clone(),
         );
         lock(&workers).insert(boot_id.clone(), boot_worker);
 
@@ -636,8 +660,23 @@ impl HostLoop {
                 }
             }
             HostCommand::Command(command) => {
-                if let Some(worker) = self.worker(session_address(&command)) {
+                let address = session_address(&command).to_string();
+                // Route-all (owner ruling): the workers own their
+                // sessions; every other address is a child's — the
+                // router delivers, the target consumes. Neither table
+                // knowing the address is the routing failure.
+                if let Some(worker) = lock(&self.workers).get(&address).cloned() {
                     worker.deliver(command);
+                } else if self.wiring.children.deliver(&address, command) {
+                    // The child's consumption is its own report.
+                } else {
+                    let _ = self.event_tx.send(EventFrame {
+                        stream: None,
+                        event: SessionEvent::error_session(format!(
+                            "unknown session `{address}` — not open in this backend \
+                             (open_session loads it; sessions_available lists the stored ones)"
+                        )),
+                    });
                 }
             }
         }
@@ -758,6 +797,7 @@ impl HostLoop {
             self.event_tx.clone(),
             self.worker_shutdown.clone(),
             self.stats.clone(),
+            self.wiring.children.clone(),
         );
         lock(&self.workers).insert(id, worker.clone());
         self.joins.push(join);
@@ -774,6 +814,7 @@ fn spawn_worker(
     event_tx: mpsc::UnboundedSender<EventFrame>,
     shutdown: CancellationToken,
     stats: Arc<Mutex<HashMap<String, SessionStats>>>,
+    children: Arc<crate::routing::ChildRouter>,
 ) -> (Worker, JoinHandle<()>) {
     let id = session.id().to_string();
     let stream = StreamId::new(id.clone());
@@ -790,6 +831,7 @@ fn spawn_worker(
     let worker_replay_due = replay_due.clone();
     let worker_mailbox = mailbox.clone();
     let task_interaction = interaction.clone();
+    let stats_id = id.clone();
     let join = tokio::spawn(async move {
         // The hub and the mailbox's submit-time notices both reach the
         // event channel, so both exist only here - attach them before
@@ -878,12 +920,13 @@ fn spawn_worker(
                 _ = worker_mailbox.work_signal().notified() => {}
             }
         }
-        lock(&stats).insert(id, session.stats());
+        lock(&stats).insert(stats_id, session.stats());
         // The worker's `event_tx` drops here; the stream ends when the
         // host's does too.
     });
     (
         Worker {
+            id,
             mailbox,
             abort_handle,
             interaction,
@@ -893,6 +936,7 @@ fn spawn_worker(
             model_register,
             model_probe,
             replay_due: worker_replay_due,
+            children,
         },
         join,
     )

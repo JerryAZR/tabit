@@ -184,7 +184,7 @@ mod tests {
         let frame = tokio::time::timeout(Duration::from_secs(5), rx.recv())
             .await
             .expect("the gate must open its card within 5s");
-        let SessionEvent::InteractionRequested { id, .. } = frame.expect("a card").event else {
+        let SessionEvent::InteractionRequest { id, .. } = frame.expect("a card").event else {
             panic!("expected an interaction request");
         };
         match respond(id.clone()) {
@@ -297,7 +297,7 @@ mod tests {
         let frame = tokio::time::timeout(Duration::from_secs(5), rx.recv())
             .await
             .expect("the gate must open its card within 5s");
-        let SessionEvent::InteractionRequested { id, .. } = frame.expect("a card").event else {
+        let SessionEvent::InteractionRequest { id, .. } = frame.expect("a card").event else {
             panic!("expected an interaction request");
         };
         // A known field with the wrong type: serde defaults only cover

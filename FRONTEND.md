@@ -206,15 +206,30 @@ value, switch on `type` when recognized) and log the rest.
 All commands are total — there is no rejection. Outcomes are events.
 Session-scoped commands **always name their session** (the boot id is
 in the ack; sessions you learn from `sessions_available`/
-`session_created`). A command naming an unknown or unloaded session
+`session_created`, **and subagent children from their
+`session_opened`**). A command naming an unknown or unloaded session
 yields `error { kind: session }` — an **unstamped, backend-level**
 frame (the routing failure belongs to no session; the message names
 the id — §6).
 
+**Children are command-addressable (v6, route-all):** a command may
+name a subagent child — `message` steers a live child (switching to
+a subagent view and steering it is normal usage; the
+`message_queued` ack arrives on the child's own stream),
+`interaction_response` answers its cards, and `abort` stops that
+child's subtree without killing the parent's run. Deep trees route
+hop by hop; the address is any id you saw stamped on a frame.
+Consumption differs by substrate: a subprocess child is a full host
+(every command consumes); an **in-process** child serves
+`message`/`abort`/`interaction_response` and rejects
+`checkout`/`model`/`continue` with a `kind: session` error stamped
+with the child's stream (a consumption rejection — not the unstamped
+routing failure).
+
 | command | when | effect |
 |---|---|---|
 | `message { session, text }` | any time | idle: starts a run — acknowledged directly by `user_message` (milliseconds; no queued event — nothing waits); running: steers at the next turn boundary, acknowledged by `message_queued { id, text }`. |
-| `abort { session }` | any time | running: preempts (`run_aborted`); discards messages queued at abort time (`messages_discarded`, omitted when none) **and any pending checkout** (§7 — no `checked_out` follows it; reset pending-rewind UI here). Post-abort messages queue normally and start the next run. Idle: no-op. |
+| `abort { session }` | any time | running: preempts (`run_aborted`); discards messages queued at abort time (`messages_discarded`, omitted when none) **and any pending checkout** (§7 — no `checked_out` follows it; reset pending-rewind UI here). **Subtree stop (v6):** consuming an abort also broadcasts to the session's registered children, recursively — every descendant's run aborts (its terminal flushes on its own stream); session instances are never destroyed. Aborting a child by id stops that child's subtree and leaves the parent's run alive. Post-abort messages queue normally and start the next run. Idle: no-op. |
 | `new_session` | any time | creates a fresh session (same config, tools, and `--model`/`--max-turns` as the boot); `session_created { id, path, model }` follows, unstamped and backend-level (the payload carries the id). Nothing replays (it is empty). Never waits on any session — lifecycle writes no session's file. |
 | `open_session { id }` | any time | loads the session if needed and streams a replay pass stamped with the id — the pass is the acknowledgment. Idempotent: an open session re-replays. Unknown id or unreadable file → unstamped, backend-level `error { kind: session }`. Creating, loading, and switching never wait on the session you are leaving; the one wait is the opened session's **own** in-flight run — its pass arrives at that run's terminal (its live streaming renders immediately; only committed history waits). |
 | `checkout { session, entry_id }` | any time | moves that session's chain to the entry (any entry in the file— an off-chain target is a branch switch); see §7. **On receipt:** the target is verified (unknown entry → immediate `error { kind: checkout }`, nothing else happens) and the still-pending messages are discarded (`messages_discarded`, handed back as drafts). The rewind itself: a run in flight is aborted first (`run_aborted` — the user rewinding has declared its continuation obsolete), then the rewind applies at the session's pause point; idle → applies immediately. |

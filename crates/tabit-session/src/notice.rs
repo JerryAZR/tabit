@@ -42,6 +42,16 @@ impl NoticeSink {
         }
     }
 
+    /// Build from the weak channel directly — the subagent-tap path
+    /// (children forward through the weak end; no strong sender exists
+    /// at the attach site).
+    pub(crate) fn from_weak(
+        events: mpsc::WeakUnboundedSender<EventFrame>,
+        stream: StreamId,
+    ) -> Self {
+        Self { events, stream }
+    }
+
     /// Emit a notice, stamped with the session's stream. Returns whether
     /// the channel was live to take the frame: a dead or never-attached
     /// channel is a silent no-op for fire-and-forget notices, but the

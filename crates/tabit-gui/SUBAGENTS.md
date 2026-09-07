@@ -115,9 +115,28 @@ transcript), footer = `turns` + usage from `details`. Unknown
 today the reducer already drops them, so shipping the nested view is
 purely additive.
 
+## v6: children are command-addressable (route-all)
+
+Every session-scoped command may name a child session — learned from
+its announcement and any descendant's frame stamps. For a frontend
+this means: **a subagent view is a steerable view**. `message` to a
+live child is acknowledged `message_queued` on the child's own
+stream and enters its conversation at the next turn boundary;
+`interaction_response` answers the child's own cards; `abort` naming
+a child stops that child's subtree (every descendant's `run_aborted`
+flushes on its own stream) and leaves the parent's run alive — the
+parent's tool result becomes the "interrupted" error and its run
+continues. Aborting a parent still stops its whole subtree (the
+abort's consumption broadcasts recursively). One substrate caveat:
+an **in-process** child rejects `checkout`/`model`/`continue` with a
+stamped `kind: session` error (no worker machinery behind them); a
+subprocess child consumes everything. Full semantics: FRONTEND.md
+§5, PROTOCOL.md flag 33.
+
 ## Not in v5 (design notes, do not assume)
 
 Persisted children (a real file, catalog presence, replay via
-`open_session`, `parent_session` lineage), per-child model/cwd
-overrides, and a result-size cap beyond the child's own `max_tokens`
-are deferred — see ROADMAP item 5. Nothing here promises any of them.
+`open_session`, `parent_session` lineage) and a result-size cap
+beyond the child's own `max_tokens` are deferred — see ROADMAP item 5
+(per-child model/cwd overrides shipped with the framework split).
+Nothing here promises the deferred ones.

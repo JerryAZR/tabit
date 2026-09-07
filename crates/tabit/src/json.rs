@@ -326,6 +326,8 @@ id = "m"
     /// pass their own builder.
     fn test_wiring(dir: &Path, create: SessionSource) -> SessionHostWiring {
         SessionHostWiring {
+            children: tabit_session::ChildRouter::shared(),
+            boot_parent: None,
             store: SessionStore::new(dir),
             create,
             open: Arc::new(move |_| Err("open_session is not driven by this test".to_string())),
@@ -1261,6 +1263,8 @@ id = "m"
             session,
             Vec::new(),
             SessionHostWiring {
+                children: tabit_session::ChildRouter::shared(),
+                boot_parent: None,
                 store: SessionStore::new(&dir),
                 create,
                 open,

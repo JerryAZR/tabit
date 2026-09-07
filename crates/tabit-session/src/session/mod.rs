@@ -35,7 +35,7 @@ mod persist;
 mod rewind;
 mod run;
 mod selection;
-mod wire;
+pub(crate) mod wire;
 
 pub(crate) use builder::ModelFactory;
 pub use builder::SessionBuilder;
@@ -187,6 +187,23 @@ impl Session {
     /// which exists only there.
     pub fn attach_interaction(&mut self, hub: InteractionHub) {
         self.interaction = Some(hub);
+    }
+
+    /// The attached interaction hub, when one is (the worker's, or a
+    /// parent's proxy on a subagent child). Routing delivers
+    /// interaction answers through it.
+    pub(crate) fn interaction_hub(&self) -> Option<InteractionHub> {
+        self.interaction.clone()
+    }
+
+    /// Point a subagent child's mailbox and persist notices at the
+    /// weak frontend channel its events forward through — the worker's
+    /// attach pair, minus the worker: steering acknowledgments
+    /// (`message_queued`) and degrade notices stay on the child's own
+    /// stream.
+    pub(crate) fn attach_child_notices(&self, sink: crate::notice::NoticeSink) {
+        self.mailbox.attach_notice_sink(sink.clone());
+        self.attach_persist_sink(sink);
     }
 
     /// Attach the channel subagent child events forward through.

@@ -340,6 +340,26 @@ wire, the parent bridges (re-stamped events, parent-field
 announcement, interaction relay, tree-kill abort). No extension-
 substrate assumptions (item 9 owns that).
 
+**Shipped: the substrate + routing (2026-09, PROTOCOL.md flag 33).**
+`tabit --json` child role (`--parent`/`--tools`/`--ephemeral`, the
+parent carrying the announcement from the source); the bridge
+(`subprocess.rs`) spawns the self-binary under a Job Object/process
+group with the child's cwd as the process cwd, forwards stamped
+frames as-is, and closes with the ruled abort shape (forward +
+stdin close, return now, reaper-bounded tree kill). **Routing became
+framework machinery** (`routing.rs` — the ChildRouter): route-all
+command delivery to children (in-process facade over the session's
+shared leaves; subprocess children as full hosts), deep-tree routing
+by learned tables (bridge-snooped stamps), and abort consumption as
+a recursive subtree stop. The example tool grew `execution`
+(`in_process` default, `subprocess` opt-in). Deferred with the
+design: persisted-children lineage (`parent_session` header +
+catalog grouping), the in-process child's checkout/model/continue
+consumption (needs worker machinery or a facade extension), the
+execution-default flip, and detached children that outlive their
+parent's run (the learning table's known boundary — recorded for
+that design).
+
 **Shipped v1 (2026-09):** the above landed. `SessionCwd` (every
 session carries a working directory; the coding tools are contextual
 and resolve against it), the builder's `ephemeral` entrance
@@ -350,7 +370,7 @@ abort, results with `{child_id, outcome, turns, usage}` details).
 Protocol v5 (`session_opened.parent`, empty path = ephemeral).
 Deferred with the design's own notes: persisted (inspectable)
 children via the `parent_session` header field + catalog grouping;
-per-child model/cwd overrides; the subagent result cap refinement
+the subagent result cap refinement
 (the child's own `max_tokens` bounds v1); nested-transcript GUI
 rendering (the GUI bridge drops child streams for now).
 
