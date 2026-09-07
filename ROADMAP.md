@@ -550,6 +550,17 @@ rendering (the GUI bridge drops child streams for now).
   tabit-session; flag 13) — engine-free, protocol-owned shapes, so
   frontends (the egui GUI included) share the serde types without
   touching persistence internals.
+- **ACP (Agent Client Protocol) ruled adapter-only (2026-09; survey in
+  PROTOCOL.md flag 32):** the native vocabulary stays the one contract —
+  ACP is too little where tabit is deliberately rich (steering, the
+  checkout tree, subagent streams, custom widget UI, durability
+  signals), too much where tabit is deliberately lean (the JSON-RPC
+  envelope, capability negotiation, auth/MCP/plan/slash-command
+  machinery), and the wrong shape for the in-process GUI consumer. The
+  reach play is an optional `tabit-acp` adapter crate — a leaf frontend
+  projecting stamped events onto `session/update`, the pi/pi-acp
+  pattern — deferred **at least until ACP v2 ships and stabilizes
+  through a few patch rounds**; that is the re-evaluation trigger.
 
 ### 9. Extensions
 

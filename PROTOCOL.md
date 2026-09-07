@@ -1473,6 +1473,63 @@ the tool pair consumes: the announced turn id, the unified
 capability map, and the rewrite-chaining frames. Re-addable if a
 consumer ever appears.
 
+### 32. ACP adoption — RESOLVED (2026-09: adapter-only, deferred)
+
+Should the frontend protocol be the Agent Client Protocol (ACP —
+Zed/JetBrains, JSON-RPC 2.0 over LF-delimited stdio;
+agentclientprotocol.com, Apache-2.0, official Rust SDK, ~40 listed
+agents) instead of this vocabulary? Surveyed 2026-09 against
+FRONTEND.md feature by feature. **Ruled: never a replacement — the
+native protocol is the product's own contract; ACP is a possible
+adapter edge, deferred at least until ACP v2 ships and stabilizes
+through a few patch rounds (that is the re-evaluation trigger).**
+
+Three findings, in force order:
+
+- **Too little where this protocol is deliberately rich.** No steering
+  — the only mid-flight client action is `session/cancel` (v1 and the
+  v2 draft alike), so the always-queue mailbox and the message ledger
+  are inexpressible except as `_`-extensions (the ecosystem queues
+  prompts client-side to compensate). Linear history — no tree, no
+  checkout; forking is an unshipped RFD with a different goal. No
+  subagent hierarchy — child streams flatten into the parent's tool
+  calls, so `session_opened.parent`, sibling stamps, and
+  `details.child_id` have no shape. No custom widget UI — elicitation
+  forms are flat primitive/enum schemas, so `ui_type` + payload
+  templates (the open extension-UI surface) cannot be expressed at
+  all. No durability or crash contract — persist kinds, `durable`,
+  the exit-code/EOF classification are out of ACP's scope.
+- **Too much where this protocol is deliberately lean.** The JSON-RPC
+  envelope (request ids, a demanded response per command, two-role
+  capability negotiation, v2 batching) is ceremony for one frontend
+  whose commands are total and fire-and-forget with outcomes as
+  events — the response slot is dead weight. Auth/OAuth-elicitation
+  machinery, MCP server config in session setup, plan objects, slash
+  commands, cost reporting — all ruled out or deferred here.
+  (Client-side `fs/*` and terminal execution — v1 surface this
+  protocol never grew — v2 removes: ACP itself retraced our step.)
+- **Wrong shape for the in-process consumer.** This vocabulary is not
+  only the stdio wire; it is the egui reducer's event stream with no
+  translation seam. ACP is an inter-process RPC contract — adopting
+  it internally couples the GUI to ids and method dispatch that mean
+  nothing in-process, or inserts exactly the seam the front/back
+  split exists to avoid.
+
+Convergence noted as validation, not pressure: ACP v2's direction
+(id-keyed upserts, explicit running/idle states, replay cursors,
+structured diffs, dropping client fs/terminal) matches decisions
+already locked here.
+
+The deferred play is the pi pattern (`pi-acp` — pi is listed among
+ACP's agents through that adapter, not natively): an optional
+`tabit-acp` crate as a leaf frontend projecting stamped events onto
+`session/update` (`message`→`session/prompt`, `abort`→
+`session/cancel`, `interaction_request`→`session/request_permission`
+/elicitation, `model`→config option, children flattened into the
+`subagent` tool call) — honestly lossy, which is fine for editor
+reach and never a constraint on the core. Until the re-evaluation,
+nothing in this contract bends toward it.
+
 ## Resolved
 
 - **1 — Resident loop** (supersedes 4, 5, 7, 12): one worker task owns
