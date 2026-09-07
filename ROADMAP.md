@@ -438,10 +438,10 @@ rendering (the GUI bridge drops child streams for now).
   Deferred with it: the global implicit preference (`~/.tabit/`
   last-selected file + registry rung below `default_model`) and the
   "selection didn't land" picker signal (open note in PROTOCOL.md).
-- **GUI: egui, the primary frontend (decided; supersedes the TUI plan).**
-  The TUI milestone (the claurst harvest, ~19K LOC) is dead/low priority —
-  only reconsidered if everything else lands and a terminal frontend is
-  still wanted. The GUI is an egui app (eframe shell, egui style theming)
+- **GUI: egui, the primary frontend (decided).** The TUI milestone
+  (the claurst harvest, ~19K LOC) is dead — GPL, ruled out; the
+  terminal frontend found its own non-ratatui track (the TUI ruling
+  below). The GUI is an egui app (eframe shell, egui style theming)
   speaking the item-7 protocol over the existing stdio edge: it spawns
   one `tabit --json` child process — the multi-session host (PROTOCOL.md
   v3): sessions are created, opened, and switched by channel commands,
@@ -499,6 +499,25 @@ rendering (the GUI bridge drops child streams for now).
   the register ruling; for an in-flight session the pass still parks
   behind the run's terminal — the same window as the transcript).
   Both die with the per-session projection.
+- **TUI: back on, the Node route (ruled 2026-09 after the research
+  round; full survey in TUI-RESEARCH.md, branch `tui/research`).**
+  The claurst ratatui harvest stays dead (GPL) and a Rust-native
+  TUI stays deferred (a later claurst-ideas rewrite remains open);
+  the terminal frontend rides the JS ecosystem instead: **the omp
+  fork of pi-tui (`@oh-my-pi/pi-tui`, MIT — Mario Zechner's own
+  next-gen line, not a third-party fork) under Bun**, spawning
+  `tabit --json` as a child process (the stdio edge GUI, print, and
+  JSON mode already ride — zero backend changes), distributed via
+  the npm registry as per-platform optional packages (esbuild
+  pattern; no postinstall) carrying a Bun-compiled standalone TUI
+  exe plus the cargo-built core — the installer is whatever the
+  user has (`npm i -g` / `bun i -g`), no JS runtime at run time.
+  Single repo, single tag, single version: the lockstepped pair is
+  the strict protocol handshake made atomic. Fallback ladder: stock
+  pi-tui on plain Node, then opentui (its Node ≥ 26.4 engines floor
+  breaks the one-line install today). Next: the §7 walking-slice
+  spike on Windows Terminal before product commitment; the TUI
+  enters the monorepo (`tui/`) when it graduates.
 - **Framework: egui (ruled 2026-08, after evaluation).** Runner-up
   iced (its Elm architecture matches our reducer split natively) loses
   on ecosystem for our exact surfaces — no markdown widget, no list
