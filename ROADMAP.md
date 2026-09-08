@@ -470,14 +470,21 @@ assumptions (item 9 owns that).
   forfeit the cache), and the <75% bound forward-guarantees the
   request fits by construction even when compaction fires over-window
   — the forward-looking cut, not codex's backwards trim-and-retry.
-  The constraints never conflict — a cut at the session start
-  satisfies both (nothing sent, the whole history kept as tail) — so
-  selection is a maximization: **the longest prefix satisfying all
-  constraints**. The tail may still overshoot `KEEP_TAIL` when block
-  granularity leaves no valid boundary closer; the only true
-  infeasibility is a history shorter than `KEEP_TAIL` itself — skip
-  compaction, reachable only on MANUAL requests (the auto triggers
-  imply a context far past `KEEP_TAIL`).
+  Both hard constraints push the cut the **same direction** — up the
+  history, a shorter prefix: sent < 75% caps how late the cut can sit,
+  and tail ≥ `KEEP_TAIL` caps it too (a later cut means a shorter
+  tail). The **longest-prefix** objective is the soft pull in the
+  *opposite* direction — compaction efficiency: summarize as much as
+  one request can carry. Selection = the latest valid boundary
+  satisfying both. The session-start cut satisfies both vacuously, so
+  infeasibility reduces to a history shorter than `KEEP_TAIL` itself —
+  skip compaction, reachable only on MANUAL requests (the auto
+  triggers imply a context far past `KEEP_TAIL`). Tail overshoot
+  beyond `KEEP_TAIL` is **normal, not granularity-only**: when
+  history ≫ window (3M history, 1M window) the cut sits at the 75%
+  cap and the 2.25M remainder stays as tail — the post-check rerun
+  then makes several passes, each summarizing another ≤75%-of-window
+  chunk until the context fits.
   (2) **Rejection and length-cap alike:** on a server rejection of the
   cut point — any non-transient, engine-visible error (the typed
   classification; the transient family already rides the pi-policy
