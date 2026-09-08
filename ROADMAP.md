@@ -420,11 +420,33 @@ assumptions (item 9 owns that).
   recorded alternative: the request shape is one construction site, and
   the cut/projection machinery is shared by both styles, so switching
   later is contained.
+- **Ruled 2026-09 — trigger numbers and queue conditions (owner):** the
+  idle seam fires at **75%** of the window, and only when the steer
+  queue is empty — a waiting message means not actually idle, and the
+  user never waits behind a summary. Messages arriving *during*
+  compaction queue normally and run after it (always-queue gives this
+  structurally). The seam compaction ignores queued messages entirely:
+  they stay queued and drain at the next boundary after compaction
+  completes. The seam reserve is bounded by the **two-turn budget**
+  (owner correction of the one-turn derivation): the check fires
+  discretely one seam *after* the crossing turn, so the worst case at
+  fire time is threshold + one full turn of growth, and the compaction
+  call must still fit its prompt and summary output in the window —
+  reserve ≥ one turn's growth + summary room ≈ two turns. Reference
+  reserves for calibration: pi/yaca 16,384 absolute; opencode
+  min(20k, max output tokens); crush 20k absolute above a 200k window,
+  20% of the window below it; codex 90% soft / 95% hard — plus a
+  runtime escape hatch (on overflow *during* compaction, trim the
+  oldest item and retry), evidence the fixed reserves under-provision
+  the compaction call and get patched at runtime instead.
 - **Open agenda (the discussion continues; leanings are leanings, not
-  rulings):** (1) trigger conditions beyond the seams — threshold numbers
-  (percent vs reserve, per-model via `context_window` wiring), the
-  queued-messages question at the idle seam, token counting (last-turn
-  provider usage + trailing estimate, pi's four-component sum); (2) cut
+  rulings):** (1) trigger conditions — settled per the rulings above
+  except the **concrete seam number** (it must satisfy idle 75% < seam
+  threshold, or the seam fires first mid-run and the idle pass never
+  gets its gentle window; a two-turn reserve bounds the assumed turn
+  budget to < 25% of the window) and the token-counting input (leaning:
+  last-turn provider usage — pi's four-component sum — plus a chars/4
+  estimate of trailing messages); (2) cut
   points — leaning user-message boundaries only (yaca's stricter rule:
   tool pairing safe by construction, no split-turn machinery) with a
   token-budgeted retained tail; (3) tool calls during compaction —
