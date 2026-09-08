@@ -470,23 +470,31 @@ assumptions (item 9 owns that).
   forfeit the cache), and the <75% bound forward-guarantees the
   request fits by construction even when compaction fires over-window
   — the forward-looking cut, not codex's backwards trim-and-retry.
-  When the constraints conflict, <75% binds: the cut moves earlier and
-  the tail overshoots `KEEP_TAIL` (a floor, not a cap); the post-check
-  loop handles a still-oversized result.
-  (2) **Rejection:** on a server rejection of the cut point — any
-  non-transient, engine-visible error (the typed classification; the
-  transient family already rides the pi-policy retry) — move the cut
-  one block up the history (a shorter request) and try again.
+  The constraints never conflict — a cut at the session start
+  satisfies both (nothing sent, the whole history kept as tail) — so
+  selection is a maximization: **the longest prefix satisfying all
+  constraints**. The tail may still overshoot `KEEP_TAIL` when block
+  granularity leaves no valid boundary closer; the only true
+  infeasibility is a history shorter than `KEEP_TAIL` itself — skip
+  compaction, reachable only on MANUAL requests (the auto triggers
+  imply a context far past `KEEP_TAIL`).
+  (2) **Rejection and length-cap alike:** on a server rejection of the
+  cut point — any non-transient, engine-visible error (the typed
+  classification; the transient family already rides the pi-policy
+  retry) — or a length-capped summary (protocol-complete but
+  information-incomplete: the summary could not fit what the prefix
+  contained), move the cut one block up the history (a shorter
+  request) and try again. Blocks are the valid cut boundaries
+  (no-tool-call outputs).
   (3) **Post-check loop:** after compaction, immediately re-check the
   trigger against the new context (preamble + summary + retained
   tail); still too big → rerun the loop, pass N's summary feeding pass
   N+1 as the previous-summary (pi's update pattern).
-  Sub-decisions left to the dig: the block granularity for (2)'s
-  one-block moves (presumably the valid-boundary units — no-tool-call
-  outputs), the rerun loop's no-progress guard (a pass that cannot
-  shrink stops loud, never spins — yaca's rule), whether a
-  length-capped summary is accepted, and the rerun threshold (leaning:
-  condition B again).
+  Sub-decisions left to the dig: the retry loops' termination — the
+  rejection/length-cap loop has a natural floor (the empty prefix,
+  past which the pass fails loud), the post-check rerun needs the
+  cannot-shrink guard (yaca's rule) — and the rerun threshold
+  (leaning: condition B again).
 - **Open agenda (quick thoughts recorded 2026-09, owner — each gets a
   deep dive; leanings marked):** (1) trigger conditions — **settled**
   (formula above); the token-counting input stays a leaning (last-turn
