@@ -502,6 +502,38 @@ assumptions (item 9 owns that).
   past which the pass fails loud), the post-check rerun needs the
   cannot-shrink guard (yaca's rule) — and the rerun threshold
   (leaning: condition B again).
+- **Ruled 2026-09 — the compaction record, file and tree (owner):**
+  the session file gets ONE compaction entry per pass, append-only —
+  the kept tail is already in the file, so the entry carries the cut
+  identity: **the id of the message immediately after the cut point**
+  (the first tail entry), its own parent being the node before the
+  cut, plus the summary payload. The runtime tree performs a real
+  **insertion**: the compaction node becomes the parent of the
+  cut-point child and the child of the original cut-point parent, and
+  history walkers **stop at the compaction, included** — the walked
+  context is [summary] + retained tail; everything before the
+  insertion stays in the file and the tree, un-walked. In file terms
+  the insertion is *derived*: the tail entry's record keeps its
+  original parent, and the loader re-parents it through the
+  compaction entry on replay (append-only preserved; the derivation
+  lives in the one fold the parser and the resident context share; a
+  record whose parent ≠ its cut child's file parent is a loud parse
+  error). Consequences: the **head does not move** at compaction —
+  later appends attach to the unchanged head and their effective
+  chain routes through the insertion; **checkout/rewind to
+  pre-compaction nodes yields the full-history branch** (the
+  compaction is not on that path — "compaction never deletes"
+  realized as tree topology, no projection machinery; rewind-to-X
+  itself is degenerate but consistent, and the user surface never
+  lands there); **multi-pass composes as successive insertions**
+  (each pass's entry parents the node before its own cut and names
+  its own cut child — no entry is rewritten); a **torn compaction
+  entry loses only the pass** — reload yields the full history, the
+  write-behind contract's accepted loss. Open with the flow dig: the
+  entry's exact payload fields (tokens-before, usage, pass sequence,
+  the instruction for audit), how the summary enters the
+  model-facing context (leaning: a user-role wrapper message, the
+  references' pattern), and the session-format version bump.
 - **Open agenda (quick thoughts recorded 2026-09, owner — each gets a
   deep dive; leanings marked):** (1) trigger conditions — **settled**
   (formula above); the token-counting input stays a leaning (last-turn
@@ -511,9 +543,10 @@ assumptions (item 9 owns that).
   tool calls; queued steers cluster before the first user message;
   flexible tail budget via `KEEP_TAIL`). (3) **settled** — compaction
   state rejects all tool calls (ruling above). (4) **flow fit —
-  three separate designs, not to be mixed**: the session file (what
-  the compaction record is on disk), the runtime session tree & state
-  (projection, head, checkout), and the execution flow (ENGINE.md —
+  three separate designs, not to be mixed**: the session file
+  **settled** (the compaction record ruling above), the runtime
+  session tree & state **settled** (the insertion ruling above), and
+  the execution flow (ENGINE.md —
   who triggers, which states, how compaction state is entered and
   queried). (5) **overflow recovery — merged into the cut-selection
   loop ruling above** (pre-flight fit by construction + rejection
