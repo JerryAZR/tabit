@@ -356,8 +356,13 @@ a full session host. Protocol v5/v6 (`session_opened.parent`, empty
 path = ephemeral; the interaction tag realigned). Deferred:
 persisted children's lineage (`parent_session` header + catalog
 grouping), the result-cap refinement, nested-transcript GUI
-rendering, and detached children that outlive their parent's run
-(the learning table's known boundary). No extension-substrate
+rendering, and background children — deferred to the **background
+tool execution** discussion (owner note 2026-09: routing and
+commands are already substrate-independent of active tools — the
+registry, forwarding, and the child's mailbox all key to the child
+process's lifetime, not to a tool call — so the gap is one knob,
+handle detachment, plus the wait/cancel/list collection surface in
+opencode's shape). No extension-substrate
 assumptions (item 9 owns that).
 
 ### 6. Compaction + overflow recovery
