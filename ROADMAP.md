@@ -380,6 +380,65 @@ assumptions (item 9 owns that).
   append-only tree, how checkout interacts with a compacted chain, and what
   replay reconstructs. `context_window` config stays unwired until that
   design exists.
+- **Reference survey (2026-09, the design discussion's evidence base):**
+  all five references (pi, codex, opencode, crush, yaca) roll their own but
+  converge on one skeleton — threshold from real provider usage minus a
+  reserve, a cut with a retained recent tail, a structured handoff summary,
+  an overflow-error backstop. The check runs between model calls everywhere
+  (the tool-roundtrip seam — the only point with fresh usage numbers),
+  never after individual tool calls; codex compacts mid-turn at the seam,
+  pi/yaca compact at the run boundary, crush stops the run to summarize.
+  Two payload camps: **codex appends the summarization prompt to the REAL
+  conversation** (same system prompt, empty toolset — the request prefix
+  `compact.rs:282-286` — so it rides the prompt cache and the history goes
+  verbatim); **pi/opencode/yaca send standalone requests** with the
+  conversation lossily serialized to text (tool results truncated ~2k
+  chars; a cache hit is impossible by construction, and pi explicitly
+  disables cache writes). Post-compaction, both camps pay a full cache
+  re-write — the replacement context is a new prefix. The only
+  standard-shaped thing is OpenAI's server-side Responses compaction
+  (codex negotiates it as a provider capability); nobody has our
+  rewind/branch tree, so the tree interaction is ours to design.
+- **Ruled 2026-09 — two seams, two thresholds (owner):** the trigger is
+  checked at two seams with different jobs. The **tool-roundtrip seam**
+  (between model calls, mid-run) carries the high threshold — "compact
+  now, or the next few calls will exceed the context window and fail"
+  (safety; fires mid-task only when genuinely close). The **outer-loop
+  idle seam** (after run end, back at idle) carries the lower threshold —
+  "summarize at a natural pause point, make room for the next task"
+  (compacting at 80% when the model has finished its work beats 90% in
+  the middle of a task).
+- **Ruled 2026-09 — in-conversation summarization (codex-style, owner):**
+  the compaction request is appended to the real conversation — same
+  preamble, **no tools**, the instruction riding in the user message
+  (swapping in a summarizer system prompt is what breaks the prefix
+  cache; the user prompt does all the work). The request prefix-rides
+  the existing prompt cache and the history goes verbatim — no
+  serialize-to-text loss. Reason on record: input-cost savings ("a penny
+  is a penny" — cache-read dominates real coding sessions, so the saving
+  is admittedly small). The reconstructed-request style stays the
+  recorded alternative: the request shape is one construction site, and
+  the cut/projection machinery is shared by both styles, so switching
+  later is contained.
+- **Open agenda (the discussion continues; leanings are leanings, not
+  rulings):** (1) trigger conditions beyond the seams — threshold numbers
+  (percent vs reserve, per-model via `context_window` wiring), the
+  queued-messages question at the idle seam, token counting (last-turn
+  provider usage + trailing estimate, pi's four-component sum); (2) cut
+  points — leaning user-message boundaries only (yaca's stricter rule:
+  tool pairing safe by construction, no split-turn machinery) with a
+  token-budgeted retained tail; (3) tool calls during compaction —
+  references unanimous on the empty toolset; what a stray tool-call
+  response means (model defect → failed pass, nothing persisted); (4)
+  flow fit — what a compaction entry IS in the append-only tree
+  (leaning: compaction never deletes, the context projection changes —
+  checkout before a compaction restores the full chain), which layer
+  owns each seam check (the seam check is a flow change: ENGINE.md gets
+  the new state/edge before code), the event/protocol surface, and
+  subprocess children (route-all says a child compacts itself
+  structurally); (5) overflow recovery — leaning typed classification
+  over pi's regex port (we own the anthropic/openai wire clients), the
+  compact-retry-once shape, and a cannot-shrink guard that fails loud.
 
 ### 7. CLI / interface layer
 
