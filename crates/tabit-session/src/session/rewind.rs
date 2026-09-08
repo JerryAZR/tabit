@@ -62,60 +62,6 @@ impl Session {
         self.apply_checkout(Some(entry_id))
     }
 
-    /// Serve the parked checkout at a pause point: rewind the chain,
-    /// announce, re-render. The discard already happened at receive
-    /// (command consumption's abort composition); an execution-time
-    /// failure — the rewind cannot apply — is the command's error
-    /// event and a no-op (receive-time validation caught the common
-    /// failure; these are the environmental ones: persist trouble,
-    /// the chain's model gone from config). One serve for every
-    /// driver's beat — the worker loop between pumps, the pump
-    /// between runs and at its exit.
-    pub(crate) fn serve_checkout(
-        &mut self,
-        entry_id: String,
-        on_event: &mut (dyn FnMut(tabit_protocol::SessionEvent) + Send),
-    ) {
-        match self.rewind_to_entry(&entry_id) {
-            Err(error) => on_event(tabit_protocol::SessionEvent::error_checkout(
-                error.to_string(),
-            )),
-            Ok(_) => {
-                on_event(tabit_protocol::SessionEvent::CheckedOut {
-                    entry_id,
-                    // Full re-render (the suffix mode's reserved seam).
-                    base_id: None,
-                });
-                self.replay_pass(on_event);
-            }
-        }
-    }
-
-    /// The replay pass (PROTOCOL.md v2): the resident chain projected
-    /// into finalized live events, bracketed, led by the register
-    /// announcement (a session becoming visible — boot, open,
-    /// re-replay, checkout — always tells the frontend its active
-    /// selection). Idempotent by construction; replayed history never
-    /// carries `model_changed` (state is announced live, not
-    /// reconstructed). One emission path for its askers — the
-    /// transport's replay request, checkout's re-render, the boot
-    /// pass — each passing its own sink.
-    pub(crate) fn replay_pass(
-        &self,
-        on_event: &mut (dyn FnMut(tabit_protocol::SessionEvent) + Send),
-    ) {
-        on_event(tabit_protocol::SessionEvent::model_changed(
-            &self.selection(),
-        ));
-        let events = self.replay_events();
-        let total = events.len() as u64;
-        on_event(tabit_protocol::SessionEvent::ReplayStarted { total });
-        for event in events {
-            on_event(event);
-        }
-        on_event(tabit_protocol::SessionEvent::ReplayDone);
-    }
-
     /// Shared checkout mechanics: move the recorder's head (closed-path
     /// rule enforced at the door) and re-project the context from the new
     /// branch. The selection is a session preference (owner ruling

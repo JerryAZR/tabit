@@ -18,52 +18,7 @@ software/hardware contract, not just the encodings):
 Every `PROTOCOL_VERSION` bump — and every additive change a frontend
 could observe — gets an entry here in the same commit.
 
-## v6 (current)
-
-### wire: the interaction event's tag is `interaction_request` (2026-09)
-
-Protocol version 6. A contract-alignment fix found by the TUI spike:
-the event variant was named `InteractionRequested`, so the derived
-wire tag was **`interaction_requested`** while FRONTEND.md §6/§8 —
-the frozen contract — documents `interaction_request`. The variant is
-renamed and the wire now emits the contract's name. Typed clients
-(the GUI) recompiled without noticing — matched pairs never see the
-tag; hand-rolled clients parsing per FRONTEND.md were right all
-along.
-
-### behavior: children are command-addressable; abort stops subtrees (2026-09)
-
-Same protocol version. Two behavioral rulings landed with the
-subprocess substrate (details in ROADMAP item 5 and PROTOCOL.md
-flag 33):
-
-- **Route-all**: every session-scoped command may name a subagent
-  child session (in-process or a subprocess child's boot session —
-  learned from its announcement and every descendant's frames).
-  `message` steers a live child (acknowledged `message_queued` on
-  the child's own stream — switching to a subagent view and steering
-  is normal usage); `interaction_response` answers the child's own
-  cards by request id. Deep trees route hop by hop through learned
-  tables — an id that never emitted anything is unroutable (a child
-  that never announced is dead on arrival; the announcement is the
-  first unconditional emission). Consumption is **the session's own
-  on either substrate** (one implementation shared with the worker's
-  delivery): `checkout`/`model`/`continue` consume on an in-process
-  child too — a checkout composes abort and applies at the run's
-  pause point (`run_aborted`, then `checked_out`, then the re-render
-  pass, all on the child's stream).
-- **Abort is a subtree stop**: consuming an `abort` now also
-  broadcasts to the target's registered children, recursively —
-  stop all work in the subtree, never destroy the session
-  instances. In-run children were already leash-covered; the walk
-  adds direct addressing (`abort` naming a child stops that child
-  and its descendants without killing the parent's run) and reaches
-  anything a finished run left registered. A subprocess child's
-  aborted terminal still flushes before its stream ends; the parent
-  never waits on its cooperation (a reaper bounds its exit with the
-  tree kill).
-
-## v5
+## v5 (current)
 
 ### wire: `session_opened.parent` — subagent children announce through the same door (2026-09)
 

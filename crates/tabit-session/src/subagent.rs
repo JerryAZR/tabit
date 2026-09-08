@@ -26,16 +26,13 @@
 //! and the interaction proxy is one line (`attach_interaction` with
 //! the parent's hub).
 //!
-//! v1 children ride either substrate: **in-process** (ephemeral,
-//! events forwarded through the tap above) or **subprocess**
-//! ([`crate::subprocess`] — the OS enforces the cwd, hard isolation,
-//! and a persisted child is a session file under its own cwd). Both
-//! register for **routing** ([`crate::routing`]): every command the
-//! frontend addresses to a child delivers to it — route-all, the
-//! owner ruling — and abort consumption cascades through the tree.
+//! v1 children are **ephemeral** (in memory; nothing to resume,
+//! replay, or list). A second execution substrate — subprocess
+//! children, where the OS enforces the cwd instead of a convention —
+//! is a first-class roadmap item (ROADMAP item 5), not dismissed: the
+//! JSON stdio protocol is its wire.
 
 use crate::interaction::InteractionHub;
-use crate::routing::ChildTarget;
 use crate::session::{RunOutcome, RunSummary, Session, SessionBuilder};
 use rig_agent::completion::Message;
 use rig_agent::tool::{DynamicTool, ToolContext, ToolExecutionError, ToolOutput};
@@ -64,14 +61,6 @@ pub struct SubagentParts {
     /// The shared model factory (one registry, one set of connection
     /// pools for every session — PROTOCOL.md v3).
     pub model_factory: crate::session::ModelFactory,
-    /// The child registry the host routes through — spawns register
-    /// here, routing's second table reads here (one table per
-    /// process; the assembly shares it with the host wiring).
-    pub router: Arc<crate::routing::ChildRouter>,
-    /// The tabit executable subprocess children spawn (`--json` child
-    /// role). The assembly resolves it (`TABIT_BIN` dev override, else
-    /// the current executable — the pi self-spawn pattern).
-    pub exe: PathBuf,
 }
 
 /// The per-run spawn context: this parent's identity and channels,
@@ -137,64 +126,10 @@ impl SpawnContext {
         self.interaction.as_ref()
     }
 
-    /// The weak frontend channel — the subprocess bridge forwards the
-    /// child process's frames through it, as-is.
-    pub(crate) fn events_channel(&self) -> Option<mpsc::WeakUnboundedSender<EventFrame>> {
-        self.events.clone()
-    }
-
-    /// Begin a subprocess child: the second execution substrate. The
-    /// OS enforces the cwd (every tool, extension, and path inside the
-    /// child resolves against it by fact, not convention), the child
-    /// builds its own truthful preamble in that cwd, and a persisted
-    /// child is just a session file under its own cwd. The child
-    /// announces itself (`--parent` speaks at the source); routing
-    /// registers at spawn.
-    pub fn spawn_subprocess(&self) -> crate::subprocess::SubprocessBuilder {
-        crate::subprocess::SubprocessBuilder::new(self)
-    }
-
-    /// Drive a subprocess child under the same leash contract as
-    /// [`Self::drive`]: the task crosses as the first message, the
-    /// child's frames are already forwarding on their own stamps, and
-    /// a cancel forwards the abort + closes stdin — the parent returns
-    /// immediately (a reaper bounds the child's exit with the tree
-    /// kill; the graceful window buys the write-behind flush for
-    /// persisted children, never the parent's latency).
-    pub async fn drive_subprocess(
-        &self,
-        child: &mut crate::subprocess::SubprocessChild,
-        task: Message,
-        token: Option<CancellationToken>,
-    ) -> RunSummary {
-        child.drive(task, token).await
-    }
-
     /// Announce the child: `session_opened` with `parent` set, on the
     /// child's own stream stamp, ahead of every event [`Self::drive`]
-    /// forwards — and **register it for routing** (route-all): from
-    /// this moment, commands addressed to the child deliver through
-    /// the session's own consumption ([`crate::session::SessionCommands`]
-    /// — every arm, identical to a worker-owned session; the pump
-    /// serves parked intent at its beat). Skip the announcement for a
-    /// dark child — unannounced is also unroutable.
+    /// forwards. Skip it for a dark child.
     pub fn announce(&self, child: &Session) {
-        let sink = self
-            .events
-            .clone()
-            .map(|events| crate::notice::NoticeSink::from_weak(events, StreamId::new(child.id())))
-            .unwrap_or_else(crate::notice::NoticeSink::dead);
-        self.parts.router.register(
-            child.id(),
-            &self.parent_id,
-            ChildTarget::InProcess {
-                commands: crate::session::SessionCommands::new(
-                    child,
-                    sink,
-                    self.parts.router.clone(),
-                ),
-            },
-        );
         self.tap(child.id()).emit(SessionEvent::SessionOpened {
             id: child.id().to_string(),
             path: child.wire_path(),
@@ -210,30 +145,19 @@ impl SpawnContext {
     /// nobody is left to tell), and the parent's run token as the
     /// leash — on cancel, the child's run is aborted and the pump
     /// drains to its terminal (never dropped mid-flight; the terminal
-    /// is the report). The child's mailbox and persist notices attach
-    /// to the same channel here (steering acks stay on its stream),
-    /// and its routing registration ends with the drive — the
-    /// announced-then-driven recipe's cleanup half. Mapping the
-    /// returned [`RunSummary`] to a tool result is the caller's
-    /// policy.
+    /// is the report). Mapping the returned [`RunSummary`] to a tool
+    /// result is the caller's policy.
     pub async fn drive(
         &self,
         child: &mut Session,
         task: Message,
         token: Option<CancellationToken>,
     ) -> RunSummary {
-        if let Some(events) = self.events.clone() {
-            child.attach_child_notices(crate::notice::NoticeSink::from_weak(
-                events,
-                StreamId::new(child.id()),
-            ));
-        }
-        let child_id = child.id().to_string();
-        let tap = self.tap(&child_id);
+        let tap = self.tap(child.id());
         let abort = child.abort_handle();
         let mut forward = |event: SessionEvent| tap.emit(event);
         let mut pump = std::pin::pin!(child.prompt_with(task, &mut forward));
-        let summary = match token {
+        match token {
             Some(token) => tokio::select! {
                 summary = &mut pump => summary,
                 _ = token.cancelled() => {
@@ -242,9 +166,7 @@ impl SpawnContext {
                 }
             },
             None => pump.await,
-        };
-        self.parts.router.unregister(&child_id);
-        summary
+        }
     }
 
     /// One child's weak handle on the frontend channel, stamped with
@@ -288,10 +210,8 @@ impl ChildTap {
                    (scope the subagent to another directory; its tools and \
                    instructions follow it there), tools (an allow-list of tool \
                    names, e.g. [\"read\", \"bash\"] for read-only research; \
-                   default: this session's toolset), execution (\"in_process\" — \
-                   the default — or \"subprocess\": a separate tabit process whose \
-                   working directory is the OS-enforced cwd). Progress streams to \
-                   the user on the subagent's own channel."
+                   default: this session's toolset). Progress streams to the \
+                   user on the subagent's own channel."
 )]
 pub async fn subagent(
     #[rig(context)] context: &mut ToolContext,
@@ -299,7 +219,6 @@ pub async fn subagent(
     model: Option<String>,
     cwd: Option<String>,
     tools: Option<Vec<String>>,
-    execution: Option<String>,
 ) -> Result<ToolOutput, ToolExecutionError> {
     let ctx = context.get::<Arc<SpawnContext>>().cloned().ok_or_else(|| {
         ToolExecutionError::other(
@@ -316,98 +235,45 @@ pub async fn subagent(
     let cwd = cwd
         .map(PathBuf::from)
         .unwrap_or_else(|| ctx.parent_cwd().to_path_buf());
+    // The preamble is per-agent: the standard system prompt built FOR
+    // THE CHILD'S CWD (its AGENTS.md discovery, its environment
+    // block) plus the task as the brief.
+    let base = crate::build_system_prompt(&cwd).map_err(|e| {
+        ToolExecutionError::other(format!("cannot build the subagent preamble: {e}"))
+    })?;
+    let preamble = format!("{base}\n\n<task>\n{task}\n</task>");
     let toolset = match &tools {
         Some(allow) => filter_tools(&parts.tools, allow)?,
         None => parts.tools.clone(),
     };
-    let execution = match execution.as_deref() {
-        None | Some("in_process") => Execution::InProcess,
-        Some("subprocess") => Execution::Subprocess,
-        Some(other) => {
-            return Err(ToolExecutionError::other(format!(
-                "unknown execution `{other}` — use \"in_process\" or \"subprocess\""
-            )));
-        }
-    };
 
-    match execution {
-        Execution::InProcess => {
-            // The preamble is per-agent: the standard system prompt built FOR
-            // THE CHILD'S CWD (its AGENTS.md discovery, its environment
-            // block) plus the task as the brief.
-            let base = crate::build_system_prompt(&cwd).map_err(|e| {
-                ToolExecutionError::other(format!("cannot build the subagent preamble: {e}"))
-            })?;
-            let preamble = format!("{base}\n\n<task>\n{task}\n</task>");
-            let mut builder = SessionBuilder::new(
-                parts.store.clone(),
-                parts.config.clone(),
-                parts.auth.clone(),
-                selection,
-            )
-            .map_err(|e| {
-                ToolExecutionError::other(format!("cannot build the subagent session: {e}"))
-            })?
-            .preamble(preamble)
-            .max_turns(parts.max_turns)
-            // The example policy: the child's own gate, fresh memory (the
-            // memory shape is deferred to the extension phase).
-            .hooks(crate::permission_gate(crate::PermissionMemory::default()))
-            .model_factory(parts.model_factory.clone());
-            for tool in toolset {
-                builder = builder.dynamic_tool(tool);
-            }
-            let mut child = builder.ephemeral(&cwd.display().to_string()).map_err(|e| {
-                ToolExecutionError::other(format!("cannot build the subagent session: {e}"))
-            })?;
-            if let Some(hub) = ctx.parent_hub() {
-                child.attach_interaction(hub.clone());
-            }
-
-            ctx.announce(&child);
-            let token = context.get::<CancellationToken>().cloned();
-            let summary = ctx.drive(&mut child, Message::user(task), token).await;
-            summary_result(summary, child.id())
-        }
-        Execution::Subprocess => {
-            // The child process builds its own preamble in its own cwd
-            // (truthful by construction); the task crosses as the first
-            // message. The allow-list already validated parent-side
-            // (`filter_tools` above); the names cross as-is.
-            let mut builder = ctx
-                .spawn_subprocess()
-                .cwd(cwd)
-                .model(selection)
-                .max_turns(parts.max_turns)
-                .ephemeral(true);
-            if tools.is_some() {
-                let names = toolset.iter().map(|tool| tool.name().to_string()).collect();
-                builder = builder.tools(names);
-            }
-            let mut child = builder.spawn().await.map_err(ToolExecutionError::other)?;
-            let token = context.get::<CancellationToken>().cloned();
-            let summary = ctx
-                .drive_subprocess(&mut child, Message::user(task), token)
-                .await;
-            let id = child.id().to_string();
-            child.wait_exit().await;
-            summary_result(summary, &id)
-        }
+    let mut builder = SessionBuilder::new(
+        parts.store.clone(),
+        parts.config.clone(),
+        parts.auth.clone(),
+        selection,
+    )
+    .map_err(|e| ToolExecutionError::other(format!("cannot build the subagent session: {e}")))?
+    .preamble(preamble)
+    .max_turns(parts.max_turns)
+    // The example policy: the child's own gate, fresh memory (the
+    // memory shape is deferred to the extension phase).
+    .hooks(crate::permission_gate(crate::PermissionMemory::default()))
+    .model_factory(parts.model_factory.clone());
+    for tool in toolset {
+        builder = builder.dynamic_tool(tool);
     }
-}
+    let mut child = builder.ephemeral(&cwd.display().to_string()).map_err(|e| {
+        ToolExecutionError::other(format!("cannot build the subagent session: {e}"))
+    })?;
+    if let Some(hub) = ctx.parent_hub() {
+        child.attach_interaction(hub.clone());
+    }
 
-/// The two execution substrates the example tool offers.
-enum Execution {
-    InProcess,
-    Subprocess,
-}
+    ctx.announce(&child);
+    let token = context.get::<CancellationToken>().cloned();
+    let summary = ctx.drive(&mut child, Message::user(task), token).await;
 
-/// Map a run summary to the tool's result — one mapping over both
-/// substrates (the summary shapes agree by design).
-fn summary_result(
-    summary: crate::session::RunSummary,
-    child_id: &str,
-) -> Result<ToolOutput, ToolExecutionError> {
     let turns = summary
         .events
         .iter()
@@ -423,7 +289,7 @@ fn summary_result(
             rig_core::tool::content_parts(
                 report,
                 Some(serde_json::json!({
-                    "child_id": child_id,
+                    "child_id": child.id(),
                     "outcome": "completed",
                     "turns": turns,
                     "usage": {

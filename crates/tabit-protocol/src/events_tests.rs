@@ -99,7 +99,7 @@ fn events_round_trip_through_json() {
         SessionEvent::RunAborted {
             output: "partial text".to_string(),
         },
-        SessionEvent::InteractionRequest {
+        SessionEvent::InteractionRequested {
             id: "0199".to_string(),
             ui_type: "native:confirm".to_string(),
             payload: serde_json::json!({"title": "Run command?"}),

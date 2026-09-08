@@ -3466,19 +3466,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "process-wrap"
-version = "10.0.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "0e3f4237d0e4741eb50bc5584db701f1299c85fa31ff0274dd6445e79dc42d12"
-dependencies = [
- "futures",
- "indexmap",
- "nix",
- "tokio",
- "windows",
-]
-
-[[package]]
 name = "profiling"
 version = "1.0.18"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -4723,7 +4710,6 @@ dependencies = [
 name = "tabit"
 version = "0.41.0"
 dependencies = [
- "httpmock",
  "rig-agent",
  "rig-core",
  "serde_json",
@@ -4784,7 +4770,6 @@ dependencies = [
  "futures",
  "http 1.5.0",
  "humantime",
- "process-wrap 10.0.0",
  "rig-agent",
  "rig-core",
  "rig-derive",
@@ -4798,7 +4783,6 @@ dependencies = [
  "tokio-util",
  "tracing",
  "uuid",
- "windows",
 ]
 
 [[package]]
@@ -4807,7 +4791,7 @@ version = "0.41.0"
 dependencies = [
  "base64",
  "futures",
- "process-wrap 9.1.0",
+ "process-wrap",
  "rig-agent",
  "rig-core",
  "rig-derive",

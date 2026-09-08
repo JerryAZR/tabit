@@ -34,10 +34,9 @@ Defensive ("unreachable") arms follow a stricter rule:
 - Current state: **93.59% lines / 92.24% regions** (2,518 of 39,269
   lines; re-measured after the frontend-protocol v4 + no-orphan-gate
   round — **the subagent arc after it (SessionCwd, ephemeral
-  sessions, the SpawnContext split and its suites) and the
-  routing/subprocess arc (the ChildRouter, the bridge, the
-  child-role flags) are not yet re-measured**; their code arrived
-  tested per the maintenance rule, the next round folds them in — `tool_result.details` with its edit/shell producers, the
+  sessions, the SpawnContext split and its suites) is not yet
+  re-measured**; its code arrived tested per the maintenance rule,
+  the next round folds it in — `tool_result.details` with its edit/shell producers, the
   select widgets, `session_opened`, and the born-bit gate. The
   review filled thirteen gaps and deleted two provably-dead arms;
   see the dedicated section below. Before that: **93.26% lines /

@@ -16,8 +16,6 @@ use tabit_protocol::{SessionEvent, StreamId};
 
 fn plain_wiring(store: &crate::store::SessionStore) -> SessionHostWiring {
     SessionHostWiring {
-        children: crate::ChildRouter::shared(),
-        boot_parent: None,
         store: store.clone(),
         create: Arc::new(|| Err("not driven".to_string())),
         open: Arc::new(|_| Err("not driven".to_string())),
@@ -58,8 +56,6 @@ fn parts(
 ) -> Arc<SubagentParts> {
     let config = crate::tests::test_config();
     Arc::new(SubagentParts {
-        router: crate::ChildRouter::shared(),
-        exe: std::path::PathBuf::from("tabit"),
         config: config.clone(),
         auth: crate::tests::test_auth(),
         store: store.clone(),
@@ -212,8 +208,6 @@ async fn a_failing_child_is_an_error_result_not_a_fake_answer() {
     });
     let store = temp_store("subagent-fail");
     let parts = Arc::new(SubagentParts {
-        router: crate::ChildRouter::shared(),
-        exe: std::path::PathBuf::from("tabit"),
         config: crate::tests::test_config(),
         auth: crate::tests::test_auth(),
         store: store.clone(),
@@ -422,8 +416,6 @@ async fn aborting_the_parent_leashes_the_child_promptly() {
     let store = temp_store("subagent-abort");
     let config = crate::tests::test_config();
     let parts = Arc::new(SubagentParts {
-        router: crate::ChildRouter::shared(),
-        exe: std::path::PathBuf::from("tabit"),
         config,
         auth: crate::tests::test_auth(),
         store: store.clone(),
@@ -616,8 +608,6 @@ id = "cheap"
         .expect("config"),
     );
     let parts = Arc::new(SubagentParts {
-        router: crate::ChildRouter::shared(),
-        exe: std::path::PathBuf::from("tabit"),
         config,
         auth: crate::tests::test_auth(),
         store: store.clone(),
@@ -709,8 +699,6 @@ async fn an_allow_list_restricts_the_child_toolset() {
         text_turn("after the refusal"),
     ]);
     let parts = Arc::new(SubagentParts {
-        router: crate::ChildRouter::shared(),
-        exe: std::path::PathBuf::from("tabit"),
         config: crate::tests::test_config(),
         auth: crate::tests::test_auth(),
         store: store.clone(),
@@ -823,8 +811,6 @@ async fn extension_style_spawners_drive_children_through_the_framework() {
 
     let store = temp_store("subagent-extension");
     let parts = Arc::new(SubagentParts {
-        router: crate::ChildRouter::shared(),
-        exe: std::path::PathBuf::from("tabit"),
         config: crate::tests::test_config(),
         auth: crate::tests::test_auth(),
         store: store.clone(),
@@ -873,335 +859,6 @@ async fn extension_style_spawners_drive_children_through_the_framework() {
         preamble.starts_with("CUSTOM BRIEF"),
         "the extension owns the policy: {preamble:?}"
     );
-    handle.close_commands();
-    std::fs::remove_dir_all(store.dir()).ok();
-}
-
-// --- route-all: children are command-addressable through the router ---
-
-/// A tool that sleeps `secs` — the parking spot steering and routed
-/// aborts must interrupt.
-fn slow_tool(secs: u64) -> rig_agent::tool::DynamicTool {
-    rig_agent::tool::DynamicTool::new(
-        "slow",
-        "Sleeps a while",
-        json!({"type":"object","properties":{}}),
-        move |_ctx, _args| {
-            Box::pin(async move {
-                tokio::time::sleep(std::time::Duration::from_secs(secs)).await;
-                Ok(rig_agent::tool::ToolOutput::text("finally"))
-            })
-        },
-    )
-}
-
-#[tokio::test]
-async fn a_message_addressed_to_a_live_child_steers_it() {
-    // Route-all (owner ruling): the frontend switches to the child's
-    // view and steers. The message routes through the child registry
-    // into the child's mailbox — acknowledged `message_queued` on the
-    // child's own stream, delivered as a steer at its next turn
-    // boundary.
-    let store = temp_store("subagent-steer");
-    let config = crate::tests::test_config();
-    let router = crate::ChildRouter::shared();
-    let parts = Arc::new(SubagentParts {
-        router: router.clone(),
-        exe: std::path::PathBuf::from("tabit"),
-        config,
-        auth: crate::tests::test_auth(),
-        store: store.clone(),
-        tools: vec![slow_tool(1)],
-        max_turns: 4,
-        model_factory: child_factory(vec![
-            crate::tests::tool_turn("s1", "slow"),
-            text_turn("child done"),
-        ]),
-    });
-    let parent = subagent_parent(
-        &store,
-        vec![subagent_call_turn(), text_turn("parent wrap-up")],
-        parts,
-    );
-    let wiring = SessionHostWiring {
-        children: router,
-        boot_parent: None,
-        store: store.clone(),
-        create: Arc::new(|| Err("not driven".to_string())),
-        open: Arc::new(|_| Err("not driven".to_string())),
-    };
-    let mut handle = SessionHost::spawn(parent, Vec::new(), wiring);
-    let parent_id = handle.info().session_id.clone();
-
-    handle.message(&parent_id, "go");
-    // Park the child on its slow tool.
-    let mut child_id = None;
-    loop {
-        let frame = tokio::time::timeout(std::time::Duration::from_secs(10), handle.next_event())
-            .await
-            .expect("frames keep coming")
-            .expect("the stream stays open");
-        match &frame.event {
-            SessionEvent::SessionOpened {
-                id,
-                parent: Some(_),
-                ..
-            } => child_id = Some(id.clone()),
-            SessionEvent::ToolCall { name, .. } if name == "slow" => break,
-            _ => {}
-        }
-    }
-    let child_id = child_id.expect("the child announced");
-
-    // The steer, addressed to the CHILD (route-all): acknowledged on
-    // the child's stream while its run is live.
-    handle.message(&child_id, "steered mid-run");
-
-    let mut queued = false;
-    let mut steered = false;
-    let mut child_done = false;
-    loop {
-        let frame = tokio::time::timeout(std::time::Duration::from_secs(10), handle.next_event())
-            .await
-            .expect("frames keep coming")
-            .expect("the stream stays open");
-        let on_child = frame
-            .stream
-            .as_ref()
-            .is_some_and(|s| s.as_str() == child_id);
-        match &frame.event {
-            SessionEvent::MessageQueued { text, .. } if on_child && text == "steered mid-run" => {
-                queued = true;
-            }
-            SessionEvent::UserMessage { text, .. } if on_child && text == "steered mid-run" => {
-                steered = true;
-            }
-            SessionEvent::RunFinished { output, .. } if on_child && output == "child done" => {
-                child_done = true;
-            }
-            SessionEvent::RunFinished { output, .. } if output == "parent wrap-up" => break,
-            _ => {}
-        }
-    }
-    assert!(queued, "the steer was acknowledged on the child's stream");
-    assert!(steered, "the steer entered the child's conversation");
-    assert!(child_done, "the child completed after the steer");
-    handle.close_commands();
-    std::fs::remove_dir_all(store.dir()).ok();
-}
-
-#[tokio::test]
-async fn an_abort_addressed_to_a_child_stops_it_without_killing_the_parent_run() {
-    // Abort's routed consumption: cancel the child's work (its own
-    // run_aborted terminal), cascade to its children — and leave the
-    // parent's run alive to recover (the interrupted tool result is an
-    // error; the parent's next turn wraps up).
-    use std::time::Instant;
-
-    let store = temp_store("subagent-routed-abort");
-    let config = crate::tests::test_config();
-    let router = crate::ChildRouter::shared();
-    let parts = Arc::new(SubagentParts {
-        router: router.clone(),
-        exe: std::path::PathBuf::from("tabit"),
-        config,
-        auth: crate::tests::test_auth(),
-        store: store.clone(),
-        tools: vec![slow_tool(5)],
-        max_turns: 4,
-        model_factory: child_factory(vec![
-            crate::tests::tool_turn("s1", "slow"),
-            text_turn("never reached"),
-        ]),
-    });
-    let parent = subagent_parent(
-        &store,
-        vec![subagent_call_turn(), text_turn("parent recovered")],
-        parts,
-    );
-    let wiring = SessionHostWiring {
-        children: router,
-        boot_parent: None,
-        store: store.clone(),
-        create: Arc::new(|| Err("not driven".to_string())),
-        open: Arc::new(|_| Err("not driven".to_string())),
-    };
-    let mut handle = SessionHost::spawn(parent, Vec::new(), wiring);
-    let parent_id = handle.info().session_id.clone();
-
-    handle.message(&parent_id, "go");
-    let mut child_id = None;
-    loop {
-        let frame = tokio::time::timeout(std::time::Duration::from_secs(10), handle.next_event())
-            .await
-            .expect("frames keep coming")
-            .expect("the stream stays open");
-        match &frame.event {
-            SessionEvent::SessionOpened {
-                id,
-                parent: Some(_),
-                ..
-            } => child_id = Some(id.clone()),
-            SessionEvent::ToolCall { name, .. } if name == "slow" => break,
-            _ => {}
-        }
-    }
-    let child_id = child_id.expect("the child announced");
-
-    // The abort, addressed to the CHILD only.
-    let started = Instant::now();
-    handle.abort(&child_id);
-
-    let mut child_aborted = false;
-    loop {
-        let frame = tokio::time::timeout(std::time::Duration::from_secs(6), handle.next_event())
-            .await
-            .expect("frames keep coming")
-            .expect("the stream stays open");
-        let on_child = frame
-            .stream
-            .as_ref()
-            .is_some_and(|s| s.as_str() == child_id);
-        match &frame.event {
-            SessionEvent::RunAborted { .. } if on_child => child_aborted = true,
-            SessionEvent::RunFinished { output, .. } if output == "parent recovered" => break,
-            SessionEvent::RunAborted { .. } => {
-                panic!("the parent's run must survive a child-addressed abort");
-            }
-            _ => {}
-        }
-    }
-    assert!(child_aborted, "the child's own terminal arrived");
-    assert!(
-        started.elapsed() < std::time::Duration::from_secs(3),
-        "the child aborted in {:?} — the routed handle, not the tool",
-        started.elapsed()
-    );
-    handle.close_commands();
-    std::fs::remove_dir_all(store.dir()).ok();
-}
-
-#[tokio::test]
-async fn checkout_and_model_consume_on_a_live_in_process_child() {
-    // The 2026-09 correction: command consumption is the session's own
-    // (SessionCommands — one implementation shared with the worker),
-    // so a child consumes EVERY command. A model switch lands at
-    // receive (`model_changed` on the child's stream); a checkout
-    // composes abort, applies at the pump's pause point (`checked_out`
-    // + the re-render pass), and the parent's run survives both.
-    let store = temp_store("subagent-child-commands");
-    let config = crate::tests::test_config();
-    let router = crate::ChildRouter::shared();
-    let parts = Arc::new(SubagentParts {
-        router: router.clone(),
-        exe: std::path::PathBuf::from("tabit"),
-        config,
-        auth: crate::tests::test_auth(),
-        store: store.clone(),
-        tools: vec![slow_tool(2)],
-        max_turns: 4,
-        model_factory: child_factory(vec![
-            crate::tests::tool_turn("s1", "slow"),
-            text_turn("never reached"),
-        ]),
-    });
-    let parent = subagent_parent(
-        &store,
-        vec![subagent_call_turn(), text_turn("parent recovered")],
-        parts,
-    );
-    let wiring = SessionHostWiring {
-        children: router,
-        boot_parent: None,
-        store: store.clone(),
-        create: Arc::new(|| Err("not driven".to_string())),
-        open: Arc::new(|_| Err("not driven".to_string())),
-    };
-    let mut handle = SessionHost::spawn(parent, Vec::new(), wiring);
-    let parent_id = handle.info().session_id.clone();
-
-    handle.message(&parent_id, "go");
-    // Park the child on its slow tool; collect its task's entry id.
-    let mut child_id = None;
-    let mut task_entry = None;
-    loop {
-        let frame = tokio::time::timeout(std::time::Duration::from_secs(10), handle.next_event())
-            .await
-            .expect("frames keep coming")
-            .expect("the stream stays open");
-        match &frame.event {
-            SessionEvent::SessionOpened {
-                id,
-                parent: Some(_),
-                ..
-            } => child_id = Some(id.clone()),
-            SessionEvent::UserMessage { entry_id, .. } => {
-                if frame
-                    .stream
-                    .as_ref()
-                    .is_some_and(|s| s.as_str() == child_id.as_deref().unwrap_or(""))
-                {
-                    task_entry = Some(entry_id.clone());
-                }
-            }
-            SessionEvent::ToolCall { name, .. } if name == "slow" => break,
-            _ => {}
-        }
-    }
-    let child_id = child_id.expect("the child announced");
-    let task_entry = task_entry.expect("the child's task entered history");
-    let on_child = |frame: &tabit_protocol::EventFrame| {
-        frame
-            .stream
-            .as_ref()
-            .is_some_and(|s| s.as_str() == child_id)
-    };
-
-    // The model command, addressed to the child: a state write at
-    // receive — `model_changed` on the child's own stream, promptly.
-    handle.model(&child_id, tabit_protocol::ModelSelection::new("p", "m"));
-
-    // The checkout, addressed to the child: composes abort, applies at
-    // the pump's pause point. The wire order on the child's stream:
-    // model_changed, run_aborted, checked_out, the re-render pass.
-    handle.checkout(&child_id, task_entry);
-
-    let mut model_changed = false;
-    let mut child_aborted = false;
-    let mut checked_out = false;
-    let mut replay_done = false;
-    let mut seen_model_change = false;
-    loop {
-        let frame = tokio::time::timeout(std::time::Duration::from_secs(10), handle.next_event())
-            .await
-            .expect("frames keep coming")
-            .expect("the stream stays open");
-        if !on_child(&frame) {
-            if let SessionEvent::RunFinished { output, .. } = &frame.event
-                && output == "parent recovered"
-            {
-                break;
-            }
-            continue;
-        }
-        match &frame.event {
-            SessionEvent::ModelChanged { .. } => {
-                seen_model_change = true;
-                model_changed = true;
-            }
-            SessionEvent::RunAborted { .. } => {
-                assert!(seen_model_change, "the register write announced first");
-                child_aborted = true;
-            }
-            SessionEvent::CheckedOut { .. } => checked_out = true,
-            SessionEvent::ReplayDone => replay_done = true,
-            _ => {}
-        }
-    }
-    assert!(model_changed, "the child consumed the model command");
-    assert!(child_aborted, "checkout composed abort on the child's run");
-    assert!(checked_out, "the checkout applied at the pause point");
-    assert!(replay_done, "the re-render pass followed the checkout");
     handle.close_commands();
     std::fs::remove_dir_all(store.dir()).ok();
 }

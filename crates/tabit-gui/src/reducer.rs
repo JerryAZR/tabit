@@ -712,7 +712,7 @@ impl GuiState {
                 let _ = kind;
                 self.push_notice(message, true);
             }
-            SessionEvent::InteractionRequest {
+            SessionEvent::InteractionRequested {
                 id,
                 ui_type,
                 payload,
@@ -747,7 +747,7 @@ impl GuiState {
                 }
                 self.push_notice(message, true);
             }
-            SessionEvent::InteractionRequest {
+            SessionEvent::InteractionRequested {
                 id,
                 ui_type,
                 payload,

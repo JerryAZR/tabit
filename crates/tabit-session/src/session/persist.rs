@@ -59,11 +59,4 @@ impl Session {
     ) {
         let _ = self.persist_notices.set(NoticeSink::new(events, stream));
     }
-
-    /// The sink-based variant for subagent children: their persist
-    /// notices ride the same weak channel their events forward
-    /// through (no worker exists to attach the strong one).
-    pub(crate) fn attach_persist_sink(&self, sink: NoticeSink) {
-        let _ = self.persist_notices.set(sink);
-    }
 }

@@ -20,15 +20,6 @@ rig-agent = { path = "../rig-agent", version = "0.41.0", default-features = fals
 rig-core = { path = "../rig-core", version = "0.41.0", default-features = false }
 rig-derive = { path = "../rig-derive", version = "0.41.0" }
 http = { workspace = true }
-# Tree-kill wrapping for subprocess subagent children: a Job Object on
-# Windows / a process group elsewhere, so killing a child reclaims its
-# bash descendants too.
-process-wrap = { version = "10", default-features = false, features = [
-    "tokio1",
-    "creation-flags",
-    "job-object",
-    "process-group",
-] }
 serde = { workspace = true, features = ["derive"] }
 serde_json = { workspace = true }
 tabit-config = { path = "../tabit-config", version = "0.41.0" }
@@ -38,16 +29,9 @@ thiserror = { workspace = true }
 tracing = { workspace = true }
 uuid = { workspace = true, features = ["v7"] }
 
-tokio = { workspace = true, features = ["macros", "process", "rt", "sync"] }
+tokio = { workspace = true, features = ["macros", "rt", "sync"] }
 tokio-util = { version = "0.7", default-features = false }
 
 [dev-dependencies]
 rig-agent = { path = "../rig-agent", version = "0.41.0", default-features = false, features = ["test-utils"] }
 tokio = { workspace = true, features = ["rt-multi-thread", "macros", "time"] }
-
-# The CreationFlags shim's type — version-matched to process-wrap's own
-# windows dependency so they are the same type.
-[target.'cfg(windows)'.dependencies]
-windows = { version = "0.62.2", default-features = false, features = [
-    "Win32_System_Threading",
-] }

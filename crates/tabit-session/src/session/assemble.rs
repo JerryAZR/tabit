@@ -97,7 +97,6 @@ impl Session {
             interaction: None,
             subagent_parts: builder.subagent_parts,
             subagent_events: Arc::new(std::sync::OnceLock::new()),
-            checkout_intent: Arc::new(std::sync::Mutex::new(None)),
         };
         Ok(session)
     }

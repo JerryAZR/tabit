@@ -67,13 +67,6 @@ impl Mailbox {
         let _ = self.notices.set(NoticeSink::new(events, stream));
     }
 
-    /// The sink-based variant for subagent children: steering
-    /// acknowledgments (`message_queued`) ride the same weak channel
-    /// the child's events forward through.
-    pub(crate) fn attach_notice_sink(&self, sink: NoticeSink) {
-        let _ = self.notices.set(sink);
-    }
-
     /// A pump began: submissions from here until [`Self::run_ended`] are
     /// acknowledged with `message_queued`.
     pub(crate) fn run_started(&self) {

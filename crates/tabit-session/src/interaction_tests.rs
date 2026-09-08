@@ -85,7 +85,7 @@ fn asking_tool() -> DynamicTool {
 fn interaction_count(frames: &[EventFrame]) -> usize {
     frames
         .iter()
-        .filter(|frame| matches!(frame.event, SessionEvent::InteractionRequest { .. }))
+        .filter(|frame| matches!(frame.event, SessionEvent::InteractionRequested { .. }))
         .count()
 }
 
@@ -104,7 +104,7 @@ async fn run_answering(
             .await
             .expect("the run must keep producing events (or end) within 5s");
         let Some(frame) = frame else { break };
-        if let SessionEvent::InteractionRequest { id, .. } = &frame.event {
+        if let SessionEvent::InteractionRequested { id, .. } = &frame.event {
             let command = answer(&session, id);
             link.send(command);
         }
@@ -326,7 +326,7 @@ async fn frontend_death_with_a_card_open_winds_the_worker_down() {
         if matches!(
             frame,
             Some(tabit_protocol::EventFrame {
-                event: SessionEvent::InteractionRequest { .. },
+                event: SessionEvent::InteractionRequested { .. },
                 ..
             })
         ) {
@@ -401,7 +401,7 @@ async fn abort_with_a_card_open_closes_the_question_totally() {
     let mut frames = Vec::new();
     let mut stale_id = None;
     while let Some(frame) = handle.next_event().await {
-        if let SessionEvent::InteractionRequest { id, .. } = &frame.event {
+        if let SessionEvent::InteractionRequested { id, .. } = &frame.event {
             stale_id = Some(id.clone());
             // Abort with the card open: the question dies with the run.
             link.send(SessionCommand::Abort {
@@ -467,7 +467,7 @@ async fn two_open_cards_answered_in_reverse_order_both_run() {
     let mut frames = Vec::new();
     let mut open: Vec<String> = Vec::new();
     while let Some(frame) = handle.next_event().await {
-        if let SessionEvent::InteractionRequest { id, .. } = &frame.event {
+        if let SessionEvent::InteractionRequested { id, .. } = &frame.event {
             open.push(id.clone());
         }
         // Once both cards are standing, answer them in reverse order —

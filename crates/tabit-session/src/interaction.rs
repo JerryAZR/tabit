@@ -63,19 +63,6 @@ impl InteractionHub {
         }
     }
 
-    /// A hub with no one to ask: emits are silent no-ops and every ask
-    /// resolves dismissed — the fail-closed child (no proxy attached,
-    /// no frontend of its own). Routing can still deliver answers to
-    /// it; they find no open question and drop.
-    pub fn disconnected() -> Self {
-        Self {
-            inner: Arc::new(Inner {
-                notices: NoticeSink::dead(),
-                pending: std::sync::Mutex::new(HashMap::new()),
-            }),
-        }
-    }
-
     /// The capability tools consume: `Arc<dyn UserInteraction>` for
     /// [`rig_agent::tool::ToolContext`]'s typed map.
     pub fn capability(&self) -> Arc<dyn UserInteraction> {
@@ -115,7 +102,7 @@ impl InteractionHub {
         let (sender, receiver) = oneshot::channel();
         let id = new_entry_id();
         lock(&self.inner.pending).insert(id.clone(), sender);
-        let sent = self.inner.notices.emit(SessionEvent::InteractionRequest {
+        let sent = self.inner.notices.emit(SessionEvent::InteractionRequested {
             id: id.clone(),
             ui_type: ui_type.to_string(),
             payload,
@@ -166,7 +153,7 @@ mod tests {
 
     fn request_from(frame: &EventFrame) -> (String, String, serde_json::Value) {
         match &frame.event {
-            SessionEvent::InteractionRequest {
+            SessionEvent::InteractionRequested {
                 id,
                 ui_type,
                 payload,

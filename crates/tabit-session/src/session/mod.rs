@@ -30,15 +30,12 @@
 
 mod assemble;
 mod builder;
-mod commands;
 mod mailbox;
 mod persist;
 mod rewind;
 mod run;
 mod selection;
-pub(crate) mod wire;
-
-pub(crate) use commands::SessionCommands;
+mod wire;
 
 pub(crate) use builder::ModelFactory;
 pub use builder::SessionBuilder;
@@ -159,12 +156,6 @@ pub struct Session {
     subagent_events: Arc<
         std::sync::OnceLock<tokio::sync::mpsc::WeakUnboundedSender<tabit_protocol::EventFrame>>,
     >,
-    /// The parked checkout intent — session-resident because the
-    /// intent belongs to the session: command consumption parks it
-    /// ([`session::commands`]), whichever driver holds the session
-    /// serves it at its beat (the worker loop between pumps, the pump
-    /// between runs and at its exit).
-    checkout_intent: Arc<std::sync::Mutex<Option<String>>>,
 }
 
 /// The receive-time view of the conversation (checkout validation at
@@ -190,35 +181,12 @@ impl Session {
         self.shared_conversation.clone()
     }
 
-    /// The parked checkout intent's slot — shared between command
-    /// consumption (parks) and the driver's beat (serves).
-    pub(crate) fn checkout_intent(&self) -> std::sync::Arc<std::sync::Mutex<Option<String>>> {
-        self.checkout_intent.clone()
-    }
-
     /// Attach the interaction hub. Called once by the session worker
     /// ([`crate::endpoint::spawn_worker`]) when it takes
     /// ownership — the hub is built over the worker's event channel,
     /// which exists only there.
     pub fn attach_interaction(&mut self, hub: InteractionHub) {
         self.interaction = Some(hub);
-    }
-
-    /// The attached interaction hub, when one is (the worker's, or a
-    /// parent's proxy on a subagent child). Routing delivers
-    /// interaction answers through it.
-    pub(crate) fn interaction_hub(&self) -> Option<InteractionHub> {
-        self.interaction.clone()
-    }
-
-    /// Point a subagent child's mailbox and persist notices at the
-    /// weak frontend channel its events forward through — the worker's
-    /// attach pair, minus the worker: steering acknowledgments
-    /// (`message_queued`) and degrade notices stay on the child's own
-    /// stream.
-    pub(crate) fn attach_child_notices(&self, sink: crate::notice::NoticeSink) {
-        self.mailbox.attach_notice_sink(sink.clone());
-        self.attach_persist_sink(sink);
     }
 
     /// Attach the channel subagent child events forward through.
