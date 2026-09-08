@@ -298,26 +298,80 @@ async fn a_manual_pass_commits_the_entry_and_truncates_the_context() {
 }
 
 #[tokio::test]
-async fn a_violating_summarizer_fails_the_pass_and_persists_nothing() {
+async fn a_violating_summarizer_is_discarded_and_the_request_retried() {
     let cell = cell_with_dialogue(BIG_FLOOR_ROUNDS, BIG_MESSAGE_CHARS);
-    let agent = AgentBuilder::new(MockCompletionModel::from_stream_turns([vec![
+    // First attempt: the summarizer reaches for a tool. Second: a
+    // clean summary. The discard-and-retry (owner ruling) recovers.
+    let agent = AgentBuilder::new(MockCompletionModel::from_stream_turns([
+        vec![
+            MockStreamEvent::text("let me look"),
+            MockStreamEvent::tool_call("call-1", "read", serde_json::json!({"path": "x"})),
+            MockStreamEvent::FinalResponse(rig_core::test_utils::mock_final(
+                rig_core::completion::Usage::default(),
+            )),
+        ],
+        vec![
+            MockStreamEvent::text(
+                "## Goal
+- recovered",
+            ),
+            MockStreamEvent::FinalResponse(rig_core::test_utils::mock_final(
+                rig_core::completion::Usage::default(),
+            )),
+        ],
+    ]))
+    .build();
+    let config = config_with_window(10_000_000);
+    let (outcome, events) = run_manual(&cell, &agent, &config).await;
+    assert!(
+        matches!(&outcome, Outcome::Compacted { passes: 1, .. }),
+        "{outcome:?}"
+    );
+    // The discarded attempt closed its bracket as failed; the retry
+    // opened a fresh one and committed.
+    assert!(events.iter().any(|event| matches!(
+        event,
+        SessionEvent::CompactionFailed { message, .. } if message.contains("discarded and the request retried")
+    )));
+    assert!(events.iter().any(|event| matches!(
+        &event,
+        SessionEvent::CompactionDelta { text, .. } if text.contains("recovered")
+    )));
+    assert!(matches!(
+        events.last(),
+        Some(SessionEvent::CompactionFinished { .. })
+    ));
+}
+
+#[tokio::test]
+async fn a_persistently_violating_summarizer_fails_the_pass_and_persists_nothing() {
+    let cell = cell_with_dialogue(BIG_FLOOR_ROUNDS, BIG_MESSAGE_CHARS);
+    // Every attempt (the initial + the one bounded retry) violates.
+    let violating_turn = vec![
         MockStreamEvent::text("let me look"),
         MockStreamEvent::tool_call("call-1", "read", serde_json::json!({"path": "x"})),
         MockStreamEvent::FinalResponse(rig_core::test_utils::mock_final(
             rig_core::completion::Usage::default(),
         )),
-    ]]))
+    ];
+    let agent = AgentBuilder::new(MockCompletionModel::from_stream_turns([
+        violating_turn.clone(),
+        violating_turn,
+    ]))
     .build();
     let config = config_with_window(10_000_000);
     let (outcome, events) = run_manual(&cell, &agent, &config).await;
     assert!(matches!(
         &outcome,
-        Outcome::Failed { message, passes: 0 } if message.contains("tool call")
+        Outcome::Failed { message, passes: 0 } if message.contains("every attempt")
     ));
-    assert!(
+    // Both attempts announced their discard.
+    assert_eq!(
         events
             .iter()
-            .any(|event| matches!(event, SessionEvent::CompactionFailed { .. }))
+            .filter(|event| matches!(event, SessionEvent::CompactionFailed { .. }))
+            .count(),
+        2
     );
     // Nothing committed: no compaction node exists.
     assert!(

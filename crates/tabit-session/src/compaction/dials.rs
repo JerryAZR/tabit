@@ -32,6 +32,13 @@ pub const SUMMARY_MAX_TOKENS: u64 = 8_192;
 /// reference uses (no tokenizer dependency).
 pub const CHARS_PER_TOKEN: u64 = 4;
 
+/// How many times a tool-call-violating summarizer response is
+/// discarded and the request resent before the pass fails (owner
+/// ruling: throw the response away and retry — sampling variance
+/// usually corrects a one-off; never synthesize an in-band error
+/// result).
+pub const VIOLATION_RETRY_CAP: u32 = 1;
+
 /// The maximum number of passes one door invocation runs before the
 /// post-check loop stops as a belt alongside the cannot-shrink guard
 /// (the guard alone terminates; this bounds pathological ping-pong

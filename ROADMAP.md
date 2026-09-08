@@ -476,8 +476,13 @@ ENGINE.md's compaction amendment.
   trimming to a subset like `read`) diverges the cached prefix at the
   tools position — forbids calls in the instruction, and **rejects
   every tool call** made in compaction state. Entry and query are
-  settled by the own-system ruling below (the two doors); the
-  rejection's response shape stays open (implementation-time).
+  settled by the own-system ruling below (the two doors). The
+  rejection's response shape, settled 2026-09 (owner: "not allowing
+  tool calls doesn't mean ignore tool calls" — discard-and-retry
+  preferred over synthesizing an in-band error result): a violating
+  response is **thrown away and the request resent**, bounded by
+  `VIOLATION_RETRY_CAP`; each discard closes its bracket as
+  `compaction_failed` so the frontend drops that attempt's deltas.
 - **Ruled 2026-09 — the cut-selection loop (owner, high-level; agenda
   items 2+5 merged into it):** one procedure, three points.
   (1) **Initial cut:** keep at least `KEEP_TAIL` (an internal

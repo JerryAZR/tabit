@@ -186,6 +186,11 @@ pub(crate) async fn run(
         return Outcome::Skipped;
     }
     let mut passes: u32 = 0;
+    // Bounded retries of a tool-call-violating response (owner ruling:
+    // throw the response away and resend — never synthesize an in-band
+    // error result; each discard closes its bracket as failed so the
+    // frontend drops that attempt's deltas).
+    let mut violation_retries: u32 = 0;
     loop {
         let branch = read(cell).active_branch();
         let Some(cut) = select_cut(&branch, window, preamble_tokens) else {
@@ -232,6 +237,29 @@ pub(crate) async fn run(
                     message: "cancelled".to_string(),
                 });
                 return Outcome::Cancelled { passes };
+            }
+            // A violating response is discarded and the request resent
+            // (bounded): sampling variance usually corrects a one-off
+            // tool call; a model that insists fails the pass. The
+            // failed bracket announces the discard — the retry opens a
+            // fresh one.
+            PassOutcome::Violated => {
+                emit(SessionEvent::CompactionFailed {
+                    id,
+                    message: "the summarizer attempted a tool call — the response \
+                              is discarded and the request retried"
+                        .to_string(),
+                });
+                if violation_retries < dials::VIOLATION_RETRY_CAP {
+                    violation_retries += 1;
+                    continue;
+                }
+                return Outcome::Failed {
+                    message: "the summarizer attempted a tool call on every \
+                              attempt — compaction state rejects every tool call"
+                        .to_string(),
+                    passes,
+                };
             }
             PassOutcome::Failed { message } => {
                 emit(SessionEvent::CompactionFailed {
@@ -377,8 +405,16 @@ fn estimate_entries(branch: &[SessionEntry]) -> u64 {
 
 /// One pass's stream outcome.
 enum PassOutcome {
-    Committed { summary: String, usage: Usage },
-    Failed { message: String },
+    Committed {
+        summary: String,
+        usage: Usage,
+    },
+    /// The model attempted a tool call: the response is discarded; the
+    /// caller decides whether to resend (bounded) or fail.
+    Violated,
+    Failed {
+        message: String,
+    },
     Cancelled,
 }
 
@@ -465,11 +501,7 @@ async fn one_pass(
             };
         }
         if violated {
-            return PassOutcome::Failed {
-                message: "the summarizer attempted a tool call — compaction state \
-                          rejects every tool call; the pass is discarded"
-                    .to_string(),
-            };
+            return PassOutcome::Violated;
         }
         // A length-capped summary is protocol-complete but
         // information-incomplete: it could not fit what the prefix
