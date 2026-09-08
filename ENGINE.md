@@ -29,6 +29,7 @@ stateDiagram-v2
     Running --> Idle : abort preempts (token race at any await)<br/>— emit run_aborted; the ABORT SITE cleared the<br/>at-abort-time queue (the discard notice is immediate)
     Idle --> Idle : abort while idle — the abort site clears the<br/>queue (the notice is immediate; a no-op when empty)
     Idle --> Idle : checkout — the chain rewinds to entry_id;<br/>what was queued before the checkout is discarded<br/>(messages_discarded), then checked_out +<br/>a full replay pass
+    Idle --> Idle : compaction — the idle door at the beat<br/>(A ∨ B) or a parked compact command runs<br/>the box; abort is the usual discard plus<br/>terminating the stream; a cancelled or<br/>failed pass persists nothing
     Running --> Idle : checkout aborts the run mid-flight<br/>and executes at the beat — the pause point —<br/>before the next work signal
 ```
 
@@ -152,8 +153,46 @@ command path that serves this (owner-ruled through design review):
   run's frames, unmergeable without a per-session sequence number.
   The stage-4 seq primitive lifts it into a wait-free read— served
   at receive from a published chain snapshot, like any other read.
-  Reads never hold writes: messages keep flowing while a pass is
-  parked.
+Reads never hold writes: messages keep flowing while a pass is
+parked.
+
+**The compaction doors (ruled 2026-09; the policy record is ROADMAP
+item 6 — this section records only the flow facts).** Compaction is
+its own system, a black box in tabit-session with three doors; the
+engine has zero compaction knowledge.
+
+- **The pre-request door (mid-run).** A leaf the engine awaits
+  between DECIDE and PREPARE — the point the run is about to send a
+  request to the model, every request, the first included. The leaf
+  is an opaque async callable on the runner (the steering source's
+  sibling): the engine awaits it, unaware that inside, condition B
+  may run a whole summarization model call and rewrite the tree. The
+  awaiting is the ownership story: **the box's tree write is
+  time-exclusive with the loop's** — the loop is suspended at the
+  seam, so the box is simply the writer at that instant (the cell's
+  one-writer-at-a-time law holds; the box is a named third writer
+  site). After the door, PREPARE re-reads history — compaction
+  landed before request prep; the queue drains at CONVERGE as
+  always. Ordering, not coordination: no other coupling exists.
+- **The idle door (the beat).** After the pump arm, with the mailbox
+  empty, the beat evaluates the box's own condition (A ∨ B) and runs
+  it inline. A parked `compact` command (the manual door) runs at
+  the same beat position, ahead of any queued batch. Both doors run
+  under a fresh token in the session's abort slot: the abort command
+  does the usual mailbox discard plus terminating the box's stream —
+  the box's future races the token and a cancelled pass persists
+  nothing (the entry write happens only at pass end).
+- **Overflow recovery is the session's, not the engine's.** A typed
+  context-overflow error still exits the engine as a terminal
+  provider failure (the taxonomy row below) — the engine is not
+  compaction-aware. The intercept lives in the run epilogue: a
+  failure classified as overflow routes to the box **with the window
+  the error itself reports** (the wall teaches the window) before
+  the terminal event; a repaired context sets a continue intent and
+  the pump re-runs over it (the failed turn folded nothing — the
+  conversation still ends at the pre-failure roundtrip, so the retry
+  is the same turn); an unrepairable one (cannot shrink, the empty
+  prefix) emits `run_failed` with the overflow message.
 
 ## Layer 2 — the inner loop (one run's coroutine)
 
@@ -225,6 +264,13 @@ loop {
   }
 
   // ── PREPARE ──
+  // The pre-request door (ruled 2026-09) comes first: an opaque leaf
+  //   the engine awaits — the point it is about to send a request.
+  //   Inside, the session's compaction box may rewrite the tree
+  //   (time-exclusive: the loop is suspended at the seam); the
+  //   history read below sees whatever the door left. Absent leaf =
+  //   no-op.
+  if let Some(door) = pre_request { door.at_door().await; }
   history = conversation.messages();  // [READ] the request IS the history;
                                       // no prompt/context split
   turn_id = ids.mint();               // announced ids are never reused
@@ -309,7 +355,7 @@ notice channel, which the run's death cannot drop.
 | model-side defect | tool-call arguments that cannot be parsed | discarded as a local; `ModelTurnRetried`; bounded streak; steers reset it |
 | model-side mistake | a tool name not in the registry | admission scan: an in-band synthetic result tells the model; never stops the run |
 | retryable provider/transport | rate-limit, transient connection failures, timeouts | drained, then bounded retry through the normal loop |
-| terminal provider | auth failure, permanent quota, context overflow | drained, then exit-Failed — history (with steers) carries forward |
+| terminal provider | auth failure, permanent quota, context overflow | drained, then exit-Failed — history (with steers) carries forward. Context overflow is the one recoverable terminal (ruled 2026-09): the session's epilogue intercept routes it to the compaction box before `run_failed` lands — see the compaction doors |
 | internal (ours) | our own invariants | **panic and hard stop** — a development bug; the process dies loud. Not a loop path and not a terminal: there is nothing graceful to do with ourselves |
 | request construction | a provider cannot carry the content (e.g. a video attachment on Anthropic) | surfaced as a **terminal** error through the drain — implementation judgment: it can stem from *user content* (external input), so it fails gracefully rather than panicking |
 
@@ -352,6 +398,7 @@ a passive event bus) is the reference shape when that day comes.
 | the one drain; the one policy site | cancel token: races every await, never a state |
 | conversation writes (`fold`, `fold_all`) | interaction hub: asks register/resolve; run terminals clear |
 | budget, streaks, `terminating`, `turns_used` | event channel: write-only, frontend-facing |
+| **the pre-request await** (the compaction door's only engine-side existence — the loop owns the await, nothing else) | the pre-request door: an opaque async leaf; its interior is the session's (compaction), never the engine's |
 | loop-or-exit decisions | the conversation: **one instance behind
 the shared cell** (`ContextManager` in the session's `RwLock`); the
 loop folds it during a run — its folds are the durable commits — and
@@ -372,6 +419,7 @@ a gap to patch around. Today:
 | the interaction hub | the session actor | tool gates/bodies (asks) |
 | the model register | the `ModelRegister` (receive-time write) | run open (reads the selection) |
 | the persist-degraded flag | the writer (set/clear on its enqueue outcome) | the session, draining transitions at the guard and conclude |
+| the compaction box | the box itself, during its awaited execution (the pre-request door, the beat doors) — a named third writer of the tree, time-exclusive with the loop and the beat by construction (whoever awaited it is suspended) | everything else reads the cell as always |
 
 **The probe's read is tree-truth.** The probe's `contains` names
 committed nodes only: a checkout target must be a committed,
