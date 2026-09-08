@@ -435,8 +435,9 @@ assumptions (item 9 owns that).
   user never waits behind a summary. Messages arriving *during*
   compaction queue normally and run after it (always-queue gives this
   structurally). The seam compaction ignores queued messages entirely:
-  they stay queued and drain at the next boundary after compaction
-  completes. The seam reserve is bounded by the **two-turn budget**
+  they stay queued; compaction lands before request prep, and the
+  queue drains at request prep as it always does — ordering only, no
+  explicit coordination (ruled 2026-09). The seam reserve is bounded by the **two-turn budget**
   (owner correction of the one-turn derivation): the check fires
   discretely one seam *after* the crossing turn, so the worst case at
   fire time is threshold + one full turn of growth, and the compaction
@@ -504,8 +505,10 @@ assumptions (item 9 owns that).
   (no-tool-call outputs).
   (3) **Post-check loop:** after compaction, immediately re-check the
   trigger against the new context (preamble + summary + retained
-  tail); still too big → rerun the loop, pass N's summary feeding pass
-  N+1 as the previous-summary (pi's update pattern).
+  tail); still too big → rerun the loop — pass N+1 is **just another
+  regular compaction**: the walked history already carries pass N's
+  summary as its first item, so there is no previous-summary
+  machinery (ruled 2026-09; pi's update pattern is not adopted).
   Sub-decisions left to the dig: the retry loops' termination — the
   rejection/length-cap loop has a natural floor (the empty prefix,
   past which the pass fails loud), the post-check rerun needs the
@@ -564,6 +567,39 @@ assumptions (item 9 owns that).
   pre-request seam rides the existing tool-phase hook pair or a new
   pre-request edge is the ENGINE.md amendment's first decision —
   which precedes code (rule 11).
+- **Ruled 2026-09 — pre-implementation clearances (owner):**
+  (1) **Events:** compaction start/end events, with the summary
+  streaming as text deltas on the session's stream (the frontend is
+  already a streaming consumer; a silent multi-second call is the bad
+  UX). The events, the `compact` command, and the protocol version
+  bump land together, with FRONTEND.md and the GUI changelog.
+  (2) **Abort:** compaction is a long async operation — the main flow
+  stays responsive while it runs. An abort does the usual mailbox
+  discard plus terminating the compaction stream; a cancelled or
+  failed pass persists nothing.
+  (3) **Manual compaction:** a third door — a `compact` command type
+  carrying the session id and optional compaction directives; the
+  frontend's presentation of it is its own business. The
+  short-history skip is its guard.
+  (4) **Unknown `context_window` — the wall teaches the window:**
+  every designed constraint needs a known window, and the overflow
+  error carries it — Anthropic: `prompt is too long: X tokens > Y
+  tokens maximum`; OpenAI: `maximum context length is N tokens … you
+  requested M tokens (… in the messages, … in the completion)` — and
+  the typed transport error preserves `{status}` and `{message}`, so
+  the numbers are reachable. An unknown window therefore skips the
+  threshold triggers (with a warning) while overflow recovery still
+  functions, learning the real window from the error; the learned
+  window serves the rest of the session.
+  (5) **Dials are data:** the instruction prompt text and every
+  threshold (75%, 32K, `KEEP_TAIL`, the summary output cap) are data
+  fields clustered in one or a few files — review and polish happen
+  in one place.
+  (6) **Multi-pass is just another regular compaction** (amended into
+  the cut-selection ruling above — no previous-summary machinery).
+  (7) **Ordering, not coordination** (amended into the trigger
+  ruling above — compaction lands before request prep; the queue
+  drains at request prep as always).
 - **Open agenda (quick thoughts recorded 2026-09, owner — each gets a
   deep dive; leanings marked):** (1) trigger conditions — **settled**
   (formula above); the token-counting input stays a leaning (last-turn
