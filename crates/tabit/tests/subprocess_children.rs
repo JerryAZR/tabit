@@ -339,20 +339,37 @@ async fn aborting_the_parent_returns_promptly_and_the_child_flushes_its_terminal
     let parent_id = handle.info().session_id.clone();
 
     handle.message(&parent_id, "go");
-    // Wait for the child's announcement, then abort the parent.
+    let mut child_id: Option<String> = None;
+    // Wait until the child's run is LIVE (its task drained, a turn
+    // started — parked on the delayed model), then abort the parent.
+    // Waiting only for the announcement would race the task's drain:
+    // an abort winning that race discards a never-started run (no
+    // terminal owed — the discard notice is the report), a different
+    // (also correct) outcome this test does not assert.
     let child_id = loop {
         let frame = tokio::time::timeout(std::time::Duration::from_secs(60), handle.next_event())
             .await
             .expect("frames keep coming")
             .expect("the stream stays open");
-        if let SessionEvent::SessionOpened {
-            id,
-            parent: Some(parent),
-            ..
-        } = &frame.event
-            && parent == &parent_id
-        {
-            break id.clone();
+        match &frame.event {
+            SessionEvent::SessionOpened {
+                id,
+                parent: Some(parent),
+                ..
+            } => {
+                if parent == &parent_id {
+                    child_id = Some(id.clone());
+                }
+            }
+            SessionEvent::TurnStarted { .. }
+                if frame
+                    .stream
+                    .as_ref()
+                    .is_some_and(|s| s.as_str() == child_id.as_deref().unwrap_or("")) =>
+            {
+                break child_id.expect("the child announced before its turn");
+            }
+            _ => {}
         }
     };
     let started = std::time::Instant::now();
@@ -365,7 +382,9 @@ async fn aborting_the_parent_returns_promptly_and_the_child_flushes_its_terminal
     loop {
         let frame = tokio::time::timeout(std::time::Duration::from_secs(15), handle.next_event())
             .await
-            .expect("the terminals arrive within the reap budget")
+            .unwrap_or_else(|_| {
+                panic!("timed out: parent_aborted={parent_aborted} child_aborted={child_aborted}")
+            })
             .expect("the stream stays open");
         if let SessionEvent::RunAborted { .. } = &frame.event {
             let on = frame.stream.as_ref().map(|s| s.as_str());

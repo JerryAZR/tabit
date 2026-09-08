@@ -1080,3 +1080,128 @@ async fn an_abort_addressed_to_a_child_stops_it_without_killing_the_parent_run()
     handle.close_commands();
     std::fs::remove_dir_all(store.dir()).ok();
 }
+
+#[tokio::test]
+async fn checkout_and_model_consume_on_a_live_in_process_child() {
+    // The 2026-09 correction: command consumption is the session's own
+    // (SessionCommands — one implementation shared with the worker),
+    // so a child consumes EVERY command. A model switch lands at
+    // receive (`model_changed` on the child's stream); a checkout
+    // composes abort, applies at the pump's pause point (`checked_out`
+    // + the re-render pass), and the parent's run survives both.
+    let store = temp_store("subagent-child-commands");
+    let config = crate::tests::test_config();
+    let router = crate::ChildRouter::shared();
+    let parts = Arc::new(SubagentParts {
+        router: router.clone(),
+        exe: std::path::PathBuf::from("tabit"),
+        config,
+        auth: crate::tests::test_auth(),
+        store: store.clone(),
+        tools: vec![slow_tool(2)],
+        max_turns: 4,
+        model_factory: child_factory(vec![
+            crate::tests::tool_turn("s1", "slow"),
+            text_turn("never reached"),
+        ]),
+    });
+    let parent = subagent_parent(
+        &store,
+        vec![subagent_call_turn(), text_turn("parent recovered")],
+        parts,
+    );
+    let wiring = SessionHostWiring {
+        children: router,
+        boot_parent: None,
+        store: store.clone(),
+        create: Arc::new(|| Err("not driven".to_string())),
+        open: Arc::new(|_| Err("not driven".to_string())),
+    };
+    let mut handle = SessionHost::spawn(parent, Vec::new(), wiring);
+    let parent_id = handle.info().session_id.clone();
+
+    handle.message(&parent_id, "go");
+    // Park the child on its slow tool; collect its task's entry id.
+    let mut child_id = None;
+    let mut task_entry = None;
+    loop {
+        let frame = tokio::time::timeout(std::time::Duration::from_secs(10), handle.next_event())
+            .await
+            .expect("frames keep coming")
+            .expect("the stream stays open");
+        match &frame.event {
+            SessionEvent::SessionOpened {
+                id,
+                parent: Some(_),
+                ..
+            } => child_id = Some(id.clone()),
+            SessionEvent::UserMessage { entry_id, .. } => {
+                if frame
+                    .stream
+                    .as_ref()
+                    .is_some_and(|s| s.as_str() == child_id.as_deref().unwrap_or(""))
+                {
+                    task_entry = Some(entry_id.clone());
+                }
+            }
+            SessionEvent::ToolCall { name, .. } if name == "slow" => break,
+            _ => {}
+        }
+    }
+    let child_id = child_id.expect("the child announced");
+    let task_entry = task_entry.expect("the child's task entered history");
+    let on_child = |frame: &tabit_protocol::EventFrame| {
+        frame
+            .stream
+            .as_ref()
+            .is_some_and(|s| s.as_str() == child_id)
+    };
+
+    // The model command, addressed to the child: a state write at
+    // receive — `model_changed` on the child's own stream, promptly.
+    handle.model(&child_id, tabit_protocol::ModelSelection::new("p", "m"));
+
+    // The checkout, addressed to the child: composes abort, applies at
+    // the pump's pause point. The wire order on the child's stream:
+    // model_changed, run_aborted, checked_out, the re-render pass.
+    handle.checkout(&child_id, task_entry);
+
+    let mut model_changed = false;
+    let mut child_aborted = false;
+    let mut checked_out = false;
+    let mut replay_done = false;
+    let mut seen_model_change = false;
+    loop {
+        let frame = tokio::time::timeout(std::time::Duration::from_secs(10), handle.next_event())
+            .await
+            .expect("frames keep coming")
+            .expect("the stream stays open");
+        if !on_child(&frame) {
+            if let SessionEvent::RunFinished { output, .. } = &frame.event
+                && output == "parent recovered"
+            {
+                break;
+            }
+            continue;
+        }
+        match &frame.event {
+            SessionEvent::ModelChanged { .. } => {
+                seen_model_change = true;
+                model_changed = true;
+            }
+            SessionEvent::RunAborted { .. } => {
+                assert!(seen_model_change, "the register write announced first");
+                child_aborted = true;
+            }
+            SessionEvent::CheckedOut { .. } => checked_out = true,
+            SessionEvent::ReplayDone => replay_done = true,
+            _ => {}
+        }
+    }
+    assert!(model_changed, "the child consumed the model command");
+    assert!(child_aborted, "checkout composed abort on the child's run");
+    assert!(checked_out, "the checkout applied at the pause point");
+    assert!(replay_done, "the re-render pass followed the checkout");
+    handle.close_commands();
+    std::fs::remove_dir_all(store.dir()).ok();
+}

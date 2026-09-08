@@ -96,6 +96,7 @@ impl Session {
             events: Vec::new(),
         };
         loop {
+            self.serve_parked_checkout(on_event);
             let queued = self.mailbox.has_queued();
             let continuing = self.mailbox.take_continue();
             if !queued && !continuing {
@@ -120,8 +121,23 @@ impl Session {
                 break;
             }
         }
+        // The exit pause point: a checkout parked by an aborting run
+        // (checkout composes abort) applies before the pump returns —
+        // the worker's caller-beat previously owned this serve; a
+        // driven child has no caller-beat, so the pump serves its own
+        // pause point (the beat unification, 2026-09).
+        self.serve_parked_checkout(on_event);
         self.mailbox.run_ended();
         total
+    }
+
+    /// Serve the parked checkout intent if one waits — a beat arm,
+    /// cheap when empty.
+    fn serve_parked_checkout(&mut self, on_event: &mut (dyn FnMut(SessionEvent) + Send)) {
+        let parked = crate::lock::lock(&self.checkout_intent).take();
+        if let Some(entry_id) = parked {
+            self.serve_checkout(entry_id, on_event);
+        }
     }
 
     /// One outer loop for a drained batch: stage the input, drive the

@@ -46,12 +46,12 @@ flag 33):
   cards by request id. Deep trees route hop by hop through learned
   tables — an id that never emitted anything is unroutable (a child
   that never announced is dead on arrival; the announcement is the
-  first unconditional emission). Commands an **in-process** child
-  cannot serve (`checkout`/`model`/`continue` — no worker machinery)
-  reject with a `kind: session` error **stamped with the child's
-  stream** (a consumption rejection, not the unstamped routing
-  failure). Subprocess children consume everything — they are full
-  hosts.
+  first unconditional emission). Consumption is **the session's own
+  on either substrate** (one implementation shared with the worker's
+  delivery): `checkout`/`model`/`continue` consume on an in-process
+  child too — a checkout composes abort and applies at the run's
+  pause point (`run_aborted`, then `checked_out`, then the re-render
+  pass, all on the child's stream).
 - **Abort is a subtree stop**: consuming an `abort` now also
   broadcasts to the target's registered children, recursively —
   stop all work in the subtree, never destroy the session

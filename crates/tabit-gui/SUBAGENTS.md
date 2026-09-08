@@ -127,11 +127,11 @@ a child stops that child's subtree (every descendant's `run_aborted`
 flushes on its own stream) and leaves the parent's run alive — the
 parent's tool result becomes the "interrupted" error and its run
 continues. Aborting a parent still stops its whole subtree (the
-abort's consumption broadcasts recursively). One substrate caveat:
-an **in-process** child rejects `checkout`/`model`/`continue` with a
-stamped `kind: session` error (no worker machinery behind them); a
-subprocess child consumes everything. Full semantics: FRONTEND.md
-§5, PROTOCOL.md flag 33.
+abort's consumption broadcasts recursively). `checkout`/`model`/
+`continue` consume on either substrate — the consumption is the
+session's own; an in-process child's checkout applies at its run's
+pause point (`run_aborted`, `checked_out`, then the re-render pass
+on its stream). Full semantics: FRONTEND.md §5, PROTOCOL.md flag 33.
 
 ## Not in v5 (design notes, do not assume)
 

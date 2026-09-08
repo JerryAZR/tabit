@@ -348,17 +348,20 @@ group with the child's cwd as the process cwd, forwards stamped
 frames as-is, and closes with the ruled abort shape (forward +
 stdin close, return now, reaper-bounded tree kill). **Routing became
 framework machinery** (`routing.rs` — the ChildRouter): route-all
-command delivery to children (in-process facade over the session's
-shared leaves; subprocess children as full hosts), deep-tree routing
-by learned tables (bridge-snooped stamps), and abort consumption as
-a recursive subtree stop. The example tool grew `execution`
+command delivery to children, deep-tree routing by learned tables
+(bridge-snooped stamps), and abort consumption as a recursive
+subtree stop. **Consumption is the session's own**
+(`session/commands.rs` — `SessionCommands`, one implementation over
+the session's handles shared by the worker's dequeue point and the
+child router; the owner's correction round deleted the first cut's
+in-process facade, which rejected checkout/model/continue the
+sessions already handled, and made the pump serve the parked
+checkout at its own pause point). The example tool grew `execution`
 (`in_process` default, `subprocess` opt-in). Deferred with the
 design: persisted-children lineage (`parent_session` header +
-catalog grouping), the in-process child's checkout/model/continue
-consumption (needs worker machinery or a facade extension), the
-execution-default flip, and detached children that outlive their
-parent's run (the learning table's known boundary — recorded for
-that design).
+catalog grouping), the execution-default flip, and detached children
+that outlive their parent's run (the learning table's known boundary
+— recorded for that design).
 
 **Shipped v1 (2026-09):** the above landed. `SessionCwd` (every
 session carries a working directory; the coding tools are contextual

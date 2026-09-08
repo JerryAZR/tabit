@@ -52,6 +52,19 @@ impl NoticeSink {
         Self { events, stream }
     }
 
+    /// A sink with no one to tell: upgrades never succeed, emissions
+    /// are silent no-ops — the fail-closed audience (a dark child, a
+    /// disconnected hub). One construction for the dead-channel trick.
+    pub(crate) fn dead() -> Self {
+        let (events, _receiver) = mpsc::unbounded_channel::<EventFrame>();
+        let weak = events.downgrade();
+        drop(events);
+        Self {
+            events: weak,
+            stream: StreamId::new("disconnected"),
+        }
+    }
+
     /// Emit a notice, stamped with the session's stream. Returns whether
     /// the channel was live to take the frame: a dead or never-attached
     /// channel is a silent no-op for fire-and-forget notices, but the

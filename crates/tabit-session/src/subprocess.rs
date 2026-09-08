@@ -359,7 +359,6 @@ impl SubprocessBuilder {
             ChildTarget::Process {
                 commands: command_tx.clone(),
             },
-            None,
         );
 
         Ok(SubprocessChild {

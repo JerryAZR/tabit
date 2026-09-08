@@ -28,7 +28,7 @@ fn an_unknown_address_is_not_routed() {
 fn a_registered_child_receives_the_command_as_a_wire_line() {
     let router = ChildRouter::default();
     let (target, mut rx) = inbox();
-    router.register("child", "parent", target, None);
+    router.register("child", "parent", target);
 
     assert!(router.deliver(
         "child",
@@ -51,7 +51,7 @@ fn a_learned_descendant_routes_to_the_owning_child() {
     // intact (the CHILD's router resolves the next hop).
     let router = ChildRouter::default();
     let (target, mut rx) = inbox();
-    router.register("child", "parent", target, None);
+    router.register("child", "parent", target);
     router.learn("grandchild", "child");
 
     assert!(router.deliver(
@@ -73,7 +73,7 @@ fn a_learned_descendant_routes_to_the_owning_child() {
 fn unregister_purges_the_child_and_everything_learned_through_it() {
     let router = ChildRouter::default();
     let (target, _rx) = inbox();
-    router.register("child", "parent", target, None);
+    router.register("child", "parent", target);
     router.learn("grandchild", "child");
 
     router.unregister("child");
@@ -95,10 +95,10 @@ fn abort_broadcasts_to_every_child_of_the_parent_as_a_routed_command() {
     let router = ChildRouter::default();
     let (first, mut rx_first) = inbox();
     let (second, mut rx_second) = inbox();
-    router.register("first", "parent", first, None);
-    router.register("second", "parent", second, None);
+    router.register("first", "parent", first);
+    router.register("second", "parent", second);
     let (unrelated, _rx_other) = inbox();
-    router.register("unrelated", "someone-else", unrelated, None);
+    router.register("unrelated", "someone-else", unrelated);
 
     router.broadcast_abort("parent");
     for (name, rx) in [("first", &mut rx_first), ("second", &mut rx_second)] {

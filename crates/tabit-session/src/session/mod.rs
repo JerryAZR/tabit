@@ -30,12 +30,15 @@
 
 mod assemble;
 mod builder;
+mod commands;
 mod mailbox;
 mod persist;
 mod rewind;
 mod run;
 mod selection;
 pub(crate) mod wire;
+
+pub(crate) use commands::SessionCommands;
 
 pub(crate) use builder::ModelFactory;
 pub use builder::SessionBuilder;
@@ -156,6 +159,12 @@ pub struct Session {
     subagent_events: Arc<
         std::sync::OnceLock<tokio::sync::mpsc::WeakUnboundedSender<tabit_protocol::EventFrame>>,
     >,
+    /// The parked checkout intent — session-resident because the
+    /// intent belongs to the session: command consumption parks it
+    /// ([`session::commands`]), whichever driver holds the session
+    /// serves it at its beat (the worker loop between pumps, the pump
+    /// between runs and at its exit).
+    checkout_intent: Arc<std::sync::Mutex<Option<String>>>,
 }
 
 /// The receive-time view of the conversation (checkout validation at
@@ -179,6 +188,12 @@ impl Session {
     /// receive time — see [`SharedConversation`]).
     pub(crate) fn entry_id_probe(&self) -> SharedConversation {
         self.shared_conversation.clone()
+    }
+
+    /// The parked checkout intent's slot — shared between command
+    /// consumption (parks) and the driver's beat (serves).
+    pub(crate) fn checkout_intent(&self) -> std::sync::Arc<std::sync::Mutex<Option<String>>> {
+        self.checkout_intent.clone()
     }
 
     /// Attach the interaction hub. Called once by the session worker

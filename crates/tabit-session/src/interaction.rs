@@ -68,12 +68,9 @@ impl InteractionHub {
     /// no frontend of its own). Routing can still deliver answers to
     /// it; they find no open question and drop.
     pub fn disconnected() -> Self {
-        let (events, _receiver) = mpsc::unbounded_channel::<EventFrame>();
-        let weak = events.downgrade();
-        drop(events);
         Self {
             inner: Arc::new(Inner {
-                notices: NoticeSink::from_weak(weak, StreamId::new("disconnected")),
+                notices: NoticeSink::dead(),
                 pending: std::sync::Mutex::new(HashMap::new()),
             }),
         }

@@ -174,29 +174,26 @@ impl SpawnContext {
     /// child's own stream stamp, ahead of every event [`Self::drive`]
     /// forwards — and **register it for routing** (route-all): from
     /// this moment, commands addressed to the child deliver through
-    /// its shared leaves (a message steers the running pump, abort
-    /// cascades, interaction answers resolve by request id). Skip it
-    /// for a dark child — unannounced is also unroutable.
+    /// the session's own consumption ([`crate::session::SessionCommands`]
+    /// — every arm, identical to a worker-owned session; the pump
+    /// serves parked intent at its beat). Skip the announcement for a
+    /// dark child — unannounced is also unroutable.
     pub fn announce(&self, child: &Session) {
         let sink = self
             .events
             .clone()
-            .map(|events| crate::notice::NoticeSink::from_weak(events, StreamId::new(child.id())));
+            .map(|events| crate::notice::NoticeSink::from_weak(events, StreamId::new(child.id())))
+            .unwrap_or_else(crate::notice::NoticeSink::dead);
         self.parts.router.register(
             child.id(),
             &self.parent_id,
             ChildTarget::InProcess {
-                mailbox: child.mailbox_handle(),
-                abort: child.abort_handle(),
-                interaction: child.interaction_hub().unwrap_or_else(|| {
-                    // A child with no hub attached fails closed on
-                    // interaction — the parent-proxy ruling's other
-                    // half. A dead hub keeps that contract: answers
-                    // drop, asks never hang.
-                    InteractionHub::disconnected()
-                }),
+                commands: crate::session::SessionCommands::new(
+                    child,
+                    sink,
+                    self.parts.router.clone(),
+                ),
             },
-            sink,
         );
         self.tap(child.id()).emit(SessionEvent::SessionOpened {
             id: child.id().to_string(),

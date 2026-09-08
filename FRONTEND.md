@@ -216,15 +216,13 @@ the id — §6).
 name a subagent child — `message` steers a live child (switching to
 a subagent view and steering it is normal usage; the
 `message_queued` ack arrives on the child's own stream),
-`interaction_response` answers its cards, and `abort` stops that
+`interaction_response` answers its cards, `checkout`/`model`/
+`continue` consume exactly as on any session, and `abort` stops that
 child's subtree without killing the parent's run. Deep trees route
 hop by hop; the address is any id you saw stamped on a frame.
-Consumption differs by substrate: a subprocess child is a full host
-(every command consumes); an **in-process** child serves
-`message`/`abort`/`interaction_response` and rejects
-`checkout`/`model`/`continue` with a `kind: session` error stamped
-with the child's stream (a consumption rejection — not the unstamped
-routing failure).
+Consumption is the session's own on either substrate — an in-process
+child's checkout applies at its run's pause point (the wire order:
+`run_aborted`, `checked_out`, the re-render pass).
 
 | command | when | effect |
 |---|---|---|
