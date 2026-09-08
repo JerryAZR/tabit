@@ -450,6 +450,14 @@ assumptions (item 9 owns that).
   queued message behind an over-window context waits for the
   compaction; the alternative is running it into the wall). The 32K
   reserve is the two-turn budget at ~16k/turn.
+- **Ruled 2026-09 — compaction state rejects all tool calls (owner):**
+  the compaction request keeps the exact same preamble and toolset —
+  prefix-cache identity, since any toolset change (emptying it, or
+  trimming to a subset like `read`) diverges the cached prefix at the
+  tools position — forbids calls in the instruction, and **rejects
+  every tool call** made in compaction state. How that state is
+  entered or queried is execution-flow machinery — item 4 territory
+  (along with the rejection's response shape).
 - **Open agenda (quick thoughts recorded 2026-09, owner — each gets a
   deep dive; leanings marked):** (1) trigger conditions — **settled**
   (formula above); the token-counting input stays a leaning (last-turn
@@ -460,16 +468,13 @@ assumptions (item 9 owns that).
   after a turn-end output, cut **before the first user message** so the
   cluster stays intact in the tail; the tail rule should be a flexible
   budget **connected to overflow recovery**, not a fixed keep-20k.
-  (3) **tools in the compaction request** — owner correction: an empty
-  toolset changes the request prefix, so the cache would no longer hit
-  (the references' no-tools unanimity doesn't survive our cache
-  ruling); the options are keep the exact same toolset + forbid calls
-  in the instruction + reject violations, or deliberately allow a
-  subset (e.g. `read`) as an accepted cache trade. (4) **flow fit —
+  (3) **settled** — compaction state rejects all tool calls (ruling
+  above). (4) **flow fit —
   three separate designs, not to be mixed**: the session file (what
   the compaction record is on disk), the runtime session tree & state
   (projection, head, checkout), and the execution flow (ENGINE.md —
-  who triggers, which states). (5) **overflow recovery — two
+  who triggers, which states, how compaction state is entered and
+  queried). (5) **overflow recovery — two
   scenarios**: (i) known-over pre-flight — pick the cut point
   forward-thinking (size it so the summarization request itself fits:
   compact ~75%, keep the tail — not codex's backwards trim-and-retry)
