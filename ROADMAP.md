@@ -534,6 +534,27 @@ assumptions (item 9 owns that).
   the instruction for audit), how the summary enters the
   model-facing context (leaning: a user-role wrapper message, the
   references' pattern), and the session-format version bump.
+- **Ruled 2026-09 — compaction is its own system (owner):** a
+  dedicated procedure in tabit-session beside `run_one` — a focused
+  black box to the rest of the system. The box owns the trigger
+  evaluation (the A/B formulas), cut selection, the request assembly
+  (prefix-truncated, same preamble and toolset), the shorten-retry
+  and multi-pass loops, and the compaction entry write; no flags in
+  the engine, no compaction knowledge anywhere else. Its interface is
+  **two doors** — the caller names the seam, the box picks the
+  formula: (1) the **pre-request point** — the point you are about to
+  send a request to the model, every request in a run, the first
+  included (a resumed over-window session is caught at run start);
+  the pre-flight overflow case is this same check, not a separate
+  path — condition B; (2) **idle** — between runs in the session
+  actor, condition A ∨ B. Out of the box: its own events, the
+  compaction entry, and the compacted context the run or the next
+  prompt continues from. The ruled queue behaviors are structural
+  (the pump isn't running, so the mailbox waits; the summary turn
+  records as one entry, never a message pair). Whether the
+  pre-request seam rides the existing tool-phase hook pair or a new
+  pre-request edge is the ENGINE.md amendment's first decision —
+  which precedes code (rule 11).
 - **Open agenda (quick thoughts recorded 2026-09, owner — each gets a
   deep dive; leanings marked):** (1) trigger conditions — **settled**
   (formula above); the token-counting input stays a leaning (last-turn
