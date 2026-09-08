@@ -31,6 +31,20 @@ renamed and the wire now emits the contract's name. Typed clients
 tag; hand-rolled clients parsing per FRONTEND.md were right all
 along.
 
+### behavior: children are command-addressable; abort stops subtrees (2026-09)
+
+Same protocol version. With the subprocess substrate (details in
+ROADMAP item 5 and PROTOCOL.md flag 33), a subagent child is a full
+session host in its own process — every session command works on a
+child structurally, forwarded as one wire line: `message` steers a
+live child (the `message_queued` ack on the child's own stream — a
+subagent view is a steerable view), `interaction_response` answers
+its cards, `checkout`/`model`/`continue` consume as on any session.
+Abort is a **subtree stop**: consuming it broadcasts to the
+session's registered children, recursively — every descendant's
+`run_aborted` flushes on its own stream; instances are never
+destroyed; aborting a child by id leaves the parent's run alive.
+
 ## v5
 
 ### wire: `session_opened.parent` — subagent children announce through the same door (2026-09)

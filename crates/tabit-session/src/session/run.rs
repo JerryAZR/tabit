@@ -254,7 +254,6 @@ impl Session {
                 self.id.clone(),
                 self.selection(),
                 self.cwd.clone(),
-                self.interaction.clone(),
                 self.subagent_events.get().cloned(),
             )));
         }

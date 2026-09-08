@@ -332,27 +332,32 @@ forwarding under the abort leash — the one recipe extensions must not
 hand-roll). The example tool adds: `model` ("provider/model" or bare
 id), `cwd` (scoped: its tools AND its prompt follow), `tools`
 (allow-list; unknown names error loudly), recursion by omission.
-**Subprocess children are a first-class second substrate, not
-dismissed** (owner ruling): the OS enforces the cwd instead of a
-convention every tool author must follow, plus hard isolation and
-free persisted children (`--session`); the JSON stdio protocol is the
-wire, the parent bridges (re-stamped events, parent-field
-announcement, interaction relay, tree-kill abort). No extension-
-substrate assumptions (item 9 owns that).
-
-**Shipped v1 (2026-09):** the above landed. `SessionCwd` (every
-session carries a working directory; the coding tools are contextual
-and resolve against it), the builder's `ephemeral` entrance
-(`NullBuffer` — in-memory sessions; `Session.path` is `Option`), and
-`tabit-session::subagent` (the tool, the `SubagentParts` assembly
-capability, the child tap, parent-proxy interaction, token-linked
-abort, results with `{child_id, outcome, turns, usage}` details).
-Protocol v5 (`session_opened.parent`, empty path = ephemeral).
-Deferred with the design's own notes: persisted (inspectable)
-children via the `parent_session` header field + catalog grouping;
-per-child model/cwd overrides; the subagent result cap refinement
-(the child's own `max_tokens` bounds v1); nested-transcript GUI
-rendering (the GUI bridge drops child streams for now).
+**Substrate closed (2026-09, two rounds — PROTOCOL.md flag 33):**
+subprocess children are the ONE substrate. Round one shipped
+in-process v1 then built subprocess beside it; the routing work
+exposed the cost — child-specific consumption code existed only
+because an in-process child is a session without a worker — and the
+owner's correction removed in-process entirely ("maintaining
+something we don't need; worse, complicating the design for what's
+useless"). **Shipped:** `SessionCwd` (contextual tools), the
+builder's `ephemeral` entrance (plain session machinery the child's
+`--ephemeral` rides), the child-role flags (`--parent`, `--tools`,
+`--ephemeral`; ordinary `--session`/`--continue`/`--model`/
+`--max-turns` for persisted children), the bridge (`subprocess.rs`:
+self-spawn under a Job Object/process group with the child cwd as
+the process cwd, frames forwarded as-is, the ruled abort shape),
+the router (`routing.rs`: route-all line forwarding, learned tables
+for deep trees, abort's recursive subtree broadcast), and the
+example tool spawning subprocess children (`task`/`model`/`cwd`/
+`tools`; extensions override via `SpawnContext`'s spawn/drive pair).
+Every session command works on a child structurally — the child is
+a full session host. Protocol v5/v6 (`session_opened.parent`, empty
+path = ephemeral; the interaction tag realigned). Deferred:
+persisted children's lineage (`parent_session` header + catalog
+grouping), the result-cap refinement, nested-transcript GUI
+rendering, and detached children that outlive their parent's run
+(the learning table's known boundary). No extension-substrate
+assumptions (item 9 owns that).
 
 ### 6. Compaction + overflow recovery
 

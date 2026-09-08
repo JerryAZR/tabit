@@ -35,7 +35,7 @@ mod persist;
 mod rewind;
 mod run;
 mod selection;
-mod wire;
+pub(crate) mod wire;
 
 pub(crate) use builder::ModelFactory;
 pub use builder::SessionBuilder;

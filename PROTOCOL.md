@@ -1530,6 +1530,70 @@ ACP's agents through that adapter, not natively): an optional
 reach and never a constraint on the core. Until the re-evaluation,
 nothing in this contract bends toward it.
 
+### 33. Subagents: subprocess-only, route-all — RESOLVED (2026-09, after one false start)
+
+The substrate question closed in two rounds. **Round one** shipped
+in-process children (v1, protocol v5) and then built the subprocess
+substrate beside them — and the routing work exposed the cost: every
+child-specific line of consumption code (a facade, then a
+`SessionCommands` unification, then pump beat-service) existed only
+because an in-process child is a session *without a worker*. **Round
+two (the correction, owner ruling): in-process children are removed
+entirely** — "keeping it in the library means maintaining something we
+don't need; worse, complicating the design for what's useless." One
+substrate: **a child is this binary in `--json` child role**, and the
+structural guarantee the owner demanded holds by construction — every
+session command works on a child because the child is a full session
+host; the router forwards wire lines; there is no child-specific
+consumption code anywhere.
+
+The rulings, in force order:
+
+- **Route all commands, no filters**: the router never decides; an
+  address resolving to a child is one forwarded wire line; unknown
+  addresses keep the existing `error { kind: session }`. "A subagent
+  view is a steerable view" — `message` queues on the child's own
+  mailbox (`message_queued` on its stream), every command consumes.
+- **Deep trees route by learning** (the Ethernet-switch model): the
+  bridge snoops the frames it forwards; a stamp teaches which child
+  subtree owns the id; commands walk hop by hop. Flat stamps survive
+  — no wire change, no wrap/unwrap. Rejected: layered/source-routed
+  ids (wire churn for structure the `parent`-chained announcements
+  already carry) and flooding (conflates delivery with the semantic
+  abort cascade, cannot error on unknown ids). A never-emitting id is
+  unroutable — moot, because `session_opened` is the first
+  unconditional emission (a child that never announced is dead on
+  arrival).
+- **Abort is a subtree stop**: consumption at every node is cancel +
+  broadcast to registered children, recursively; instances are never
+  destroyed. The broadcast crosses into each child as one routed
+  command; the child's host cascades through this same router. The
+  run-token leash remains the in-run fast path.
+- **Abort forwarding to a child is a courtesy with a deadline**: on
+  leash cancel, forward `abort`, close stdin (the child aborts,
+  flushes, exits — the write-behind flush is the one thing the
+  graceful window buys, for persisted children), return `Aborted`
+  immediately; a reaper bounds the exit with the tree kill (Job
+  Object / process group — the child's bash descendants must not
+  orphan). Force-kill stays correct at handshake failure and on a
+  repeated abort.
+- **The one child-specific surface is the creation event**: the
+  child's `session_opened` carries `parent` (`--parent`, spoken at
+  the source of truth) and the empty path when ephemeral. Everything
+  else — spawn, forwarding, kill — is session management and routing.
+
+The example tool spawns subprocess children (`task`/`model`/`cwd`/
+`tools`); extensions override it through the same
+`SpawnContext::spawn_subprocess`/`drive_subprocess` pair (the drive
+is the leash recipe they must not hand-roll). Deferred: persisted
+children's lineage (`parent_session` header + catalog grouping) and
+detached children that outlive their parent's run (the learning
+table's known boundary — recorded for that design). A same-round
+contract fix: the interaction event's tag realigned to
+`interaction_request` (v6) — a flow flaw (round-trip tests pin
+self-consistency, not the contract's strings), found by the TUI
+spike.
+
 ## Resolved
 
 - **1 — Resident loop** (supersedes 4, 5, 7, 12): one worker task owns

@@ -75,10 +75,12 @@ mod permission;
 mod prompt;
 mod registry;
 pub(crate) mod replay;
+mod routing;
 mod session;
 mod stats;
 mod store;
 pub mod subagent;
+mod subprocess;
 
 // The durable-conversation layer, extracted to tabit-log (2026-08):
 // re-exposed as modules so internal `crate::` paths and the public
@@ -103,6 +105,7 @@ pub use parser::Parsed;
 pub use permission::{PERMISSION_ASK_TOOLS, PermissionMemory, permission_gate};
 pub use prompt::build_system_prompt;
 pub use registry::ModelRegistry;
+pub use routing::ChildRouter;
 pub use session::{
     AbortHandle, DEFAULT_MAX_TURNS, MailboxHandle, RewindSummary, RunOutcome, RunSummary, Session,
     SessionBuilder, TOOL_CONCURRENCY,
@@ -118,6 +121,3 @@ pub use writer::{SessionWriter, SharedBuffer, WriteBuffer};
 
 #[cfg(test)]
 mod tests;
-
-#[cfg(test)]
-mod subagent_tests;

@@ -1,18 +1,21 @@
-# Subagent events — a frontend handoff (protocol v5)
+# Subagent events — a frontend handoff (protocol v6)
 
-What your frontend sees when the model calls the `subagent` tool.
-The contract rows live in FRONTEND.md (`session_opened`,
-`tool_result.details`); this walks through the live wire, event by
-event, and names the assumptions that are safe and the ones that are
-not. Reference implementation of the assertions: the e2e test
-`a_subagent_answers_as_the_tools_result_and_streams_its_own_events`
-(tabit-session, `subagent_tests.rs`).
+A subagent is a **child process** — this very backend binary in
+`--json` child role, spawned by the parent when the model calls the
+`subagent` tool. Its whole run streams to you on **its own stream
+stamp** exactly as any session's would (the child is a full session
+host); the parent's transcript carries only the `subagent`
+`tool_call`/`tool_result` pair. The tool's arguments now include
+`cwd` (scope the child to another directory — its tools *and* its
+instructions follow) and `tools` (an allow-list); `model` overrides
+as before.
 
-The model-facing tool takes optional `model` ("provider/model"),
-`cwd` (scope the child elsewhere — its tools *and* its instructions
-follow), and `tools` (an allow-list; e.g. `["read", "bash"]` for a
-read-only researcher). All three ride the `tool_call` arguments when
-present — render them in the call row if you show arguments.
+**Children are command-addressable (route-all):** a subagent view is
+a steerable view — `message` to a live child queues on its own
+mailbox (`message_queued` on its stream) and enters its conversation
+at the next turn boundary; `abort` to a child stops its subtree and
+leaves the parent's run alive. No child-specific caveats exist:
+every session command consumes as on any session.
 
 ## The shape of a subagent run
 
@@ -115,9 +118,10 @@ transcript), footer = `turns` + usage from `details`. Unknown
 today the reducer already drops them, so shipping the nested view is
 purely additive.
 
-## Not in v5 (design notes, do not assume)
+## Not in v6 (design notes, do not assume)
 
 Persisted children (a real file, catalog presence, replay via
-`open_session`, `parent_session` lineage), per-child model/cwd
-overrides, and a result-size cap beyond the child's own `max_tokens`
-are deferred — see ROADMAP item 5. Nothing here promises any of them.
+`open_session`, `parent_session` lineage), a result-size cap beyond
+the child's own `max_tokens`, and detached children that outlive
+their parent's run are deferred — see ROADMAP item 5. Nothing here
+promises any of them.

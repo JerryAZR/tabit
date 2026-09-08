@@ -14,6 +14,8 @@ use tabit_protocol::{ModelSelection, SessionCommand};
 /// lifecycle); the store stays real so the catalog is honest.
 fn plain_wiring(store: &SessionStore) -> SessionHostWiring {
     SessionHostWiring {
+        children: crate::ChildRouter::shared(),
+        boot_parent: None,
         store: store.clone(),
         create: std::sync::Arc::new(|| Err("new_session is not driven".to_string())),
         open: std::sync::Arc::new(|_| Err("open_session is not driven".to_string())),
@@ -538,6 +540,8 @@ async fn new_session_runs_a_second_stream_and_both_route_by_id() {
         .expect("session");
     let create_store = store.clone();
     let wiring = SessionHostWiring {
+        children: crate::ChildRouter::shared(),
+        boot_parent: None,
         store: store.clone(),
         create: std::sync::Arc::new(move || {
             Factory::new(vec![text_turn("new answer")])
@@ -632,6 +636,8 @@ async fn open_session_loads_a_stored_session_and_replays_it() {
         .expect("session");
     let open_store = store.clone();
     let wiring = SessionHostWiring {
+        children: crate::ChildRouter::shared(),
+        boot_parent: None,
         store: store.clone(),
         create: std::sync::Arc::new(|| Err("not driven".to_string())),
         open: std::sync::Arc::new(move |id: &str| {
@@ -777,6 +783,8 @@ async fn open_session_emits_its_model_notes_ahead_of_the_replay() {
         .expect("session");
     let open_store = store.clone();
     let wiring = SessionHostWiring {
+        children: crate::ChildRouter::shared(),
+        boot_parent: None,
         store: store.clone(),
         create: std::sync::Arc::new(|| Err("not driven".to_string())),
         open: std::sync::Arc::new(move |id: &str| {
@@ -961,6 +969,8 @@ async fn a_catalog_failure_is_the_carrier_in_place_of_the_announcement() {
         session,
         Vec::new(),
         SessionHostWiring {
+            children: crate::ChildRouter::shared(),
+            boot_parent: None,
             store: SessionStore::new(&dir),
             create: std::sync::Arc::new(|| Err("not driven".to_string())),
             open: std::sync::Arc::new(|_| Err("not driven".to_string())),
@@ -998,6 +1008,8 @@ async fn lifecycle_failures_and_notes_ride_the_carrier() {
         session,
         Vec::new(),
         SessionHostWiring {
+            children: crate::ChildRouter::shared(),
+            boot_parent: None,
             store: store.clone(),
             // The builder degrades: the failure is boot-stamped, the
             // notes are new-session-stamped.
@@ -1053,6 +1065,8 @@ async fn a_created_sessions_selection_notes_follow_its_stream() {
         session,
         Vec::new(),
         SessionHostWiring {
+            children: crate::ChildRouter::shared(),
+            boot_parent: None,
             store: store.clone(),
             create: std::sync::Arc::new(move || {
                 Factory::new(vec![text_turn("new answer")])
@@ -1114,6 +1128,8 @@ async fn new_session_is_never_blocked_by_a_running_session() {
         .expect("session");
     let create_store = store.clone();
     let wiring = SessionHostWiring {
+        children: crate::ChildRouter::shared(),
+        boot_parent: None,
         store: store.clone(),
         create: std::sync::Arc::new(move || {
             Factory::new(vec![text_turn("new answer")])
@@ -1271,6 +1287,8 @@ async fn frontend_death_aborts_every_sessions_run() {
         .expect("session");
     let create_store = store.clone();
     let wiring = SessionHostWiring {
+        children: crate::ChildRouter::shared(),
+        boot_parent: None,
         store: store.clone(),
         create: std::sync::Arc::new(move || {
             Factory::new(vec![tool_turn("t2", "slow"), text_turn("never")])
