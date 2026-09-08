@@ -460,3 +460,38 @@ fn a_cancelled_token_kills_the_stream_before_anything_persists() {
             .any(|entry| matches!(entry.kind, EntryKind::Compaction { .. }))
     );
 }
+
+#[tokio::test]
+async fn a_broken_tool_call_is_the_same_violation_discarded_and_retried() {
+    let cell = cell_with_dialogue(BIG_FLOOR_ROUNDS, BIG_MESSAGE_CHARS);
+    // First attempt: a tool call with unparseable arguments — the
+    // model-side defect, classified by the common path. The pass
+    // treats it exactly like any attempted tool call: discard and
+    // resend. Second attempt: a clean summary.
+    let agent = AgentBuilder::new(MockCompletionModel::from_stream_turns([
+        vec![MockStreamEvent::Error(
+            rig_agent::test_utils::MockError::malformed_tool_call(
+                "read",
+                "arguments are not valid JSON",
+            ),
+        )],
+        vec![
+            MockStreamEvent::text("## Goal\n- recovered"),
+            MockStreamEvent::FinalResponse(rig_core::test_utils::mock_final(
+                rig_core::completion::Usage::default(),
+            )),
+        ],
+    ]))
+    .build();
+    let config = config_with_window(10_000_000);
+    let (outcome, events) = run_manual(&cell, &agent, &config).await;
+    assert!(
+        matches!(&outcome, Outcome::Compacted { passes: 1, .. }),
+        "{outcome:?}"
+    );
+    assert!(events.iter().any(|event| matches!(
+        event,
+        SessionEvent::CompactionFailed { message, .. }
+            if message.contains("discarded and the request retried")
+    )));
+}

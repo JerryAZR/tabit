@@ -297,22 +297,31 @@ impl Agent {
         self.tool_server_handle.get_tool_defs().await
     }
 
-    /// One raw provider stream over caller-supplied history with this
-    /// agent's request configuration — the engine's per-turn request
-    /// assembly without the engine: no loop, no tool execution, no
-    /// hooks, no ledger. For callers that need a single completion
+    /// One model call over caller-supplied history, consumed and
+    /// classified through the common path ([`crate::agent::turn`]) —
+    /// the engine's per-turn request assembly and response
+    /// classification without the engine: no loop, no tool execution,
+    /// no hooks, no ledger. For callers that need a single completion
     /// shaped exactly like a turn (same preamble, same toolset, so the
     /// request prefix-rides the conversation's prompt cache) but must
-    /// not run tools — compaction's summarization request is the
-    /// consumer (its tool-call rejection is exactly "tools offered,
-    /// tools never executed"). The history's final message is the turn
-    /// being sent. `max_tokens` overrides the agent's configured cap
-    /// for this call alone; `None` keeps the configured value.
-    pub async fn raw_completion_stream(
+    /// not run tools — compaction's summarization pass is the consumer
+    /// (its tool-call rejection is exactly "tools offered, nothing
+    /// executed", answered by [`AttemptOutcome::carries_tools`]). The
+    /// history's final message is the turn being sent. `max_tokens`
+    /// overrides the agent's configured cap for this call alone;
+    /// `None` keeps the configured value. `cancel` races the
+    /// consumption (a cancellation token's `cancelled()` future);
+    /// `on_item` receives every forwarded stream item — the live view.
+    pub async fn completion_turn<F>(
         &self,
         history: Vec<Message>,
         max_tokens: Option<u64>,
-    ) -> Result<rig_core::streaming::StreamingCompletionResponse, CompletionError> {
+        cancel: F,
+        on_item: crate::agent::turn::ItemSink<'_>,
+    ) -> Result<crate::agent::turn::AttemptOutcome, CompletionError>
+    where
+        F: std::future::Future<Output = ()>,
+    {
         let prepared = build_prepared_completion_request(
             &self.model,
             &history,
@@ -325,7 +334,15 @@ impl Agent {
             &self.tool_server_handle,
         )
         .await?;
-        prepared.builder.stream().await
+        let stream = prepared.builder.stream().await?;
+        Ok(crate::agent::turn::consume_completion_stream(
+            stream,
+            cancel,
+            prepared.executable_tool_names.clone(),
+            prepared.allowed_tool_names.clone(),
+            on_item,
+        )
+        .await)
     }
 }
 

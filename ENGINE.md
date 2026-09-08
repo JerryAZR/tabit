@@ -364,7 +364,20 @@ notice channel, which the run's death cannot drop.
 
 A drained steer resets every retry streak, for the same reason as the
 defect streak: new user input changes the situation, and the budgets
-bound unattended loops. Retry budgets are small named constants.
+bound unattended loops.
+
+**The classification is one exposed path (ruled 2026-09).** The
+response questions — does it carry tool calls? broken ones? stopped at
+the length cap? — are answered through
+`rig_agent::agent::turn` ([`AttemptOutcome`]), which drives the same
+sans-io assembler the loop's MODEL phase uses; the loop's own
+classification consumes the same predicates (`carries_tools`, the
+malformed-call defect, the finish reason). Consumers outside the loop
+(compaction's pass, future one-shot callers) go through it too — the
+classification is never rebuilt at a consumption site. The loop keeps
+its generator-shaped driving (items yield mid-consumption through
+`async_stream`); both drivers feed the one assembler and settle into
+the one type, so each question has one answer. Retry budgets are small named constants.
 Streaks are run locals: fresh at every run entry (every run is an
 attended start — a message or an explicit continue signal); if
 continue is ever driven *automatically*, that driver needs its own

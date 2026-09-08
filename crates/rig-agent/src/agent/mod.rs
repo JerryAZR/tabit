@@ -50,6 +50,7 @@ pub(crate) mod prompt_request;
 pub mod run;
 pub mod runner;
 mod tool;
+pub mod turn;
 
 /// Fallback display name used in telemetry spans and logs when an agent has no
 /// configured name.
@@ -69,3 +70,4 @@ pub use prompt_request::{CompletionCall, PromptResponse};
 pub use rig_core::message::Text;
 pub use run::{ModelTurn, PendingToolCall, ProviderErrorClass};
 pub use runner::{AgentRunner, PreRequestSource, SteeringSource, TurnIdSource};
+pub use turn::{AttemptOutcome, consume_completion_stream};

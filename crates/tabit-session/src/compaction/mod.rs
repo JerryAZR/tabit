@@ -32,8 +32,7 @@ mod tests;
 
 use crate::entry::{EntryKind, SessionEntry};
 use crate::lock::{read, write};
-use futures::StreamExt;
-use rig_agent::agent::{Agent, PreRequestSource};
+use rig_agent::agent::{Agent, AttemptOutcome, PreRequestSource};
 use rig_core::completion::{CompletionError, Message, Usage};
 use rig_core::streaming::StreamedAssistantContent;
 use std::sync::Arc;
@@ -419,9 +418,13 @@ enum PassOutcome {
 }
 
 /// One pass: the request is the walked prefix plus the instruction,
-/// streamed under the token. The rejection/length-cap retry loop
-/// lives here — each retry moves the cut one boundary earlier (a
-/// strictly shorter request), floored at the empty prefix.
+/// consumed and classified through the common path
+/// ([`Agent::completion_turn`] — the engine's assembly, one exposed
+/// consumer). The pass's own policy is all that remains here: the
+/// violation verdicts, the length-cap/overflow shortening, the
+/// empty-summary guard. The rejection/length-cap retry loop lives
+/// here — each retry moves the cut one boundary earlier (a strictly
+/// shorter request), floored at the empty prefix.
 #[allow(clippy::indexing_slicing)] // sanctioned crash: the boundary is a validated index into this branch
 async fn one_pass(
     branch: &[SessionEntry],
@@ -436,11 +439,30 @@ async fn one_pass(
     loop {
         let mut history = tabit_log::fold_branch(&branch[..boundary]);
         history.push(Message::user(dials::SUMMARIZATION_INSTRUCTION));
-        let mut stream = match agent
-            .raw_completion_stream(history, Some(dials::SUMMARY_MAX_TOKENS))
-            .await
-        {
-            Ok(stream) => stream,
+        // The live view: summary text streams as bracket deltas. Tool
+        // call items pass through here too — the verdict on them is
+        // the assembled classification below (the common predicate),
+        // never this forwarding.
+        let bracket_id = id.to_string();
+        let outcome = agent
+            .completion_turn(
+                history,
+                Some(dials::SUMMARY_MAX_TOKENS),
+                token.cancelled(),
+                &mut |item| {
+                    if let StreamedAssistantContent::Text(delta) = item {
+                        emit(SessionEvent::CompactionDelta {
+                            id: bracket_id.clone(),
+                            text: delta.text,
+                        });
+                    }
+                },
+            )
+            .await;
+        let outcome = match outcome {
+            Ok(outcome) => outcome,
+            // The request itself failed to build or open: classify the
+            // same way as an in-stream failure.
             Err(error) => {
                 return match rejected(error, state, boundary, branch) {
                     RetryStep(shortened) => {
@@ -451,86 +473,76 @@ async fn one_pass(
                 };
             }
         };
-        let mut summary = String::new();
-        let mut usage = Usage::default();
-        let mut finish_reason = None;
-        let mut violated = false;
-        let mut failure: Option<CompletionError> = None;
-        while let Some(item) = tokio::select! {
-            biased;
-            _ = token.cancelled() => return PassOutcome::Cancelled,
-            item = stream.next() => item,
-        } {
-            match item {
-                Ok(StreamedAssistantContent::Text(delta)) => {
-                    summary.push_str(&delta.text);
-                    emit(SessionEvent::CompactionDelta {
-                        id: id.to_string(),
-                        text: delta.text,
-                    });
+        match outcome {
+            AttemptOutcome::Cancelled => return PassOutcome::Cancelled,
+            // A broken tool call is still an attempted tool call — the
+            // same violation verdict (the response is discarded and
+            // retried; nothing executes either way).
+            AttemptOutcome::MalformedToolCall { .. } => return PassOutcome::Violated,
+            AttemptOutcome::Failed(error) => {
+                return match rejected(error, state, boundary, branch) {
+                    RetryStep(shortened) => {
+                        boundary = shortened;
+                        continue;
+                    }
+                    Fail(message) => PassOutcome::Failed { message },
+                };
+            }
+            AttemptOutcome::Completed {
+                turn,
+                finish_reason,
+            } => {
+                // The canonical predicate: tools offered, nothing
+                // executed — a tool-carrying response fails the pass
+                // (the caller's bounded discard-and-retry handles it).
+                if turn.carries_tools() {
+                    return PassOutcome::Violated;
                 }
-                // Tool calls are forbidden by the instruction and
-                // rejected here: the request offers the real toolset
-                // (cache identity) but nothing ever executes — a
-                // violating response fails the pass. No immediate
-                // resend: a model that called tools once will likely
-                // repeat it on the same prompt; the still-tripped
-                // trigger retries at the next door.
-                Ok(StreamedAssistantContent::ToolCall { .. })
-                | Ok(StreamedAssistantContent::ToolCallDelta { .. }) => {
-                    violated = true;
+                // A length-capped summary is protocol-complete but
+                // information-incomplete: it could not fit what the
+                // prefix contained — treated exactly like a rejection
+                // (ruled).
+                if finish_reason == Some(rig_core::completion::FinishReason::Length) {
+                    match shorten(branch, boundary) {
+                        Some(shortened) if shortened < boundary => {
+                            boundary = shortened;
+                            continue;
+                        }
+                        _ => {
+                            return PassOutcome::Failed {
+                                message: "the summary hit the output cap even at the                                           shortest prefix — raise the model's output                                           limit or shrink the retained tail"
+                                    .to_string(),
+                            }
+                        }
+                    }
                 }
-                Ok(StreamedAssistantContent::Final(final_record)) => {
-                    usage = final_record.usage;
-                    finish_reason = final_record.finish_reason;
+                let summary = assistant_text(&turn);
+                if summary.trim().is_empty() {
+                    return PassOutcome::Failed {
+                        message: "the summarizer returned an empty summary".to_string(),
+                    };
                 }
-                Ok(_) => {}
-                Err(error) => {
-                    failure = Some(error);
-                    break;
-                }
+                return PassOutcome::Committed {
+                    summary,
+                    usage: turn.usage,
+                };
             }
         }
-        if let Some(error) = failure {
-            return match rejected(error, state, boundary, branch) {
-                RetryStep(shortened) => {
-                    boundary = shortened;
-                    continue;
-                }
-                Fail(message) => PassOutcome::Failed { message },
-            };
-        }
-        if violated {
-            return PassOutcome::Violated;
-        }
-        // A length-capped summary is protocol-complete but
-        // information-incomplete: it could not fit what the prefix
-        // contained — treated exactly like a rejection (ruled).
-        if finish_reason == Some(rig_core::completion::FinishReason::Length)
-            && !shorten(branch, boundary).is_some_and(|shortened| shortened < boundary)
-        {
-            return PassOutcome::Failed {
-                message: "the summary hit the output cap even at the shortest \
-                          prefix — raise the model's output limit or shrink the \
-                          retained tail"
-                    .to_string(),
-            };
-        }
-        if finish_reason == Some(rig_core::completion::FinishReason::Length) {
-            #[allow(clippy::expect_used)]
-            // Sanctioned crash: the guard above proved a shorter
-            // boundary exists.
-            let shortened = shorten(branch, boundary).expect("a shorter boundary exists");
-            boundary = shortened;
-            continue;
-        }
-        if summary.trim().is_empty() {
-            return PassOutcome::Failed {
-                message: "the summarizer returned an empty summary".to_string(),
-            };
-        }
-        return PassOutcome::Committed { summary, usage };
     }
+}
+
+/// The assembled turn's text (canonical order puts all text ahead of
+/// any trailing items; the concatenation covers non-canonical shapes
+/// too).
+fn assistant_text(turn: &rig_agent::agent::ModelTurn) -> String {
+    use rig_core::message::AssistantContent;
+    turn.choice
+        .iter()
+        .filter_map(|item| match item {
+            AssistantContent::Text(text) => Some(text.text.as_str()),
+            _ => None,
+        })
+        .collect()
 }
 
 /// What a request-level failure means for the retry loop.
