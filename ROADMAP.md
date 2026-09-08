@@ -439,28 +439,43 @@ assumptions (item 9 owns that).
   runtime escape hatch (on overflow *during* compaction, trim the
   oldest item and retry), evidence the fixed reserves under-provision
   the compaction call and get patched at runtime instead.
-- **Open agenda (the discussion continues; leanings are leanings, not
-  rulings):** (1) trigger conditions — settled per the rulings above
-  except the **concrete seam number** (it must satisfy idle 75% < seam
-  threshold, or the seam fires first mid-run and the idle pass never
-  gets its gentle window; a two-turn reserve bounds the assumed turn
-  budget to < 25% of the window) and the token-counting input (leaning:
-  last-turn provider usage — pi's four-component sum — plus a chars/4
-  estimate of trailing messages); (2) cut
-  points — leaning user-message boundaries only (yaca's stricter rule:
-  tool pairing safe by construction, no split-turn machinery) with a
-  token-budgeted retained tail; (3) tool calls during compaction —
-  references unanimous on the empty toolset; what a stray tool-call
-  response means (model defect → failed pass, nothing persisted); (4)
-  flow fit — what a compaction entry IS in the append-only tree
-  (leaning: compaction never deletes, the context projection changes —
-  checkout before a compaction restores the full chain), which layer
-  owns each seam check (the seam check is a flow change: ENGINE.md gets
-  the new state/edge before code), the event/protocol surface, and
-  subprocess children (route-all says a child compacts itself
-  structurally); (5) overflow recovery — leaning typed classification
-  over pi's regex port (we own the anthropic/openai wire clients), the
-  compact-retry-once shape, and a cannot-shrink guard that fails loud.
+- **Ruled 2026-09 — the final trigger formula (owner):** two conditions
+  over the configured window `max` — **A**: `context > 75%·max ∧
+  mailbox empty`; **B**: `context > max − 32K`. Idle compaction checks
+  both (A ∨ B); seam compaction checks only B. The disjunction makes
+  the idle bound never exceed the seam bound at every window size by
+  construction: at 128k the two coincide; below it idle rides the
+  urgent bound (75% would leave too little room); above it idle gets
+  the gentle window. B carries no mailbox gate — urgent is urgent (a
+  queued message behind an over-window context waits for the
+  compaction; the alternative is running it into the wall). The 32K
+  reserve is the two-turn budget at ~16k/turn.
+- **Open agenda (quick thoughts recorded 2026-09, owner — each gets a
+  deep dive; leanings marked):** (1) trigger conditions — **settled**
+  (formula above); the token-counting input stays a leaning (last-turn
+  provider usage, pi's four-component sum, plus chars/4 of trailing
+  messages). (2) **cut points**: valid boundaries are after model
+  outputs **without tool calls** — never after a tool-call output
+  (steers may have followed it mid-turn); when queued steers cluster
+  after a turn-end output, cut **before the first user message** so the
+  cluster stays intact in the tail; the tail rule should be a flexible
+  budget **connected to overflow recovery**, not a fixed keep-20k.
+  (3) **tools in the compaction request** — owner correction: an empty
+  toolset changes the request prefix, so the cache would no longer hit
+  (the references' no-tools unanimity doesn't survive our cache
+  ruling); the options are keep the exact same toolset + forbid calls
+  in the instruction + reject violations, or deliberately allow a
+  subset (e.g. `read`) as an accepted cache trade. (4) **flow fit —
+  three separate designs, not to be mixed**: the session file (what
+  the compaction record is on disk), the runtime session tree & state
+  (projection, head, checkout), and the execution flow (ENGINE.md —
+  who triggers, which states). (5) **overflow recovery — two
+  scenarios**: (i) known-over pre-flight — pick the cut point
+  forward-thinking (size it so the summarization request itself fits:
+  compact ~75%, keep the tail — not codex's backwards trim-and-retry)
+  and loop if the projected context is still over (with a guard);
+  (ii) the server rejected or capped the request at runtime — move the
+  cut point backwards (summarize more, keep less tail) and try again.
 
 ### 7. CLI / interface layer
 
