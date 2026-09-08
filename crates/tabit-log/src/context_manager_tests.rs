@@ -428,3 +428,111 @@ fn the_buffer_serves_the_manager_and_the_session() {
     assert!(matches!(records[0], FileRecord::Node(_)));
     assert!(matches!(records[1], FileRecord::Side(_)));
 }
+
+#[test]
+fn commit_compaction_inserts_without_moving_the_head() {
+    let (mut manager, tap) = manager();
+    manager.fold(user("first"));
+    manager.fold(assistant_text("first answer"));
+    manager.fold(user("second"));
+    manager.fold(assistant_text("second answer"));
+    let cut_child = manager
+        .active_branch()
+        .last()
+        .expect("the branch holds the final answer")
+        .id
+        .clone();
+    let head_before = manager.tree.head().map(str::to_string);
+    manager.commit_compaction(
+        "compaction-id".to_string(),
+        "the summary".to_string(),
+        cut_child,
+        1234,
+        Usage::default(),
+    );
+    // The head does not move.
+    assert_eq!(manager.tree.head(), head_before.as_deref());
+    // The entry enqueued as its own batch.
+    assert!(tap.records().iter().any(|record| matches!(
+        record,
+        FileRecord::Node(SessionEntry {
+            kind: EntryKind::Compaction { summary, .. },
+            ..
+        }) if summary == "the summary"
+    )));
+    // The derived context is [wrapped summary] + tail (the cut child
+    // and everything after it stay).
+    let messages = manager.messages();
+    assert_eq!(
+        messages.len(),
+        2,
+        "the summary plus the retained tail: {messages:?}"
+    );
+    let Message::User { content } = &messages[0] else {
+        panic!("the summary is the first message");
+    };
+    assert!(matches!(
+        content.first(),
+        UserContent::Text(text) if text.text.contains("the summary")
+    ));
+}
+
+#[test]
+fn commit_compaction_refuses_a_cut_child_off_the_branch() {
+    let (mut manager, _tap) = manager();
+    manager.fold(user("first"));
+    manager.fold(assistant_text("first answer"));
+    assert!(
+        std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            manager.commit_compaction(
+                "x".to_string(),
+                "s".to_string(),
+                "not-in-this-tree".to_string(),
+                0,
+                Usage::default(),
+            );
+        }))
+        .is_err()
+    );
+}
+
+#[test]
+fn a_second_compaction_composes_as_another_insertion() {
+    let (mut manager, _tap) = manager();
+    manager.fold(user("first"));
+    manager.fold(assistant_text("first answer"));
+    manager.fold(user("second"));
+    manager.fold(assistant_text("second answer"));
+    let branch = manager.active_branch();
+    let first_tail_start = branch[2].id.clone();
+    manager.commit_compaction(
+        "pass-1".to_string(),
+        "first summary".to_string(),
+        first_tail_start,
+        0,
+        Usage::default(),
+    );
+    // Pass 2 cuts at the very head: everything after pass 1's tail is
+    // re-summarized.
+    let head_id = manager.tree.head().expect("the head").to_string();
+    manager.commit_compaction(
+        "pass-2".to_string(),
+        "combined summary".to_string(),
+        head_id,
+        0,
+        Usage::default(),
+    );
+    let messages = manager.messages();
+    assert_eq!(
+        messages.len(),
+        2,
+        "the second summary plus the retained tail: {messages:?}"
+    );
+    let Message::User { content } = &messages[0] else {
+        panic!("user message");
+    };
+    assert!(matches!(
+        content.first(),
+        UserContent::Text(text) if text.text.contains("combined summary")
+    ));
+}

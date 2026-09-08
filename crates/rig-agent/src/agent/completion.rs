@@ -296,6 +296,37 @@ impl Agent {
     pub async fn tool_definitions(&self) -> Vec<ToolDefinition> {
         self.tool_server_handle.get_tool_defs().await
     }
+
+    /// One raw provider stream over caller-supplied history with this
+    /// agent's request configuration — the engine's per-turn request
+    /// assembly without the engine: no loop, no tool execution, no
+    /// hooks, no ledger. For callers that need a single completion
+    /// shaped exactly like a turn (same preamble, same toolset, so the
+    /// request prefix-rides the conversation's prompt cache) but must
+    /// not run tools — compaction's summarization request is the
+    /// consumer (its tool-call rejection is exactly "tools offered,
+    /// tools never executed"). The history's final message is the turn
+    /// being sent. `max_tokens` overrides the agent's configured cap
+    /// for this call alone; `None` keeps the configured value.
+    pub async fn raw_completion_stream(
+        &self,
+        history: Vec<Message>,
+        max_tokens: Option<u64>,
+    ) -> Result<rig_core::streaming::StreamingCompletionResponse, CompletionError> {
+        let prepared = build_prepared_completion_request(
+            &self.model,
+            &history,
+            self.preamble.as_deref(),
+            &self.static_context,
+            self.temperature,
+            max_tokens.or(self.max_tokens),
+            self.additional_params.as_ref(),
+            self.tool_choice.as_ref(),
+            &self.tool_server_handle,
+        )
+        .await?;
+        prepared.builder.stream().await
+    }
 }
 
 impl StreamingPrompt for Agent {

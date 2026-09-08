@@ -156,6 +156,11 @@ struct Worker {
     /// A parked replay request (idempotent read — one flag collapses
     /// any number of requests; the beat serves it before batching).
     replay_due: Arc<std::sync::atomic::AtomicBool>,
+    /// A parked `compact` command (the manual door): served at the
+    /// beat ahead of any queued batch. A flag, not a queue — the
+    /// command carries no directives a second request could differ
+    /// in; abort clears it (drop-all-pending-intent).
+    compact_due: Arc<std::sync::atomic::AtomicBool>,
 }
 
 impl Worker {
@@ -178,6 +183,8 @@ impl Worker {
     /// session.
     fn abort(&self) {
         lock(&self.checkout_slot).take();
+        self.compact_due
+            .store(false, std::sync::atomic::Ordering::Release);
         self.abort_handle.abort();
     }
 
@@ -245,6 +252,15 @@ impl Worker {
                 // every pass announces the cell.
                 self.model_register.write(selection.clone());
                 self.notices.emit(SessionEvent::model_changed(&selection));
+            }
+            // The manual compaction door: parks as pending intent and
+            // runs at the beat (idle position, ahead of queued
+            // batches). Compaction never aborts a run — it does not
+            // move the chain, so a run in flight finishes first.
+            SessionCommand::Compact { .. } => {
+                self.compact_due
+                    .store(true, std::sync::atomic::Ordering::Release);
+                self.mailbox.work_signal().notify_one();
             }
             // Lifecycle is not session-scoped — the router forwards
             // those to the lifecycle handler. Unreachable by
@@ -612,7 +628,8 @@ fn session_address(command: &SessionCommand) -> &str {
         | SessionCommand::Continue { session }
         | SessionCommand::InteractionResponse { session, .. }
         | SessionCommand::Checkout { session, .. }
-        | SessionCommand::Model { session, .. } => session,
+        | SessionCommand::Model { session, .. }
+        | SessionCommand::Compact { session, .. } => session,
         // Matched before the session-scoped arm in `handle`;
         // unreachable by construction. Sanctioned crash: see the
         // error doctrine in AGENTS.md.
@@ -813,12 +830,14 @@ fn spawn_worker(
     let interaction = InteractionHub::new(event_tx.clone(), stream.clone());
     let checkout_slot = Arc::new(Mutex::new(None::<String>));
     let replay_due = Arc::new(std::sync::atomic::AtomicBool::new(false));
+    let compact_due = Arc::new(std::sync::atomic::AtomicBool::new(false));
     let worker_notices = NoticeSink::new(&event_tx, stream.clone());
     let entry_probe = session.entry_id_probe();
     let model_probe = session.model_probe();
     let model_register = session.model_register();
     let worker_slot = checkout_slot.clone();
     let worker_replay_due = replay_due.clone();
+    let worker_compact_due = compact_due.clone();
     let worker_mailbox = mailbox.clone();
     let task_interaction = interaction.clone();
     let stats_id = id.clone();
@@ -829,7 +848,7 @@ fn spawn_worker(
         session.attach_interaction(task_interaction);
         session.attach_mailbox_notices(&event_tx, stream.clone());
         session.attach_persist_notices(&event_tx, stream.clone());
-        session.attach_subagent_channel(&event_tx);
+        session.attach_event_tap(&event_tx);
         // The resident worker. Ownership never moves: idle is the wait
         // below, running is the pump call - two positions of one loop,
         // not two tasks. One wake (the work signal) serves every
@@ -851,6 +870,12 @@ fn spawn_worker(
             if let Some(entry_id) = lock(&checkout_slot).take() {
                 execute_checkout(&mut session, &event_tx, &stream, entry_id);
             }
+            // The manual compaction door runs ahead of any queued
+            // batch (the beat's ruled order: reads, rewinds, then
+            // forced compaction, then batches).
+            if worker_compact_due.swap(false, std::sync::atomic::Ordering::Acquire) {
+                session.compact_manual().await;
+            }
             if !worker_mailbox.is_empty() || worker_mailbox.has_continue() {
                 // The pump returns on an aborted outcome (a checkout
                 // aborts its way here), so anything parked behind a
@@ -869,6 +894,11 @@ fn spawn_worker(
                     .await;
                 continue;
             }
+            // The idle compaction door: with the mailbox empty, the
+            // beat evaluates A ∨ B and runs the box when it fires. A
+            // queued message arriving mid-compaction waits for it
+            // (always-queue) and runs on the compacted context.
+            session.compact_idle().await;
             tokio::select! {
                 biased;
                 _ = shutdown.cancelled() => {
@@ -889,6 +919,9 @@ fn spawn_worker(
                     }
                     if let Some(entry_id) = lock(&checkout_slot).take() {
                         execute_checkout(&mut session, &event_tx, &stream, entry_id);
+                    }
+                    if worker_compact_due.swap(false, std::sync::atomic::Ordering::Acquire) {
+                        session.compact_manual().await;
                     }
                     // The clean-exit flush attempt (flag 8): one more
                     // drain before the stream ends.
@@ -925,6 +958,7 @@ fn spawn_worker(
             model_register,
             model_probe,
             replay_due: worker_replay_due,
+            compact_due,
         },
         join,
     )

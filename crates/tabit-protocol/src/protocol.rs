@@ -14,8 +14,10 @@ use serde::{Deserialize, Serialize};
 
 /// The protocol version this build speaks. Clients declare theirs in
 /// [`ClientFrame::Initialize`]; a mismatch rejects the connection at the
-/// handshake.
-pub const PROTOCOL_VERSION: u32 = 6;
+/// handshake. v7: compaction — the `compact` command and the
+/// `compaction_started`/`compaction_delta`/`compaction_finished`/
+/// `compaction_failed` event bracket.
+pub const PROTOCOL_VERSION: u32 = 7;
 
 /// Which session produced an event. The stamp is the session id
 /// itself (v3: the `"main"` alias is retired — one name per session);
@@ -69,6 +71,7 @@ pub struct EventFrame {
 /// | `Abort`               | no-op                  | aborts; discards queued messages     |
 /// | `InteractionResponse` | no-op (logged)         | routes the answer by id to the asker |
 /// | `Checkout`            | rewinds; replays       | aborts the run; rewinds; replays     |
+/// | `Compact`             | runs the box at the beat | parks; runs when the run ends      |
 ///
 /// Outcomes are events (`user_message` for acceptance, the run
 /// terminals for results); a command naming an unknown session yields
@@ -168,6 +171,22 @@ pub enum SessionCommand {
         /// (`None` clears — absent on the wire means the same).
         #[serde(default)]
         thinking_level: Option<String>,
+    },
+    /// Run compaction now — the manual door (v7). The same machinery
+    /// as the automatic doors, forced regardless of the trigger
+    /// conditions and guarded only by the short-history skip. Idle, it
+    /// runs at the session's next beat; mid-run it parks and runs when
+    /// the run ends (compaction never aborts a run — it does not move
+    /// the chain, so there is nothing to make obsolete). Outcomes: the
+    /// `compaction_*` bracket. `directives` is reserved for typed
+    /// compaction overrides (kept-tail size, summarizer focus); no
+    /// directive is defined yet, and the box ignores the field today.
+    Compact {
+        /// The target session id.
+        session: String,
+        /// Reserved directives (see the variant docs).
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        directives: Option<serde_json::Value>,
     },
 }
 

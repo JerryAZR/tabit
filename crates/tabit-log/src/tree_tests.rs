@@ -120,3 +120,83 @@ fn path_to_a_broken_link_is_a_fault() {
         .expect_err("missing parent");
     assert!(fault.0.contains("missing node"));
 }
+
+fn compaction_node(id: &str, parent: Option<&str>, cut_child: &str) -> SessionEntry {
+    SessionEntry::with_id(
+        id.to_string(),
+        parent.map(str::to_string),
+        "t".to_string(),
+        crate::entry::EntryKind::Compaction {
+            summary: "summarized".to_string(),
+            cut_child: cut_child.to_string(),
+            tokens_before: 0,
+            usage: rig_core::completion::Usage::default(),
+        },
+    )
+}
+
+#[test]
+fn insert_compaction_reparents_the_cut_child_without_moving_the_head() {
+    let mut tree = SessionTree::empty();
+    tree.append(node("a", None));
+    tree.append(node("b", Some("a")));
+    tree.append(node("c", Some("b")));
+    tree.append(node("d", Some("c")));
+    // Cut between b and c: the compaction node lands there.
+    tree.insert_compaction(compaction_node("x", Some("b"), "c"))
+        .expect("the insertion is well-formed");
+    // The head does not move; the path routes through the insertion.
+    assert_eq!(tree.head(), Some("d"));
+    assert_eq!(
+        tree.path_to_head()
+            .iter()
+            .map(|e| e.id.as_str())
+            .collect::<Vec<_>>(),
+        ["a", "b", "x", "c", "d"]
+    );
+    // A branch from the pre-compaction node never sees the insertion.
+    assert_eq!(
+        tree.path_to(Some("b"))
+            .expect("b exists")
+            .iter()
+            .map(|e| e.id.as_str())
+            .collect::<Vec<_>>(),
+        ["a", "b"]
+    );
+}
+
+#[test]
+fn insert_compaction_rejects_a_mismatched_edge() {
+    let mut tree = SessionTree::empty();
+    tree.append(node("a", None));
+    tree.append(node("b", Some("a")));
+    tree.append(node("c", Some("b")));
+    // The entry claims the cut sits after a, but c's parent is b.
+    let fault = tree
+        .insert_compaction(compaction_node("x", Some("a"), "c"))
+        .expect_err("the edge must exist");
+    assert!(fault.0.contains("cut child"), "{fault:?}");
+    // Nothing changed.
+    assert_eq!(
+        tree.path_to_head()
+            .iter()
+            .map(|e| e.id.as_str())
+            .collect::<Vec<_>>(),
+        ["a", "b", "c"]
+    );
+}
+
+#[test]
+fn insert_compaction_rejects_unknown_nodes_and_non_compaction_entries() {
+    let mut tree = SessionTree::empty();
+    tree.append(node("a", None));
+    assert!(
+        tree.insert_compaction(compaction_node("x", Some("ghost"), "a"))
+            .is_err()
+    );
+    assert!(
+        tree.insert_compaction(compaction_node("x", Some("a"), "ghost"))
+            .is_err()
+    );
+    assert!(tree.insert_compaction(node("x", Some("a"))).is_err());
+}

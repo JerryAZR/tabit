@@ -67,6 +67,16 @@ impl Projection {
             EntryKind::ToolResult { result } => {
                 self.tool_result(entry, result, events);
             }
+            // The compaction marker: the durable record that history
+            // was compacted here. The transcript keeps rendering the
+            // pre-compaction entries (they stay on the walked chain —
+            // the file never deletes); this marker is where a frontend
+            // draws the boundary the model's context has.
+            EntryKind::Compaction { .. } => {
+                events.push(SessionEvent::CompactionFinished {
+                    id: entry.id.clone(),
+                });
+            }
         }
     }
 

@@ -729,6 +729,13 @@ impl GuiState {
             SessionEvent::SessionsAvailable { .. }
             | SessionEvent::SessionCreated { .. }
             | SessionEvent::SessionOpened { .. } => {}
+            // The compaction bracket (v7): an interim no-op — the
+            // redesign worktree owns the real rendering (master-side
+            // GUI changes stay minimal until it lands).
+            SessionEvent::CompactionStarted { .. }
+            | SessionEvent::CompactionDelta { .. }
+            | SessionEvent::CompactionFinished { .. }
+            | SessionEvent::CompactionFailed { .. } => {}
         }
     }
 

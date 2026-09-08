@@ -195,3 +195,74 @@ fn user_message_boundaries_list_every_user_message_in_order() {
         .collect();
     assert_eq!(texts, vec!["first", "second", "a steer mid-run"]);
 }
+
+fn compaction(summary: &str) -> EntryKind {
+    EntryKind::Compaction {
+        summary: summary.to_string(),
+        cut_child: "irrelevant-to-the-fold".to_string(),
+        tokens_before: 0,
+        usage: rig_core::completion::Usage::default(),
+    }
+}
+
+#[test]
+fn a_compaction_node_truncates_the_prefix_and_wraps_the_summary() {
+    let folded = fold_branch(&[
+        entry(user("first question")),
+        entry(assistant_text("first answer")),
+        entry(compaction("the summary")),
+        entry(user("after the cut")),
+        entry(assistant_text("after answer")),
+    ]);
+    // The walked context is [summary] + tail — nothing before the
+    // insertion survives, and the summary enters as a user-role
+    // wrapped message.
+    assert_eq!(folded.len(), 3);
+    let Message::User { content } = &folded[0] else {
+        panic!("the summary enters as a user message");
+    };
+    let UserContent::Text(text) = content.first() else {
+        panic!("a text part");
+    };
+    assert!(text.text.contains("the summary"));
+    assert!(
+        text.text
+            .starts_with(crate::fold::COMPACTION_SUMMARY_PREFIX.trim())
+    );
+    assert!(
+        text.text
+            .ends_with(crate::fold::COMPACTION_SUMMARY_SUFFIX.trim())
+    );
+}
+
+#[test]
+fn only_the_last_compaction_on_a_path_survives() {
+    let folded = fold_branch(&[
+        entry(user("old")),
+        entry(compaction("first summary")),
+        entry(user("middle")),
+        entry(compaction("second summary")),
+        entry(user("tail")),
+    ]);
+    let Message::User { content } = &folded[0] else {
+        panic!("user message first");
+    };
+    let UserContent::Text(text) = content.first() else {
+        panic!("a text part");
+    };
+    assert!(text.text.contains("second summary"));
+    assert!(!text.text.contains("first summary"));
+    assert_eq!(folded.len(), 2, "the summary plus the tail: {folded:?}");
+}
+
+#[test]
+fn a_compaction_boundary_is_closed_for_the_tail_check() {
+    // A path ending AT a compaction node (a checkout target) is a
+    // legal, closed branch.
+    let path = vec![
+        entry(user("q")),
+        entry(assistant_text("a")),
+        entry(compaction("s")),
+    ];
+    assert_eq!(tail_is_closed(&path), Ok(()));
+}

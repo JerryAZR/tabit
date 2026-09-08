@@ -65,6 +65,7 @@
 //!
 //! [`Session::prompt`]: crate::Session::prompt
 
+mod compaction;
 mod endpoint;
 mod error;
 mod interaction;

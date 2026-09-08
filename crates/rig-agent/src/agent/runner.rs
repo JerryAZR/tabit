@@ -44,7 +44,7 @@ use super::{
 };
 use rig_core::{
     message::{ToolCall, ToolChoice, UserContent},
-    wasm_compat::{WasmCompatSend, WasmCompatSync},
+    wasm_compat::{WasmBoxedFuture, WasmCompatSend, WasmCompatSync},
 };
 
 use tabit_log::ContextManager;
@@ -157,6 +157,20 @@ pub(crate) enum RunInput {
 
 impl RunInput {}
 
+/// Where the driver pauses between deciding to send and sending: the
+/// pre-request door (ENGINE.md, the compaction amendment). The engine
+/// awaits the door with no knowledge of its interior; a door may
+/// rewrite the conversation (its writes are time-exclusive with the
+/// loop's — the loop is suspended at the await), and the loop re-reads
+/// history after it returns. A door runs at exactly one point: after
+/// the DECIDE exits pass and before PREPARE reads history — every
+/// request, the first included.
+pub trait PreRequestSource: WasmCompatSend + WasmCompatSync {
+    /// Run at the point the run is about to send a request to the
+    /// model.
+    fn at_door(&self) -> WasmBoxedFuture<'_, ()>;
+}
+
 /// A hook-aware driver over [`AgentRun`].
 ///
 /// Construct one from an [`Agent`] with [`Agent::runner`], attach hooks with
@@ -189,6 +203,10 @@ pub struct AgentRunner {
     /// Queued user input injected at steering points; `None` disables
     /// steering for this request.
     pub(crate) steering: Option<Arc<dyn SteeringSource>>,
+    /// The pre-request door (ENGINE.md, the compaction amendment):
+    /// awaited between DECIDE and PREPARE on every request. Opaque to
+    /// the engine — its interior is the session's; `None` is no door.
+    pub(crate) pre_request: Option<Arc<dyn PreRequestSource>>,
     /// Called once per model-call attempt, at the moment the attempt
     /// commits, to mint the turn's announced id. The engine's default is
     /// its short random ids; consumers that key durable records on turn
@@ -243,6 +261,7 @@ impl AgentRunner {
             hooks: agent.hooks.clone(),
             error_usage: None,
             steering: None,
+            pre_request: None,
             turn_id_source: Arc::new(rig_core::id::generate),
         }
     }
@@ -261,6 +280,14 @@ impl AgentRunner {
     /// messages that do not fit stay queued in the source).
     pub fn steering(mut self, steering: Arc<dyn SteeringSource>) -> Self {
         self.steering = Some(steering);
+        self
+    }
+
+    /// Attach the pre-request door (ENGINE.md, the compaction
+    /// amendment): awaited between the decision to send and the request
+    /// itself, on every request. Opaque to the engine.
+    pub fn pre_request(mut self, door: Arc<dyn PreRequestSource>) -> Self {
+        self.pre_request = Some(door);
         self
     }
 

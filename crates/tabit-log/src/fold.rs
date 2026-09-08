@@ -14,9 +14,24 @@ use rig_core::OneOrMany;
 use rig_core::completion::Message;
 use rig_core::message::{ToolCall, UserContent};
 
+/// How the summary enters the model-visible context: a user-role
+/// message wrapping the summary text (the references' pattern — codex's
+/// "another language model" prefix, pi's `<summary>` tags). User-role,
+/// never system: mid-conversation system messages are unsupported by
+/// design (AGENTS.md), and the wrapper must read as conversation
+/// history, not instruction. Everything before the compaction node on
+/// the walked path is dropped from the view — the fold truncates what
+/// it accumulated when it reaches a compaction entry, so only the
+/// LAST compaction on the path and the entries after it survive.
+pub const COMPACTION_SUMMARY_PREFIX: &str = "The conversation history before this point was compacted into the following summary:\n\n<summary>\n";
+/// The closing tag of [`COMPACTION_SUMMARY_PREFIX`].
+pub const COMPACTION_SUMMARY_SUFFIX: &str = "\n</summary>";
+
 /// Fold a whole branch (root → head) into the model-visible message
 /// list. Consecutive `tool_result` nodes merge into one user message
-/// per batch.
+/// per batch. A `compaction` node truncates everything before it and
+/// enters as the wrapped summary message — walkers stop at the
+/// compaction, included.
 pub fn fold_branch(entries: &[SessionEntry]) -> Vec<Message> {
     let mut messages: Vec<Message> = Vec::new();
     let mut pending_results: Vec<UserContent> = Vec::new();
@@ -32,6 +47,18 @@ pub fn fold_branch(entries: &[SessionEntry]) -> Vec<Message> {
             }
             EntryKind::ToolResult { result } => {
                 pending_results.push(UserContent::ToolResult(result.clone()));
+            }
+            EntryKind::Compaction { summary, .. } => {
+                // The stop rule (v4): the summary replaces the walked
+                // prefix wholesale — clear the accumulated view (and any
+                // staged results, which belong to that prefix) and start
+                // from the summary. A later compaction on the same path
+                // repeats this, so only the last one survives.
+                pending_results.clear();
+                messages.clear();
+                messages.push(Message::user(format!(
+                    "{COMPACTION_SUMMARY_PREFIX}{summary}{COMPACTION_SUMMARY_SUFFIX}"
+                )));
             }
         }
     }

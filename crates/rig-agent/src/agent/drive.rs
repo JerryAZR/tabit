@@ -379,6 +379,18 @@ where
                 }
             }
 
+            // ── the pre-request door ────────────────────────────────
+            // The point the run is about to send a request to the model
+            // (ENGINE.md, the compaction amendment): an opaque leaf the
+            // engine awaits. Its interior may rewrite the conversation
+            // (time-exclusive with the loop's writes — the loop is
+            // suspended here); the history read below sees whatever the
+            // door left. Never reached on a stop or exit path — only a
+            // turn that will actually issue reads this.
+            if let Some(door) = runner.pre_request.as_ref() {
+                door.at_door().await;
+            }
+
             // ── PREPARE ─────────────────────────────────────────────
             // The conversation is never empty here: the entry rule above
             // just proved it, and the loop only folds into it.

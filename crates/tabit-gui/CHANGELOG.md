@@ -18,7 +18,38 @@ software/hardware contract, not just the encodings):
 Every `PROTOCOL_VERSION` bump — and every additive change a frontend
 could observe — gets an entry here in the same commit.
 
-## v6 (current)
+## v7 (current)
+
+### wire: the compaction bracket and the `compact` command (2026-09)
+
+Protocol version 7. Compaction (ROADMAP item 6) ships its frontend
+surface: the `compact { session, directives? }` command (the manual
+door — forced compaction; idle runs it at the beat, running parks it)
+and the event bracket
+`compaction_started { id, pass }` → `compaction_delta { id, text }`
+(streamed summary) → `compaction_finished { id }`, with
+`compaction_failed { id, message }` for a failed or cancelled pass.
+The bracket `id` is the pass's eventual compaction-entry id. Not a
+run terminal — a mid-run bracket simply lands between turns. A
+replayed session renders `compaction_finished` markers at each
+boundary; history before a compaction still replays (the file never
+deletes). Master's reducer no-ops the bracket (the redesign worktree
+owns the real rendering); FRONTEND.md §5/§6 carry the contract.
+
+### behavior: context compaction is live (2026-09)
+
+Two automatic doors now run the same machinery with no frontend
+input: after a run ends at idle (condition A: over 75% of the
+configured `context_window` with an empty mailbox) and before any
+request that would exceed `window − 32K` (condition B — a mid-run
+bracket is this door firing). An overflow rejection mid-run also
+compacts (the error itself teaches the window) and the conversation
+retries — visible as `run_failed` followed by a fresh run, with the
+bracket in between. Models without a configured `context_window`
+skip the automatic doors (overflow recovery still works); set it in
+providers.toml to enable them.
+
+## v6
 
 ### wire: the interaction event's tag is `interaction_request` (2026-09)
 

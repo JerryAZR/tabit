@@ -380,6 +380,16 @@ fn print_event(event: &SessionEvent) {
         | SessionEvent::ReplayDone
         | SessionEvent::CheckedOut { .. }
         | SessionEvent::ModelChanged { .. } => {}
+        // The compaction bracket (v7): stdout stays the answer channel,
+        // so the boundaries note on stderr and the summary stays quiet
+        // in print mode.
+        SessionEvent::CompactionStarted { .. } => {
+            let _ = writeln!(std::io::stderr(), "[compacting the conversation…]");
+        }
+        SessionEvent::CompactionDelta { .. } | SessionEvent::CompactionFinished { .. } => {}
+        SessionEvent::CompactionFailed { message, .. } => {
+            let _ = writeln!(std::io::stderr(), "warning: compaction failed: {message}");
+        }
         // The host's session catalog and creations are frontend
         // concerns; print mode is a single-session consumer.
         SessionEvent::SessionsAvailable { .. }

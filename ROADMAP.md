@@ -369,6 +369,16 @@ assumptions (item 9 owns that).
 
 ### 6. Compaction + overflow recovery
 
+**SHIPPED (2026-09, the rulings below implemented whole):** the box
+(`tabit-session/src/compaction/`), the dials file, the three doors
+(pre-request leaf, the beat doors, the `compact` command), the
+overflow intercept (session-side; the wall teaches the window), the
+`compaction` tree node (session format v4 — v3 files still load),
+the insertion fold (walkers stop at the compaction, included), typed
+overflow classification at the rig-core transport layer, and protocol
+v7 (the bracket events + the command). The flow facts live in
+ENGINE.md's compaction amendment.
+
 - Context compaction: summarize old turns when approaching the context
   window (pi: replace history with a summary + recent tail).
 - Overflow detection and recovery: detect context-overflow errors from

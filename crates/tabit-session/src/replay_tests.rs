@@ -254,3 +254,40 @@ fn failed_results_keep_their_structured_status() {
                 && content.contains("status 3")
     )));
 }
+
+#[test]
+fn a_compaction_node_replays_as_the_boundary_marker() {
+    let events = super::project_events(&[
+        entry(
+            "u1",
+            EntryKind::UserMessage {
+                message: Message::user("old work"),
+            },
+        ),
+        entry(
+            "x1",
+            EntryKind::Compaction {
+                summary: "summarized".to_string(),
+                cut_child: "irrelevant".to_string(),
+                tokens_before: 0,
+                usage: rig_core::completion::Usage::default(),
+            },
+        ),
+        entry(
+            "u2",
+            EntryKind::UserMessage {
+                message: Message::user("after the cut"),
+            },
+        ),
+    ]);
+    // The full history renders (the file never deletes); the marker
+    // sits at the insertion's position.
+    assert!(matches!(
+        &events[events.len() - 2],
+        SessionEvent::CompactionFinished { id } if id == "x1"
+    ));
+    assert!(matches!(
+        events.last(),
+        Some(SessionEvent::UserMessage { text, .. }) if text.contains("after the cut")
+    ));
+}

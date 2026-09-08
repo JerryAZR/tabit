@@ -2483,3 +2483,57 @@ async fn each_model_call_attempt_is_announced_before_its_content() {
         "the second turn commits before the run ends"
     );
 }
+
+#[tokio::test]
+async fn the_pre_request_door_runs_before_every_request() {
+    use std::sync::atomic::{AtomicUsize, Ordering};
+
+    use crate::agent::runner::PreRequestSource;
+    use crate::test_utils::{MockAddTool, MockCompletionModel, MockStreamEvent};
+
+    struct CountingDoor(Arc<AtomicUsize>);
+    impl PreRequestSource for CountingDoor {
+        fn at_door(&self) -> rig_core::wasm_compat::WasmBoxedFuture<'_, ()> {
+            let count = self.0.fetch_add(1, Ordering::SeqCst);
+            // The door runs BEFORE the request: at entry, exactly
+            // `count` requests have been issued (0 before the first).
+            assert_eq!(count, 0, "reached per run? this script is single-turn");
+            Box::pin(async {})
+        }
+    }
+
+    let door_calls = Arc::new(AtomicUsize::new(0));
+    let agent = crate::AgentBuilder::new(MockCompletionModel::from_stream_turns([vec![
+        MockStreamEvent::text("ok"),
+        MockStreamEvent::final_response_with_default_usage(),
+    ]]))
+    .tool(MockAddTool)
+    .build();
+    let mut stream = agent
+        .stream_prompt("hi")
+        .pre_request(Arc::new(CountingDoor(door_calls.clone())))
+        .await;
+    while let Some(item) = stream.next().await {
+        assert!(item.is_ok(), "the scripted turn succeeds: {item:?}");
+    }
+    assert_eq!(
+        door_calls.load(Ordering::SeqCst),
+        1,
+        "one request, one door"
+    );
+}
+
+#[tokio::test]
+async fn a_run_without_a_door_is_unchanged() {
+    use crate::test_utils::{MockCompletionModel, MockStreamEvent};
+    let agent = crate::AgentBuilder::new(MockCompletionModel::from_stream_turns([vec![
+        MockStreamEvent::text("fine"),
+        MockStreamEvent::final_response_with_default_usage(),
+    ]]))
+    .build();
+    let mut stream = agent.stream_prompt("hi").await;
+    let output = crate::agent::prompt_request::streaming::fold_stream(&mut stream)
+        .await
+        .expect("the plain run still works");
+    assert_eq!(output.output, "fine");
+}

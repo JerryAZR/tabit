@@ -47,6 +47,17 @@ macro_rules! forward_prompt_setters {
             self
         }
 
+        /// Attach the pre-request door (ENGINE.md, the compaction
+        /// amendment): awaited between the decision to send and the
+        /// request itself, on every request. Opaque to the engine.
+        pub fn pre_request(
+            mut self,
+            door: ::std::sync::Arc<dyn $crate::agent::runner::PreRequestSource>,
+        ) -> Self {
+            self.$recv = self.$recv.pre_request(door);
+            self
+        }
+
         /// Override the agent preamble for this request.
         pub fn preamble(mut self, preamble: impl Into<String>) -> Self {
             self.$recv = self.$recv.preamble(preamble);

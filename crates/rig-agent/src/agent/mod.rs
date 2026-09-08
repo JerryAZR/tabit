@@ -68,4 +68,4 @@ pub use prompt_request::streaming::{
 pub use prompt_request::{CompletionCall, PromptResponse};
 pub use rig_core::message::Text;
 pub use run::{ModelTurn, PendingToolCall, ProviderErrorClass};
-pub use runner::{AgentRunner, SteeringSource, TurnIdSource};
+pub use runner::{AgentRunner, PreRequestSource, SteeringSource, TurnIdSource};

@@ -2899,3 +2899,150 @@ async fn a_blocked_store_blocks_starts_and_recovers() {
     );
     let _ = std::fs::remove_dir_all(base.dir());
 }
+
+/// A config whose model declares a context window, so the idle door's
+/// conditions fire once the dialogue is large enough.
+fn windowed_config(window: u64) -> Arc<tabit_config::TabitConfig> {
+    Arc::new(
+        tabit_config::TabitConfig::from_toml_str(
+            &format!(
+                r#"
+[providers.p]
+base_url = "http://127.0.0.1:9999/v1"
+api = "openai-completions"
+
+[[providers.p.models]]
+id = "m"
+context_window = {window}
+"#
+            ),
+            std::path::Path::new("test.toml"),
+        )
+        .expect("valid config"),
+    )
+}
+
+#[tokio::test]
+async fn the_idle_door_compacts_after_a_large_run_and_the_file_holds_the_entry() {
+    let store = temp_store("compaction-idle");
+    // Two rounds of dialogue (each answer ~80k chars ≈ 20k tokens):
+    // the context lands around 40k estimated tokens — over the 60k
+    // window's urgent bound (60k − 32.7k) — and the cut at the first
+    // round's end keeps a ~20k-token tail past the floor.
+    let big = "x".repeat(80_000);
+    let session = Factory::new(vec![
+        text_turn(&big),
+        text_turn(&big),
+        text_turn("## Goal\n- the summarized work"),
+    ])
+    .into_builder_with_config(
+        store.clone(),
+        windowed_config(60_000),
+        ModelSelection::new("p", "m"),
+    )
+    .create("C:/w")
+    .expect("session");
+    let path = session.path().expect("file-backed").to_path_buf();
+    let mut handle = SessionHost::spawn(session, Vec::new(), plain_wiring(&store));
+    let id = boot_id(&handle);
+    handle.message(&id, "go");
+    tokio::time::sleep(Duration::from_millis(200)).await;
+    handle.message(&id, "more");
+    let frames = drain(&mut handle).await;
+
+    // Both runs finished, then the beat's idle door ran the box: the
+    // compaction bracket followed the last terminal.
+    assert_eq!(finished_outputs(&frames).len(), 2);
+    let terminal_at = frames
+        .iter()
+        .rposition(|frame| terminal(&frame.event))
+        .expect("a terminal");
+    let bracket_at = frames
+        .iter()
+        .position(|frame| matches!(frame.event, SessionEvent::CompactionStarted { .. }))
+        .expect("the idle door fired");
+    assert!(bracket_at > terminal_at, "compaction follows the runs");
+    assert!(frames.iter().any(|frame| matches!(
+        &frame.event,
+        SessionEvent::CompactionDelta { text, .. } if text.contains("summarized work")
+    )));
+    assert!(
+        frames
+            .iter()
+            .any(|frame| matches!(frame.event, SessionEvent::CompactionFinished { .. }))
+    );
+
+    // The file holds the entry; a reload derives [summary] + tail.
+    let parsed = crate::parser::parse_file(&path).expect("the file reloads");
+    assert!(
+        parsed
+            .tree
+            .path_to_head()
+            .iter()
+            .any(|entry| matches!(entry.kind, crate::EntryKind::Compaction { .. }))
+    );
+    let messages = crate::ContextManager::from_tree(
+        parsed.tree,
+        Arc::new(std::sync::Mutex::new(tabit_log::NullBuffer)),
+    )
+    .messages();
+    assert!(matches!(
+        messages.first(),
+        Some(rig_agent::completion::Message::User { content })
+            if matches!(
+                content.first(),
+                rig_core::message::UserContent::Text(text)
+                    if text.text.contains("summarized work")
+            )
+    ));
+    std::fs::remove_dir_all(store.dir()).ok();
+}
+
+#[tokio::test]
+async fn the_compact_command_forces_the_box_on_an_idle_session() {
+    let store = temp_store("compaction-manual");
+    let big = "x".repeat(80_000);
+    // A window so large the idle door never fires on its own.
+    let session = Factory::new(vec![
+        text_turn(&big),
+        text_turn(&big),
+        text_turn("## Goal\n- the forced summary"),
+    ])
+    .into_builder_with_config(
+        store.clone(),
+        windowed_config(100_000_000),
+        ModelSelection::new("p", "m"),
+    )
+    .create("C:/w")
+    .expect("session");
+    let mut handle = SessionHost::spawn(session, Vec::new(), plain_wiring(&store));
+    let id = boot_id(&handle);
+    handle.message(&id, "go");
+    tokio::time::sleep(Duration::from_millis(200)).await;
+    handle.message(&id, "more");
+    // Let the run finish before the manual door parks (compaction
+    // parks when busy and runs at the beat).
+    tokio::time::sleep(Duration::from_millis(200)).await;
+    handle.command_link().send(SessionCommand::Compact {
+        session: id.clone(),
+        directives: None,
+    });
+    let frames = drain(&mut handle).await;
+
+    // The forced pass ran after the run's terminal (the idle door
+    // stayed quiet — the window is enormous).
+    let bracket_at = frames
+        .iter()
+        .position(|frame| matches!(frame.event, SessionEvent::CompactionStarted { .. }))
+        .expect("the manual door ran the box");
+    let terminal_at = frames
+        .iter()
+        .position(|frame| terminal(&frame.event))
+        .expect("a terminal");
+    assert!(bracket_at > terminal_at);
+    assert!(frames.iter().any(|frame| matches!(
+        &frame.event,
+        SessionEvent::CompactionDelta { text, .. } if text.contains("forced summary")
+    )));
+    std::fs::remove_dir_all(store.dir()).ok();
+}

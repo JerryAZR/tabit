@@ -199,7 +199,8 @@ impl Session {
             };
         }
         let stream = self.open_run(&run_token).await;
-        let driven = self.drive(stream, &run_token, &mut sink).await;
+        let mut driven = self.drive(stream, &run_token, &mut sink).await;
+        driven = self.overflow_intercept(driven).await;
         let (outcome, output, usage) = self.conclude(driven, &mut sink);
         RunSummary {
             outcome,
@@ -207,6 +208,35 @@ impl Session {
             usage,
             events: sink.events,
         }
+    }
+
+    /// The overflow intercept (ENGINE.md's compaction amendment): a
+    /// typed context-overflow failure routes to the compaction box —
+    /// with the window the error itself reported — before the
+    /// terminal lands. A repaired context sets a continue intent: the
+    /// failed turn folded nothing (the conversation still ends at the
+    /// pre-failure roundtrip), so the pump's next run re-answers the
+    /// same turn over the compacted context. An unrepairable one
+    /// (cannot shrink, the empty prefix) leaves the failure standing
+    /// and `run_failed` reports it.
+    async fn overflow_intercept(&mut self, driven: DriveOutcome) -> DriveOutcome {
+        if driven.aborted {
+            return driven;
+        }
+        let Some(failure) = &driven.failure else {
+            return driven;
+        };
+        let Some(overflow) = overflow_of(failure) else {
+            return driven;
+        };
+        if self.compact_after_overflow(&overflow).await {
+            // The retry is visible, not hidden: this run still fails
+            // (its request was rejected), and the continue intent
+            // starts the next run over the compacted context — the
+            // compaction bracket in between explains why.
+            self.mailbox.continue_run();
+        }
+        driven
     }
 
     /// A run that cannot start its engine: the queued batch is still
@@ -254,7 +284,7 @@ impl Session {
                 self.id.clone(),
                 self.selection(),
                 self.cwd.clone(),
-                self.subagent_events.get().cloned(),
+                self.event_tap.get().cloned(),
             )));
         }
         // The cell IS the conversation (ENGINE.md, the unified
@@ -273,6 +303,13 @@ impl Session {
             .steering(Arc::new(SessionSteers {
                 mailbox: self.mailbox.clone(),
             }))
+            // The pre-request door (ENGINE.md's compaction amendment):
+            // an opaque leaf the engine awaits between DECIDE and
+            // PREPARE; inside, the box may compact before the request
+            // assembles. Ordering, not coordination — the drain at
+            // CONVERGE and the history read at PREPARE sit either
+            // side of it.
+            .pre_request(self.pre_request_door(run_token))
             .tool_context(tool_context)
             // Announced turn ids are entry ids (ENGINE.md behavior delta
             // 10): the engine mints from tabit's UUIDv7 source, so the id
@@ -397,6 +434,10 @@ impl Session {
                             call.usage,
                         );
                     }
+                    // The compaction box's trigger input: the last
+                    // provider-reported request total (the exact
+                    // component of the context estimate).
+                    self.compaction.note_usage(call.usage);
                     sink.emit(SessionEvent::CompletionCall {
                         turn_id: turn_id.clone(),
                         input_tokens: call.usage.input_tokens,
@@ -514,6 +555,18 @@ impl Session {
             hub.clear_pending();
         }
         (outcome, output, usage)
+    }
+}
+
+/// Map an engine failure's provider error to its typed overflow
+/// classification, when it is one.
+fn overflow_of(failure: &SessionError) -> Option<rig_core::completion::ContextOverflow> {
+    let SessionError::Prompt(error) = failure else {
+        return None;
+    };
+    match error {
+        rig_agent::completion::PromptError::CompletionError(inner) => inner.as_context_overflow(),
+        _ => None,
     }
 }
 

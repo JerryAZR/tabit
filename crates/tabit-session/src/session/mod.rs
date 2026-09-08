@@ -30,6 +30,7 @@
 
 mod assemble;
 mod builder;
+mod compaction_doors;
 mod mailbox;
 mod persist;
 mod rewind;
@@ -150,12 +151,21 @@ pub struct Session {
     /// ([`SessionBuilder::subagents`]): the process-wide parts; the
     /// per-run capability is minted at run open.
     subagent_parts: Option<Arc<crate::subagent::SubagentParts>>,
-    /// The frontend channel's weak end for child-event forwarding
-    /// (the subagent tap), attached by the worker at spawn — the same
-    /// attach-once discipline the notice slots keep.
-    subagent_events: Arc<
+    /// The frontend channel's weak end for module-level emissions —
+    /// anything a session subsystem emits outside a run's item fold
+    /// (subagent child-event forwarding, the compaction bracket).
+    /// Attached by the worker at spawn — the same attach-once
+    /// discipline the notice slots keep; a dead tap means nobody is
+    /// left to tell.
+    event_tap: Arc<
         std::sync::OnceLock<tokio::sync::mpsc::WeakUnboundedSender<tabit_protocol::EventFrame>>,
     >,
+    /// The compaction box's session state (the window the wall taught,
+    /// the last completion's usage) — the pass logic lives in
+    /// [`crate::compaction`], the doors call into it. Shared with the
+    /// pre-request leaf (an `Arc`: the leaf is minted at run open and
+    /// lives inside the engine's stream).
+    compaction: std::sync::Arc<crate::compaction::Compaction>,
 }
 
 /// The receive-time view of the conversation (checkout validation at
@@ -189,14 +199,15 @@ impl Session {
         self.interaction = Some(hub);
     }
 
-    /// Attach the channel subagent child events forward through.
-    /// Called once by the session worker at spawn; the weak end keeps
-    /// the notice discipline (the stream ends with the frontend).
-    pub fn attach_subagent_channel(
+    /// Attach the frontend channel module-level emissions forward
+    /// through (subagent child events, the compaction bracket). Called
+    /// once by the session worker at spawn; the weak end keeps the
+    /// notice discipline (the stream ends with the frontend).
+    pub fn attach_event_tap(
         &mut self,
         events: &tokio::sync::mpsc::UnboundedSender<tabit_protocol::EventFrame>,
     ) {
-        let _ = self.subagent_events.set(events.downgrade());
+        let _ = self.event_tap.set(events.downgrade());
     }
 
     /// The session id.

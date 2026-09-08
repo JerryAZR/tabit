@@ -28,7 +28,9 @@
 //! ```
 
 pub mod message;
+pub mod overflow;
 pub mod request;
 
 pub use message::{AssistantContent, Message, MessageError, ToolResultStatus};
+pub use overflow::ContextOverflow;
 pub use request::*;

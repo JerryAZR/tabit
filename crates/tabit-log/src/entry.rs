@@ -33,12 +33,23 @@ use rig_core::message::ToolResult;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
-/// The current session file format version. v3: the log splits into
-/// conversation nodes (id + parent, the tree) and parentless side
-/// records (`model_change`, `checkout`, `aborted`, `label`, `custom`) —
-/// bookkeeping stops chaining into the tree. Pre-release break: v2
-/// files are rejected loudly, there is no migration.
-pub const SESSION_FORMAT_VERSION: u32 = 3;
+/// The current session file format version. v4: the `compaction` tree
+/// node (the insertion record — its `cut_child` names the first
+/// retained-tail entry; the loader re-parents that child through the
+/// compaction node, so a v4 tree can hold an inserted node whose
+/// parent is not the head at load time). v4 readers also accept v3
+/// files (no compaction entries exist in them by construction). v3:
+/// the log splits into conversation nodes (id + parent, the tree) and
+/// parentless side records (`model_change`, `checkout`, `aborted`,
+/// `label`, `custom`) — bookkeeping stops chaining into the tree.
+/// Pre-release break: v2 files are rejected loudly, there is no
+/// migration.
+pub const SESSION_FORMAT_VERSION: u32 = 4;
+/// Session file versions this build can read. Writers always write
+/// [`SESSION_FORMAT_VERSION`]; older versions stay readable while
+/// their records are a subset of the current vocabulary (a v3 file
+/// cannot contain a `compaction` node).
+pub const READABLE_FORMAT_VERSIONS: [u32; 2] = [3, SESSION_FORMAT_VERSION];
 
 /// The first line of a session file.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -150,6 +161,28 @@ pub enum EntryKind {
     ToolResult {
         /// The result, carrying the tool call id it answers.
         result: ToolResult,
+    },
+    /// A compaction insertion (v4): the history before the cut, replaced
+    /// by this node's summary. The node's `parent_id` is the node before
+    /// the cut point; `cut_child` names the first retained-tail entry —
+    /// the loader re-parents that child through this node, so the walked
+    /// chain routes `[... before-cut, compaction, cut child, ... tail]`
+    /// and history walkers stop here (included): the model-visible
+    /// context becomes `[summary] + retained tail`. Everything before
+    /// the insertion stays in the file and the tree — checkout to a
+    /// pre-compaction node yields the full-history branch (compaction
+    /// never deletes). The head does not move at insertion time.
+    Compaction {
+        /// The summary text, verbatim as the summarizer produced it.
+        summary: String,
+        /// The id of the first retained-tail entry (the message that
+        /// immediately follows the cut point).
+        cut_child: String,
+        /// The estimated context tokens before this pass ran (the
+        /// trigger's measurement, recorded for audit).
+        tokens_before: u64,
+        /// The summarization call's provider-reported usage.
+        usage: Usage,
     },
 }
 

@@ -323,6 +323,66 @@ impl ContextManager {
         Ok(())
     }
 
+    /// Commit one compaction pass: verify the cut, then insert. The cut
+    /// child must sit on the **active branch** (the compaction box
+    /// selected it there); the insertion node's parent is the cut
+    /// child's recorded parent (the node before the cut), its id is the
+    /// pass's announced bracket id, and — like every commit — the
+    /// record enqueues into the buffer as one batch and the tree grows
+    /// in the same operation. The head does not move. Validation
+    /// failures are internal wiring bugs (the box checks cut viability
+    /// before committing) and fail loud.
+    #[allow(clippy::panic)] // sanctioned crash: an engine wiring bug, failed loud (AGENTS.md doctrine)
+    pub fn commit_compaction(
+        &mut self,
+        id: String,
+        summary: String,
+        cut_child: String,
+        tokens_before: u64,
+        usage: Usage,
+    ) {
+        let on_branch = self
+            .tree
+            .path_to_head()
+            .iter()
+            .any(|entry| entry.id == cut_child);
+        if !on_branch {
+            panic!(
+                "ContextManager::commit_compaction: cut child `{cut_child}` is not on the \
+                 active branch — the compaction box selected a stale cut"
+            );
+        }
+        let parent = self
+            .tree
+            .node(&cut_child)
+            .and_then(|entry| entry.parent_id.clone());
+        let Some(parent) = parent else {
+            panic!(
+                "ContextManager::commit_compaction: cut child `{cut_child}` is the root — \
+                 there is no history before it to compact"
+            );
+        };
+        let entry = SessionEntry::with_id(
+            id,
+            Some(parent),
+            ids::now_rfc3339(),
+            EntryKind::Compaction {
+                summary,
+                cut_child,
+                tokens_before,
+                usage,
+            },
+        );
+        // The buffer's one interface, as every commit: the record enters
+        // the outbox and the write attempt happens inside.
+        let _ = lock::lock(&self.buffer).enqueue(&[FileRecord::Node(entry.clone())]);
+        self.tree
+            .insert_compaction(entry)
+            .unwrap_or_else(|TreeFault(fault)| {
+                panic!("ContextManager::commit_compaction: insertion refused: {fault}")
+            });
+    }
+
     /// The unified commit: chain the entries under the head, enqueue
     /// their records as **one batch** (one outbox unit, all-or-nothing),
     /// then grow the tree — never one without the other, and never a

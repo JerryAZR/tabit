@@ -82,6 +82,60 @@ impl SessionTree {
         Ok(())
     }
 
+    /// Insert a compaction node between the cut-point parent and the cut
+    /// child (v4) — the one insert that is not a head-append. The
+    /// entry's parent must be an existing node, `cut_child` must be an
+    /// existing node whose recorded parent IS the entry's parent (the
+    /// derivation's consistency check — a mismatched record is
+    /// corruption, named as such), and the entry's id must be fresh. The
+    /// cut child is re-parented through the compaction node **in the
+    /// resident tree only** (its file record keeps the original parent;
+    /// every load re-derives the insertion from this record). The head
+    /// does not move: the conversation tip is unchanged, later appends
+    /// chain through the insertion by walking the re-parented links.
+    pub fn insert_compaction(&mut self, entry: SessionEntry) -> Result<(), TreeFault> {
+        let cut_child_id = match &entry.kind {
+            crate::entry::EntryKind::Compaction { cut_child, .. } => cut_child.clone(),
+            _ => {
+                return Err(TreeFault(format!(
+                    "tree.insert_compaction: entry `{}` is not a compaction node",
+                    entry.id
+                )));
+            }
+        };
+        let parent = entry.parent_id.clone().ok_or_else(|| {
+            TreeFault(format!(
+                "compaction entry `{}` has no parent — the node before the cut is required",
+                entry.id
+            ))
+        })?;
+        if !self.nodes.contains_key(&parent) {
+            return Err(TreeFault(format!(
+                "compaction entry `{}` parents unknown node `{parent}`",
+                entry.id
+            )));
+        }
+        if self.nodes.contains_key(&entry.id) {
+            return Err(TreeFault(format!("duplicate entry id `{}`", entry.id)));
+        }
+        let cut_child = self.nodes.get_mut(&cut_child_id).ok_or_else(|| {
+            TreeFault(format!(
+                "compaction entry `{}` names unknown cut child `{cut_child_id}`",
+                entry.id
+            ))
+        })?;
+        if cut_child.parent_id.as_deref() != Some(parent.as_str()) {
+            return Err(TreeFault(format!(
+                "compaction entry `{}` parents `{parent}` but its cut child `{cut_child_id}` \
+                 records parent `{:?}` — the insertion must name an existing edge",
+                entry.id, cut_child.parent_id
+            )));
+        }
+        cut_child.parent_id = Some(entry.id.clone());
+        self.nodes.insert(entry.id.clone(), entry);
+        Ok(())
+    }
+
     /// The node the head points at, when the conversation is non-empty.
     pub fn head(&self) -> Option<&str> {
         self.head.as_deref()

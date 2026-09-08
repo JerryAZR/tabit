@@ -307,6 +307,44 @@ pub enum SessionEvent {
         /// The ask, opaque to the core.
         payload: serde_json::Value,
     },
+    /// A compaction pass began (v7): the summarization model call is
+    /// running. The bracket id is the pass's eventual compaction entry
+    /// id (born early, like turn ids); the summary streams as
+    /// `compaction_delta`s inside the bracket. A mid-run pass emits
+    /// between turn events — compaction landed between turns.
+    CompactionStarted {
+        /// The pass's bracket id (its eventual entry id).
+        id: String,
+        /// The 1-based pass index — multi-pass compaction emits several
+        /// back-to-back brackets.
+        pass: u32,
+    },
+    /// A summary text delta inside a compaction bracket.
+    CompactionDelta {
+        /// The pass bracket id (`compaction_started.id`).
+        id: String,
+        /// The delta text.
+        text: String,
+    },
+    /// A compaction pass finished: the summary committed as a
+    /// compaction entry. The model-visible context is now `[summary] +
+    /// retained tail`; everything before the cut stays in the file
+    /// (checkout there yields the full-history branch) and is visible
+    /// again on the next replay pass.
+    CompactionFinished {
+        /// The pass bracket id — now a durable entry id.
+        id: String,
+    },
+    /// A compaction pass failed or was cancelled: nothing committed,
+    /// the context is unchanged. Not a run terminal — the run (if any)
+    /// continues, and the automatic doors retry when the conditions
+    /// next hold.
+    CompactionFailed {
+        /// The pass bracket id.
+        id: String,
+        /// Why, in display form.
+        message: String,
+    },
 }
 
 /// One stored session in the startup `sessions_available` catalog.

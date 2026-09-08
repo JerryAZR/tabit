@@ -79,6 +79,7 @@ fn record_kinds(path: &Path) -> Vec<&'static str> {
                 crate::entry::EntryKind::UserMessage { .. } => "user",
                 crate::entry::EntryKind::AssistantMessage { .. } => "assistant",
                 crate::entry::EntryKind::ToolResult { .. } => "tool_result",
+                crate::entry::EntryKind::Compaction { .. } => "compaction",
             },
         })
         .collect()

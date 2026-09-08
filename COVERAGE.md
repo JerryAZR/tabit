@@ -377,6 +377,11 @@ named, the classification applies to its current lcov-uncovered ranges.
   would need a child-process harness.
 - Doctests are outside the measurement (see Methodology); they run and are
   gated in CI but do not fold into these numbers.
+- The compaction arc (2026-09) and the subagent arc before it await a
+  fresh llvm-cov measurement pass: their new modules carry direct unit
+  and e2e tests (the box, the doors, the insertion/fold, the parser,
+  the overflow classifier), but the per-branch ledger numbers have not
+  been re-derived. Re-measure both in one pass.
 
 (Removed from this list after the defensive-arm audit: the SSE
 retry-`None` branches — the premise was wrong, `ExponentialBackoff`

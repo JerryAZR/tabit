@@ -22,7 +22,10 @@
 //! which IS caught. There is no repair pass: a detected violation
 //! fails the open with a named error, not a guess.
 
-use crate::entry::{EntryKind, FileRecord, SESSION_FORMAT_VERSION, SessionHeader, SideKind};
+use crate::entry::{
+    EntryKind, FileRecord, READABLE_FORMAT_VERSIONS, SESSION_FORMAT_VERSION, SessionHeader,
+    SideKind,
+};
 use crate::error::SessionError;
 use crate::stats::UsageLedger;
 use crate::tree::{SessionTree, TreeFault};
@@ -80,10 +83,11 @@ pub fn parse(raw: &str, path: &Path) -> Result<Parsed, SessionError> {
             line: 1,
             source,
         })?;
-    if header.version != SESSION_FORMAT_VERSION {
+    if !READABLE_FORMAT_VERSIONS.contains(&header.version) {
         return Err(corrupt(format!(
-            "unsupported session format version {} (this tabit reads version {})",
-            header.version, SESSION_FORMAT_VERSION
+            "unsupported session format version {} (this tabit reads versions {READABLE_FORMAT_VERSIONS:?}, \
+             writes version {SESSION_FORMAT_VERSION})",
+            header.version
         )));
     }
 
@@ -93,9 +97,6 @@ pub fn parse(raw: &str, path: &Path) -> Result<Parsed, SessionError> {
     // The model usage attributes to (empty ids before any change —
     // uncosted), mirroring the record stream's own sequence.
     let mut attribution = (String::new(), String::new(), None);
-    // The last node the file appended — the tail check's tip (a torn
-    // write shows as its batch left open).
-    let mut last_node: Option<String> = None;
 
     for (offset, line) in lines.enumerate() {
         let line = line.trim_end_matches(['\r']);
@@ -110,12 +111,28 @@ pub fn parse(raw: &str, path: &Path) -> Result<Parsed, SessionError> {
             })?;
         match record {
             FileRecord::Node(entry) => {
-                if let EntryKind::AssistantMessage { usage, .. } = &entry.kind {
-                    let (provider, model, level) = &attribution;
-                    stats.add(provider, model, level.as_deref(), *usage);
+                match &entry.kind {
+                    EntryKind::AssistantMessage { usage, .. } => {
+                        let (provider, model, level) = &attribution;
+                        stats.add(provider, model, level.as_deref(), *usage);
+                    }
+                    // The summarization call's spend is real spend; the
+                    // summary itself enters the walked context, not the
+                    // stats' shape.
+                    EntryKind::Compaction { usage, .. } => {
+                        let (provider, model, level) = &attribution;
+                        stats.add(provider, model, level.as_deref(), *usage);
+                    }
+                    EntryKind::UserMessage { .. } | EntryKind::ToolResult { .. } => {}
                 }
-                last_node = Some(entry.id.clone());
-                tree.load_append(entry).map_err(tree_fault)?;
+                // A compaction node is the one insert that is not a
+                // head-append: it lands between the cut-point parent and
+                // the cut child (v4), and the head does not move.
+                if matches!(entry.kind, EntryKind::Compaction { .. }) {
+                    tree.insert_compaction(entry).map_err(tree_fault)?;
+                } else {
+                    tree.load_append(entry).map_err(tree_fault)?;
+                }
             }
             FileRecord::Side(record) => match record.kind {
                 SideKind::ModelChange {
@@ -150,10 +167,15 @@ pub fn parse(raw: &str, path: &Path) -> Result<Parsed, SessionError> {
     }
     // The tail check — the load's one pairing validation (see the
     // module docs' threat model): a torn write left the trailing batch
-    // open. Bounded: one walk back over the last batch's span.
-    if let Some(tip) = last_node {
-        let tail = tree.path_to(Some(&tip)).map_err(tree_fault)?;
-        tabit_log::tail_is_closed(&tail).map_err(corrupt)?;
+    // open. Bounded: one walk back over the last batch's span. Checked
+    // on the ACTIVE branch (the head's path — the conversation the
+    // session resumes), which since v4 can end past an inserted
+    // compaction node whose file position is later than the head.
+    {
+        let path = tree.path_to_head();
+        if !path.is_empty() {
+            tabit_log::tail_is_closed(&path).map_err(corrupt)?;
+        }
     }
 
     Ok(Parsed {

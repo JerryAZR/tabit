@@ -141,7 +141,7 @@ fn header_round_trips_and_rejects_unknown_fields() {
         cwd: "C:/work".to_string(),
         parent_session: None,
     };
-    assert_eq!(SESSION_FORMAT_VERSION, 3);
+    assert_eq!(SESSION_FORMAT_VERSION, 4);
     let line = serde_json::to_string(&header).expect("header serializes");
     let back: SessionHeader = serde_json::from_str(&line).expect("header parses back");
     assert_eq!(back, header);

@@ -401,3 +401,68 @@ fn stream_ids_are_the_session_ids() {
     assert_eq!(stream, StreamId::new("0197-session"));
     assert_ne!(stream, StreamId::new("0196-other"));
 }
+
+#[test]
+fn the_compaction_bracket_and_command_round_trip() {
+    // The command: session id plus reserved directives (absent by
+    // default on the wire).
+    let command: SessionCommand =
+        serde_json::from_str(r#"{"type":"compact","session":"s1"}"#).expect("parse");
+    assert_eq!(
+        round_trip(&command),
+        SessionCommand::Compact {
+            session: "s1".to_string(),
+            directives: None,
+        }
+    );
+    let with_directives: SessionCommand =
+        serde_json::from_str(r#"{"type":"compact","session":"s1","directives":{"keep_tail":512}}"#)
+            .expect("parse");
+    assert_eq!(
+        round_trip(&with_directives),
+        SessionCommand::Compact {
+            session: "s1".to_string(),
+            directives: Some(serde_json::json!({"keep_tail": 512})),
+        }
+    );
+
+    // The event bracket.
+    assert_eq!(
+        round_trip(&SessionEvent::CompactionStarted {
+            id: "c1".to_string(),
+            pass: 2,
+        }),
+        SessionEvent::CompactionStarted {
+            id: "c1".to_string(),
+            pass: 2,
+        }
+    );
+    assert_eq!(
+        round_trip(&SessionEvent::CompactionDelta {
+            id: "c1".to_string(),
+            text: "## Goal".to_string(),
+        }),
+        SessionEvent::CompactionDelta {
+            id: "c1".to_string(),
+            text: "## Goal".to_string(),
+        }
+    );
+    assert_eq!(
+        round_trip(&SessionEvent::CompactionFinished {
+            id: "c1".to_string()
+        }),
+        SessionEvent::CompactionFinished {
+            id: "c1".to_string()
+        }
+    );
+    assert_eq!(
+        round_trip(&SessionEvent::CompactionFailed {
+            id: "c1".to_string(),
+            message: "cancelled".to_string(),
+        }),
+        SessionEvent::CompactionFailed {
+            id: "c1".to_string(),
+            message: "cancelled".to_string(),
+        }
+    );
+}

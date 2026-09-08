@@ -108,8 +108,9 @@ impl Mailbox {
         lock(&self.queue).is_empty()
     }
 
-    /// Park a continue intent.
-    fn continue_run(&self) {
+    /// Park a continue intent. Also the overflow intercept's retry
+    /// signal (run.rs): a repaired context re-answers the turn.
+    pub(crate) fn continue_run(&self) {
         self.continue_pending
             .store(true, std::sync::atomic::Ordering::Release);
         self.work.notify_one();
