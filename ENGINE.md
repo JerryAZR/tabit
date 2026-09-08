@@ -138,13 +138,16 @@ command path that serves this (owner-ruled through design review):
   slot. A discarded pending checkout emits nothing— no `checked_out`
   follows; the abort is the marker.
 - **The beat** (idle wake, loop-top after a pump, the pre-close
-  drain— one drain point in code): serve a parked **pass** (a read
-  of the chain as it stands— reads and rewinds requested ahead of a
-  message answer ahead of it; a message's inclusion in a pass is
-  decided solely by whether it drained before the beat), then take
-  the **checkout slot** (rewind— an execution-time failure is a
-  no-op plus an `error` event; verification already caught the
-  common failure at receive), then batch messages. The pump returns
+  drain— one drain point in code): serve the parked intent in one
+  order (the code's one home: `serve_parked`) — a parked **pass** (a
+  read of the chain as it stands— reads and rewinds requested ahead
+  of a message answer ahead of it; a message's inclusion in a pass is
+  decided solely by whether it drained before the beat), then the
+  **checkout slot** (rewind— an execution-time failure is a no-op
+  plus an `error` event; verification already caught the common
+  failure at receive), then a parked **manual compaction** — then
+  batch messages, then the **idle compaction door** (the compaction
+  section below). The pump returns
   on an aborted outcome, so a checkout that aborted a run always
   executes at this beat before a later message starts a batch on the
   old chain.

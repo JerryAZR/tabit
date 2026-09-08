@@ -26,8 +26,10 @@
 //! intent — plus the shared model register (a state write at receive,
 //! never parked: the worker's next run open derives from it, and
 //! every pass announces it). The worker task owns the session itself
-//! and serves its beat — passes, then a parked checkout (the rewind),
-//! then message batches — so routing never blocks on a run.
+//! and serves its beat — passes, a parked checkout (the rewind), a
+//! parked manual compaction (all three in `serve_parked`'s one
+//! order), then message batches, then the idle compaction door — so
+//! routing never blocks on a run.
 //!
 //! Termination (ruled 2026-08 — the core dies with the frontend):
 //!
@@ -120,8 +122,9 @@ enum HostCommand {
 /// forwards; every command's semantics live here, in module code,
 /// running synchronously at receive). The worker task holds the
 /// session itself and consumes the pending intent this struct
-/// manages: the beat serves parked passes, then a parked checkout,
-/// then batches messages.
+/// manages: the beat serves the parked intent in `serve_parked`'s
+/// one order (a replay pass, a checkout, a manual compaction), then
+/// batches messages, then the idle compaction door.
 #[derive(Clone)]
 struct Worker {
     mailbox: MailboxHandle,
@@ -855,27 +858,22 @@ fn spawn_worker(
         // pending thing; the beat at the loop top is the single drain
         // point.
         loop {
-            // The beat, in its ruled order: a parked pass answers
-            // first (a read of the chain as it stands), then a parked
-            // checkout (the rewind - the one session mutation - plus
-            // its re-render), then the empties check batches messages.
-            // Reads and rewinds requested ahead of a message answer
-            // ahead of it; a message's inclusion in a pass is decided
-            // solely by whether it drained before the beat. (The model
-            // register needs no beat arm: its writes land at receive,
-            // and the passes announce it live.)
-            if replay_due.swap(false, std::sync::atomic::Ordering::Acquire) {
-                emit_replay(&session, &event_tx, &stream);
-            }
-            if let Some(entry_id) = lock(&checkout_slot).take() {
-                execute_checkout(&mut session, &event_tx, &stream, entry_id);
-            }
-            // The manual compaction door runs ahead of any queued
-            // batch (the beat's ruled order: reads, rewinds, then
-            // forced compaction, then batches).
-            if worker_compact_due.swap(false, std::sync::atomic::Ordering::Acquire) {
-                session.compact_manual().await;
-            }
+            // The beat: the parked intent answers ahead of the pump
+            // arm - the order's one home is `serve_parked`. Reads and
+            // rewinds requested ahead of a message answer ahead of it;
+            // a message's inclusion in a pass is decided solely by
+            // whether it drained before the beat. (The model register
+            // needs no beat arm: its writes land at receive, and the
+            // passes announce it live.)
+            serve_parked(
+                &mut session,
+                &event_tx,
+                &stream,
+                &replay_due,
+                &checkout_slot,
+                &worker_compact_due,
+            )
+            .await;
             if !worker_mailbox.is_empty() || worker_mailbox.has_continue() {
                 // The pump returns on an aborted outcome (a checkout
                 // aborts its way here), so anything parked behind a
@@ -911,18 +909,18 @@ fn spawn_worker(
                         continue;
                     }
                     // Serve what the handler parked ahead of the
-                    // close (the same beat order), then wind down.
-                    // (Register writes are already durable — receive
-                    // wrote them.)
-                    if replay_due.swap(false, std::sync::atomic::Ordering::Acquire) {
-                        emit_replay(&session, &event_tx, &stream);
-                    }
-                    if let Some(entry_id) = lock(&checkout_slot).take() {
-                        execute_checkout(&mut session, &event_tx, &stream, entry_id);
-                    }
-                    if worker_compact_due.swap(false, std::sync::atomic::Ordering::Acquire) {
-                        session.compact_manual().await;
-                    }
+                    // close (the order's one home: `serve_parked`),
+                    // then wind down. (Register writes are already
+                    // durable — receive wrote them.)
+                    serve_parked(
+                        &mut session,
+                        &event_tx,
+                        &stream,
+                        &replay_due,
+                        &checkout_slot,
+                        &worker_compact_due,
+                    )
+                    .await;
                     // The clean-exit flush attempt (flag 8): one more
                     // drain before the stream ends.
                     session.flush_log();
@@ -962,6 +960,32 @@ fn spawn_worker(
         },
         join,
     )
+}
+
+/// Serve the parked conversation intent in the ruled order: a parked
+/// pass answers first (a read of the chain as it stands), then a
+/// parked checkout (the rewind - the one session mutation - plus its
+/// re-render), then a parked manual compaction (the forced door, ahead
+/// of any queued batch). The order's one home - the worker's beat and
+/// the shutdown arm both call here, so a new parked intent joins this
+/// list exactly once.
+async fn serve_parked(
+    session: &mut Session,
+    event_tx: &mpsc::UnboundedSender<EventFrame>,
+    stream: &StreamId,
+    replay_due: &std::sync::atomic::AtomicBool,
+    checkout_slot: &Mutex<Option<String>>,
+    compact_due: &std::sync::atomic::AtomicBool,
+) {
+    if replay_due.swap(false, std::sync::atomic::Ordering::Acquire) {
+        emit_replay(session, event_tx, stream);
+    }
+    if let Some(entry_id) = lock(checkout_slot).take() {
+        execute_checkout(session, event_tx, stream, entry_id);
+    }
+    if compact_due.swap(false, std::sync::atomic::Ordering::Acquire) {
+        session.compact_manual().await;
+    }
 }
 
 /// Execute the parked checkout at a pause point: rewind the chain,
