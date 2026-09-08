@@ -352,7 +352,7 @@ impl SubprocessBuilder {
             }
             reaper_router.unregister(&reaper_id);
         });
-        router.register(&child_id, &parent_id, command_tx.clone());
+        router.register(&child_id, command_tx.clone());
 
         Ok(SubprocessChild {
             id: child_id.clone(),

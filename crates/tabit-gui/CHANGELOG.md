@@ -40,10 +40,12 @@ child structurally, forwarded as one wire line: `message` steers a
 live child (the `message_queued` ack on the child's own stream — a
 subagent view is a steerable view), `interaction_response` answers
 its cards, `checkout`/`model`/`continue` consume as on any session.
-Abort is a **subtree stop**: consuming it broadcasts to the
-session's registered children, recursively — every descendant's
-`run_aborted` flushes on its own stream; instances are never
-destroyed; aborting a child by id leaves the parent's run alive.
+Abort is a **subtree stop**: aborting a session stops its in-flight
+descendants — every descendant's `run_aborted` flushes on its own
+stream; instances are never destroyed; aborting a child by id leaves
+the parent's run alive. (The cascade rides the run token each tool
+already holds — no framework walk; children with no active tool call
+survive, the background model's basis.)
 
 ## v5
 

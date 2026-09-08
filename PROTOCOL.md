@@ -1564,11 +1564,18 @@ The rulings, in force order:
   unroutable — moot, because `session_opened` is the first
   unconditional emission (a child that never announced is dead on
   arrival).
-- **Abort is a subtree stop**: consumption at every node is cancel +
-  broadcast to registered children, recursively; instances are never
-  destroyed. The broadcast crosses into each child as one routed
-  command; the child's host cascades through this same router. The
-  run-token leash remains the in-run fast path.
+- **Abort propagation is the tool's job; the framework owns none of
+  it** (the codex/opencode survey ruling — both kill foreground only,
+  nobody walks a registry). The run token is every tool body's leash,
+  exactly as for bash: a session's abort cancels its run token, each
+  active subagent tool sees the cancel and kills its own child, and
+  the cascade rides that token chain — no broadcast, no registry walk,
+  the Worker knows nothing of children. A routed `abort {child}` is
+  just a forwarded line the child's host consumes like any session,
+  cascading through its own tools. Children with no active tool call
+  survive aborts naturally — the background model's basis (a
+  background child still needs handle detachment, since the bridge's
+  drop closes; opencode's explicit-collection shape, deferred).
 - **Abort forwarding to a child is a courtesy with a deadline**: on
   leash cancel, forward `abort`, close stdin (the child aborts,
   flushes, exits — the write-behind flush is the one thing the

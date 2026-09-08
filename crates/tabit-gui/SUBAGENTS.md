@@ -14,8 +14,9 @@ as before.
 a steerable view — `message` to a live child queues on its own
 mailbox (`message_queued` on its stream) and enters its conversation
 at the next turn boundary; `abort` to a child stops its subtree and
-leaves the parent's run alive. No child-specific caveats exist:
-every session command consumes as on any session.
+leaves the parent's run alive (the cascade rides the run token each
+tool already holds). No child-specific caveats exist: every session
+command consumes as on any session.
 
 ## The shape of a subagent run
 

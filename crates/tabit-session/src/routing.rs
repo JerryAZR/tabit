@@ -22,12 +22,15 @@
 //! unroutable — and a child that never announced is dead on arrival,
 //! because `session_opened` is the first unconditional emission.
 //!
-//! Abort is the one command with tree semantics (owner ruling):
-//! consumption at the target is *cancel + broadcast to my children*,
-//! recursively — abort stops all work in a subtree without destroying
-//! the session instances. The broadcast crosses into each child as
-//! one routed command; the child's own host cascades inside its
-//! process, through this same router.
+//! Abort carries no routing machinery: the run token is every tool
+//! body's leash, so a session's abort cascades through its active
+//! tool calls (a subagent tool kills its own child process — the
+//! tool's job, not the framework's), and a routed `abort {child}` is
+//! just a forwarded line the child's own host consumes like any
+//! session. Children with no active tool call survive aborts
+//! naturally — the background model's whole trick (owner ruling
+//! 2026-09, after the codex/opencode survey: both kill foreground
+//! only; nobody walks a registry).
 
 use crate::lock::lock;
 use std::collections::HashMap;
@@ -46,7 +49,6 @@ mod tests;
 /// child with zero child-specific code: a child IS a session host.
 #[derive(Clone)]
 struct Child {
-    parent: String,
     commands: tokio::sync::mpsc::UnboundedSender<String>,
 }
 
@@ -79,17 +81,12 @@ impl ChildRouter {
     pub(crate) fn register(
         &self,
         child_id: &str,
-        parent_id: &str,
         commands: tokio::sync::mpsc::UnboundedSender<String>,
     ) {
         let mut state = lock(&self.state);
-        state.children.insert(
-            child_id.to_string(),
-            Child {
-                parent: parent_id.to_string(),
-                commands,
-            },
-        );
+        state
+            .children
+            .insert(child_id.to_string(), Child { commands });
         state
             .routes
             .insert(child_id.to_string(), child_id.to_string());
@@ -134,27 +131,5 @@ impl ChildRouter {
             let _ = child.commands.send(line);
         }
         true
-    }
-
-    /// Abort every child of `parent` — the abort-consumption rule
-    /// (cancel my work, then stop my children's, recursively). The
-    /// leash cascade (run tokens) already covers children inside a
-    /// live run; this walk is the session-tree semantic, and also
-    /// reaches anything a finished run left registered.
-    pub(crate) fn broadcast_abort(&self, parent: &str) {
-        let children: Vec<(String, Child)> = lock(&self.state)
-            .children
-            .iter()
-            .filter(|(_, child)| child.parent == parent)
-            .map(|(id, child)| (id.clone(), child.clone()))
-            .collect();
-        for (id, child) in children {
-            // The routed command is consumed by the child's own host:
-            // cancel + its own recursive broadcast, through this same
-            // router inside its process.
-            if let Ok(line) = serde_json::to_string(&SessionCommand::Abort { session: id }) {
-                let _ = child.commands.send(line);
-            }
-        }
     }
 }

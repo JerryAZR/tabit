@@ -124,9 +124,6 @@ enum HostCommand {
 /// then batches messages.
 #[derive(Clone)]
 struct Worker {
-    /// The worker's own session id — abort's broadcast names its
-    /// children by parent, and this is the parent's name.
-    id: String,
     mailbox: MailboxHandle,
     abort_handle: AbortHandle,
     interaction: InteractionHub,
@@ -159,9 +156,6 @@ struct Worker {
     /// A parked replay request (idempotent read — one flag collapses
     /// any number of requests; the beat serves it before batching).
     replay_due: Arc<std::sync::atomic::AtomicBool>,
-    /// The shared child registry — abort's tree broadcast (routing's
-    /// deliveries go through the host loop, not the worker).
-    children: Arc<crate::routing::ChildRouter>,
 }
 
 impl Worker {
@@ -185,7 +179,6 @@ impl Worker {
     fn abort(&self) {
         lock(&self.checkout_slot).take();
         self.abort_handle.abort();
-        self.children.broadcast_abort(&self.id);
     }
 
     /// Deliver a session-scoped command — the handler at the dequeue
@@ -394,7 +387,6 @@ impl SessionHost {
             event_tx.clone(),
             worker_shutdown.clone(),
             closing_stats.clone(),
-            wiring.children.clone(),
         );
         lock(&workers).insert(boot_id.clone(), boot_worker);
 
@@ -797,7 +789,6 @@ impl HostLoop {
             self.event_tx.clone(),
             self.worker_shutdown.clone(),
             self.stats.clone(),
-            self.wiring.children.clone(),
         );
         lock(&self.workers).insert(id, worker.clone());
         self.joins.push(join);
@@ -814,7 +805,6 @@ fn spawn_worker(
     event_tx: mpsc::UnboundedSender<EventFrame>,
     shutdown: CancellationToken,
     stats: Arc<Mutex<HashMap<String, SessionStats>>>,
-    children: Arc<crate::routing::ChildRouter>,
 ) -> (Worker, JoinHandle<()>) {
     let id = session.id().to_string();
     let stream = StreamId::new(id.clone());
@@ -926,7 +916,6 @@ fn spawn_worker(
     });
     (
         Worker {
-            id,
             mailbox,
             abort_handle,
             interaction,
@@ -936,7 +925,6 @@ fn spawn_worker(
             model_register,
             model_probe,
             replay_due: worker_replay_due,
-            children,
         },
         join,
     )

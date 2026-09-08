@@ -347,7 +347,8 @@ builder's `ephemeral` entrance (plain session machinery the child's
 self-spawn under a Job Object/process group with the child cwd as
 the process cwd, frames forwarded as-is, the ruled abort shape),
 the router (`routing.rs`: route-all line forwarding, learned tables
-for deep trees, abort's recursive subtree broadcast), and the
+for deep trees — no abort machinery; propagation is the tool's job,
+the run-token leash, per the codex/opencode survey), and the
 example tool spawning subprocess children (`task`/`model`/`cwd`/
 `tools`; extensions override via `SpawnContext`'s spawn/drive pair).
 Every session command works on a child structurally — the child is

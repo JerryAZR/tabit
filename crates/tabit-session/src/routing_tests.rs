@@ -31,7 +31,7 @@ fn an_unknown_address_is_not_routed() {
 fn a_registered_child_receives_the_command_as_a_wire_line() {
     let router = ChildRouter::default();
     let (tx, mut rx) = inbox();
-    router.register("child", "parent", tx);
+    router.register("child", tx);
 
     assert!(router.deliver(
         "child",
@@ -54,7 +54,7 @@ fn a_learned_descendant_routes_to_the_owning_child() {
     // intact (the CHILD's router resolves the next hop).
     let router = ChildRouter::default();
     let (tx, mut rx) = inbox();
-    router.register("child", "parent", tx);
+    router.register("child", tx);
     router.learn("grandchild", "child");
 
     assert!(router.deliver(
@@ -76,7 +76,7 @@ fn a_learned_descendant_routes_to_the_owning_child() {
 fn unregister_purges_the_child_and_everything_learned_through_it() {
     let router = ChildRouter::default();
     let (tx, _rx) = inbox();
-    router.register("child", "parent", tx);
+    router.register("child", tx);
     router.learn("grandchild", "child");
 
     router.unregister("child");
@@ -91,30 +91,4 @@ fn unregister_purges_the_child_and_everything_learned_through_it() {
             "`{address}` stopped routing with its child"
         );
     }
-}
-
-#[test]
-fn abort_broadcasts_to_every_child_of_the_parent_as_a_routed_command() {
-    let router = ChildRouter::default();
-    let (first, mut rx_first) = inbox();
-    let (second, mut rx_second) = inbox();
-    router.register("first", "parent", first);
-    router.register("second", "parent", second);
-    let (unrelated, _rx_other) = inbox();
-    router.register("unrelated", "someone-else", unrelated);
-
-    router.broadcast_abort("parent");
-    for (name, rx) in [("first", &mut rx_first), ("second", &mut rx_second)] {
-        let line = rx
-            .try_recv()
-            .unwrap_or_else(|_| panic!("`{name}` received the routed abort"));
-        assert!(
-            line.contains("\"type\":\"abort\"") && line.contains(name),
-            "the abort addressed `{name}` by id: {line}"
-        );
-    }
-    assert!(
-        rx_first.try_recv().is_err() && rx_second.try_recv().is_err(),
-        "one abort per child"
-    );
 }
