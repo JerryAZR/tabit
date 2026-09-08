@@ -458,29 +458,51 @@ assumptions (item 9 owns that).
   every tool call** made in compaction state. How that state is
   entered or queried is execution-flow machinery — item 4 territory
   (along with the rejection's response shape).
+- **Ruled 2026-09 — the cut-selection loop (owner, high-level; agenda
+  items 2+5 merged into it):** one procedure, three points.
+  (1) **Initial cut:** keep at least `KEEP_TAIL` (an internal
+  configurable dial — tokens or percentage) of recent history as the
+  retained tail, while ensuring the history **sent** for compaction is
+  < 75% of the window. The request is the conversation **prefix up to
+  the cut** plus the summarization instruction — never the full
+  conversation: prefix caching covers whatever prefix is sent (the hit
+  is on the longest common prefix, so dropping the tail does not
+  forfeit the cache), and the <75% bound forward-guarantees the
+  request fits by construction even when compaction fires over-window
+  — the forward-looking cut, not codex's backwards trim-and-retry.
+  When the constraints conflict, <75% binds: the cut moves earlier and
+  the tail overshoots `KEEP_TAIL` (a floor, not a cap); the post-check
+  loop handles a still-oversized result.
+  (2) **Rejection:** on a server rejection of the cut point — any
+  non-transient, engine-visible error (the typed classification; the
+  transient family already rides the pi-policy retry) — move the cut
+  one block up the history (a shorter request) and try again.
+  (3) **Post-check loop:** after compaction, immediately re-check the
+  trigger against the new context (preamble + summary + retained
+  tail); still too big → rerun the loop, pass N's summary feeding pass
+  N+1 as the previous-summary (pi's update pattern).
+  Sub-decisions left to the dig: the block granularity for (2)'s
+  one-block moves (presumably the valid-boundary units — no-tool-call
+  outputs), the rerun loop's no-progress guard (a pass that cannot
+  shrink stops loud, never spins — yaca's rule), whether a
+  length-capped summary is accepted, and the rerun threshold (leaning:
+  condition B again).
 - **Open agenda (quick thoughts recorded 2026-09, owner — each gets a
   deep dive; leanings marked):** (1) trigger conditions — **settled**
   (formula above); the token-counting input stays a leaning (last-turn
   provider usage, pi's four-component sum, plus chars/4 of trailing
-  messages). (2) **cut points**: valid boundaries are after model
-  outputs **without tool calls** — never after a tool-call output
-  (steers may have followed it mid-turn); when queued steers cluster
-  after a turn-end output, cut **before the first user message** so the
-  cluster stays intact in the tail; the tail rule should be a flexible
-  budget **connected to overflow recovery**, not a fixed keep-20k.
-  (3) **settled** — compaction state rejects all tool calls (ruling
-  above). (4) **flow fit —
+  messages). (2) **cut points — merged into the cut-selection loop
+  ruling above** (valid boundaries are after model outputs without
+  tool calls; queued steers cluster before the first user message;
+  flexible tail budget via `KEEP_TAIL`). (3) **settled** — compaction
+  state rejects all tool calls (ruling above). (4) **flow fit —
   three separate designs, not to be mixed**: the session file (what
   the compaction record is on disk), the runtime session tree & state
   (projection, head, checkout), and the execution flow (ENGINE.md —
   who triggers, which states, how compaction state is entered and
-  queried). (5) **overflow recovery — two
-  scenarios**: (i) known-over pre-flight — pick the cut point
-  forward-thinking (size it so the summarization request itself fits:
-  compact ~75%, keep the tail — not codex's backwards trim-and-retry)
-  and loop if the projected context is still over (with a guard);
-  (ii) the server rejected or capped the request at runtime — move the
-  cut point backwards (summarize more, keep less tail) and try again.
+  queried). (5) **overflow recovery — merged into the cut-selection
+  loop ruling above** (pre-flight fit by construction + rejection
+  shortening + the post-check loop).
 
 ### 7. CLI / interface layer
 
