@@ -102,7 +102,7 @@ impl InteractionHub {
         let (sender, receiver) = oneshot::channel();
         let id = new_entry_id();
         lock(&self.inner.pending).insert(id.clone(), sender);
-        let sent = self.inner.notices.emit(SessionEvent::InteractionRequested {
+        let sent = self.inner.notices.emit(SessionEvent::InteractionRequest {
             id: id.clone(),
             ui_type: ui_type.to_string(),
             payload,
@@ -153,7 +153,7 @@ mod tests {
 
     fn request_from(frame: &EventFrame) -> (String, String, serde_json::Value) {
         match &frame.event {
-            SessionEvent::InteractionRequested {
+            SessionEvent::InteractionRequest {
                 id,
                 ui_type,
                 payload,

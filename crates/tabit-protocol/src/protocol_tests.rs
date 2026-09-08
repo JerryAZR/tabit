@@ -294,7 +294,7 @@ fn sampled_event_variants_survive_the_frame_envelope() {
         },
         EventFrame {
             stream: Some(StreamId::new("s1")),
-            event: SessionEvent::InteractionRequested {
+            event: SessionEvent::InteractionRequest {
                 id: "0199".to_string(),
                 ui_type: crate::templates::ui::SELECT_ONE.to_string(),
                 payload: serde_json::to_value(crate::templates::SelectOneCard {

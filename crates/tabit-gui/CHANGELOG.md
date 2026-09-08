@@ -18,7 +18,20 @@ software/hardware contract, not just the encodings):
 Every `PROTOCOL_VERSION` bump — and every additive change a frontend
 could observe — gets an entry here in the same commit.
 
-## v5 (current)
+## v6 (current)
+
+### wire: the interaction event's tag is `interaction_request` (2026-09)
+
+Protocol version 6. A contract-alignment fix found by the TUI spike:
+the event variant was named `InteractionRequested`, so the derived
+wire tag was **`interaction_requested`** while FRONTEND.md §6/§8 —
+the frozen contract — documents `interaction_request`. The variant is
+renamed and the wire now emits the contract's name. Typed clients
+(the GUI) recompiled without noticing — matched pairs never see the
+tag; hand-rolled clients parsing per FRONTEND.md were right all
+along.
+
+## v5
 
 ### wire: `session_opened.parent` — subagent children announce through the same door (2026-09)
 

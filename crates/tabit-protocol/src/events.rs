@@ -299,7 +299,7 @@ pub enum SessionEvent {
     /// terminal closes every unanswered request — no close event,
     /// none needed. Never persisted, never replayed; the durable
     /// record is the tool result.
-    InteractionRequested {
+    InteractionRequest {
         /// Backend-minted request id (UUIDv7, like every protocol id).
         id: String,
         /// The widget type (`templates` owns the native names).

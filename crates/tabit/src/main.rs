@@ -288,7 +288,7 @@ fn print_event(event: &SessionEvent) {
         }
         // Cards render on stderr in the event loop; stdout stays the
         // answer channel.
-        SessionEvent::InteractionRequested { .. } => {}
+        SessionEvent::InteractionRequest { .. } => {}
         SessionEvent::RunAborted { .. } => {
             let _ = writeln!(
                 out,
@@ -756,7 +756,7 @@ fn print_mode(args: &Args, registry: &ModelRegistry) -> Result<i32, String> {
                         // A terminal closes every card (FRONTEND.md §8).
                         lock_armed(&armed).clear();
                     }
-                    SessionEvent::InteractionRequested {
+                    SessionEvent::InteractionRequest {
                         id,
                         ui_type,
                         payload,

@@ -447,7 +447,7 @@ fn interaction_cards_open_in_order_and_close_on_answer() {
         ("i1", "Allow `bash` to run?"),
         ("i2", "Question from the assistant"),
     ] {
-        state.reduce(event(SessionEvent::InteractionRequested {
+        state.reduce(event(SessionEvent::InteractionRequest {
             id: id.to_string(),
             ui_type: tabit_protocol::templates::ui::SELECT_ONE.to_string(),
             payload: serde_json::json!({
@@ -490,7 +490,7 @@ fn every_run_terminal_closes_all_open_cards() {
         state.reduce(ack());
         state.reduce(opened(true));
         state.reduce(user("go"));
-        state.reduce(event(SessionEvent::InteractionRequested {
+        state.reduce(event(SessionEvent::InteractionRequest {
             id: "i1".to_string(),
             ui_type: tabit_protocol::templates::ui::SELECT_ANY.to_string(),
             payload: serde_json::json!({"title": "Question", "body": "rm -rf target?", "options": [], "free_text": true}),
@@ -1106,7 +1106,7 @@ fn cards_survive_a_view_switch_and_route_by_their_own_session() {
             entry_count: 4,
         }],
     }));
-    state.reduce(event(SessionEvent::InteractionRequested {
+    state.reduce(event(SessionEvent::InteractionRequest {
         id: "ask-1".to_string(),
         ui_type: tabit_protocol::templates::ui::SELECT_ONE.to_string(),
         payload: serde_json::json!({
@@ -1154,7 +1154,7 @@ fn a_background_question_raises_attention_and_dies_with_its_run() {
     ));
     state.reduce(from(
         "s2",
-        SessionEvent::InteractionRequested {
+        SessionEvent::InteractionRequest {
             id: "ask-2".to_string(),
             ui_type: tabit_protocol::templates::ui::SELECT_ONE.to_string(),
             payload: serde_json::json!({
@@ -1284,7 +1284,7 @@ fn unknown_and_malformed_interaction_widgets_surface_as_notices_not_cards() {
     state.reduce(opened(true));
     // An extension widget this frontend cannot render: reported, never
     // answered, never a card.
-    state.reduce(event(SessionEvent::InteractionRequested {
+    state.reduce(event(SessionEvent::InteractionRequest {
         id: "i1".to_string(),
         ui_type: "ext:demo:map".to_string(),
         payload: serde_json::json!({"region": "north"}),
@@ -1300,7 +1300,7 @@ fn unknown_and_malformed_interaction_widgets_surface_as_notices_not_cards() {
     assert!(state.interactions.is_empty());
     // A native card in a shape this frontend cannot parse: same
     // treatment — a notice, not a broken card.
-    state.reduce(event(SessionEvent::InteractionRequested {
+    state.reduce(event(SessionEvent::InteractionRequest {
         id: "i2".to_string(),
         ui_type: tabit_protocol::templates::ui::SELECT_ONE.to_string(),
         payload: serde_json::json!({"unexpected": true}),
