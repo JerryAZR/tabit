@@ -329,7 +329,8 @@ histories).
   texts. Risk noted: yaca's implementation has never run in production —
   we adopt the approach, not the code. Our replay is a projection of
   our own chain walk (simpler than yaca's: no compaction to fold in
-  yet), tested for ordering, branch exclusion, tool batches, and usage.
+  yet — item 6's ruled insertion is the planned addition), tested for
+  ordering, branch exclusion, tool batches, and usage.
 - **`message_queued { text, id }` — the submit-time ack for messages
   that wait, linked by id.** Emitted when a `message` command is
   accepted while a run is live (a steer sitting until the turn
@@ -1455,9 +1456,10 @@ homes:
 When the extension discussion reopens the surface: pi's redesign is
 the reference shape (fail-open observers, fail-closed gates,
 first-block-terminal, chained argument patches — all already our
-rulings), `transform_context`-style context projection waits for the
-compaction design (item 6), and "retry fresh" stays unsupported
-until then.
+rulings), `transform_context`-style context projection follows the
+compaction design (item 6 — ruled 2026-09, lands with its
+implementation), and "retry fresh" stays unsupported until that
+lands.
 
 **Follow-up (2026-08, owner ruling): the context's introspection
 getters went the same way.** `HookContext`'s `run_id`/`turn`/

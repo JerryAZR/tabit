@@ -13,9 +13,10 @@ CBOR wire protocol + headless server/client, session-repo backends,
 harness v2, and skills all landed 2026-06 → 2026-08, right around the
 founding. What remains tabit's own, and the reasons to keep building:
 the native Rust stack (single binary, no Node), the egui GUI as a
-first-class frontend over a frozen protocol, planned **in-process**
-subagents (pi still only spawns subprocesses), and full ownership of
-the design — its pace, its discipline, its failure modes.
+first-class frontend over a frozen protocol, native subagents
+(subprocess children over the frozen stdio protocol — the ONE
+substrate, item 5), and full ownership of the design — its pace, its
+discipline, its failure modes.
 
 ## Where we are
 
@@ -39,8 +40,9 @@ that pi's `pi-ai` provides, at or above its robustness:
 - `examples/local_probe.rs` — verified live probe against LM Studio
   (OpenAI completions, OpenAI Responses, Anthropic wire formats).
 
-Known deviation from pi: **native in-process subagents** instead of pi's
-subprocess model. Everything else follows pi's minimal path.
+Subagents ride the same substrate as pi (subprocess children; item 5
+records the two rounds that got there — the in-process deviation was
+built, then removed whole). Everything else follows pi's minimal path.
 
 ## What to build (in order)
 
@@ -77,7 +79,8 @@ model catalog). Decisions:
   (it is the escape hatch); provider-level `headers` ride the constructed
   client. Re-resolved on every model/thinking-level switch (the agent
   rebuild). Deliberately unwired: per-model `headers` (needs a
-  client-caching decision), `context_window` (compaction — item 6),
+  client-caching decision), `context_window` (compaction — item 6,
+  design ruled 2026-09; wires with implementation),
   `reasoning`/`input`/display names (model-picker UI, item 7 v2).
 - `default_model` is the preferred-model slot: a bare model id (must be
   unambiguous), optional `provider` qualifier for conflicts, optional
@@ -262,13 +265,12 @@ tool described itself as bash.
 
 ### 5. Native subagents
 
-The known deviation from pi's subprocess model:
-
-- In-process subagents driven by the same `AgentRun` state machine: a parent
-  spawns a child run with its own model/preamble/toolset; child streams
-  progress to the parent's transcript; result returns as a tool result.
-- Isolation boundaries: which tools a subagent may use, recursion depth,
-  context accounting so child output can't silently blow the parent budget.
+Subprocess children are the ONE substrate (ruled 2026-09, two rounds —
+"Substrate closed" below); the initial in-process plan was removed
+whole, and with it this section's old framing as "the known deviation
+from pi's subprocess model" — tabit's subagents ride the same
+substrate as pi's, over the frozen stdio protocol. The rulings below
+carry the actual shape:
 
 **Design rulings (2026-09, the session-surface review):**
 
@@ -369,17 +371,21 @@ assumptions (item 9 owns that).
 
 - Context compaction: summarize old turns when approaching the context
   window (pi: replace history with a summary + recent tail).
-- Overflow detection and recovery: detect context-overflow errors from the
-  provider, repair and retry rather than fail the session.
-- Port pi's overflow heuristics when a consumer exists (deferred helper —
-  see COVERAGE.md phase 4 note).
+- Overflow detection and recovery: detect context-overflow errors from
+  the provider, repair and retry rather than fail the session —
+  detection is **typed classification at the transport layer** (ruled
+  2026-09 with the cut-selection loop below — we own the
+  anthropic/openai wire clients, so no regex port; the old
+  pi-`overflow.ts` port deferral, and the COVERAGE.md note it pointed
+  at, are dead).
 - **Ruled 2026-08: compaction gets a real design discussion before any
   code.** No coding agent (pi included) ships a genuinely robust compaction
   pass — treat pi's as a reference, not a target. The design must also cover
   the history/session-tree interaction: what a compaction entry *is* in the
   append-only tree, how checkout interacts with a compacted chain, and what
-  replay reconstructs. `context_window` config stays unwired until that
-  design exists.
+  replay reconstructs. All three questions are answered by the 2026-09
+  rulings below (the record, the insertion, the flow).
+  `context_window` config wires with the implementation.
 - **Reference survey (2026-09, the design discussion's evidence base):**
   all five references (pi, codex, opencode, crush, yaca) roll their own but
   converge on one skeleton — threshold from real provider usage minus a
@@ -400,14 +406,17 @@ assumptions (item 9 owns that).
   (codex negotiates it as a provider capability); nobody has our
   rewind/branch tree, so the tree interaction is ours to design.
 - **Ruled 2026-09 — two seams, two thresholds (owner):** the trigger is
-  checked at two seams with different jobs. The **tool-roundtrip seam**
-  (between model calls, mid-run) carries the high threshold — "compact
-  now, or the next few calls will exceed the context window and fail"
-  (safety; fires mid-task only when genuinely close). The **outer-loop
-  idle seam** (after run end, back at idle) carries the lower threshold —
+  checked at two seams with different jobs. The **pre-request seam**
+  (the point you are about to send a request to the model — between
+  model calls, mid-run; defined precisely in the own-system ruling
+  below) carries the high threshold — "compact now, or the next few
+  calls will exceed the context window and fail" (safety; fires
+  mid-task only when genuinely close). The **outer-loop idle seam**
+  (after run end, back at idle) carries the lower threshold —
   "summarize at a natural pause point, make room for the next task"
-  (compacting at 80% when the model has finished its work beats 90% in
-  the middle of a task).
+  (compacting at 75% when the model has finished its work beats
+  waiting for the urgent bound mid-task; the numbers are finalized in
+  the trigger-formula ruling below).
 - **Ruled 2026-09 — in-conversation summarization (codex-style, owner):**
   the compaction request is appended to the real conversation — same
   preamble, **no tools**, the instruction riding in the user message
@@ -455,9 +464,9 @@ assumptions (item 9 owns that).
   prefix-cache identity, since any toolset change (emptying it, or
   trimming to a subset like `read`) diverges the cached prefix at the
   tools position — forbids calls in the instruction, and **rejects
-  every tool call** made in compaction state. How that state is
-  entered or queried is execution-flow machinery — item 4 territory
-  (along with the rejection's response shape).
+  every tool call** made in compaction state. Entry and query are
+  settled by the own-system ruling below (the two doors); the
+  rejection's response shape stays open (implementation-time).
 - **Ruled 2026-09 — the cut-selection loop (owner, high-level; agenda
   items 2+5 merged into it):** one procedure, three points.
   (1) **Initial cut:** keep at least `KEEP_TAIL` (an internal
@@ -529,8 +538,8 @@ assumptions (item 9 owns that).
   (each pass's entry parents the node before its own cut and names
   its own cut child — no entry is rewritten); a **torn compaction
   entry loses only the pass** — reload yields the full history, the
-  write-behind contract's accepted loss. Open with the flow dig: the
-  entry's exact payload fields (tokens-before, usage, pass sequence,
+  write-behind contract's accepted loss. Still open (implementation-
+  time): the entry's exact payload fields (tokens-before, usage, pass sequence,
   the instruction for audit), how the summary enters the
   model-facing context (leaning: a user-role wrapper message, the
   references' pattern), and the session-format version bump.
@@ -567,9 +576,8 @@ assumptions (item 9 owns that).
   three separate designs, not to be mixed**: the session file
   **settled** (the compaction record ruling above), the runtime
   session tree & state **settled** (the insertion ruling above), and
-  the execution flow (ENGINE.md —
-  who triggers, which states, how compaction state is entered and
-  queried). (5) **overflow recovery — merged into the cut-selection
+  the execution flow **settled** (the own-system ruling above, a
+  black box with two doors; the ENGINE.md amendment precedes code). (5) **overflow recovery — merged into the cut-selection
   loop ruling above** (pre-flight fit by construction + rejection
   shortening + the post-check loop).
 
@@ -677,7 +685,11 @@ assumptions (item 9 owns that).
   liveness, cards dying at view switches), the same seam each time.
   The **trigger**: after checkout, `model`, and write-behind's
   per-session seq land — the remaining events that touch reducer
-  surface; until then GUI changes are minimal interim patches with the
+  surface; the trigger has since fired (checkout, model, and
+  write-behind's per-session seq all landed) and the redesign is in
+  progress on the `tabit-gui-work` worktree (branch `gui/redesign`,
+  kicked off 2026-09) — until it lands, master-side GUI changes are
+  minimal interim patches with the
   seams marked, not investments in the doomed shape. The **scope**:
   the state model and view layer are redesigned; `backend.rs`
   (process/pipes/handshake, bug-free through v3) and the InMsg
@@ -848,7 +860,6 @@ assumptions (item 9 owns that).
 
 ## Deferred until a consumer exists (phase 4 leftovers)
 
-- Overflow-detection helper (port pi's `overflow.ts`).
 - Orphan-result repair utility.
 - Typed `provider_status` on `CompletionError`.
 - Eval harness (pi has one; build when there are sessions + tools to eval).
