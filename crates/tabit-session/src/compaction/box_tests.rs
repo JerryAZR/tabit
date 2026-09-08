@@ -197,7 +197,7 @@ fn an_overflow_rejection_teaches_the_window_and_shortens() {
             "prompt is too long: 19565 tokens > 16384 tokens maximum".to_string(),
         ));
     match rejected(error, &state, 4, &branch) {
-        RetryStep(shortened) => {
+        Rejection::Shorten(shortened) => {
             assert!(shortened < 4);
             assert_eq!(state.taught_window(), Some(16384));
         }
@@ -213,7 +213,7 @@ fn a_non_overflow_failure_fails_the_pass() {
     let error = CompletionError::ProviderError("model overloaded".to_string());
     assert!(matches!(
         rejected(error, &state, 4, &branch),
-        Fail(message) if message.contains("overloaded")
+        Rejection::Fail(message) if message.contains("overloaded")
     ));
 }
 

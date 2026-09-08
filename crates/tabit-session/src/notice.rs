@@ -58,6 +58,17 @@ impl NoticeSink {
             })
             .is_ok()
     }
+
+    /// Send a frame that already carries its own stamp — the subprocess
+    /// bridge's rule (forward, don't re-stamp): a child's frame keeps
+    /// the child's stream id as it crosses onto the parent's channel.
+    /// Same liveness contract as [`Self::emit`].
+    pub(crate) fn forward(&self, frame: EventFrame) -> bool {
+        let Some(events) = self.events.upgrade() else {
+            return false;
+        };
+        events.send(frame).is_ok()
+    }
 }
 
 /// The attach-once cell for a sink that does not exist until the

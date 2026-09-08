@@ -104,8 +104,10 @@ impl Mailbox {
         }
     }
 
-    pub(crate) fn is_empty(&self) -> bool {
-        lock(&self.queue).is_empty()
+    /// Whether anything is queued (the pump's run-or-idle check, the
+    /// worker's beat).
+    pub(crate) fn has_queued(&self) -> bool {
+        !lock(&self.queue).is_empty()
     }
 
     /// Park a continue intent. Also the overflow intercept's retry
@@ -169,11 +171,6 @@ impl Mailbox {
             .collect()
     }
 
-    /// Whether anything is queued (the pump's run-or-idle check).
-    pub(super) fn has_queued(&self) -> bool {
-        !lock(&self.queue).is_empty()
-    }
-
     /// The work signal the resident worker waits on. A push before the
     /// wait stores a permit, so no wakeup can be lost.
     pub(crate) fn work_signal(&self) -> &tokio::sync::Notify {
@@ -209,8 +206,8 @@ impl MailboxHandle {
     }
 
     /// Whether anything is queued (the actor's idle check).
-    pub(crate) fn is_empty(&self) -> bool {
-        self.mailbox.is_empty()
+    pub(crate) fn has_queued(&self) -> bool {
+        self.mailbox.has_queued()
     }
 
     /// The work signal the resident worker waits on.

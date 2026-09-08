@@ -874,7 +874,7 @@ fn spawn_worker(
                 &worker_compact_due,
             )
             .await;
-            if !worker_mailbox.is_empty() || worker_mailbox.has_continue() {
+            if worker_mailbox.has_queued() || worker_mailbox.has_continue() {
                 // The pump returns on an aborted outcome (a checkout
                 // aborts its way here), so anything parked behind a
                 // run executes at this beat before a later message
@@ -905,7 +905,7 @@ fn spawn_worker(
                     // queued - run it before winding down. (Pushes
                     // that race the wind-down simply run too; nothing
                     // is lost.)
-                    if !worker_mailbox.is_empty() {
+                    if worker_mailbox.has_queued() {
                         continue;
                     }
                     // Serve what the handler parked ahead of the

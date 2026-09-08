@@ -151,15 +151,13 @@ pub struct Session {
     /// ([`SessionBuilder::subagents`]): the process-wide parts; the
     /// per-run capability is minted at run open.
     subagent_parts: Option<Arc<crate::subagent::SubagentParts>>,
-    /// The frontend channel's weak end for module-level emissions —
-    /// anything a session subsystem emits outside a run's item fold
-    /// (subagent child-event forwarding, the compaction bracket).
-    /// Attached by the worker at spawn — the same attach-once
+    /// The frontend channel's weak, pre-stamped handle for module-level
+    /// emissions — anything a session subsystem emits outside a run's
+    /// item fold (subagent child-event forwarding, the compaction
+    /// bracket). Attached by the worker at spawn — the same attach-once
     /// discipline the notice slots keep; a dead tap means nobody is
     /// left to tell.
-    event_tap: Arc<
-        std::sync::OnceLock<tokio::sync::mpsc::WeakUnboundedSender<tabit_protocol::EventFrame>>,
-    >,
+    event_tap: Arc<crate::notice::NoticeSlot>,
     /// The compaction box's session state (the window the wall taught,
     /// the last completion's usage) — the pass logic lives in
     /// [`crate::compaction`], the doors call into it. Shared with the
@@ -201,13 +199,22 @@ impl Session {
 
     /// Attach the frontend channel module-level emissions forward
     /// through (subagent child events, the compaction bracket). Called
-    /// once by the session worker at spawn; the weak end keeps the
-    /// notice discipline (the stream ends with the frontend).
+    /// once by the session worker at spawn; the sink keeps the notice
+    /// discipline (weak, pre-stamped — the stream ends with the
+    /// frontend).
     pub fn attach_event_tap(
         &mut self,
         events: &tokio::sync::mpsc::UnboundedSender<tabit_protocol::EventFrame>,
     ) {
-        let _ = self.event_tap.set(events.downgrade());
+        let _ = self.event_tap.set(crate::notice::NoticeSink::new(
+            events,
+            tabit_protocol::StreamId::new(self.id.clone()),
+        ));
+    }
+
+    /// The preamble's char count (the compaction estimate's input).
+    pub(crate) fn preamble_chars(&self) -> u64 {
+        self.preamble.as_ref().map_or(0, |p| p.len() as u64)
     }
 
     /// The session id.

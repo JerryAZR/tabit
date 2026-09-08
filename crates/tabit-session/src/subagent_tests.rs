@@ -66,3 +66,19 @@ fn filter_tools_keeps_order_and_fails_loudly_on_unknown_names() {
     assert!(message.contains("typo"), "names the miss: {message}");
     assert!(message.contains("bash"), "lists what exists: {message}");
 }
+
+#[tokio::test]
+async fn a_pre_cancelled_token_refuses_before_spawning() {
+    // Bash's rule (tabit-tools' run_shell): "it never ran" is
+    // structural — the check sits ahead of the SpawnContext fetch, so
+    // a refused call spawns nothing (and needs no mounted capability).
+    let mut context = rig_agent::tool::ToolContext::new();
+    let token = tokio_util::sync::CancellationToken::new();
+    token.cancel();
+    context.insert(token);
+    let error = super::subagent(&mut context, "do a thing".to_string(), None, None, None)
+        .await
+        .expect_err("a pre-cancelled run refuses");
+    let message = error.to_string();
+    assert!(message.contains("did not run"), "{message}");
+}

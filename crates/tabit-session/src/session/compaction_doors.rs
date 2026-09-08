@@ -25,10 +25,9 @@ impl Session {
             agent: self.agent.clone(),
             config: self.config.clone(),
             selection: self.selection(),
-            preamble_chars: self.preamble.as_ref().map_or(0, |p| p.len() as u64),
+            preamble_chars: self.preamble_chars(),
             token: run_token.clone(),
-            tap: self.event_tap.get().cloned(),
-            stream: tabit_protocol::StreamId::new(self.id.clone()),
+            notice: self.event_tap.get().cloned(),
         })
     }
 
@@ -80,14 +79,10 @@ impl Session {
                 passes: 0,
             };
         }
-        let tap = self.event_tap.get().cloned();
-        let stream = tabit_protocol::StreamId::new(self.id.clone());
+        let notice = self.event_tap.get().cloned();
         let mut emit = move |event: tabit_protocol::SessionEvent| {
-            if let Some(tx) = tap.as_ref().and_then(|tap| tap.upgrade()) {
-                let _ = tx.send(tabit_protocol::EventFrame {
-                    stream: Some(stream.clone()),
-                    event,
-                });
+            if let Some(notice) = &notice {
+                notice.emit(event);
             }
         };
         box_module::run(
@@ -98,7 +93,7 @@ impl Session {
             &token,
             &self.config,
             &self.selection(),
-            self.preamble.as_ref().map_or(0, |p| p.len() as u64),
+            self.preamble_chars(),
             mailbox_empty,
             &mut emit,
         )

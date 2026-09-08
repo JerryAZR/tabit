@@ -65,12 +65,12 @@ pub struct SubprocessBuilder {
     session: Option<PathBuf>,
     max_turns: Option<usize>,
     router: Arc<crate::routing::ChildRouter>,
-    events: Option<tokio::sync::mpsc::WeakUnboundedSender<EventFrame>>,
+    notice: Option<crate::notice::NoticeSink>,
 }
 
 impl SubprocessBuilder {
     /// Begin from a spawner's context — the exe, the parent identity,
-    /// the shared router, and the weak frontend channel all come from
+    /// the shared router, and the weak frontend handle all come from
     /// the assembly's parts.
     pub fn new(ctx: &SpawnContext) -> Self {
         Self {
@@ -83,7 +83,7 @@ impl SubprocessBuilder {
             session: None,
             max_turns: None,
             router: ctx.parts().router.clone(),
-            events: ctx.events_channel(),
+            notice: ctx.notice(),
         }
     }
 
@@ -138,7 +138,7 @@ impl SubprocessBuilder {
             session,
             max_turns,
             router,
-            events,
+            notice,
         } = self;
 
         let mut args: Vec<String> = vec![
@@ -250,7 +250,7 @@ impl SubprocessBuilder {
         let (frame_tx, frame_rx) = tokio::sync::mpsc::unbounded_channel::<EventFrame>();
         let (handshake_tx, handshake_rx) = tokio::sync::oneshot::channel::<Handshake>();
         let pump_router = router.clone();
-        let pump_events = events;
+        let pump_notice = notice;
         tokio::spawn(async move {
             let mut lines = BufReader::new(stdout).lines();
             let mut child_id: Option<String> = None;
@@ -287,12 +287,11 @@ impl SubprocessBuilder {
                         // Forward as-is (the child's stamps are already
                         // its session ids) and learn: a frame's stamp
                         // teaches which subtree owns the id.
-                        if let (Some(events), Some(id)) = (&pump_events, &child_id)
-                            && let Some(events) = events.upgrade()
+                        if let (Some(notice), Some(id)) = (&pump_notice, &child_id)
                             && let Some(stream) = &frame.stream
                         {
                             pump_router.learn(stream.as_str(), id);
-                            let _ = events.send(frame.clone());
+                            notice.forward(frame.clone());
                         }
                         let _ = frame_tx.send(frame);
                     }

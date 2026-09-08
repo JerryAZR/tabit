@@ -60,7 +60,7 @@ pub struct SpawnContext {
     parent_id: String,
     parent_selection: ModelSelection,
     parent_cwd: PathBuf,
-    events: Option<tokio::sync::mpsc::WeakUnboundedSender<tabit_protocol::EventFrame>>,
+    notice: Option<crate::notice::NoticeSink>,
 }
 
 impl SpawnContext {
@@ -71,14 +71,14 @@ impl SpawnContext {
         parent_id: String,
         parent_selection: ModelSelection,
         parent_cwd: PathBuf,
-        events: Option<tokio::sync::mpsc::WeakUnboundedSender<tabit_protocol::EventFrame>>,
+        notice: Option<crate::notice::NoticeSink>,
     ) -> Self {
         Self {
             parts,
             parent_id,
             parent_selection,
             parent_cwd,
-            events,
+            notice,
         }
     }
 
@@ -103,12 +103,10 @@ impl SpawnContext {
         &self.parent_cwd
     }
 
-    /// The weak frontend channel — the subprocess bridge forwards the
-    /// child process's frames through it, as-is.
-    pub(crate) fn events_channel(
-        &self,
-    ) -> Option<tokio::sync::mpsc::WeakUnboundedSender<tabit_protocol::EventFrame>> {
-        self.events.clone()
+    /// The frontend channel's weak, pre-stamped handle — the subprocess
+    /// bridge forwards the child process's frames through it, as-is.
+    pub(crate) fn notice(&self) -> Option<crate::notice::NoticeSink> {
+        self.notice.clone()
     }
 
     /// Begin a subprocess child: the bridge builder. The OS enforces
@@ -161,6 +159,15 @@ pub async fn subagent(
     cwd: Option<String>,
     tools: Option<Vec<String>>,
 ) -> Result<ToolOutput, ToolExecutionError> {
+    let token = context.get::<CancellationToken>().cloned();
+    // A pre-cancelled token refuses before spawning (bash's rule in
+    // tabit-tools' run_shell: "it never ran" is structural, not a
+    // race against a fast child).
+    if token.as_ref().is_some_and(|t| t.is_cancelled()) {
+        return Err(ToolExecutionError::other(
+            "the subagent was interrupted before starting — it did not run".to_string(),
+        ));
+    }
     let ctx = context.get::<Arc<SpawnContext>>().cloned().ok_or_else(|| {
         ToolExecutionError::other(
             "subagents are not available in this session — the assembly did not mount them",
@@ -196,7 +203,6 @@ pub async fn subagent(
         builder = builder.tools(names);
     }
     let mut child = builder.spawn().await.map_err(ToolExecutionError::other)?;
-    let token = context.get::<CancellationToken>().cloned();
     let summary = ctx
         .drive_subprocess(&mut child, Message::user(task), token)
         .await;
@@ -237,6 +243,9 @@ fn summary_result(summary: RunSummary, child_id: &str) -> Result<ToolOutput, Too
                 })),
             )
         }
+        // The interrupted-report shape is bash's verbatim (tabit-tools,
+        // run_shell's cancel arm) modulo the noun — keep the twins in
+        // step when either wording changes.
         RunOutcome::Aborted => Err(ToolExecutionError::other(
             "the subagent was interrupted before completing — its effects may be \
              partial; check before relying on anything it wrote",

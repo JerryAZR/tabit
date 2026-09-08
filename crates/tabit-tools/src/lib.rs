@@ -999,8 +999,13 @@ fn run_with_deadlines(
     let status = loop {
         if cancel.is_some_and(|token| token.is_cancelled()) {
             guard.kill_tree();
+            // The interrupted-report shape is the subagent tool's
+            // verbatim (tabit-session, summary_result's aborted arm)
+            // modulo the noun — keep the twins in step when either
+            // wording changes.
             return Err(ToolExecutionError::other(
-                "command was interrupted before completing — its effects may be                  partial; check before relying on anything it wrote"
+                "command was interrupted before completing — its effects may be \
+                 partial; check before relying on anything it wrote"
                     .to_string(),
             ));
         }
@@ -1010,7 +1015,8 @@ fn run_with_deadlines(
                 if Instant::now() >= deadline {
                     guard.kill_tree();
                     return Err(ToolExecutionError::other(format!(
-                        "command exceeded its {}s timeout and was killed                          (raise timeout_secs if it legitimately needs longer)",
+                        "command exceeded its {}s timeout and was killed \
+                         (raise timeout_secs if it legitimately needs longer)",
                         timeout.as_secs()
                     )));
                 }

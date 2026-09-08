@@ -38,7 +38,7 @@ use rig_core::streaming::StreamedAssistantContent;
 use std::sync::Arc;
 use tabit_config::TabitConfig;
 use tabit_log::ConversationCell;
-use tabit_protocol::{ModelSelection, SessionEvent, StreamId};
+use tabit_protocol::{ModelSelection, SessionEvent};
 use tokio_util::sync::CancellationToken;
 
 /// The box's session-persistent state: what survives across doors.
@@ -166,7 +166,10 @@ pub(crate) async fn run(
 ) -> Outcome {
     let preamble_tokens = preamble_chars / dials::CHARS_PER_TOKEN;
     let branch = read(cell).active_branch();
-    let mut tokens_before = context_tokens(state, &branch, preamble_tokens);
+    // The live context estimate: the value each pass starts from (the
+    // entry's `tokens_before`), and — after the post-pass update —
+    // the latest measurement the exits report as `tokens_after`.
+    let mut tokens_now = context_tokens(state, &branch, preamble_tokens);
     // Every designed constraint needs a known window. Unknown means
     // the threshold doors skip with a warning — and the overflow
     // door's caller noted the wall's lesson before knocking, so an
@@ -181,7 +184,7 @@ pub(crate) async fn run(
         );
         return Outcome::Skipped;
     };
-    if !fires(door, tokens_before, window, mailbox_empty) {
+    if !fires(door, tokens_now, window, mailbox_empty) {
         return Outcome::Skipped;
     }
     let mut passes: u32 = 0;
@@ -208,7 +211,7 @@ pub(crate) async fn run(
                 (0, _) => Outcome::Skipped,
                 (_, _) => Outcome::Compacted {
                     passes,
-                    tokens_after: tokens_before,
+                    tokens_after: tokens_now,
                 },
             };
         };
@@ -224,7 +227,7 @@ pub(crate) async fn run(
                     id.clone(),
                     summary,
                     cut.cut_child(&branch).to_string(),
-                    tokens_before,
+                    tokens_now,
                     usage,
                 );
                 emit(SessionEvent::CompactionFinished { id });
@@ -279,7 +282,7 @@ pub(crate) async fn run(
                 tokens_after,
             };
         }
-        if tokens_after >= tokens_before {
+        if tokens_after >= tokens_now {
             // The cannot-shrink guard: a pass that committed without
             // shrinking the estimate would spin the loop forever —
             // stop loud, with the passes that did land left in place.
@@ -292,7 +295,7 @@ pub(crate) async fn run(
                 passes,
             };
         }
-        tokens_before = tokens_after;
+        tokens_now = tokens_after;
     }
 }
 
@@ -465,11 +468,11 @@ async fn one_pass(
             // same way as an in-stream failure.
             Err(error) => {
                 return match rejected(error, state, boundary, branch) {
-                    RetryStep(shortened) => {
+                    Rejection::Shorten(shortened) => {
                         boundary = shortened;
                         continue;
                     }
-                    Fail(message) => PassOutcome::Failed { message },
+                    Rejection::Fail(message) => PassOutcome::Failed { message },
                 };
             }
         };
@@ -481,11 +484,11 @@ async fn one_pass(
             AttemptOutcome::MalformedToolCall { .. } => return PassOutcome::Violated,
             AttemptOutcome::Failed(error) => {
                 return match rejected(error, state, boundary, branch) {
-                    RetryStep(shortened) => {
+                    Rejection::Shorten(shortened) => {
                         boundary = shortened;
                         continue;
                     }
-                    Fail(message) => PassOutcome::Failed { message },
+                    Rejection::Fail(message) => PassOutcome::Failed { message },
                 };
             }
             AttemptOutcome::Completed {
@@ -504,15 +507,17 @@ async fn one_pass(
                 // (ruled).
                 if finish_reason == Some(rig_core::completion::FinishReason::Length) {
                     match shorten(branch, boundary) {
-                        Some(shortened) if shortened < boundary => {
+                        Some(shortened) => {
                             boundary = shortened;
                             continue;
                         }
-                        _ => {
+                        None => {
                             return PassOutcome::Failed {
-                                message: "the summary hit the output cap even at the                                           shortest prefix — raise the model's output                                           limit or shrink the retained tail"
+                                message: "the summary hit the output cap even at the \
+                                          shortest prefix — raise the model's output \
+                                          limit or shrink the retained tail"
                                     .to_string(),
-                            }
+                            };
                         }
                     }
                 }
@@ -547,13 +552,13 @@ fn assistant_text(turn: &rig_agent::agent::ModelTurn) -> String {
 
 /// What a request-level failure means for the retry loop.
 #[derive(Debug)]
-enum Retry {
-    /// A strictly earlier boundary to resend from.
-    Retry(usize),
+enum Rejection {
+    /// A strictly earlier boundary to resend from (`shorten`'s result
+    /// is below `from` by construction).
+    Shorten(usize),
     /// The pass fails; nothing persists.
     Fail(String),
 }
-use Retry::{Fail, Retry as RetryStep};
 
 /// Classify a request-level failure: an overflow rejection teaches
 /// the window and shortens; everything else fails the pass.
@@ -562,7 +567,7 @@ fn rejected(
     state: &Compaction,
     boundary: usize,
     branch: &[SessionEntry],
-) -> Retry {
+) -> Rejection {
     match error.as_context_overflow() {
         Some(overflow) => {
             // The wall teaches the window — the lesson serves the rest
@@ -571,15 +576,15 @@ fn rejected(
                 state.note_window(window);
             }
             match shorten(branch, boundary) {
-                Some(shortened) if shortened < boundary => RetryStep(shortened),
-                _ => Fail(
+                Some(shortened) => Rejection::Shorten(shortened),
+                None => Rejection::Fail(
                     "the compaction request overflows the context window even with \
                      an empty prefix — a single entry exceeds the window"
                         .to_string(),
                 ),
             }
         }
-        None => Fail(error.to_string()),
+        None => Rejection::Fail(error.to_string()),
     }
 }
 
@@ -603,24 +608,19 @@ pub(crate) struct PreRequestDoor {
     pub(crate) selection: ModelSelection,
     pub(crate) preamble_chars: u64,
     pub(crate) token: CancellationToken,
-    /// The frontend channel's weak end — `None` for a session with no
-    /// host attached (a direct consumer); the bracket drops, the
-    /// compaction still runs.
-    pub(crate) tap: Option<tokio::sync::mpsc::WeakUnboundedSender<tabit_protocol::EventFrame>>,
-    pub(crate) stream: StreamId,
+    /// The frontend channel's weak, pre-stamped handle — `None` for a
+    /// session with no host attached (a direct consumer); the bracket
+    /// drops, the compaction still runs.
+    pub(crate) notice: Option<crate::notice::NoticeSink>,
 }
 
 impl PreRequestSource for PreRequestDoor {
     fn at_door(&self) -> rig_core::wasm_compat::WasmBoxedFuture<'_, ()> {
         Box::pin(async move {
-            let tap = self.tap.clone();
-            let stream = self.stream.clone();
+            let notice = self.notice.clone();
             let mut emit = move |event: SessionEvent| {
-                if let Some(tx) = tap.as_ref().and_then(|tap| tap.upgrade()) {
-                    let _ = tx.send(tabit_protocol::EventFrame {
-                        stream: Some(stream.clone()),
-                        event,
-                    });
+                if let Some(notice) = &notice {
+                    notice.emit(event);
                 }
             };
             let _ = run(
