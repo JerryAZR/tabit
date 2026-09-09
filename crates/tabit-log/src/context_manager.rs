@@ -139,20 +139,30 @@ impl ContextManager {
     }
 
     /// The history view (root → head with the newest compaction
-    /// spliced at its cut): the model-facing entry order, for
-    /// projections that read nodes (the compaction box's cut
-    /// selection and measurement reads). Materialized on demand —
-    /// never stored.
+    /// spliced at its cut): the model-facing entry order — the **cut
+    /// surface** (owner ruling 2026-09: cut points and folds consume
+    /// the view; totals come from [`Self::measured_total`], never
+    /// from walking this). Materialized on demand — never stored.
     pub fn history(&self) -> Vec<SessionEntry> {
         self.tree.history_to_head()
+    }
+
+    /// The branch's measured context size — the total of the nearest
+    /// measurement-bearing node at-or-before the head. **The one
+    /// public read of the raw walk** (the tree walk serves this total
+    /// and the history view's own construction — the surfaces are not
+    /// interchangeable, and the choice lives here, never at call
+    /// sites). `None` is an unmeasured context.
+    pub fn measured_total(&self) -> Option<u64> {
+        crate::fold::regime_total(&self.tree.path_to_head())
     }
 
     /// The active branch as entries (root → head, the raw tree walk,
     /// compactions at their leaf positions), for session-side
     /// projections that read the whole grown branch — rewind targets,
-    /// replay. Materialized on demand — never stored. Never the
-    /// model-facing order: consumers that walk history use
-    /// [`Self::history`].
+    /// replay. Materialized on demand — never stored. Never a
+    /// measurement or cut surface: totals come from
+    /// [`Self::measured_total`], cut points from [`Self::history`].
     pub fn active_branch(&self) -> Vec<SessionEntry> {
         self.tree.path_to_head()
     }
@@ -209,17 +219,31 @@ impl ContextManager {
     /// history, or a misreport) is also `None`, warned: external
     /// world, graceful — the chain re-anchors at this turn's total.
     fn turn_delta(&self, usage: Option<&Usage>) -> Option<u64> {
+        // `None` is the seed door only (no server measured it —
+        // expected, silent). A live commit (this method's `Some`
+        // paths) carries the provider's report; the zero sentinel
+        // there means the provider answered without one.
         let usage = usage?;
         if usage.total_tokens == 0 {
+            // The assumption this design builds on: every valid
+            // provider reports usage (owner ruling 2026-09) — an
+            // unreported live turn disables compaction for the whole
+            // context (measurement, never estimation). Warn at the
+            // source, on the first occurrence, not later at the
+            // door's skip. This crate carries no tracing dependency;
+            // the lock module's eprintln convention serves
+            // diagnostics here too.
+            eprintln!(
+                "tabit-log: a provider completed a turn without reporting usage — \
+                 compaction measures and never estimates, so it cannot run on this \
+                 conversation while turns go unreported (check the provider/model)"
+            );
             return None;
         }
         let predecessor = crate::fold::regime_total(&self.tree.path_to_head()).unwrap_or(0);
         match usage.total_tokens.checked_sub(predecessor) {
             Some(delta) => Some(delta),
             None => {
-                // This crate carries no tracing dependency; the lock
-                // module's eprintln convention serves diagnostics here
-                // too.
                 eprintln!(
                     "tabit-log: a turn reported {} total tokens against a predecessor \
                      measurement of {} — its delta is uncounted and the chain \

@@ -141,21 +141,11 @@ pub(crate) enum Outcome {
     Cancelled { passes: u32 },
 }
 
-/// One selected cut: the boundary index into the history view (the
-/// first retained entry), over the suffix delta sums the constraints
-/// fed on.
-#[derive(Debug, Clone, PartialEq)]
-struct Cut {
-    boundary: usize,
-}
-
-impl Cut {
-    /// The first retained entry's id at a boundary — the selection's
-    /// own, or a shortened retry's.
-    #[allow(clippy::indexing_slicing)] // sanctioned crash: boundaries are validated indices into this view
-    fn cut_child(history: &[SessionEntry], boundary: usize) -> &str {
-        &history[boundary].id
-    }
+/// The first retained entry's id at a boundary — a selection's own,
+/// or a shortened retry's.
+#[allow(clippy::indexing_slicing)] // sanctioned crash: boundaries are validated indices into this view
+fn cut_child_of(history: &[SessionEntry], boundary: usize) -> &str {
+    &history[boundary].id
 }
 
 /// Whether `index` (the first retained entry) sits at a valid
@@ -247,7 +237,7 @@ pub(crate) async fn run(
     // unmeasured context — a fresh session, a provider that never
     // reports usage — is absence, not an estimate (the unknown-window
     // skip's sibling).
-    let Some(mut tokens_now) = tabit_log::regime_total(&read(cell).active_branch()) else {
+    let Some(mut tokens_now) = read(cell).measured_total() else {
         tracing::warn!(
             "compaction skipped: the context has no measurement yet — no turn \
              on the history reported usage"
@@ -266,7 +256,7 @@ pub(crate) async fn run(
     loop {
         let history = read(cell).history();
         let tail_sums = delta_suffix_sums(&history);
-        let Some(cut) = select_cut(&history, &tail_sums, tokens_now, window) else {
+        let Some(boundary) = select_cut(&history, &tail_sums, tokens_now, window) else {
             // Nothing worth folding is benign for every door — the
             // manual command reports it as a friendly note, the
             // automatic doors are silent about it. After committed
@@ -291,7 +281,7 @@ pub(crate) async fn run(
             id: id.clone(),
             pass,
         });
-        match one_pass(&history, cut.clone(), state, agent, token, &id, emit).await {
+        match one_pass(&history, boundary, state, agent, token, &id, emit).await {
             PassOutcome::Committed {
                 summary,
                 usage,
@@ -307,7 +297,7 @@ pub(crate) async fn run(
                 write(cell).commit_compaction(
                     id.clone(),
                     summary,
-                    Cut::cut_child(&history, boundary).to_string(),
+                    cut_child_of(&history, boundary).to_string(),
                     tokens_now,
                     tokens_after,
                     usage,
@@ -360,7 +350,8 @@ pub(crate) async fn run(
         // its persisted base.
         #[allow(clippy::expect_used)]
         // sanctioned crash: the commit one step above wrote this measurement
-        let tokens_after = tabit_log::regime_total(&read(cell).active_branch())
+        let tokens_after = read(cell)
+            .measured_total()
             .expect("the compaction node just committed carries the regime's base");
         // The primary exit: the context now fits the urgent bound —
         // compaction happened, good to continue.
@@ -456,7 +447,7 @@ fn select_cut(
     tail_sums: &[u64],
     head_total: u64,
     window: u64,
-) -> Option<Cut> {
+) -> Option<usize> {
     if history.is_empty() {
         return None;
     }
@@ -468,7 +459,7 @@ fn select_cut(
         let tail_tokens = tail_sums[index];
         let prefix_tokens = head_total.saturating_sub(tail_tokens);
         if prefix_tokens < cap && tail_tokens >= dials::KEEP_TAIL_TOKENS {
-            return Some(Cut { boundary: index });
+            return Some(index);
         }
     }
     None
@@ -504,14 +495,14 @@ enum PassOutcome {
 #[allow(clippy::indexing_slicing)] // sanctioned crash: the boundary is a validated index into this view
 async fn one_pass(
     history: &[SessionEntry],
-    initial_cut: Cut,
+    initial_boundary: usize,
     state: &Compaction,
     agent: &Agent,
     token: &CancellationToken,
     id: &str,
     emit: &mut (dyn FnMut(SessionEvent) + Send),
 ) -> PassOutcome {
-    let mut boundary = initial_cut.boundary;
+    let mut boundary = initial_boundary;
     loop {
         let mut view = tabit_log::fold_branch(&history[..boundary]);
         view.push(Message::user(dials::SUMMARIZATION_INSTRUCTION));

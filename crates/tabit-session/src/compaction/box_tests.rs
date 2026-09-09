@@ -120,9 +120,9 @@ fn select_cut_picks_the_latest_feasible_boundary() {
     let cell = cell_with_measured_dialogue(4, 9_000);
     let history = read(&cell).history();
     let sums = delta_suffix_sums(&history);
-    let cut = select_cut(&history, &sums, 36_000, 10_000_000).expect("feasible");
+    let boundary = select_cut(&history, &sums, 36_000, 10_000_000).expect("feasible");
     assert_eq!(
-        cut.boundary, 4,
+        boundary, 4,
         "the maximization cuts as late as the tail floor allows"
     );
     assert_eq!(sums[4], 18_000, "the retained tail is two rounds of deltas");
@@ -145,10 +145,10 @@ fn select_cut_bounds_the_prefix_under_the_cap() {
     let history = read(&cell).history();
     let sums = delta_suffix_sums(&history);
     let window = 30_000u64;
-    let cut = select_cut(&history, &sums, 50_000, window).expect("feasible");
+    let boundary = select_cut(&history, &sums, 50_000, window).expect("feasible");
     let cap = (dials::SENT_PREFIX_FRACTION * window as f64) as u64;
     assert_eq!(
-        cut.boundary, 44,
+        boundary, 44,
         "the latest boundary whose prefix fits the cap"
     );
     assert!(50_000 - sums[44] < cap);
@@ -158,7 +158,7 @@ fn select_cut_bounds_the_prefix_under_the_cap() {
     assert!(50_000 - sums[46] >= cap, "a later boundary was feasible");
     // The cut lands on a model output: the entry before it is a
     // tool-free assistant (or the leading compaction).
-    assert!(valid_boundary(&history, cut.boundary));
+    assert!(valid_boundary(&history, boundary));
 }
 
 #[test]
@@ -270,10 +270,7 @@ fn the_head_measurement_is_the_newest_reported_total() {
             ..Usage::default()
         },
     );
-    assert_eq!(
-        tabit_log::regime_total(&read(&cell).active_branch()),
-        Some(10_000)
-    );
+    assert_eq!(read(&cell).measured_total(), Some(10_000));
 }
 
 #[test]
@@ -299,10 +296,7 @@ fn an_unreported_turn_inherits_the_previous_valid_total() {
         "a2".to_string(),
         Usage::new(),
     );
-    assert_eq!(
-        tabit_log::regime_total(&read(&cell).active_branch()),
-        Some(10_000)
-    );
+    assert_eq!(read(&cell).measured_total(), Some(10_000));
 }
 
 #[test]
@@ -319,10 +313,7 @@ fn the_window_read_in_the_post_compaction_gap_is_the_regime_base() {
         18_020,
         Usage::default(),
     );
-    assert_eq!(
-        tabit_log::regime_total(&read(&cell).active_branch()),
-        Some(18_020)
-    );
+    assert_eq!(read(&cell).measured_total(), Some(18_020));
     // The view leads with the compaction, and a boundary right after
     // it is valid — multi-pass cuts exactly there.
     let history = read(&cell).history();
@@ -363,7 +354,7 @@ fn a_stale_tail_total_is_unreachable_the_regime_base_wins() {
         Usage::default(),
     );
     assert_eq!(
-        tabit_log::regime_total(&read(&cell).active_branch()),
+        read(&cell).measured_total(),
         Some(3_500),
         "the stale tail total is behind the compaction on the walk"
     );
@@ -380,10 +371,7 @@ fn a_stale_tail_total_is_unreachable_the_regime_base_wins() {
             ..Usage::default()
         },
     );
-    assert_eq!(
-        tabit_log::regime_total(&read(&cell).active_branch()),
-        Some(3_500)
-    );
+    assert_eq!(read(&cell).measured_total(), Some(3_500));
 }
 
 async fn run_manual(

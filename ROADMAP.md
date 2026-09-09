@@ -483,8 +483,12 @@ the boundary's suffix sum of deltas, summarization size =
 `head_total − tail(i)`); zero-usage turns commit no delta and the
 next measured delta telescopes over them; a total below its
 predecessor (mid-regime model switch, misreport) is uncounted and the
-chain re-anchors at it. Unmeasured stretches are **uncounted, never
-estimated** — the error budget (owner): one-or-a-bounded-few entries
+chain re-anchors at it. The design assumes every valid provider
+reports usage (owner ruling 2026-09): a **live** turn committing
+with the zero sentinel warns at the commit, early at the source —
+compaction (which measures, never estimates) is off for such a
+context, overflow repair included. Unmeasured stretches are
+**uncounted, never estimated** — the error budget (owner): one-or-a-bounded-few entries
 off by a few K per compaction is fine; one entry per compaction off
 by half a context window is not; every entry off by a few percent is
 not (chars/4 is deleted from the decision path — it breaks on CJK,

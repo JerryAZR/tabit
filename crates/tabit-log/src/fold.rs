@@ -187,7 +187,14 @@ pub fn tail_is_closed(path: &[SessionEntry]) -> Result<(), String> {
 /// `None` when nothing on the branch ever measured: an unmeasured
 /// context (a fresh session, a provider that never reports usage) —
 /// callers treat absence as absence, never an estimate.
-pub fn regime_total(branch: &[SessionEntry]) -> Option<u64> {
+///
+/// Internal by design (owner ruling: the raw walk serves this total
+/// and the history view's own construction; cut points consume the
+/// view). The public read is
+/// [`ContextManager::measured_total`](crate::ContextManager::measured_total),
+/// so the surface choice lives in one place — passing the history
+/// view here is the exact bug the B-delta regression test pins.
+pub(crate) fn regime_total(branch: &[SessionEntry]) -> Option<u64> {
     branch.iter().rev().find_map(|entry| match &entry.kind {
         EntryKind::AssistantMessage { usage, .. } if usage.total_tokens > 0 => {
             Some(usage.total_tokens)
