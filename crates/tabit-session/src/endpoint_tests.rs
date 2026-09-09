@@ -4,7 +4,7 @@
 
 use super::*;
 use crate::SessionEvent;
-use crate::tests::{Factory, echo_tool, temp_store, text_turn, tool_turn};
+use crate::tests::{Factory, echo_tool, temp_store, text_turn, text_turn_reported, tool_turn};
 use rig_agent::tool::{DynamicTool, ToolOutput};
 use serde_json::json;
 use std::time::Duration;
@@ -2925,14 +2925,16 @@ context_window = {window}
 #[tokio::test]
 async fn the_idle_door_compacts_after_a_large_run_and_the_file_holds_the_entry() {
     let store = temp_store("compaction-idle");
-    // Two rounds of dialogue (each answer ~80k chars ≈ 20k tokens):
-    // the context lands around 40k estimated tokens — over the 60k
-    // window's urgent bound (60k − 32.7k) — and the cut at the first
-    // round's end keeps a ~20k-token tail past the floor.
+    // Two rounds of dialogue (each answer ~80k chars ≈ 20k tokens).
+    // The trigger measures from the entries' reported usage: the last
+    // turn reports input ~20k (the request it carried) + output ~20k
+    // (the reply that stayed) ≈ 40k total — over the 60k window's
+    // urgent bound (60k − 32.7k) — and the cut at the first round's
+    // end keeps a ~20k-token tail past the floor.
     let big = "x".repeat(80_000);
     let session = Factory::new(vec![
-        text_turn(&big),
-        text_turn(&big),
+        text_turn_reported(&big, 10, 20_000),
+        text_turn_reported(&big, 20_060, 20_000),
         text_turn("## Goal\n- the summarized work"),
     ])
     .into_builder_with_config(

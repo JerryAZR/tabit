@@ -536,3 +536,73 @@ fn a_second_compaction_composes_as_another_insertion() {
         UserContent::Text(text) if text.text.contains("combined summary")
     ));
 }
+
+#[test]
+fn fold_turn_with_id_commits_the_reported_usage() {
+    let (mut manager, _tap) = manager();
+    let usage = Usage {
+        input_tokens: 90,
+        output_tokens: 10,
+        total_tokens: 100,
+        ..Usage::default()
+    };
+    manager.fold_turn_with_id(assistant_text("the answer"), "turn-1".to_string(), usage);
+    let branch = manager.active_branch();
+    let EntryKind::AssistantMessage {
+        usage: recorded, ..
+    } = &branch[0].kind
+    else {
+        panic!("the assistant entry leads the branch")
+    };
+    assert_eq!(*recorded, usage);
+}
+
+#[test]
+fn fold_all_with_ids_commits_the_reported_usage() {
+    let (mut manager, _tap) = manager();
+    let usage = Usage {
+        input_tokens: 70,
+        output_tokens: 30,
+        total_tokens: 100,
+        ..Usage::default()
+    };
+    manager.fold_all_with_ids(
+        vec![
+            Message::Assistant {
+                id: None,
+                content: OneOrMany::one(call("c1")),
+            },
+            results_message(vec![result("c1", "ok")]),
+        ],
+        usage,
+        vec!["r1".to_string()],
+    );
+    let branch = manager.active_branch();
+    let EntryKind::AssistantMessage {
+        usage: recorded, ..
+    } = &branch[0].kind
+    else {
+        panic!("the assistant entry leads the branch")
+    };
+    assert_eq!(*recorded, usage);
+}
+
+#[test]
+#[should_panic(expected = "fold_turn_with_id")]
+fn fold_with_id_refuses_an_assistant_turn() {
+    let (mut manager, _tap) = manager();
+    manager.fold_with_id(assistant_text("smuggled"), "turn-1".to_string());
+}
+
+#[test]
+fn a_seeded_assistant_stays_unmeasured() {
+    // fold() keeps the seed door: no server measured the turn, and
+    // zeros are the type's not-reported sentinel.
+    let (mut manager, _tap) = manager();
+    manager.fold(assistant_text("a seeded turn"));
+    let branch = manager.active_branch();
+    let EntryKind::AssistantMessage { usage, .. } = &branch[0].kind else {
+        panic!("the assistant entry leads the branch")
+    };
+    assert_eq!(*usage, Usage::new());
+}

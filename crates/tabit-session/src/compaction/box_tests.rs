@@ -217,6 +217,83 @@ fn a_non_overflow_failure_fails_the_pass() {
     ));
 }
 
+#[test]
+fn the_context_measures_from_the_newest_reported_total() {
+    // A measured turn lands after the seeded (never-measured)
+    // dialogue: the server's total wins — the unmeasured past does
+    // not inflate it.
+    let cell = cell_with_dialogue(BIG_FLOOR_ROUNDS, BIG_MESSAGE_CHARS);
+    crate::lock::write(&cell).fold_turn_with_id(
+        Message::assistant("the measured answer"),
+        "measured".to_string(),
+        Usage {
+            input_tokens: 9_000,
+            output_tokens: 1_000,
+            total_tokens: 10_000,
+            ..Usage::default()
+        },
+    );
+    let branch = read(&cell).active_branch();
+    assert_eq!(context_tokens(&branch, 0), 10_000);
+}
+
+#[test]
+fn an_unreported_turn_walks_past_and_its_tail_is_estimated() {
+    // [user, assistant(total 10k), user, assistant(no report)] — the
+    // newest real measurement plus estimated tokens for everything
+    // appended after it.
+    let cell = Arc::new(std::sync::RwLock::new(tabit_log::ContextManager::seeded(
+        vec![Message::user("q")],
+    )));
+    crate::lock::write(&cell).fold_turn_with_id(
+        Message::assistant("a"),
+        "a".to_string(),
+        Usage {
+            input_tokens: 9_000,
+            output_tokens: 1_000,
+            total_tokens: 10_000,
+            ..Usage::default()
+        },
+    );
+    crate::lock::write(&cell).fold(Message::user("q2"));
+    crate::lock::write(&cell).fold(Message::assistant("a2"));
+    let branch = read(&cell).active_branch();
+    #[allow(clippy::indexing_slicing)] // the dialogue shape is fixed by construction
+    let expected = 10_000 + estimate_entry(&branch[2]) + estimate_entry(&branch[3]);
+    assert_eq!(context_tokens(&branch, 0), expected);
+}
+
+#[test]
+fn the_walk_stops_at_a_compaction_entry() {
+    // Everything before the insertion is gone from the context; its
+    // measurements died with it. The measurement restarts at the
+    // summary's estimate plus the retained tail.
+    let cell = cell_with_dialogue(BIG_FLOOR_ROUNDS, BIG_MESSAGE_CHARS);
+    let cut_child = branch_of(&cell)[6].clone();
+    crate::lock::write(&cell).commit_compaction(
+        "compaction-id".to_string(),
+        "the summary".to_string(),
+        cut_child,
+        24_000,
+        Usage::default(),
+    );
+    let branch = read(&cell).active_branch();
+    // [u0, a0, u1, a1, u2, a2, COMP, u3, a3] — the insertion sits at
+    // the cut, index 6; most of the dialogue is pre-cut.
+    #[allow(clippy::indexing_slicing)] // the insertion's position is the constructed shape
+    let summary_est = estimate_entry(&branch[6]);
+    #[allow(clippy::indexing_slicing)] // the retained tail follows the insertion
+    let tail_est: u64 = branch[7..].iter().map(estimate_entry).sum();
+    assert_eq!(context_tokens(&branch, 0), summary_est + tail_est);
+    // The pre-cut entries are excluded: the whole-branch estimate is
+    // several times larger.
+    let whole: u64 = branch.iter().map(estimate_entry).sum();
+    assert!(
+        summary_est + tail_est < whole / 2,
+        "the walk stopped at the insertion"
+    );
+}
+
 async fn run_manual(
     cell: &ConversationCell,
     agent: &rig_agent::agent::Agent,

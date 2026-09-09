@@ -205,12 +205,22 @@ fn cell_fold_steers(cell: &ConversationCell, steers: &[(String, Message)]) {
     }
 }
 
-fn cell_fold_final(cell: &ConversationCell, message: Message, id: String) {
-    tabit_log::lock::write(cell).fold_with_id(message, id);
+fn cell_fold_final(
+    cell: &ConversationCell,
+    message: Message,
+    id: String,
+    usage: rig_core::completion::Usage,
+) {
+    tabit_log::lock::write(cell).fold_turn_with_id(message, id, usage);
 }
 
-fn cell_fold_roundtrip(cell: &ConversationCell, batch: Vec<Message>, result_ids: Vec<String>) {
-    tabit_log::lock::write(cell).fold_all_with_ids(batch, result_ids);
+fn cell_fold_roundtrip(
+    cell: &ConversationCell,
+    batch: Vec<Message>,
+    usage: rig_core::completion::Usage,
+    result_ids: Vec<String>,
+) {
+    tabit_log::lock::write(cell).fold_all_with_ids(batch, usage, result_ids);
 }
 
 /// The run: one coroutine over the conversation. See the module docs
@@ -548,6 +558,7 @@ where
                             content: turn.choice.clone(),
                         },
                         turn_id.clone(),
+                        turn.usage,
                     );
                 }
                 yield Ok(DriveItem::Item(MultiTurnStreamItem::TurnCommitted {
@@ -678,6 +689,7 @@ where
                         content: results_content,
                     },
                 ],
+                turn.usage,
                 result_ids,
             );
             yield Ok(DriveItem::Item(MultiTurnStreamItem::TurnCommitted {

@@ -48,24 +48,13 @@ pub(crate) struct Compaction {
     /// outranks config — it is the fresher measurement). Session-
     /// scoped; nothing persists it.
     window_cache: std::sync::Mutex<Option<u64>>,
-    /// The last completion's provider-reported usage — the trigger
-    /// estimate's exact component (noted from the drive loop's
-    /// `CompletionCall` arm).
-    last_usage: std::sync::Mutex<Option<Usage>>,
 }
 
 impl Compaction {
     pub(super) fn new() -> Self {
         Self {
             window_cache: std::sync::Mutex::new(None),
-            last_usage: std::sync::Mutex::new(None),
         }
-    }
-
-    /// The drive loop's usage note — one per completion call, the
-    /// last one wins.
-    pub(crate) fn note_usage(&self, usage: Usage) {
-        *crate::lock::lock(&self.last_usage) = Some(usage);
     }
 
     /// The wall's lesson: an overflow error reported the real window.
@@ -75,10 +64,6 @@ impl Compaction {
 
     fn taught_window(&self) -> Option<u64> {
         *crate::lock::lock(&self.window_cache)
-    }
-
-    fn usage(&self) -> Option<Usage> {
-        *crate::lock::lock(&self.last_usage)
     }
 }
 
@@ -169,7 +154,7 @@ pub(crate) async fn run(
     // The live context estimate: the value each pass starts from (the
     // entry's `tokens_before`), and — after the post-pass update —
     // the latest measurement the exits report as `tokens_after`.
-    let mut tokens_now = context_tokens(state, &branch, preamble_tokens);
+    let mut tokens_now = context_tokens(&branch, preamble_tokens);
     // Every designed constraint needs a known window. Unknown means
     // the threshold doors skip with a warning — and the overflow
     // door's caller noted the wall's lesson before knocking, so an
@@ -275,7 +260,7 @@ pub(crate) async fn run(
         // condition B — pass N+1 is just another regular compaction
         // over a history that already begins with pass N's summary.
         let branch = read(cell).active_branch();
-        let tokens_after = context_tokens(state, &branch, preamble_tokens);
+        let tokens_after = context_tokens(&branch, preamble_tokens);
         if passes >= dials::MAX_PASSES || tokens_after + dials::URGENT_RESERVE_TOKENS <= window {
             return Outcome::Compacted {
                 passes,
@@ -314,21 +299,34 @@ fn fires(door: Door, context_tokens: u64, window: u64, mailbox_empty: bool) -> b
     }
 }
 
-/// The context estimate: the last provider-reported request total
-/// (input + output + both cache components) floored by the plain
-/// estimate over everything — usage is the exact component while it
-/// is fresh; the estimate covers a reloaded session and any
-/// undercount.
-fn context_tokens(state: &Compaction, branch: &[SessionEntry], preamble_tokens: u64) -> u64 {
-    let plain = preamble_tokens + estimate_entries(branch);
-    let Some(usage) = state.usage() else {
-        return plain;
-    };
-    let spent = usage.input_tokens
-        + usage.output_tokens
-        + usage.cached_input_tokens
-        + usage.cache_creation_input_tokens;
-    spent.max(plain)
+/// The context measurement: the newest server-reported request total
+/// on the branch, plus estimated tokens for the entries appended
+/// after it. Every assistant entry carries the usage its provider
+/// reported (the engine's commit folds it in); `total_tokens` is each
+/// provider's correct partition of everything that request processed
+/// — Anthropic sums input + both cache counters + output (its
+/// `input_tokens` excludes cache), OpenAI passes the wire total (its
+/// prompt figure already includes cached), so summing the components
+/// here would double-count on one side of that split. Zeros mean "not
+/// reported" (the type's own sentinel): the walk passes such entries
+/// by, estimating them, and falls back to the full estimate when no
+/// turn ever measured the branch. A compaction entry ends the walk —
+/// every measurement before it measured a history the summary
+/// replaced.
+fn context_tokens(branch: &[SessionEntry], preamble_tokens: u64) -> u64 {
+    let mut tail = 0;
+    for entry in branch.iter().rev() {
+        match &entry.kind {
+            EntryKind::AssistantMessage { usage, .. } if usage.total_tokens > 0 => {
+                return usage.total_tokens + tail;
+            }
+            EntryKind::Compaction { .. } => {
+                return preamble_tokens + tail + estimate_entry(entry);
+            }
+            _ => tail += estimate_entry(entry),
+        }
+    }
+    preamble_tokens + tail
 }
 
 /// The window: the wall-taught value (fresher than config) else the
@@ -385,6 +383,9 @@ fn select_cut(branch: &[SessionEntry], window: u64, preamble_tokens: u64) -> Opt
 
 /// One entry's token estimate: serialized chars /
 /// [`dials::CHARS_PER_TOKEN`] — the heuristic every reference uses.
+/// Only the unmeasured needs it: the tail after the newest
+/// measurement, cut-selection arithmetic, and branches no server ever
+/// measured (seeds, zero-usage reports).
 fn estimate_entry(entry: &SessionEntry) -> u64 {
     #[allow(clippy::expect_used)] // sanctioned crash: log payloads always serialize
     fn json_tokens(value: &impl serde::Serialize) -> u64 {
@@ -399,10 +400,6 @@ fn estimate_entry(entry: &SessionEntry) -> u64 {
         EntryKind::ToolResult { result } => json_tokens(result),
         EntryKind::Compaction { summary, .. } => summary.len() as u64 / dials::CHARS_PER_TOKEN,
     }
-}
-
-fn estimate_entries(branch: &[SessionEntry]) -> u64 {
-    branch.iter().map(estimate_entry).sum()
 }
 
 /// One pass's stream outcome.

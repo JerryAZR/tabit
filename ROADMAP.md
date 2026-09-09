@@ -379,6 +379,32 @@ overflow classification at the rig-core transport layer, and protocol
 v7 (the bracket events + the command). The flow facts live in
 ENGINE.md's compaction amendment.
 
+**Amended 2026-09 — the trigger measures, it does not estimate
+(owner: "cache hit + input + output is the history size in context —
+if the data exists, there's no need to estimate").** The data existed
+in the schema all along (`assistant_message.usage`) but the write
+sites deferred it (the 2026-08 usage-deferral); the ruling paid that
+debt: every assistant commit — the FINAL fold and the roundtrip fold
+— carries the turn's provider-reported usage onto the entry. The
+trigger input is the branch walk-back: the newest reported
+`total_tokens` plus chars/4 estimates for only the tail appended
+after it. `total_tokens` is the provider-correct partition of
+everything that request processed (Anthropic sums input + both cache
+counters + output; OpenAI's prompt figure already includes cached —
+summing components per-side would double-count one of them). A
+compaction entry ends the walk (every earlier measurement measured a
+history the summary replaced); zeros mean "not reported" (the type's
+sentinel) and the walk passes them by to the last real measurement; a
+branch nothing measured falls to the full estimate. The box's
+`last_usage` session state is deleted with its justification — the
+entry IS the measurement, so it survives reload by construction, and
+reloaded stats count the same numbers the live ledger does. The
+chars/4 heuristic remains only where no server number exists: the
+unmeasured tail and cut-selection arithmetic. Complexity (same
+ruling): O(history) is fine — binary search would need a tree
+re-shape for a size the context window bounds anyway, and the beat's
+common case is a walk-back with no serialization at all.
+
 - Context compaction: summarize old turns when approaching the context
   window (pi: replace history with a summary + recent tail).
 - Overflow detection and recovery: detect context-overflow errors from

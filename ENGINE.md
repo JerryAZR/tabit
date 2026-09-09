@@ -295,9 +295,9 @@ loop {
       pending_error = (class, e);
       if class is retryable { provider_streak += 1; }
       continue;
-    Turn { choice, .. } => {
+    Turn { choice, usage, .. } => {
       if choice carries no tool calls {
-        if !choice.is_empty() { conversation.fold(assistant(choice)); }  // [WRITE]
+        if !choice.is_empty() { conversation.fold_turn(assistant(choice), usage); }  // [WRITE]
         events.emit(TurnCommitted { turn_id });
         turns_used += 1;
         exit Done(response_from(choice));  // a steer arriving now is the
@@ -499,9 +499,11 @@ Recorded where the code had to pick; revisit on review:
   less thing to check, identical behavior).
 - **Empty finals fold nothing and record nothing** — one decision
   site (the loop), which closes PROTOCOL.md flag 29 by deletion.
-- **Usage facts are deferred** (owner ruling 2026-08): assistant
-  entries the manager constructs carry zeros from one named site;
-  discard billing (flags 25/27) returns with that discussion.
+- **Usage facts ride the commits** (the 2026-08 deferral closed by the
+  2026-09 usage discussion): every assistant commit — the FINAL fold
+  and the roundtrip fold — carries the turn's provider-reported usage
+  onto the entry. Zeros remain only where nothing was measured (seeded
+  histories); discard billing (flags 25/27) is the still-open residue.
 
 ## The tool phase (loop-side subsystem, ruled 2026-08)
 

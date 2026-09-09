@@ -421,10 +421,9 @@ impl Session {
                 }
                 Ok(MultiTurnStreamItem::CompletionCall(call)) => {
                     let turn_id = announce(&current_turn);
-                    // The live ledger grows with the deferred zeros:
-                    // the per-model slot exists (usage facts ride the
-                    // records; the totals resume at the usage
-                    // discussion, which updates these the same way).
+                    // The live ledger grows with the entries' own usage
+                    // facts (the fold commits them — reload counts the
+                    // same numbers; live adds only what is new).
                     {
                         let selection = self.selection();
                         self.ledger.add(
@@ -434,10 +433,6 @@ impl Session {
                             call.usage,
                         );
                     }
-                    // The compaction box's trigger input: the last
-                    // provider-reported request total (the exact
-                    // component of the context estimate).
-                    self.compaction.note_usage(call.usage);
                     sink.emit(SessionEvent::CompletionCall {
                         turn_id: turn_id.clone(),
                         input_tokens: call.usage.input_tokens,

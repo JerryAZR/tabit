@@ -150,27 +150,42 @@ impl ContextManager {
         self.tree.contains(id)
     }
 
-    /// Fold one immediately-committable message: a user message, or a
-    /// tool-free assistant turn. Verified trivially, then committed —
-    /// record queued and tree grown in one operation. An assistant
-    /// carrying tool calls is refused loud: tool calls commit only
-    /// through [`fold_all`](Self::fold_all), never without their
-    /// results.
-    /// As [`fold`](Self::fold), but the entry reuses the id its
-    /// producer announced (a user message's born-early id from its
-    /// `message_queued`; an assistant's announced turn id) — so live
-    /// and replay name the same node.
-    pub fn fold_with_id(&mut self, message: Message, id: String) {
-        self.fold_entry(message, Some(id));
-    }
-
-    #[allow(clippy::panic)] // sanctioned crash: an engine wiring bug, failed loud (AGENTS.md doctrine)
+    /// Fold one message from a seeded history (or a test double): a
+    /// user message, a system note, or a tool-free assistant turn no
+    /// server measured — its usage records the type's not-reported
+    /// zeros. An assistant carrying tool calls is refused loud: tool
+    /// calls commit only through [`fold_all`](Self::fold_all), never
+    /// without their results.
     pub fn fold(&mut self, message: Message) {
-        self.fold_entry(message, None);
+        self.fold_entry(message, None, None);
+    }
+
+    /// Fold a user message under its born-early id (its `message_queued`
+    /// id) — live and replay name the same node. A settled assistant
+    /// commits through [`fold_turn_with_id`](Self::fold_turn_with_id)
+    /// instead: its usage rides the commit, and folding one here would
+    /// silently record an unmeasured turn.
+    #[allow(clippy::panic)] // sanctioned crash: an engine wiring bug, failed loud (AGENTS.md doctrine)
+    pub fn fold_with_id(&mut self, message: Message, id: String) {
+        if matches!(message, Message::Assistant { .. }) {
+            panic!(
+                "ContextManager::fold_with_id: an assistant turn commits through \
+                 fold_turn_with_id — its reported usage rides the commit"
+            );
+        }
+        self.fold_entry(message, None, Some(id));
+    }
+
+    /// Commit a settled, tool-free assistant turn under its announced
+    /// turn id, with the usage the provider reported for it — the
+    /// measurement rides the entry (the compaction trigger reads it
+    /// back; reloaded stats count it). The engine's FINAL fold.
+    pub fn fold_turn_with_id(&mut self, message: Message, id: String, usage: Usage) {
+        self.fold_entry(message, Some(usage), Some(id));
     }
 
     #[allow(clippy::panic)] // sanctioned crash: an engine wiring bug, failed loud (AGENTS.md doctrine)
-    fn fold_entry(&mut self, message: Message, id: Option<String>) {
+    fn fold_entry(&mut self, message: Message, usage: Option<Usage>, id: Option<String>) {
         let kind = match message {
             Message::User { .. } => EntryKind::UserMessage { message },
             Message::Assistant { id, content } => {
@@ -185,7 +200,10 @@ impl ContextManager {
                 }
                 EntryKind::AssistantMessage {
                     message: Message::Assistant { id, content },
-                    usage: usage_deferred(),
+                    // `None` only on the seed path — no server measured
+                    // a seeded turn, and zeros are the type's
+                    // not-reported sentinel.
+                    usage: usage.unwrap_or_else(Usage::new),
                 }
             }
             // A System message carries verbatim as its own message
@@ -201,25 +219,35 @@ impl ContextManager {
         self.commit_with_ids([(kind, id)]);
     }
 
-    /// As [`fold_all`](Self::fold_all), but the result entries reuse
-    /// their born-early ids (minted at settlement, announced by the
-    /// result events) — live and replay name the same nodes. `result_ids`
-    /// pairs 1:1 with the batch's results, in order.
-    pub fn fold_all_with_ids(&mut self, batch: Vec<Message>, result_ids: Vec<String>) {
-        self.fold_all_entry(batch, result_ids);
+    /// As [`fold_all`](Self::fold_all), but the committed entries carry
+    /// the provider-reported usage of the batch's assistant turn, and
+    /// the result entries reuse their born-early ids (minted at
+    /// settlement, announced by the result events) — live and replay
+    /// name the same nodes. `result_ids` pairs 1:1 with the batch's
+    /// results, in order. The engine's roundtrip fold.
+    pub fn fold_all_with_ids(
+        &mut self,
+        batch: Vec<Message>,
+        usage: Usage,
+        result_ids: Vec<String>,
+    ) {
+        self.fold_all_entry(batch, usage, result_ids);
     }
 
-    /// The roundtrip commit. The batch must be exactly one tool-carrying
-    /// assistant turn followed by user messages of tool results, every
-    /// call answered exactly once, nothing unpaired. Verified whole,
-    /// then committed whole: one buffer blob, one tree grow, all-or-none
-    /// — tool calls enter the context only with their results, or never.
+    /// The roundtrip commit for a seeded history (or a test double) —
+    /// no server measured it, so the assistant's usage records the
+    /// type's not-reported zeros. The batch must be exactly one
+    /// tool-carrying assistant turn followed by user messages of tool
+    /// results, every call answered exactly once, nothing unpaired.
+    /// Verified whole, then committed whole: one buffer blob, one tree
+    /// grow, all-or-none — tool calls enter the context only with
+    /// their results, or never.
     pub fn fold_all(&mut self, batch: Vec<Message>) {
-        self.fold_all_entry(batch, Vec::new());
+        self.fold_all_entry(batch, Usage::new(), Vec::new());
     }
 
     #[allow(clippy::panic)] // sanctioned crash: an engine wiring bug, failed loud (AGENTS.md doctrine)
-    fn fold_all_entry(&mut self, batch: Vec<Message>, result_ids: Vec<String>) {
+    fn fold_all_entry(&mut self, batch: Vec<Message>, usage: Usage, result_ids: Vec<String>) {
         let mut messages = batch.into_iter();
         let assistant = match messages.next() {
             Some(message @ Message::Assistant { .. }) => message,
@@ -274,7 +302,7 @@ impl ContextManager {
         kinds.push((
             EntryKind::AssistantMessage {
                 message: assistant,
-                usage: usage_deferred(),
+                usage,
             },
             assistant_id,
         ));
@@ -415,14 +443,6 @@ impl ContextManager {
             self.tree.append(entry);
         }
     }
-}
-
-/// Usage facts are deferred (owner ruling, 2026-08): assistant entries
-/// the manager constructs carry [`Usage::new`] zeros — "the provider
-/// reported nothing," per the type's own contract — from this one named
-/// site. Delete wholesale when the usage discussion lands.
-fn usage_deferred() -> Usage {
-    Usage::new()
 }
 
 #[cfg(test)]

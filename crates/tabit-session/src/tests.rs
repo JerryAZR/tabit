@@ -157,6 +157,26 @@ pub(crate) fn text_turn(text: &str) -> Vec<MockStreamEvent> {
     ]
 }
 
+/// Stream-scripted turn reporting a context-sized measurement — the
+/// idle door's trigger reads the entry's reported usage, so a turn
+/// that should trip it must report like a real server would: the
+/// input the request carried plus the output that stayed.
+pub(crate) fn text_turn_reported(
+    text: &str,
+    input_tokens: u64,
+    output_tokens: u64,
+) -> Vec<MockStreamEvent> {
+    vec![
+        MockStreamEvent::text(text),
+        MockStreamEvent::final_response(Usage {
+            input_tokens,
+            output_tokens,
+            total_tokens: input_tokens + output_tokens,
+            ..Usage::default()
+        }),
+    ]
+}
+
 /// Stream-scripted turn: a complete tool call, then the terminal record.
 pub(crate) fn tool_turn(call_id: &str, tool: &str) -> Vec<MockStreamEvent> {
     vec![
@@ -326,11 +346,18 @@ async fn single_turn_prompt_persists_and_projects() -> Result<(), SessionError> 
     let nodes = file_nodes(file_path(&session));
     assert_eq!(nodes.len(), 2);
     assert!(matches!(&nodes[0].kind, EntryKind::UserMessage { .. }));
-    // Usage facts are deferred (the ruling): the assistant entry
-    // records the zero sentinel until the usage discussion returns.
+    // The usage discussion landed: the assistant entry carries the
+    // turn's reported usage (the measurement the compaction trigger
+    // and reloaded stats read back).
     assert!(matches!(
         &nodes[1].kind,
-        EntryKind::AssistantMessage { usage, .. } if *usage == Usage::new()
+        EntryKind::AssistantMessage { usage, .. }
+            if *usage == Usage {
+                input_tokens: 100,
+                output_tokens: 10,
+                total_tokens: 110,
+                ..Usage::default()
+            }
     ));
 
     // Events tell the whole run in order.
