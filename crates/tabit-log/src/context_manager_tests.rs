@@ -606,3 +606,82 @@ fn a_seeded_assistant_stays_unmeasured() {
     };
     assert_eq!(*usage, Usage::new());
 }
+
+#[test]
+#[should_panic(expected = "tool-carrying assistant commits only through")]
+fn fold_refuses_a_tool_carrying_assistant() {
+    let (mut manager, _tap) = manager();
+    manager.fold(Message::Assistant {
+        id: None,
+        content: OneOrMany::one(call("c1")),
+    });
+}
+
+#[test]
+#[should_panic(expected = "stale cut")]
+fn commit_compaction_refuses_a_cut_child_off_the_active_branch() {
+    let (mut manager, _tap) = manager();
+    // Build a branch, then branch away from it: the abandoned child
+    // is a node in the tree but not on the active branch.
+    manager.fold(user("go"));
+    manager.fold_turn_with_id(assistant_text("answer"), "t1".to_string(), Usage::default());
+    manager.checkout(Some("t1")).expect("head at t1");
+    manager.fold(user("branched"));
+    let off_branch = "t1-side".to_string();
+    // `t1` is on the branch; use checkout bookkeeping instead: commit
+    // against an id from a branch that is no longer walked — the
+    // abandoned branch gets one by rewinding and re-growing.
+    manager.checkout(None).expect("root");
+    manager.fold(user("other branch"));
+    manager.fold_turn_with_id(
+        assistant_text("other answer"),
+        off_branch.clone(),
+        Usage::default(),
+    );
+    manager.checkout(Some(off_branch.as_str())).expect("on it");
+    manager
+        .checkout(Some("t1"))
+        .expect("back on the main branch");
+    manager.commit_compaction(
+        "compaction-id".to_string(),
+        "summary".to_string(),
+        off_branch,
+        100,
+        Usage::default(),
+    );
+}
+
+#[test]
+fn the_debug_impl_names_the_tree() {
+    let (mut manager, _tap) = manager();
+    manager.fold(user("hi"));
+    let rendered = format!("{manager:?}");
+    assert!(rendered.contains("ContextManager"), "{rendered}");
+    assert!(rendered.contains("tree"), "{rendered}");
+}
+
+#[test]
+#[should_panic(expected = "ends inside an open tool roundtrip")]
+fn seeded_refuses_a_dangling_tool_batch() {
+    // A tool-carrying assistant with no results at the seed's end is
+    // an unrepresentable conversation state.
+    let _ = ContextManager::seeded(vec![Message::Assistant {
+        id: None,
+        content: OneOrMany::one(call("c1")),
+    }]);
+}
+
+#[test]
+#[should_panic(expected = "the root")]
+fn commit_compaction_refuses_the_root_as_the_cut_child() {
+    let (mut manager, _tap) = manager();
+    manager.fold(user("go"));
+    let root = manager.active_branch()[0].id.clone();
+    manager.commit_compaction(
+        "compaction-id".to_string(),
+        "summary".to_string(),
+        root,
+        100,
+        Usage::default(),
+    );
+}

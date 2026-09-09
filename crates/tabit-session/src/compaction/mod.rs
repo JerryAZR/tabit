@@ -310,14 +310,29 @@ fn fires(door: Door, context_tokens: u64, window: u64, mailbox_empty: bool) -> b
 /// here would double-count on one side of that split. Zeros mean "not
 /// reported" (the type's own sentinel): the walk passes such entries
 /// by, estimating them, and falls back to the full estimate when no
-/// turn ever measured the branch. A compaction entry ends the walk —
-/// every measurement before it measured a history the summary
-/// replaced.
+/// turn ever measured the branch.
+///
+/// A compaction taints older measurements: a request that ran before
+/// the insertion measured a context the summary has since replaced —
+/// its total is an overcount now (the retained tail's measurements
+/// included the old prefix). The horizon is the newest compaction on
+/// the branch, compared by entry id (UUIDv7 — millisecond time order;
+/// the stamps are second-precision and collide within a fast
+/// exchange); only younger measurements count, and the walk stops at
+/// the compaction with a pure estimate when none do.
 fn context_tokens(branch: &[SessionEntry], preamble_tokens: u64) -> u64 {
+    let horizon = branch
+        .iter()
+        .filter(|entry| matches!(entry.kind, EntryKind::Compaction { .. }))
+        .map(|entry| entry.id.as_str())
+        .max();
     let mut tail = 0;
     for entry in branch.iter().rev() {
         match &entry.kind {
-            EntryKind::AssistantMessage { usage, .. } if usage.total_tokens > 0 => {
+            EntryKind::AssistantMessage { usage, .. }
+                if usage.total_tokens > 0
+                    && horizon.is_none_or(|newest| entry.id.as_str() > newest) =>
+            {
                 return usage.total_tokens + tail;
             }
             EntryKind::Compaction { .. } => {

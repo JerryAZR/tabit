@@ -266,3 +266,8 @@ fn a_compaction_boundary_is_closed_for_the_tail_check() {
     ];
     assert_eq!(tail_is_closed(&path), Ok(()));
 }
+
+#[test]
+fn an_empty_path_is_trivially_closed() {
+    assert_eq!(super::tail_is_closed(&[]), Ok(()));
+}

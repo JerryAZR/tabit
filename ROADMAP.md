@@ -395,15 +395,26 @@ summing components per-side would double-count one of them). A
 compaction entry ends the walk (every earlier measurement measured a
 history the summary replaced); zeros mean "not reported" (the type's
 sentinel) and the walk passes them by to the last real measurement; a
-branch nothing measured falls to the full estimate. The box's
-`last_usage` session state is deleted with its justification — the
-entry IS the measurement, so it survives reload by construction, and
-reloaded stats count the same numbers the live ledger does. The
-chars/4 heuristic remains only where no server number exists: the
-unmeasured tail and cut-selection arithmetic. Complexity (same
-ruling): O(history) is fine — binary search would need a tree
-re-shape for a size the context window bounds anyway, and the beat's
-common case is a walk-back with no serialization at all.
+branch nothing measured falls to the full estimate. A compaction
+**taints older measurements** (found by the coverage round's
+overflow-intercept e2e): a request that ran before the insertion
+counted the old prefix — its total is an overcount now, and trusting
+it kept condition B fired until the cannot-shrink guard failed a
+successful pass. The walk honors a compaction horizon compared by
+entry id (UUIDv7 millisecond order; the RFC3339 stamps are
+second-precision and collide in fast exchanges): only younger
+measurements count. The box's `last_usage` session state is deleted
+with its justification — the entry IS the measurement, so it
+survives reload by construction, and reloaded stats count the same
+numbers the live ledger does. The chars/4 heuristic remains only
+where no server number exists: the unmeasured tail and
+cut-selection arithmetic. The multi-pass post-check's real exit for
+a converged history is the cannot-shrink guard (the maximization
+plus the tail floor make consecutive passes converge; the pass cap
+is the belt), pinned by its own test. Complexity (same ruling):
+O(history) is fine — binary search would need a tree re-shape for a
+size the context window bounds anyway, and the beat's common case is
+a walk-back with no serialization at all.
 
 - Context compaction: summarize old turns when approaching the context
   window (pi: replace history with a summary + recent tail).

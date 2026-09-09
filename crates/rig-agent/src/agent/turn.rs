@@ -357,4 +357,71 @@ mod tests {
         final_record.finish_reason = Some(reason);
         final_record
     }
+
+    #[tokio::test]
+    async fn content_after_the_final_record_is_a_protocol_fault() {
+        let outcome = consume_turns(
+            vec![vec![
+                MockStreamEvent::text("done"),
+                MockStreamEvent::final_response_with_default_usage(),
+                MockStreamEvent::text("late"),
+            ]],
+            &mut Vec::new(),
+        )
+        .await;
+        assert!(matches!(
+            outcome,
+            AttemptOutcome::Failed(CompletionError::ResponseError(message))
+                if message.contains("after its final response")
+        ));
+    }
+
+    #[tokio::test]
+    async fn a_mid_stream_provider_error_settles_failed() {
+        let outcome = consume_turns(
+            vec![vec![MockStreamEvent::Error(MockError::provider(
+                "the wall fell",
+            ))]],
+            &mut Vec::new(),
+        )
+        .await;
+        assert!(matches!(
+            outcome,
+            AttemptOutcome::Failed(CompletionError::ProviderError(message))
+                if message.contains("the wall fell")
+        ));
+    }
+
+    #[tokio::test]
+    async fn tool_call_deltas_forward_live_and_a_complete_call_carries() {
+        // The live view is the sink's to prove: the delta items the
+        // assembler clears forward as they stream.
+        // The mock grammar: deltas are the live view, the complete
+        // call event is the record the assembler settles from.
+        let stream = MockCompletionModel::from_stream_turns([vec![
+            MockStreamEvent::tool_call_name_delta("call-1", "read"),
+            MockStreamEvent::tool_call_arguments_delta("call-1", r#"{"path": "x"}"#),
+            MockStreamEvent::tool_call("call-1", "read", serde_json::json!({"path": "x"})),
+            MockStreamEvent::final_response_with_default_usage(),
+        ]])
+        .completion_request(rig_core::completion::Message::user("hi"))
+        .stream()
+        .await
+        .expect("the mock opens");
+        let (executable, allowed) = no_tools();
+        let mut deltas = 0usize;
+        let mut cancel = std::pin::pin!(std::future::pending::<()>());
+        let outcome =
+            consume_completion_stream(stream, &mut *cancel, executable, allowed, &mut |item| {
+                if matches!(item, StreamedAssistantContent::ToolCallDelta { .. }) {
+                    deltas += 1;
+                }
+            })
+            .await;
+        assert!(
+            outcome.carries_tools(),
+            "the assembled turn carries the call"
+        );
+        assert!(deltas > 0, "the delta view forwarded live");
+    }
 }

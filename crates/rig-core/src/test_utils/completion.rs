@@ -24,6 +24,10 @@ pub enum MockError {
     Provider(String),
     /// Request construction error.
     Request(String),
+    /// An HTTP response error (status + response body) — the wire
+    /// shape the overflow classifier and the compaction rejection
+    /// paths ride; a 4xx here classifies terminal like the real wire.
+    Http { status: u16, body: String },
     /// A tool call whose arguments cannot be parsed — the model-side
     /// defect the engine's turn-discard retry is exercised against.
     MalformedToolCall { tool: String, reason: String },
@@ -40,6 +44,15 @@ impl MockError {
         Self::Request(message.into())
     }
 
+    /// Create an HTTP response error. Panics on an out-of-range
+    /// status — a test author's typo, not a runtime condition.
+    pub fn http(status: u16, body: impl Into<String>) -> Self {
+        Self::Http {
+            status,
+            body: body.into(),
+        }
+    }
+
     /// Create a malformed-tool-call defect.
     pub fn malformed_tool_call(tool: impl Into<String>, reason: impl Into<String>) -> Self {
         Self::MalformedToolCall {
@@ -48,10 +61,18 @@ impl MockError {
         }
     }
 
+    #[allow(clippy::expect_used)] // sanctioned crash: a scripted status outside u16's valid range is a test-author typo
     pub(crate) fn into_completion_error(self) -> CompletionError {
         match self {
             Self::Provider(message) => CompletionError::ProviderError(message),
             Self::Request(message) => CompletionError::RequestError(message.into()),
+            Self::Http { status, body } => {
+                CompletionError::HttpError(crate::http_client::Error::InvalidStatusCodeWithMessage(
+                    http::StatusCode::from_u16(status)
+                        .expect("a scripted status is always a valid u16 status"),
+                    body,
+                ))
+            }
             Self::MalformedToolCall { tool, reason } => {
                 CompletionError::MalformedToolCall { tool, reason }
             }

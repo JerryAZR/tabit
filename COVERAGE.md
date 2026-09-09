@@ -31,11 +31,27 @@ Defensive ("unreachable") arms follow a stricter rule:
 - The whole suite runs offline (cassette replay + test doubles). Doctests
   are NOT included in these numbers (`llvm-cov` was run without
   `--doctests`); they are gated by the same CI run.
-- Current state: **93.59% lines / 92.24% regions** (2,518 of 39,269
+- Current state: **93.56% lines / 92.71% regions** (2,658 of 41,246
+  lines; re-measured after the subagent + compaction arcs — the
+  deferred item below, closed. The base grew ~2,000 lines (the
+  subprocess substrate, the json bridge, the compaction box) while
+  the missed count fell by 113. The round filled ~30 gaps and found
+  two design facts: the overflow-intercept e2e exposed that a
+  measurement taken before a compaction is tainted (it counted the
+  prefix the summary replaced) — the walk-back now honors a
+  compaction horizon by entry id; and the multi-pass post-check's
+  real exit for a converged history is the cannot-shrink guard, not
+  the pass cap (pinned by its own test). Per-file, the arc modules:
+  `compaction/mod.rs` 95.9%, `compaction_doors.rs` 93.9% (the
+  overflow intercept e2e'd, both outcomes), `turn.rs` 98.4%,
+  `overflow.rs` 100%, `tree.rs` 100%, `subagent.rs` 93.3%,
+  `subprocess.rs` 79.7% (the process-fault family, classified below).
+  Residue classified in the dedicated section below. Before that:
+  **93.59% lines / 92.24% regions** (2,518 of 39,269
   lines; re-measured after the frontend-protocol v4 + no-orphan-gate
-  round — **the subagent arc after it (SessionCwd, ephemeral
+  round — the subagent arc after it (SessionCwd, ephemeral
   sessions, the SpawnContext split and its suites) is not yet
-  re-measured**; its code arrived tested per the maintenance rule,
+  re-measured; its code arrived tested per the maintenance rule,
   the next round folds it in — `tool_result.details` with its edit/shell producers, the
   select widgets, `session_opened`, and the born-bit gate. The
   review filled thirteen gaps and deleted two provably-dead arms;
@@ -248,6 +264,106 @@ Remaining residue, classified:
   (ROADMAP item 7) — classified with the walking-skeleton section
   until that lands.
 
+## Subagents + compaction, the deferred re-measurement (2026-09)
+
+The two arcs measured with their suites in place. **Filled** (the
+gaps the measurement found):
+
+- **The overflow intercept had never run** — the round's biggest
+  find. Two e2e tests now drive it end to end over a windowless
+  config (only the wall's report can teach the window): the
+  repairable path (failed run → the bracket → the continue intent →
+  the retry answers over the compacted context, file holds the
+  insertion) and the unrepairable one (no feasible cut → no bracket,
+  `run_failed` stands). `MockError::http` was added to the test
+  doubles for the wire shape.
+- **The taint bug** (found by that e2e): a measurement taken before
+  a compaction counted the prefix the summary replaced — the
+  walk-back trusted it, condition B stayed fired, the cannot-shrink
+  guard failed the whole invocation, and the intercept reported
+  failure after a successful pass. The walk now honors a compaction
+  horizon (compared by entry id — UUIDv7 millisecond order; the
+  RFC3339 stamps are second-precision and collide in fast
+  exchanges); the unit pins both the taint and the younger-
+  measurement recovery.
+- **The box's policy arms**: manual door below the tail floor
+  (loud "nothing to compact"), the auto doors' infeasible skip, the
+  cannot-shrink guard (two passes commit, the second cannot shrink,
+  the loop stops loud with what landed — this, not the pass cap, is
+  the multi-pass exit for a converged history), the length-cap
+  shorten-retry and its empty-prefix failure, the in-stream overflow
+  rejection retry (window learned), the empty-prefix rejection, the
+  pre-request leaf driven directly (condition B through its own
+  emission path), `select_cut`'s empty branch, and the
+  compaction-as-boundary validity.
+- **`turn.rs`**: content-after-final fault, mid-stream provider
+  error, tool-call delta forwarding (the mock grammar needs the
+  complete call event after its deltas — the deltas alone are the
+  live view only).
+- **`overflow.rs` to 100%**: the non-rejection status gate, the
+  status-less envelope, the no-vocabulary body.
+- **`tree.rs` to 100%**: `load_append`'s duplicate id,
+  `insert_compaction`'s parentless and duplicate-id faults.
+- **`context_manager`**: the seeded dangling-batch panic, the stale-
+  cut and root-cut commit panics, `fold`'s tool-carrying refusal,
+  the Debug impl.
+- **`fold.rs`**: the empty path; the trailing-run `continue` arm was
+  **provably dead** (the `rposition` split guarantees an all-result
+  tail) — converted to a sanctioned crash rather than documented.
+- **`subagent`**: the missing-capability refusal, all three
+  `summary_result` outcomes (aborted, failed-with-reason,
+  failed-unknown, empty-answer report), and the spawn failure naming
+  the executable.
+
+Remaining residue, classified:
+
+**Justified:**
+
+- `compaction/mod.rs` — the after-passes no-feasible-cut exit
+  (197-200): unreachable through the loop's own guarantees (the
+  post-pass branch re-offers the compaction boundary as feasible
+  while the floor holds; non-shrink exits at the guard first) — the
+  loop's total-function defense. The request-build `Err` arm
+  (480-486): a serialization failure the mock cannot produce; the
+  classification is shared with the covered in-stream arm.
+  `assistant_text`'s non-text catch (559): no committed summary turn
+  carries other content. The pre-request leaf's emit-through-notice
+  body (634): needs a live tap on a firing pre-request door — the
+  identical `NoticeSink::emit` is covered through the beat doors.
+- `compaction_doors.rs` — `run_box`'s `ensure_agent` failure: the
+  registry `build_error` class (client constructors cannot fail once
+  config validation passed).
+- `turn.rs` — the assembler-ingest error arm (132) and the
+  trailing-delta deferral (175): protocol-violation shapes the mock
+  grammar does not synthesize; `classify_error` itself is covered on
+  both siblings. Test-internal assertion arms (the existing class).
+- `tabit-log` — `fold.rs`'s new sanctioned crash (unreachable by the
+  split); `context_manager`'s checkout Corrupt belts (338/349, the
+  existing provably-dead-by-load class) and the insertion-refused
+  belt behind commit's own validated construction (410).
+- `notice.rs` `forward`'s dead-channel no-op, `replay.rs`'s
+  non-assistant and content-catch arms, `routing.rs`'s
+  route-outliving-child defense — the established frontend-gone /
+  no-producer / racing-frame classes.
+- `subprocess.rs`'s process-fault family: the rejected/hung
+  handshake (needs a protocol-mismatched or unresponsive peer), the
+  reaper's force-kill (a child ignoring the courtesy abort), the
+  crash report and death detection (a child dying mid-drive), and
+  the stderr-ring edges — none stageable without a fault-injection
+  child the suite does not have.
+
+**Deferred:**
+
+- `subagent.rs`'s override plumbing (the tool's `model`/`cwd`/
+  `tools` args, 180-203) and `subprocess.rs`'s `--tools`/`--session`
+  builder args: exercised only through a real subprocess spawn with
+  overrides — the next subprocess e2e round passes them.
+- `tabit/src/json.rs`'s child-role arms (the `--parent` resolve
+  paths, the open-session lookup, 1221-1261): code that runs inside
+  the spawned child binary — the class-6 subprocess-execution
+  attribution gap; the parent-side bridge is covered by the wire
+  suite.
+
 ## Justified residue
 
 The remaining uncovered lines fall into these categories. Where a file is
@@ -377,11 +493,8 @@ named, the classification applies to its current lcov-uncovered ranges.
   would need a child-process harness.
 - Doctests are outside the measurement (see Methodology); they run and are
   gated in CI but do not fold into these numbers.
-- The compaction arc (2026-09) and the subagent arc before it await a
-  fresh llvm-cov measurement pass: their new modules carry direct unit
-  and e2e tests (the box, the doors, the insertion/fold, the parser,
-  the overflow classifier), but the per-branch ledger numbers have not
-  been re-derived. Re-measure both in one pass.
+- The subagent override plumbing and the subprocess child-role arms —
+  see the dedicated section above (the next subprocess e2e round).
 
 (Removed from this list after the defensive-arm audit: the SSE
 retry-`None` branches — the premise was wrong, `ExponentialBackoff`

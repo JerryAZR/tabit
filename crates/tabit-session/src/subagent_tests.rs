@@ -82,3 +82,103 @@ async fn a_pre_cancelled_token_refuses_before_spawning() {
     let message = error.to_string();
     assert!(message.contains("did not run"), "{message}");
 }
+
+#[tokio::test]
+async fn the_tool_refuses_when_the_capability_is_not_mounted() {
+    // A session whose assembly skipped subagents still has the tool
+    // reachable only through explicit registration — the error names
+    // the missing mount.
+    let mut context = rig_agent::tool::ToolContext::new();
+    let error = super::subagent(&mut context, "do a thing".to_string(), None, None, None)
+        .await
+        .expect_err("no capability mounted");
+    let message = error.to_string();
+    assert!(message.contains("did not mount"), "{message}");
+}
+
+fn summary(outcome: crate::session::RunOutcome, output: &str) -> crate::session::RunSummary {
+    crate::session::RunSummary {
+        outcome,
+        output: output.to_string(),
+        usage: Default::default(),
+        events: Vec::new(),
+    }
+}
+
+#[test]
+fn an_aborted_child_maps_to_the_interrupted_report() {
+    let error = super::summary_result(summary(crate::session::RunOutcome::Aborted, ""), "child-1")
+        .expect_err("aborted is an error");
+    let message = error.to_string();
+    assert!(
+        message.contains("interrupted before completing"),
+        "{message}"
+    );
+    assert!(message.contains("partial"), "{message}");
+}
+
+#[test]
+fn a_failed_child_carries_its_own_failure_reason() {
+    let mut run = summary(crate::session::RunOutcome::Failed, "");
+    run.events.push(tabit_protocol::SessionEvent::RunFailed {
+        message: "provider unreachable".to_string(),
+    });
+    let error = super::summary_result(run, "child-1").expect_err("failed is an error");
+    let message = error.to_string();
+    assert!(message.contains("provider unreachable"), "{message}");
+}
+
+#[test]
+fn a_failed_child_without_a_recorded_reason_says_unknown() {
+    // A crash-shaped failure leaves no RunFailed event; the report
+    // names the absence instead of inventing a cause.
+    let error = super::summary_result(summary(crate::session::RunOutcome::Failed, ""), "child-1")
+        .expect_err("failed is an error");
+    let message = error.to_string();
+    assert!(message.contains("unknown failure"), "{message}");
+}
+
+#[test]
+fn a_completed_child_without_a_final_answer_says_so() {
+    let output = super::summary_result(
+        summary(crate::session::RunOutcome::Completed, "   "),
+        "child-1",
+    )
+    .expect("completed is a result");
+    let text = output.render();
+    assert!(
+        text.contains("without a final answer"),
+        "the report names the empty answer: {text}"
+    );
+}
+
+#[tokio::test]
+async fn a_missing_executable_fails_the_spawn_with_the_exe_named() {
+    // The bridge's spawn error carries the executable path — the
+    // operator's first question is which binary failed to start.
+    let parts = std::sync::Arc::new(super::SubagentParts {
+        router: std::sync::Arc::new(crate::routing::ChildRouter::default()),
+        exe: std::path::PathBuf::from("Z:/does-not-exist/tabit-child.exe"),
+        tools: Vec::new(),
+        max_turns: 4,
+    });
+    let ctx = super::SpawnContext::new(
+        parts,
+        "parent-session".to_string(),
+        tabit_protocol::ModelSelection::new("p", "m"),
+        std::path::PathBuf::from("."),
+        None,
+    );
+    let result = ctx
+        .spawn_subprocess()
+        .cwd(std::path::PathBuf::from("."))
+        .model(tabit_protocol::ModelSelection::new("p", "m"))
+        .max_turns(4)
+        .ephemeral(true)
+        .spawn()
+        .await;
+    let Err(error) = result else {
+        panic!("the executable does not exist — the spawn must fail");
+    };
+    assert!(error.contains("tabit-child.exe"), "{error}");
+}

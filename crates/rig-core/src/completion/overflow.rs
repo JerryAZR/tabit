@@ -239,4 +239,43 @@ mod tests {
         );
         assert_eq!(number_before("no digits before", "before"), None);
     }
+
+    #[test]
+    fn a_body_without_overflow_vocabulary_is_not_overflow() {
+        assert_eq!(
+            rejected("the model is busy, try again").as_context_overflow(),
+            None
+        );
+    }
+
+    #[test]
+    fn an_overflow_shaped_message_on_a_non_rejection_status_is_not_overflow() {
+        // A 5xx carrying overflow vocabulary is transport trouble the
+        // retry family owns, not the wall's verdict: the status gate
+        // keeps the classification honest.
+        let error = CompletionError::HttpError(
+            crate::http_client::Error::InvalidStatusCodeWithMessage(
+                http::StatusCode::INTERNAL_SERVER_ERROR,
+                "This model's maximum context length is 16385 tokens. However, you requested 16401 tokens."
+                    .to_string(),
+            ),
+        );
+        assert_eq!(error.as_context_overflow(), None);
+    }
+
+    #[test]
+    fn an_in_band_envelope_with_no_status_classifies_on_its_text() {
+        // A gateway's error envelope surfaces a body with no captured
+        // status; the matched message text is the same evidence.
+        let error = CompletionError::ProviderResponse(
+            crate::provider_response::ProviderResponseError::without_status(
+                "This model's maximum context length is 16385 tokens. However, you requested 16401 tokens.",
+            ),
+        );
+        let overflow = ContextOverflow {
+            window_tokens: Some(16385),
+            prompt_tokens: Some(16401),
+        };
+        assert_eq!(error.as_context_overflow(), Some(overflow));
+    }
 }

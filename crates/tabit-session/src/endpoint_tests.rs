@@ -2922,6 +2922,39 @@ context_window = {window}
     )
 }
 
+/// A config whose model declares no context window — only the wall
+/// (an overflow error's report) can teach one.
+fn windowless_config() -> Arc<tabit_config::TabitConfig> {
+    Arc::new(
+        tabit_config::TabitConfig::from_toml_str(
+            r#"
+[providers.p]
+base_url = "http://127.0.0.1:9999/v1"
+api = "openai-completions"
+
+[[providers.p.models]]
+id = "m"
+"#,
+            std::path::Path::new("test.toml"),
+        )
+        .expect("valid config"),
+    )
+}
+
+/// A scripted turn whose request the wall rejects — the typed overflow
+/// error carrying the numbers that teach the window.
+fn overflow_turn(maximum: u64) -> Vec<rig_agent::test_utils::MockStreamEvent> {
+    vec![rig_agent::test_utils::MockStreamEvent::Error(
+        rig_agent::test_utils::MockError::http(
+            400,
+            format!(
+                "prompt is too long: {} tokens > {maximum} tokens maximum",
+                maximum + 100
+            ),
+        ),
+    )]
+}
+
 #[tokio::test]
 async fn the_idle_door_compacts_after_a_large_run_and_the_file_holds_the_entry() {
     let store = temp_store("compaction-idle");
@@ -3046,5 +3079,137 @@ async fn the_compact_command_forces_the_box_on_an_idle_session() {
         &frame.event,
         SessionEvent::CompactionDelta { text, .. } if text.contains("forced summary")
     )));
+    std::fs::remove_dir_all(store.dir()).ok();
+}
+
+#[tokio::test]
+async fn an_overflow_failure_is_intercepted_compacted_and_the_run_retried() {
+    let store = temp_store("compaction-overflow-repair");
+    // Two big rounds build a compactable history; the third run's
+    // request hits the wall, whose report teaches the only window in
+    // play (the config declares none). The intercept compacts and
+    // parks the continue intent; the retry's own pre-request door
+    // stays quiet (the compaction taints the tail's old measurement —
+    // it counted the prefix the summary replaced — so the context
+    // measures by estimate, small again), and the retry answers over
+    // the compacted context. Script order: run1, run2, the rejected
+    // request, the intercept's summary, the retry's answer.
+    let big = "x".repeat(80_000);
+    let session = Factory::new(vec![
+        text_turn_reported(&big, 20_060, 20_000),
+        text_turn_reported(&big, 40_060, 20_000),
+        overflow_turn(80_000),
+        text_turn("## Goal\n- the summarized work"),
+        text_turn("answered after repair"),
+    ])
+    .into_builder_with_config(
+        store.clone(),
+        windowless_config(),
+        ModelSelection::new("p", "m"),
+    )
+    .create("C:/w")
+    .expect("session");
+    let path = session.path().expect("file-backed").to_path_buf();
+    let mut handle = SessionHost::spawn(session, Vec::new(), plain_wiring(&store));
+    let id = boot_id(&handle);
+    handle.message(&id, "go");
+    tokio::time::sleep(Duration::from_millis(200)).await;
+    handle.message(&id, "more");
+    tokio::time::sleep(Duration::from_millis(200)).await;
+    handle.message(&id, "again");
+    tokio::time::sleep(Duration::from_millis(500)).await;
+    let frames = drain(&mut handle).await;
+
+    // The failing run is visible (its request was rejected), the two
+    // earlier runs and the retry finished — and one compaction
+    // bracket explains the space between the failure and the retry.
+    assert_eq!(finished_outputs(&frames).len(), 3);
+    assert!(
+        frames
+            .iter()
+            .any(|frame| matches!(&frame.event, SessionEvent::RunFailed { .. }))
+    );
+    let failed_at = frames
+        .iter()
+        .position(|frame| matches!(&frame.event, SessionEvent::RunFailed { .. }))
+        .expect("the overflow run failed visibly");
+    let retry_at = frames
+        .iter()
+        .rposition(|frame| matches!(&frame.event, SessionEvent::RunFinished { .. }))
+        .expect("the retry finished");
+    let brackets: Vec<usize> = frames
+        .iter()
+        .enumerate()
+        .filter(|(_, frame)| matches!(frame.event, SessionEvent::CompactionStarted { .. }))
+        .map(|(at, _)| at)
+        .collect();
+    assert_eq!(brackets.len(), 1, "the intercept compacted once");
+    // The bracket precedes the failure it explains (the intercept
+    // runs in the failed run's epilogue, before its terminal event),
+    // and the retry follows both.
+    assert!(
+        brackets[0] < failed_at,
+        "the bracket precedes the failure event"
+    );
+    assert!(failed_at < retry_at, "the retry follows the bracket");
+    assert!(finished_outputs(&frames).contains(&"answered after repair".to_string()));
+
+    // The file holds the insertion; the walked context begins with
+    // the summary.
+    let parsed = crate::parser::parse_file(&path).expect("the file reloads");
+    assert!(
+        parsed
+            .tree
+            .path_to_head()
+            .iter()
+            .any(|entry| matches!(entry.kind, crate::EntryKind::Compaction { .. }))
+    );
+    let messages = crate::ContextManager::from_tree(
+        parsed.tree,
+        Arc::new(std::sync::Mutex::new(tabit_log::NullBuffer)),
+    )
+    .messages();
+    assert!(matches!(
+        messages.first(),
+        Some(rig_agent::completion::Message::User { content })
+            if matches!(
+                content.first(),
+                rig_core::message::UserContent::Text(text)
+                    if text.text.contains("summarized work")
+            )
+    ));
+    std::fs::remove_dir_all(store.dir()).ok();
+}
+
+#[tokio::test]
+async fn an_unrepairable_overflow_leaves_the_failure_standing() {
+    let store = temp_store("compaction-overflow-stuck");
+    // A single user message is no feasible cut: the forced door skips
+    // (nothing to compact), no bracket opens, no retry runs — the
+    // failure stands as the run's terminal.
+    let session = Factory::new(vec![overflow_turn(60_000), text_turn("never reached")])
+        .into_builder_with_config(
+            store.clone(),
+            windowless_config(),
+            ModelSelection::new("p", "m"),
+        )
+        .create("C:/w")
+        .expect("session");
+    let mut handle = SessionHost::spawn(session, Vec::new(), plain_wiring(&store));
+    let id = boot_id(&handle);
+    handle.message(&id, "go");
+    let frames = drain(&mut handle).await;
+
+    assert_eq!(finished_outputs(&frames).len(), 0);
+    assert!(frames.iter().any(|frame| matches!(
+        &frame.event,
+        SessionEvent::RunFailed { message } if message.contains("prompt is too long")
+    )));
+    assert!(
+        !frames
+            .iter()
+            .any(|frame| matches!(frame.event, SessionEvent::CompactionStarted { .. })),
+        "nothing to compact — no bracket"
+    );
     std::fs::remove_dir_all(store.dir()).ok();
 }

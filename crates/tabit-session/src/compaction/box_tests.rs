@@ -106,6 +106,9 @@ fn select_cut_picks_the_latest_feasible_boundary() {
         "the maximization cuts as late as the tail floor allows"
     );
 
+    // An empty branch has nothing to compact.
+    assert!(select_cut(&[], 10_000_000, 0).is_none());
+
     // A small tail budget is unreachable through the dial constant, so
     // exercise the maximization through the prefix cap instead: a tiny
     // window makes every late boundary infeasible (prefix over the
@@ -292,6 +295,67 @@ fn the_walk_stops_at_a_compaction_entry() {
         summary_est + tail_est < whole / 2,
         "the walk stopped at the insertion"
     );
+    // The insertion is itself a valid cut boundary (multi-pass cuts
+    // right after the previous summary).
+    assert!(valid_boundary(&branch, 7), "a compaction ends a prefix");
+}
+
+#[test]
+fn a_compaction_taints_older_measurements_in_the_tail() {
+    // A request that ran before the insertion measured the old
+    // prefix; its total is an overcount now. Validity compares entry
+    // ids (UUIDv7 time order), so the test mints explicitly ordered
+    // v7-shaped ids: stale < compaction < fresh.
+    let older_than = |id: &str| format!("00000000-{id}-7000-8000-000000000000");
+    let stale_id = older_than("000000000001");
+    let compaction_id = older_than("000000000002");
+    let fresh_id = older_than("000000000003");
+
+    let cell = Arc::new(std::sync::RwLock::new(tabit_log::ContextManager::seeded(
+        vec![Message::user("q")],
+    )));
+    crate::lock::write(&cell).fold_turn_with_id(
+        Message::assistant("the stale, measured answer"),
+        stale_id.clone(),
+        Usage {
+            input_tokens: 90_000,
+            output_tokens: 10_000,
+            total_tokens: 100_000,
+            ..Usage::default()
+        },
+    );
+    // The insertion lands after (its id is strictly later), retaining
+    // the stale entry in its tail.
+    let cut_child = branch_of(&cell)[1].clone();
+    crate::lock::write(&cell).commit_compaction(
+        compaction_id,
+        "the summary".to_string(),
+        cut_child,
+        100_000,
+        Usage::default(),
+    );
+    let branch = read(&cell).active_branch();
+    // [u, COMP, a(stale, measured 100k)] — the stale total must not
+    // stand: the walk stops at the insertion, estimating the summary
+    // and the retained (stale) tail.
+    #[allow(clippy::indexing_slicing)] // the constructed shape
+    let expected = estimate_entry(&branch[1]) + estimate_entry(&branch[2]);
+    assert_eq!(context_tokens(&branch, 0), expected);
+
+    // A younger measurement — a request on the compacted context —
+    // is the newest valid number again.
+    crate::lock::write(&cell).fold_turn_with_id(
+        Message::assistant("measured on the compacted context"),
+        fresh_id,
+        Usage {
+            input_tokens: 3_000,
+            output_tokens: 500,
+            total_tokens: 3_500,
+            ..Usage::default()
+        },
+    );
+    let branch = read(&cell).active_branch();
+    assert_eq!(context_tokens(&branch, 0), 3_500);
 }
 
 async fn run_manual(
@@ -571,4 +635,221 @@ async fn a_broken_tool_call_is_the_same_violation_discarded_and_retried() {
         SessionEvent::CompactionFailed { message, .. }
             if message.contains("discarded and the request retried")
     )));
+}
+
+#[tokio::test]
+async fn a_manual_request_below_the_tail_floor_fails_loudly() {
+    // A short history has no feasible cut: the manual door is forced,
+    // so it fails naming the floor instead of skipping silently.
+    let cell = cell_with_dialogue(1, 100);
+    let agent = AgentBuilder::new(MockCompletionModel::from_stream_turns(
+        summary_stream_turns(),
+    ))
+    .build();
+    let config = config_with_window(10_000_000);
+    let (outcome, events) = run_manual(&cell, &agent, &config).await;
+    assert!(
+        matches!(&outcome, Outcome::Failed { message, passes: 0 } if message.contains("nothing to compact")),
+        "{outcome:?}"
+    );
+    // Nothing ran: no bracket opened.
+    assert!(events.is_empty());
+}
+
+#[tokio::test]
+async fn a_pass_that_cannot_shrink_stops_loud_with_what_landed() {
+    // Window 40k: pass 1 compacts 24k of dialogue down to a summary +
+    // the floor-bounded tail (~18k estimated) — still over condition
+    // B's bound (40k − 32.8k), so the post-check loops. Pass 2's
+    // maximization keeps the same just-above-floor tail (the cut
+    // selection cannot retain less), so the estimate does not shrink
+    // and the cannot-shrink guard stops the loop loud: the guard, not
+    // the pass cap, is the multi-pass exit for a converged history.
+    let cell = cell_with_dialogue(BIG_FLOOR_ROUNDS, BIG_MESSAGE_CHARS);
+    let summary = || {
+        vec![
+            MockStreamEvent::text("## Goal\n- pass"),
+            MockStreamEvent::FinalResponse(rig_core::test_utils::mock_final(Usage::default())),
+        ]
+    };
+    let agent = AgentBuilder::new(MockCompletionModel::from_stream_turns(
+        (0..dials::MAX_PASSES)
+            .map(|_| summary())
+            .collect::<Vec<_>>(),
+    ))
+    .build();
+    let config = config_with_window(40_000);
+    let (outcome, events) = run_manual(&cell, &agent, &config).await;
+    assert!(
+        matches!(&outcome, Outcome::Failed { message, passes: 2 } if message.contains("cannot shrink")),
+        "{outcome:?}"
+    );
+    let started = events
+        .iter()
+        .filter(|event| matches!(event, SessionEvent::CompactionStarted { .. }))
+        .count();
+    assert_eq!(started, 2, "both passes ran and committed");
+    let branch = read(&cell).active_branch();
+    assert_eq!(
+        branch
+            .iter()
+            .filter(|entry| matches!(entry.kind, EntryKind::Compaction { .. }))
+            .count(),
+        2,
+        "what landed stands — both insertions persisted"
+    );
+}
+
+fn length_capped_turn() -> Vec<MockStreamEvent> {
+    let mut final_record = rig_core::test_utils::mock_final(Usage::default());
+    final_record.finish_reason = Some(rig_core::completion::FinishReason::Length);
+    vec![
+        MockStreamEvent::text("cut short"),
+        MockStreamEvent::FinalResponse(final_record),
+    ]
+}
+
+#[tokio::test]
+async fn a_length_capped_summary_shortens_and_retries() {
+    // Length-cap is rejection-shaped (ruled): the first capped
+    // summary shortens the request one boundary; the retry commits.
+    let cell = cell_with_dialogue(BIG_FLOOR_ROUNDS, BIG_MESSAGE_CHARS);
+    let agent = AgentBuilder::new(MockCompletionModel::from_stream_turns([
+        length_capped_turn(),
+        vec![
+            MockStreamEvent::text("## Goal\n- fits now"),
+            MockStreamEvent::FinalResponse(rig_core::test_utils::mock_final(Usage::default())),
+        ],
+    ]))
+    .build();
+    let config = config_with_window(10_000_000);
+    let (outcome, _) = run_manual(&cell, &agent, &config).await;
+    assert!(
+        matches!(&outcome, Outcome::Compacted { passes: 1, .. }),
+        "{outcome:?}"
+    );
+}
+
+#[tokio::test]
+async fn a_length_cap_at_the_shortest_prefix_fails_the_pass() {
+    // Capped at the empty prefix too: there is nothing shorter to
+    // send — the pass fails naming the output cap.
+    let cell = cell_with_dialogue(BIG_FLOOR_ROUNDS, BIG_MESSAGE_CHARS);
+    let agent = AgentBuilder::new(MockCompletionModel::from_stream_turns([
+        length_capped_turn(),
+        length_capped_turn(),
+    ]))
+    .build();
+    let config = config_with_window(10_000_000);
+    let (outcome, _) = run_manual(&cell, &agent, &config).await;
+    assert!(
+        matches!(&outcome, Outcome::Failed { message, passes: 0 } if message.contains("output cap")),
+        "{outcome:?}"
+    );
+}
+
+#[tokio::test]
+async fn an_in_stream_overflow_rejection_shortens_and_retries() {
+    // The request itself is rejected mid-stream with the wall's
+    // message: the window is learned, the request shortens one
+    // boundary, and the retry commits.
+    let cell = cell_with_dialogue(BIG_FLOOR_ROUNDS, BIG_MESSAGE_CHARS);
+    let agent = AgentBuilder::new(MockCompletionModel::from_stream_turns([
+        vec![MockStreamEvent::Error(
+            rig_agent::test_utils::MockError::http(
+                400,
+                "prompt is too long: 19565 tokens > 16384 tokens maximum",
+            ),
+        )],
+        vec![
+            MockStreamEvent::text("## Goal\n- after the wall"),
+            MockStreamEvent::FinalResponse(rig_core::test_utils::mock_final(Usage::default())),
+        ],
+    ]))
+    .build();
+    let config = config_with_window(10_000_000);
+    let state = Compaction::new();
+    let token = CancellationToken::new();
+    let mut events = Vec::new();
+    let outcome = run(
+        Door::Manual,
+        &cell,
+        &state,
+        &agent,
+        &token,
+        &config,
+        &selection(),
+        0,
+        true,
+        &mut |event| events.push(event),
+    )
+    .await;
+    assert!(
+        matches!(&outcome, Outcome::Compacted { passes: 1, .. }),
+        "{outcome:?}"
+    );
+    assert_eq!(
+        state.taught_window(),
+        Some(16384),
+        "the wall taught the window"
+    );
+}
+
+#[test]
+fn an_overflow_rejection_at_the_empty_prefix_fails_the_pass() {
+    let state = Compaction::new();
+    let cell = cell_with_dialogue(BIG_FLOOR_ROUNDS, BIG_MESSAGE_CHARS);
+    let branch = read(&cell).active_branch();
+    let error =
+        CompletionError::HttpError(rig_core::http_client::Error::InvalidStatusCodeWithMessage(
+            http::StatusCode::BAD_REQUEST,
+            "prompt is too long: 19565 tokens > 16384 tokens maximum".to_string(),
+        ));
+    assert!(matches!(
+        rejected(error, &state, 0, &branch),
+        Rejection::Fail(message) if message.contains("empty prefix")
+    ));
+}
+
+#[tokio::test]
+async fn the_pre_request_leaf_compacts_when_condition_b_holds() {
+    // The engine awaits this leaf blindly; directly: a measured
+    // context past the urgent bound runs the box through the leaf's
+    // own door and emission path.
+    let cell = cell_with_dialogue(BIG_FLOOR_ROUNDS, BIG_MESSAGE_CHARS);
+    crate::lock::write(&cell).fold_turn_with_id(
+        Message::assistant("the latest, measured answer"),
+        "measured".to_string(),
+        Usage {
+            input_tokens: 99_000,
+            output_tokens: 1_000,
+            total_tokens: 100_000,
+            ..Usage::default()
+        },
+    );
+    let agent = AgentBuilder::new(MockCompletionModel::from_stream_turns(
+        summary_stream_turns(),
+    ))
+    .build();
+    let door = PreRequestDoor {
+        cell: cell.clone(),
+        state: Arc::new(Compaction::new()),
+        agent: Arc::new(agent),
+        config: config_with_window(60_000),
+        selection: selection(),
+        preamble_chars: 0,
+        token: CancellationToken::new(),
+        notice: None,
+    };
+    rig_agent::agent::PreRequestSource::at_door(&door).await;
+    // The box ran through the leaf: the branch holds an insertion and
+    // the walked context begins with the summary.
+    let branch = read(&cell).active_branch();
+    assert!(
+        branch
+            .iter()
+            .any(|entry| matches!(entry.kind, EntryKind::Compaction { .. }))
+    );
+    let messages = read(&cell).messages();
+    assert!(messages.len() < branch.len(), "the walk truncated");
 }

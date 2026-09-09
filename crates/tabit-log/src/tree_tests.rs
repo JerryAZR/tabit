@@ -200,3 +200,33 @@ fn insert_compaction_rejects_unknown_nodes_and_non_compaction_entries() {
     );
     assert!(tree.insert_compaction(node("x", Some("a"))).is_err());
 }
+
+#[test]
+fn load_append_rejects_a_duplicate_id() {
+    let mut tree = SessionTree::empty();
+    tree.append(node("a", None));
+    // A file replaying `a` again under a correct parent still names a
+    // corrupt log: ids are unique by construction.
+    let err = tree
+        .load_append(node("a", Some("a")))
+        .expect_err("duplicate id");
+    assert!(err.0.contains("duplicate entry id `a`"), "{}", err.0);
+}
+
+#[test]
+fn insert_compaction_rejects_a_parentless_node_and_a_duplicate_id() {
+    let mut tree = SessionTree::empty();
+    tree.append(node("a", None));
+    tree.append(node("b", Some("a")));
+    // No parent: the node before the cut is required.
+    let err = tree
+        .insert_compaction(compaction_node("x", None, "b"))
+        .expect_err("parentless");
+    assert!(err.0.contains("no parent"), "{}", err.0);
+    // A duplicate id (an `a`-named insertion) is refused like any
+    // other duplicate.
+    let err = tree
+        .insert_compaction(compaction_node("a", Some("a"), "b"))
+        .expect_err("duplicate");
+    assert!(err.0.contains("duplicate entry id `a`"), "{}", err.0);
+}

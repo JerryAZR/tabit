@@ -144,8 +144,13 @@ pub fn tail_is_closed(path: &[SessionEntry]) -> Result<(), String> {
         .map(|call| call.id.clone())
         .collect();
     for entry in trailing {
+        #[allow(clippy::panic)]
+        // sanctioned crash: unreachable by the split above — an internal invariant break, failed loud
         let EntryKind::ToolResult { result } = &entry.kind else {
-            continue; // the trailing run holds only results by construction
+            panic!(
+                "tail_is_closed: a non-result entry `{}` rode the trailing result run",
+                entry.id
+            );
         };
         let Some(index) = open.iter().position(|id| *id == result.id) else {
             return Err(format!(
