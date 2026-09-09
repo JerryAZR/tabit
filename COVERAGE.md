@@ -292,7 +292,8 @@ gaps the measurement found):
   exchanges); the unit pins both the taint and the younger-
   measurement recovery.
 - **The box's policy arms**: manual door below the tail floor
-  (loud "nothing to compact"), the auto doors' infeasible skip, the
+  (benign `NothingToCompact` — nothing worth folding is not a
+  failure), the auto doors' infeasible skip, the
   cannot-shrink guard (a huge late entry no feasible cut can move
   into the prefix — the exceptional loud stop, with what landed
   standing; NOT the normal multi-pass exit, which strictly shrinks

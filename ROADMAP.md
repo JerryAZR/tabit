@@ -416,6 +416,25 @@ ruling): O(history) is fine — binary search would need a tree
 re-shape for a size the context window bounds anyway, and the beat's
 common case is a walk-back with no serialization at all.
 
+**Amended again 2026-09 — the Outcome carries two facts (owner:
+"should it mean 'compaction happened', or 'you are good to
+continue'?"), and the pass cap is 16.** The wall argument for "8
+rounds can't exist" was wrong — the wall bounds growth *within one
+regime*; switching a nearly-full 1M context down to a 128K model
+imports a history needing ~10–11 legitimate passes (one prefix-cap of
+the *current* window per pass). `MAX_PASSES` is 16 (revisit at 2M
+models — a 2M → 128K switch would need ~21; bump to 32 then). The
+`Outcome` variants now state both facts: `Compacted` (happened ∧
+fits), `NothingToCompact` (didn't happen, good to continue as-is —
+the manual door's short-history decline is benign, not a failure),
+`Oversized { reason, passes, tokens_after }` (happened, **not** good
+to continue — the guard, the pass cap, or the unreachable
+no-further-cut arm), `Failed` (a pass errored; earlier commits
+stand), `Cancelled`. The intercept parks a retry only on `Compacted`
+— an `Oversized` retry would re-hit the wall (the old cap-exits-
+`Compacted` shape would have ping-ponged: retry → overflow → 16 more
+passes → …).
+
 **Amended again 2026-09 — the support envelope is declared, not
 adaptive (owner: "state what we support"; "neither option optimizes
 for 40K").** Windows below **64K** (rounded up from the 57,344

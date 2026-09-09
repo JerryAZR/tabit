@@ -42,11 +42,18 @@ pub const CHARS_PER_TOKEN: u64 = 4;
 /// result).
 pub const VIOLATION_RETRY_CAP: u32 = 1;
 
-/// The maximum number of passes one door invocation runs before the
-/// post-check loop stops as a belt alongside the cannot-shrink guard
-/// (the guard alone terminates; this bounds pathological ping-pong
-/// between estimation error and the provider's counting).
-pub const MAX_PASSES: u32 = 8;
+/// The pass cap: the largest legitimate multi-pass is a **model
+/// switch importing a larger regime's history** — a nearly-full 1M
+/// context switched to a 128K model needs ~10–11 passes (each pass
+/// takes at most a prefix-cap of the *current* window; the wall only
+/// bounds growth within one regime, a correction of the earlier
+/// "8 rounds can't exist" argument). 16 covers that with headroom;
+/// revisit when 2M models arrive (a 2M → 128K switch would need ~21
+/// — bump to 32 then). Secondarily it bounds estimation ping-pong
+/// the cannot-shrink guard's `>=` cannot see (strict-by-a-drip
+/// shrink). Hitting it is `Oversized`: compaction happened, not good
+/// to continue.
+pub const MAX_PASSES: u32 = 16;
 
 /// The declared support envelope for compaction, in tokens: **64K**.
 /// The bare contradiction line is 57,344 (`URGENT_RESERVE` +

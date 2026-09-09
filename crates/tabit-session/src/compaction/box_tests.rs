@@ -638,9 +638,11 @@ async fn a_broken_tool_call_is_the_same_violation_discarded_and_retried() {
 }
 
 #[tokio::test]
-async fn a_manual_request_below_the_tail_floor_fails_loudly() {
-    // A short history has no feasible cut: the manual door is forced,
-    // so it fails naming the floor instead of skipping silently.
+async fn a_manual_request_below_the_tail_floor_declines_benignly() {
+    // A short history has no feasible cut: nothing worth folding is
+    // not a failure — compaction did not happen, and the context is
+    // good to continue with as-is. The manual command reports this
+    // as a friendly note, not a failed bracket.
     let cell = cell_with_dialogue(1, 100);
     let agent = AgentBuilder::new(MockCompletionModel::from_stream_turns(
         summary_stream_turns(),
@@ -648,11 +650,7 @@ async fn a_manual_request_below_the_tail_floor_fails_loudly() {
     .build();
     let config = config_with_window(10_000_000);
     let (outcome, events) = run_manual(&cell, &agent, &config).await;
-    assert!(
-        matches!(&outcome, Outcome::Failed { message, passes: 0 } if message.contains("nothing to compact")),
-        "{outcome:?}"
-    );
-    // Nothing ran: no bracket opened.
+    assert_eq!(outcome, Outcome::NothingToCompact, "{outcome:?}");
     assert!(events.is_empty());
 }
 
@@ -745,10 +743,11 @@ async fn a_huge_late_entry_the_cut_cannot_move_stops_the_loop_loud() {
     let (outcome, events) = run_manual(&cell, &agent, &config).await;
     // Pass 1 commits (it shrinks by the small prefix it folds); pass 2
     // re-cuts right after the insertion, retains the same paste, and
-    // the estimates come back equal — the guard's `>=`.
+    // the estimates come back equal — the guard's `>=`. Oversized:
+    // compaction happened (both passes landed), not good to continue.
     assert!(
-        matches!(&outcome, Outcome::Failed { message, passes: 2 }
-            if message.contains("cannot shrink") && message.contains("single entry")),
+        matches!(&outcome, Outcome::Oversized { reason, passes: 2, .. }
+            if reason.contains("cannot shrink") && reason.contains("single entry")),
         "{outcome:?}"
     );
     let started = events

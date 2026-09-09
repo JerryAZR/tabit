@@ -89,16 +89,35 @@ pub(crate) enum Door {
 
 /// What one door invocation did.
 #[derive(Debug, Clone, PartialEq)]
+/// What one door invocation did. Two orthogonal facts, each variant
+/// stating both (owner ruling 2026-09): **did compaction happen**
+/// (≥1 pass committed) and **is the context good to continue with**
+/// (fits the urgent bound, or was fine to begin with).
 pub(crate) enum Outcome {
-    /// At least one pass committed; the context estimate afterwards
-    /// fit condition B (or the pass cap applied).
+    /// Compaction happened, good to continue: at least one pass
+    /// committed and the context now fits condition B.
     Compacted { passes: u32, tokens_after: u64 },
-    /// The door's conditions did not hold, the window is unknown, or
-    /// nothing feasible exists — nothing ran.
+    /// The door declined to run (conditions did not hold, the window
+    /// is unknown or below the support envelope). Compaction did not
+    /// happen — good to continue as-is.
     Skipped,
-    /// A pass failed (possibly after earlier passes committed —
-    /// `passes` says which landed). Nothing from the failing pass
-    /// persisted.
+    /// No feasible cut exists: nothing worth folding (a history
+    /// shorter than the kept-tail budget). Compaction did not happen
+    /// — good to continue as-is. The manual door reports this
+    /// benignly; it is not a failure.
+    NothingToCompact,
+    /// Compaction happened (the passes named landed), but the context
+    /// is **still over the urgent bound** — not good to continue
+    /// without further compaction. The cannot-shrink guard, the pass
+    /// cap, or (unreachable by construction) no further feasible cut.
+    Oversized {
+        reason: String,
+        passes: u32,
+        tokens_after: u64,
+    },
+    /// A pass errored (model failure, violation cap exhausted);
+    /// earlier passes' commits stand, the failing pass persisted
+    /// nothing.
     Failed { message: String, passes: u32 },
     /// Aborted mid-pass. Nothing from this pass persisted.
     Cancelled { passes: u32 },
@@ -198,21 +217,21 @@ pub(crate) async fn run(
     loop {
         let branch = read(cell).active_branch();
         let Some(cut) = select_cut(&branch, window, preamble_tokens) else {
-            return match (passes, door) {
-                (0, Door::Manual) => Outcome::Failed {
-                    message: format!(
-                        "nothing to compact: the history is shorter than the \
-                         retained-tail budget ({} tokens)",
-                        dials::KEEP_TAIL_TOKENS
-                    ),
-                    passes: 0,
-                },
-                // The automatic doors are silent about a skip; after
-                // committed passes there is simply nothing more
-                // feasible — what landed stands.
-                (0, _) => Outcome::Skipped,
-                (_, _) => Outcome::Compacted {
-                    passes,
+            // Nothing worth folding is benign for every door — the
+            // manual command reports it as a friendly note, the
+            // automatic doors are silent about it. After committed
+            // passes there is simply nothing more feasible — which
+            // (unreachable by construction since the folded sums: the
+            // branch always re-offers the previous compaction as a
+            // feasible boundary) would mean the loop gave up while
+            // still over condition B.
+            return match passes {
+                0 => Outcome::NothingToCompact,
+                more => Outcome::Oversized {
+                    reason: "no further feasible cut with the context still over \
+                             the urgent bound"
+                        .to_string(),
+                    passes: more,
                     tokens_after: tokens_now,
                 },
             };
@@ -278,8 +297,29 @@ pub(crate) async fn run(
         // over a history that already begins with pass N's summary.
         let branch = read(cell).active_branch();
         let tokens_after = context_tokens(&branch, preamble_tokens);
-        if passes >= dials::MAX_PASSES || tokens_after + dials::URGENT_RESERVE_TOKENS <= window {
+        // The primary exit: the context now fits the urgent bound —
+        // compaction happened, good to continue.
+        if tokens_after + dials::URGENT_RESERVE_TOKENS <= window {
             return Outcome::Compacted {
+                passes,
+                tokens_after,
+            };
+        }
+        // The pass cap: compaction happened, but the context is still
+        // oversized — the legitimate big one is a model switch
+        // importing a larger regime's history (see the dial); the
+        // pathological one is estimation ping-pong the guard's `>=`
+        // cannot see. What landed stands; not good to continue.
+        if passes >= dials::MAX_PASSES {
+            return Outcome::Oversized {
+                reason: format!(
+                    "the pass cap ({}) reached with the context still over the \
+                     urgent bound ({tokens_after} estimated tokens against a \
+                     {window}-token window): a model switch importing a larger \
+                     regime's history, or estimation ping-pong — the passes that \
+                     landed stand",
+                    dials::MAX_PASSES
+                ),
                 passes,
                 tokens_after,
             };
@@ -288,13 +328,14 @@ pub(crate) async fn run(
             // The cannot-shrink guard: a pass that committed without
             // shrinking the estimate would spin the loop forever —
             // stop loud, with the passes that did land left in place.
-            return Outcome::Failed {
-                message: format!(
+            return Outcome::Oversized {
+                reason: format!(
                     "compaction cannot shrink the context further ({tokens_after} estimated \
                      tokens against a {window}-token window): a single entry may exceed the \
                      retained-tail budget, or the window is misreported"
                 ),
                 passes,
+                tokens_after,
             };
         }
         tokens_now = tokens_after;

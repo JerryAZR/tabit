@@ -50,6 +50,10 @@ impl Session {
     /// window the error itself reported — the wall teaches the
     /// window. Returns whether the context was compacted (the run
     /// then sets a continue intent and the pump retries the turn).
+    /// Only `Compacted` parks the retry — happened **and** fits the
+    /// urgent bound. `Oversized` (the guard or the pass cap stopped
+    /// with the context still over the bound) must not: the retry
+    /// would re-hit the wall.
     pub(crate) async fn compact_after_overflow(&mut self, overflow: &ContextOverflow) -> bool {
         if let Some(window) = overflow.window_tokens {
             self.compaction.note_window(window);
