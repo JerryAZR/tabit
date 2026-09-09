@@ -216,8 +216,9 @@ impl ContextManager {
     /// the zero sentinel) — the turn is then uncounted and the next
     /// measured delta telescopes over it. A total below its
     /// predecessor (a mid-regime model switch re-tokenizing the same
-    /// history, or a misreport) is also `None`, warned: external
-    /// world, graceful — the chain re-anchors at this turn's total.
+    /// history, or a misreport) is also `None` — a debug line, never
+    /// a warning (nobody can act on it): external world, graceful —
+    /// the chain re-anchors at this turn's total.
     fn turn_delta(&self, usage: Option<&Usage>) -> Option<u64> {
         // `None` is the seed door only (no server measured it —
         // expected, silent). A live commit (this method's `Some`
@@ -228,15 +229,12 @@ impl ContextManager {
             // The assumption this design builds on: every valid
             // provider reports usage (owner ruling 2026-09) — an
             // unreported live turn disables compaction for the whole
-            // context (measurement, never estimation). Warn at the
-            // source, on the first occurrence, not later at the
-            // door's skip. This crate carries no tracing dependency;
-            // the lock module's eprintln convention serves
-            // diagnostics here too.
-            eprintln!(
-                "tabit-log: a provider completed a turn without reporting usage — \
-                 compaction measures and never estimates, so it cannot run on this \
-                 conversation while turns go unreported (check the provider/model)"
+            // context (measurement, never estimation). A warning: the
+            // user can act on it (their provider/model choice).
+            tracing::warn!(
+                "a provider completed a turn without reporting usage — compaction \
+                 measures and never estimates, so it cannot run on this conversation \
+                 while turns go unreported (check the provider/model)"
             );
             return None;
         }
@@ -244,11 +242,16 @@ impl ContextManager {
         match usage.total_tokens.checked_sub(predecessor) {
             Some(delta) => Some(delta),
             None => {
-                eprintln!(
-                    "tabit-log: a turn reported {} total tokens against a predecessor \
-                     measurement of {} — its delta is uncounted and the chain \
-                     re-anchors at its total",
-                    usage.total_tokens, predecessor
+                // Expected on a mid-regime model/tokenizer change (the
+                // user switched models — their need) or a flaky report:
+                // nobody can act on it, so it is a debug line, never a
+                // warning. The span is uncounted; the next delta
+                // anchors at this turn's total.
+                tracing::debug!(
+                    total = usage.total_tokens,
+                    predecessor,
+                    "a turn total below its predecessor — delta uncounted, the chain \
+                     re-anchors at this total"
                 );
                 None
             }

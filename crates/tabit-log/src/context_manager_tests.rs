@@ -622,6 +622,27 @@ fn committed_deltas(manager: &ContextManager) -> Vec<Option<u64>> {
 }
 
 #[test]
+fn a_total_below_its_predecessor_is_uncounted_and_re_anchors() {
+    // A mid-regime model switch can count the same history smaller:
+    // the impossible subtraction commits no delta, and the next turn
+    // anchors at the smaller total. Debug-diagnosed, never a
+    // warning — the user switched models for their own reasons and
+    // nobody can act on the discontinuity.
+    let (mut manager, _tap) = manager();
+    manager.fold_turn_with_id(assistant_text("one"), "t1".to_string(), reported(90, 10));
+    // The switch: total 80 against a predecessor of 100.
+    manager.fold_turn_with_id(
+        assistant_text("switched tokenizer"),
+        "t2".to_string(),
+        reported(70, 10),
+    );
+    // The next turn anchors at 80: delta = 130 − 80.
+    manager.fold_turn_with_id(assistant_text("three"), "t3".to_string(), reported(120, 10));
+    assert_eq!(committed_deltas(&manager), vec![Some(100), None, Some(50)]);
+    assert_eq!(manager.measured_total(), Some(130));
+}
+
+#[test]
 fn turn_deltas_telescope_against_the_predecessor_total() {
     let (mut manager, _tap) = manager();
     // The first turn's delta is its whole measured total (predecessor
