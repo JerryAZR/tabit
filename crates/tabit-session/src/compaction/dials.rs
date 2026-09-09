@@ -28,13 +28,6 @@ pub const SENT_PREFIX_FRACTION: f64 = 0.75;
 /// the agent's configured cap is overridden for this call alone).
 pub const SUMMARY_MAX_TOKENS: u64 = 8_192;
 
-/// The token estimate divisor: chars per token, the heuristic every
-/// reference uses (no tokenizer dependency). Only the unmeasured
-/// needs it — the tail after the newest reported usage, cut-selection
-/// arithmetic, branches no server measured (the 2026-09 measurement
-/// ruling).
-pub const CHARS_PER_TOKEN: u64 = 4;
-
 /// How many times a tool-call-violating summarizer response is
 /// discarded and the request resent before the pass fails (owner
 /// ruling: throw the response away and retry — sampling variance

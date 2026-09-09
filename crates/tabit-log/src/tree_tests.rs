@@ -130,55 +130,74 @@ fn compaction_node(id: &str, parent: Option<&str>, cut_child: &str) -> SessionEn
             summary: "summarized".to_string(),
             cut_child: cut_child.to_string(),
             tokens_before: 0,
+            tokens_after: 0,
             usage: rig_core::completion::Usage::default(),
         },
     )
 }
 
+/// The owner's pinning snapshots (2026-09 ruling): the raw branch
+/// keeps compactions at their leaf positions, the history view
+/// leads with the newest one and stops at its cut child. Branch
+/// `[A, B, C, D, COMPACT1, COMPACT2]` with COMPACT1 cutting at B
+/// and COMPACT2 at C.
 #[test]
-fn insert_compaction_reparents_the_cut_child_without_moving_the_head() {
+fn history_view_matches_the_ruled_snapshots() {
     let mut tree = SessionTree::empty();
     tree.append(node("a", None));
     tree.append(node("b", Some("a")));
     tree.append(node("c", Some("b")));
     tree.append(node("d", Some("c")));
-    // Cut between b and c: the compaction node lands there.
-    tree.insert_compaction(compaction_node("x", Some("b"), "c"))
-        .expect("the insertion is well-formed");
-    // The head does not move; the path routes through the insertion.
-    assert_eq!(tree.head(), Some("d"));
+    tree.append(compaction_node("x1", Some("d"), "b"));
+    tree.append(compaction_node("x2", Some("x1"), "c"));
+    let ids = |tree: &SessionTree| {
+        tree.history_to_head()
+            .iter()
+            .map(|e| e.id.clone())
+            .collect::<Vec<_>>()
+    };
+    // Before COMPACT1: the plain chain.
+    tree.move_head(Some("d")).expect("d exists");
+    assert_eq!(ids(&tree), ["a", "b", "c", "d"]);
+    // Before COMPACT2: pass 1's view.
+    tree.move_head(Some("x1")).expect("x1 exists");
+    assert_eq!(ids(&tree), ["x1", "b", "c", "d"]);
+    // Finally: pass 2's view — the older compaction is dead (its
+    // summary was itself summarized) and never enters.
+    tree.move_head(Some("x2")).expect("x2 exists");
+    assert_eq!(ids(&tree), ["x2", "c", "d"]);
+    // The raw branch (checkout/audit surface) keeps every node at its
+    // true position — the view is derived, the tree stays honest.
     assert_eq!(
         tree.path_to_head()
             .iter()
             .map(|e| e.id.as_str())
             .collect::<Vec<_>>(),
-        ["a", "b", "x", "c", "d"]
-    );
-    // A branch from the pre-compaction node never sees the insertion.
-    assert_eq!(
-        tree.path_to(Some("b"))
-            .expect("b exists")
-            .iter()
-            .map(|e| e.id.as_str())
-            .collect::<Vec<_>>(),
-        ["a", "b"]
+        ["a", "b", "c", "d", "x1", "x2"]
     );
 }
 
 #[test]
-fn insert_compaction_rejects_a_mismatched_edge() {
+fn history_view_appends_new_entries_after_the_leading_compaction() {
     let mut tree = SessionTree::empty();
     tree.append(node("a", None));
     tree.append(node("b", Some("a")));
     tree.append(node("c", Some("b")));
-    // The entry claims the cut sits after a, but c's parent is b.
-    let fault = tree
-        .insert_compaction(compaction_node("x", Some("a"), "c"))
-        .expect_err("the edge must exist");
-    assert!(fault.0.contains("cut child"), "{fault:?}");
-    // Nothing changed.
+    tree.append(compaction_node("x", Some("c"), "b"));
+    // Post-compaction turns chain through the compaction node —
+    // exactly the walked order.
+    tree.append(node("e", Some("x")));
     assert_eq!(
-        tree.path_to_head()
+        tree.history_to_head()
+            .iter()
+            .map(|e| e.id.as_str())
+            .collect::<Vec<_>>(),
+        ["x", "b", "c", "e"]
+    );
+    // A branch from a pre-compaction node never sees the compaction.
+    assert_eq!(
+        tree.path_to(Some("c"))
+            .expect("c exists")
             .iter()
             .map(|e| e.id.as_str())
             .collect::<Vec<_>>(),
@@ -186,19 +205,27 @@ fn insert_compaction_rejects_a_mismatched_edge() {
     );
 }
 
+/// The spaced variant: entries between the two compactions, the
+/// second cut landing in the retained tail. The walk stops at the
+/// cut child without entering the replaced prefix — `a`, `b`, `c`
+/// and the dead COMPACT1 are never reached.
 #[test]
-fn insert_compaction_rejects_unknown_nodes_and_non_compaction_entries() {
+fn history_view_with_a_spaced_second_compaction() {
     let mut tree = SessionTree::empty();
     tree.append(node("a", None));
-    assert!(
-        tree.insert_compaction(compaction_node("x", Some("ghost"), "a"))
-            .is_err()
+    tree.append(node("b", Some("a")));
+    tree.append(node("c", Some("b")));
+    tree.append(compaction_node("x1", Some("c"), "b"));
+    tree.append(node("e", Some("x1")));
+    // COMPACT2 cuts inside COMPACT1's tail, before `c`.
+    tree.append(compaction_node("x2", Some("e"), "c"));
+    assert_eq!(
+        tree.history_to_head()
+            .iter()
+            .map(|e| e.id.as_str())
+            .collect::<Vec<_>>(),
+        ["x2", "c", "e"]
     );
-    assert!(
-        tree.insert_compaction(compaction_node("x", Some("a"), "ghost"))
-            .is_err()
-    );
-    assert!(tree.insert_compaction(node("x", Some("a"))).is_err());
 }
 
 #[test]
@@ -210,23 +237,5 @@ fn load_append_rejects_a_duplicate_id() {
     let err = tree
         .load_append(node("a", Some("a")))
         .expect_err("duplicate id");
-    assert!(err.0.contains("duplicate entry id `a`"), "{}", err.0);
-}
-
-#[test]
-fn insert_compaction_rejects_a_parentless_node_and_a_duplicate_id() {
-    let mut tree = SessionTree::empty();
-    tree.append(node("a", None));
-    tree.append(node("b", Some("a")));
-    // No parent: the node before the cut is required.
-    let err = tree
-        .insert_compaction(compaction_node("x", None, "b"))
-        .expect_err("parentless");
-    assert!(err.0.contains("no parent"), "{}", err.0);
-    // A duplicate id (an `a`-named insertion) is refused like any
-    // other duplicate.
-    let err = tree
-        .insert_compaction(compaction_node("a", Some("a"), "b"))
-        .expect_err("duplicate");
     assert!(err.0.contains("duplicate entry id `a`"), "{}", err.0);
 }

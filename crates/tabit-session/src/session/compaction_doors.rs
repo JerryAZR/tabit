@@ -25,7 +25,6 @@ impl Session {
             agent: self.agent.clone(),
             config: self.config.clone(),
             selection: self.selection(),
-            preamble_chars: self.preamble_chars(),
             token: run_token.clone(),
             notice: self.event_tap.get().cloned(),
         })
@@ -97,7 +96,6 @@ impl Session {
             &token,
             &self.config,
             &self.selection(),
-            self.preamble_chars(),
             mailbox_empty,
             &mut emit,
         )

@@ -130,16 +130,29 @@ impl ContextManager {
         seeded
     }
 
-    /// The conversation so far, as the model sees it: the active branch
-    /// folded through the one context builder. Derived on every call —
-    /// the only read, and nothing stores it.
+    /// The conversation so far, as the model sees it: the **history
+    /// view** (the newest compaction's summary leading its tail plus
+    /// newer entries) folded through the one context builder. Derived
+    /// on every call — the only read, and nothing stores it.
     pub fn messages(&self) -> Vec<Message> {
-        fold_branch(&self.tree.path_to_head())
+        fold_branch(&self.tree.history_to_head())
     }
 
-    /// The active branch as entries (root → head), for session-side
-    /// projections that read nodes, not messages (rewind targets,
-    /// replay). Materialized on demand — never stored.
+    /// The history view (root → head with the newest compaction
+    /// spliced at its cut): the model-facing entry order, for
+    /// projections that read nodes (the compaction box's cut
+    /// selection and measurement reads). Materialized on demand —
+    /// never stored.
+    pub fn history(&self) -> Vec<SessionEntry> {
+        self.tree.history_to_head()
+    }
+
+    /// The active branch as entries (root → head, the raw tree walk,
+    /// compactions at their leaf positions), for session-side
+    /// projections that read the whole grown branch — rewind targets,
+    /// replay. Materialized on demand — never stored. Never the
+    /// model-facing order: consumers that walk history use
+    /// [`Self::history`].
     pub fn active_branch(&self) -> Vec<SessionEntry> {
         self.tree.path_to_head()
     }
@@ -184,6 +197,40 @@ impl ContextManager {
         self.fold_entry(message, Some(usage), Some(id));
     }
 
+    /// The committing turn's measured context growth (owner ruling
+    /// 2026-09): `total_tokens` minus the predecessor measurement's
+    /// total — the previous measured assistant on the history view,
+    /// the leading compaction node's `tokens_after`, or 0 at session
+    /// start (the system prompt folds into the first turn's delta,
+    /// measured). `None` when the turn is unmeasured (no usage, or
+    /// the zero sentinel) — the turn is then uncounted and the next
+    /// measured delta telescopes over it. A total below its
+    /// predecessor (a mid-regime model switch re-tokenizing the same
+    /// history, or a misreport) is also `None`, warned: external
+    /// world, graceful — the chain re-anchors at this turn's total.
+    fn turn_delta(&self, usage: Option<&Usage>) -> Option<u64> {
+        let usage = usage?;
+        if usage.total_tokens == 0 {
+            return None;
+        }
+        let predecessor = crate::fold::regime_total(&self.tree.path_to_head()).unwrap_or(0);
+        match usage.total_tokens.checked_sub(predecessor) {
+            Some(delta) => Some(delta),
+            None => {
+                // This crate carries no tracing dependency; the lock
+                // module's eprintln convention serves diagnostics here
+                // too.
+                eprintln!(
+                    "tabit-log: a turn reported {} total tokens against a predecessor \
+                     measurement of {} — its delta is uncounted and the chain \
+                     re-anchors at its total",
+                    usage.total_tokens, predecessor
+                );
+                None
+            }
+        }
+    }
+
     #[allow(clippy::panic)] // sanctioned crash: an engine wiring bug, failed loud (AGENTS.md doctrine)
     fn fold_entry(&mut self, message: Message, usage: Option<Usage>, id: Option<String>) {
         let kind = match message {
@@ -203,7 +250,8 @@ impl ContextManager {
                     // `None` only on the seed path — no server measured
                     // a seeded turn, and zeros are the type's
                     // not-reported sentinel.
-                    usage: usage.unwrap_or_else(Usage::new),
+                    usage: usage.unwrap_or_default(),
+                    delta_tokens: self.turn_delta(usage.as_ref()),
                 }
             }
             // A System message carries verbatim as its own message
@@ -302,6 +350,7 @@ impl ContextManager {
         kinds.push((
             EntryKind::AssistantMessage {
                 message: assistant,
+                delta_tokens: self.turn_delta(Some(&usage)),
                 usage,
             },
             assistant_id,
@@ -351,15 +400,17 @@ impl ContextManager {
         Ok(())
     }
 
-    /// Commit one compaction pass: verify the cut, then insert. The cut
-    /// child must sit on the **active branch** (the compaction box
-    /// selected it there); the insertion node's parent is the cut
-    /// child's recorded parent (the node before the cut), its id is the
-    /// pass's announced bracket id, and — like every commit — the
-    /// record enqueues into the buffer as one batch and the tree grows
-    /// in the same operation. The head does not move. Validation
-    /// failures are internal wiring bugs (the box checks cut viability
-    /// before committing) and fail loud.
+    /// Commit one compaction pass (v5): a **leaf-append at the head**
+    /// — the entry's parent is the current head, the head advances to
+    /// it, and `cut_child` names where the history view splices it
+    /// in. The cut child must sit on the active branch (the box
+    /// selected it there). The regime's base (`tokens_after`) is the
+    /// box's suffix-delta arithmetic, persisted here once — every
+    /// later read is a field access. Like every commit: the record
+    /// enqueues into the buffer as one batch and the tree grows in
+    /// the same operation. Validation failures are internal wiring
+    /// bugs (the box checks cut viability before committing) and
+    /// fail loud.
     #[allow(clippy::panic)] // sanctioned crash: an engine wiring bug, failed loud (AGENTS.md doctrine)
     pub fn commit_compaction(
         &mut self,
@@ -367,6 +418,7 @@ impl ContextManager {
         summary: String,
         cut_child: String,
         tokens_before: u64,
+        tokens_after: u64,
         usage: Usage,
     ) {
         let on_branch = self
@@ -380,35 +432,24 @@ impl ContextManager {
                  active branch — the compaction box selected a stale cut"
             );
         }
-        let parent = self
-            .tree
-            .node(&cut_child)
-            .and_then(|entry| entry.parent_id.clone());
-        let Some(parent) = parent else {
-            panic!(
-                "ContextManager::commit_compaction: cut child `{cut_child}` is the root — \
-                 there is no history before it to compact"
-            );
-        };
         let entry = SessionEntry::with_id(
             id,
-            Some(parent),
+            self.tree.head().map(str::to_string),
             ids::now_rfc3339(),
             EntryKind::Compaction {
                 summary,
                 cut_child,
                 tokens_before,
+                tokens_after,
                 usage,
             },
         );
         // The buffer's one interface, as every commit: the record enters
-        // the outbox and the write attempt happens inside.
+        // the outbox and the write attempt happens inside. The tree
+        // append moves the head — later turns chain through the
+        // compaction node, exactly the walked order.
         let _ = lock::lock(&self.buffer).enqueue(&[FileRecord::Node(entry.clone())]);
-        self.tree
-            .insert_compaction(entry)
-            .unwrap_or_else(|TreeFault(fault)| {
-                panic!("ContextManager::commit_compaction: insertion refused: {fault}")
-            });
+        self.tree.append(entry);
     }
 
     /// The unified commit: chain the entries under the head, enqueue

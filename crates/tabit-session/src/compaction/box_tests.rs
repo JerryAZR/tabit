@@ -3,6 +3,12 @@
 //! whole-door runs over a scripted mock — the entry lands, the walked
 //! context becomes [summary] + tail, the bracket events fire, and a
 //! violating summarizer fails the pass with nothing persisted.
+//!
+//! Fixtures are **measured** dialogues (2026-09 ruling: nothing is
+//! estimated — an unmeasured context skips): each round commits a
+//! reported usage growing the context by exactly `delta` tokens, so a
+//! boundary's tail is its suffix of deltas and the head total is the
+//! last turn's reported total.
 
 use super::*;
 use crate::entry::EntryKind;
@@ -40,28 +46,31 @@ fn selection() -> ModelSelection {
     }
 }
 
-/// A cell over a scripted conversation: alternating user prompts and
-/// tool-free answers (every answer is a valid cut boundary). Each
-/// message is ~`filler` bytes, so `rounds` and `filler` size the
-/// dialogue past the retained-tail floor when the tests need a
-/// feasible cut.
-fn cell_with_dialogue(rounds: usize, chars_per_message: usize) -> ConversationCell {
-    let mut seeded: Vec<Message> = Vec::new();
+/// A measured dialogue: `rounds` user/assistant pairs where turn
+/// r's reported total is `(r+1)·delta` — the first delta folds the
+/// system prompt and opening prompt in (measured), every later one
+/// grows the context by exactly `delta`. The head measurement is
+/// `rounds·delta`; a boundary after round k keeps a tail of
+/// `(rounds−1−k)·delta` delta tokens.
+fn cell_with_measured_dialogue(rounds: usize, delta: u64) -> ConversationCell {
+    let cell: ConversationCell = Arc::new(std::sync::RwLock::new(
+        tabit_log::ContextManager::seeded(Vec::new()),
+    ));
     for round in 0..rounds {
-        let filler = "x".repeat(chars_per_message);
-        seeded.push(Message::user(format!("{filler} question {round}")));
-        seeded.push(Message::assistant(format!("{filler} answer {round}")));
+        crate::lock::write(&cell).fold(Message::user(format!("question {round}")));
+        crate::lock::write(&cell).fold_turn_with_id(
+            Message::assistant(format!("answer {round}")),
+            format!("turn-{round}"),
+            Usage {
+                input_tokens: (round as u64 + 1) * delta - 10,
+                output_tokens: 10,
+                total_tokens: (round as u64 + 1) * delta,
+                ..Usage::default()
+            },
+        );
     }
-    Arc::new(std::sync::RwLock::new(tabit_log::ContextManager::seeded(
-        seeded,
-    )))
+    cell
 }
-
-/// ~3k estimated tokens per message — four rounds (8 messages, ~24k
-/// tokens) leave room to cut at the second boundary while keeping the
-/// 16,384-token tail floor.
-const BIG_FLOOR_ROUNDS: usize = 4;
-const BIG_MESSAGE_CHARS: usize = 12_000;
 
 fn branch_of(cell: &ConversationCell) -> Vec<String> {
     read(cell)
@@ -69,6 +78,16 @@ fn branch_of(cell: &ConversationCell) -> Vec<String> {
         .iter()
         .map(|entry| entry.id.clone())
         .collect()
+}
+
+/// The compaction count on the raw branch (leaf-appended, never
+/// deleted).
+fn compactions_of(cell: &ConversationCell) -> usize {
+    read(cell)
+        .active_branch()
+        .iter()
+        .filter(|entry| matches!(entry.kind, EntryKind::Compaction { .. }))
+        .count()
 }
 
 #[test]
@@ -95,53 +114,51 @@ fn fires_matches_the_ruled_formulas() {
 
 #[test]
 fn select_cut_picks_the_latest_feasible_boundary() {
-    let cell = cell_with_dialogue(BIG_FLOOR_ROUNDS, BIG_MESSAGE_CHARS);
-    let branch = read(&cell).active_branch();
-    // Window big enough that the prefix cap never binds; the maximization
-    // cuts at the LATEST boundary keeping the 16,384-token tail floor —
-    // here the second pair boundary (6 messages ≈ 18k tokens of tail).
-    let cut = select_cut(&branch, 10_000_000, 0).expect("feasible");
+    // Four rounds × 9,000 tokens: the head total is 36,000, and the
+    // latest boundary keeping the 16,384-token tail floor retains two
+    // rounds (18,000) — boundary 4, right before round 2's prompt.
+    let cell = cell_with_measured_dialogue(4, 9_000);
+    let history = read(&cell).history();
+    let sums = delta_suffix_sums(&history);
+    let cut = select_cut(&history, &sums, 36_000, 10_000_000).expect("feasible");
     assert_eq!(
-        cut.boundary, 2,
+        cut.boundary, 4,
         "the maximization cuts as late as the tail floor allows"
     );
+    assert_eq!(sums[4], 18_000, "the retained tail is two rounds of deltas");
 
-    // An empty branch has nothing to compact.
-    assert!(select_cut(&[], 10_000_000, 0).is_none());
+    // An empty view has nothing to compact.
+    assert!(select_cut(&[], &[], 0, 10_000_000).is_none());
 
-    // A small tail budget is unreachable through the dial constant, so
-    // exercise the maximization through the prefix cap instead: a tiny
-    // window makes every late boundary infeasible (prefix over the
-    // cap) while the session start stays feasible only if the whole
-    // history fits under the cap AND above the tail floor — here it
-    // does not, so no cut exists and the door skips.
-    assert!(select_cut(&branch, 1, 0).is_none());
+    // A tiny window makes every boundary's prefix break the 75% cap —
+    // no cut exists and the door declines.
+    assert!(select_cut(&history, &sums, 36_000, 1).is_none());
 }
 
 #[test]
 fn select_cut_bounds_the_prefix_under_the_cap() {
-    // A large dialogue with a middling window: the latest boundary
-    // whose prefix fits the 75% cap wins.
-    let cell = cell_with_dialogue(50, 2_000);
-    let branch = read(&cell).active_branch();
-    let window = 30_000u64; // cap 22,500 tokens ≈ 90,000 chars
-    let cut = select_cut(&branch, window, 0).expect("feasible");
-    let prefix: u64 = branch[..cut.boundary].iter().map(estimate_entry).sum();
-    assert!(prefix < (dials::SENT_PREFIX_FRACTION * window as f64) as u64);
-    // It is the LATEST such boundary: the next boundary's prefix
-    // breaks the cap or the tail floor.
-    let next = cut.boundary + 2; // boundaries sit two entries apart
-    if next < branch.len() {
-        let next_prefix: u64 = branch[..next].iter().map(estimate_entry).sum();
-        assert!(
-            next_prefix >= (dials::SENT_PREFIX_FRACTION * window as f64) as u64
-                || next >= branch.len(),
-            "a later boundary was feasible — the cut is not maximal"
-        );
-    }
+    // Fifty rounds × 1,000 tokens (head 50,000) on a 30,000 window:
+    // the cap is 22,500, so the latest feasible boundary keeps at
+    // least 27,500 tokens of tail — 28 rounds, cutting before round
+    // 22 (boundary 44).
+    let cell = cell_with_measured_dialogue(50, 1_000);
+    let history = read(&cell).history();
+    let sums = delta_suffix_sums(&history);
+    let window = 30_000u64;
+    let cut = select_cut(&history, &sums, 50_000, window).expect("feasible");
+    let cap = (dials::SENT_PREFIX_FRACTION * window as f64) as u64;
+    assert_eq!(
+        cut.boundary, 44,
+        "the latest boundary whose prefix fits the cap"
+    );
+    assert!(50_000 - sums[44] < cap);
+    assert!(sums[44] >= dials::KEEP_TAIL_TOKENS);
+    // It is the LATEST such boundary: the next one's prefix breaks
+    // the cap.
+    assert!(50_000 - sums[46] >= cap, "a later boundary was feasible");
     // The cut lands on a model output: the entry before it is a
-    // tool-free assistant (or the session start).
-    assert!(valid_boundary(&branch, cut.boundary));
+    // tool-free assistant (or the leading compaction).
+    assert!(valid_boundary(&history, cut.boundary));
 }
 
 #[test]
@@ -177,29 +194,29 @@ fn valid_boundary_rejects_tool_carrying_outputs_and_mid_turn_positions() {
             Message::assistant("final"),
         ]),
     ));
-    let branch = read(&cell).active_branch();
+    let history = read(&cell).history();
     // Position 0 is always valid (the session-start floor).
-    assert!(valid_boundary(&branch, 0));
+    assert!(valid_boundary(&history, 0));
     // After the tool-carrying assistant (mid-roundtrip) and after its
     // results: invalid — the model was mid-task and steers may have
     // queued there.
-    assert!(!valid_boundary(&branch, 2));
-    assert!(!valid_boundary(&branch, 3));
+    assert!(!valid_boundary(&history, 2));
+    assert!(!valid_boundary(&history, 3));
     // After the final, tool-free answer: valid.
-    assert!(valid_boundary(&branch, 5));
+    assert!(valid_boundary(&history, 5));
 }
 
 #[test]
 fn an_overflow_rejection_teaches_the_window_and_shortens() {
     let state = Compaction::new();
-    let cell = cell_with_dialogue(BIG_FLOOR_ROUNDS, BIG_MESSAGE_CHARS);
-    let branch = read(&cell).active_branch();
+    let cell = cell_with_measured_dialogue(4, 9_000);
+    let history = read(&cell).history();
     let error =
         CompletionError::HttpError(rig_core::http_client::Error::InvalidStatusCodeWithMessage(
             http::StatusCode::BAD_REQUEST,
             "prompt is too long: 19565 tokens > 16384 tokens maximum".to_string(),
         ));
-    match rejected(error, &state, 4, &branch) {
+    match rejected(error, &state, 4, &history) {
         Rejection::Shorten(shortened) => {
             assert!(shortened < 4);
             assert_eq!(state.taught_window(), Some(16384));
@@ -211,21 +228,38 @@ fn an_overflow_rejection_teaches_the_window_and_shortens() {
 #[test]
 fn a_non_overflow_failure_fails_the_pass() {
     let state = Compaction::new();
-    let cell = cell_with_dialogue(BIG_FLOOR_ROUNDS, BIG_MESSAGE_CHARS);
-    let branch = read(&cell).active_branch();
+    let cell = cell_with_measured_dialogue(4, 9_000);
+    let history = read(&cell).history();
     let error = CompletionError::ProviderError("model overloaded".to_string());
     assert!(matches!(
-        rejected(error, &state, 4, &branch),
+        rejected(error, &state, 4, &history),
         Rejection::Fail(message) if message.contains("overloaded")
     ));
 }
 
 #[test]
-fn the_context_measures_from_the_newest_reported_total() {
+fn an_overflow_rejection_at_the_empty_prefix_fails_the_pass() {
+    let state = Compaction::new();
+    let cell = cell_with_measured_dialogue(4, 9_000);
+    let history = read(&cell).history();
+    let error =
+        CompletionError::HttpError(rig_core::http_client::Error::InvalidStatusCodeWithMessage(
+            http::StatusCode::BAD_REQUEST,
+            "prompt is too long: 19565 tokens > 16384 tokens maximum".to_string(),
+        ));
+    assert!(matches!(
+        rejected(error, &state, 0, &history),
+        Rejection::Fail(message) if message.contains("empty prefix")
+    ));
+}
+
+#[test]
+fn the_head_measurement_is_the_newest_reported_total() {
     // A measured turn lands after the seeded (never-measured)
     // dialogue: the server's total wins — the unmeasured past does
     // not inflate it.
-    let cell = cell_with_dialogue(BIG_FLOOR_ROUNDS, BIG_MESSAGE_CHARS);
+    let cell = cell_with_measured_dialogue(0, 9_000);
+    crate::lock::write(&cell).fold(Message::user("the question"));
     crate::lock::write(&cell).fold_turn_with_id(
         Message::assistant("the measured answer"),
         "measured".to_string(),
@@ -236,18 +270,19 @@ fn the_context_measures_from_the_newest_reported_total() {
             ..Usage::default()
         },
     );
-    let branch = read(&cell).active_branch();
-    assert_eq!(context_tokens(&branch, 0), 10_000);
+    assert_eq!(
+        tabit_log::regime_total(&read(&cell).active_branch()),
+        Some(10_000)
+    );
 }
 
 #[test]
-fn an_unreported_turn_walks_past_and_its_tail_is_estimated() {
+fn an_unreported_turn_inherits_the_previous_valid_total() {
     // [user, assistant(total 10k), user, assistant(no report)] — the
-    // newest real measurement plus estimated tokens for everything
-    // appended after it.
-    let cell = Arc::new(std::sync::RwLock::new(tabit_log::ContextManager::seeded(
-        vec![Message::user("q")],
-    )));
+    // read is the newest real measurement; the uncounted turn adds
+    // nothing and is never estimated.
+    let cell = cell_with_measured_dialogue(0, 9_000);
+    crate::lock::write(&cell).fold(Message::user("q"));
     crate::lock::write(&cell).fold_turn_with_id(
         Message::assistant("a"),
         "a".to_string(),
@@ -259,64 +294,57 @@ fn an_unreported_turn_walks_past_and_its_tail_is_estimated() {
         },
     );
     crate::lock::write(&cell).fold(Message::user("q2"));
-    crate::lock::write(&cell).fold(Message::assistant("a2"));
-    let branch = read(&cell).active_branch();
-    #[allow(clippy::indexing_slicing)] // the dialogue shape is fixed by construction
-    let expected = 10_000 + estimate_entry(&branch[2]) + estimate_entry(&branch[3]);
-    assert_eq!(context_tokens(&branch, 0), expected);
+    crate::lock::write(&cell).fold_turn_with_id(
+        Message::assistant("a2"),
+        "a2".to_string(),
+        Usage::new(),
+    );
+    assert_eq!(
+        tabit_log::regime_total(&read(&cell).active_branch()),
+        Some(10_000)
+    );
 }
 
 #[test]
-fn the_walk_stops_at_a_compaction_entry() {
-    // Everything before the insertion is gone from the context; its
-    // measurements died with it. The measurement restarts at the
-    // summary's estimate plus the retained tail.
-    let cell = cell_with_dialogue(BIG_FLOOR_ROUNDS, BIG_MESSAGE_CHARS);
+fn the_window_read_in_the_post_compaction_gap_is_the_regime_base() {
+    // The head is the compaction node: the context read is its
+    // persisted `tokens_after` exactly — no walk, no estimate.
+    let cell = cell_with_measured_dialogue(4, 9_000);
     let cut_child = branch_of(&cell)[6].clone();
     crate::lock::write(&cell).commit_compaction(
         "compaction-id".to_string(),
         "the summary".to_string(),
         cut_child,
-        24_000,
+        36_000,
+        18_020,
         Usage::default(),
     );
-    let branch = read(&cell).active_branch();
-    // [u0, a0, u1, a1, u2, a2, COMP, u3, a3] — the insertion sits at
-    // the cut, index 6; most of the dialogue is pre-cut.
-    #[allow(clippy::indexing_slicing)] // the insertion's position is the constructed shape
-    let summary_est = estimate_entry(&branch[6]);
-    #[allow(clippy::indexing_slicing)] // the retained tail follows the insertion
-    let tail_est: u64 = branch[7..].iter().map(estimate_entry).sum();
-    assert_eq!(context_tokens(&branch, 0), summary_est + tail_est);
-    // The pre-cut entries are excluded: the whole-branch estimate is
-    // several times larger.
-    let whole: u64 = branch.iter().map(estimate_entry).sum();
-    assert!(
-        summary_est + tail_est < whole / 2,
-        "the walk stopped at the insertion"
+    assert_eq!(
+        tabit_log::regime_total(&read(&cell).active_branch()),
+        Some(18_020)
     );
-    // The insertion is itself a valid cut boundary (multi-pass cuts
-    // right after the previous summary).
-    assert!(valid_boundary(&branch, 7), "a compaction ends a prefix");
+    // The view leads with the compaction, and a boundary right after
+    // it is valid — multi-pass cuts exactly there.
+    let history = read(&cell).history();
+    assert!(matches!(
+        history.first().map(|entry| &entry.kind),
+        Some(EntryKind::Compaction { .. })
+    ));
+    assert!(valid_boundary(&history, 1), "a compaction ends a prefix");
 }
 
 #[test]
-fn a_compaction_taints_older_measurements_in_the_tail() {
-    // A request that ran before the insertion measured the old
-    // prefix; its total is an overcount now. Validity compares entry
-    // ids (UUIDv7 time order), so the test mints explicitly ordered
-    // v7-shaped ids: stale < compaction < fresh.
-    let older_than = |id: &str| format!("00000000-{id}-7000-8000-000000000000");
-    let stale_id = older_than("000000000001");
-    let compaction_id = older_than("000000000002");
-    let fresh_id = older_than("000000000003");
-
-    let cell = Arc::new(std::sync::RwLock::new(tabit_log::ContextManager::seeded(
-        vec![Message::user("q")],
-    )));
+fn a_stale_tail_total_is_unreachable_the_regime_base_wins() {
+    // The old bug's shape, now structurally excluded: a measured turn
+    // retained in the tail reported 100k against the replaced prefix.
+    // The raw walk meets the compaction node before that entry, so
+    // the read is the regime's base — the stale 100k can never
+    // surface.
+    let cell = cell_with_measured_dialogue(0, 9_000);
+    crate::lock::write(&cell).fold(Message::user("q"));
     crate::lock::write(&cell).fold_turn_with_id(
         Message::assistant("the stale, measured answer"),
-        stale_id.clone(),
+        "stale".to_string(),
         Usage {
             input_tokens: 90_000,
             output_tokens: 10_000,
@@ -324,29 +352,27 @@ fn a_compaction_taints_older_measurements_in_the_tail() {
             ..Usage::default()
         },
     );
-    // The insertion lands after (its id is strictly later), retaining
-    // the stale entry in its tail.
-    let cut_child = branch_of(&cell)[1].clone();
+    // The compaction retains the stale entry in its tail.
+    let cut_child = branch_of(&cell)[0].clone();
     crate::lock::write(&cell).commit_compaction(
-        compaction_id,
+        "compaction-id".to_string(),
         "the summary".to_string(),
         cut_child,
         100_000,
+        3_500,
         Usage::default(),
     );
-    let branch = read(&cell).active_branch();
-    // [u, COMP, a(stale, measured 100k)] — the stale total must not
-    // stand: the walk stops at the insertion, estimating the summary
-    // and the retained (stale) tail.
-    #[allow(clippy::indexing_slicing)] // the constructed shape
-    let expected = estimate_entry(&branch[1]) + estimate_entry(&branch[2]);
-    assert_eq!(context_tokens(&branch, 0), expected);
-
+    assert_eq!(
+        tabit_log::regime_total(&read(&cell).active_branch()),
+        Some(3_500),
+        "the stale tail total is behind the compaction on the walk"
+    );
     // A younger measurement — a request on the compacted context —
     // is the newest valid number again.
+    crate::lock::write(&cell).fold(Message::user("next"));
     crate::lock::write(&cell).fold_turn_with_id(
         Message::assistant("measured on the compacted context"),
-        fresh_id,
+        "fresh".to_string(),
         Usage {
             input_tokens: 3_000,
             output_tokens: 500,
@@ -354,8 +380,10 @@ fn a_compaction_taints_older_measurements_in_the_tail() {
             ..Usage::default()
         },
     );
-    let branch = read(&cell).active_branch();
-    assert_eq!(context_tokens(&branch, 0), 3_500);
+    assert_eq!(
+        tabit_log::regime_total(&read(&cell).active_branch()),
+        Some(3_500)
+    );
 }
 
 async fn run_manual(
@@ -374,7 +402,6 @@ async fn run_manual(
         &token,
         config,
         &selection(),
-        0,
         true,
         &mut |event| events.push(event),
     )
@@ -397,7 +424,7 @@ fn summary_stream_turns() -> Vec<Vec<MockStreamEvent>> {
 
 #[tokio::test]
 async fn a_manual_pass_commits_the_entry_and_truncates_the_context() {
-    let cell = cell_with_dialogue(BIG_FLOOR_ROUNDS, BIG_MESSAGE_CHARS);
+    let cell = cell_with_measured_dialogue(4, 9_000);
     let agent = AgentBuilder::new(MockCompletionModel::from_stream_turns(
         summary_stream_turns(),
     ))
@@ -421,8 +448,8 @@ async fn a_manual_pass_commits_the_entry_and_truncates_the_context() {
         event,
         SessionEvent::CompactionDelta { text, .. } if text.contains("keep working")
     )));
-    // The walked context is [summary] + retained tail; the head never
-    // moved.
+    // The walked context is [summary] + retained tail; the tree keeps
+    // every node and gains the compaction leaf.
     let messages = read(&cell).messages();
     let Message::User { content } = &messages[0] else {
         panic!("the summary leads");
@@ -433,14 +460,14 @@ async fn a_manual_pass_commits_the_entry_and_truncates_the_context() {
     ));
     assert_eq!(
         branch_of(&cell).len(),
-        (BIG_FLOOR_ROUNDS * 2) + 1,
-        "the tree keeps every node — the walked path gains the insertion, nothing is deleted"
+        (4 * 2) + 1,
+        "the tree keeps every node — the branch gains the compaction, nothing is deleted"
     );
 }
 
 #[tokio::test]
 async fn a_violating_summarizer_is_discarded_and_the_request_retried() {
-    let cell = cell_with_dialogue(BIG_FLOOR_ROUNDS, BIG_MESSAGE_CHARS);
+    let cell = cell_with_measured_dialogue(4, 9_000);
     // First attempt: the summarizer reaches for a tool. Second: a
     // clean summary. The discard-and-retry (owner ruling) recovers.
     let agent = AgentBuilder::new(MockCompletionModel::from_stream_turns([
@@ -486,7 +513,7 @@ async fn a_violating_summarizer_is_discarded_and_the_request_retried() {
 
 #[tokio::test]
 async fn a_persistently_violating_summarizer_fails_the_pass_and_persists_nothing() {
-    let cell = cell_with_dialogue(BIG_FLOOR_ROUNDS, BIG_MESSAGE_CHARS);
+    let cell = cell_with_measured_dialogue(4, 9_000);
     // Every attempt (the initial + the one bounded retry) violates.
     let violating_turn = vec![
         MockStreamEvent::text("let me look"),
@@ -515,17 +542,12 @@ async fn a_persistently_violating_summarizer_fails_the_pass_and_persists_nothing
         2
     );
     // Nothing committed: no compaction node exists.
-    assert!(
-        !read(&cell)
-            .active_branch()
-            .iter()
-            .any(|entry| matches!(entry.kind, EntryKind::Compaction { .. }))
-    );
+    assert_eq!(compactions_of(&cell), 0);
 }
 
 #[tokio::test]
 async fn an_empty_summary_fails_the_pass() {
-    let cell = cell_with_dialogue(BIG_FLOOR_ROUNDS, BIG_MESSAGE_CHARS);
+    let cell = cell_with_measured_dialogue(4, 9_000);
     let agent = AgentBuilder::new(MockCompletionModel::from_stream_turns([vec![
         MockStreamEvent::FinalResponse(rig_core::test_utils::mock_final(
             rig_core::completion::Usage::default(),
@@ -541,8 +563,29 @@ async fn an_empty_summary_fails_the_pass() {
 }
 
 #[tokio::test]
+async fn an_unmeasured_context_skips_every_door() {
+    // Nothing on the branch ever reported usage: the context size is
+    // absence, never an estimate — even the forced doors decline.
+    let cell: ConversationCell = Arc::new(std::sync::RwLock::new(
+        tabit_log::ContextManager::seeded(vec![
+            Message::user("q"),
+            Message::assistant("an unmeasured answer"),
+        ]),
+    ));
+    let agent = AgentBuilder::new(MockCompletionModel::from_stream_turns(
+        summary_stream_turns(),
+    ))
+    .build();
+    let config = config_with_window(10_000_000);
+    let (outcome, events) = run_manual(&cell, &agent, &config).await;
+    assert_eq!(outcome, Outcome::Skipped);
+    assert!(events.is_empty(), "no bracket opened");
+    assert_eq!(compactions_of(&cell), 0, "nothing persisted");
+}
+
+#[tokio::test]
 async fn an_unknown_window_skips_with_nothing_run() {
-    let cell = cell_with_dialogue(BIG_FLOOR_ROUNDS, BIG_MESSAGE_CHARS);
+    let cell = cell_with_measured_dialogue(4, 9_000);
     let agent = AgentBuilder::new(MockCompletionModel::from_stream_turns(
         summary_stream_turns(),
     ))
@@ -571,7 +614,7 @@ id = "m"
 fn a_cancelled_token_kills_the_stream_before_anything_persists() {
     // The token fires before the first poll: the select's biased arm
     // returns Cancelled without ever yielding from the mock.
-    let cell = cell_with_dialogue(BIG_FLOOR_ROUNDS, BIG_MESSAGE_CHARS);
+    let cell = cell_with_measured_dialogue(4, 9_000);
     let agent = AgentBuilder::new(MockCompletionModel::from_stream_turns(
         summary_stream_turns(),
     ))
@@ -589,22 +632,16 @@ fn a_cancelled_token_kills_the_stream_before_anything_persists() {
         &token,
         &config,
         &selection(),
-        0,
         true,
         &mut |event| events.push(event),
     ));
     assert_eq!(outcome, Outcome::Cancelled { passes: 0 });
-    assert!(
-        !read(&cell)
-            .active_branch()
-            .iter()
-            .any(|entry| matches!(entry.kind, EntryKind::Compaction { .. }))
-    );
+    assert_eq!(compactions_of(&cell), 0);
 }
 
 #[tokio::test]
 async fn a_broken_tool_call_is_the_same_violation_discarded_and_retried() {
-    let cell = cell_with_dialogue(BIG_FLOOR_ROUNDS, BIG_MESSAGE_CHARS);
+    let cell = cell_with_measured_dialogue(4, 9_000);
     // First attempt: a tool call with unparseable arguments — the
     // model-side defect, classified by the common path. The pass
     // treats it exactly like any attempted tool call: discard and
@@ -643,7 +680,7 @@ async fn a_manual_request_below_the_tail_floor_declines_benignly() {
     // not a failure — compaction did not happen, and the context is
     // good to continue with as-is. The manual command reports this
     // as a friendly note, not a failed bracket.
-    let cell = cell_with_dialogue(1, 100);
+    let cell = cell_with_measured_dialogue(1, 100);
     let agent = AgentBuilder::new(MockCompletionModel::from_stream_turns(
         summary_stream_turns(),
     ))
@@ -662,7 +699,7 @@ async fn a_below_envelope_window_skips_loudly_without_running_a_pass() {
     // satisfy the post-check. The declared envelope is 64k, rounded
     // up from the 57,344 contradiction line to leave room for real
     // work.
-    let cell = cell_with_dialogue(BIG_FLOOR_ROUNDS, BIG_MESSAGE_CHARS);
+    let cell = cell_with_measured_dialogue(4, 9_000);
     let agent = AgentBuilder::new(MockCompletionModel::from_stream_turns(
         summary_stream_turns(),
     ))
@@ -671,25 +708,27 @@ async fn a_below_envelope_window_skips_loudly_without_running_a_pass() {
     let (outcome, events) = run_manual(&cell, &agent, &config).await;
     assert_eq!(outcome, Outcome::Skipped, "{outcome:?}");
     assert!(events.is_empty(), "no bracket opened");
-    assert_eq!(
-        branch_of(&cell).len(),
-        BIG_FLOOR_ROUNDS * 2,
-        "nothing persisted"
-    );
+    assert_eq!(branch_of(&cell).len(), 4 * 2, "nothing persisted");
 }
 
 #[tokio::test]
 async fn a_history_far_over_the_window_compacts_in_strictly_shrinking_passes() {
-    // The designed multi-pass: a 100k history on a 70k window. The
-    // prefix cap (75%) limits one pass to ~52k, so pass 1 keeps a
-    // ~50k tail — still over B's bound (70k − 32.8k = 37.2k) — and
-    // pass 2 cuts to the floor-pinned tail and exits. Strict shrink
-    // each pass; the pass cap never comes into play.
-    let cell = cell_with_dialogue(10, 20_000);
+    // The designed multi-pass: a 100k measured history on a 70k
+    // window. Pass 1's latest boundary keeps a 50k tail (the 75% cap
+    // forbids more prefix) — still over B's bound (70k − 32.8k) —
+    // and pass 2 cuts to a 20k tail and exits. Strict shrink each
+    // pass; the pass cap never comes into play.
+    let cell = cell_with_measured_dialogue(10, 10_000);
     let summary = || {
         vec![
             MockStreamEvent::text("## Goal\n- pass"),
-            MockStreamEvent::FinalResponse(rig_core::test_utils::mock_final(Usage::default())),
+            MockStreamEvent::FinalResponse(rig_core::test_utils::mock_final(
+                rig_core::completion::Usage {
+                    input_tokens: 100,
+                    output_tokens: 20,
+                    ..Default::default()
+                },
+            )),
         ]
     };
     let agent = AgentBuilder::new(MockCompletionModel::from_stream_turns([
@@ -700,7 +739,13 @@ async fn a_history_far_over_the_window_compacts_in_strictly_shrinking_passes() {
     let config = config_with_window(70_000);
     let (outcome, events) = run_manual(&cell, &agent, &config).await;
     assert!(
-        matches!(&outcome, Outcome::Compacted { passes: 2, .. }),
+        matches!(
+            &outcome,
+            Outcome::Compacted {
+                passes: 2,
+                tokens_after: 20_020
+            }
+        ),
         "{outcome:?}"
     );
     let started = events
@@ -711,29 +756,65 @@ async fn a_history_far_over_the_window_compacts_in_strictly_shrinking_passes() {
 }
 
 #[tokio::test]
-async fn a_huge_late_entry_the_cut_cannot_move_stops_the_loop_loud() {
-    // The guard's designed case: a ~40k user paste so late that every
-    // feasible cut keeps it in the retained tail (cutting after it
-    // leaves too little tail). Pass 1 commits what it can; pass 2
-    // re-cuts to the same boundary, cannot shrink, and the guard
-    // fails loud with what landed standing.
-    let paste = "x".repeat(160_000);
-    let cell = Arc::new(std::sync::RwLock::new(tabit_log::ContextManager::seeded(
-        vec![
-            Message::user("first question"),
-            Message::assistant("first answer"),
-            Message::user("second question"),
-            Message::assistant("second answer"),
-            Message::user(paste),
-            Message::assistant("done with the paste"),
-        ],
-    )));
+async fn a_huge_late_growth_the_cut_cannot_shed_stops_the_loop_loud() {
+    // The guard's designed case: a 60k late paste riding the last
+    // turn's delta. Passes peel the small turns off the tail one at a
+    // time, but the paste rides every feasible tail (cutting after it
+    // leaves nothing measurable behind); once the tail is only the
+    // paste's turn, the next pass cannot shrink and the guard fails
+    // loud with what landed standing.
+    let cell: ConversationCell = Arc::new(std::sync::RwLock::new(
+        tabit_log::ContextManager::seeded(Vec::new()),
+    ));
+    let paste = "x".repeat(1_000);
+    crate::lock::write(&cell).fold(Message::user("first question"));
+    crate::lock::write(&cell).fold_turn_with_id(
+        Message::assistant("first answer"),
+        "t0".to_string(),
+        Usage {
+            input_tokens: 990,
+            output_tokens: 10,
+            total_tokens: 1_000,
+            ..Usage::default()
+        },
+    );
+    crate::lock::write(&cell).fold(Message::user("second question"));
+    crate::lock::write(&cell).fold_turn_with_id(
+        Message::assistant("second answer"),
+        "t1".to_string(),
+        Usage {
+            input_tokens: 1_990,
+            output_tokens: 10,
+            total_tokens: 2_000,
+            ..Usage::default()
+        },
+    );
+    crate::lock::write(&cell).fold(Message::user(paste));
+    crate::lock::write(&cell).fold_turn_with_id(
+        Message::assistant("done with the paste"),
+        "t2".to_string(),
+        Usage {
+            input_tokens: 2_000,
+            output_tokens: 60_000,
+            total_tokens: 62_000,
+            ..Usage::default()
+        },
+    );
     let summary = || {
         vec![
             MockStreamEvent::text("## Goal\n- pass"),
-            MockStreamEvent::FinalResponse(rig_core::test_utils::mock_final(Usage::default())),
+            MockStreamEvent::FinalResponse(rig_core::test_utils::mock_final(
+                rig_core::completion::Usage {
+                    input_tokens: 100,
+                    output_tokens: 20,
+                    ..Default::default()
+                },
+            )),
         ]
     };
+    // Pass 1 retains the paste's turn alone (60k tail — the 75% cap
+    // forbids folding it into the prefix), pass 2 re-cuts to the same
+    // tail and the guard's `>=` fires.
     let agent = AgentBuilder::new(MockCompletionModel::from_stream_turns([
         summary(),
         summary(),
@@ -741,29 +822,17 @@ async fn a_huge_late_entry_the_cut_cannot_move_stops_the_loop_loud() {
     .build();
     let config = config_with_window(70_000);
     let (outcome, events) = run_manual(&cell, &agent, &config).await;
-    // Pass 1 commits (it shrinks by the small prefix it folds); pass 2
-    // re-cuts right after the insertion, retains the same paste, and
-    // the estimates come back equal — the guard's `>=`. Oversized:
-    // compaction happened (both passes landed), not good to continue.
     assert!(
         matches!(&outcome, Outcome::Oversized { reason, passes: 2, .. }
-            if reason.contains("cannot shrink") && reason.contains("single entry")),
+            if reason.contains("cannot shrink")),
         "{outcome:?}"
     );
     let started = events
         .iter()
         .filter(|event| matches!(event, SessionEvent::CompactionStarted { .. }))
         .count();
-    assert_eq!(started, 2, "both passes ran and committed");
-    let branch = read(&cell).active_branch();
-    assert_eq!(
-        branch
-            .iter()
-            .filter(|entry| matches!(entry.kind, EntryKind::Compaction { .. }))
-            .count(),
-        2,
-        "what landed stands — both insertions persisted"
-    );
+    assert_eq!(started, 2, "every pass ran and committed");
+    assert_eq!(compactions_of(&cell), 2, "what landed stands");
 }
 
 fn length_capped_turn() -> Vec<MockStreamEvent> {
@@ -779,12 +848,14 @@ fn length_capped_turn() -> Vec<MockStreamEvent> {
 async fn a_length_capped_summary_shortens_and_retries() {
     // Length-cap is rejection-shaped (ruled): the first capped
     // summary shortens the request one boundary; the retry commits.
-    let cell = cell_with_dialogue(BIG_FLOOR_ROUNDS, BIG_MESSAGE_CHARS);
+    let cell = cell_with_measured_dialogue(4, 9_000);
     let agent = AgentBuilder::new(MockCompletionModel::from_stream_turns([
         length_capped_turn(),
         vec![
             MockStreamEvent::text("## Goal\n- fits now"),
-            MockStreamEvent::FinalResponse(rig_core::test_utils::mock_final(Usage::default())),
+            MockStreamEvent::FinalResponse(rig_core::test_utils::mock_final(
+                rig_core::completion::Usage::default(),
+            )),
         ],
     ]))
     .build();
@@ -798,10 +869,13 @@ async fn a_length_capped_summary_shortens_and_retries() {
 
 #[tokio::test]
 async fn a_length_cap_at_the_shortest_prefix_fails_the_pass() {
-    // Capped at the empty prefix too: there is nothing shorter to
-    // send — the pass fails naming the output cap.
-    let cell = cell_with_dialogue(BIG_FLOOR_ROUNDS, BIG_MESSAGE_CHARS);
+    // Capped all the way down to the empty prefix: there is nothing
+    // shorter to send — the pass fails naming the output cap. (The
+    // selection starts at boundary 4; each cap steps one boundary
+    // earlier: 4 → 2 → 0 → fail.)
+    let cell = cell_with_measured_dialogue(4, 9_000);
     let agent = AgentBuilder::new(MockCompletionModel::from_stream_turns([
+        length_capped_turn(),
         length_capped_turn(),
         length_capped_turn(),
     ]))
@@ -819,7 +893,7 @@ async fn an_in_stream_overflow_rejection_shortens_and_retries() {
     // The request itself is rejected mid-stream with the wall's
     // message: the window is learned, the request shortens one
     // boundary, and the retry commits.
-    let cell = cell_with_dialogue(BIG_FLOOR_ROUNDS, BIG_MESSAGE_CHARS);
+    let cell = cell_with_measured_dialogue(4, 9_000);
     let agent = AgentBuilder::new(MockCompletionModel::from_stream_turns([
         vec![MockStreamEvent::Error(
             rig_agent::test_utils::MockError::http(
@@ -829,7 +903,9 @@ async fn an_in_stream_overflow_rejection_shortens_and_retries() {
         )],
         vec![
             MockStreamEvent::text("## Goal\n- after the wall"),
-            MockStreamEvent::FinalResponse(rig_core::test_utils::mock_final(Usage::default())),
+            MockStreamEvent::FinalResponse(rig_core::test_utils::mock_final(
+                rig_core::completion::Usage::default(),
+            )),
         ],
     ]))
     .build();
@@ -845,7 +921,6 @@ async fn an_in_stream_overflow_rejection_shortens_and_retries() {
         &token,
         &config,
         &selection(),
-        0,
         true,
         &mut |event| events.push(event),
     )
@@ -861,38 +936,12 @@ async fn an_in_stream_overflow_rejection_shortens_and_retries() {
     );
 }
 
-#[test]
-fn an_overflow_rejection_at_the_empty_prefix_fails_the_pass() {
-    let state = Compaction::new();
-    let cell = cell_with_dialogue(BIG_FLOOR_ROUNDS, BIG_MESSAGE_CHARS);
-    let branch = read(&cell).active_branch();
-    let error =
-        CompletionError::HttpError(rig_core::http_client::Error::InvalidStatusCodeWithMessage(
-            http::StatusCode::BAD_REQUEST,
-            "prompt is too long: 19565 tokens > 16384 tokens maximum".to_string(),
-        ));
-    assert!(matches!(
-        rejected(error, &state, 0, &branch),
-        Rejection::Fail(message) if message.contains("empty prefix")
-    ));
-}
-
 #[tokio::test]
 async fn the_pre_request_leaf_compacts_when_condition_b_holds() {
     // The engine awaits this leaf blindly; directly: a measured
     // context past the urgent bound runs the box through the leaf's
     // own door and emission path.
-    let cell = cell_with_dialogue(BIG_FLOOR_ROUNDS, BIG_MESSAGE_CHARS);
-    crate::lock::write(&cell).fold_turn_with_id(
-        Message::assistant("the latest, measured answer"),
-        "measured".to_string(),
-        Usage {
-            input_tokens: 99_000,
-            output_tokens: 1_000,
-            total_tokens: 100_000,
-            ..Usage::default()
-        },
-    );
+    let cell = cell_with_measured_dialogue(3, 25_000);
     let agent = AgentBuilder::new(MockCompletionModel::from_stream_turns(
         summary_stream_turns(),
     ))
@@ -901,14 +950,14 @@ async fn the_pre_request_leaf_compacts_when_condition_b_holds() {
         cell: cell.clone(),
         state: Arc::new(Compaction::new()),
         agent: Arc::new(agent),
+        // Window 80k with a 75k measured context: condition B holds.
         config: config_with_window(80_000),
         selection: selection(),
-        preamble_chars: 0,
         token: CancellationToken::new(),
         notice: None,
     };
     rig_agent::agent::PreRequestSource::at_door(&door).await;
-    // The box ran through the leaf: the branch holds an insertion and
+    // The box ran through the leaf: the branch holds a compaction and
     // the walked context begins with the summary.
     let branch = read(&cell).active_branch();
     assert!(

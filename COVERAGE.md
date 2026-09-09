@@ -1049,3 +1049,19 @@ output-tool collision suite, the typed/extractor suites (unit,
 conformance, runtime-swap, facade cassettes), and the
 structured-output cassettes trimmed to the native pass-through
 smoke.
+
+
+## Compaction/tree refactor: deltas + leaf-append (2026-09) — re-measurement deferred
+
+The delta-tokens refactor (compaction session format v5: leaf-append
+compaction nodes with a persisted `tokens_after` base, `delta_tokens`
+stamped at assistant commits, the history view replacing the
+loader-splice walked chain, `regime_total` replacing the
+estimate-based walk, estimation deleted from the decision path)
+rewrites most of `tabit-log`'s tree/context-manager surface and the
+compaction box. New code needing its own fill/justify/defer pass:
+`history_to_head`'s corruption panics, `turn_delta`'s underflow arm,
+`delta_suffix_sums`, and the rewritten box tests' arithmetic. The
+llvm-cov re-measurement is **explicitly deferred** to the next
+coverage round (owner's gate cadence: the fmt/clippy/test gate runs
+per change; coverage runs are their own rounds).

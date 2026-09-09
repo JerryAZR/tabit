@@ -31,9 +31,28 @@ use tabit_protocol::SessionEvent;
 /// Project the active chain (root → leaf, the entries the next outer
 /// loop sees) into the finalized live events of a replay pass.
 pub fn project_events(chain: &[SessionEntry]) -> Vec<SessionEvent> {
+    // v5: a compaction node sits at its leaf position in the raw
+    // walk; its marker renders at the cut — just before the cut
+    // child — so the transcript shows the boundary where the model's
+    // context has it. Nested passes over the same cut stack in walk
+    // order (oldest first).
+    let mut cut_markers: HashMap<&str, Vec<String>> = HashMap::new();
+    for entry in chain {
+        if let EntryKind::Compaction { cut_child, .. } = &entry.kind {
+            cut_markers
+                .entry(cut_child.as_str())
+                .or_default()
+                .push(entry.id.clone());
+        }
+    }
     let mut projection = Projection::default();
     let mut events = Vec::new();
     for entry in chain {
+        if let Some(markers) = cut_markers.get(entry.id.as_str()) {
+            for id in markers {
+                events.push(SessionEvent::CompactionFinished { id: id.clone() });
+            }
+        }
         projection.entry(entry, &mut events);
     }
     events
@@ -61,22 +80,19 @@ impl Projection {
                     entry_id: entry.id.clone(),
                 });
             }
-            EntryKind::AssistantMessage { message, usage } => {
+            EntryKind::AssistantMessage { message, usage, .. } => {
                 self.assistant_turn(entry, message, *usage, events);
             }
             EntryKind::ToolResult { result } => {
                 self.tool_result(entry, result, events);
             }
-            // The compaction marker: the durable record that history
-            // was compacted here. The transcript keeps rendering the
-            // pre-compaction entries (they stay on the walked chain —
-            // the file never deletes); this marker is where a frontend
-            // draws the boundary the model's context has.
-            EntryKind::Compaction { .. } => {
-                events.push(SessionEvent::CompactionFinished {
-                    id: entry.id.clone(),
-                });
-            }
+            // The compaction record itself renders nothing here —
+            // its marker was already emitted at the cut (see
+            // `project_events`); the pre-compaction entries stay in
+            // the transcript (the file never deletes), and the marker
+            // is where a frontend draws the boundary the model's
+            // context has.
+            EntryKind::Compaction { .. } => {}
         }
     }
 

@@ -212,11 +212,6 @@ impl Session {
         ));
     }
 
-    /// The preamble's char count (the compaction estimate's input).
-    pub(crate) fn preamble_chars(&self) -> u64 {
-        self.preamble.as_ref().map_or(0, |p| p.len() as u64)
-    }
-
     /// The session id.
     pub fn id(&self) -> &str {
         &self.id

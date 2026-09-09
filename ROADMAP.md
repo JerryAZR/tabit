@@ -396,22 +396,21 @@ compaction entry ends the walk (every earlier measurement measured a
 history the summary replaced); zeros mean "not reported" (the type's
 sentinel) and the walk passes them by to the last real measurement; a
 branch nothing measured falls to the full estimate. A compaction
-**taints older measurements** (found by the coverage round's
+**tainted older measurements** (found by the coverage round's
 overflow-intercept e2e): a request that ran before the insertion
 counted the old prefix — its total is an overcount now, and trusting
 it kept condition B fired until the cannot-shrink guard failed a
-successful pass. The walk honors a compaction horizon compared by
-entry id (UUIDv7 millisecond order; the RFC3339 stamps are
-second-precision and collide in fast exchanges): only younger
-measurements count. *(The id-horizon is itself provisional — the
-owner's pending delta-tokens design would replace time-ordered
-validity with stored per-entry contributions and a recorded insertion
-frontier; parked pending the reference survey.)* The box's
+successful pass. The walk honored a compaction horizon compared by
+entry id (UUIDv7 millisecond order). *(Historical: the id-horizon is
+deleted — superseded by the delta amendment below, which makes the
+stale read structurally unreachable instead of filtered.)* The box's
 `last_usage` session state is deleted with its justification — the
 entry IS the measurement, so it survives reload by construction, and
 reloaded stats count the same numbers the live ledger does. The
-chars/4 heuristic remains only where no server number exists: the
-unmeasured tail and cut-selection arithmetic. Complexity (same
+chars/4 heuristic remained only where no server number existed: the
+unmeasured tail and cut-selection arithmetic. *(Superseded — the
+delta amendment below deletes estimation from the decision path
+entirely.)* Complexity (same
 ruling): O(history) is fine — binary search would need a tree
 re-shape for a size the context window bounds anyway, and the beat's
 common case is a walk-back with no serialization at all.
@@ -456,6 +455,58 @@ same raw-array-vs-folded-context class as the taint: cut selection's
 prefix sums now restart at a compaction node (pass N+1's cap was
 throttled by dead entries the fold had removed, so later passes could
 never cut deeper than pass N).
+
+**Amended again 2026-09 — deltas are committed facts; nothing is
+estimated (the rulings that closed the design, after the four-reference
+survey in `reports/`).** Every assistant commit stamps
+`delta_tokens = total[k] − total[k−1]` — the predecessor is the
+previous measured assistant in the same regime, the leading
+compaction node's `tokens_after`, or 0 at session start (the system
+prompt folds into each regime's first delta, measured; a regime
+counts it once, regimes never overlap). Client-added text — tool
+results, user messages, steers — rides the following assistant's
+delta: one class, never estimated. A compaction node appends as a
+**leaf at the head** (session format v5: no re-parenting, the tree
+stays honest) carrying `tokens_after = retained tail + the summary's
+own output tokens`, computed once at insert and persisted — a
+measurement-bearing node: the context read in the post-compaction gap
+is exactly this number, and the first post-compaction turn's delta
+telescopes against it (any tier-1 undercount inside it lands in that
+delta as overcount — the chain self-heals at the next measurement;
+boundary errors are one-shot, never compounding). Reads: current
+context = the total of the nearest measurement-bearing node
+at-or-before the head, walking the **raw branch** (the leaf-append
+geometry meets the live compaction before any tail entry, so a stale
+old-regime total is structurally unreachable — the taint bug is
+unrepresentable); cut selection = one suffix-delta pass (`tail(i)` =
+the boundary's suffix sum of deltas, summarization size =
+`head_total − tail(i)`); zero-usage turns commit no delta and the
+next measured delta telescopes over them; a total below its
+predecessor (mid-regime model switch, misreport) is uncounted and the
+chain re-anchors at it. Unmeasured stretches are **uncounted, never
+estimated** — the error budget (owner): one-or-a-bounded-few entries
+off by a few K per compaction is fine; one entry per compaction off
+by half a context window is not; every entry off by a few percent is
+not (chars/4 is deleted from the decision path — it breaks on CJK,
+which is not even percent-level). An unmeasured context (no turn ever
+reported usage) skips loudly — the unknown-window skip's sibling.
+The walked surface is the **history view** — the raw branch with the
+newest compaction spliced at its cut (`[newest summary, tail, newer
+entries]`), one backward walk stopping after the live compaction's
+`cut_child`; consumers never walk tree links (owner: "construct the
+history array first, then walk that" — the raw parent walk cannot
+reconstruct a multi-compaction history). Residual edge on record: a
+cut landing immediately after a zero-usage turn makes that spanning
+delta absorb some cut-side content (needs a provider that skips
+usage *and* a cut in that exact window; bounded by one turn's
+content). Deferred with the agentic-cut ruling: cuts stay after
+text-only assistants and compaction nodes — a single long agentic run
+(one prompt, many roundtrips) has no usable cut and the Overflow door
+fails loud rather than repair; the future option is score-based
+selection — prefer a slightly-overshooting clean post-text cut over a
+tool-result cut, unless the clean cut forces a super-long tail —
+which would reinstate the out-only correction for the first tail
+assistant.
 
 - Context compaction: summarize old turns when approaching the context
   window (pi: replace history with a summary + recent tail).

@@ -99,6 +99,7 @@ pub fn calls_of(message: &Message) -> Vec<&ToolCall> {
 /// check is a bounded lookback, never a branch walk. The live checkout
 /// door (a mid-roundtrip target refuses) and the parser's torn-tail
 /// check both route through here.
+#[allow(clippy::panic_in_result_fn)] // the crash inside is sanctioned (AGENTS.md doctrine), annotated below
 pub fn tail_is_closed(path: &[SessionEntry]) -> Result<(), String> {
     // The trailing run of tool results, walking back from the tip.
     let batch_start = path
@@ -168,6 +169,32 @@ pub fn tail_is_closed(path: &[SessionEntry]) -> Result<(), String> {
             open.len()
         ))
     }
+}
+
+/// The branch's measured context size: the total of the nearest
+/// measurement-bearing node at-or-before the head, walking the **raw
+/// branch** (owner ruling 2026-09 — deltas are facts, nothing is
+/// estimated). An assistant's `total_tokens` already measures the
+/// whole request it rode (`P + history through the turn`,
+/// partition-correct per provider); a compaction node's
+/// `tokens_after` is the regime's base. The raw walk matters: the
+/// leaf-append geometry meets the live compaction **before** any
+/// retained-tail entry, so an old-regime total (stale — its prefix
+/// was replaced) is structurally unreachable, and the walk returns
+/// at the compaction's base instead of inheriting across it.
+/// Zero-sentinel assistants pass by — the read inherits the previous
+/// valid total (their content rides the next measured turn's delta).
+/// `None` when nothing on the branch ever measured: an unmeasured
+/// context (a fresh session, a provider that never reports usage) —
+/// callers treat absence as absence, never an estimate.
+pub fn regime_total(branch: &[SessionEntry]) -> Option<u64> {
+    branch.iter().rev().find_map(|entry| match &entry.kind {
+        EntryKind::AssistantMessage { usage, .. } if usage.total_tokens > 0 => {
+            Some(usage.total_tokens)
+        }
+        EntryKind::Compaction { tokens_after, .. } => Some(*tokens_after),
+        _ => None,
+    })
 }
 
 /// The branch's `user_message` nodes in root→head order — the valid

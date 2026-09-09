@@ -761,6 +761,7 @@ async fn a_dangling_tool_roundtrip_fails_the_resume_loudly() -> Result<(), Sessi
                 )),
             },
             usage: Usage::default(),
+            delta_tokens: None,
         },
     );
     let error =
@@ -2020,6 +2021,7 @@ async fn rewind_targets_steers_like_prompts() -> Result<(), SessionError> {
                 content: OneOrMany::one(AssistantContent::text("answer")),
             },
             usage: Usage::default(),
+            delta_tokens: None,
         },
     );
     write_node(
@@ -2080,6 +2082,7 @@ async fn rewinding_into_an_open_roundtrip_panics() -> Result<(), SessionError> {
                 .expect("two calls"),
             },
             usage: Usage::default(),
+            delta_tokens: None,
         },
     );
     let first_result = write_node(
@@ -2185,6 +2188,7 @@ async fn rewind_to_the_root_leaves_the_register_untouched() -> Result<(), Sessio
                 content: OneOrMany::one(AssistantContent::text("answer")),
             },
             usage: Usage::default(),
+            delta_tokens: None,
         },
     );
     let path = writer.path().to_path_buf();
@@ -2267,6 +2271,7 @@ async fn a_ghost_model_in_history_does_not_block_a_rewind() -> Result<(), Sessio
                 content: OneOrMany::one(AssistantContent::text("answer")),
             },
             usage: Usage::default(),
+            delta_tokens: None,
         },
     );
     let path = writer.path().to_path_buf();

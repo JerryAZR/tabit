@@ -82,58 +82,75 @@ impl SessionTree {
         Ok(())
     }
 
-    /// Insert a compaction node between the cut-point parent and the cut
-    /// child (v4) — the one insert that is not a head-append. The
-    /// entry's parent must be an existing node, `cut_child` must be an
-    /// existing node whose recorded parent IS the entry's parent (the
-    /// derivation's consistency check — a mismatched record is
-    /// corruption, named as such), and the entry's id must be fresh. The
-    /// cut child is re-parented through the compaction node **in the
-    /// resident tree only** (its file record keeps the original parent;
-    /// every load re-derives the insertion from this record). The head
-    /// does not move: the conversation tip is unchanged, later appends
-    /// chain through the insertion by walking the re-parented links.
-    pub fn insert_compaction(&mut self, entry: SessionEntry) -> Result<(), TreeFault> {
-        let cut_child_id = match &entry.kind {
-            crate::entry::EntryKind::Compaction { cut_child, .. } => cut_child.clone(),
-            _ => {
-                return Err(TreeFault(format!(
-                    "tree.insert_compaction: entry `{}` is not a compaction node",
-                    entry.id
-                )));
+    /// The model-visible **history view** ending at the head: the
+    /// newest compaction's summary leading its retained tail plus
+    /// every newer entry. Constructed by one backward walk — the
+    /// first `compaction` node met is the live one (a cut can only
+    /// land at-or-after the previous newest compaction's position,
+    /// so nothing older governs); any further compaction nodes met
+    /// are dead (back-to-back passes hang off the same stretch) and
+    /// are skipped; the walk **stops after emitting the live one's
+    /// `cut_child`** — everything older is its replaced prefix,
+    /// never entered. With no compaction on the path this is the
+    /// plain branch. Consumers walk this view, never the raw tree
+    /// (owner ruling 2026-09): the tree's links are honest history,
+    /// the view is the model-facing placement.
+    #[allow(clippy::panic)] // sanctioned crashes: structural corruption, failed loud (AGENTS.md doctrine)
+    pub fn history_to_head(&self) -> Vec<SessionEntry> {
+        // Walked head → root in two segments: the entries newer than
+        // the live compaction, then (skipping dead compactions) its
+        // retained tail down to the cut child. The view is the live
+        // compaction leading the tail, then the newer entries — each
+        // segment reversed into root → head order.
+        let mut newer: Vec<SessionEntry> = Vec::new();
+        let mut tail: Vec<SessionEntry> = Vec::new();
+        let mut live: Option<SessionEntry> = None;
+        let mut live_cut_child: Option<String> = None;
+        let mut current = self.head.clone();
+        while let Some(id) = current {
+            let entry = self.nodes.get(&id).unwrap_or_else(|| {
+                panic!("session tree: history walks through missing node `{id}`")
+            });
+            current = entry.parent_id.clone();
+            match &entry.kind {
+                crate::entry::EntryKind::Compaction { cut_child, .. } => {
+                    if live.is_none() {
+                        live_cut_child = Some(cut_child.clone());
+                        live = Some(entry.clone());
+                    }
+                    // A dead compaction: its summary was itself
+                    // summarized — it never enters the view.
+                }
+                _ => {
+                    let is_stop = live_cut_child.as_deref() == Some(entry.id.as_str());
+                    if live.is_some() {
+                        tail.push(entry.clone());
+                    } else {
+                        newer.push(entry.clone());
+                    }
+                    if is_stop {
+                        break;
+                    }
+                }
             }
-        };
-        let parent = entry.parent_id.clone().ok_or_else(|| {
-            TreeFault(format!(
-                "compaction entry `{}` has no parent — the node before the cut is required",
-                entry.id
-            ))
-        })?;
-        if !self.nodes.contains_key(&parent) {
-            return Err(TreeFault(format!(
-                "compaction entry `{}` parents unknown node `{parent}`",
-                entry.id
-            )));
         }
-        if self.nodes.contains_key(&entry.id) {
-            return Err(TreeFault(format!("duplicate entry id `{}`", entry.id)));
+        match live {
+            Some(live) => {
+                if live_cut_child.is_some_and(|cut| !tail.iter().any(|e| e.id == cut)) {
+                    panic!(
+                        "session tree: a compaction's cut child was never met walking to the \
+                         head — the record names an off-branch entry"
+                    );
+                }
+                let mut view = Vec::with_capacity(newer.len() + tail.len() + 1);
+                view.push(live);
+                view.extend(tail.into_iter().rev());
+                view.extend(newer.into_iter().rev());
+                view
+            }
+            // No compaction governs: the plain branch.
+            None => newer.into_iter().rev().collect(),
         }
-        let cut_child = self.nodes.get_mut(&cut_child_id).ok_or_else(|| {
-            TreeFault(format!(
-                "compaction entry `{}` names unknown cut child `{cut_child_id}`",
-                entry.id
-            ))
-        })?;
-        if cut_child.parent_id.as_deref() != Some(parent.as_str()) {
-            return Err(TreeFault(format!(
-                "compaction entry `{}` parents `{parent}` but its cut child `{cut_child_id}` \
-                 records parent `{:?}` — the insertion must name an existing edge",
-                entry.id, cut_child.parent_id
-            )));
-        }
-        cut_child.parent_id = Some(entry.id.clone());
-        self.nodes.insert(entry.id.clone(), entry);
-        Ok(())
     }
 
     /// The node the head points at, when the conversation is non-empty.

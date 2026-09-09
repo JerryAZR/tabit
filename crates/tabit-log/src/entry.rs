@@ -33,18 +33,18 @@ use rig_core::message::ToolResult;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
-/// The current session file format version. v4: the `compaction` tree
-/// node (the insertion record — its `cut_child` names the first
-/// retained-tail entry; the loader re-parents that child through the
-/// compaction node, so a v4 tree can hold an inserted node whose
-/// parent is not the head at load time). v4 readers also accept v3
-/// files (no compaction entries exist in them by construction). v3:
-/// the log splits into conversation nodes (id + parent, the tree) and
-/// parentless side records (`model_change`, `checkout`, `aborted`,
-/// `label`, `custom`) — bookkeeping stops chaining into the tree.
-/// Pre-release break: v2 files are rejected loudly, there is no
-/// migration.
-pub const SESSION_FORMAT_VERSION: u32 = 4;
+/// The current session file format version. v5: the `compaction`
+/// node appends as a **leaf at the head-at-insert** (the tree's
+/// parent links are never rewritten — the history view, not the
+/// writer, places the boundary), assistant entries carry a measured
+/// `delta_tokens`, and the compaction node carries its persisted
+/// `tokens_after` (the regime's base measurement). Pre-release
+/// breaks, no migration: v4 and older compaction-bearing files are
+/// rejected loudly. v3: the log splits into conversation nodes (id +
+/// parent, the tree) and parentless side records (`model_change`,
+/// `checkout`, `aborted`, `label`, `custom`) — bookkeeping stops
+/// chaining into the tree. v2 and older are rejected loudly.
+pub const SESSION_FORMAT_VERSION: u32 = 5;
 /// Session file versions this build can read. Writers always write
 /// [`SESSION_FORMAT_VERSION`]; older versions stay readable while
 /// their records are a subset of the current vocabulary (a v3 file
@@ -153,6 +153,18 @@ pub enum EntryKind {
         message: Message,
         /// Provider-reported token usage for the turn.
         usage: Usage,
+        /// The turn's measured context growth — `usage.total_tokens`
+        /// minus the predecessor measurement's total (the previous
+        /// measured assistant in the same regime, the leading
+        /// compaction node's `tokens_after`, or 0 at session start).
+        /// A fact stamped at commit (owner ruling 2026-09: measured
+        /// facts commit, nothing is estimated). Absent when the
+        /// provider reported no usage (zeros are the type's
+        /// not-reported sentinel) or the subtraction is impossible —
+        /// the turn is then uncounted and the next measured turn's
+        /// delta telescopes over it.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        delta_tokens: Option<u64>,
     },
     /// The result of one executed tool call. Consecutive `tool_result`
     /// entries after an `assistant_message` form that turn's tool batch;
@@ -162,25 +174,33 @@ pub enum EntryKind {
         /// The result, carrying the tool call id it answers.
         result: ToolResult,
     },
-    /// A compaction insertion (v4): the history before the cut, replaced
-    /// by this node's summary. The node's `parent_id` is the node before
-    /// the cut point; `cut_child` names the first retained-tail entry —
-    /// the loader re-parents that child through this node, so the walked
-    /// chain routes `[... before-cut, compaction, cut child, ... tail]`
-    /// and history walkers stop here (included): the model-visible
-    /// context becomes `[summary] + retained tail`. Everything before
-    /// the insertion stays in the file and the tree — checkout to a
-    /// pre-compaction node yields the full-history branch (compaction
-    /// never deletes). The head does not move at insertion time.
+    /// A compaction pass (v5), appended as a **leaf at the
+    /// head-at-insert**: `cut_child` names the first retained-tail
+    /// entry, and the history-view construction splices this node in
+    /// at that position — the file's parent links are never
+    /// rewritten, the walk (not the writer) places the boundary. The
+    /// node is measurement-bearing: `tokens_after` is the regime's
+    /// base — retained tail + the summary's own output tokens —
+    /// computed once at insert and persisted (the suffix-delta walk
+    /// it replaces is a multi-level tree pass not worth repeating);
+    /// the context read in the window before the next turn is
+    /// exactly this number, and the first post-compaction turn's
+    /// delta telescopes against it. Everything before the cut stays
+    /// in the file and the tree — checkout to a pre-compaction node
+    /// yields the full-history branch (compaction never deletes).
     Compaction {
         /// The summary text, verbatim as the summarizer produced it.
         summary: String,
         /// The id of the first retained-tail entry (the message that
         /// immediately follows the cut point).
         cut_child: String,
-        /// The estimated context tokens before this pass ran (the
-        /// trigger's measurement, recorded for audit).
+        /// The context tokens before this pass ran (the trigger's
+        /// measurement, recorded for audit).
         tokens_before: u64,
+        /// The regime's base measurement: retained tail + the
+        /// summary's own output tokens (the context size the next
+        /// regime starts from).
+        tokens_after: u64,
         /// The summarization call's provider-reported usage.
         usage: Usage,
     },

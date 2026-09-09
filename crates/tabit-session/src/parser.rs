@@ -125,14 +125,11 @@ pub fn parse(raw: &str, path: &Path) -> Result<Parsed, SessionError> {
                     }
                     EntryKind::UserMessage { .. } | EntryKind::ToolResult { .. } => {}
                 }
-                // A compaction node is the one insert that is not a
-                // head-append: it lands between the cut-point parent and
-                // the cut child (v4), and the head does not move.
-                if matches!(entry.kind, EntryKind::Compaction { .. }) {
-                    tree.insert_compaction(entry).map_err(tree_fault)?;
-                } else {
-                    tree.load_append(entry).map_err(tree_fault)?;
-                }
+                // Every node — user, assistant, result, compaction —
+                // loads as a head-append (v5: a compaction record was
+                // written as a leaf at the then-head, so the append
+                // invariant holds for it like every other record).
+                tree.load_append(entry).map_err(tree_fault)?;
             }
             FileRecord::Side(record) => match record.kind {
                 SideKind::ModelChange {

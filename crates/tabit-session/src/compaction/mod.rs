@@ -7,17 +7,35 @@
 //! compaction knowledge: the pre-request door is an opaque
 //! [`PreRequestSource`] leaf the loop awaits.
 //!
+//! Measurement (owner ruling 2026-09): **nothing is estimated.** The
+//! context size is the history view's measured total — the nearest
+//! measurement-bearing node at-or-before the head (an assistant's
+//! `total_tokens`, or the leading compaction node's `tokens_after`
+//! in the post-compaction window). Every measured turn commits a
+//! `delta_tokens` fact (`total[k] − total[k−1]`, predecessor 0 at
+//! session start, the compaction node's base at a regime boundary;
+//! the system prompt folds into each regime's first delta, measured)
+//! — client-added text (results, user messages) rides the following
+//! assistant's delta, unmeasured stretches are simply **uncounted**
+//! (the error budget: one-or-a-bounded-few entries off by a few K
+//! per compaction is fine; one entry off by half a window is not;
+//! everything off by a few percent is not — so no chars/4 anywhere
+//! in the decision path).
+//!
 //! Every dial and prompt text lives in [`dials`] — data, clustered
 //! for review. The pass shape: cut selection is a maximization (the
-//! longest prefix satisfying both hard constraints — sent history
-//! under the [`dials::SENT_PREFIX_FRACTION`] cap, retained tail at or
-//! above [`dials::KEEP_TAIL_TOKENS`]); the request is that prefix
-//! plus the instruction, riding the conversation's preamble and
-//! toolset verbatim (prefix-cache identity — any toolset change
+//! latest boundary satisfying both hard constraints — the
+//! summarization prefix `head_total − tail` under the
+//! [`dials::SENT_PREFIX_FRACTION`] cap, the retained tail's delta sum
+//! at or above [`dials::KEEP_TAIL_TOKENS`]); the request is that
+//! prefix plus the instruction, riding the conversation's preamble
+//! and toolset verbatim (prefix-cache identity — any toolset change
 //! diverges the cached prefix); tool calls are forbidden by the
 //! instruction and a violating response fails the pass (nothing ever
 //! executes); overflow rejections and length-capped summaries shorten
 //! the request one boundary and retry, floored at the empty prefix;
+//! the committed node is a leaf-append whose `tokens_after` (retained
+//! tail + the summary's own output tokens) is the new regime's base;
 //! the post-check loop re-runs while the context is still over
 //! condition B — pass N+1 is just another regular compaction over a
 //! history that already begins with pass N's summary. A cancelled or
@@ -123,17 +141,20 @@ pub(crate) enum Outcome {
     Cancelled { passes: u32 },
 }
 
-/// One selected cut: the boundary index into the active branch (the
-/// first retained entry), with the estimates the constraints fed on.
+/// One selected cut: the boundary index into the history view (the
+/// first retained entry), over the suffix delta sums the constraints
+/// fed on.
 #[derive(Debug, Clone, PartialEq)]
 struct Cut {
     boundary: usize,
 }
 
 impl Cut {
-    #[allow(clippy::indexing_slicing)] // sanctioned crash: the boundary is a validated index into this branch
-    fn cut_child<'a>(&self, branch: &'a [SessionEntry]) -> &'a str {
-        &branch[self.boundary].id
+    /// The first retained entry's id at a boundary — the selection's
+    /// own, or a shortened retry's.
+    #[allow(clippy::indexing_slicing)] // sanctioned crash: boundaries are validated indices into this view
+    fn cut_child(history: &[SessionEntry], boundary: usize) -> &str {
+        &history[boundary].id
     }
 }
 
@@ -142,14 +163,38 @@ impl Cut {
 /// run end, a prior compaction) or at the session start. A boundary
 /// after a tool-carrying output never exists — tool pairs stay whole
 /// and queued-steer clusters stay in the tail by construction.
-#[allow(clippy::indexing_slicing)] // sanctioned crash: callers pass in-range indices (0..branch.len())
-fn valid_boundary(branch: &[SessionEntry], index: usize) -> bool {
+#[allow(clippy::indexing_slicing)] // sanctioned crash: callers pass in-range indices (0..history.len())
+fn valid_boundary(history: &[SessionEntry], index: usize) -> bool {
     index == 0
-        || match &branch[index - 1].kind {
+        || match &history[index - 1].kind {
             EntryKind::Compaction { .. } => true,
             EntryKind::AssistantMessage { message, .. } => tabit_log::calls_of(message).is_empty(),
             EntryKind::UserMessage { .. } | EntryKind::ToolResult { .. } => false,
         }
+}
+
+/// The suffix delta sums of a history view: `sums[i]` is the
+/// retained-tail size when the boundary is `i` — every assistant
+/// entry at index ≥ i contributing its measured `delta_tokens`
+/// (absent deltas are unmeasured turns: uncounted, never estimated).
+/// Non-assistant entries ride their following assistant's delta by
+/// construction, so they never sum separately.
+fn delta_suffix_sums(history: &[SessionEntry]) -> Vec<u64> {
+    let mut sums = Vec::with_capacity(history.len() + 1);
+    sums.push(0);
+    let mut running: u64 = 0;
+    for entry in history.iter().rev() {
+        if let EntryKind::AssistantMessage {
+            delta_tokens: Some(delta),
+            ..
+        } = &entry.kind
+        {
+            running += delta;
+        }
+        sums.push(running);
+    }
+    sums.reverse();
+    sums
 }
 
 /// Run the box for one door invocation. `emit` receives the
@@ -164,16 +209,9 @@ pub(crate) async fn run(
     token: &CancellationToken,
     config: &TabitConfig,
     selection: &ModelSelection,
-    preamble_chars: u64,
     mailbox_empty: bool,
     emit: &mut (dyn FnMut(SessionEvent) + Send),
 ) -> Outcome {
-    let preamble_tokens = preamble_chars / dials::CHARS_PER_TOKEN;
-    let branch = read(cell).active_branch();
-    // The live context estimate: the value each pass starts from (the
-    // entry's `tokens_before`), and — after the post-pass update —
-    // the latest measurement the exits report as `tokens_after`.
-    let mut tokens_now = context_tokens(&branch, preamble_tokens);
     // Every designed constraint needs a known window. Unknown means
     // the threshold doors skip with a warning — and the overflow
     // door's caller noted the wall's lesson before knocking, so an
@@ -205,6 +243,17 @@ pub(crate) async fn run(
         );
         return Outcome::Skipped;
     }
+    // The live context measurement (the head node's total). An
+    // unmeasured context — a fresh session, a provider that never
+    // reports usage — is absence, not an estimate (the unknown-window
+    // skip's sibling).
+    let Some(mut tokens_now) = tabit_log::regime_total(&read(cell).active_branch()) else {
+        tracing::warn!(
+            "compaction skipped: the context has no measurement yet — no turn \
+             on the history reported usage"
+        );
+        return Outcome::Skipped;
+    };
     if !fires(door, tokens_now, window, mailbox_empty) {
         return Outcome::Skipped;
     }
@@ -215,16 +264,16 @@ pub(crate) async fn run(
     // frontend drops that attempt's deltas).
     let mut violation_retries: u32 = 0;
     loop {
-        let branch = read(cell).active_branch();
-        let Some(cut) = select_cut(&branch, window, preamble_tokens) else {
+        let history = read(cell).history();
+        let tail_sums = delta_suffix_sums(&history);
+        let Some(cut) = select_cut(&history, &tail_sums, tokens_now, window) else {
             // Nothing worth folding is benign for every door — the
             // manual command reports it as a friendly note, the
             // automatic doors are silent about it. After committed
             // passes there is simply nothing more feasible — which
-            // (unreachable by construction since the folded sums: the
-            // branch always re-offers the previous compaction as a
-            // feasible boundary) would mean the loop gave up while
-            // still over condition B.
+            // (unreachable by construction: the view always re-offers
+            // the previous compaction as a feasible boundary) would
+            // mean the loop gave up while still over condition B.
             return match passes {
                 0 => Outcome::NothingToCompact,
                 more => Outcome::Oversized {
@@ -242,13 +291,25 @@ pub(crate) async fn run(
             id: id.clone(),
             pass,
         });
-        match one_pass(&branch, cut.clone(), state, agent, token, &id, emit).await {
-            PassOutcome::Committed { summary, usage } => {
+        match one_pass(&history, cut.clone(), state, agent, token, &id, emit).await {
+            PassOutcome::Committed {
+                summary,
+                usage,
+                boundary,
+            } => {
+                // The regime's base, persisted once: the retained
+                // tail's delta sum plus the summary's own measured
+                // output. (The boundary is the pass's final one — a
+                // shortened retry may have moved it off the selection.)
+                #[allow(clippy::indexing_slicing)]
+                // sanctioned crash: the pass validated this boundary against this view
+                let tokens_after = tail_sums[boundary] + usage.output_tokens;
                 write(cell).commit_compaction(
                     id.clone(),
                     summary,
-                    cut.cut_child(&branch).to_string(),
+                    Cut::cut_child(&history, boundary).to_string(),
                     tokens_now,
+                    tokens_after,
                     usage,
                 );
                 emit(SessionEvent::CompactionFinished { id });
@@ -295,8 +356,12 @@ pub(crate) async fn run(
         // The post-check loop: rerun while the context is still over
         // condition B — pass N+1 is just another regular compaction
         // over a history that already begins with pass N's summary.
-        let branch = read(cell).active_branch();
-        let tokens_after = context_tokens(&branch, preamble_tokens);
+        // The head is the fresh compaction node: this read is exactly
+        // its persisted base.
+        #[allow(clippy::expect_used)]
+        // sanctioned crash: the commit one step above wrote this measurement
+        let tokens_after = tabit_log::regime_total(&read(cell).active_branch())
+            .expect("the compaction node just committed carries the regime's base");
         // The primary exit: the context now fits the urgent bound —
         // compaction happened, good to continue.
         if tokens_after + dials::URGENT_RESERVE_TOKENS <= window {
@@ -308,15 +373,15 @@ pub(crate) async fn run(
         // The pass cap: compaction happened, but the context is still
         // oversized — the legitimate big one is a model switch
         // importing a larger regime's history (see the dial); the
-        // pathological one is estimation ping-pong the guard's `>=`
+        // pathological one is measurement ping-pong the guard's `>=`
         // cannot see. What landed stands; not good to continue.
         if passes >= dials::MAX_PASSES {
             return Outcome::Oversized {
                 reason: format!(
                     "the pass cap ({}) reached with the context still over the \
-                     urgent bound ({tokens_after} estimated tokens against a \
+                     urgent bound ({tokens_after} measured tokens against a \
                      {window}-token window): a model switch importing a larger \
-                     regime's history, or estimation ping-pong — the passes that \
+                     regime's history, or measurement ping-pong — the passes that \
                      landed stand",
                     dials::MAX_PASSES
                 ),
@@ -326,13 +391,13 @@ pub(crate) async fn run(
         }
         if tokens_after >= tokens_now {
             // The cannot-shrink guard: a pass that committed without
-            // shrinking the estimate would spin the loop forever —
+            // shrinking the measurement would spin the loop forever —
             // stop loud, with the passes that did land left in place.
             return Outcome::Oversized {
                 reason: format!(
-                    "compaction cannot shrink the context further ({tokens_after} estimated \
-                     tokens against a {window}-token window): a single entry may exceed the \
-                     retained-tail budget, or the window is misreported"
+                    "compaction cannot shrink the context further ({tokens_after} measured \
+                     tokens against a {window}-token window): a single retained tail \
+                     may exceed the window, or the window is misreported"
                 ),
                 passes,
                 tokens_after,
@@ -357,51 +422,6 @@ fn fires(door: Door, context_tokens: u64, window: u64, mailbox_empty: bool) -> b
     }
 }
 
-/// The context measurement: the newest server-reported request total
-/// on the branch, plus estimated tokens for the entries appended
-/// after it. Every assistant entry carries the usage its provider
-/// reported (the engine's commit folds it in); `total_tokens` is each
-/// provider's correct partition of everything that request processed
-/// — Anthropic sums input + both cache counters + output (its
-/// `input_tokens` excludes cache), OpenAI passes the wire total (its
-/// prompt figure already includes cached), so summing the components
-/// here would double-count on one side of that split. Zeros mean "not
-/// reported" (the type's own sentinel): the walk passes such entries
-/// by, estimating them, and falls back to the full estimate when no
-/// turn ever measured the branch.
-///
-/// A compaction taints older measurements: a request that ran before
-/// the insertion measured a context the summary has since replaced —
-/// its total is an overcount now (the retained tail's measurements
-/// included the old prefix). The horizon is the newest compaction on
-/// the branch, compared by entry id (UUIDv7 — millisecond time order;
-/// the stamps are second-precision and collide within a fast
-/// exchange); only younger measurements count, and the walk stops at
-/// the compaction with a pure estimate when none do.
-fn context_tokens(branch: &[SessionEntry], preamble_tokens: u64) -> u64 {
-    let horizon = branch
-        .iter()
-        .filter(|entry| matches!(entry.kind, EntryKind::Compaction { .. }))
-        .map(|entry| entry.id.as_str())
-        .max();
-    let mut tail = 0;
-    for entry in branch.iter().rev() {
-        match &entry.kind {
-            EntryKind::AssistantMessage { usage, .. }
-                if usage.total_tokens > 0
-                    && horizon.is_none_or(|newest| entry.id.as_str() > newest) =>
-            {
-                return usage.total_tokens + tail;
-            }
-            EntryKind::Compaction { .. } => {
-                return preamble_tokens + tail + estimate_entry(entry);
-            }
-            _ => tail += estimate_entry(entry),
-        }
-    }
-    preamble_tokens + tail
-}
-
 /// The window: the wall-taught value (fresher than config) else the
 /// configured `context_window`.
 fn resolve_window(
@@ -418,45 +438,35 @@ fn resolve_window(
 }
 
 /// Cut selection — the maximization: the **latest** boundary
-/// satisfying both hard constraints. Both push the cut the same
-/// direction (a later cut means a longer prefix AND a shorter tail);
-/// the longest-prefix objective is the soft pull the other way —
-/// compaction efficiency. The session-start boundary is the
-/// always-feasible floor (nothing sent, the whole history kept).
-///
-/// The sums are over the **folded** context, not the raw array: a
-/// compaction node replaces everything before it, so the running
-/// totals restart there (preamble + the summary's estimate).
-/// Summing the raw array would count entries the fold removed —
-/// every later pass's prefix cap would be throttled by dead history
-/// and pass N+1 could never cut deeper than pass N.
-#[allow(clippy::indexing_slicing)] // sanctioned crash: prefix_sums carries branch.len()+1 sums by construction
-fn select_cut(branch: &[SessionEntry], window: u64, preamble_tokens: u64) -> Option<Cut> {
-    if branch.is_empty() {
+/// satisfying both hard constraints (owner ruling 2026-09: the tail
+/// is the boundary's suffix delta sum; the summarization size is
+/// `head_total − tail` — the measured context minus the retained
+/// tail). Both push the cut the same direction (a later cut means a
+/// longer prefix AND a shorter tail); the longest-prefix objective is
+/// the soft pull the other way — compaction efficiency. The
+/// session-start boundary is the always-feasible floor (nothing
+/// sent, the whole history kept), never a selection: an empty prefix
+/// summarizes nothing. Unmeasured stretches are uncounted, never
+/// estimated — the prefix reads smaller and the tail reads smaller
+/// by exactly the uncounted few-K (the blessed error budget), both
+/// in the conservative direction.
+#[allow(clippy::indexing_slicing)] // sanctioned crash: tail_sums carries history.len()+1 sums by construction
+fn select_cut(
+    history: &[SessionEntry],
+    tail_sums: &[u64],
+    head_total: u64,
+    window: u64,
+) -> Option<Cut> {
+    if history.is_empty() {
         return None;
     }
-    let mut prefix_sums = Vec::with_capacity(branch.len() + 1);
-    let mut total = preamble_tokens;
-    prefix_sums.push(total);
-    for entry in branch {
-        total = match &entry.kind {
-            EntryKind::Compaction { .. } => preamble_tokens + estimate_entry(entry),
-            _ => total + estimate_entry(entry),
-        };
-        prefix_sums.push(total);
-    }
     let cap = (dials::SENT_PREFIX_FRACTION * window as f64) as u64;
-    let all_tokens = prefix_sums[branch.len()];
-    // The session-start boundary is the feasibility floor, never a
-    // selection: an empty prefix summarizes nothing (the owner's
-    // "just not making progress") and its insertion would parent no
-    // node. The loop starts at 1.
-    for index in (1..branch.len()).rev() {
-        if !valid_boundary(branch, index) {
+    for index in (1..history.len()).rev() {
+        if !valid_boundary(history, index) {
             continue;
         }
-        let prefix_tokens = prefix_sums[index];
-        let tail_tokens = all_tokens - prefix_tokens;
+        let tail_tokens = tail_sums[index];
+        let prefix_tokens = head_total.saturating_sub(tail_tokens);
         if prefix_tokens < cap && tail_tokens >= dials::KEEP_TAIL_TOKENS {
             return Some(Cut { boundary: index });
         }
@@ -464,32 +474,15 @@ fn select_cut(branch: &[SessionEntry], window: u64, preamble_tokens: u64) -> Opt
     None
 }
 
-/// One entry's token estimate: serialized chars /
-/// [`dials::CHARS_PER_TOKEN`] — the heuristic every reference uses.
-/// Only the unmeasured needs it: the tail after the newest
-/// measurement, cut-selection arithmetic, and branches no server ever
-/// measured (seeds, zero-usage reports).
-fn estimate_entry(entry: &SessionEntry) -> u64 {
-    #[allow(clippy::expect_used)] // sanctioned crash: log payloads always serialize
-    fn json_tokens(value: &impl serde::Serialize) -> u64 {
-        serde_json::to_string(value)
-            .expect("a log payload that cannot serialize could not have been written")
-            .len() as u64
-            / dials::CHARS_PER_TOKEN
-    }
-    match &entry.kind {
-        EntryKind::UserMessage { message } => json_tokens(message),
-        EntryKind::AssistantMessage { message, .. } => json_tokens(message),
-        EntryKind::ToolResult { result } => json_tokens(result),
-        EntryKind::Compaction { summary, .. } => summary.len() as u64 / dials::CHARS_PER_TOKEN,
-    }
-}
-
 /// One pass's stream outcome.
 enum PassOutcome {
     Committed {
         summary: String,
         usage: Usage,
+        /// The boundary the pass finally summarized from (a shortened
+        /// retry may have moved it off the selection) — the retained
+        /// tail starts here, and the regime's base sums from it.
+        boundary: usize,
     },
     /// The model attempted a tool call: the response is discarded; the
     /// caller decides whether to resend (bounded) or fail.
@@ -508,9 +501,9 @@ enum PassOutcome {
 /// empty-summary guard. The rejection/length-cap retry loop lives
 /// here — each retry moves the cut one boundary earlier (a strictly
 /// shorter request), floored at the empty prefix.
-#[allow(clippy::indexing_slicing)] // sanctioned crash: the boundary is a validated index into this branch
+#[allow(clippy::indexing_slicing)] // sanctioned crash: the boundary is a validated index into this view
 async fn one_pass(
-    branch: &[SessionEntry],
+    history: &[SessionEntry],
     initial_cut: Cut,
     state: &Compaction,
     agent: &Agent,
@@ -520,8 +513,8 @@ async fn one_pass(
 ) -> PassOutcome {
     let mut boundary = initial_cut.boundary;
     loop {
-        let mut history = tabit_log::fold_branch(&branch[..boundary]);
-        history.push(Message::user(dials::SUMMARIZATION_INSTRUCTION));
+        let mut view = tabit_log::fold_branch(&history[..boundary]);
+        view.push(Message::user(dials::SUMMARIZATION_INSTRUCTION));
         // The live view: summary text streams as bracket deltas. Tool
         // call items pass through here too — the verdict on them is
         // the assembled classification below (the common predicate),
@@ -529,7 +522,7 @@ async fn one_pass(
         let bracket_id = id.to_string();
         let outcome = agent
             .completion_turn(
-                history,
+                view,
                 Some(dials::SUMMARY_MAX_TOKENS),
                 token.cancelled(),
                 &mut |item| {
@@ -547,7 +540,7 @@ async fn one_pass(
             // The request itself failed to build or open: classify the
             // same way as an in-stream failure.
             Err(error) => {
-                return match rejected(error, state, boundary, branch) {
+                return match rejected(error, state, boundary, history) {
                     Rejection::Shorten(shortened) => {
                         boundary = shortened;
                         continue;
@@ -563,7 +556,7 @@ async fn one_pass(
             // retried; nothing executes either way).
             AttemptOutcome::MalformedToolCall { .. } => return PassOutcome::Violated,
             AttemptOutcome::Failed(error) => {
-                return match rejected(error, state, boundary, branch) {
+                return match rejected(error, state, boundary, history) {
                     Rejection::Shorten(shortened) => {
                         boundary = shortened;
                         continue;
@@ -586,7 +579,7 @@ async fn one_pass(
                 // prefix contained — treated exactly like a rejection
                 // (ruled).
                 if finish_reason == Some(rig_core::completion::FinishReason::Length) {
-                    match shorten(branch, boundary) {
+                    match shorten(history, boundary) {
                         Some(shortened) => {
                             boundary = shortened;
                             continue;
@@ -610,6 +603,7 @@ async fn one_pass(
                 return PassOutcome::Committed {
                     summary,
                     usage: turn.usage,
+                    boundary,
                 };
             }
         }
@@ -646,7 +640,7 @@ fn rejected(
     error: CompletionError,
     state: &Compaction,
     boundary: usize,
-    branch: &[SessionEntry],
+    history: &[SessionEntry],
 ) -> Rejection {
     match error.as_context_overflow() {
         Some(overflow) => {
@@ -655,7 +649,7 @@ fn rejected(
             if let Some(window) = overflow.window_tokens {
                 state.note_window(window);
             }
-            match shorten(branch, boundary) {
+            match shorten(history, boundary) {
                 Some(shortened) => Rejection::Shorten(shortened),
                 None => Rejection::Fail(
                     "the compaction request overflows the context window even with \
@@ -669,8 +663,10 @@ fn rejected(
 }
 
 /// The latest valid boundary strictly before `from`, if any.
-fn shorten(branch: &[SessionEntry], from: usize) -> Option<usize> {
-    (0..from).rev().find(|index| valid_boundary(branch, *index))
+fn shorten(history: &[SessionEntry], from: usize) -> Option<usize> {
+    (0..from)
+        .rev()
+        .find(|index| valid_boundary(history, *index))
 }
 
 /// The pre-request door leaf: the opaque async callable the engine
@@ -686,7 +682,6 @@ pub(crate) struct PreRequestDoor {
     pub(crate) agent: Arc<Agent>,
     pub(crate) config: Arc<TabitConfig>,
     pub(crate) selection: ModelSelection,
-    pub(crate) preamble_chars: u64,
     pub(crate) token: CancellationToken,
     /// The frontend channel's weak, pre-stamped handle — `None` for a
     /// session with no host attached (a direct consumer); the bracket
@@ -711,7 +706,6 @@ impl PreRequestSource for PreRequestDoor {
                 &self.token,
                 &self.config,
                 &self.selection,
-                self.preamble_chars,
                 // Condition B carries no mailbox requirement (urgent
                 // is urgent); the queue defers to compaction by
                 // ordering alone — the drain sits at the loop's

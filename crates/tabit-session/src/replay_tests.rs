@@ -25,6 +25,7 @@ fn assistant(content: Vec<AssistantContent>, usage: Usage) -> EntryKind {
             content: OneOrMany::many(content).expect("non-empty assistant content"),
         },
         usage,
+        delta_tokens: None,
     }
 }
 
@@ -268,8 +269,9 @@ fn a_compaction_node_replays_as_the_boundary_marker() {
             "x1",
             EntryKind::Compaction {
                 summary: "summarized".to_string(),
-                cut_child: "irrelevant".to_string(),
+                cut_child: "u2".to_string(),
                 tokens_before: 0,
+                tokens_after: 0,
                 usage: rig_core::completion::Usage::default(),
             },
         ),
@@ -281,7 +283,8 @@ fn a_compaction_node_replays_as_the_boundary_marker() {
         ),
     ]);
     // The full history renders (the file never deletes); the marker
-    // sits at the insertion's position.
+    // sits at the cut — right before the retained tail's first entry
+    // — wherever the raw walk carries the compaction record itself.
     assert!(matches!(
         &events[events.len() - 2],
         SessionEvent::CompactionFinished { id } if id == "x1"

@@ -502,8 +502,14 @@ Recorded where the code had to pick; revisit on review:
 - **Usage facts ride the commits** (the 2026-08 deferral closed by the
   2026-09 usage discussion): every assistant commit — the FINAL fold
   and the roundtrip fold — carries the turn's provider-reported usage
-  onto the entry. Zeros remain only where nothing was measured (seeded
-  histories); discard billing (flags 25/27) is the still-open residue.
+  onto the entry, and stamps the turn's measured `delta_tokens`
+  (`total[k] − total[k−1]`; predecessor 0 at session start, the
+  leading compaction node's `tokens_after` at a regime boundary —
+  the system prompt folds into each regime's first delta, measured;
+  absent when the turn is unreported, and the next measured delta
+  telescopes over it). Zeros remain only where nothing was measured
+  (seeded histories); discard billing (flags 25/27) is the
+  still-open residue.
 
 ## The tool phase (loop-side subsystem, ruled 2026-08)
 

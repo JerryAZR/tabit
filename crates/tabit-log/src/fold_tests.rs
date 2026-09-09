@@ -36,6 +36,7 @@ fn assistant_tool_calls(ids: &[&str]) -> EntryKind {
     EntryKind::AssistantMessage {
         message: Message::Assistant { id: None, content },
         usage: rig_core::completion::Usage::default(),
+        delta_tokens: None,
     }
 }
 
@@ -46,6 +47,7 @@ fn assistant_text(text: &str) -> EntryKind {
             content: OneOrMany::one(AssistantContent::text(text)),
         },
         usage: rig_core::completion::Usage::default(),
+        delta_tokens: None,
     }
 }
 
@@ -159,6 +161,7 @@ fn a_non_assistant_message_carries_no_calls() {
             content: OneOrMany::one(UserContent::Text(Text::new("odd but legal"))),
         },
         usage: rig_core::completion::Usage::default(),
+        delta_tokens: None,
     })];
     assert!(tail_is_closed(&entries).is_ok());
     assert_eq!(calls_of(&Message::user("x")).len(), 0);
@@ -201,6 +204,7 @@ fn compaction(summary: &str) -> EntryKind {
         summary: summary.to_string(),
         cut_child: "irrelevant-to-the-fold".to_string(),
         tokens_before: 0,
+        tokens_after: 0,
         usage: rig_core::completion::Usage::default(),
     }
 }

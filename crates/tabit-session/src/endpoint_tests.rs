@@ -3037,11 +3037,13 @@ async fn the_idle_door_compacts_after_a_large_run_and_the_file_holds_the_entry()
 async fn the_compact_command_forces_the_box_on_an_idle_session() {
     let store = temp_store("compaction-manual");
     let big = "x".repeat(80_000);
-    // A window so large the idle door never fires on its own.
+    // A window so large the idle door never fires on its own. The
+    // turns report context-sized measurements — turn 2's delta (the
+    // tail the cut retains) clears the kept-tail floor.
     let session = Factory::new(vec![
-        text_turn(&big),
-        text_turn(&big),
-        text_turn("## Goal\n- the forced summary"),
+        text_turn_reported(&big, 20_000, 10_000),
+        text_turn_reported(&big, 50_000, 10_000),
+        text_turn_reported("## Goal\n- the forced summary", 100, 20),
     ])
     .into_builder_with_config(
         store.clone(),

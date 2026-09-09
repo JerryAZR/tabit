@@ -41,6 +41,7 @@ fn assistant_node(id: &str, parent: Option<&str>, calls: &[(&str, &str)]) -> Fil
         EntryKind::AssistantMessage {
             message: Message::Assistant { id: None, content },
             usage: Usage::default(),
+            delta_tokens: None,
         },
     ))
 }
@@ -271,17 +272,17 @@ fn branch_switching_via_checkout_rebuilds_head_and_context() {
 }
 
 #[test]
-fn a_v4_file_with_a_compaction_entry_derives_the_insertion() {
+fn a_v5_file_with_a_compaction_entry_loads_as_a_leaf() {
     let parsed = parse_ok(&[
         user_node("u1", None, "hello"),
         assistant_node("a1", Some("u1"), &[]),
         user_node("u2", Some("a1"), "again"),
         assistant_node("a2", Some("u2"), &[]),
-        compaction_node("x1", Some("a1"), "u2"),
+        compaction_node("x1", Some("a2"), "u2"),
     ]);
-    // The head does not move; the walked path routes through the
-    // insertion.
-    assert_eq!(parsed.tree.head(), Some("a2"));
+    // The compaction is a leaf-append: the head advances to it, the
+    // raw path keeps every node at its true position.
+    assert_eq!(parsed.tree.head(), Some("x1"));
     assert_eq!(
         parsed
             .tree
@@ -289,9 +290,10 @@ fn a_v4_file_with_a_compaction_entry_derives_the_insertion() {
             .iter()
             .map(|entry| entry.id.as_str())
             .collect::<Vec<_>>(),
-        ["u1", "a1", "x1", "u2", "a2"]
+        ["u1", "a1", "u2", "a2", "x1"]
     );
-    // The derived context is [summary] + tail.
+    // The derived context is [summary] + tail — the view splices the
+    // compaction in at its cut.
     let messages = crate::context_manager::ContextManager::from_tree(
         parsed.tree.clone(),
         std::sync::Arc::new(std::sync::Mutex::new(tabit_log::NullBuffer)),
@@ -326,15 +328,16 @@ fn a_v2_file_is_rejected() {
 
 #[test]
 fn a_mismatched_compaction_entry_fails_loud() {
-    // The compaction names u2 as its cut child but parents a1's
-    // sibling u1 — the edge it claims does not exist.
+    // The compaction parents u1 while the head at that point is u2 —
+    // a compaction record is a head-append like every other record;
+    // a stale parent is a corrupt file.
     let error = parse_err(&[
         user_node("u1", None, "hello"),
         assistant_node("a1", Some("u1"), &[]),
         user_node("u2", Some("a1"), "again"),
         compaction_node("x1", Some("u1"), "u2"),
     ]);
-    assert!(error.to_string().contains("cut child"), "{error}");
+    assert!(error.to_string().contains("parents"), "{error}");
 }
 
 #[test]
@@ -344,12 +347,13 @@ fn a_compaction_entry_carrying_usage_counts_into_stats() {
         assistant_node("a1", Some("u1"), &[]),
         FileRecord::Node(SessionEntry::with_id(
             "x1".to_string(),
-            Some("u1".to_string()),
+            Some("a1".to_string()),
             "t".to_string(),
             EntryKind::Compaction {
                 summary: "s".to_string(),
                 cut_child: "a1".to_string(),
                 tokens_before: 0,
+                tokens_after: 0,
                 usage: rig_core::completion::Usage {
                     input_tokens: 10,
                     output_tokens: 5,
@@ -374,6 +378,7 @@ fn compaction_node(id: &str, parent: Option<&str>, cut_child: &str) -> FileRecor
             cut_child: cut_child.to_string(),
             tokens_before: 42,
             usage: rig_core::completion::Usage::default(),
+            tokens_after: 0,
         },
     ))
 }

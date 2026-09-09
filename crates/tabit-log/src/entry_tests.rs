@@ -31,6 +31,7 @@ fn assistant_entry_with_tool_call() -> EntryKind {
             total_tokens: 15,
             ..Usage::default()
         },
+        delta_tokens: None,
     }
 }
 
@@ -141,7 +142,7 @@ fn header_round_trips_and_rejects_unknown_fields() {
         cwd: "C:/work".to_string(),
         parent_session: None,
     };
-    assert_eq!(SESSION_FORMAT_VERSION, 4);
+    assert_eq!(SESSION_FORMAT_VERSION, 5);
     let line = serde_json::to_string(&header).expect("header serializes");
     let back: SessionHeader = serde_json::from_str(&line).expect("header parses back");
     assert_eq!(back, header);
