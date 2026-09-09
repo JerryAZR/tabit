@@ -48,6 +48,19 @@ pub const VIOLATION_RETRY_CAP: u32 = 1;
 /// between estimation error and the provider's counting).
 pub const MAX_PASSES: u32 = 8;
 
+/// The declared support envelope for compaction, in tokens: **64K**.
+/// The bare contradiction line is 57,344 (`URGENT_RESERVE` +
+/// `KEEP_TAIL` + `SUMMARY_MAX_TOKENS`) — below it, condition B
+/// (`context ≤ window − URGENT_RESERVE`) is unsatisfiable by
+/// construction, the kept-tail floor plus a maximal summary already
+/// exceeding what B demands. Rounded up to 64K to leave room for
+/// real work beyond the bare dial sum (owner ruling 2026-09: state
+/// what we support rather than adaptively re-scale the ruled
+/// constants — the dials target real windows, 256K–1M; a
+/// below-envelope window skips loudly, the unknown-window skip's
+/// sibling).
+pub const MIN_SUPPORTED_WINDOW: u64 = 65_536;
+
 /// The summarization instruction — the final user message of the
 /// compaction request. The request rides the real conversation's
 /// prefix (same preamble, same toolset — cache identity), so the

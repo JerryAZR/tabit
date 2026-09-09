@@ -2961,9 +2961,9 @@ async fn the_idle_door_compacts_after_a_large_run_and_the_file_holds_the_entry()
     // Two rounds of dialogue (each answer ~80k chars ≈ 20k tokens).
     // The trigger measures from the entries' reported usage: the last
     // turn reports input ~20k (the request it carried) + output ~20k
-    // (the reply that stayed) ≈ 40k total — over the 60k window's
-    // urgent bound (60k − 32.7k) — and the cut at the first round's
-    // end keeps a ~20k-token tail past the floor.
+    // (the reply that stayed) ≈ 40k total — over the 70k window's
+    // urgent bound (70k − 32.7k = 37.3k) — and the cut at the first
+    // round's end keeps a ~20k-token tail past the floor.
     let big = "x".repeat(80_000);
     let session = Factory::new(vec![
         text_turn_reported(&big, 10, 20_000),
@@ -2972,7 +2972,7 @@ async fn the_idle_door_compacts_after_a_large_run_and_the_file_holds_the_entry()
     ])
     .into_builder_with_config(
         store.clone(),
-        windowed_config(60_000),
+        windowed_config(70_000),
         ModelSelection::new("p", "m"),
     )
     .create("C:/w")
@@ -3184,10 +3184,11 @@ async fn an_overflow_failure_is_intercepted_compacted_and_the_run_retried() {
 #[tokio::test]
 async fn an_unrepairable_overflow_leaves_the_failure_standing() {
     let store = temp_store("compaction-overflow-stuck");
-    // A single user message is no feasible cut: the forced door skips
-    // (nothing to compact), no bracket opens, no retry runs — the
-    // failure stands as the run's terminal.
-    let session = Factory::new(vec![overflow_turn(60_000), text_turn("never reached")])
+    // A single user message is no feasible cut: the forced door — on
+    // a supported (taught) window — skips (nothing to compact), no
+    // bracket opens, no retry runs — the failure stands as the run's
+    // terminal.
+    let session = Factory::new(vec![overflow_turn(80_000), text_turn("never reached")])
         .into_builder_with_config(
             store.clone(),
             windowless_config(),

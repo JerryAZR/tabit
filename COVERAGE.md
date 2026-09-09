@@ -39,9 +39,14 @@ Defensive ("unreachable") arms follow a stricter rule:
   two design facts: the overflow-intercept e2e exposed that a
   measurement taken before a compaction is tainted (it counted the
   prefix the summary replaced) — the walk-back now honors a
-  compaction horizon by entry id; and the multi-pass post-check's
-  real exit for a converged history is the cannot-shrink guard, not
-  the pass cap (pinned by its own test). Per-file, the arc modules:
+  compaction horizon by entry id; and the multi-pass test exposed
+  that cut selection summed the raw array instead of the folded
+  context (prefix sums now restart at a compaction node). The
+  round's original "the guard is the normal multi-pass exit" reading
+  was an artifact of testing below the 64K support envelope and is
+  corrected in ROADMAP item 6 — on supported windows multi-pass
+  strictly shrinks and exits `Compacted`; the guard is exceptional.
+  Per-file, the arc modules:
   `compaction/mod.rs` 95.9%, `compaction_doors.rs` 93.9% (the
   overflow intercept e2e'd, both outcomes), `turn.rs` 98.4%,
   `overflow.rs` 100%, `tree.rs` 100%, `subagent.rs` 93.3%,
@@ -288,9 +293,14 @@ gaps the measurement found):
   measurement recovery.
 - **The box's policy arms**: manual door below the tail floor
   (loud "nothing to compact"), the auto doors' infeasible skip, the
-  cannot-shrink guard (two passes commit, the second cannot shrink,
-  the loop stops loud with what landed — this, not the pass cap, is
-  the multi-pass exit for a converged history), the length-cap
+  cannot-shrink guard (a huge late entry no feasible cut can move
+  into the prefix — the exceptional loud stop, with what landed
+  standing; NOT the normal multi-pass exit, which strictly shrinks
+  and exits `Compacted` — the correction lives in ROADMAP item 6),
+  the below-envelope window skip (the declared 64K support line),
+  the designed multi-pass (a 100k history on a 70k window →
+  `Compacted {2}` with strict shrink — the test that exposed the
+  raw-array prefix sums), the length-cap
   shorten-retry and its empty-prefix failure, the in-stream overflow
   rejection retry (window learned), the empty-prefix rejection, the
   pre-request leaf driven directly (condition B through its own

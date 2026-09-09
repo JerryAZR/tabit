@@ -657,31 +657,98 @@ async fn a_manual_request_below_the_tail_floor_fails_loudly() {
 }
 
 #[tokio::test]
-async fn a_pass_that_cannot_shrink_stops_loud_with_what_landed() {
-    // Window 40k: pass 1 compacts 24k of dialogue down to a summary +
-    // the floor-bounded tail (~18k estimated) — still over condition
-    // B's bound (40k − 32.8k), so the post-check loops. Pass 2's
-    // maximization keeps the same just-above-floor tail (the cut
-    // selection cannot retain less), so the estimate does not shrink
-    // and the cannot-shrink guard stops the loop loud: the guard, not
-    // the pass cap, is the multi-pass exit for a converged history.
+async fn a_below_envelope_window_skips_loudly_without_running_a_pass() {
+    // A 40k window contradicts the dials (B demands a context below
+    // the kept-tail floor), so the door declines up front — even
+    // forced — rather than burning passes that provably cannot
+    // satisfy the post-check. The declared envelope is 64k, rounded
+    // up from the 57,344 contradiction line to leave room for real
+    // work.
     let cell = cell_with_dialogue(BIG_FLOOR_ROUNDS, BIG_MESSAGE_CHARS);
+    let agent = AgentBuilder::new(MockCompletionModel::from_stream_turns(
+        summary_stream_turns(),
+    ))
+    .build();
+    let config = config_with_window(40_000);
+    let (outcome, events) = run_manual(&cell, &agent, &config).await;
+    assert_eq!(outcome, Outcome::Skipped, "{outcome:?}");
+    assert!(events.is_empty(), "no bracket opened");
+    assert_eq!(
+        branch_of(&cell).len(),
+        BIG_FLOOR_ROUNDS * 2,
+        "nothing persisted"
+    );
+}
+
+#[tokio::test]
+async fn a_history_far_over_the_window_compacts_in_strictly_shrinking_passes() {
+    // The designed multi-pass: a 100k history on a 70k window. The
+    // prefix cap (75%) limits one pass to ~52k, so pass 1 keeps a
+    // ~50k tail — still over B's bound (70k − 32.8k = 37.2k) — and
+    // pass 2 cuts to the floor-pinned tail and exits. Strict shrink
+    // each pass; the pass cap never comes into play.
+    let cell = cell_with_dialogue(10, 20_000);
     let summary = || {
         vec![
             MockStreamEvent::text("## Goal\n- pass"),
             MockStreamEvent::FinalResponse(rig_core::test_utils::mock_final(Usage::default())),
         ]
     };
-    let agent = AgentBuilder::new(MockCompletionModel::from_stream_turns(
-        (0..dials::MAX_PASSES)
-            .map(|_| summary())
-            .collect::<Vec<_>>(),
-    ))
+    let agent = AgentBuilder::new(MockCompletionModel::from_stream_turns([
+        summary(),
+        summary(),
+    ]))
     .build();
-    let config = config_with_window(40_000);
+    let config = config_with_window(70_000);
     let (outcome, events) = run_manual(&cell, &agent, &config).await;
     assert!(
-        matches!(&outcome, Outcome::Failed { message, passes: 2 } if message.contains("cannot shrink")),
+        matches!(&outcome, Outcome::Compacted { passes: 2, .. }),
+        "{outcome:?}"
+    );
+    let started = events
+        .iter()
+        .filter(|event| matches!(event, SessionEvent::CompactionStarted { .. }))
+        .count();
+    assert_eq!(started, 2);
+}
+
+#[tokio::test]
+async fn a_huge_late_entry_the_cut_cannot_move_stops_the_loop_loud() {
+    // The guard's designed case: a ~40k user paste so late that every
+    // feasible cut keeps it in the retained tail (cutting after it
+    // leaves too little tail). Pass 1 commits what it can; pass 2
+    // re-cuts to the same boundary, cannot shrink, and the guard
+    // fails loud with what landed standing.
+    let paste = "x".repeat(160_000);
+    let cell = Arc::new(std::sync::RwLock::new(tabit_log::ContextManager::seeded(
+        vec![
+            Message::user("first question"),
+            Message::assistant("first answer"),
+            Message::user("second question"),
+            Message::assistant("second answer"),
+            Message::user(paste),
+            Message::assistant("done with the paste"),
+        ],
+    )));
+    let summary = || {
+        vec![
+            MockStreamEvent::text("## Goal\n- pass"),
+            MockStreamEvent::FinalResponse(rig_core::test_utils::mock_final(Usage::default())),
+        ]
+    };
+    let agent = AgentBuilder::new(MockCompletionModel::from_stream_turns([
+        summary(),
+        summary(),
+    ]))
+    .build();
+    let config = config_with_window(70_000);
+    let (outcome, events) = run_manual(&cell, &agent, &config).await;
+    // Pass 1 commits (it shrinks by the small prefix it folds); pass 2
+    // re-cuts right after the insertion, retains the same paste, and
+    // the estimates come back equal — the guard's `>=`.
+    assert!(
+        matches!(&outcome, Outcome::Failed { message, passes: 2 }
+            if message.contains("cannot shrink") && message.contains("single entry")),
         "{outcome:?}"
     );
     let started = events
@@ -835,7 +902,7 @@ async fn the_pre_request_leaf_compacts_when_condition_b_holds() {
         cell: cell.clone(),
         state: Arc::new(Compaction::new()),
         agent: Arc::new(agent),
-        config: config_with_window(60_000),
+        config: config_with_window(80_000),
         selection: selection(),
         preamble_chars: 0,
         token: CancellationToken::new(),

@@ -169,6 +169,23 @@ pub(crate) async fn run(
         );
         return Outcome::Skipped;
     };
+    // The declared envelope: below it the constraints contradict (B
+    // demands a context the kept-tail floor forbids), so the door
+    // declines before burning a pass that provably cannot satisfy the
+    // post-check — the loud statement of what we support.
+    if window < dials::MIN_SUPPORTED_WINDOW {
+        tracing::warn!(
+            provider = %selection.provider,
+            model = %selection.model,
+            window,
+            minimum = dials::MIN_SUPPORTED_WINDOW,
+            "compaction skipped: the context window is below the supported \
+             envelope ({} tokens) — the urgent bound is unsatisfiable by \
+             construction below it",
+            dials::MIN_SUPPORTED_WINDOW
+        );
+        return Outcome::Skipped;
+    }
     if !fires(door, tokens_now, window, mailbox_empty) {
         return Outcome::Skipped;
     }
@@ -365,6 +382,13 @@ fn resolve_window(
 /// the longest-prefix objective is the soft pull the other way —
 /// compaction efficiency. The session-start boundary is the
 /// always-feasible floor (nothing sent, the whole history kept).
+///
+/// The sums are over the **folded** context, not the raw array: a
+/// compaction node replaces everything before it, so the running
+/// totals restart there (preamble + the summary's estimate).
+/// Summing the raw array would count entries the fold removed —
+/// every later pass's prefix cap would be throttled by dead history
+/// and pass N+1 could never cut deeper than pass N.
 #[allow(clippy::indexing_slicing)] // sanctioned crash: prefix_sums carries branch.len()+1 sums by construction
 fn select_cut(branch: &[SessionEntry], window: u64, preamble_tokens: u64) -> Option<Cut> {
     if branch.is_empty() {
@@ -374,7 +398,10 @@ fn select_cut(branch: &[SessionEntry], window: u64, preamble_tokens: u64) -> Opt
     let mut total = preamble_tokens;
     prefix_sums.push(total);
     for entry in branch {
-        total += estimate_entry(entry);
+        total = match &entry.kind {
+            EntryKind::Compaction { .. } => preamble_tokens + estimate_entry(entry),
+            _ => total + estimate_entry(entry),
+        };
         prefix_sums.push(total);
     }
     let cap = (dials::SENT_PREFIX_FRACTION * window as f64) as u64;

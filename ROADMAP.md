@@ -403,18 +403,40 @@ it kept condition B fired until the cannot-shrink guard failed a
 successful pass. The walk honors a compaction horizon compared by
 entry id (UUIDv7 millisecond order; the RFC3339 stamps are
 second-precision and collide in fast exchanges): only younger
-measurements count. The box's `last_usage` session state is deleted
-with its justification — the entry IS the measurement, so it
-survives reload by construction, and reloaded stats count the same
-numbers the live ledger does. The chars/4 heuristic remains only
-where no server number exists: the unmeasured tail and
-cut-selection arithmetic. The multi-pass post-check's real exit for
-a converged history is the cannot-shrink guard (the maximization
-plus the tail floor make consecutive passes converge; the pass cap
-is the belt), pinned by its own test. Complexity (same ruling):
-O(history) is fine — binary search would need a tree re-shape for a
-size the context window bounds anyway, and the beat's common case is
-a walk-back with no serialization at all.
+measurements count. *(The id-horizon is itself provisional — the
+owner's pending delta-tokens design would replace time-ordered
+validity with stored per-entry contributions and a recorded insertion
+frontier; parked pending the reference survey.)* The box's
+`last_usage` session state is deleted with its justification — the
+entry IS the measurement, so it survives reload by construction, and
+reloaded stats count the same numbers the live ledger does. The
+chars/4 heuristic remains only where no server number exists: the
+unmeasured tail and cut-selection arithmetic. Complexity (same
+ruling): O(history) is fine — binary search would need a tree
+re-shape for a size the context window bounds anyway, and the beat's
+common case is a walk-back with no serialization at all.
+
+**Amended again 2026-09 — the support envelope is declared, not
+adaptive (owner: "state what we support"; "neither option optimizes
+for 40K").** Windows below **64K** (rounded up from the 57,344
+contradiction line — reserve + kept tail + summary cap — to leave
+room for real work) skip loudly at the door, the unknown-window
+skip's sibling; the dials stay absolute constants targeting real
+windows (256K–1M). This correction also retires an earlier wrong
+statement in this record ("the guard, not the pass cap, is the
+multi-pass exit") — an artifact of testing below the envelope, where
+condition B is unsatisfiable by construction. The corrected taxonomy:
+on supported windows, one pass brings the context under B in
+essentially every case; a history far over the window multi-passes
+with strict shrink (a 100k history on a 70k window: pass 1 takes a
+prefix-cap's worth, pass 2 cuts to the floor-pinned tail, exit
+`Compacted {2}`); the cannot-shrink guard fires only exceptionally —
+a single huge entry no feasible cut can move into the prefix, or a
+misreported window. The multi-pass test exposed a real bug of the
+same raw-array-vs-folded-context class as the taint: cut selection's
+prefix sums now restart at a compaction node (pass N+1's cap was
+throttled by dead entries the fold had removed, so later passes could
+never cut deeper than pass N).
 
 - Context compaction: summarize old turns when approaching the context
   window (pi: replace history with a summary + recent tail).
