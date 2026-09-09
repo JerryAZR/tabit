@@ -19,4 +19,5 @@ rig-core = { path = "../rig-core", version = "0.41.0", default-features = false 
 serde = { workspace = true, features = ["derive"] }
 serde_json = { workspace = true }
 thiserror = { workspace = true }
+tracing = { workspace = true }
 uuid = { workspace = true, features = ["v7"] }

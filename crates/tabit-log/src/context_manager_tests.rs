@@ -683,6 +683,87 @@ fn the_first_turn_after_compaction_deltas_against_the_regime_base() {
 }
 
 #[test]
+fn the_deltas_telescope_to_the_head_measurement() {
+    // The design's closing identity (owner 2026-09): the measured
+    // total equals the delta sum over the history view, plus the
+    // leading compaction's own output tokens when a regime base
+    // stands in for the telescoped past. Held over every shape:
+    // plain sessions (Σ deltas = total[last] from total[−1] = 0),
+    // zero-usage turns (absent deltas; the next measured delta spans
+    // the gap, so the sum stays exact), and compactions (the
+    // identity gains exactly the summary's output — `tokens_after`
+    // IS the tail's delta sum plus that output, so the two telescoped
+    // regimes join without a seam). The one sanctioned break: an
+    // underflow turn (total below its predecessor) re-anchors the
+    // chain and drops its negative span — outside this test by
+    // design.
+    let delta_sum = |manager: &ContextManager| {
+        manager
+            .history()
+            .iter()
+            .filter_map(|entry| match &entry.kind {
+                EntryKind::AssistantMessage { delta_tokens, .. } => *delta_tokens,
+                _ => None,
+            })
+            .sum::<u64>()
+    };
+    let leading_output =
+        |manager: &ContextManager| match manager.history().first().map(|entry| &entry.kind) {
+            Some(EntryKind::Compaction { usage, .. }) => usage.output_tokens,
+            _ => 0,
+        };
+
+    // A plain measured session: the sum IS the measurement.
+    let (mut manager, _tap) = manager();
+    manager.fold_turn_with_id(assistant_text("one"), "t1".to_string(), reported(90, 10));
+    manager.fold(user("next"));
+    manager.fold_turn_with_id(assistant_text("two"), "t2".to_string(), reported(150, 10));
+    assert_eq!(delta_sum(&manager), 160);
+    assert_eq!(manager.measured_total(), Some(160));
+
+    // A zero-usage turn: absent from the sum, spanned by the next
+    // measured delta — the identity holds without it.
+    manager.fold_turn_with_id(assistant_text("lost"), "t3".to_string(), Usage::new());
+    manager.fold_turn_with_id(assistant_text("three"), "t4".to_string(), reported(200, 10));
+    assert_eq!(delta_sum(&manager), 210);
+    assert_eq!(manager.measured_total(), Some(210));
+
+    // A compaction: the base is the tail's delta sum plus the
+    // summary's own output (10), and a further turn joins the new
+    // regime's chain against it. The cut retains t4 alone (its
+    // delta: 50).
+    let tail_start = manager
+        .active_branch()
+        .last()
+        .expect("the branch holds the turn")
+        .id
+        .clone();
+    manager.commit_compaction(
+        "pass-1".to_string(),
+        "the summary".to_string(),
+        tail_start,
+        210,
+        60, // 50 of retained-tail deltas + the summary's 10 output
+        reported(0, 10),
+    );
+    assert_eq!(
+        manager.measured_total(),
+        Some(60),
+        "the window reads the base"
+    );
+    manager.fold(user("after"));
+    manager.fold_turn_with_id(assistant_text("post"), "t5".to_string(), reported(60, 30));
+    // View deltas: the retained t4's 50 + the post turn's 30 (90 − 60);
+    // the identity gains the leading summary's 10 output.
+    assert_eq!(delta_sum(&manager), 80);
+    assert_eq!(
+        manager.measured_total(),
+        Some(delta_sum(&manager) + leading_output(&manager)),
+        "measured_total = Σ view deltas + the leading summary's own output"
+    );
+}
+
+#[test]
 fn a_seeded_assistant_stays_unmeasured() {
     // fold() keeps the seed door: no server measured the turn, and
     // zeros are the type's not-reported sentinel.
