@@ -146,7 +146,7 @@ compile_error!(
 pub mod rmcp;
 pub mod server;
 
-pub use extensions::{MissingToolContext, SessionCwd, ToolContext};
+pub use extensions::{InternalCallId, MissingToolContext, SessionCwd, ToolContext};
 pub use rig_core::tool::{
     IntoToolOutput, PortableDynamicTool, ToolErrorKind, ToolExecutionError, ToolOutput, ToolResult,
 };
@@ -570,8 +570,12 @@ pub(crate) async fn dispatch_tool(
     args: String,
     tool: Option<RegisteredTool>,
     context: &ToolContext,
+    internal_call_id: Option<&str>,
 ) -> ToolDispatch {
-    let dispatch_context = context.for_dispatch();
+    let mut dispatch_context = context.for_dispatch();
+    if let Some(id) = internal_call_id {
+        dispatch_context.insert(InternalCallId(id.to_string()));
+    }
     let (result, context) = match tool {
         Some(tool) => {
             tracing::debug!(target: "rig", tool_name = name, "calling tool with args:\n{args}");
@@ -788,7 +792,7 @@ impl ToolSet {
         let ToolDispatch {
             result,
             context: dispatch_context,
-        } = dispatch_tool(name, args.into(), tool, context).await;
+        } = dispatch_tool(name, args.into(), tool, context, None).await;
         context.accept_dispatch_result(dispatch_context);
         result
     }
@@ -1412,6 +1416,7 @@ mod tests {
             "{}".to_string(),
             Some(RegisteredTool(Arc::new(blocker))),
             &ToolContext::new(),
+            None,
         )
         .await;
         heartbeat.abort();
@@ -1472,6 +1477,7 @@ mod tests {
             "{}".to_string(),
             Some(RegisteredTool(Arc::new(probe))),
             &context,
+            None,
         );
         let dispatch = dispatch
             .instrument(tracing::info_span!("tool_dispatch_span"))

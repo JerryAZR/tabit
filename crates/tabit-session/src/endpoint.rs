@@ -106,6 +106,10 @@ pub struct SessionHostWiring {
     /// The `parent` field on the boot session's announcement — the
     /// child-role flag speaking at the source of truth.
     pub boot_parent: Option<String>,
+    /// The `parent_call` field on the boot session's announcement —
+    /// the spawning tool call's correlation id, crossing the same
+    /// way `boot_parent` does. Present only in a child-role boot.
+    pub boot_parent_call: Option<String>,
 }
 
 /// A command on its way to the host loop: a wire command, or a
@@ -367,6 +371,7 @@ impl SessionHost {
                 model: info.model.clone(),
                 resumed: info.resumed,
                 parent: wiring.boot_parent.clone(),
+                parent_call: wiring.boot_parent_call.clone(),
             },
         });
         for note in startup_notes {
@@ -755,6 +760,7 @@ impl HostLoop {
                 model: session.selection(),
                 resumed: session.resumed(),
                 parent: None,
+                parent_call: None,
             },
         });
         self.add_worker(id, session);
@@ -789,6 +795,7 @@ impl HostLoop {
                 model: session.selection(),
                 resumed: session.resumed(),
                 parent: None,
+                parent_call: None,
             },
         });
         for note in notes {

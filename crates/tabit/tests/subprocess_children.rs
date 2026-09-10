@@ -165,6 +165,7 @@ fn host(store: &SessionStore, router: Arc<ChildRouter>, session: Session) -> Ses
     let wiring = SessionHostWiring {
         children: router,
         boot_parent: None,
+        boot_parent_call: None,
         store: store.clone(),
         create: Arc::new(|| Err("not driven".to_string())),
         open: Arc::new(|_| Err("not driven".to_string())),
@@ -209,6 +210,7 @@ async fn a_subprocess_child_announces_streams_and_answers_over_the_real_binary()
     let mut frames = Vec::new();
     let mut steered = false;
     let mut child_id: Option<String> = None;
+    let mut subagent_call: Option<String> = None;
     loop {
         let frame = tokio::time::timeout(std::time::Duration::from_secs(60), handle.next_event())
             .await
@@ -222,6 +224,11 @@ async fn a_subprocess_child_announces_streams_and_answers_over_the_real_binary()
                 parent: Some(parent),
                 ..
             } if parent == &parent_id => child_id = Some(id.clone()),
+            SessionEvent::ToolCall {
+                name,
+                internal_call_id,
+                ..
+            } if name == "subagent" => subagent_call = Some(internal_call_id.clone()),
             SessionEvent::UserMessage { .. }
                 if !steered && frame.stream.as_ref().map(|s| s.as_str()) == child_id.as_deref() =>
             {
@@ -236,6 +243,21 @@ async fn a_subprocess_child_announces_streams_and_answers_over_the_real_binary()
         }
     }
     let child_id = child_id.expect("the child announced");
+    let subagent_call = subagent_call.expect("the parent model called the subagent tool");
+
+    // The pairing: the child's announce carries the spawning tool
+    // call's correlation id — the same `internal_call_id` the parent's
+    // `ToolCall` event announced, so a frontend pairs the two exactly
+    // (arrival order could not, under concurrent subagent calls).
+    let announced_call = frames.iter().find_map(|frame| match &frame.event {
+        SessionEvent::SessionOpened { parent_call, .. } => parent_call.clone(),
+        _ => None,
+    });
+    assert_eq!(
+        announced_call,
+        Some(subagent_call.clone()),
+        "the announce pairs the child with the exact spawning tool call"
+    );
 
     // The announcement carried the parent field from the source and
     // the empty path of an ephemeral session.

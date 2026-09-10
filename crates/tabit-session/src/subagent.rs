@@ -23,7 +23,7 @@
 
 use crate::session::RunSummary;
 use rig_agent::completion::Message;
-use rig_agent::tool::{DynamicTool, ToolContext, ToolExecutionError, ToolOutput};
+use rig_agent::tool::{DynamicTool, InternalCallId, ToolContext, ToolExecutionError, ToolOutput};
 use rig_derive::rig_tool;
 use std::path::PathBuf;
 use std::sync::Arc;
@@ -192,13 +192,17 @@ pub async fn subagent(
     // The child process builds its own preamble in its own cwd
     // (truthful by construction); the task crosses as the first
     // message. The allow-list validated parent-side; the names cross
-    // as-is.
+    // as-is. The call's correlation id crosses too: the child's
+    // announce pairs its session with this very tool call.
     let mut builder = ctx
         .spawn_subprocess()
         .cwd(cwd)
         .model(selection)
         .max_turns(parts.max_turns)
         .ephemeral(true);
+    if let Some(id) = context.get::<InternalCallId>() {
+        builder = builder.parent_call(id.0.clone());
+    }
     if tools.is_some() {
         let names = toolset.iter().map(|tool| tool.name().to_string()).collect();
         builder = builder.tools(names);

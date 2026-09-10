@@ -181,6 +181,33 @@ fn events_round_trip_through_json() {
         .expect("serialize"),
         r#"{"type":"session_created","id":"0198","path":"C:/w/s.jsonl","model":{"provider":"p","model":"m","thinking_level":null}}"#
     );
+    // The announce's wire spelling: a subagent child carries its
+    // parentage and the spawning call's correlation id; a user
+    // session carries neither (absent fields never hit the wire).
+    assert_eq!(
+        serde_json::to_string(&SessionEvent::SessionOpened {
+            id: "0199".to_string(),
+            path: String::new(),
+            model: ModelSelection::new("p", "m"),
+            resumed: false,
+            parent: Some("0192uuidv7parent".to_string()),
+            parent_call: Some("i1".to_string()),
+        })
+        .expect("serialize"),
+        r#"{"type":"session_opened","id":"0199","path":"","model":{"provider":"p","model":"m","thinking_level":null},"resumed":false,"parent":"0192uuidv7parent","parent_call":"i1"}"#
+    );
+    assert_eq!(
+        serde_json::to_string(&SessionEvent::SessionOpened {
+            id: "0199".to_string(),
+            path: "C:/w/s.jsonl".to_string(),
+            model: ModelSelection::new("p", "m"),
+            resumed: true,
+            parent: None,
+            parent_call: None,
+        })
+        .expect("serialize"),
+        r#"{"type":"session_opened","id":"0199","path":"C:/w/s.jsonl","model":{"provider":"p","model":"m","thinking_level":null},"resumed":true}"#
+    );
     // The wire spelling of the brackets and the truncation warning.
     assert_eq!(
         serde_json::to_string(&SessionEvent::TurnStarted {

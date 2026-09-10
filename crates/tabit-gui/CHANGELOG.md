@@ -20,6 +20,28 @@ could observe — gets an entry here in the same commit.
 
 ## v7 (current)
 
+### wire: `session_opened.parent_call` — the subagent pairing (2026-09, additive; no version bump)
+
+A subagent child's announce now carries `parent_call`: the spawning
+tool call's `internal_call_id`, pairing the child with the exact open
+`tool_call` event a frontend already holds — exact under concurrent
+subagent calls, where arrival order cannot disambiguate (previously
+the pairing was inferable only at result time, via the `subagent`
+result's `details.child_id`). Absent whenever `parent` is; old
+frontends ignore the field. The one enabling engine change: a
+model-turn dispatch now hands tool bodies their correlation id as
+typed context (`rig_agent::tool::InternalCallId`) — absent for
+executions outside a model turn.
+
+### docs: the contract split — TOOLS.md (2026-09)
+
+The per-tool interpretation layer moved out of FRONTEND.md into
+TOOLS.md: every built-in tool's `tool_result.details` shape (edit's
+diff + outcomes, bash's truncation/spill, subagent's child-session
+facts) and the interaction template payload schemas (the two
+`native:*` widgets and their askers). Content moved, not changed —
+FRONTEND.md stays the mechanics contract and points across.
+
 ### wire: the compaction bracket and the `compact` command (2026-09)
 
 Protocol version 7. Compaction (ROADMAP item 6) ships its frontend

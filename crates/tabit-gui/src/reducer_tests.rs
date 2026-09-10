@@ -43,6 +43,7 @@ fn opened(resumed: bool) -> InMsg {
         model: tabit_protocol::ModelSelection::new("local", "m"),
         resumed,
         parent: None,
+        parent_call: None,
     })
 }
 

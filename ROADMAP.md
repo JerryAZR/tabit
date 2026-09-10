@@ -298,6 +298,17 @@ carry the actual shape:
   announcement event was rejected). Wire change → protocol v5 with the
   GUI changelog entry; the reducer must learn the parent branch (its
   `session_opened` handler currently sets Facts unconditionally).
+- **The announce pairs with the spawning tool call** (ruled 2026-09,
+  v7 additive, no bump): `session_opened.parent_call` carries the
+  call's `internal_call_id` — crossed at boot as `--parent-call`,
+  sourced from the tool body's `InternalCallId` context (typed
+  context the runner inserts per model-turn dispatch; absent for
+  executions outside a model turn). Exact pairing under concurrent
+  subagent calls, where arrival order cannot disambiguate; the
+  result-time pairing (`details.child_id`) stays as the completed
+  arm's facts. The frontend contract split landed with it (same
+  ruling): TOOLS.md owns the per-tool `details` shapes and
+  interaction templates, FRONTEND.md the mechanics.
 - **Interaction default: parent-proxy** (ruled). The child's tool
   context receives the parent's `Arc<dyn UserInteraction>` — cards pop
   on the parent's stream and answers route through the existing rails,

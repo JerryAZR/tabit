@@ -458,6 +458,7 @@ impl GuiState {
                 model,
                 resumed,
                 parent: None,
+                ..
             } => {
                 self.facts = Some(Facts {
                     session_id: id.clone(),

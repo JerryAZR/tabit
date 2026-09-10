@@ -328,6 +328,7 @@ id = "m"
         SessionHostWiring {
             children: tabit_session::ChildRouter::shared(),
             boot_parent: None,
+            boot_parent_call: None,
             store: SessionStore::new(dir),
             create,
             open: Arc::new(move |_| Err("open_session is not driven by this test".to_string())),
@@ -1265,6 +1266,7 @@ id = "m"
             SessionHostWiring {
                 children: tabit_session::ChildRouter::shared(),
                 boot_parent: None,
+                boot_parent_call: None,
                 store: SessionStore::new(&dir),
                 create,
                 open,

@@ -167,6 +167,15 @@ pub struct ToolContext {
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct SessionCwd(pub std::path::PathBuf);
 
+/// The executing call's correlation id — the same id the
+/// `ToolCall`/`ToolResult` stream items carry as `internal_call_id`,
+/// inserted freshly into every model-turn dispatch; absent when a
+/// tool executes outside a model turn (a tool server's direct
+/// `execute`). A tool with frontend-visible effects reads it to pair
+/// those effects with the call the frontend already holds.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct InternalCallId(pub String);
+
 impl ToolContext {
     /// Create an empty context.
     pub const fn new() -> Self {

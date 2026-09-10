@@ -51,7 +51,8 @@ Current workspace layout:
   item 7). Its `CHANGELOG.md` is the frontend protocol's changelog —
   every `PROTOCOL_VERSION` bump or frontend-observable change (wire
   or behavior) gets an entry in the same commit; FRONTEND.md stays
-  the frozen contract)
+  the frozen mechanics contract, TOOLS.md its companion for the
+  built-in tool `details` shapes and interaction templates)
 - `crates/tabit` — the `tabit` binary: bare `tabit [path]` is the
   launcher mode (detach-spawns the GUI and exits — the supported
   entry point), print mode (`-p <PROMPT>`, `--rewind <n>`) and JSON

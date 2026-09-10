@@ -48,9 +48,10 @@ impl ToolRegistrySnapshot {
         tool_name: &str,
         args: &str,
         context: &ToolContext,
+        internal_call_id: Option<&str>,
     ) -> ToolDispatch {
         let tool = self.tools.get(tool_name).cloned();
-        dispatch_tool(tool_name, args.to_string(), tool, context).await
+        dispatch_tool(tool_name, args.to_string(), tool, context, internal_call_id).await
     }
 }
 
@@ -401,6 +402,8 @@ impl ToolServerHandle {
     }
 
     /// Run one isolated dispatch and retain its full context for agent hooks.
+    /// No call id: a server-side execute runs outside a model turn, so
+    /// there is no correlation id to give the body.
     pub(crate) async fn dispatch(
         &self,
         tool_name: &str,
@@ -418,7 +421,7 @@ impl ToolServerHandle {
             let state = self.0.read().await;
             state.toolset.get(tool_name).cloned()
         };
-        dispatch_tool(tool_name, args.to_string(), tool, context).await
+        dispatch_tool(tool_name, args.to_string(), tool, context, None).await
     }
 
     /// Retrieve tool definitions.
@@ -471,8 +474,8 @@ mod tests {
     use crate::{
         test_utils::{MockAddTool, MockBarrierTool, MockControlledTool, MockSubtractTool},
         tool::{
-            DynamicTool, PortableDynamicTool, Tool, ToolContext, ToolExecutionError, ToolOutput,
-            ToolSet,
+            DynamicTool, InternalCallId, PortableDynamicTool, Tool, ToolContext,
+            ToolExecutionError, ToolOutput, ToolSet,
             server::{ToolServer, ToolServerHandle},
         },
     };
@@ -600,7 +603,7 @@ mod tests {
 
         assert_eq!(snapshot.definitions()[0].description, "first schema");
         let dispatch = snapshot
-            .dispatch(ReplacementTool::NAME, "{}", &ToolContext::new())
+            .dispatch(ReplacementTool::NAME, "{}", &ToolContext::new(), None)
             .await;
         assert_eq!(dispatch.result.output().render(), "first implementation");
 
@@ -612,9 +615,44 @@ mod tests {
         let next_snapshot = handle.snapshot_tool_defs().await;
         assert_eq!(next_snapshot.definitions()[0].description, "second schema");
         let dispatch = next_snapshot
-            .dispatch(ReplacementTool::NAME, "{}", &ToolContext::new())
+            .dispatch(ReplacementTool::NAME, "{}", &ToolContext::new(), None)
             .await;
         assert_eq!(dispatch.result.output().render(), "second implementation");
+    }
+
+    #[tokio::test]
+    pub async fn test_snapshot_dispatch_carries_the_call_id_to_the_body() {
+        // The pairing seam: a model-turn dispatch hands the body its
+        // correlation id as typed context, fresh per call (a second
+        // dispatch never sees the first's id; a server-side execute
+        // sees none).
+        let handle = ToolServer::new()
+            .tool(ReplacementTool {
+                description: "context probe",
+                output: "ran",
+            })
+            .run();
+        let snapshot = handle.snapshot_tool_defs().await;
+        let dispatch = snapshot
+            .dispatch(
+                ReplacementTool::NAME,
+                "{}",
+                &ToolContext::new(),
+                Some("call-7"),
+            )
+            .await;
+        assert_eq!(
+            dispatch.context.get::<InternalCallId>(),
+            Some(&InternalCallId("call-7".to_string()))
+        );
+        let again = snapshot
+            .dispatch(ReplacementTool::NAME, "{}", &ToolContext::new(), None)
+            .await;
+        assert_eq!(again.context.get::<InternalCallId>(), None);
+        let server_side = handle
+            .dispatch(ReplacementTool::NAME, "{}", &ToolContext::new())
+            .await;
+        assert_eq!(server_side.context.get::<InternalCallId>(), None);
     }
 
     #[tokio::test]

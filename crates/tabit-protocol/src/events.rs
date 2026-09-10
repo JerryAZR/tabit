@@ -118,7 +118,8 @@ pub enum SessionEvent {
         /// edit tool's unified diff + per-edit outcomes). The shape is
         /// owned by the tool named in this event — dispatch on `name`;
         /// absent or unknown `details` degrades to `content` rendering.
-        /// Never model-facing: `content` remains the faithful copy, and
+        /// The per-tool shapes are TOOLS.md's table. Never
+        /// model-facing: `content` remains the faithful copy, and
         /// `details` duplicates no prose — it structures what `content`
         /// already states.
         #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -248,6 +249,15 @@ pub enum SessionEvent {
         /// every user-facing session.
         #[serde(default, skip_serializing_if = "Option::is_none")]
         parent: Option<String>,
+        /// The parent's tool-call correlation id whose execution
+        /// spawned this session (v7, additive): the same
+        /// `internal_call_id` the `ToolCall`/`ToolResult` events
+        /// carry, so a frontend pairs the announce with the exact
+        /// open tool call — exact under concurrent subagent calls,
+        /// where arrival order cannot disambiguate. Absent whenever
+        /// `parent` is.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        parent_call: Option<String>,
     },
     /// A `new_session` command succeeded: a fresh session exists in
     /// this backend, empty (nothing replays). Unstamped,

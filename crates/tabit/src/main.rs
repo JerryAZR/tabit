@@ -55,8 +55,10 @@ struct Args {
     json: bool,
     /// Child-role flags (the subagent bridge spawns `--json` with
     /// these): the parent to announce, the tool allow-list, and the
-    /// in-memory boot session.
+    /// in-memory boot session. `parent_call` pairs the announce with
+    /// the spawning tool call's correlation id.
     parent: Option<String>,
+    parent_call: Option<String>,
     tools: Option<String>,
     ephemeral: bool,
     /// Positional project path — selects GUI mode (`tabit <path>`).
@@ -71,7 +73,8 @@ usage: tabit -p <PROMPT>                  print mode: one prompt, one run
                                          add -p <PROMPT> to branch with it
        tabit --json [session flags]       JSON protocol on stdio (scriptable)
                                          child role adds: --parent <id> (the
-                                         spawning session), --tools <a,b,..>
+                                         spawning session), --parent-call <id>
+                                         (its tool call), --tools <a,b,..>
                                          (an allow-list), --ephemeral (no
                                          file) — the subagent bridge's flags
        tabit --list                      list this project's sessions
@@ -144,6 +147,7 @@ fn validate_mode(args: &Args) -> Result<Mode, String> {
         args.json.then_some("--json"),
         args.list.then_some("--list"),
         args.parent.is_some().then_some("--parent"),
+        args.parent_call.is_some().then_some("--parent-call"),
         args.tools.is_some().then_some("--tools"),
         args.ephemeral.then_some("--ephemeral"),
         args.path.is_some().then_some("<path>"),
@@ -160,6 +164,7 @@ fn validate_mode(args: &Args) -> Result<Mode, String> {
             "--model",
             "--max-turns",
             "--parent",
+            "--parent-call",
             "--tools",
             "--ephemeral",
         ],
@@ -203,6 +208,7 @@ where
         rewind: None,
         json: false,
         parent: None,
+        parent_call: None,
         tools: None,
         ephemeral: false,
         path: None,
@@ -252,6 +258,12 @@ where
                     .next()
                     .ok_or("--parent needs a session id (see --help)")?;
                 parsed.parent = Some(value);
+            }
+            "--parent-call" => {
+                let value = it
+                    .next()
+                    .ok_or("--parent-call needs a call id (see --help)")?;
+                parsed.parent_call = Some(value);
             }
             "--tools" => {
                 let value = it
@@ -1126,6 +1138,7 @@ fn host_wiring(args: &Args, registry: &ModelRegistry, store: SessionStore) -> Se
         store,
         children: child_router(),
         boot_parent: args.parent.clone(),
+        boot_parent_call: args.parent_call.clone(),
         create: Arc::new(move || {
             assemble(
                 &fresh_args,
@@ -1378,14 +1391,22 @@ mod tests {
             "--json",
             "--parent",
             "p1",
+            "--parent-call",
+            "c7",
             "--tools",
             "read,bash",
             "--ephemeral",
         ])
         .expect("child role parses");
         assert_eq!(parsed.parent.as_deref(), Some("p1"));
+        assert_eq!(parsed.parent_call.as_deref(), Some("c7"));
         assert_eq!(parsed.tools.as_deref(), Some("read,bash"));
         assert!(parsed.ephemeral);
+
+        // The pairing flag needs its id like every value flag.
+        let bare = args(&["--json", "--parent", "p1", "--parent-call"])
+            .expect_err("parent-call without a value");
+        assert!(bare.contains("--parent-call needs a call id"), "{bare}");
 
         // The ephemeral boot resumes nothing — the persistence
         // entrances are mutually exclusive.

@@ -58,6 +58,7 @@ const STDERR_RING: usize = 200;
 pub struct SubprocessBuilder {
     exe: PathBuf,
     parent_id: String,
+    parent_call: Option<String>,
     cwd: PathBuf,
     model: Option<ModelSelection>,
     tools: Option<Vec<String>>,
@@ -76,6 +77,7 @@ impl SubprocessBuilder {
         Self {
             exe: ctx.parts().exe.clone(),
             parent_id: ctx.parent_id().to_string(),
+            parent_call: None,
             cwd: ctx.parent_cwd().to_path_buf(),
             model: None,
             tools: None,
@@ -124,6 +126,16 @@ impl SubprocessBuilder {
         self
     }
 
+    /// The spawning tool call's correlation id — crosses as
+    /// `--parent-call` so the child's `session_opened` announce pairs
+    /// with the `ToolCall` event the frontend already holds (exact
+    /// under concurrent subagent calls). Absent for spawners outside
+    /// a model turn.
+    pub fn parent_call(mut self, id: String) -> Self {
+        self.parent_call = Some(id);
+        self
+    }
+
     /// Run the child: spawn, handshake, registration. Errors are
     /// display strings — the caller (a tool body) turns them into its
     /// failure report.
@@ -131,6 +143,7 @@ impl SubprocessBuilder {
         let Self {
             exe,
             parent_id,
+            parent_call,
             cwd,
             model,
             tools,
@@ -146,6 +159,10 @@ impl SubprocessBuilder {
             "--parent".to_string(),
             parent_id.clone(),
         ];
+        if let Some(id) = &parent_call {
+            args.push("--parent-call".to_string());
+            args.push(id.clone());
+        }
         if let Some(selection) = &model {
             args.push("--model".to_string());
             args.push(format!("{}/{}", selection.provider, selection.model));

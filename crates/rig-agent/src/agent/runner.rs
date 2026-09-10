@@ -665,7 +665,9 @@ pub(crate) async fn run_single_tool(
             let ToolDispatch {
                 result: exec,
                 context: dispatch_context,
-            } = tool_snapshot.dispatch(tool_name, &args, tool_context).await;
+            } = tool_snapshot
+                .dispatch(tool_name, &args, tool_context, Some(internal_call_id))
+                .await;
             (
                 exec,
                 ToolExecution::Executed(Box::new(effective_tool_call)),

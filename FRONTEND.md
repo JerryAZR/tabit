@@ -5,6 +5,12 @@ backend: what the backend provides, what it expects from you, and the
 invariants your UI can rely on. Read this document alone; you should
 not need the codebase to design a frontend.
 
+This doc owns the **mechanics** — wire format, lifecycle, the event
+vocabulary's semantics, invariants. The interpretation layer — how to
+render a specific tool's `details` cargo, the interaction template
+payloads — lives in **TOOLS.md**, its companion since the shapes grew
+past one doc (2026-09 ruling).
+
 Wire shapes below are the **v4 contract**. v3 was the multi-session
 host — session-addressed commands, `new_session`/`open_session` on the
 channel, the `"main"` stream alias retired (the stream stamp is the
@@ -270,7 +276,7 @@ those connection-level).
 | `compaction_delta` | `id`, `text` | a summary text delta inside the bracket. |
 | `compaction_finished` | `id` | the pass committed: the model-visible context is now `[summary] + retained tail`. Everything before the cut stays in the file — the next replay pass still renders it, with a `compaction_finished` marker at the boundary; checkout to a pre-compaction entry yields the full-history branch. |
 | `compaction_failed` | `id`, `message` | the pass failed or was cancelled: nothing committed, the context is unchanged. Not a run terminal — the run (if any) continues; the automatic doors retry when their conditions next hold. |
-| `tool_result` | `turn_id`, `entry_id`, `name`, `internal_call_id`, `content`, `status`, `details?` | one tool body finished; its result committed. `content` is exactly the text the model saw — already capped at the source, failure text included; render it verbatim. `status` is structure only: `success` or `failed { exit_code? }`; the detail is in `content`, not `status`. `details`, when present, is derived presentation cargo owned by the tool named in `name` (today: the edit tool's unified diff + per-edit outcomes) — dispatch on `name`, degrade to `content` when absent or unknown. |
+| `tool_result` | `turn_id`, `entry_id`, `name`, `internal_call_id`, `content`, `status`, `details?` | one tool body finished; its result committed. `content` is exactly the text the model saw — already capped at the source, failure text included; render it verbatim. `status` is structure only: `success` or `failed { exit_code? }`; the detail is in `content`, not `status`. `details`, when present, is derived presentation cargo owned by the tool named in `name` — dispatch on `name`, degrade to `content` when absent or unknown. The per-tool shapes are TOOLS.md's (today's producers: `edit`'s diff + outcomes, `bash`'s truncation/spill, `subagent`'s child-session facts). |
 | `completion_call` | `turn_id`, `input_tokens`, `output_tokens` | one model request finished; usage is final for it. |
 | `turn_truncated` | `turn_id` | the committed turn ended truncated: the provider cut generation at its output limit (`finish_reason: length`). Informational, never a failure — the run continues exactly as usual (steers drain into the next turn; the run may end normally). Show it as a note; a steer is how the user asks the model to go on. |
 | `turn_committed` | `id` | the turn is durable history. Same id as `turn_started`. |
@@ -289,7 +295,8 @@ command block for `bash`) are a view-side dispatch on the tool name,
 matched in one module with a generic name+args+result card as the
 fallback; the reducer never learns tool names. The dispatch extracts
 when `tool_result.content` first lands on the wire, not before — no
-dead structure ahead of the data.
+dead structure ahead of the data. What each tool's specialized view
+consumes (its `details` cargo) is TOOLS.md's table of shapes.
 
 **Run terminals** (exactly one per run)
 
@@ -304,7 +311,7 @@ dead structure ahead of the data.
 | event | payload | when |
 |---|---|---|
 | `sessions_available` | `sessions: [{ id, created_at, entry_count }]` | once, right after the ack's startup notes: every stored session, newest first. **Unstamped, backend-level.** Minimal by ruling — a plain object, fields grow when needed. A brand-new session has no file yet and is absent until it records. |
-| `session_opened` | `id`, `path`, `model`, `resumed`, `parent?` | a session became visible in this backend — the boot (at spawn, right after the ack), a `new_session`, an `open_session`, **or a subagent child** (v5). **One announcement shape for every path** (2026-09 ruling — the ack carries protocol-level facts only; the boot is not a special case). Stamped with the session's own stream. Selection notes, if any, follow on the same stream. v5: `path` is **empty for an ephemeral session** (in memory only — nothing to open or replay; subagent children are ephemeral today), and `parent` names the spawning session for a subagent child — absent for every user-facing session. A frontend branches on `parent`: user sessions update their session facts, children render nested (or not at all) — a child announcement must never overwrite the active session's facts. The child's whole run (its `user_message`, deltas, `tool_call`s, terminal) streams on its own stamp; the spawner's transcript sees only the subagent `tool_call`/`tool_result` pair. |
+| `session_opened` | `id`, `path`, `model`, `resumed`, `parent?`, `parent_call?` | a session became visible in this backend — the boot (at spawn, right after the ack), a `new_session`, an `open_session`, **or a subagent child** (v5). **One announcement shape for every path** (2026-09 ruling — the ack carries protocol-level facts only; the boot is not a special case). Stamped with the session's own stream. Selection notes, if any, follow on the same stream. v5: `path` is **empty for an ephemeral session** (in memory only — nothing to open or replay; subagent children are ephemeral today), and `parent` names the spawning session for a subagent child — absent for every user-facing session. A frontend branches on `parent`: user sessions update their session facts, children render nested (or not at all) — a child announcement must never overwrite the active session's facts. The child's whole run (its `user_message`, deltas, `tool_call`s, terminal) streams on its own stamp; the spawner's transcript sees only the subagent `tool_call`/`tool_result` pair. `parent_call` (v7, additive) is the spawning tool call's `internal_call_id`: the announce pairs the child with the **exact** open `tool_call` event — exact under concurrent subagent calls, where arrival order cannot disambiguate. Absent whenever `parent` is. |
 | `session_created` | `id`, `path`, `model` | a `new_session` succeeded — **unstamped, backend-level** (the payload carries the id; no faked stamp). Its selection notes, if any, follow stamped with the new session's id. Nothing replays (the session is empty). **Superseded by `session_opened`** (kept one version for in-flight frontends, then deleted). |
 | `checked_out` | `entry_id`, `base_id` | checkout succeeded. `base_id` is `null` today: drop everything and rebuild from the replay pass that follows. A non-null `base_id` is the reserved suffix mode (keep through `base_id`, apply the pass) — treat any non-null value as "rebuild from the pass" and you stay correct. |
 | `model_changed` | `provider`, `model`, `thinking_level` | the session's **active model** — a session preference: the file's last `model_change`, latest in time wins (a rewind never moves it). Announced live whenever the session becomes visible: ahead of every replay pass (boot, `open_session`, re-replay, after `checked_out`) — idempotent, the value repeats — and at every `model` command (a state write at receive; §5). **Never inside a pass** (state is announced, not reconstructed). The ack's `model` is the boot session's register. |
@@ -514,20 +521,11 @@ order.
   widgets cover the native surface (2026-09 ruling — there is no
   separate confirm or ask card; both were special cases of these and
   keeping them named would mislead future developers into believing
-  in a special UI that does not exist):
-  - `native:select_one` — given multiple choices, select exactly
-    one, with optional free text. Request `{ title, body, options:
-    [{ label, description? }], free_text }`, answer `{ selected:
-    [label], text? }`. The permission gate's allow/always/deny card
-    is this template with its own labels.
-  - `native:select_any` — given multiple choices, select zero or
-    more, with optional free text. Request `{ title, body, options:
-    [{ label, description? }], free_text }`, answer `{ selected:
-    [label, ...], text? }` (0..n). With zero options given this is
-    the old free-text ask.
-  Both share the one `SelectAnswer` shape: `selected` echoes the
-  chosen labels (exactly one for select_one), `text` carries the
-  free-text answer when invited.
+  in a special UI that does not exist): `native:select_one` and
+  `native:select_any`, sharing the one `SelectAnswer` answer shape.
+  **Their request/answer payload schemas and the built-in askers
+  that use them are TOOLS.md's** (the interaction-shapes half of the
+  doc split — this section keeps the mechanics).
 - A `free_text` answer is delivered to the model when present (a
   denial reason shapes the retry), not just logged.
 
