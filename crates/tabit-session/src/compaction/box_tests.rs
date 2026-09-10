@@ -454,6 +454,56 @@ async fn a_manual_pass_commits_the_entry_and_truncates_the_context() {
 }
 
 #[tokio::test]
+async fn a_committed_pass_satisfies_the_telescoping_identity() {
+    // The design's closing identity over a **real** pass — the base
+    // the box computed itself: the committed node's `tokens_after`
+    // equals the retained tail's suffix-delta sum plus the summary's
+    // own measured output, and the head measurement equals the view's
+    // delta sum plus that same output. Cut at boundary 4 retains two
+    // rounds (18,000 of deltas); the scripted summary outputs 20.
+    let cell = cell_with_measured_dialogue(4, 9_000);
+    let agent = AgentBuilder::new(MockCompletionModel::from_stream_turns(
+        summary_stream_turns(),
+    ))
+    .build();
+    let config = config_with_window(10_000_000);
+    let (outcome, _events) = run_manual(&cell, &agent, &config).await;
+    assert!(
+        matches!(
+            &outcome,
+            Outcome::Compacted {
+                passes: 1,
+                tokens_after: 18_020
+            }
+        ),
+        "{outcome:?}"
+    );
+    let view = read(&cell).history();
+    let Some(EntryKind::Compaction {
+        tokens_after,
+        usage,
+        ..
+    }) = view.first().map(|entry| &entry.kind)
+    else {
+        panic!("the compaction leads the view");
+    };
+    assert_eq!(*tokens_after, 18_020);
+    assert_eq!(usage.output_tokens, 20);
+    let delta_sum: u64 = view
+        .iter()
+        .filter_map(|entry| match &entry.kind {
+            EntryKind::AssistantMessage { delta_tokens, .. } => *delta_tokens,
+            _ => None,
+        })
+        .sum();
+    assert_eq!(delta_sum, 18_000, "the two retained rounds");
+    assert_eq!(
+        read(&cell).measured_total(),
+        Some(delta_sum + usage.output_tokens)
+    );
+}
+
+#[tokio::test]
 async fn a_violating_summarizer_is_discarded_and_the_request_retried() {
     let cell = cell_with_measured_dialogue(4, 9_000);
     // First attempt: the summarizer reaches for a tool. Second: a
