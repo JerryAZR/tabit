@@ -440,12 +440,11 @@ fn child_router() -> std::sync::Arc<tabit_session::ChildRouter> {
         .clone()
 }
 
-/// The tabit executable subprocess children spawn: the `TABIT_BIN` dev
-/// override, else this very binary (the pi self-spawn pattern).
+/// The tabit executable subprocess children spawn: this very binary
+/// (the pi self-spawn pattern). `current_exe`, no exceptions — an
+/// inherited `TABIT_BIN` (the frontend's dev override for finding the
+/// backend) must not diverge children from the running image.
 fn tabit_exe() -> Result<PathBuf, String> {
-    if let Ok(path) = std::env::var("TABIT_BIN") {
-        return Ok(PathBuf::from(path));
-    }
     std::env::current_exe().map_err(|e| format!("cannot resolve the tabit executable: {e}"))
 }
 
@@ -1252,6 +1251,26 @@ mod tests {
 
     fn args(list: &[&str]) -> Result<Args, String> {
         parse_args_from(list.iter().map(|s| s.to_string()))
+    }
+
+    #[test]
+    fn a_set_tabit_bin_never_overrides_self_reference() {
+        // Pins the ruling: backend self-reference is current_exe, no
+        // exceptions — a frontend's TABIT_BIN (stale or not) must not
+        // diverge subagent children from the running image.
+        // SAFETY: process-global state; no other test in this binary
+        // reads the variable, and it is removed before the assertion.
+        unsafe {
+            std::env::set_var("TABIT_BIN", "a-stale-override");
+        }
+        let resolved = tabit_exe().expect("current_exe resolves in a test binary");
+        unsafe {
+            std::env::remove_var("TABIT_BIN");
+        }
+        assert_eq!(
+            resolved,
+            std::env::current_exe().expect("current_exe resolves in a test binary")
+        );
     }
 
     #[test]

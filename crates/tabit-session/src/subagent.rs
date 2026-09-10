@@ -40,8 +40,9 @@ pub struct SubagentParts {
     /// process; the assembly shares it with the host wiring).
     pub router: Arc<crate::routing::ChildRouter>,
     /// The tabit executable subprocess children spawn (`--json` child
-    /// role). The assembly resolves it (`TABIT_BIN` dev override, else
-    /// the current executable — the pi self-spawn pattern).
+    /// role). The assembly resolves it to the current executable, no
+    /// exceptions (the pi self-spawn pattern) — children are this very
+    /// binary; binary-finding overrides belong to frontends only.
     pub exe: PathBuf,
     /// The default child toolset — the parent's minus the subagent
     /// tool (recursion depth is enforced by omission). A starting
