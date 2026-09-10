@@ -309,6 +309,14 @@ carry the actual shape:
   arm's facts. The frontend contract split landed with it (same
   ruling): TOOLS.md owns the per-tool `details` shapes and
   interaction templates, FRONTEND.md the mechanics.
+- **Resume addressing is by friendly name, not raw id** (ruled
+  2026-09): a model writing a UUIDv7 into a tool call pays ~10
+  tokens per reference, and a random-looking string invites
+  mistranscription; a 3–5 word natural phrase is cheap and reliably
+  reproduced. The future resume tool's parameter is a name the
+  backend resolves against lineage (the persisted child's
+  `parent_session` header) — the id stays what frontends pair on,
+  never the model's addressing path.
 - **Interaction default: parent-proxy** (ruled). The child's tool
   context receives the parent's `Arc<dyn UserInteraction>` — cards pop
   on the parent's stream and answers route through the existing rails,
