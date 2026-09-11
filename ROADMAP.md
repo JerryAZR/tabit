@@ -164,6 +164,30 @@ The application-level conversation layer pi builds over its agent loop:
   (name, description), discovered from user-level and workspace-level
   directories, exposed as an on-demand listing (load-on-trigger, not
   always-inlined) in the same prompt module.
+  **Discovery ruled (2026-09): four sources, merge with override on
+  name collision** — precedence lowest → highest: `~/.agents/skills/`,
+  `~/.tabit/skills/`, `<cwd>/.agents/skills/`, `<cwd>/.tabit/skills/`
+  (workspace beats home, and within a level `.tabit` beats `.agents`).
+  Unlike AGENTS.md's single-file fallback, all four dirs merge — a
+  shared skill survives the existence of a tabit-specific one.
+  Per-directory shape follows the references (pi/yaca): recursive, a
+  directory containing SKILL.md is a leaf, dotdirs skipped, loose
+  root-level `.md` files are not skills, malformed skills skip + warn.
+  **Model-side surface: open (surveyed 2026-09 — codex, opencode, yaca,
+  pi).** The ecosystem splits evenly. pi and codex read-direct: the
+  catalog (name + description + path/locator) rides the prompt and the
+  model loads the body with the ordinary read tool — codex needs a
+  "skill roots" alias table to keep prompt paths short, and pi's prompt
+  must instruct path resolution against the skill dir. opencode (and
+  Claude Code) inject: the catalog rides the system prompt name-only
+  and a dedicated `skill` tool returns the body — yaca's surveyed
+  variant takes `{name, relPath?}` confined to the skill dir, with a
+  directory-listing mode for progressive disclosure of resources, and
+  treats the tool call itself as the invocation event (audit,
+  telemetry, future per-skill gating). The tabit recommendation is the
+  confined tool (structure over prompt-instructed path discipline; the
+  catalog stays path-free and byte-stable; the invocation is a
+  renderable `tool_call`), pending the owner's call.
 - Prompt contributions from extensions (item 9) mount at session
   build under the same byte-stability rule — changing the prompt is
   the user's explicit reload decision, never a silent mid-run event
