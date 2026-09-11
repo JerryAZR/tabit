@@ -33,7 +33,9 @@ mod protocol;
 pub mod templates;
 mod usage;
 
-pub use events::{AvailableSession, DiscardedMessage, ErrorKind, SessionEvent, ToolResultStatus};
+pub use events::{
+    AvailableSession, AvailableSkill, DiscardedMessage, ErrorKind, SessionEvent, ToolResultStatus,
+};
 pub use model::ModelSelection;
 pub use protocol::{
     ClientFrame, EventFrame, PROTOCOL_VERSION, ServerControlFrame, ServerFrame, SessionCommand,

@@ -17,6 +17,7 @@ fn plain_wiring(store: &SessionStore) -> SessionHostWiring {
         children: crate::ChildRouter::shared(),
         boot_parent: None,
         boot_parent_call: None,
+        skills: Vec::new(),
         store: store.clone(),
         create: std::sync::Arc::new(|| Err("new_session is not driven".to_string())),
         open: std::sync::Arc::new(|_| Err("open_session is not driven".to_string())),
@@ -152,6 +153,61 @@ async fn startup_degradations_are_the_workers_first_frames() {
         "exactly one error frame for one note"
     );
     assert_eq!(finished_outputs(&frames), vec!["hi"]);
+    std::fs::remove_dir_all(store.dir()).ok();
+}
+
+#[tokio::test]
+async fn the_skills_catalog_follows_the_session_catalog() {
+    let store = temp_store("endpoint-skills");
+    let session = Factory::new(vec![text_turn("hi")])
+        .into_builder(store.clone())
+        .create("C:/w")
+        .expect("session");
+    let mut wiring = plain_wiring(&store);
+    wiring.skills = vec![tabit_protocol::AvailableSkill {
+        name: "lint".to_string(),
+        description: "Lint".to_string(),
+        location: "C:/w/.tabit/skills/lint/SKILL.md".to_string(),
+        level: "workspace".to_string(),
+    }];
+    let mut handle = SessionHost::spawn(session, Vec::new(), wiring);
+    let id = boot_id(&handle);
+    handle.message(&id, "go");
+    let frames = drain(&mut handle).await;
+    // The skill announcement is backend-level (unstamped) and lands
+    // right after the session catalog, before any run event.
+    let positions: Vec<(usize, &str)> = frames
+        .iter()
+        .enumerate()
+        .filter_map(|(index, frame)| match &frame.event {
+            SessionEvent::SessionsAvailable { .. } => Some((index, "sessions")),
+            SessionEvent::SkillsAvailable { skills, .. } => {
+                assert_eq!(skills.len(), 1);
+                assert!(frame.stream.is_none(), "backend-level, unstamped");
+                Some((index, "skills"))
+            }
+            _ => None,
+        })
+        .collect();
+    assert_eq!(positions, vec![(1, "sessions"), (2, "skills")], "{positions:?}");
+    std::fs::remove_dir_all(store.dir()).ok();
+
+    // Empty discovery announces nothing — no empty frames.
+    let store = temp_store("endpoint-skills-empty");
+    let session = Factory::new(vec![text_turn("hi")])
+        .into_builder(store.clone())
+        .create("C:/w")
+        .expect("session");
+    let mut handle = SessionHost::spawn(session, Vec::new(), plain_wiring(&store));
+    let id = boot_id(&handle);
+    handle.message(&id, "go");
+    let frames = drain(&mut handle).await;
+    assert!(
+        !frames
+            .iter()
+            .any(|f| matches!(f.event, SessionEvent::SkillsAvailable { .. })),
+        "no empty announcement"
+    );
     std::fs::remove_dir_all(store.dir()).ok();
 }
 
@@ -544,6 +600,7 @@ async fn new_session_runs_a_second_stream_and_both_route_by_id() {
         children: crate::ChildRouter::shared(),
         boot_parent: None,
         boot_parent_call: None,
+        skills: Vec::new(),
         store: store.clone(),
         create: std::sync::Arc::new(move || {
             Factory::new(vec![text_turn("new answer")])
@@ -641,6 +698,7 @@ async fn open_session_loads_a_stored_session_and_replays_it() {
         children: crate::ChildRouter::shared(),
         boot_parent: None,
         boot_parent_call: None,
+        skills: Vec::new(),
         store: store.clone(),
         create: std::sync::Arc::new(|| Err("not driven".to_string())),
         open: std::sync::Arc::new(move |id: &str| {
@@ -789,6 +847,7 @@ async fn open_session_emits_its_model_notes_ahead_of_the_replay() {
         children: crate::ChildRouter::shared(),
         boot_parent: None,
         boot_parent_call: None,
+        skills: Vec::new(),
         store: store.clone(),
         create: std::sync::Arc::new(|| Err("not driven".to_string())),
         open: std::sync::Arc::new(move |id: &str| {
@@ -976,6 +1035,7 @@ async fn a_catalog_failure_is_the_carrier_in_place_of_the_announcement() {
             children: crate::ChildRouter::shared(),
             boot_parent: None,
             boot_parent_call: None,
+            skills: Vec::new(),
             store: SessionStore::new(&dir),
             create: std::sync::Arc::new(|| Err("not driven".to_string())),
             open: std::sync::Arc::new(|_| Err("not driven".to_string())),
@@ -1016,6 +1076,7 @@ async fn lifecycle_failures_and_notes_ride_the_carrier() {
             children: crate::ChildRouter::shared(),
             boot_parent: None,
             boot_parent_call: None,
+            skills: Vec::new(),
             store: store.clone(),
             // The builder degrades: the failure is boot-stamped, the
             // notes are new-session-stamped.
@@ -1074,6 +1135,7 @@ async fn a_created_sessions_selection_notes_follow_its_stream() {
             children: crate::ChildRouter::shared(),
             boot_parent: None,
             boot_parent_call: None,
+            skills: Vec::new(),
             store: store.clone(),
             create: std::sync::Arc::new(move || {
                 Factory::new(vec![text_turn("new answer")])
@@ -1138,6 +1200,7 @@ async fn new_session_is_never_blocked_by_a_running_session() {
         children: crate::ChildRouter::shared(),
         boot_parent: None,
         boot_parent_call: None,
+        skills: Vec::new(),
         store: store.clone(),
         create: std::sync::Arc::new(move || {
             Factory::new(vec![text_turn("new answer")])
@@ -1298,6 +1361,7 @@ async fn frontend_death_aborts_every_sessions_run() {
         children: crate::ChildRouter::shared(),
         boot_parent: None,
         boot_parent_call: None,
+        skills: Vec::new(),
         store: store.clone(),
         create: std::sync::Arc::new(move || {
             Factory::new(vec![tool_turn("t2", "slow"), text_turn("never")])

@@ -96,6 +96,7 @@ impl Session {
             resumed,
             interaction: None,
             subagent_parts: builder.subagent_parts,
+            skills: builder.skills,
             event_tap: Arc::new(std::sync::OnceLock::new()),
             compaction: Arc::new(crate::compaction::Compaction::new()),
         };

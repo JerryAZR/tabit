@@ -138,6 +138,14 @@ fn events_round_trip_through_json() {
             thinking_level: Some("high".to_string()),
         },
         SessionEvent::error_persist_degraded(3, "records are pending on disk"),
+        SessionEvent::SkillsAvailable {
+            skills: vec![AvailableSkill {
+                name: "lint".to_string(),
+                description: "Lint the workspace".to_string(),
+                location: "C:/w/.agents/skills/lint/SKILL.md".to_string(),
+                level: "user".to_string(),
+            }],
+        },
         SessionEvent::NativeItem {
             turn_id: TURN.to_string(),
             item: serde_json::json!({"web_search_call": {}}),
@@ -171,6 +179,20 @@ fn events_round_trip_through_json() {
         })
         .expect("serialize"),
         r#"{"type":"sessions_available","sessions":[{"id":"0197","created_at":"2026-08-22T10:00:00Z","entry_count":14}]}"#
+    );
+    // The skills announcement: unstamped backend-level facts, same
+    // shape family as the session catalog.
+    assert_eq!(
+        serde_json::to_string(&SessionEvent::SkillsAvailable {
+            skills: vec![AvailableSkill {
+                name: "code-review".to_string(),
+                description: "Review a changeset".to_string(),
+                location: "C:/w/.tabit/skills/code-review/SKILL.md".to_string(),
+                level: "workspace".to_string(),
+            }]
+        })
+        .expect("serialize"),
+        r#"{"type":"skills_available","skills":[{"name":"code-review","description":"Review a changeset","location":"C:/w/.tabit/skills/code-review/SKILL.md","level":"workspace"}]}"#
     );
     assert_eq!(
         serde_json::to_string(&SessionEvent::SessionCreated {

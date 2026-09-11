@@ -18,7 +18,26 @@ software/hardware contract, not just the encodings):
 Every `PROTOCOL_VERSION` bump — and every additive change a frontend
 could observe — gets an entry here in the same commit.
 
-## v7 (current)
+## v8 (current)
+
+### wire: `skills_available` — the skills catalog at startup (2026-09)
+
+Protocol version 8. Skills ship (ROADMAP item 3): the four-source
+discovery (home `~/.agents/skills` → `~/.tabit/skills`, workspace
+`.agents/skills` → `.tabit/skills`, merge with override on name
+collision), the prompt catalog, and the confined `skill` tool. The
+frontend surface is one new event: `skills_available { skills: [{
+name, description, location, level }] }` — unstamped, backend-level,
+announced once right after `sessions_available`, only when discovery
+found at least one skill. A new event kind is parse-breaking for
+frontends compiled against the shared protocol crate (an unknown
+variant fails the enum parse), which is why the version moved where
+the `parent_call` field did not. Skill invocation is no new shape:
+the model calls the `skill` tool, an ordinary `tool_call`/
+`tool_result` pair. Master's reducer marks the seam (the redesign
+worktree owns the real panel).
+
+## v7
 
 ### wire: `session_opened.parent_call` — the subagent pairing (2026-09, additive; no version bump)
 

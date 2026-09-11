@@ -16,8 +16,10 @@ copy of what the model saw.
 
 ## `tool_result.details` by tool name
 
-Today's producers — `read` and `write` emit no cargo (their `content`
-is the whole story); unknown names have no cargo by definition.
+Today's producers — `read`, `write`, and `skill` emit no cargo
+(their `content` is the whole story; the skill tool's content ends
+with the base-directory footer); unknown names have no cargo by
+definition.
 
 ### `edit`
 

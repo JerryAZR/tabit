@@ -110,6 +110,9 @@ pub struct SessionHostWiring {
     /// the spawning tool call's correlation id, crossing the same
     /// way `boot_parent` does. Present only in a child-role boot.
     pub boot_parent_call: Option<String>,
+    /// The skills catalog's wire snapshot, announced once at startup
+    /// after the session catalog (empty = no announcement).
+    pub skills: Vec<tabit_protocol::AvailableSkill>,
 }
 
 /// A command on its way to the host loop: a wire command, or a
@@ -404,6 +407,18 @@ impl SessionHost {
                     event: SessionEvent::error_session(format!("could not list sessions: {error}")),
                 });
             }
+        }
+        // The skills catalog rides right after the session catalog —
+        // backend-level for the same reason (one process, one cwd,
+        // one skill set). Only when discovery found something: an
+        // empty announcement is noise with no state to clear.
+        if !wiring.skills.is_empty() {
+            let _ = event_tx.send(EventFrame {
+                stream: None,
+                event: SessionEvent::SkillsAvailable {
+                    skills: wiring.skills.clone(),
+                },
+            });
         }
 
         let (boot_worker, boot_join) = spawn_worker(

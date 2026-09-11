@@ -11,14 +11,16 @@ render a specific tool's `details` cargo, the interaction template
 payloads — lives in **TOOLS.md**, its companion since the shapes grew
 past one doc (2026-09 ruling).
 
-Wire shapes below are the **v4 contract**. v3 was the multi-session
+Wire shapes below are the **v8 contract**. v3 was the multi-session
 host — session-addressed commands, `new_session`/`open_session` on the
 channel, the `"main"` stream alias retired (the stream stamp is the
 session id). v4 made backend-level frames **unstamped** (§6) and
 generalized interaction requests to `ui_type` + opaque payloads (§8).
-Each version landed as one protocol-version bump with no compatibility
-period; always check the ack's `protocol_version`. (`tabit --list`
-prints a human table — there is no JSON listing edge.)
+v7 shipped compaction (§5/§6); v8 added the `skills_available`
+startup announcement (§6). Each version landed as one
+protocol-version bump with no compatibility period; always check the
+ack's `protocol_version`. (`tabit --list` prints a human table —
+there is no JSON listing edge.)
 
 ## 1. Architecture: two processes, one pipe
 
@@ -137,8 +139,9 @@ value, switch on `type` when recognized) and log the rest.
    arrives by event, 2026-09 ruling: the boot session is announced
    exactly like every other). The next frame is `session_opened`
    with the boot's facts (id, path, active model, `resumed`), then
-   the catalog, then — if you asked — the replay pass, then live
-   traffic. `resumed: false` after you asked the
+   the session catalog, then the skills catalog (v8 — only when
+   discovery found something), then — if you asked — the replay
+   pass, then live traffic. `resumed: false` after you asked the
    backend to resume means the store was empty and the backend
    **started fresh — an absorbed miss, not an error**; show a small
    note. Mismatch → `initialize_rejected { reason }` and the
@@ -311,6 +314,7 @@ consumes (its `details` cargo) is TOOLS.md's table of shapes.
 | event | payload | when |
 |---|---|---|
 | `sessions_available` | `sessions: [{ id, created_at, entry_count }]` | once, right after the ack's startup notes: every stored session, newest first. **Unstamped, backend-level.** Minimal by ruling — a plain object, fields grow when needed. A brand-new session has no file yet and is absent until it records. |
+| `skills_available` | `skills: [{ name, description, location, level }]` | **(v8)** once, right after `sessions_available`: every skill the four-source discovery merged (home `~/.agents`/`~/.tabit` + workspace `.agents`/`.tabit` skills dirs), the same facts the prompt catalog carries — `level` is `user` or `workspace` (which source won). **Unstamped, backend-level** (one process, one cwd, one skill set); only announced when at least one skill was discovered. Skill *invocation* is no new wire shape: the model calls the `skill` tool, an ordinary `tool_call`/`tool_result` pair on the asking session's stream. |
 | `session_opened` | `id`, `path`, `model`, `resumed`, `parent?`, `parent_call?` | a session became visible in this backend — the boot (at spawn, right after the ack), a `new_session`, an `open_session`, **or a subagent child** (v5). **One announcement shape for every path** (2026-09 ruling — the ack carries protocol-level facts only; the boot is not a special case). Stamped with the session's own stream. Selection notes, if any, follow on the same stream. v5: `path` is **empty for an ephemeral session** (in memory only — nothing to open or replay; subagent children are ephemeral today), and `parent` names the spawning session for a subagent child — absent for every user-facing session. A frontend branches on `parent`: user sessions update their session facts, children render nested (or not at all) — a child announcement must never overwrite the active session's facts. The child's whole run (its `user_message`, deltas, `tool_call`s, terminal) streams on its own stamp; the spawner's transcript sees only the subagent `tool_call`/`tool_result` pair. `parent_call` (v7, additive) is the spawning tool call's `internal_call_id`: the announce pairs the child with the **exact** open `tool_call` event — exact under concurrent subagent calls, where arrival order cannot disambiguate. Absent whenever `parent` is. |
 | `session_created` | `id`, `path`, `model` | a `new_session` succeeded — **unstamped, backend-level** (the payload carries the id; no faked stamp). Its selection notes, if any, follow stamped with the new session's id. Nothing replays (the session is empty). **Superseded by `session_opened`** (kept one version for in-flight frontends, then deleted). |
 | `checked_out` | `entry_id`, `base_id` | checkout succeeded. `base_id` is `null` today: drop everything and rebuild from the replay pass that follows. A non-null `base_id` is the reserved suffix mode (keep through `base_id`, apply the pass) — treat any non-null value as "rebuild from the pass" and you stay correct. |

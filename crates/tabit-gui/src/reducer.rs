@@ -646,6 +646,11 @@ impl GuiState {
                 // Per-request usage; the run terminal carries the
                 // aggregate. v1 keeps the aggregate only.
             }
+            SessionEvent::SkillsAvailable { .. } => {
+                // Interim (v8): the skills catalog arrives
+                // connection-level; the per-session redesign worktree
+                // owns the real panel — the seam stays marked here.
+            }
             SessionEvent::TurnTruncated { .. } => {
                 // Informational (ENGINE.md behavior delta 9): the run
                 // continues; the note is the user's cue that the model hit

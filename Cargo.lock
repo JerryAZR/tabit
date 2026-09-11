@@ -4791,6 +4791,7 @@ dependencies = [
  "rig-derive",
  "serde",
  "serde_json",
+ "serde_yaml",
  "tabit-config",
  "tabit-log",
  "tabit-protocol",

@@ -223,6 +223,19 @@ pub enum SessionEvent {
         /// Every stored session, newest first.
         sessions: Vec<AvailableSession>,
     },
+    /// The skills catalog, announced once at startup right after
+    /// `sessions_available` (v8): every skill the four-source
+    /// discovery merged, the same facts the prompt catalog carries.
+    /// **Unstamped, backend-level** — one backend process has one
+    /// cwd, so one skill set; fold it connection-level. Only
+    /// announced when discovery found at least one skill (no empty
+    /// announcements). Skill *invocation* needs no wire shape: the
+    /// model calls the `skill` tool, which is an ordinary
+    /// `tool_call`/`tool_result` pair on the asking session's stream.
+    SkillsAvailable {
+        /// Every discovered skill.
+        skills: Vec<AvailableSkill>,
+    },
     /// A session became visible in this backend: the boot session
     /// (emitted at spawn, ahead of the catalog and any replay), a
     /// `new_session` (the same facts `session_created` always
@@ -368,6 +381,23 @@ pub struct AvailableSession {
     pub created_at: String,
     /// Entries in the session file (all branches and markers).
     pub entry_count: u64,
+}
+
+/// One discovered skill in the startup `skills_available`
+/// announcement: the same facts the prompt catalog carries, for a
+/// frontend's own listing (the invocation itself rides the ordinary
+/// `tool_call` event when the model uses the `skill` tool).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct AvailableSkill {
+    /// The skill's invocation name (the `skill` tool's `name`).
+    pub name: String,
+    /// The trigger description (the SKILL.md frontmatter).
+    pub description: String,
+    /// The SKILL.md's path on the host.
+    pub location: String,
+    /// Which discovery level supplied the entry: `user` (home) or
+    /// `workspace` (cwd).
+    pub level: String,
 }
 
 /// One discarded queued message, handed back by

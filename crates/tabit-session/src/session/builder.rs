@@ -26,6 +26,7 @@ pub struct SessionBuilder {
     pub(super) model_factory: ModelFactory,
     pub(super) run_hooks: Option<rig_agent::agent::HookStack>,
     pub(super) subagent_parts: Option<Arc<crate::subagent::SubagentParts>>,
+    pub(super) skills: Option<Arc<crate::skills::Skills>>,
 }
 
 /// Builds the model behind a selection: `(provider, model, cache_key)`
@@ -73,6 +74,7 @@ impl SessionBuilder {
             model_factory: default_factory,
             run_hooks: None,
             subagent_parts: None,
+            skills: None,
         })
     }
 
@@ -82,6 +84,13 @@ impl SessionBuilder {
     /// (recursion depth is enforced by omission).
     pub fn subagents(mut self, parts: Arc<crate::subagent::SubagentParts>) -> Self {
         self.subagent_parts = Some(parts);
+        self
+    }
+
+    /// Mount the skills catalog (one discovery per process, shared as
+    /// typed tool context for the `skill` tool).
+    pub fn skills(mut self, skills: Arc<crate::skills::Skills>) -> Self {
+        self.skills = Some(skills);
         self
     }
 

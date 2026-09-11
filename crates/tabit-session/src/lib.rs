@@ -78,6 +78,7 @@ mod registry;
 pub(crate) mod replay;
 mod routing;
 mod session;
+pub mod skills;
 mod stats;
 mod store;
 pub mod subagent;

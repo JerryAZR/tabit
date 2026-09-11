@@ -14,10 +14,12 @@ use serde::{Deserialize, Serialize};
 
 /// The protocol version this build speaks. Clients declare theirs in
 /// [`ClientFrame::Initialize`]; a mismatch rejects the connection at the
-/// handshake. v7: compaction — the `compact` command and the
+/// handshake. v8: skills — the `skills_available` startup
+/// announcement (a new event kind; the additive reason the version
+/// moved). v7: compaction — the `compact` command and the
 /// `compaction_started`/`compaction_delta`/`compaction_finished`/
 /// `compaction_failed` event bracket.
-pub const PROTOCOL_VERSION: u32 = 7;
+pub const PROTOCOL_VERSION: u32 = 8;
 
 /// Which session produced an event. The stamp is the session id
 /// itself (v3: the `"main"` alias is retired — one name per session);

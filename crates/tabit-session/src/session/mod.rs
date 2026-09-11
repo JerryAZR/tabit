@@ -151,6 +151,11 @@ pub struct Session {
     /// ([`SessionBuilder::subagents`]): the process-wide parts; the
     /// per-run capability is minted at run open.
     subagent_parts: Option<Arc<crate::subagent::SubagentParts>>,
+    /// The skills catalog, when the assembly mounted it
+    /// ([`SessionBuilder::skills`]): one discovery per process,
+    /// inserted as typed tool context at run open for the `skill`
+    /// tool.
+    skills: Option<Arc<crate::skills::Skills>>,
     /// The frontend channel's weak, pre-stamped handle for module-level
     /// emissions — anything a session subsystem emits outside a run's
     /// item fold (subagent child-event forwarding, the compaction

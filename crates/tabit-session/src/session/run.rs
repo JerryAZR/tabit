@@ -287,6 +287,11 @@ impl Session {
                 self.event_tap.get().cloned(),
             )));
         }
+        // The skills catalog (one discovery per process): the `skill`
+        // tool's lookup table.
+        if let Some(skills) = &self.skills {
+            tool_context.insert(skills.clone());
+        }
         // The cell IS the conversation (ENGINE.md, the unified
         // conversation): the run folds the session's one durable
         // manager, and the opening message — if any — arrives through

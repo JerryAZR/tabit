@@ -32,7 +32,9 @@ Current workspace layout:
 - `crates/tabit-session` — persistent sessions over the outer loop (native
   only: filesystem-backed; the rig crates keep wasm support), the
   compaction box (`src/compaction/`: the pass machinery, the doors, the
-  dials file — every threshold and prompt text as data), plus the
+  dials file — every threshold and prompt text as data), the
+  skills module (`src/skills.rs`: four-source discovery, the prompt
+  catalog, the confined `skill` tool), plus the
   subagent framework (`subagent.rs`: `SpawnContext` — spawn/drive a
   subprocess child, the one substrate; `subprocess.rs`: the bridge —
   self-spawn in `--json` child role with the OS-enforced cwd and the

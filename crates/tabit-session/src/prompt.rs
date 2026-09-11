@@ -105,8 +105,9 @@ fn normalize(path: &Path) -> String {
 }
 
 /// Assemble the prompt: base identity, environment block, then each
-/// instruction file wrapped with its path.
-fn compose_system_prompt(cwd: &Path, date: &str, files: &[ContextFile]) -> String {
+/// instruction file wrapped with its path, then the skills catalog
+/// (when discovery found any).
+fn compose_system_prompt(cwd: &Path, date: &str, files: &[ContextFile], skills: &str) -> String {
     let mut prompt = String::new();
     prompt.push_str(BASE_PROMPT);
     prompt.push_str("\n<environment_context>\n");
@@ -131,6 +132,11 @@ fn compose_system_prompt(cwd: &Path, date: &str, files: &[ContextFile]) -> Strin
         }
         prompt.push_str("</project_context>\n");
     }
+    if !skills.is_empty() {
+        prompt.push('\n');
+        prompt.push_str(skills);
+        prompt.push('\n');
+    }
     prompt
 }
 
@@ -141,24 +147,30 @@ fn utc_date() -> String {
     ids::now_rfc3339().chars().take(10).collect()
 }
 
-/// Build the default tabit system prompt for a process running in `cwd`.
+/// Build the default tabit system prompt for a process running in
+/// `cwd`, with the discovered skills catalog (the `<available_skills>`
+/// block; empty discovery adds nothing).
 ///
-/// Reads the home-level and cwd AGENTS.md (see the module docs for the
-/// discovery policy). Missing files are fine; a file that exists but
-/// cannot be read fails loudly. Build once per process and reuse the
-/// string for the session's lifetime.
-pub fn build_system_prompt(cwd: &Path) -> Result<String, SessionError> {
-    build_with_home(tabit_config::home_dir(), cwd)
+/// Reads the home-level and cwd AGENTS.md (see the module docs for
+/// the discovery policy). Missing files are fine; a file that exists
+/// but cannot be read fails loudly. Build once per process and reuse
+/// the string for the session's lifetime.
+pub fn build_system_prompt(cwd: &Path, skills: &crate::skills::Skills) -> Result<String, SessionError> {
+    build_with_home(tabit_config::home_dir(), cwd, skills)
 }
 
-fn build_with_home(home: Option<PathBuf>, cwd: &Path) -> Result<String, SessionError> {
+fn build_with_home(
+    home: Option<PathBuf>,
+    cwd: &Path,
+    skills: &crate::skills::Skills,
+) -> Result<String, SessionError> {
     let home = home.ok_or_else(|| SessionError::Config {
         message: "a home directory to read AGENTS.md from (neither \
                   USERPROFILE nor HOME is set)"
             .to_string(),
     })?;
     let files = discover_context_files(&home, cwd)?;
-    Ok(compose_system_prompt(cwd, &utc_date(), &files))
+    Ok(compose_system_prompt(cwd, &utc_date(), &files, &skills.render_catalog()))
 }
 
 #[cfg(test)]

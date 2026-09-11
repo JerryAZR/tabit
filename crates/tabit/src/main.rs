@@ -334,6 +334,7 @@ fn print_event(event: &SessionEvent) {
         // The submit-time ack for messages that wait; print mode cannot
         // submit mid-run (Esc aborts), so this never fires in practice.
         SessionEvent::MessageQueued { .. } => {}
+        SessionEvent::SkillsAvailable { .. } => {}
         SessionEvent::MessagesDiscarded { messages } => {
             let _ = writeln!(out, "[{} queued message(s) discarded]", messages.len());
         }
@@ -452,6 +453,24 @@ fn child_router() -> std::sync::Arc<tabit_session::ChildRouter> {
         .clone()
 }
 
+/// The process-wide skills catalog — one discovery per process, the
+/// consistency guarantee between the prompt's listing and the `skill`
+/// tool's lookup (two discoveries could race a directory edit and
+/// disagree; one cannot). Built against the process cwd (the backend
+/// never chdirs — the same fact the session store roots at).
+fn skills_catalog() -> std::sync::Arc<tabit_session::skills::Skills> {
+    static SKILLS: std::sync::OnceLock<std::sync::Arc<tabit_session::skills::Skills>> =
+        std::sync::OnceLock::new();
+    SKILLS.get_or_init(|| {
+        // A failed `current_dir` assembles nothing anyway (the loud
+        // gate lives in `assemble_session`); here it degrades to a
+        // discovery that finds nothing.
+        let cwd = std::env::current_dir().unwrap_or_default();
+        std::sync::Arc::new(tabit_session::skills::discover(&cwd))
+    })
+    .clone()
+}
+
 /// The tabit executable subprocess children spawn: this very binary
 /// (the pi self-spawn pattern). `current_exe`, no exceptions — an
 /// inherited `TABIT_BIN` (the frontend's dev override for finding the
@@ -504,8 +523,11 @@ fn assemble_session(
     let cwd = std::env::current_dir()
         .map_err(|e| format!("cannot determine the working directory: {e}"))?;
     // Built once per process: the prompt must stay byte-stable for the
-    // provider's prompt cache (see the prompt module docs).
-    let preamble = build_system_prompt(&cwd).map_err(|e| e.to_string())?;
+    // provider's prompt cache (see the prompt module docs). The skills
+    // catalog is the same once-per-process fact — one discovery feeds
+    // the prompt's listing, the tool's lookup, and the wire snapshot.
+    let skills = skills_catalog();
+    let preamble = build_system_prompt(&cwd, &skills).map_err(|e| e.to_string())?;
 
     // Subagent support (ROADMAP item 5): the process-wide parts, whose
     // toolset is the child toolset — the parent's minus the subagent
@@ -540,7 +562,8 @@ fn assemble_session(
     .hooks(tabit_session::permission_gate(
         tabit_session::PermissionMemory::default(),
     ))
-    .subagents(subagents);
+    .subagents(subagents)
+    .skills(skills);
     // The parent's toolset: the child tools plus the subagent tool —
     // except in a child-role process, where recursion stays omitted.
     let mounted: Vec<_> = if args.parent.is_some() {
@@ -575,7 +598,7 @@ fn assemble_session(
 
 /// The toolset a subagent child runs: every coding tool (contextual —
 /// they read the session cwd and the run token from the per-run
-/// ToolContext) except the subagent tool.
+/// ToolContext) plus the skill tool, except the subagent tool.
 fn child_tools() -> Vec<rig_agent::tool::DynamicTool> {
     vec![
         dynamic_contextual(tabit_tools::Read),
@@ -583,6 +606,7 @@ fn child_tools() -> Vec<rig_agent::tool::DynamicTool> {
         dynamic_contextual(tabit_tools::Edit),
         tabit_tools::shell_tool(),
         dynamic_contextual(tabit_tools::AskUser),
+        tabit_session::skills::skill_tool(),
     ]
 }
 
@@ -1139,6 +1163,7 @@ fn host_wiring(args: &Args, registry: &ModelRegistry, store: SessionStore) -> Se
         children: child_router(),
         boot_parent: args.parent.clone(),
         boot_parent_call: args.parent_call.clone(),
+        skills: skills_catalog().available(),
         create: Arc::new(move || {
             assemble(
                 &fresh_args,
