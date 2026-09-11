@@ -1,0 +1,43 @@
+[package]
+name = "tabit-ext-sdk"
+version.workspace = true
+edition.workspace = true
+license = "MIT"
+description = "The tabit extension SDK: own the pipe loop so authors write tool bodies and hooks."
+
+[lints]
+workspace = true
+
+[lib]
+name = "tabit_ext_sdk"
+path = "src/lib.rs"
+doctest = true
+
+# Example extensions (ROADMAP item 9's roster): the task-2 demos and
+# the developer path's reference consumers. Hand-rolled frames below
+# live here on purpose — the SDK shares no code with the host, so the
+# protocol doc stays the whole contract.
+[[bin]]
+name = "echo-ext"
+path = "src/bin/echo.rs"
+
+[[bin]]
+name = "shadow-ext"
+path = "src/bin/shadow.rs"
+
+[[bin]]
+name = "clash-a-ext"
+path = "src/bin/clash_a.rs"
+
+[[bin]]
+name = "clash-b-ext"
+path = "src/bin/clash_b.rs"
+
+[dependencies]
+serde_json = { workspace = true }
+
+[dev-dependencies]
+futures = { workspace = true }
+rig-agent = { path = "../rig-agent", version = "0.41.0", default-features = false }
+tabit-ext = { path = "../tabit-ext", version = "0.41.0" }
+tokio = { workspace = true, features = ["rt-multi-thread", "macros", "time"] }

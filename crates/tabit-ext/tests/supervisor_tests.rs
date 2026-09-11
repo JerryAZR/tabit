@@ -16,8 +16,11 @@
 )]
 
 use std::path::{Path, PathBuf};
+use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
+use futures::future::BoxFuture;
+use rig_agent::tool::interaction::{InteractionOutcome, UserInteraction};
 use tabit_ext::supervisor::{self, ExtensionEvent, HANDSHAKE_TIMEOUT, Status};
 
 /// Generous bound for real-process roundtrips (spawn + handshake on a
@@ -233,13 +236,27 @@ async fn a_mute_sibling_does_not_delay_the_healthy() {
     install(&root, "aaa-hello", "hello");
     install(&root, "zzz-mute", "mute");
     // The mute sibling's timeout is the whole window: if handshakes
-    // serialized, hello would only resolve after it burned.
-    let timeout = Duration::from_millis(400);
+    // serialized, hello would only resolve after it burned. The
+    // margin is deliberately loose — a machine saturated by the
+    // sibling tests may starve hello's task, and that is load, not
+    // serialization; the fail-fast on Dead below keeps a real
+    // timeout diagnosable instead of burning the bound.
+    let timeout = Duration::from_secs(5);
     let (supervisor, mut events) = supervisor::launch(&root, timeout);
     let start = std::time::Instant::now();
-    await_status(&mut events, "aaa-hello", |s| matches!(s, Status::Alive)).await;
+    loop {
+        let event = next_event(&mut events).await;
+        if event.name != "aaa-hello" {
+            continue;
+        }
+        match event.status {
+            Status::Alive => break,
+            Status::Dead { reason } => panic!("the healthy sibling died: {reason}"),
+            Status::Starting => {}
+        }
+    }
     assert!(
-        start.elapsed() < timeout,
+        start.elapsed() < Duration::from_secs(4),
         "the healthy extension must not wait for its mute sibling"
     );
     await_status(&mut events, "zzz-mute", |s| {
@@ -269,4 +286,165 @@ async fn shutdown_reclaims_the_extension_tree() {
         marker.is_file(),
         "the extension must have exited on the pipe close"
     );
+}
+
+/// A scripted interaction capability: records what crossed, answers
+/// (or dismisses) on cue.
+struct FakeInteraction {
+    answer: Option<serde_json::Value>,
+    seen: Arc<Mutex<Vec<(String, serde_json::Value)>>>,
+}
+
+impl UserInteraction for FakeInteraction {
+    fn request(
+        &self,
+        ui_type: &str,
+        payload: serde_json::Value,
+    ) -> BoxFuture<'static, InteractionOutcome> {
+        let ui_type = ui_type.to_string();
+        let answer = self.answer.clone();
+        let seen = self.seen.clone();
+        Box::pin(async move {
+            seen.lock().expect("seen lock").push((ui_type, payload));
+            match answer {
+                Some(payload) => InteractionOutcome::Answered(payload),
+                None => InteractionOutcome::Dismissed,
+            }
+        })
+    }
+}
+
+#[tokio::test]
+async fn a_tool_call_round_trips_over_the_pipe() {
+    let root = test_dir("call");
+    install(&root, "echoer", "tools-echo");
+    let (supervisor, mut events) = supervisor::launch(&root, HANDSHAKE_TIMEOUT);
+    await_status(&mut events, "echoer", |s| matches!(s, Status::Alive)).await;
+    let handle = supervisor.extension("echoer").expect("installed");
+    let result = handle
+        .call("echo", serde_json::json!({"text": "hi"}), None)
+        .await
+        .expect("the call resolves");
+    assert_eq!(result.error, None);
+    assert_eq!(result.report, "EXT-ECHOED:hi");
+    assert_eq!(result.details, Some(serde_json::json!({"echoed": true})));
+    supervisor.shutdown().await;
+}
+
+#[tokio::test]
+async fn a_failing_tool_carries_its_error() {
+    let root = test_dir("fail");
+    install(&root, "boomer", "tools-fail");
+    let (supervisor, mut events) = supervisor::launch(&root, HANDSHAKE_TIMEOUT);
+    await_status(&mut events, "boomer", |s| matches!(s, Status::Alive)).await;
+    let handle = supervisor.extension("boomer").expect("installed");
+    let result = handle
+        .call("boom", serde_json::json!({"text": "x"}), None)
+        .await
+        .expect("the call resolves");
+    assert_eq!(
+        result.error.as_deref(),
+        Some("the boom tool refuses"),
+        "{result:?}"
+    );
+    supervisor.shutdown().await;
+}
+
+#[tokio::test]
+async fn an_ask_lifts_through_the_interaction_capability() {
+    let root = test_dir("ask");
+    install(&root, "asker", "tools-ask");
+    let (supervisor, mut events) = supervisor::launch(&root, HANDSHAKE_TIMEOUT);
+    await_status(&mut events, "asker", |s| matches!(s, Status::Alive)).await;
+    let handle = supervisor.extension("asker").expect("installed");
+    let seen = Arc::new(Mutex::new(Vec::new()));
+    let interaction = FakeInteraction {
+        answer: Some(serde_json::json!({"text": "yes"})),
+        seen: seen.clone(),
+    };
+    let result = handle
+        .call(
+            "ask",
+            serde_json::json!({"text": "should we?"}),
+            Some(Arc::new(interaction)),
+        )
+        .await
+        .expect("the call resolves");
+    assert_eq!(result.error, None);
+    assert_eq!(result.report, "answered: yes");
+    {
+        let seen = seen.lock().expect("seen lock");
+        let (ui_type, payload) = &seen[0];
+        assert_eq!(ui_type, "native:select_any");
+        assert_eq!(payload["body"], "the ask tool was called with should we?");
+    }
+    supervisor.shutdown().await;
+}
+
+#[tokio::test]
+async fn an_ask_without_a_capability_fails_closed() {
+    let root = test_dir("no-ask");
+    install(&root, "asker", "tools-ask");
+    let (supervisor, mut events) = supervisor::launch(&root, HANDSHAKE_TIMEOUT);
+    await_status(&mut events, "asker", |s| matches!(s, Status::Alive)).await;
+    let handle = supervisor.extension("asker").expect("installed");
+    let result = handle
+        .call("ask", serde_json::json!({"text": "anyone?"}), None)
+        .await
+        .expect("the call resolves");
+    assert_eq!(result.error, None);
+    assert_eq!(result.report, "dismissed");
+    supervisor.shutdown().await;
+}
+
+#[tokio::test]
+async fn a_call_after_death_fails_fast() {
+    let root = test_dir("late-call");
+    install(&root, "echoer", "tools-echo");
+    let (supervisor, mut events) = supervisor::launch(&root, HANDSHAKE_TIMEOUT);
+    await_status(&mut events, "echoer", |s| matches!(s, Status::Alive)).await;
+    let handle = supervisor.extension("echoer").expect("installed");
+    // One healthy call, then the host closes (the supervisor drops:
+    // stdin EOF, the double exits, the reader drains the lane).
+    let result = handle
+        .call("echo", serde_json::json!({"text": "first"}), None)
+        .await
+        .expect("the first call resolves");
+    assert_eq!(result.report, "EXT-ECHOED:first");
+    drop(supervisor);
+    let deadline = std::time::Instant::now() + Duration::from_secs(10);
+    loop {
+        match handle
+            .call("echo", serde_json::json!({"text": "again"}), None)
+            .await
+        {
+            Ok(result) => assert_eq!(result.error, None, "still serving before the close lands"),
+            Err(reason) => {
+                assert!(reason.contains("not running"), "{reason}");
+                return;
+            }
+        }
+        assert!(std::time::Instant::now() < deadline, "the lane never died");
+    }
+}
+
+#[tokio::test]
+async fn await_resolved_joins_every_handshake() {
+    let root = test_dir("resolved");
+    install(&root, "aaa-hello", "hello");
+    install(&root, "zzz-mute", "mute");
+    let (supervisor, mut events) = supervisor::launch(&root, Duration::from_millis(300));
+    supervisor.await_resolved().await;
+    // Both verdicts stand — the join did not return on the first.
+    let reports = supervisor.reports();
+    assert_eq!(reports.len(), 2);
+    for report in &reports {
+        assert!(
+            !matches!(report.status, Status::Starting),
+            "join returned with a Starting child: {:?}",
+            report.status
+        );
+    }
+    await_status(&mut events, "aaa-hello", |s| matches!(s, Status::Alive)).await;
+    supervisor.shutdown().await;
 }

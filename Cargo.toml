@@ -11,6 +11,7 @@ default-members = [
     "crates/rig",
     "crates/tabit-config",
     "crates/tabit-ext",
+    "crates/tabit-ext-sdk",
     "crates/tabit-log",
     "crates/tabit-protocol",
     "crates/tabit-session",

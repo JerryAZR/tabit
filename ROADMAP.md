@@ -1032,10 +1032,11 @@ assistant.
 ### 9. Extensions
 
 **DESIGN SETTLED (2026-09, the discussion record lives in
-EXTENSIONS.md); implementation started — task 1 shipped (`crates/
-tabit-ext`: discovery, the initialize/ack pipe, supervision, the
-death policy; booted by the `tabit --json` backend, reports on
-stderr until task 2's wire catalog).** The shape:
+EXTENSIONS.md); implementation under way — tasks 1–2 shipped (the
+`crates/tabit-ext` host: discovery, the frozen pipe, supervision,
+the death policy, the tool lane; `crates/tabit-ext-sdk`: the guest
+dispatcher; proxy assembly + the `extensions_available` catalog in
+the `tabit --json` backend).** The shape:
 
 - **The substrate: subprocess executables over a frozen JSONL
   extension protocol** — the subagent substrate generalized. One
@@ -1114,13 +1115,22 @@ stderr until task 2's wire catalog).** The shape:
    roles never boot extensions — one host per backend, the leaf
    law). The death paths' test vehicle is the in-crate `ext-double`
    behavior double. Development rides `path:` installs throughout.
-2. **Tool registration & execution** — proxy tools, conflict-free
-   name→tool assembly at the host (extension-replaces-core reported
-   by the backend; ext-vs-ext refuses the newcomer), the
-   `extensions_available` catalog with provenance (protocol bump),
-   interaction forwarding (service zero — asking tools need it).
-   **The developer surface lands with it (ruled 2026-09): a small
-   Rust SDK** (`tabit-ext-sdk` — the dispatcher owning the pipe
+2. **Tool registration & execution** — *shipped* — proxy tools,
+   conflict-free name→tool assembly at the host
+   (extension-replaces-core reported by the backend; ext-vs-ext
+   refuses the newcomer — registration order is the scan's, so the
+   newcomer is deterministic), the `extensions_available` catalog
+   with provenance and conflict reports (protocol v9), interaction
+   forwarding as the capability lift (`interaction_request`/
+   `interaction_response` over the pipe, mirroring the engine's
+   ui_type + payload verbatim; no capability answers dismissed —
+   fail closed). Boot ordering: every handshake resolves before the
+   session assembly (tools exist at build; a broken package costs
+   one boot, loudly, never a healthy sibling's delay). E2E-proven
+   across three processes (backend → mock provider → extension
+   double: the model's `tool_call` runs the extension's tool and the
+   result feeds the next turn). **The developer surface (ruled
+   2026-09): a small Rust SDK** (`tabit-ext-sdk` — the dispatcher owning the pipe
    loop: ack, tool-call dispatch to bodies, result serialization,
    hook-event delivery; sync and boring by design, no lifecycle
    machinery). The SDK **hand-rolls its frames, sharing no code with
@@ -1154,14 +1164,15 @@ stderr until task 2's wire catalog).** The shape:
 is also the offline test vehicle.** The roster, mapped to the
 checklist:
 
-1. `hello` — declares nothing; the spawn/handshake/alive smoke. The
-   death paths (exit before the ack, exit after it, handshake
-   silence, garbage) ride an in-crate behavior double rather than
-   packages.
-2. `echo` — a trivial tool plus an asking tool (proxy execution and
-   interaction forwarding); `shadow` — declares `read` (the
-   replaces-core report); a clash pair — two packages, same name (the
-   newcomer refused, the incumbent named).
+1. *shipped* — `hello` declares nothing; the spawn/handshake/alive
+   smoke. The death paths (exit before the ack, exit after it,
+   handshake silence, garbage) ride the in-crate `ext-double`
+   behavior double.
+2. *shipped* — `echo` (a trivial tool plus an asking tool — proxy
+   execution and interaction forwarding), `shadow` (declares `read` —
+   the replaces-core report, e2e-asserted on the channel), and the
+   clash pair (same name — the newcomer refused, the incumbent
+   named), all SDK-built in `crates/tabit-ext-sdk/src/bin/`.
 3. `gate` — the permission gate itself, moved out of core (the ruling
    above; deleting `permission.rs` is the demo): `on::tool_call` +
    the interaction prompt + session memory.

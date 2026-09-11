@@ -181,6 +181,7 @@ fn host(store: &SessionStore, router: Arc<ChildRouter>, session: Session) -> Ses
         boot_parent: None,
         boot_parent_call: None,
         skills: Vec::new(),
+        extensions: Default::default(),
         store: store.clone(),
         create: Arc::new(|| Err("not driven".to_string())),
         open: Arc::new(|_| Err("not driven".to_string())),

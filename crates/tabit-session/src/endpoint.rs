@@ -111,8 +111,13 @@ pub struct SessionHostWiring {
     /// way `boot_parent` does. Present only in a child-role boot.
     pub boot_parent_call: Option<String>,
     /// The skills catalog's wire snapshot, announced once at startup
-    /// after the session catalog (empty = no announcement).
+    /// after the session catalog (empty = no announcement)
     pub skills: Vec<tabit_protocol::AvailableSkill>,
+    /// The extension catalog's wire snapshot, announced once at
+    /// startup after the skills catalog (empty = no announcement) —
+    /// the binary's boot-time assembly verdict: provenance, standing,
+    /// and the load-time conflict reports.
+    pub extensions: tabit_protocol::ExtensionsCatalog,
 }
 
 /// A command on its way to the host loop: a wire command, or a
@@ -417,6 +422,19 @@ impl SessionHost {
                 stream: None,
                 event: SessionEvent::SkillsAvailable {
                     skills: wiring.skills.clone(),
+                },
+            });
+        }
+        // The extension catalog rides right after the skills catalog —
+        // same backend-level reasons (one process, one extension
+        // host), and the conflict reports are load-time facts: they
+        // belong to the boot that produced them.
+        if !wiring.extensions.extensions.is_empty() {
+            let _ = event_tx.send(EventFrame {
+                stream: None,
+                event: SessionEvent::ExtensionsAvailable {
+                    extensions: wiring.extensions.extensions.clone(),
+                    conflicts: wiring.extensions.conflicts.clone(),
                 },
             });
         }

@@ -18,7 +18,29 @@ software/hardware contract, not just the encodings):
 Every `PROTOCOL_VERSION` bump — and every additive change a frontend
 could observe — gets an entry here in the same commit.
 
-## v8 (current)
+## v9 (current)
+
+### wire: `extensions_available` — the extension catalog at startup (2026-09)
+
+Protocol version 9. Extension tools ship (ROADMAP item 9, task 2):
+installed packages (subprocesses over the frozen JSONL pipe) declare
+tools at the handshake; the backend assembles them into the
+model-facing toolset — flat names, one name one tool, an extension
+tool **replacing** a core tool of the same name (reported, the signal
+is mandatory) and a peer collision refusing the newcomer (the
+incumbent named). The frontend surface is one new event:
+`extensions_available { extensions: [{ name, version, description?,
+dir, status, reason?, tools, hooks }], conflicts: [{ kind,
+extension, tool, incumbent? }] }` — unstamped, backend-level,
+announced once right after `skills_available`, only when discovery
+found at least one extension (a refused package counts as
+discovered: it reports as `dead` with its reason). Extension tool
+invocation is no new shape: an ordinary `tool_call`/`tool_result`
+pair attributed by the model-facing name. The reducer marks the seam
+(same interim as the skills catalog; the redesign worktree owns the
+extension surface).
+
+## v8
 
 ### wire: `skills_available` — the skills catalog at startup (2026-09)
 

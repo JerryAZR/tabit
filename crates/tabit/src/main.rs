@@ -29,6 +29,7 @@
 //! tabit --list                                       # show this project's sessions
 //! ```
 
+mod extensions;
 mod json;
 
 use std::io::Write as _;
@@ -350,6 +351,8 @@ fn print_event(event: &SessionEvent) {
         // submit mid-run (Esc aborts), so this never fires in practice.
         SessionEvent::MessageQueued { .. } => {}
         SessionEvent::SkillsAvailable { .. } => {}
+        // Backend-level catalogs never ride a run's print stream.
+        SessionEvent::ExtensionsAvailable { .. } => {}
         SessionEvent::MessagesDiscarded { messages } => {
             let _ = writeln!(out, "[{} queued message(s) discarded]", messages.len());
         }
@@ -521,6 +524,7 @@ fn assemble_session(
     selection: ModelSelection,
     resume_target: Option<PathBuf>,
     store: SessionStore,
+    extensions: Option<&std::sync::Arc<extensions::Mounted>>,
 ) -> Result<Session, String> {
     let cwd = std::env::current_dir()
         .map_err(|e| format!("cannot determine the working directory: {e}"))?;
@@ -536,12 +540,9 @@ fn assemble_session(
     // tool itself, so children cannot spawn children (recursion depth
     // is enforced by omission). A child-role process (`--parent`)
     // mounts that toolset only: it does not spawn.
-    let mut children = child_tools();
-    if let Some(spec) = &args.tools {
-        children = filter_child_tools(children, spec)?;
-    }
+    let (children, parent_core) = core_sets(args)?;
     let subagents = std::sync::Arc::new(tabit_session::subagent::SubagentParts {
-        tools: children.clone(),
+        tools: children,
         max_turns: args.max_turns.unwrap_or(tabit_session::DEFAULT_MAX_TURNS),
         router: child_router(),
         exe: tabit_exe()?,
@@ -567,15 +568,20 @@ fn assemble_session(
     ))
     .subagents(subagents)
     .skills(skills);
-    // The parent's toolset: the child tools plus the subagent tool —
-    // except in a child-role process, where recursion stays omitted.
-    let mounted: Vec<_> = if args.parent.is_some() {
-        children
-    } else {
-        children
-            .into_iter()
-            .chain(std::iter::once(tabit_session::subagent::subagent_tool()))
-            .collect()
+    // The parent's toolset: the core set, plus the extension mount —
+    // replaced core tools unmount, the proxies join (one name, one
+    // tool, resolved at this assembly). A child-role process mounts
+    // the core only: it never booted extensions (the leaf law).
+    let mounted: Vec<_> = match extensions {
+        Some(mounted) if args.parent.is_none() => {
+            let replaced = mounted.replaced_core();
+            parent_core
+                .into_iter()
+                .filter(|tool| !replaced.iter().any(|name| name == tool.name()))
+                .chain(mounted.tools().iter().cloned())
+                .collect()
+        }
+        _ => parent_core,
     };
     for tool in mounted {
         builder = builder.dynamic_tool(tool);
@@ -611,6 +617,31 @@ fn child_tools() -> Vec<rig_agent::tool::DynamicTool> {
         dynamic_contextual(tabit_tools::AskUser),
         tabit_session::skills::skill_tool(),
     ]
+}
+
+/// The two core toolsets every assembly derives from: the child set
+/// (every coding tool, the `--tools` allow-list applied) and the
+/// parent set (the child set plus the subagent tool). The extension
+/// mount's conflict baseline is the parent set — exactly what the
+/// session would mount without extensions.
+fn core_sets(
+    args: &Args,
+) -> Result<
+    (
+        Vec<rig_agent::tool::DynamicTool>,
+        Vec<rig_agent::tool::DynamicTool>,
+    ),
+    String,
+> {
+    let mut children = child_tools();
+    if let Some(spec) = &args.tools {
+        children = filter_child_tools(children, spec)?;
+    }
+    let mut parent = children.clone();
+    if args.parent.is_none() {
+        parent.push(tabit_session::subagent::subagent_tool());
+    }
+    Ok((children, parent))
 }
 
 /// The `tabit-gui` executable: explicit override, else the sibling of
@@ -765,33 +796,49 @@ fn run() -> Result<i32, String> {
                 (Ok(config), Ok(auth)) => (Arc::new(config), Arc::new(auth)),
                 (Err(detail), _) | (_, Err(detail)) => return json_setup_failure(&detail),
             };
+            let registry = ModelRegistry::new(config, auth);
+            let runtime = tokio::runtime::Builder::new_current_thread()
+                .enable_all()
+                .build()
+                .map_err(|e| e.to_string())?;
+            // The extension host boots and every handshake resolves
+            // BEFORE the session assembly: tools exist at session
+            // build (the byte-stability law), and the cost is the
+            // slowest single extension — the handshakes run
+            // concurrently inside their supervision tasks, so a
+            // broken package costs one boot, loudly, and never
+            // delays a healthy sibling.
+            let mounted = {
+                let supervisor = runtime.block_on(async {
+                    let supervisor = boot_extensions(&args);
+                    supervisor.await_resolved().await;
+                    supervisor
+                });
+                // The conflict baseline is the parent core set —
+                // exactly what a session would mount without
+                // extensions.
+                let core = core_sets(&args).map(|(_, parent)| parent)?;
+                Arc::new(extensions::Mounted::mount(supervisor, &core))
+            };
             // Assemble failures (session unreadable, model unbuildable)
             // reject the handshake with the plain reason — not the
             // config setup guide, which would be advice for a problem
             // the user does not have. A `--continue` that finds no
             // sessions is absorbed into a fresh start (the pinned
             // startup contract; the ack's `resumed: false` says so).
-            let registry = ModelRegistry::new(config, auth);
             let (session, startup_notes) = match assemble(
                 &args,
                 &registry,
                 &SessionStore::project_default(),
                 ContinueMiss::StartFresh,
+                Some(mounted.clone()),
             ) {
                 Ok(assembled) => assembled,
                 Err(detail) => return json_startup_failure(&detail),
             };
             print_banner(&session);
-            let wiring = host_wiring(&args, &registry, SessionStore::project_default());
-            let runtime = tokio::runtime::Builder::new_current_thread()
-                .enable_all()
-                .build()
-                .map_err(|e| e.to_string())?;
+            let wiring = host_wiring(&args, &registry, SessionStore::project_default(), &mounted);
             Ok(runtime.block_on(async {
-                // The extension host lives for the backend's life
-                // (item 9, task 1: boot, supervise, report on stderr;
-                // the frontend-visible catalog is task 2).
-                let _extensions = boot_extensions(&args);
                 let handle = SessionHost::spawn(session, startup_notes, wiring);
                 json::serve(
                     handle,
@@ -828,11 +875,15 @@ fn print_mode(args: &Args, registry: &ModelRegistry) -> Result<i32, String> {
                 .to_string(),
         );
     }
+    // Print mode stays core-only: the extension host is backend
+    // machinery the JSON-mode process owns (one host per backend);
+    // a print-mode consumer is a later ruling with a real user.
     let (mut session, startup_notes) = assemble(
         args,
         registry,
         &SessionStore::project_default(),
         ContinueMiss::Fail,
+        None,
     )?;
     if let Some(turns) = args.rewind {
         let rewind = session.rewind(turns).map_err(|e| e.to_string())?;
@@ -862,7 +913,9 @@ fn print_mode(args: &Args, registry: &ModelRegistry) -> Result<i32, String> {
         .build()
         .map_err(|e| e.to_string())?
         .block_on(async {
-            let wiring = host_wiring(args, registry, SessionStore::project_default());
+            let empty_mount = std::sync::Arc::new(extensions::Mounted::none());
+            let wiring =
+                host_wiring(args, registry, SessionStore::project_default(), &empty_mount);
             let mut handle = SessionHost::spawn(session, startup_notes, wiring);
             let boot = handle.info().session_id.clone();
             {
@@ -1150,7 +1203,12 @@ fn parse_answer(session: &str, id: &str, options: &[String], line: &str) -> Sess
 /// One registry for the whole process (the ruling: providers are user
 /// config, not per-session) — every session the host builds shares
 /// the provider client caches.
-fn host_wiring(args: &Args, registry: &ModelRegistry, store: SessionStore) -> SessionHostWiring {
+fn host_wiring(
+    args: &Args,
+    registry: &ModelRegistry,
+    store: SessionStore,
+    extensions: &std::sync::Arc<extensions::Mounted>,
+) -> SessionHostWiring {
     let fresh_args = Args {
         session: None,
         continue_newest: false,
@@ -1162,21 +1220,25 @@ fn host_wiring(args: &Args, registry: &ModelRegistry, store: SessionStore) -> Se
     };
     let fresh_registry = registry.clone();
     let fresh_store = store.clone();
+    let fresh_extensions = extensions.clone();
     let open_args = args.clone();
     let open_registry = registry.clone();
     let open_store = store.clone();
+    let open_extensions = extensions.clone();
     SessionHostWiring {
         store,
         children: child_router(),
         boot_parent: args.parent.clone(),
         boot_parent_call: args.parent_call.clone(),
         skills: skills_catalog().available(),
+        extensions: extensions.catalog.clone(),
         create: Arc::new(move || {
             assemble(
                 &fresh_args,
                 &fresh_registry,
                 &fresh_store,
                 ContinueMiss::StartFresh,
+                Some(fresh_extensions.clone()),
             )
         }),
         open: Arc::new(move |session_id: &str| {
@@ -1191,7 +1253,13 @@ fn host_wiring(args: &Args, registry: &ModelRegistry, store: SessionStore) -> Se
                 session: Some(path),
                 ..open_args.clone()
             };
-            assemble(&args, &open_registry, &open_store, ContinueMiss::Fail)
+            assemble(
+                &args,
+                &open_registry,
+                &open_store,
+                ContinueMiss::Fail,
+                Some(open_extensions.clone()),
+            )
         }),
     }
 }
@@ -1203,14 +1271,22 @@ fn host_wiring(args: &Args, registry: &ModelRegistry, store: SessionStore) -> Se
 /// frontend-attached process, the one place tools and hooks assemble
 /// (the dependency law — one extension host per backend, leaf
 /// children stay leaf). Must run on the serving runtime (it spawns).
-fn boot_extensions(args: &Args) -> Option<tabit_ext::supervisor::Supervisor> {
+fn boot_extensions(args: &Args) -> std::sync::Arc<tabit_ext::supervisor::Supervisor> {
+    // Children never boot extensions: the host belongs to the
+    // frontend-attached process (one host per backend, the leaf law).
+    // An extension-less boot holds the empty supervisor so assembly
+    // has a single shape. Reports land on stderr (stdout is
+    // protocol); must run on the serving runtime (it spawns).
     if args.parent.is_some() {
-        return None;
+        return std::sync::Arc::new(tabit_ext::supervisor::Supervisor::empty());
     }
-    let root = args
+    let Some(root) = args
         .extensions
         .clone()
-        .or_else(|| tabit_config::home_dir().map(|home| home.join(".tabit").join("extensions")))?;
+        .or_else(|| tabit_config::home_dir().map(|home| home.join(".tabit").join("extensions")))
+    else {
+        return std::sync::Arc::new(tabit_ext::supervisor::Supervisor::empty());
+    };
     let (supervisor, mut events) =
         tabit_ext::supervisor::launch(&root, tabit_ext::supervisor::HANDSHAKE_TIMEOUT);
     tokio::spawn(async move {
@@ -1226,7 +1302,7 @@ fn boot_extensions(args: &Args) -> Option<tabit_ext::supervisor::Supervisor> {
             }
         }
     });
-    Some(supervisor)
+    std::sync::Arc::new(supervisor)
 }
 
 /// Resolve config/auth into a session per the args (model selection,
@@ -1239,6 +1315,7 @@ fn assemble(
     registry: &ModelRegistry,
     store: &SessionStore,
     miss: ContinueMiss,
+    extensions: Option<std::sync::Arc<extensions::Mounted>>,
 ) -> Result<(Session, Vec<String>), String> {
     // Default-model resolution (registry): an explicit --model wins,
     // then the resumed session's last model, then default_model in
@@ -1278,6 +1355,7 @@ fn assemble(
         selection,
         resume_target,
         store.clone(),
+        extensions.as_ref(),
     )?;
     Ok((session, startup_notes))
 }
@@ -1573,15 +1651,21 @@ id = "m"
         let registry = ModelRegistry::new(config.clone(), auth.clone());
         let cont_print = args(&["--continue", "-p", "hi"]).expect("valid print combo");
 
-        let error = match assemble(&cont_print, &registry, &store, ContinueMiss::Fail) {
+        let error = match assemble(&cont_print, &registry, &store, ContinueMiss::Fail, None) {
             Err(error) => error,
             Ok(_) => panic!("print mode fails loudly on an empty store"),
         };
         assert!(error.contains("no sessions yet"), "{error}");
 
         let cont_json = args(&["--continue", "--json"]).expect("valid json combo");
-        let (session, notes) = assemble(&cont_json, &registry, &store, ContinueMiss::StartFresh)
-            .expect("json mode starts fresh");
+        let (session, notes) = assemble(
+            &cont_json,
+            &registry,
+            &store,
+            ContinueMiss::StartFresh,
+            None,
+        )
+        .expect("json mode starts fresh");
         assert!(!session.resumed(), "the fresh start is reported");
         assert!(notes.is_empty(), "a clean config degrades nothing");
         let _ = std::fs::remove_dir_all(&dir);

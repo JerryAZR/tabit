@@ -18,6 +18,7 @@ fn plain_wiring(store: &SessionStore) -> SessionHostWiring {
         boot_parent: None,
         boot_parent_call: None,
         skills: Vec::new(),
+        extensions: Default::default(),
         store: store.clone(),
         create: std::sync::Arc::new(|| Err("new_session is not driven".to_string())),
         open: std::sync::Arc::new(|_| Err("open_session is not driven".to_string())),
@@ -605,6 +606,7 @@ async fn new_session_runs_a_second_stream_and_both_route_by_id() {
         boot_parent: None,
         boot_parent_call: None,
         skills: Vec::new(),
+        extensions: Default::default(),
         store: store.clone(),
         create: std::sync::Arc::new(move || {
             Factory::new(vec![text_turn("new answer")])
@@ -703,6 +705,7 @@ async fn open_session_loads_a_stored_session_and_replays_it() {
         boot_parent: None,
         boot_parent_call: None,
         skills: Vec::new(),
+        extensions: Default::default(),
         store: store.clone(),
         create: std::sync::Arc::new(|| Err("not driven".to_string())),
         open: std::sync::Arc::new(move |id: &str| {
@@ -852,6 +855,7 @@ async fn open_session_emits_its_model_notes_ahead_of_the_replay() {
         boot_parent: None,
         boot_parent_call: None,
         skills: Vec::new(),
+        extensions: Default::default(),
         store: store.clone(),
         create: std::sync::Arc::new(|| Err("not driven".to_string())),
         open: std::sync::Arc::new(move |id: &str| {
@@ -1040,6 +1044,7 @@ async fn a_catalog_failure_is_the_carrier_in_place_of_the_announcement() {
             boot_parent: None,
             boot_parent_call: None,
             skills: Vec::new(),
+            extensions: Default::default(),
             store: SessionStore::new(&dir),
             create: std::sync::Arc::new(|| Err("not driven".to_string())),
             open: std::sync::Arc::new(|_| Err("not driven".to_string())),
@@ -1081,6 +1086,7 @@ async fn lifecycle_failures_and_notes_ride_the_carrier() {
             boot_parent: None,
             boot_parent_call: None,
             skills: Vec::new(),
+            extensions: Default::default(),
             store: store.clone(),
             // The builder degrades: the failure is boot-stamped, the
             // notes are new-session-stamped.
@@ -1140,6 +1146,7 @@ async fn a_created_sessions_selection_notes_follow_its_stream() {
             boot_parent: None,
             boot_parent_call: None,
             skills: Vec::new(),
+            extensions: Default::default(),
             store: store.clone(),
             create: std::sync::Arc::new(move || {
                 Factory::new(vec![text_turn("new answer")])
@@ -1205,6 +1212,7 @@ async fn new_session_is_never_blocked_by_a_running_session() {
         boot_parent: None,
         boot_parent_call: None,
         skills: Vec::new(),
+        extensions: Default::default(),
         store: store.clone(),
         create: std::sync::Arc::new(move || {
             Factory::new(vec![text_turn("new answer")])
@@ -1366,6 +1374,7 @@ async fn frontend_death_aborts_every_sessions_run() {
         boot_parent: None,
         boot_parent_call: None,
         skills: Vec::new(),
+        extensions: Default::default(),
         store: store.clone(),
         create: std::sync::Arc::new(move || {
             Factory::new(vec![tool_turn("t2", "slow"), text_turn("never")])

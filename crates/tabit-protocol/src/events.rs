@@ -236,6 +236,22 @@ pub enum SessionEvent {
         /// Every discovered skill.
         skills: Vec<AvailableSkill>,
     },
+    /// The extension catalog, announced once at startup right after
+    /// `skills_available` (v9): every discovered extension with its
+    /// provenance and standing, plus the load-time conflict reports
+    /// (extension-replaces-core, extension-vs-extension refusals).
+    /// **Unstamped, backend-level** — one backend process has one
+    /// extension host. Only announced when discovery found at least
+    /// one extension (a refusal is a discovered extension too — it
+    /// reports as dead with its reason).
+    ExtensionsAvailable {
+        /// Every discovered extension, alive or dead.
+        extensions: Vec<AvailableExtension>,
+        /// The name-assembly's conflict reports — the mandatory
+        /// replaces-core signal and the peer-refusal notices
+        /// (EXTENSIONS.md's naming ruling).
+        conflicts: Vec<ExtensionConflict>,
+    },
     /// A session became visible in this backend: the boot session
     /// (emitted at spawn, ahead of the catalog and any replay), a
     /// `new_session` (the same facts `session_created` always
@@ -398,6 +414,74 @@ pub struct AvailableSkill {
     /// Which discovery level supplied the entry: `user` (home) or
     /// `workspace` (cwd).
     pub level: String,
+}
+
+/// One discovered extension in the startup `extensions_available`
+/// announcement (v9): the provenance a frontend needs to attribute
+/// without the model ever seeing a prefix — the flat model-facing
+/// names live in the tools; this carries who serves them.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct AvailableExtension {
+    /// The package's identity (its directory under the extensions
+    /// root).
+    pub name: String,
+    pub version: String,
+    /// One line from the manifest.
+    pub description: Option<String>,
+    /// The package's directory on the host — the provenance.
+    pub dir: String,
+    /// `alive` or `dead`: handshakes that refused (version, unknown
+    /// hook point), packages that failed the scan, and processes that
+    /// died since all stand as dead.
+    pub status: String,
+    /// Why a dead extension is dead.
+    pub reason: Option<String>,
+    /// The tools it declared at the handshake (empty when dead).
+    pub tools: Vec<AvailableExtensionTool>,
+    /// The hook points it subscribed to.
+    pub hooks: Vec<String>,
+}
+
+/// One declared tool in [`AvailableExtension`].
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct AvailableExtensionTool {
+    pub name: String,
+    pub description: String,
+}
+
+/// One load-time name-assembly report, riding the
+/// `extensions_available` announcement: the replaces-core signal is
+/// mandatory (the backend must make the replacement clear), and a
+/// peer refusal names the incumbent so the user can resolve by
+/// disabling one.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ExtensionConflict {
+    pub kind: ExtensionConflictKind,
+    /// The extension whose declaration triggered the report.
+    pub extension: String,
+    pub tool: String,
+    /// The incumbent's name (peer refusals; core replacements name
+    /// the core implicitly).
+    pub incumbent: Option<String>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ExtensionConflictKind {
+    /// The extension's tool replaced the core tool of the same name.
+    ReplacesCore,
+    /// The extension's tool was refused: another extension already
+    /// holds the name. The newcomer is named; the user resolves by
+    /// disabling one.
+    RefusedPeer,
+}
+
+/// The whole announcement payload — the snapshot a backend carries
+/// from its one boot-time assembly.
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
+pub struct ExtensionsCatalog {
+    pub extensions: Vec<AvailableExtension>,
+    pub conflicts: Vec<ExtensionConflict>,
 }
 
 /// One discarded queued message, handed back by

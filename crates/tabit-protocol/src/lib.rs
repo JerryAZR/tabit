@@ -34,7 +34,9 @@ pub mod templates;
 mod usage;
 
 pub use events::{
-    AvailableSession, AvailableSkill, DiscardedMessage, ErrorKind, SessionEvent, ToolResultStatus,
+    AvailableExtension, AvailableExtensionTool, AvailableSession, AvailableSkill, DiscardedMessage,
+    ErrorKind, ExtensionConflict, ExtensionConflictKind, ExtensionsCatalog, SessionEvent,
+    ToolResultStatus,
 };
 pub use model::ModelSelection;
 pub use protocol::{

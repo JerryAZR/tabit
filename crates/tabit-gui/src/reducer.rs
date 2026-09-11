@@ -651,6 +651,11 @@ impl GuiState {
                 // connection-level; the per-session redesign worktree
                 // owns the real panel — the seam stays marked here.
             }
+            SessionEvent::ExtensionsAvailable { .. } => {
+                // Interim (v9): same family as the skills catalog —
+                // provenance and load-time conflict reports for the
+                // redesign worktree's extension surface.
+            }
             SessionEvent::TurnTruncated { .. } => {
                 // Informational (ENGINE.md behavior delta 9): the run
                 // continues; the note is the user's cue that the model hit

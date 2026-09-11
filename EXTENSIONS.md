@@ -46,6 +46,11 @@ Boundaries and reasons:
   that cross the pipe pay an IPC roundtrip — local-pipe latency,
   noise against second-long tool calls; a hung extension during a
   hook is the reaper's concern, not the session's.
+- **The pipe is one lane (task 2): calls to one extension serialize
+  in arrival order.** An extension wanting parallelism executes it
+  inside its own process; a multiplexing frame joins when a consumer
+  exists. A death drains the lane — no proxy call ever hangs on a
+  dead extension.
 
 ## Declaration: manifest for install facts, handshake for
 capabilities (2026-09)
@@ -177,6 +182,14 @@ Implications:
   (`interaction_request { id, title, body, options, free_text }` /
   `interaction_response { id, option?, text? }`) is generic on
   purpose: reuse it; do not invent new popup frames.
+- **The extension pipe's lift (task 2) mirrors the engine's
+  capability verbatim**: `interaction_request { call_id, id, ui_type,
+  payload }` in, `interaction_response { id, outcome }` back
+  (`outcome: null` is the dismissal) — `ui_type` + opaque payload,
+  so extensions use the same `native:*` templates core tools do. The
+  `call_id` routes to the session whose proxy call is executing; no
+  capability on that call (a non-interactive session) answers
+  dismissed — fail closed, exactly as core tools behave.
 - The capability reaches sites through **contexts**: the tool body
   via `ToolContext`'s typed map (the `CancellationToken` precedent);
   the tool-call gate by hook construction. Other hook points gain

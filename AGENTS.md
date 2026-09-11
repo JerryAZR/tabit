@@ -56,10 +56,18 @@ Current workspace layout:
   only)
 - `crates/tabit-ext` — the extension host (ROADMAP item 9): manifest
   discovery (`tabit.json` under the extensions root), the frozen
-  JSONL extension pipe (initialize/ack), the supervisor (launch,
-  handshake, mark-dead-and-report — no mid-run respawn); the shared
-  child-process helpers (tree-kill wrapping, the stderr ring) live
-  here and serve the subagent bridge too
+  JSONL extension pipe (initialize/ack, the tool lane, the
+  interaction lift), the supervisor (launch, handshake, supervise,
+  mark-dead-and-report — no mid-run respawn; the tool-call dispatch
+  surface for proxy tools); the shared child-process helpers
+  (tree-kill wrapping, the stderr ring) live here and serve the
+  subagent bridge too
+- `crates/tabit-ext-sdk` — the extension SDK, the guest side of the
+  same pipe: the dispatcher owning the loop (ack, tool-call dispatch
+  to bodies, result serialization, ask lifts) so authors write tool
+  bodies only; hand-rolled frames sharing no code with the host —
+  the protocol doc's reference consumer. Ships the example
+  extensions (`echo-ext`, `shadow-ext`, the clash pair) as its bins
 - `crates/tabit-gui` — the egui frontend (`tabit-gui` binary; the
   `tabit` launcher detach-spawns it; reducer/view contract in ROADMAP
   item 7). Its `CHANGELOG.md` is the frontend protocol's changelog —

@@ -146,6 +146,27 @@ fn events_round_trip_through_json() {
                 level: "user".to_string(),
             }],
         },
+        SessionEvent::ExtensionsAvailable {
+            extensions: vec![AvailableExtension {
+                name: "echo".to_string(),
+                version: "0.1.0".to_string(),
+                description: Some("the example".to_string()),
+                dir: "C:/u/.tabit/extensions/echo".to_string(),
+                status: "alive".to_string(),
+                reason: None,
+                tools: vec![AvailableExtensionTool {
+                    name: "echo".to_string(),
+                    description: "Echo the text back.".to_string(),
+                }],
+                hooks: vec!["tool_call".to_string()],
+            }],
+            conflicts: vec![ExtensionConflict {
+                kind: ExtensionConflictKind::RefusedPeer,
+                extension: "clash-b".to_string(),
+                tool: "clashy".to_string(),
+                incumbent: Some("clash-a".to_string()),
+            }],
+        },
         SessionEvent::NativeItem {
             turn_id: TURN.to_string(),
             item: serde_json::json!({"web_search_call": {}}),
@@ -193,6 +214,30 @@ fn events_round_trip_through_json() {
         })
         .expect("serialize"),
         r#"{"type":"skills_available","skills":[{"name":"code-review","description":"Review a changeset","location":"C:/w/.tabit/skills/code-review/SKILL.md","level":"workspace"}]}"#
+    );
+    // The extension announcement: the same unstamped backend-level
+    // family, carrying provenance and the mandatory conflict reports.
+    assert_eq!(
+        serde_json::to_string(&SessionEvent::ExtensionsAvailable {
+            extensions: vec![AvailableExtension {
+                name: "shadow".to_string(),
+                version: "0.1.0".to_string(),
+                description: None,
+                dir: "C:/u/.tabit/extensions/shadow".to_string(),
+                status: "dead".to_string(),
+                reason: Some("no handshake within 30s".to_string()),
+                tools: Vec::new(),
+                hooks: Vec::new(),
+            }],
+            conflicts: vec![ExtensionConflict {
+                kind: ExtensionConflictKind::ReplacesCore,
+                extension: "shadow".to_string(),
+                tool: "read".to_string(),
+                incumbent: None,
+            }],
+        })
+        .expect("serialize"),
+        r#"{"type":"extensions_available","extensions":[{"name":"shadow","version":"0.1.0","description":null,"dir":"C:/u/.tabit/extensions/shadow","status":"dead","reason":"no handshake within 30s","tools":[],"hooks":[]}],"conflicts":[{"kind":"replaces_core","extension":"shadow","tool":"read","incumbent":null}]}"#
     );
     assert_eq!(
         serde_json::to_string(&SessionEvent::SessionCreated {
