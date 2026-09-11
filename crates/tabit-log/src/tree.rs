@@ -163,11 +163,6 @@ impl SessionTree {
         self.nodes.contains_key(id)
     }
 
-    /// One node by id, when held.
-    pub fn node(&self, id: &str) -> Option<&SessionEntry> {
-        self.nodes.get(id)
-    }
-
     /// The branch ending at `to` (default: the head), root → `to`. A
     /// broken parent link is a fault — the tree's only inserts are
     /// head-appends and validated loads, so a broken walk names real

@@ -31,7 +31,24 @@ Defensive ("unreachable") arms follow a stricter rule:
 - The whole suite runs offline (cassette replay + test doubles). Doctests
   are NOT included in these numbers (`llvm-cov` was run without
   `--doctests`); they are gated by the same CI run.
-- Current state: **93.56% lines / 92.71% regions** (2,658 of 41,246
+- Current state: **93.61% lines / 92.77% regions** (2,643 of 41,334
+  lines; re-measured after the delta-tokens compaction refactor and
+  the subagent pairing round — the deferred item below, closed. The
+  round's finds: the pass cap had never fired (a 410×2,000-token
+  history on the 64K window pins `Oversized { passes: 16 }` — and
+  taught the test that only the final pass's output rides
+  `tokens_after`, earlier summaries fold into the prefixes that
+  replaced them); the unrepairable in-stream summarizer failure
+  (`Outcome::Failed`, the sibling of the wall's shorten-retry) is now
+  pinned; and the standing subagent-override deferral closed — the
+  e2e rides `model`/`cwd`/`tools` through the real spawn while its
+  sibling exercises the inheritance defaults, leaving `subagent.rs`
+  clean. Two dead arms deleted rather than documented: `Tree::node`
+  (zero callers) and `HostLoop::worker`'s unknown-session error (the
+  Nth sibling of the inline routing failure; its one caller reads the
+  table directly now). The residue is the recorded classes with
+  shifted line numbers — itemized in the round's section below.
+  Before that: **93.56% lines / 92.71% regions** (2,658 of 41,246
   lines; re-measured after the subagent + compaction arcs — the
   deferred item below, closed. The base grew ~2,000 lines (the
   subprocess substrate, the json bridge, the compaction box) while
@@ -504,8 +521,10 @@ named, the classification applies to its current lcov-uncovered ranges.
   would need a child-process harness.
 - Doctests are outside the measurement (see Methodology); they run and are
   gated in CI but do not fold into these numbers.
-- The subagent override plumbing and the subprocess child-role arms —
-  see the dedicated section above (the next subprocess e2e round).
+- The subprocess child-role arms and the `--session` builder arg —
+  see the round section above (child-role execution is the class-6
+  attribution gap; `--session` needs a persisted-child spawn shape
+  the built-in tool never makes).
 
 (Removed from this list after the defensive-arm audit: the SSE
 retry-`None` branches — the premise was wrong, `ExponentialBackoff`
@@ -1051,17 +1070,86 @@ structured-output cassettes trimmed to the native pass-through
 smoke.
 
 
-## Compaction/tree refactor: deltas + leaf-append (2026-09) — re-measurement deferred
+## Compaction/tree refactor + subagent pairing — the deferred re-measurement, closed (2026-09)
 
-The delta-tokens refactor (compaction session format v5: leaf-append
-compaction nodes with a persisted `tokens_after` base, `delta_tokens`
-stamped at assistant commits, the history view replacing the
-loader-splice walked chain, `regime_total` replacing the
-estimate-based walk, estimation deleted from the decision path)
-rewrites most of `tabit-log`'s tree/context-manager surface and the
-compaction box. New code needing its own fill/justify/defer pass:
-`history_to_head`'s corruption panics, `turn_delta`'s underflow arm,
-`delta_suffix_sums`, and the rewritten box tests' arithmetic. The
-llvm-cov re-measurement is **explicitly deferred** to the next
-coverage round (owner's gate cadence: the fmt/clippy/test gate runs
-per change; coverage runs are their own rounds).
+The delta-tokens refactor (session format v5: leaf-append compaction
+nodes with a persisted `tokens_after` base, `delta_tokens` stamped at
+assistant commits, the history view, `regime_total`, estimation
+deleted) and the `parent_call` pairing round (`InternalCallId` at the
+dispatch seam, `--parent-call`, the announce), measured with their
+suites in place.
+
+**Filled** (the gaps the measurement found):
+
+- **The pass cap fired for the first time** —
+  `the_pass_cap_bounds_pathological_regimes`: 410 rounds × 2,000
+  tokens on the 64K minimum window; every pass folds the 24-round
+  prefix cap (48,000 against the 49,152 fraction) and stays over the
+  urgent bound, so the cap stops the loop at
+  `Oversized { passes: 16, tokens_after: 52_020 }`. Writing the test
+  taught the arithmetic: only the final pass's output rides
+  `tokens_after` — each earlier summary folds into the prefix the
+  next pass replaces.
+- The unrepairable in-stream summarizer failure: a plain provider
+  error (not the wall) fails the invocation — `Outcome::Failed`, no
+  retry, nothing committed (the sibling of the overflow
+  shorten-retry, which was already covered).
+- **The subagent override deferral closed**: the subprocess e2e now
+  rides the full surface (`model: "p/m"` resolving child-side, the
+  explicit cwd, `tools: []` crossing as `--tools ""`) while its abort
+  sibling exercises the inheritance defaults — every arm of the
+  tool's policy block runs, `subagent.rs` clean.
+- The failed-reason search's skip arm (a non-failure event *after*
+  the failure — the search walks backwards) and `filter_tools`'s
+  unknown-name refusal (unit; `DynamicTool` has no `Debug`, so a
+  match, not `expect_err`).
+
+**Deleted, not documented:**
+
+- `Tree::node` — zero callers; the id-horizon machinery's last
+  orphan, removed with that machinery's replacement.
+- `HostLoop::worker`'s unknown-session error arm — the live routing
+  failure errors inline in `handle` (the single home for that
+  message); `worker`'s or_else duplicated it behind a door only the
+  internal Replay arm used, and that caller now reads the table
+  directly.
+
+**Justified residue** (the recorded classes, line numbers current):
+
+- `tree.rs` 112/140 — `history_to_head`'s two sanctioned corruption
+  panics: a missing node is unreachable through every public door
+  (inserts validate parents, the parser resolves links), and the
+  cut-child-never-met crash is the corrupt-file fail-loud the
+  refactor ruled.
+- `fold.rs` 151 — the trailing-run sanctioned crash (unreachable by
+  the `rposition` split; unchanged).
+- `context_manager.rs` 374/414/425 — the non-assistant `_` arm
+  (every caller passes an assistant by construction) and the checkout
+  Corrupt belts (the provably-dead-by-load class).
+- `compaction/mod.rs` 269-275 (the loop's total-function defense —
+  the post-pass branch re-offers the compaction boundary while the
+  floor holds, so a no-feasible-cut exit cannot precede the fits,
+  guard, or cap exits), 533-539 (the request-build `Err` arm — the
+  mock cannot produce the serialization failure; the in-stream
+  sibling is now covered), 613 (no committed summary turn carries
+  other content), 689 (the pre-request door's notice body — needs a
+  live tap on a firing door; the identical `NoticeSink::emit` is
+  covered through the beat doors).
+- `compaction_doors.rs` 80-83 — `ensure_agent` (the registry
+  `build_error` class).
+- `endpoint.rs` 277/645 (the two `unreachable!` routing guards) and
+  997-1001 (checkout execution-time failure — receive-time
+  verification covers the stageable causes).
+- `subprocess.rs` — the process-fault family unchanged (rejected/hung
+  handshake, the reaper's force-kill, crash detection, the
+  stderr-ring edges); the `--tools` builder arg now crosses in the
+  e2e; `--session` stays deferred — it needs a persisted-child spawn
+  shape the built-in tool never makes.
+- `tabit/src/main.rs` (53.79%, the standing outlier) and `json.rs`'s
+  child-role arms — the class-6 subprocess-execution attribution gap;
+  the pairing round's child-boot wiring lines (`boot_parent_call`
+  onward) join it: exercised by the e2e's spawned binary, unattributed
+  by llvm-cov. Branch-region measurement needs a nightly toolchain
+  (`-Z coverage-options=branch`) whose trybuild fixtures do not
+  currently build — regions are read from llvm-cov's own summary
+  instead.

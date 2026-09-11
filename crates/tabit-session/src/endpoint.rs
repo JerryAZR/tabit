@@ -672,7 +672,7 @@ impl HostLoop {
             HostCommand::Command(SessionCommand::NewSession) => self.new_session(),
             HostCommand::Command(SessionCommand::OpenSession { id }) => self.open_session(&id),
             HostCommand::Replay(session) => {
-                if let Some(worker) = self.worker(&session) {
+                if let Some(worker) = lock(&self.workers).get(&session).cloned() {
                     worker.deliver_replay();
                 }
             }
@@ -697,21 +697,6 @@ impl HostLoop {
                 }
             }
         }
-    }
-
-    /// The named session's leaves, or the `error { kind: session }`
-    /// frame on the wire when no such session is open here.
-    fn worker(&self, session: &str) -> Option<Worker> {
-        lock(&self.workers).get(session).cloned().or_else(|| {
-            let _ = self.event_tx.send(EventFrame {
-                stream: None,
-                event: SessionEvent::error_session(format!(
-                    "unknown session `{session}` — not open in this backend \
-                     (open_session loads it; sessions_available lists the stored ones)"
-                )),
-            });
-            None
-        })
     }
 
     /// `new_session`: announce, then spawn. The creation frame and its

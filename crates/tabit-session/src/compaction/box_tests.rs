@@ -975,6 +975,62 @@ async fn an_in_stream_overflow_rejection_shortens_and_retries() {
 }
 
 #[tokio::test]
+async fn the_pass_cap_bounds_pathological_regimes() {
+    // 410 rounds of 2,000 tokens (820k) on the minimum supported
+    // window (65,536): every pass folds the prefix cap — 24 rounds
+    // (48,000) against the 49,152 fraction — and still sits over the
+    // urgent bound (32,768), so a regime that never fits would loop
+    // forever; the cap stops it at 16 passes with what landed
+    // standing (26 kept rounds + the last summary = 52,020 — only
+    // the final pass's output rides the base, earlier summaries fold
+    // into the prefixes that replaced them).
+    let cell = cell_with_measured_dialogue(410, 2_000);
+    let mut turns = summary_stream_turns();
+    while turns.len() < 16 {
+        let turn = turns[0].clone();
+        turns.push(turn);
+    }
+    let agent = AgentBuilder::new(MockCompletionModel::from_stream_turns(turns)).build();
+    let config = config_with_window(65_536);
+    let (outcome, _events) = run_manual(&cell, &agent, &config).await;
+    assert!(
+        matches!(
+            &outcome,
+            Outcome::Oversized {
+                passes: 16,
+                tokens_after: 52_020,
+                ..
+            }
+        ),
+        "{outcome:?}"
+    );
+}
+
+#[tokio::test]
+async fn an_unrepairable_in_stream_failure_fails_the_invocation() {
+    // Not the wall: a plain provider failure mid-summarization has no
+    // shrink answer — the pass fails without retry, nothing commits,
+    // and the outcome carries the failure.
+    let cell = cell_with_measured_dialogue(4, 9_000);
+    let agent = AgentBuilder::new(MockCompletionModel::from_stream_turns([vec![
+        MockStreamEvent::Error(rig_agent::test_utils::MockError::http(
+            500,
+            "upstream exploded",
+        )),
+    ]]))
+    .build();
+    let config = config_with_window(10_000_000);
+    let (outcome, _events) = run_manual(&cell, &agent, &config).await;
+    assert!(
+        matches!(
+            &outcome,
+            Outcome::Failed { message, .. } if message.contains("upstream exploded")
+        ),
+        "{outcome:?}"
+    );
+}
+
+#[tokio::test]
 async fn the_pre_request_leaf_compacts_when_condition_b_holds() {
     // The engine awaits this leaf blindly; directly: a measured
     // context past the urgent bound runs the box through the leaf's

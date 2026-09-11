@@ -100,13 +100,18 @@ fn stage_child_config(tag: &str, server: &MockServer) -> PathBuf {
 }
 
 /// The parent: a scripted in-process model whose first turn calls the
-/// subagent tool, and a second that wraps
-/// up. The child toolset is empty policy — no allow-list crosses.
+/// subagent tool, and a second that wraps up. `overrides` picks the
+/// call's shape: `Some` rides the full override surface (the model
+/// ref resolves child-side, the cwd is the parent's own, the empty
+/// allow-list crosses as `--tools ""`), `None` exercises the
+/// inheritance defaults. The child toolset is empty policy — no
+/// allow-list crosses.
 fn subprocess_parent(
     store: &SessionStore,
     cwd: &Path,
     router: Arc<ChildRouter>,
     task: &str,
+    overrides: bool,
 ) -> Session {
     let config = Arc::new(
         tabit_config::TabitConfig::from_toml_str(
@@ -134,7 +139,16 @@ id = "m"
             MockStreamEvent::ToolCall {
                 id: "c1".to_string(),
                 name: "subagent".to_string(),
-                arguments: json!({"task": task}),
+                arguments: if overrides {
+                    json!({
+                        "task": task,
+                        "model": "p/m",
+                        "cwd": cwd.display().to_string(),
+                        "tools": [],
+                    })
+                } else {
+                    json!({"task": task})
+                },
                 call_id: None,
             },
             MockStreamEvent::final_response_with_default_usage(),
@@ -199,7 +213,7 @@ async fn a_subprocess_child_announces_streams_and_answers_over_the_real_binary()
     let parent_cwd = test_dir("happy-parent");
     let store = SessionStore::new(test_dir("happy-store"));
     let router = ChildRouter::shared();
-    let parent = subprocess_parent(&store, &parent_cwd, router.clone(), "say the words");
+    let parent = subprocess_parent(&store, &parent_cwd, router.clone(), "say the words", true);
     let mut handle = host(&store, router, parent);
     let parent_id = handle.info().session_id.clone();
 
@@ -355,7 +369,7 @@ async fn aborting_the_parent_returns_promptly_and_the_child_flushes_its_terminal
     let parent_cwd = test_dir("abort-parent");
     let store = SessionStore::new(test_dir("abort-store"));
     let router = ChildRouter::shared();
-    let parent = subprocess_parent(&store, &parent_cwd, router.clone(), "park on the model");
+    let parent = subprocess_parent(&store, &parent_cwd, router.clone(), "park on the model", false);
     let mut handle = host(&store, router, parent);
     let parent_id = handle.info().session_id.clone();
 

@@ -120,12 +120,32 @@ fn an_aborted_child_maps_to_the_interrupted_report() {
 #[test]
 fn a_failed_child_carries_its_own_failure_reason() {
     let mut run = summary(crate::session::RunOutcome::Failed, "");
+    // The reason search walks backwards, so a non-failure event after
+    // the failure is skipped on the way to it.
     run.events.push(tabit_protocol::SessionEvent::RunFailed {
         message: "provider unreachable".to_string(),
     });
+    run.events
+        .push(tabit_protocol::SessionEvent::TurnStarted { id: "t1".to_string() });
     let error = super::summary_result(run, "child-1").expect_err("failed is an error");
     let message = error.to_string();
     assert!(message.contains("provider unreachable"), "{message}");
+}
+
+#[test]
+fn an_unknown_tool_in_the_allow_list_is_refused() {
+    // The allow-list validates parent-side against the mounted
+    // toolset — a name nothing offers is refused before any spawn.
+    // (`DynamicTool` carries closures and no Debug — a match, not
+    // `expect_err`.)
+    let error = match super::filter_tools(&[], &["read".to_string()]) {
+        Err(error) => error,
+        Ok(offered) => panic!(
+            "an empty toolset cannot offer `read` (returned {} tools)",
+            offered.len()
+        ),
+    };
+    assert!(error.to_string().contains("read"), "{error}");
 }
 
 #[test]
