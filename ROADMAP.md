@@ -1031,38 +1031,70 @@ assistant.
 
 ### 9. Extensions
 
-- Extension support: a way for users to add tools and hooks without
-  forking — likely WASM or script-based tool providers plus the existing
-  hook points, informed by opencode's extension/plugin design.
-- Settings surface: layered config (user > workspace > flags) already partly
-  from item 1; extensions register tools, hooks, and prompt contributions.
-- **Session-scoped extension memory** (shape designed here, deferred from
-  the subagent rulings): generic state a tool or extension registers;
-  the permission gate's "Always allow" set is the first consumer (today
-  the ad-hoc `PermissionMemory`). Open rulings: entry keying (typed vs
-  named) and the durability split (session-scoped state in the map;
-  "always allow globally" belongs to user config). **Cross-process
-  sharing is ruled out (2026-09, post-review): subagent sessions are
-  subprocesses — handles cannot cross the boundary, and no core
-  machinery will try. An extension needing shared state between parent
-  and subagent implements it itself via files or env vars.**
+**DESIGN SETTLED (2026-09, the discussion record lives in
+EXTENSIONS.md); implementation not started.** The shape:
+
+- **The substrate: subprocess executables over a frozen JSONL
+  extension protocol** — the subagent substrate generalized. One
+  dependency law for everything external: frontends, subagents, and
+  extensions are leaf consumers across process boundaries. Not
+  in-process runtimes (contradicts the single binary); not WASM for
+  v1 (the alternative with a felt-need trigger: real containment or
+  hot hooks). The trust model is user consent, full stop — native
+  code, full OS rights, no sandbox; the load-time trust prompt (pi's
+  project-trust family) is the gate.
+- **Declaration**: `tabit.json` for install facts; capabilities
+  declared live at the handshake (initialize/ack — tools, hooks,
+  prompt contributions).
+- **Naming**: model-facing names are flat (the declared name, no
+  prefix); identity is the (extension, tool) pair — the key for
+  accounting, the load-time conflict report, and the wire catalog
+  `extensions_available` (the skills_available family, with
+  provenance). One name, one tool, resolved at host assembly;
+  extension-replaces-core must be reported by the backend (how
+  loudly is the frontend's call); extension-vs-extension collisions
+  refuse the newcomer, naming the incumbent.
+- **Install**: `tabit install npm:<pkg> | git:<repo> | path:<dir>` —
+  npm as plain registry HTTP (no npm CLI, no embedded runtime, no
+  registry of our own), git via `git`, pickup at next backend start
+  (byte-stability law). No language list: the protocol is the
+  contract, the package declares its entry command.
+- **Provider contributions are catalog fragments**: a local relay
+  speaking a known wire format plus a `providers.toml` fragment
+  merged at config load (user config wins; uninstall = remove dir).
+  The credential line is attribution, not protection.
+- **Host services**: request-response verbs on the same pipe (the
+  interaction hub is service zero); verb one is `model_prompt` —
+  capped, complete-only, usage billed to the session tagged with the
+  extension identity (the auto-title shape).
+- **Frontends stay leaf consumers**: extension packages may carry
+  `frontend/<target>/` parts, but loading them is the named
+  frontend's business (the TUI can load JS plugins; the GUI stays
+  declarative — generic renderers over tagged `details` cargo; every
+  extension degrades to `content` rendering everywhere).
+- Settings surface: layered config (user > workspace > flags)
+  already partly from item 1; extensions register tools, hooks, and
+  prompt contributions through the surfaces above.
+- **Session-scoped extension memory — dissolved by the substrate
+  (2026-09).** Extension state lives in the extension's own process;
+  durable state is tool results (the interaction-state ruling);
+  cross-process sharing is files or env vars, the extension's own
+  business. What survives of the old design question: the permission
+  gate's durability split ("always allow" session-only vs user
+  config) lands with the gate's move out of core.
 - **The permission gate moves out of the core into an extension
   package when extensions land (ruled 2026-09).** Until then it stays
   in core as the interaction prompts' consumer; its mount
-  (`crates/tabit/src/main.rs`, the hook surface) is the door it leaves
-  through — see EXTENSIONS.md.
-- **Opening questions from the 2026-09 architecture review** (the
-  first agenda of the design discussion, recorded so they are not
-  rediscovered): capability carriage for extension tools (a generic
-  registration path vs state captured in the extension's own
-  `DynamicTool` closures — today every capability is a hardcoded
-  builder-field/session-field/insert triple); hook composition (the
-  priority law is per-stack with no merge surface, and
-  `on::tool_result` has no closure registration — extensions are the
-  consumer that arrives with both needs); tool-name precedence
-  (`ToolSet` warns and replaces on a duplicate name — layered
-  settings need a namespace or precedence answer, designed once at
-  registration).
+  (`crates/tabit/src/main.rs`, the hook surface) is the door it
+  leaves through — see EXTENSIONS.md.
+- **Engine-side work the extension host will need** (from the
+  2026-09 architecture review): the closure hook surface lacks an
+  `on::tool_result` registration and a stack-merge/composition
+  surface (the priority law is per-stack) — both land with the host,
+  which is the consumer that arrives with both needs. The review's
+  capability-carriage question is dissolved by the substrate
+  (extension tools are proxies; their state never enters
+  `ToolContext`).
 
 ### 10. Prompt caching (required before release)
 

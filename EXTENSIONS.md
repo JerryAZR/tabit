@@ -1,13 +1,12 @@
 # EXTENSIONS.md
 
-The extension development record. **No extension surface exists yet**
-(ROADMAP item 9: WASM or script-based tool providers plus the existing
-hook points). This file exists because design decisions are landing
-now — in ENGINE.md, PROTOCOL.md, and the crates — that will shape how
-extensions work when the surface arrives. Every entry names the
-decision, where it is recorded, and what it implies for extension
-authors. When the extension system is designed, this file is its
-requirements input; entries graduate into the real extension docs.
+The extension development record. **The substrate is ruled (2026-09,
+below); no extension surface is implemented yet** — the entries are
+the design the implementation will build against. Every entry names
+the decision, where it is recorded, and what it implies for extension
+authors. Entries record **existing design decisions**; nothing about
+how a particular extension is written leaks in — the contract is the
+protocol.
 
 Rules of the ledger:
 
@@ -16,6 +15,138 @@ Rules of the ledger:
   it does not fork the truth;
 - anything an extension author must not do (a boundary) is stated as
   a boundary, not a suggestion.
+
+## Extensions are subprocesses over a frozen pipe (2026-09, the
+item-9 substrate ruling)
+
+Ruled: an extension is an opaque executable speaking a small frozen
+JSONL protocol over stdin/stdout — the subagent substrate,
+generalized. The host spawns the entry command at backend start,
+handshakes, and from then on tool calls, hook events, interaction
+frames, and host-service requests cross the pipe. One dependency law
+for everything external: frontends, subagents, and extensions are all
+leaf consumers across process boundaries; none load into the host's
+process.
+
+Boundaries and reasons:
+
+- Not in-process language runtimes — embedding V8/QuickJS/CPython
+  contradicts the single-binary identity and adds a runtime to
+  maintain forever (pi can, because pi is Node). Not WASM for v1 —
+  recorded as the alternative with a felt-need trigger (real
+  containment/sandboxing, or hot hooks where IPC latency matters).
+- **The trust model is user consent, full stop.** An extension runs
+  native code with the user's OS rights — the same trust class as
+  `cargo install` or an npm CLI. Declarations are honesty for the
+  user and gating at load, never containment.
+- Crash isolation is the process boundary: a wedged extension is a
+  dead child (the reaper pattern), never a stalled host. Hook events
+  that cross the pipe pay an IPC roundtrip — local-pipe latency,
+  noise against second-long tool calls; a hung extension during a
+  hook is the reaper's concern, not the session's.
+
+## Declaration: manifest for install facts, handshake for
+capabilities (2026-09)
+
+The manifest (`tabit.json`) carries install-time facts only — name,
+version, entry command + args, one-line description. Capabilities are
+declared live at the handshake (initialize → ack: tools with
+name/description/schema, hook points, prompt contributions) — the
+initialize/ack pattern every tabit edge already uses. What the
+process serves is what it declared; no schema file drifts.
+
+## Model-facing names are flat; identity is the pair (2026-09)
+
+The model sees the declared tool name only — no prefix, no namespace
+noise. The internal identity is *(extension id, tool name)*: the key
+for usage accounting, the load-time conflict report, and the wire
+catalog `extensions_available` (the `skills_available` family — each
+loaded extension with its tools, skills, and provider fragments by
+provenance, so a frontend can attribute without the model ever
+seeing a prefix).
+
+**One name, one tool, resolved at host assembly.** The host builds
+the model-facing toolset as a name→tool map after all handshakes and
+hands the engine a conflict-free set by construction — the engine's
+duplicate-name shadowing never engages. Conflict policy (pi's rule):
+
+- Extension vs. core, same name: **the extension replaces**, and the
+  backend makes the replacement clear — a load-time report on the
+  channel. How loudly a frontend presents it is the frontend's
+  choice; the signal itself is mandatory.
+- Extension vs. extension, same name: the newcomer is refused, naming
+  the incumbent. No silent peer precedence — the user resolves by
+  disabling one.
+
+Sibling domains carry their own rules: skills merge last-wins-with-
+warn per the discovery ladder (ROADMAP item 3); providers are
+user-config-wins (below).
+
+## Install, distribution, package layout (2026-09)
+
+`tabit install npm:<package> | git:<repo> | path:<dir>`:
+
+- npm is the distribution substrate, accessed as plain registry HTTP
+  (fetch metadata, fetch tarball, unpack) — no npm CLI, no Node at
+  run time, no registry of our own. git shells to `git` (a machine
+  running a coding agent has it). `path:` serves local development.
+- Install places the package under `~/.tabit/extensions/<name>/` and
+  enables it in config; `tabit extensions list/uninstall` manage it;
+  update = reinstall.
+- Pickup at the **next backend start** — no mid-run loading (the
+  prompt byte-stability law; installing is the user's reload/cache
+  decision). Same UX as pi's reload.
+- A newly installed extension prompts for trust at first load (the
+  pi project-trust family): the consent IS the containment.
+
+The package layout tabit standardizes — everything else is the
+package's business:
+
+    ~/.tabit/extensions/<name>/
+      tabit.json         # manifest: name, version, entry command
+      providers.toml     # optional fragment, merged at config load
+      skills/            # optional; symlinked into ~/.tabit/skills/<name>/
+      frontend/<target>/ # optional; the named frontend's business
+
+No language list, by design: the protocol is the contract, the
+package declares its entry command (`node main.js`, `python main.py`,
+a prebuilt binary), and every language that can write LF-JSON lines
+qualifies. JS/TS will dominate in practice (the npm channel is
+natural); compiled extensions arrive via the esbuild pattern
+(per-platform prebuilt binaries as npm optional dependencies) when a
+consumer exists.
+
+## Provider contributions are catalog fragments, not API access
+(2026-09)
+
+An extension that adds a model provider ships a **local relay**
+speaking a known wire format (openai-completions or anthropic — the
+two engines tabit keeps) plus a `providers.toml` fragment pointing at
+the port. Fragments are **merged at config load** (discovery scans
+the extension dirs) — never copied into the user's file; user config
+wins on id collision; uninstall removes the provider by removing the
+directory. The API key, if the relay needs one, is the user's to fill
+in like any provider.
+
+The credential line is **attribution, not protection**: every model
+call the host makes runs through the one registry (retry, caching
+policy) and lands in the session's accounting. Extensions get
+results, never credentials.
+
+## Host services: request-response verbs on the extension pipe
+(2026-09)
+
+The reverse direction on the same pipe: the extension calls into the
+core. One envelope (request id + verb + payload → response); each
+service is a designed verb that joins when a consumer exists — the
+cadence every seam uses. The interaction hub is service zero of this
+shape (ask → response by id — it already ships).
+
+Verb one: **`model_prompt`** — prompt content + a model ref (or the
+session's), capped `max_tokens`, complete-only (no streaming over the
+pipe for v1). Usage bills to the session **tagged with the extension
+identity** — spend is visible and attributed (the auto-title shape:
+this verb is what makes the attribution story real).
 
 ## Interaction is the standard UI-event model (2026-08)
 
@@ -170,14 +301,15 @@ Implications:
   detach: the token is the ask, bounded bodies are the expectation,
   process death is the backstop. There is no force-kill for native
   in-process tools — write bodies that observe the token or bound
-  themselves.
+  themselves. **Extension tools have it better (2026-09 substrate
+  ruling): their bodies live in the extension's own process, so the
+  host's force-kill exists — the reaper's tree kill, the same shape
+  the subagent leash uses.**
 - Hooks are not isolated: hook closures are quick policy callables
   polled on the session's executor. A blocking hook stalls the
-  session — this is contract, not oversight.
-- The substrate choice matters for the extension-format decision:
-  WASM guests are the only truly preemptible tool runtime (epoch
-  interruption gives a real grace-then-kill); native-loaded
-  extensions inherit the cooperative ceiling above.
+  session — this is contract, not oversight. (Hooks forwarded to an
+  extension cross the pipe; a hung extension there is the reaper's
+  concern, not the session's executor.)
 
 ## Background tools stay in-band (2026-08)
 
