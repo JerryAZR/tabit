@@ -125,8 +125,9 @@ fn a_failed_child_carries_its_own_failure_reason() {
     run.events.push(tabit_protocol::SessionEvent::RunFailed {
         message: "provider unreachable".to_string(),
     });
-    run.events
-        .push(tabit_protocol::SessionEvent::TurnStarted { id: "t1".to_string() });
+    run.events.push(tabit_protocol::SessionEvent::TurnStarted {
+        id: "t1".to_string(),
+    });
     let error = super::summary_result(run, "child-1").expect_err("failed is an error");
     let message = error.to_string();
     assert!(message.contains("provider unreachable"), "{message}");

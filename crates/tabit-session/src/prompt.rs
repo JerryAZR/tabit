@@ -155,7 +155,10 @@ fn utc_date() -> String {
 /// the discovery policy). Missing files are fine; a file that exists
 /// but cannot be read fails loudly. Build once per process and reuse
 /// the string for the session's lifetime.
-pub fn build_system_prompt(cwd: &Path, skills: &crate::skills::Skills) -> Result<String, SessionError> {
+pub fn build_system_prompt(
+    cwd: &Path,
+    skills: &crate::skills::Skills,
+) -> Result<String, SessionError> {
     build_with_home(tabit_config::home_dir(), cwd, skills)
 }
 
@@ -170,7 +173,12 @@ fn build_with_home(
             .to_string(),
     })?;
     let files = discover_context_files(&home, cwd)?;
-    Ok(compose_system_prompt(cwd, &utc_date(), &files, &skills.render_catalog()))
+    Ok(compose_system_prompt(
+        cwd,
+        &utc_date(),
+        &files,
+        &skills.render_catalog(),
+    ))
 }
 
 #[cfg(test)]

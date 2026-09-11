@@ -329,7 +329,7 @@ id = "m"
             children: tabit_session::ChildRouter::shared(),
             boot_parent: None,
             boot_parent_call: None,
-skills: Vec::new(),
+            skills: Vec::new(),
             store: SessionStore::new(dir),
             create,
             open: Arc::new(move |_| Err("open_session is not driven by this test".to_string())),

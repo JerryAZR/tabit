@@ -61,6 +61,9 @@ struct Args {
     parent_call: Option<String>,
     tools: Option<String>,
     ephemeral: bool,
+    /// The installed-extension root (JSON mode; default
+    /// `~/.tabit/extensions`).
+    extensions: Option<PathBuf>,
     /// Positional project path — selects GUI mode (`tabit <path>`).
     path: Option<PathBuf>,
 }
@@ -76,7 +79,10 @@ usage: tabit -p <PROMPT>                  print mode: one prompt, one run
                                          spawning session), --parent-call <id>
                                          (its tool call), --tools <a,b,..>
                                          (an allow-list), --ephemeral (no
-                                         file) — the subagent bridge's flags
+                                         file) — the subagent bridge's flags;
+                                         --extensions <dir> selects the
+                                         extension root (default
+                                         ~/.tabit/extensions)
        tabit --list                      list this project's sessions
 
 bare `tabit` or `tabit <path>` launches the GUI detached (vscode-style:
@@ -150,6 +156,7 @@ fn validate_mode(args: &Args) -> Result<Mode, String> {
         args.parent_call.is_some().then_some("--parent-call"),
         args.tools.is_some().then_some("--tools"),
         args.ephemeral.then_some("--ephemeral"),
+        args.extensions.is_some().then_some("--extensions"),
         args.path.is_some().then_some("<path>"),
     ]
     .into_iter()
@@ -167,6 +174,7 @@ fn validate_mode(args: &Args) -> Result<Mode, String> {
             "--parent-call",
             "--tools",
             "--ephemeral",
+            "--extensions",
         ],
         Mode::Print => &[
             "-p/--print",
@@ -211,6 +219,7 @@ where
         parent_call: None,
         tools: None,
         ephemeral: false,
+        extensions: None,
         path: None,
     };
     let mut it = args;
@@ -272,6 +281,12 @@ where
                 parsed.tools = Some(value);
             }
             "--ephemeral" => parsed.ephemeral = true,
+            "--extensions" => {
+                let value = it
+                    .next()
+                    .ok_or("--extensions needs a directory (see --help)")?;
+                parsed.extensions = Some(PathBuf::from(value));
+            }
             other if other.starts_with('-') => {
                 return Err(format!("unknown flag `{other}`\n{USAGE}"));
             }
@@ -461,14 +476,15 @@ fn child_router() -> std::sync::Arc<tabit_session::ChildRouter> {
 fn skills_catalog() -> std::sync::Arc<tabit_session::skills::Skills> {
     static SKILLS: std::sync::OnceLock<std::sync::Arc<tabit_session::skills::Skills>> =
         std::sync::OnceLock::new();
-    SKILLS.get_or_init(|| {
-        // A failed `current_dir` assembles nothing anyway (the loud
-        // gate lives in `assemble_session`); here it degrades to a
-        // discovery that finds nothing.
-        let cwd = std::env::current_dir().unwrap_or_default();
-        std::sync::Arc::new(tabit_session::skills::discover(&cwd))
-    })
-    .clone()
+    SKILLS
+        .get_or_init(|| {
+            // A failed `current_dir` assembles nothing anyway (the loud
+            // gate lives in `assemble_session`); here it degrades to a
+            // discovery that finds nothing.
+            let cwd = std::env::current_dir().unwrap_or_default();
+            std::sync::Arc::new(tabit_session::skills::discover(&cwd))
+        })
+        .clone()
 }
 
 /// The tabit executable subprocess children spawn: this very binary
@@ -772,6 +788,10 @@ fn run() -> Result<i32, String> {
                 .build()
                 .map_err(|e| e.to_string())?;
             Ok(runtime.block_on(async {
+                // The extension host lives for the backend's life
+                // (item 9, task 1: boot, supervise, report on stderr;
+                // the frontend-visible catalog is task 2).
+                let _extensions = boot_extensions(&args);
                 let handle = SessionHost::spawn(session, startup_notes, wiring);
                 json::serve(
                     handle,
@@ -1176,6 +1196,39 @@ fn host_wiring(args: &Args, registry: &ModelRegistry, store: SessionStore) -> Se
     }
 }
 
+/// The extension host boot (ROADMAP item 9, task 1): launch every
+/// installed extension, handshake it, supervise for the backend's
+/// life — reports land on stderr (stdout is protocol). Children
+/// (`--parent`) never boot extensions: the host belongs to the
+/// frontend-attached process, the one place tools and hooks assemble
+/// (the dependency law — one extension host per backend, leaf
+/// children stay leaf). Must run on the serving runtime (it spawns).
+fn boot_extensions(args: &Args) -> Option<tabit_ext::supervisor::Supervisor> {
+    if args.parent.is_some() {
+        return None;
+    }
+    let root = args
+        .extensions
+        .clone()
+        .or_else(|| tabit_config::home_dir().map(|home| home.join(".tabit").join("extensions")))?;
+    let (supervisor, mut events) =
+        tabit_ext::supervisor::launch(&root, tabit_ext::supervisor::HANDSHAKE_TIMEOUT);
+    tokio::spawn(async move {
+        while let Some(event) = events.recv().await {
+            match &event.status {
+                tabit_ext::supervisor::Status::Alive => {
+                    eprintln!("extension {}: loaded", event.name)
+                }
+                tabit_ext::supervisor::Status::Dead { reason } => {
+                    eprintln!("extension {}: not running — {reason}", event.name)
+                }
+                tabit_ext::supervisor::Status::Starting => {}
+            }
+        }
+    });
+    Some(supervisor)
+}
+
 /// Resolve config/auth into a session per the args (model selection,
 /// resume target, tools, preamble). `store` is injected so tests drive
 /// a temp store instead of the repo's. The registry is the caller's
@@ -1394,6 +1447,16 @@ mod tests {
         // json × print is a parse error now (validate_mode), not a
         // run-time dispatch check.
         let conflict = args(&["--json", "-p", "hi"]).expect_err("parse rejects the combination");
+        assert!(conflict.contains("do not combine"), "{conflict}");
+    }
+
+    #[test]
+    fn the_extensions_flag_is_json_mode_only() {
+        let parsed = args(&["--json", "--extensions", "C:/tmp/ext"]).expect("valid");
+        assert_eq!(parsed.extensions, Some(PathBuf::from("C:/tmp/ext")));
+
+        let conflict =
+            args(&["-p", "hi", "--extensions", "C:/tmp/ext"]).expect_err("print mode rejects it");
         assert!(conflict.contains("do not combine"), "{conflict}");
     }
 

@@ -189,7 +189,11 @@ async fn the_skills_catalog_follows_the_session_catalog() {
             _ => None,
         })
         .collect();
-    assert_eq!(positions, vec![(1, "sessions"), (2, "skills")], "{positions:?}");
+    assert_eq!(
+        positions,
+        vec![(1, "sessions"), (2, "skills")],
+        "{positions:?}"
+    );
     std::fs::remove_dir_all(store.dir()).ok();
 
     // Empty discovery announces nothing — no empty frames.

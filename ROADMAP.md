@@ -1032,7 +1032,10 @@ assistant.
 ### 9. Extensions
 
 **DESIGN SETTLED (2026-09, the discussion record lives in
-EXTENSIONS.md); implementation not started.** The shape:
+EXTENSIONS.md); implementation started — task 1 shipped (`crates/
+tabit-ext`: discovery, the initialize/ack pipe, supervision, the
+death policy; booted by the `tabit --json` backend, reports on
+stderr until task 2's wire catalog).** The shape:
 
 - **The substrate: subprocess executables over a frozen JSONL
   extension protocol** — the subagent substrate generalized. One
@@ -1100,11 +1103,17 @@ EXTENSIONS.md); implementation not started.** The shape:
 
 **Implementation checklist (2026-09; in build order):**
 
-1. **Handshake + host plumbing** — the extension protocol frames,
-   initialize/ack, spawn/supervise (the subprocess.rs patterns),
-   dead-extension policy (mark dead + report; no mid-run respawn;
-   mounted contributions would stay by construction — none exist in
-   v1). Development rides `path:` installs throughout.
+1. **Handshake + host plumbing** — *shipped* — the extension
+   protocol frames, initialize/ack, spawn/supervise (the subprocess.rs
+   patterns — tree-kill wrapping and the stderr ring moved to
+   `tabit-ext` and are shared with the subagent bridge), the
+   dead-extension policy (mark dead + report via the supervisor's
+   event channel; no mid-run respawn; mounted contributions would
+   stay by construction — none exist in v1), `crates/tabit-ext` +
+   the `--json` boot (`--extensions <dir>` overrides the root; child
+   roles never boot extensions — one host per backend, the leaf
+   law). The death paths' test vehicle is the in-crate `ext-double`
+   behavior double. Development rides `path:` installs throughout.
 2. **Tool registration & execution** — proxy tools, conflict-free
    name→tool assembly at the host (extension-replaces-core reported
    by the backend; ext-vs-ext refuses the newcomer), the
@@ -1123,6 +1132,32 @@ EXTENSIONS.md); implementation not started.** The shape:
    (npm as plain registry HTTP; v1 scope: dependency-free packages),
    enable/disable layers, `list`/`uninstall`, the trust prompt at
    first load.
+
+**Example extensions accompany the tasks (ruled 2026-09) — each demo
+is also the offline test vehicle.** The roster, mapped to the
+checklist:
+
+1. `hello` — declares nothing; the spawn/handshake/alive smoke. The
+   death paths (exit before the ack, exit after it, handshake
+   silence, garbage) ride an in-crate behavior double rather than
+   packages.
+2. `echo` — a trivial tool plus an asking tool (proxy execution and
+   interaction forwarding); `shadow` — declares `read` (the
+   replaces-core report); a clash pair — two packages, same name (the
+   newcomer refused, the incumbent named).
+3. `gate` — the permission gate itself, moved out of core (the ruling
+   above; deleting `permission.rs` is the demo): `on::tool_call` +
+   the interaction prompt + session memory.
+4. `lmstudio` — the provider relay speaking LM Studio's **native**
+   REST API (deliberately not the OpenAI-compat endpoint LM Studio
+   also serves) behind a `providers.toml` fragment; plus a
+   skill-shipping package.
+5. `autotitle` — a run-end hook → `model_prompt` → usage tagged with
+   the extension identity (the host-API envelope's demo).
+6. The npm:/git: end-to-end; every earlier example rode `path:`.
+
+Examples live as real packages (path:-installable) or in-crate test
+doubles wherever the demonstration needs.
 
 Not in v1: prompt contributions (ruled above); the custom-prompt
 config knob and any richer build model (deferred with the

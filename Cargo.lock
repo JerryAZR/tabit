@@ -4728,6 +4728,7 @@ dependencies = [
  "rig-core",
  "serde_json",
  "tabit-config",
+ "tabit-ext",
  "tabit-protocol",
  "tabit-session",
  "tabit-tools",
@@ -4745,6 +4746,20 @@ dependencies = [
  "tokio",
  "toml",
  "url",
+]
+
+[[package]]
+name = "tabit-ext"
+version = "0.41.0"
+dependencies = [
+ "process-wrap 10.0.0",
+ "serde",
+ "serde_json",
+ "tabit-log",
+ "thiserror 2.0.20",
+ "tokio",
+ "tokio-util",
+ "windows",
 ]
 
 [[package]]
@@ -4785,7 +4800,6 @@ dependencies = [
  "futures",
  "http 1.5.0",
  "humantime",
- "process-wrap 10.0.0",
  "rig-agent",
  "rig-core",
  "rig-derive",
@@ -4793,6 +4807,7 @@ dependencies = [
  "serde_json",
  "serde_yaml",
  "tabit-config",
+ "tabit-ext",
  "tabit-log",
  "tabit-protocol",
  "thiserror 2.0.20",
@@ -4800,7 +4815,6 @@ dependencies = [
  "tokio-util",
  "tracing",
  "uuid",
- "windows",
 ]
 
 [[package]]

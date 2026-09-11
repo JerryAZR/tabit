@@ -54,6 +54,12 @@ Current workspace layout:
   contextual `#[rig_tool]`s (they read the session cwd and run token
   from the per-run `ToolContext`), erasable to DynamicTools (native
   only)
+- `crates/tabit-ext` — the extension host (ROADMAP item 9): manifest
+  discovery (`tabit.json` under the extensions root), the frozen
+  JSONL extension pipe (initialize/ack), the supervisor (launch,
+  handshake, mark-dead-and-report — no mid-run respawn); the shared
+  child-process helpers (tree-kill wrapping, the stderr ring) live
+  here and serve the subagent bridge too
 - `crates/tabit-gui` — the egui frontend (`tabit-gui` binary; the
   `tabit` launcher detach-spawns it; reducer/view contract in ROADMAP
   item 7). Its `CHANGELOG.md` is the frontend protocol's changelog —

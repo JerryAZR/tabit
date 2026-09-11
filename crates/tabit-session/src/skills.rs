@@ -95,13 +95,15 @@ pub fn discover_with_home(home: Option<&Path>, cwd: &Path) -> Skills {
         for entry in scan_skills_dir(&dir, level) {
             match entries.iter().position(|e| e.name == entry.name) {
                 Some(index) => {
-                    tracing::warn!(
-                        skill = %entry.name,
-                        kept = %entry.skill_file.display(),
-                        dropped = %entries[index].skill_file.display(),
-                        "skill name collision: last registration wins"
-                    );
-                    entries[index] = entry;
+                    if let Some(slot) = entries.get_mut(index) {
+                        tracing::warn!(
+                            skill = %entry.name,
+                            kept = %entry.skill_file.display(),
+                            dropped = %slot.skill_file.display(),
+                            "skill name collision: last registration wins"
+                        );
+                        *slot = entry;
+                    }
                 }
                 None => entries.push(entry),
             }
@@ -151,7 +153,10 @@ fn scan_into(dir: &Path, level: SkillLevel, out: &mut Vec<SkillEntry>) {
         if !meta.is_dir() {
             continue; // loose files are never skills
         }
-        if path.file_name().is_some_and(|n| n.to_string_lossy().starts_with('.')) {
+        if path
+            .file_name()
+            .is_some_and(|n| n.to_string_lossy().starts_with('.'))
+        {
             continue; // dotdirs are skipped
         }
         let skill_file = path.join("SKILL.md");
@@ -187,7 +192,9 @@ fn parse_frontmatter(content: &str) -> Result<Option<Frontmatter>, String> {
     let mut yaml = String::new();
     for line in lines {
         if line.trim_end() == "---" {
-            return serde_yaml::from_str(&yaml).map(Some).map_err(|err| err.to_string());
+            return serde_yaml::from_str(&yaml)
+                .map(Some)
+                .map_err(|err| err.to_string());
         }
         yaml.push_str(line);
         yaml.push('\n');
@@ -228,7 +235,12 @@ fn load_skill(skill_file: &Path, level: SkillLevel) -> Option<SkillEntry> {
             return None;
         }
     };
-    let skill_dir = skill_file.parent().expect("a SKILL.md path always has a parent");
+    // Sanctioned crash (AGENTS.md doctrine): a scanned SKILL.md path
+    // is `<dir>/SKILL.md` — it always has a parent directory.
+    #[allow(clippy::expect_used)]
+    let skill_dir = skill_file
+        .parent()
+        .expect("a SKILL.md path always has a parent");
     let parent_dir_name = skill_dir
         .file_name()
         .map(|name| name.to_string_lossy().into_owned())
@@ -353,12 +365,11 @@ pub async fn skill(
     name: String,
     rel_path: Option<String>,
 ) -> Result<ToolOutput, ToolExecutionError> {
-    let skills = context
-        .get::<Arc<Skills>>()
-        .cloned()
-        .ok_or_else(|| ToolExecutionError::other(
+    let skills = context.get::<Arc<Skills>>().cloned().ok_or_else(|| {
+        ToolExecutionError::other(
             "skills are not available in this session — the assembly did not discover them",
-        ))?;
+        )
+    })?;
     let entry = skills.lookup(&name).ok_or_else(|| {
         ToolExecutionError::other(format!(
             "no skill named `{name}` — available: {}",
@@ -428,7 +439,10 @@ fn footer(entry: &SkillEntry) -> String {
 /// escaping path is a model-visible error, never a read.
 fn resolve_confined(entry: &SkillEntry, rel: &str) -> Result<PathBuf, ToolExecutionError> {
     let rel_path = Path::new(rel);
-    if rel_path.is_absolute() || rel_path.components().any(|c| matches!(c, std::path::Component::ParentDir))
+    if rel_path.is_absolute()
+        || rel_path
+            .components()
+            .any(|c| matches!(c, std::path::Component::ParentDir))
     {
         return Err(ToolExecutionError::other(format!(
             "rel_path `{rel}` escapes the skill directory — reads are confined to {}",
@@ -451,14 +465,13 @@ fn resolve_confined(entry: &SkillEntry, rel: &str) -> Result<PathBuf, ToolExecut
             ))
         }
     })?;
-    let canonical_base =
-        std::fs::canonicalize(&entry.base_dir).map_err(|err| {
-            ToolExecutionError::other(format!(
-                "skill `{}` is no longer readable at {}: {err}",
-                entry.name,
-                entry.base_dir.display()
-            ))
-        })?;
+    let canonical_base = std::fs::canonicalize(&entry.base_dir).map_err(|err| {
+        ToolExecutionError::other(format!(
+            "skill `{}` is no longer readable at {}: {err}",
+            entry.name,
+            entry.base_dir.display()
+        ))
+    })?;
     if !canonical.starts_with(&canonical_base) {
         return Err(ToolExecutionError::other(format!(
             "rel_path `{rel}` escapes the skill directory through a symlink — reads are \

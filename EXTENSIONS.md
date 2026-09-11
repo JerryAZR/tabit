@@ -1,12 +1,14 @@
 # EXTENSIONS.md
 
 The extension development record. **The substrate is ruled (2026-09,
-below); no extension surface is implemented yet** — the entries are
-the design the implementation will build against. Every entry names
-the decision, where it is recorded, and what it implies for extension
-authors. Entries record **existing design decisions**; nothing about
-how a particular extension is written leaks in — the contract is the
-protocol.
+below) and its task-1 foundation is implemented — `crates/tabit-ext`:
+discovery, the initialize/ack handshake, supervision, the death
+policy.** Tool, hook, and host-service frames are not implemented
+yet; they land with their checklist tasks (ROADMAP item 9). Every
+entry names the decision, where it is recorded, and what it implies
+for extension authors. Entries record **existing design decisions**;
+nothing about how a particular extension is written leaks in — the
+contract is the protocol.
 
 Rules of the ledger:
 

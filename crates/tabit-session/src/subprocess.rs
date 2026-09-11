@@ -32,6 +32,7 @@ use rig_agent::completion::Message;
 use std::collections::VecDeque;
 use std::path::PathBuf;
 use std::sync::{Arc, Mutex};
+use tabit_ext::process::{spawn_stderr_ring, wrap_command};
 use tabit_protocol::{
     ClientFrame, EventFrame, ModelSelection, PROTOCOL_VERSION, ServerFrame, SessionCommand,
     SessionEvent, StreamId,
@@ -48,9 +49,6 @@ const REAP_GRACE: std::time::Duration = std::time::Duration::from_secs(5);
 /// The handshake window: a child that cannot acknowledge `initialize`
 /// in this time is dead on arrival — killed at spawn, loudly.
 const HANDSHAKE_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(30);
-
-/// The stderr ring's depth — the crash report's tail.
-const STDERR_RING: usize = 200;
 
 /// Shapes one subprocess child before the spawn: the child-role flags
 /// as builder knobs. Everything omitted inherits the default
@@ -246,20 +244,7 @@ impl SubprocessBuilder {
         });
 
         // The stderr ring — the crash report's tail.
-        let ring = Arc::new(Mutex::new(VecDeque::<String>::new()));
-        {
-            let ring = ring.clone();
-            tokio::spawn(async move {
-                let mut lines = BufReader::new(stderr).lines();
-                while let Ok(Some(line)) = lines.next_line().await {
-                    let mut ring = crate::lock::lock(&ring);
-                    if ring.len() == STDERR_RING {
-                        ring.pop_front();
-                    }
-                    ring.push_back(line);
-                }
-            });
-        }
+        let ring = spawn_stderr_ring(stderr);
 
         // The frame pump: handshake frames consumed here, stamped
         // frames forwarded as-is and learned, everything mirrored to
@@ -568,49 +553,4 @@ fn engine_usage(usage: tabit_protocol::Usage) -> rig_agent::completion::Usage {
         cache_creation_input_tokens: usage.cache_creation_input_tokens,
         ..Default::default()
     }
-}
-
-/// Build the wrapped command: a Job Object on Windows (with
-/// CREATE_NO_WINDOW — no console flash), a process group elsewhere —
-/// `kill` reclaims the child's whole tree (its bash descendants must
-/// not orphan).
-#[cfg(windows)]
-fn wrap_command(
-    exe: &std::path::Path,
-    args: &[String],
-    cwd: &std::path::Path,
-) -> process_wrap::tokio::CommandWrap {
-    let mut command = tokio::process::Command::new(exe);
-    command
-        .args(args)
-        .current_dir(cwd)
-        .stdin(std::process::Stdio::piped())
-        .stdout(std::process::Stdio::piped())
-        .stderr(std::process::Stdio::piped());
-    let mut wrap: process_wrap::tokio::CommandWrap = command.into();
-    // The CreationFlags shim is the one way flags survive the JobObject
-    // wrapper (which sets its own via CREATE_SUSPENDED).
-    wrap.wrap(process_wrap::tokio::CreationFlags(
-        windows::Win32::System::Threading::PROCESS_CREATION_FLAGS(0x0800_0000),
-    ));
-    wrap.wrap(process_wrap::tokio::JobObject);
-    wrap
-}
-
-#[cfg(not(windows))]
-fn wrap_command(
-    exe: &std::path::Path,
-    args: &[String],
-    cwd: &std::path::Path,
-) -> process_wrap::tokio::CommandWrap {
-    let mut command = tokio::process::Command::new(exe);
-    command
-        .args(args)
-        .current_dir(cwd)
-        .stdin(std::process::Stdio::piped())
-        .stdout(std::process::Stdio::piped())
-        .stderr(std::process::Stdio::piped());
-    let mut wrap: process_wrap::tokio::CommandWrap = command.into();
-    wrap.wrap(process_wrap::tokio::ProcessGroup::leader());
-    wrap
 }

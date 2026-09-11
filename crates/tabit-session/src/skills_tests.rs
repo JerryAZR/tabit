@@ -44,11 +44,9 @@ fn frontmatter_reads_name_and_description() {
 
 #[test]
 fn frontmatter_tolerates_a_bom_and_crlf() {
-    let parsed = parse_frontmatter(
-        "---\r\nname: lint\r\ndescription: Lint.\r\n---\r\nbody",
-    )
-    .expect("parses")
-    .expect("present");
+    let parsed = parse_frontmatter("---\r\nname: lint\r\ndescription: Lint.\r\n---\r\nbody")
+        .expect("parses")
+        .expect("present");
     assert_eq!(parsed.name.as_deref(), Some("lint"));
 }
 
@@ -58,7 +56,10 @@ fn frontmatter_ignores_unknown_fields_and_absence_is_none() {
         .expect("parses")
         .expect("present");
     assert_eq!(parsed.description, None, "unknown fields ignored");
-    assert_eq!(parse_frontmatter("# no frontmatter\nbody").expect("parses"), None);
+    assert_eq!(
+        parse_frontmatter("# no frontmatter\nbody").expect("parses"),
+        None
+    );
 }
 
 #[test]
@@ -91,14 +92,42 @@ fn the_ladder_merges_with_the_ruled_precedence() {
     let home = temp_dir("ladder-home");
     let cwd = temp_dir("ladder-cwd");
     // The same name in all four sources: the last scanned wins.
-    skill_dir(&home.join(".agents/skills"), "shared", "description: agents-home\n", "v1");
-    skill_dir(&home.join(".tabit/skills"), "shared", "description: tabit-home\n", "v2");
-    skill_dir(&cwd.join(".agents/skills"), "shared", "description: agents-cwd\n", "v3");
-    skill_dir(&cwd.join(".tabit/skills"), "shared", "description: tabit-cwd\n", "v4");
+    skill_dir(
+        &home.join(".agents/skills"),
+        "shared",
+        "description: agents-home\n",
+        "v1",
+    );
+    skill_dir(
+        &home.join(".tabit/skills"),
+        "shared",
+        "description: tabit-home\n",
+        "v2",
+    );
+    skill_dir(
+        &cwd.join(".agents/skills"),
+        "shared",
+        "description: agents-cwd\n",
+        "v3",
+    );
+    skill_dir(
+        &cwd.join(".tabit/skills"),
+        "shared",
+        "description: tabit-cwd\n",
+        "v4",
+    );
     // Different names merge, not replace.
-    skill_dir(&home.join(".agents/skills"), "home-only", "description: kept\n", "x");
+    skill_dir(
+        &home.join(".agents/skills"),
+        "home-only",
+        "description: kept\n",
+        "x",
+    );
     let skills = discover_with_home(Some(&home), &cwd);
-    assert_eq!(skills.lookup("shared").expect("found").description, "tabit-cwd");
+    assert_eq!(
+        skills.lookup("shared").expect("found").description,
+        "tabit-cwd"
+    );
     assert_eq!(
         skills.lookup("shared").expect("found").level,
         SkillLevel::Workspace
@@ -108,16 +137,27 @@ fn the_ladder_merges_with_the_ruled_precedence() {
     assert_eq!(wire.len(), 2);
     let shared = wire.iter().find(|s| s.name == "shared").expect("shared");
     assert_eq!(shared.level, "workspace");
-    let home_only = wire.iter().find(|s| s.name == "home-only").expect("home-only");
+    let home_only = wire
+        .iter()
+        .find(|s| s.name == "home-only")
+        .expect("home-only");
     assert_eq!(home_only.level, "user");
 }
 
 #[test]
 fn a_missing_home_scans_the_cwd_sources_only() {
     let cwd = temp_dir("no-home");
-    skill_dir(&cwd.join(".agents/skills"), "only", "description: one\n", "body");
+    skill_dir(
+        &cwd.join(".agents/skills"),
+        "only",
+        "description: one\n",
+        "body",
+    );
     let skills = discover_with_home(None, &cwd);
-    assert_eq!(skills.lookup("only").expect("found").level, SkillLevel::Workspace);
+    assert_eq!(
+        skills.lookup("only").expect("found").level,
+        SkillLevel::Workspace
+    );
 }
 
 // ---- discovery: the scan shape
@@ -129,13 +169,29 @@ fn skill_dirs_are_leaves_dotdirs_and_loose_files_are_not_skills() {
     // A plain skill.
     skill_dir(&root, "plain", "description: plain\n", "body");
     // A skill nested under a non-skill directory — found (recursive).
-    skill_dir(&root.join("group/nested"), "deep", "description: deep\n", "body");
+    skill_dir(
+        &root.join("group/nested"),
+        "deep",
+        "description: deep\n",
+        "body",
+    );
     // A directory containing SKILL.md does not recurse deeper: the
     // skill inside the skill is NOT discovered.
-    write(&root.join("outer/SKILL.md"), "---\ndescription: outer\n---\nbody");
-    write(&root.join("outer/inner/SKILL.md"), "---\ndescription: inner\n---\nbody");
+    write(
+        &root.join("outer/SKILL.md"),
+        "---\ndescription: outer\n---\nbody",
+    );
+    write(
+        &root.join("outer/inner/SKILL.md"),
+        "---\ndescription: inner\n---\nbody",
+    );
     // A dotdir skill is skipped.
-    skill_dir(&root.join(".hidden"), "secret", "description: nope\n", "body");
+    skill_dir(
+        &root.join(".hidden"),
+        "secret",
+        "description: nope\n",
+        "body",
+    );
     // A loose .md file is never a skill.
     write(&root.join("loose.md"), "---\ndescription: nope\n---\nbody");
     let skills = discover_with_home(None, &cwd);
@@ -152,9 +208,15 @@ fn malformed_skills_skip_without_failing_discovery() {
     let root = cwd.join(".agents/skills");
     skill_dir(&root, "good", "description: good\n", "body");
     // Broken YAML.
-    write(&root.join("broken/SKILL.md"), "---\nname: [unclosed\n---\nbody");
+    write(
+        &root.join("broken/SKILL.md"),
+        "---\nname: [unclosed\n---\nbody",
+    );
     // No description — dropped.
-    write(&root.join("silent/SKILL.md"), "---\nname: silent\n---\nbody");
+    write(
+        &root.join("silent/SKILL.md"),
+        "---\nname: silent\n---\nbody",
+    );
     let skills = discover_with_home(None, &cwd);
     assert!(skills.lookup("good").is_some());
     assert!(skills.lookup("broken").is_none());
@@ -166,7 +228,12 @@ fn malformed_skills_skip_without_failing_discovery() {
 #[test]
 fn the_catalog_escapes_and_empty_renders_nothing() {
     let cwd = temp_dir("render");
-    skill_dir(&cwd.join(".tabit/skills"), "xss", "description: <injection> & such\n", "body");
+    skill_dir(
+        &cwd.join(".tabit/skills"),
+        "xss",
+        "description: <injection> & such\n",
+        "body",
+    );
     let skills = discover_with_home(None, &cwd);
     let catalog = skills.render_catalog();
     assert!(catalog.contains("<name>xss</name>"), "{catalog}");
@@ -188,7 +255,12 @@ fn context_for(skills: &Skills) -> ToolContext {
 #[tokio::test]
 async fn the_tool_returns_the_body_with_the_base_dir_footer() {
     let cwd = temp_dir("tool-body");
-    skill_dir(&cwd.join(".tabit/skills"), "lint", "description: lint\n", "# the skill body");
+    skill_dir(
+        &cwd.join(".tabit/skills"),
+        "lint",
+        "description: lint\n",
+        "# the skill body",
+    );
     let skills = discover_with_home(None, &cwd);
     let mut context = context_for(&skills);
     let output = skill(&mut context, "lint".to_string(), None)
@@ -202,14 +274,23 @@ async fn the_tool_returns_the_body_with_the_base_dir_footer() {
 #[tokio::test]
 async fn the_tool_lists_a_directory_rel_path() {
     let cwd = temp_dir("tool-list");
-    let dir = skill_dir(&cwd.join(".tabit/skills"), "pack", "description: pack\n", "body");
+    let dir = skill_dir(
+        &cwd.join(".tabit/skills"),
+        "pack",
+        "description: pack\n",
+        "body",
+    );
     write(&dir.join("scripts/run.py"), "print('hi')");
     write(&dir.join("references/a.md"), "a");
     let skills = discover_with_home(None, &cwd);
     let mut context = context_for(&skills);
-    let output = skill(&mut context, "pack".to_string(), Some("scripts".to_string()))
-        .await
-        .expect("runs");
+    let output = skill(
+        &mut context,
+        "pack".to_string(),
+        Some("scripts".to_string()),
+    )
+    .await
+    .expect("runs");
     let text = output.render().to_string();
     assert!(text.contains("run.py"), "{text}");
     assert!(!text.contains("a.md"), "direct entries only: {text}");
@@ -218,11 +299,20 @@ async fn the_tool_lists_a_directory_rel_path() {
 #[tokio::test]
 async fn escapes_are_refused_with_nothing_read() {
     let cwd = temp_dir("tool-escape");
-    skill_dir(&cwd.join(".tabit/skills"), "safe", "description: safe\n", "body");
+    skill_dir(
+        &cwd.join(".tabit/skills"),
+        "safe",
+        "description: safe\n",
+        "body",
+    );
     write(&cwd.join("outside.txt"), "secret");
     let skills = discover_with_home(None, &cwd);
     let mut context = context_for(&skills);
-    for bad in ["../outside.txt", "a/../../outside.txt", "C:/Windows/system32"] {
+    for bad in [
+        "../outside.txt",
+        "a/../../outside.txt",
+        "C:/Windows/system32",
+    ] {
         let error = skill(&mut context, "safe".to_string(), Some(bad.to_string()))
             .await
             .expect_err("refused");
@@ -233,7 +323,12 @@ async fn escapes_are_refused_with_nothing_read() {
 #[tokio::test]
 async fn a_symlink_escape_is_refused_at_read_time() {
     let cwd = temp_dir("tool-symlink");
-    let dir = skill_dir(&cwd.join(".tabit/skills"), "linked", "description: l\n", "body");
+    let dir = skill_dir(
+        &cwd.join(".tabit/skills"),
+        "linked",
+        "description: l\n",
+        "body",
+    );
     write(&cwd.join("outside.txt"), "secret");
     // Windows without developer mode cannot create symlinks; a
     // junction needs no privilege and serves the same escape.
@@ -254,16 +349,25 @@ async fn a_symlink_escape_is_refused_at_read_time() {
     }
     let skills = discover_with_home(None, &cwd);
     let mut context = context_for(&skills);
-    let error = skill(&mut context, "linked".to_string(), Some("leak/outside.txt".to_string()))
-        .await
-        .expect_err("the symlink escape is refused");
+    let error = skill(
+        &mut context,
+        "linked".to_string(),
+        Some("leak/outside.txt".to_string()),
+    )
+    .await
+    .expect_err("the symlink escape is refused");
     assert!(error.to_string().contains("symlink"), "{error}");
 }
 
 #[tokio::test]
 async fn an_unknown_name_lists_what_exists() {
     let cwd = temp_dir("tool-unknown");
-    skill_dir(&cwd.join(".tabit/skills"), "known", "description: k\n", "body");
+    skill_dir(
+        &cwd.join(".tabit/skills"),
+        "known",
+        "description: k\n",
+        "body",
+    );
     let skills = discover_with_home(None, &cwd);
     let mut context = context_for(&skills);
     let error = skill(&mut context, "nope".to_string(), None)

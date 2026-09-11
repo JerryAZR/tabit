@@ -370,7 +370,13 @@ async fn aborting_the_parent_returns_promptly_and_the_child_flushes_its_terminal
     let parent_cwd = test_dir("abort-parent");
     let store = SessionStore::new(test_dir("abort-store"));
     let router = ChildRouter::shared();
-    let parent = subprocess_parent(&store, &parent_cwd, router.clone(), "park on the model", false);
+    let parent = subprocess_parent(
+        &store,
+        &parent_cwd,
+        router.clone(),
+        "park on the model",
+        false,
+    );
     let mut handle = host(&store, router, parent);
     let parent_id = handle.info().session_id.clone();
 

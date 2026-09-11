@@ -1,0 +1,49 @@
+[package]
+name = "tabit-ext"
+version.workspace = true
+edition.workspace = true
+license = "MIT"
+description = "Tabit extension host: subprocess extensions over the frozen JSONL pipe."
+
+[lints]
+workspace = true
+
+[lib]
+name = "tabit_ext"
+path = "src/lib.rs"
+doctest = true
+
+[dependencies]
+# Tree-kill wrapping for every child the host spawns (extensions, and
+# the subagent bridge's children — the helper is shared from here): a
+# Job Object on Windows / a process group elsewhere, so killing a
+# child reclaims its descendants too.
+process-wrap = { version = "10", default-features = false, features = [
+    "tokio1",
+    "creation-flags",
+    "job-object",
+    "process-group",
+] }
+serde = { workspace = true, features = ["derive"] }
+serde_json = { workspace = true }
+tabit-log = { path = "../tabit-log", version = "0.41.0" }
+thiserror = { workspace = true }
+tokio = { workspace = true, features = [
+    "io-util",
+    "macros",
+    "process",
+    "rt",
+    "sync",
+    "time",
+] }
+tokio-util = { version = "0.7", default-features = false }
+
+# The CreationFlags shim's type — version-matched to process-wrap's own
+# windows dependency so they are the same type.
+[target.'cfg(windows)'.dependencies]
+windows = { version = "0.62.2", default-features = false, features = [
+    "Win32_System_Threading",
+] }
+
+[dev-dependencies]
+tokio = { workspace = true, features = ["rt-multi-thread", "macros", "time"] }
