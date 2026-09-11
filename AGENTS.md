@@ -29,6 +29,12 @@ Current workspace layout:
 - `crates/tabit-protocol` — the frontend protocol vocabulary (commands,
   stamped events, handshake frames; `FRONTEND.md` is the contract)
 - `crates/tabit-config` — provider/model configuration (see `ROADMAP.md`)
+- `crates/tabit-log` — the durable-conversation layer between
+  providers and agents: the session log (the entry vocabulary and
+  tree, format-versioned), the write-behind writer, the parser, the
+  context manager (the resident tree + the model-facing history
+  view), the delta-token regime compaction reads — engine-free,
+  consumed by rig-agent and tabit-session
 - `crates/tabit-session` — persistent sessions over the outer loop (native
   only: filesystem-backed; the rig crates keep wasm support), the
   compaction box (`src/compaction/`: the pass machinery, the doors, the

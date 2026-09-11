@@ -1037,12 +1037,32 @@ assistant.
 - Settings surface: layered config (user > workspace > flags) already partly
   from item 1; extensions register tools, hooks, and prompt contributions.
 - **Session-scoped extension memory** (shape designed here, deferred from
-  the subagent rulings): generic state a tool or extension registers,
-  shareable with subagent sessions by handle; the permission gate's
-  "Always allow" set is the first consumer (today the ad-hoc
-  `PermissionMemory`). Open rulings: entry keying (typed vs named) and
-  the durability split (session-scoped state in the map; "always allow
-  globally" belongs to user config).
+  the subagent rulings): generic state a tool or extension registers;
+  the permission gate's "Always allow" set is the first consumer (today
+  the ad-hoc `PermissionMemory`). Open rulings: entry keying (typed vs
+  named) and the durability split (session-scoped state in the map;
+  "always allow globally" belongs to user config). **Cross-process
+  sharing is ruled out (2026-09, post-review): subagent sessions are
+  subprocesses — handles cannot cross the boundary, and no core
+  machinery will try. An extension needing shared state between parent
+  and subagent implements it itself via files or env vars.**
+- **The permission gate moves out of the core into an extension
+  package when extensions land (ruled 2026-09).** Until then it stays
+  in core as the interaction prompts' consumer; its mount
+  (`crates/tabit/src/main.rs`, the hook surface) is the door it leaves
+  through — see EXTENSIONS.md.
+- **Opening questions from the 2026-09 architecture review** (the
+  first agenda of the design discussion, recorded so they are not
+  rediscovered): capability carriage for extension tools (a generic
+  registration path vs state captured in the extension's own
+  `DynamicTool` closures — today every capability is a hardcoded
+  builder-field/session-field/insert triple); hook composition (the
+  priority law is per-stack with no merge surface, and
+  `on::tool_result` has no closure registration — extensions are the
+  consumer that arrives with both needs); tool-name precedence
+  (`ToolSet` warns and replaces on a duplicate name — layered
+  settings need a namespace or precedence answer, designed once at
+  registration).
 
 ### 10. Prompt caching (required before release)
 

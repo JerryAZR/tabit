@@ -486,31 +486,17 @@ fn filter_child_tools(
     tools: Vec<rig_agent::tool::DynamicTool>,
     spec: &str,
 ) -> Result<Vec<rig_agent::tool::DynamicTool>, String> {
-    let wanted: Vec<&str> = spec
+    // Spec splitting is the CLI's; the filter itself is the framework
+    // home's one implementation (subagent::filter_tools — the same
+    // filter the `subagent` tool's allow-list arg rides).
+    let wanted: Vec<String> = spec
         .split(',')
         .map(str::trim)
         .filter(|s| !s.is_empty())
+        .map(str::to_string)
         .collect();
-    let mut chosen = Vec::with_capacity(wanted.len());
-    let mut missing = Vec::new();
-    for name in &wanted {
-        match tools.iter().find(|tool| tool.name() == *name) {
-            Some(tool) => chosen.push(tool.clone()),
-            None => missing.push(name.to_string()),
-        }
-    }
-    if !missing.is_empty() {
-        return Err(format!(
-            "--tools: unknown tools {} — this child offers: {}",
-            missing.join(", "),
-            tools
-                .iter()
-                .map(|tool| tool.name())
-                .collect::<Vec<_>>()
-                .join(", ")
-        ));
-    }
-    Ok(chosen)
+    tabit_session::subagent::filter_tools(&tools, &wanted)
+        .map_err(|error| format!("--tools: {error}"))
 }
 
 fn assemble_session(
@@ -554,11 +540,12 @@ fn assemble_session(
     .map_err(|e| e.to_string())?
     .preamble(preamble)
     .model_factory(registry.factory())
-    // The dev-time permission gate, mounted by the assembly (the
-    // tool-gate seam): session-scoped "Always allow" memory captured
-    // per session build, the hub handed to each run's gate. Deleting
-    // the gate before release is deleting permission.rs and this one
-    // mount (EXTENSIONS.md).
+    // The dev-time permission gate, mounted by the assembly through
+    // the hook surface (closure registration; the gate asks via
+    // ctx.interaction()): session-scoped "Always allow" memory
+    // captured per session build. It stays in core until extensions
+    // land — the interaction prompts' consumer — then moves out into
+    // an extension package through this same mount (EXTENSIONS.md).
     .hooks(tabit_session::permission_gate(
         tabit_session::PermissionMemory::default(),
     ))

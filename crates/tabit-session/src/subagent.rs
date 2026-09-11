@@ -305,10 +305,12 @@ fn parse_selection(
 #[path = "subagent_tests.rs"]
 mod tests;
 
-/// Filter the default toolset down to an allow-list. An unknown name
-/// is a loud error, not a silent drop — a typo'd allow-list that
-/// quietly empties the toolset would look like a broken child.
-fn filter_tools(
+/// Filter a toolset down to an allow-list of names — the one
+/// implementation of the concern (the `subagent` tool's `tools` arg
+/// and the CLI's `--tools` flag both ride it). An unknown name is a
+/// loud error, not a silent drop — a typo'd allow-list that quietly
+/// empties the toolset would look like a broken child.
+pub fn filter_tools(
     defaults: &[DynamicTool],
     allow: &[String],
 ) -> Result<Vec<DynamicTool>, ToolExecutionError> {

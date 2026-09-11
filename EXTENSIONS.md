@@ -39,9 +39,11 @@ Implications:
   context-carriage when a consumer exists — pause points stay
   enumerable (ENGINE.md lists them), and adding one is a design
   event, not a freedom.
-- The capability type lives in tabit-session today. It moves down a
-  crate only if a rig-level host needs it — dependency direction is
-  architecture law, not license law, but it still points one way.
+- The capability type lives in rig-agent
+  (`crates/rig-agent/src/tool/interaction.rs`) — one crate below the
+  session layer, reachable by every hook and tool site. Dependency
+  direction is architecture law, not license law, but it still points
+  one way.
 
 ## Nothing may kill a batch (2026-08)
 
@@ -84,42 +86,49 @@ Implications:
   extension's.
 
 ## The permission system is a placeholder; extensions are its
-replacement (2026-08)
+replacement (2026-08; fate sharpened 2026-09)
 
 Ruled: the core ships a basic permission gate only to test the
 interaction path — an ask-set of exactly `bash`, "Always allow" as
-session memory (never persisted, no config write-back). When the
-extension system lands, the real permission system is an extension:
-hooks over the same seams, exactly like `RecorderHook` is today (our
-own components are first-party hook sets, not privileged). The
-deletable surface is the policy; the hub, the wire shapes, and the
-capability are permanent infrastructure the extension inherits.
+session memory (never persisted, no config write-back). It stays in
+the core until the extension system lands, as the interaction
+prompts' consumer (2026-09: the interaction path needs a first-party
+consumer to stay honest). When extensions land, the gate **moves out
+of the core into an extension package** — hooks over the same seams,
+exactly like `RecorderHook` is today (our own components are
+first-party hook sets, not privileged). The deletable surface is the
+policy; the hub, the wire shapes, and the capability are permanent
+infrastructure the extension inherits.
 
-## Tool-call policy mounts through the tool-gate seam (2026-08)
+## Tool-call policy mounts through the hook surface (2026-08; seam
+replaced by the hook-surface round the same month)
 
-Ruled (the permission-leak review): the core's interaction path is
-generic— it routes responses by id and knows no asker's vocabulary
-or state. Tool-call policy (the dev-time permission gate today, the
-real permission system later) is **assembly-mounted**:
-`SessionBuilder::tool_gate(factory)` builds the gate per run with the
-session's interaction hub; the binary provides the factory, a captured
-memory makes policy state session-scoped, and the core mounts
-whatever arrives beside the recorder without naming a type
-(`gate.rs`— `ToolGate` is dyn-compatible because the engine's
-`AgentHook` is not). Deleting the dev-time gate before release is
-deleting `permission.rs` and the one assembly mount— through the
-same door the real system enters.
+Ruled (the permission-leak review), then re-pointed when the
+hook-surface round replaced the original gate factory with closure
+registration: the core's interaction path is generic — it routes
+responses by id and knows no asker's vocabulary or state. Tool-call
+policy (the dev-time permission gate today) is **assembly-mounted**:
+`SessionBuilder::hooks(HookStack)` (`crates/tabit-session/src/
+session/builder.rs`) — the binary registers closure hooks
+(`HookStack::hook(spec, on::tool_call(...))` is the pre-call gate
+point; `on::tool_call` is the closure surface's one event point
+today, the post-result point having no closure registration yet),
+and the policy's state (session-scoped grants) is captured in the
+closure at mount. The gate asks through the hook context's
+interaction capability (`ctx.interaction()` — the same typed
+capability tool bodies read). The core mounts whatever arrives
+without naming a type. Deleting or replacing the dev-time gate is
+deleting `permission.rs` and the one assembly mount
+(`crates/tabit/src/main.rs`) — the same door any policy enters.
 
 Implications:
 
-- An extension providing tool-call policy implements `ToolGate` and is
-  mounted by the assembly; it never patches the session or the engine
-  hook chain.
-- Policy state (grants, denials) is the gate's own— held in the
-  factory's captured memory, runtime-only (see the interaction-state
-  entry below).
-- The gate may ask through the hub or decide statically; skipping with
-  an explanatory message is the in-band denial channel.
+- Policy registers through the hook surface; it never patches the
+  session or the engine.
+- Policy state (grants, denials) is the closure's own — captured,
+  runtime-only (see the interaction-state entry below).
+- A policy may ask through the hub or decide statically; skipping
+  with an explanatory message is the in-band denial channel.
 
 ## Interaction state is runtime-only (2026-08)
 
