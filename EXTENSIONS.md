@@ -51,9 +51,15 @@ capabilities (2026-09)
 The manifest (`tabit.json`) carries install-time facts only — name,
 version, entry command + args, one-line description. Capabilities are
 declared live at the handshake (initialize → ack: tools with
-name/description/schema, hook points, prompt contributions) — the
-initialize/ack pattern every tabit edge already uses. What the
-process serves is what it declared; no schema file drifts.
+name/description/schema, hook points) — the initialize/ack pattern
+every tabit edge already uses. What the process serves is what it
+declared; no schema file drifts. **Prompt contributions are not a v1
+capability (ruled 2026-09): nothing consumes them, and the prompt
+build phase may itself be refactored (a custom-prompt knob, richer
+builders) — an extension mounting now could be thrown away with that
+refactor. They join when the build-phase decision lands with a
+consumer; the byte-stability law below already governs whatever
+that future is.**
 
 ## Model-facing names are flat; identity is the pair (2026-09)
 

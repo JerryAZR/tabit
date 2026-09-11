@@ -1044,8 +1044,10 @@ EXTENSIONS.md); implementation not started.** The shape:
   code, full OS rights, no sandbox; the load-time trust prompt (pi's
   project-trust family) is the gate.
 - **Declaration**: `tabit.json` for install facts; capabilities
-  declared live at the handshake (initialize/ack — tools, hooks,
-  prompt contributions).
+  declared live at the handshake (initialize/ack — tools, hooks).
+  **Prompt contributions are not a v1 capability** (ruled 2026-09):
+  nothing consumes them and the build phase may be refactored — they
+  join when that decision lands with a consumer.
 - **Naming**: model-facing names are flat (the declared name, no
   prefix); identity is the (extension, tool) pair — the key for
   accounting, the load-time conflict report, and the wire catalog
@@ -1073,8 +1075,8 @@ EXTENSIONS.md); implementation not started.** The shape:
   declarative — generic renderers over tagged `details` cargo; every
   extension degrades to `content` rendering everywhere).
 - Settings surface: layered config (user > workspace > flags)
-  already partly from item 1; extensions register tools, hooks, and
-  prompt contributions through the surfaces above.
+  already partly from item 1; extensions register tools and hooks
+  through the surfaces above.
 - **Session-scoped extension memory — dissolved by the substrate
   (2026-09).** Extension state lives in the extension's own process;
   durable state is tool results (the interaction-state ruling);
@@ -1095,6 +1097,37 @@ EXTENSIONS.md); implementation not started.** The shape:
   capability-carriage question is dissolved by the substrate
   (extension tools are proxies; their state never enters
   `ToolContext`).
+
+**Implementation checklist (2026-09; in build order):**
+
+1. **Handshake + host plumbing** — the extension protocol frames,
+   initialize/ack, spawn/supervise (the subprocess.rs patterns),
+   dead-extension policy (mark dead + report; no mid-run respawn;
+   mounted contributions would stay by construction — none exist in
+   v1). Development rides `path:` installs throughout.
+2. **Tool registration & execution** — proxy tools, conflict-free
+   name→tool assembly at the host (extension-replaces-core reported
+   by the backend; ext-vs-ext refuses the newcomer), the
+   `extensions_available` catalog with provenance (protocol bump),
+   interaction forwarding (service zero — asking tools need it).
+3. **Hook registration & execution** — pipe-forwarded hook events
+   plus the engine-side work above (`on::tool_result` closure
+   registration, stack merge).
+4. **Scanning** — enabled-extension discovery over the config
+   layers; skills symlinks; `providers.toml` fragment merge at
+   config load (user config wins).
+5. **Host APIs** — the request/response envelope and `model_prompt`
+   (capped, complete-only, usage tagged with the extension
+   identity).
+6. **Install & management** — `tabit install npm:/git:/path:`
+   (npm as plain registry HTTP; v1 scope: dependency-free packages),
+   enable/disable layers, `list`/`uninstall`, the trust prompt at
+   first load.
+
+Not in v1: prompt contributions (ruled above); the custom-prompt
+config knob and any richer build model (deferred with the
+build-phase decision); WASM (the alternative with a felt-need
+trigger).
 
 ### 10. Prompt caching (required before release)
 
