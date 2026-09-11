@@ -55,7 +55,12 @@ version, entry command + args, one-line description. Capabilities are
 declared live at the handshake (initialize → ack: tools with
 name/description/schema, hook points) — the initialize/ack pattern
 every tabit edge already uses. What the process serves is what it
-declared; no schema file drifts. **Prompt contributions are not a v1
+declared; no schema file drifts. **The manifest is also the home for
+any future host-required metadata (ruled 2026-09): when the host
+needs a new install-time fact, it becomes a manifest field — not a
+second config file. Refinements to the package shape (e.g. one
+extension declaring multiple subprocesses) are deferred; v1 is one
+entry command per package.** **Prompt contributions are not a v1
 capability (ruled 2026-09): nothing consumes them, and the prompt
 build phase may itself be refactored (a custom-prompt knob, richer
 builders) — an extension mounting now could be thrown away with that
