@@ -1119,6 +1119,23 @@ stderr until task 2's wire catalog).** The shape:
    by the backend; ext-vs-ext refuses the newcomer), the
    `extensions_available` catalog with provenance (protocol bump),
    interaction forwarding (service zero — asking tools need it).
+   **The developer surface lands with it (ruled 2026-09): a small
+   Rust SDK** (`tabit-ext-sdk` — the dispatcher owning the pipe
+   loop: ack, tool-call dispatch to bodies, result serialization,
+   hook-event delivery; sync and boring by design, no lifecycle
+   machinery). The SDK **hand-rolls its frames, sharing no code with
+   the host** — it is the protocol doc's reference consumer (if it
+   can be written from the doc, any language qualifies; shared serde
+   types would prove nothing the frozen wire doesn't already). The
+   task-2 examples (`echo`, `shadow`, the clash pair) build on it —
+   they demo the developer experience, and the host's tests spawning
+   SDK-built examples make both protocol sides validate each other;
+   `ext-double` stays hand-rolled forever (the any-language proof).
+   Rust SDK first because it is ownable and in-workspace testable;
+   a JS/TS SDK joins with the npm channel (task 6). The extension
+   **template** (fork → develop → build → publish: `tabit.json`,
+   skeleton `main.rs`, release workflow, README) is `echo`
+   generalized — in-workspace until task 6, then its own repo.
 3. **Hook registration & execution** — pipe-forwarded hook events
    plus the engine-side work above (`on::tool_result` closure
    registration, stack merge).
