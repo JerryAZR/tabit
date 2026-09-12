@@ -86,7 +86,13 @@ seeing a prefix).
 **One name, one tool, resolved at host assembly.** The host builds
 the model-facing toolset as a name→tool map after all handshakes and
 hands the engine a conflict-free set by construction — the engine's
-duplicate-name shadowing never engages. Conflict policy (pi's rule):
+duplicate-name shadowing never engages. **Handshakes run
+concurrently; registration is ordered (ruled 2026-09): the assembly
+iterates the scan's alphabetical order over a complete snapshot, not
+completion order — so which tool wins or is refused on a collision
+is deterministic regardless of which extension acked first** (the
+scan sorts by directory; the directory is the identity). Conflict
+policy (pi's rule):
 
 - Extension vs. core, same name: **the extension replaces**, and the
   backend makes the replacement clear — a load-time report on the
