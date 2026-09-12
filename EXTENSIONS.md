@@ -46,11 +46,15 @@ Boundaries and reasons:
   that cross the pipe pay an IPC roundtrip — local-pipe latency,
   noise against second-long tool calls; a hung extension during a
   hook is the reaper's concern, not the session's.
-- **The pipe is one lane (task 2): calls to one extension serialize
-  in arrival order.** An extension wanting parallelism executes it
-  inside its own process; a multiplexing frame joins when a consumer
-  exists. A death drains the lane — no proxy call ever hangs on a
-  dead extension.
+- **Calls run in parallel; the wire is a router pair per extension
+  (ruled 2026-09).** The proxy (the tool adapter) enqueues its
+  request on the extension's outbound lane — the writer serializes
+  frames onto stdin, and sending is cheap — and awaits its result
+  from the inbound side, tagged by `call_id`: the extension may run
+  calls concurrently and return them in any order. A death answers
+  every waiting adapter with the failure — no call hangs on a dead
+  extension. Result deltas, when a consumer exists, ride the same
+  inbound router.
 
 ## Declaration: manifest for install facts, handshake for
 capabilities (2026-09)

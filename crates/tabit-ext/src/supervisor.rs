@@ -10,19 +10,27 @@
 //! [`ExtensionEvent`] channel the binary logs, and (task 2) the
 //! `extensions_available` wire catalog.
 //!
-//! The architecture is the subagent bridge's (`subprocess.rs`),
-//! minus the router and the drive loop: a reader task parses stdout
-//! (handshake first, tool results and ask lifts after), a writer
-//! task owns stdin (the closing token IS the pipe drop), and the
-//! supervision task owns the process handle end-to-end — a pre-ack
-//! failure kills the tree immediately (nothing was proven), a
-//! post-ack death gets the grace-bounded reclaim.
+//! The call path is a **router pair per extension** (owner ruling
+//! 2026-09): each proxy (the tool adapter) enqueues its request on
+//! its extension's outbound lane — a writer task serializes frames
+//! onto stdin, and sending is cheap (an unbounded enqueue) — and
+//! awaits its result from the inbound side, where the reader task
+//! forwards each `tool_result` to the waiting call by `call_id`.
+//! Execution is parallel: the extension side may run calls
+//! concurrently and return them in any order, which is exactly what
+//! the id-tagged forwarding allows. A death answers every waiting
+//! adapter with the failure (the drain) — no proxy call ever hangs
+//! on a dead extension — and interaction requests route to the
+//! waiting call's session through the same forwarding table.
 //!
-//! The tool lane: the pipe is one lane, so calls to one extension
-//! serialize in arrival order (an extension wanting parallelism is a
-//! future frame away — none exists in v1). Pending calls resolve
-//! through their registry entries; a death drains them with errors
-//! so no proxy tool ever hangs on a dead extension.
+//! The process architecture is the subagent bridge's
+//! (`subprocess.rs`), minus the route-all router and the drive loop:
+//! a reader task parses stdout (handshake first, tool results and
+//! ask lifts after), a writer task owns stdin (the closing token IS
+//! the pipe drop), and the supervision task owns the process handle
+//! end-to-end — a pre-ack failure kills the tree immediately
+//! (nothing was proven), a post-ack death gets the grace-bounded
+//! reclaim.
 
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};

@@ -58,8 +58,9 @@ pub enum HostFrame {
     /// else follows only after its ack.
     Initialize { protocol_version: u32 },
     /// One tool invocation; the extension answers with a
-    /// [`ToolWireResult`] carrying the same `call_id`. The pipe is one
-    /// lane: calls to one extension serialize, in arrival order.
+    /// [`ToolWireResult`] carrying the same `call_id`. Calls may be
+    /// outstanding concurrently — the id is the correlation — and
+    /// results may return in any order.
     ToolCall {
         call_id: String,
         name: String,
