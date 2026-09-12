@@ -134,8 +134,8 @@ impl Mounted {
     }
 
     /// The names of the core tools this mount replaced — the assembly
-    /// unmounts them (children keep the core: they never boot
-    /// extensions, the leaf law).
+    /// unmounts them. Each process (backend or child) resolves its
+    /// own mount against its own core set.
     pub fn replaced_core(&self) -> Vec<String> {
         self.catalog
             .conflicts

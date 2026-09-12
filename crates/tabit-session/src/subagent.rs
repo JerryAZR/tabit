@@ -44,6 +44,12 @@ pub struct SubagentParts {
     /// exceptions (the pi self-spawn pattern) — children are this very
     /// binary; binary-finding overrides belong to frontends only.
     pub exe: PathBuf,
+    /// The children's extension root, crossing as `--extensions` —
+    /// children boot their own hosts (ruled 2026-09) against the
+    /// parent's root, so a backend started with an explicit root gets
+    /// children on the same root (and tests pin empty dirs for
+    /// hermeticity). An empty dir is a valid extension-less root.
+    pub extensions: PathBuf,
     /// The default child toolset — the parent's minus the subagent
     /// tool (recursion depth is enforced by omission). A starting
     /// point for allow-lists: filter it, ignore it, build your own.

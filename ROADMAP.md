@@ -1157,10 +1157,12 @@ proxy+hook assembly and the `extensions_available` catalog in the
    process-level forwarders their per-session key). **The permission
    gate moved out of the core** (the ruling executed):
    `permission.rs` deleted, `gate-ext` is the same policy over the
-   same seam, session-keyed "Always allow" memory. Ruled with it:
-   policy fails open on a dead extension (crash isolation — one dead
-   package cannot brick the tool phase; the death is reported
-   loudly), execution fails with its error.
+   same seam, session-keyed "Always allow" memory. Ruled with it
+   (sharpened 2026-09): a failing hook is treated as absence — dead
+   or broken alike, the neutral decision for its point — while a
+   failed tool call is the model-visible failure; and children boot
+   their own extension hosts (proven e2e: a subagent child serves an
+   extension tool from its own mount).
 4. **Scanning** — enabled-extension discovery over the config
    layers; skills symlinks; `providers.toml` fragment merge at
    config load (user config wins).

@@ -133,6 +133,9 @@ id = "m"
         max_turns: 8,
         router,
         exe: PathBuf::from(env!("CARGO_BIN_EXE_tabit")),
+        // Children boot their own hosts — pin an empty root so the
+        // suite stays hermetic against the machine's real installs.
+        extensions: cwd.join(".tabit/no-extensions"),
     });
     let turns = vec![
         vec![
@@ -457,4 +460,182 @@ async fn aborting_the_parent_returns_promptly_and_the_child_flushes_its_terminal
     unsafe {
         std::env::remove_var("TABIT_CONFIG");
     }
+}
+
+/// A chat-completions SSE answer whose turn calls one tool (the
+/// child's scripted model turn — mirrors the rig cassette shape).
+fn sse_tool_call(id: &str, name: &str, arguments: &str) -> String {
+    let first = json!({
+        "id": "chatcmpl-1", "object": "chat.completion.chunk",
+        "created": 0, "model": "m",
+        "choices": [{"index": 0, "delta": {"role": "assistant", "tool_calls": [{
+            "index": 0, "id": id, "type": "function",
+            "function": {"name": name, "arguments": arguments},
+        }]}, "finish_reason": null}],
+    });
+    let last = json!({
+        "id": "chatcmpl-1", "object": "chat.completion.chunk",
+        "created": 0, "model": "m",
+        "choices": [{"index": 0, "delta": {}, "finish_reason": "tool_calls"}],
+        "usage": {"prompt_tokens": 3, "completion_tokens": 2, "total_tokens": 5},
+    });
+    format!("data: {first}\n\ndata: {last}\n\ndata: [DONE]\n\n")
+}
+
+/// Locate a workspace binary (same-package `CARGO_BIN_EXE_*` does not
+/// reach cross-package bins; test exes run from
+/// `<target>/<profile>/deps`, one level below the binaries).
+fn workspace_bin(name: &str) -> PathBuf {
+    std::env::current_exe()
+        .expect("current exe")
+        .parent()
+        .and_then(|deps| deps.parent())
+        .map(|dir| dir.join(format!("{name}{}", std::env::consts::EXE_SUFFIX)))
+        .filter(|path| path.is_file())
+        .unwrap_or_else(|| panic!("workspace binary `{name}` not built — run the workspace gate"))
+}
+
+/// The 2026-09 ruling, proven across real processes: a subagent child
+/// boots its own extension host and serves the packages' tools — the
+/// child's scripted model calls the extension's `echo`, and the
+/// result crossing back is the double's own text.
+#[tokio::test]
+async fn a_subprocess_child_boots_its_own_extension_host_and_serves_its_tools() {
+    let _guard = env_lock().lock().await;
+    let server = MockServer::start();
+    // The child's two turns: call the extension's tool, then wrap up
+    // once the result is in history (the markers are mutually
+    // exclusive — the task text rides in history forever).
+    server.mock(|when, then| {
+        when.method(POST)
+            .path("/v1/chat/completions")
+            .body_includes("child-task-8d21")
+            .body_excludes("EXT-ECHOED");
+        then.status(200)
+            .header("content-type", "text/event-stream")
+            .body(sse_tool_call(
+                "call-1",
+                "echo",
+                r#"{"text":"from the child"}"#,
+            ));
+    });
+    server.mock(|when, then| {
+        when.method(POST)
+            .path("/v1/chat/completions")
+            .body_includes("EXT-ECHOED:from the child");
+        then.status(200)
+            .header("content-type", "text/event-stream")
+            .body(sse_answer("child done"));
+    });
+    let config_path = stage_child_config("child-ext", &server);
+    #[allow(unsafe_code, clippy::missing_safety_doc)]
+    unsafe {
+        std::env::set_var("TABIT_CONFIG", &config_path);
+    }
+
+    // The child's extension root: the echo double, installed as a
+    // package like any other.
+    let ext_root = test_dir("child-ext-extensions");
+    let package = ext_root.join("echoer");
+    std::fs::create_dir_all(&package).expect("package dir");
+    std::fs::write(
+        package.join("tabit.json"),
+        serde_json::to_string(&json!({
+            "name": "echoer",
+            "version": "0.1.0",
+            "entry": [workspace_bin("ext-double").display().to_string(), "tools-echo"],
+        }))
+        .expect("manifest"),
+    )
+    .expect("manifest");
+
+    let parent_cwd = test_dir("child-ext-parent");
+    let store = SessionStore::new(test_dir("child-ext-store"));
+    let router = ChildRouter::shared();
+    let config = Arc::new(
+        tabit_config::TabitConfig::from_toml_str(
+            r#"
+[providers.p]
+base_url = "http://127.0.0.1:1/v1"
+api = "openai-completions"
+
+[[providers.p.models]]
+id = "m"
+"#,
+            Path::new("providers.toml"),
+        )
+        .expect("parent config"),
+    );
+    let auth = Arc::new(tabit_config::AuthConfig::default());
+    let parts = Arc::new(subagent::SubagentParts {
+        tools: Vec::new(),
+        max_turns: 8,
+        router: router.clone(),
+        exe: PathBuf::from(env!("CARGO_BIN_EXE_tabit")),
+        extensions: ext_root,
+    });
+    let turns = vec![
+        vec![
+            MockStreamEvent::ToolCall {
+                id: "c1".to_string(),
+                name: "subagent".to_string(),
+                arguments: json!({"task": "child-task-8d21"}),
+                call_id: None,
+            },
+            MockStreamEvent::final_response_with_default_usage(),
+        ],
+        vec![
+            MockStreamEvent::text("parent wrap-up"),
+            MockStreamEvent::final_response_with_default_usage(),
+        ],
+    ];
+    let parent = SessionBuilder::new(store.clone(), config, auth, ModelSelection::new("p", "m"))
+        .expect("builder")
+        .preamble("test parent".to_string())
+        .model_factory(Arc::new(move |_, _, _| {
+            Ok(ModelHandle::new(MockCompletionModel::from_stream_turns(
+                turns.clone(),
+            )))
+        }))
+        .subagents(parts)
+        .dynamic_tool(subagent::subagent_tool())
+        .create(&parent_cwd.display().to_string())
+        .expect("parent session");
+    let mut handle = host(&store, router, parent);
+    let parent_id = handle.info().session_id.clone();
+    handle.message(&parent_id, "go");
+
+    let mut child_echo: Option<String> = None;
+    let mut child_id: Option<String> = None;
+    loop {
+        let frame = tokio::time::timeout(std::time::Duration::from_secs(60), handle.next_event())
+            .await
+            .expect("frames keep coming")
+            .expect("the stream stays open");
+        let done = matches!(&frame.event,
+            SessionEvent::RunFinished { output, .. } if output == "parent wrap-up");
+        let on_child_stream =
+            frame.stream.as_ref().map(|s| s.as_str()) == child_id.as_deref() && child_id.is_some();
+        match &frame.event {
+            SessionEvent::SessionOpened {
+                id,
+                parent: Some(parent),
+                ..
+            } if parent == &parent_id => child_id = Some(id.clone()),
+            SessionEvent::ToolCall { name, .. } if on_child_stream && name == "echo" => {
+                child_echo = Some("called".to_string());
+            }
+            SessionEvent::ToolResult { name, content, .. } if on_child_stream && name == "echo" => {
+                assert!(content.contains("EXT-ECHOED:from the child"), "{content}");
+            }
+            _ => {}
+        }
+        if done {
+            break;
+        }
+    }
+    assert!(
+        child_echo.is_some(),
+        "the child's model called the extension's tool — its host booted"
+    );
 }

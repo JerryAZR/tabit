@@ -546,6 +546,9 @@ fn assemble_session(
         max_turns: args.max_turns.unwrap_or(tabit_session::DEFAULT_MAX_TURNS),
         router: child_router(),
         exe: tabit_exe()?,
+        // Children boot their own hosts against the parent's root
+        // (the same packages, the same rules).
+        extensions: extension_root(args).unwrap_or_default(),
     });
 
     let mut builder = SessionBuilder::new(
@@ -560,20 +563,20 @@ fn assemble_session(
     // The hook surface: whatever the extension mount carries — the
     // forwarded policy hooks of installed packages (the permission
     // gate is the `gate` extension now; EXTENSIONS.md) plus any core
-    // stack, composed through the builder's one seam. Children mount
-    // nothing: they never booted extensions (the leaf law).
+    // stack, composed through the builder's one seam — children mount
+    // their own (they boot their own hosts, the 2026-09 ruling).
     .hooks(match extensions {
-        Some(mounted) if args.parent.is_none() => mounted.hooks(),
-        _ => rig_agent::agent::HookStack::new(),
+        Some(mounted) => mounted.hooks(),
+        None => rig_agent::agent::HookStack::new(),
     })
     .subagents(subagents)
     .skills(skills);
-    // The parent's toolset: the core set, plus the extension mount —
+    // The process's toolset: its core set, plus the extension mount —
     // replaced core tools unmount, the proxies join (one name, one
-    // tool, resolved at this assembly). A child-role process mounts
-    // the core only: it never booted extensions (the leaf law).
+    // tool, resolved at this assembly). Children resolve against
+    // their own core set (the child set): they boot their own hosts.
     let mounted: Vec<_> = match extensions {
-        Some(mounted) if args.parent.is_none() => {
+        Some(mounted) => {
             let replaced = mounted.replaced_core();
             parent_core
                 .into_iter()
@@ -581,7 +584,7 @@ fn assemble_session(
                 .chain(mounted.tools().iter().cloned())
                 .collect()
         }
-        _ => parent_core,
+        None => parent_core,
     };
     for tool in mounted {
         builder = builder.dynamic_tool(tool);
@@ -1267,24 +1270,21 @@ fn host_wiring(
 /// The extension host boot (ROADMAP item 9, task 1): launch every
 /// installed extension, handshake it, supervise for the backend's
 /// life — reports land on stderr (stdout is protocol). Children
-/// (`--parent`) never boot extensions: the host belongs to the
-/// frontend-attached process, the one place tools and hooks assemble
-/// (the dependency law — one extension host per backend, leaf
-/// children stay leaf). Must run on the serving runtime (it spawns).
-fn boot_extensions(args: &Args) -> std::sync::Arc<tabit_ext::supervisor::Supervisor> {
-    // Children never boot extensions: the host belongs to the
-    // frontend-attached process (one host per backend, the leaf law).
-    // An extension-less boot holds the empty supervisor so assembly
-    // has a single shape. Reports land on stderr (stdout is
-    // protocol); must run on the serving runtime (it spawns).
-    if args.parent.is_some() {
-        return std::sync::Arc::new(tabit_ext::supervisor::Supervisor::empty());
-    }
-    let Some(root) = args
-        .extensions
+/// Every tabit process boots its own extension host — the
+/// frontend-attached backend AND every subagent child (ruled
+/// 2026-09: children pick up extensions; the leaf law outlaws
+/// loading into a parent's process, not a child hosting its own
+/// set). Must run on the serving runtime (it spawns).
+fn extension_root(args: &Args) -> Option<PathBuf> {
+    args.extensions
         .clone()
         .or_else(|| tabit_config::home_dir().map(|home| home.join(".tabit").join("extensions")))
-    else {
+}
+fn boot_extensions(args: &Args) -> std::sync::Arc<tabit_ext::supervisor::Supervisor> {
+    // An extension-less boot (no root) holds the empty supervisor so
+    // assembly has a single shape. Reports land on stderr (stdout is
+    // protocol).
+    let Some(root) = extension_root(args) else {
         return std::sync::Arc::new(tabit_ext::supervisor::Supervisor::empty());
     };
     let (supervisor, mut events) =

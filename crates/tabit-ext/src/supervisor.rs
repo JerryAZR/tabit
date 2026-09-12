@@ -626,10 +626,12 @@ async fn supervise(
     }
 
     // The frame reader: handshake outcome first, then the tool lane
-    // (results resolved, asks lifted). A frame the host does not know
-    // is tolerated and ignored (forward compatibility: the host may
-    // be older than the extension); an unparseable line is death —
-    // the pipe is the contract.
+    // (results resolved, asks lifted). A parseable frame the host
+    // does not know is tolerated and ignored (the additive-vocabulary
+    // rule); an unparseable line is death — the pipe is the contract
+    // (a newer extension's unknown frame type parses as garbage on an
+    // older host; both sides version as one workspace until external
+    // extensions exist).
     let (handshake_tx, handshake_rx) = tokio::sync::oneshot::channel::<Handshake>();
     let (death_tx, mut death_rx) = tokio::sync::oneshot::channel::<String>();
     {
@@ -809,8 +811,22 @@ fn lift_ask(
         let ask = tabit_log::lock::lock(&lane.pending)
             .get(&call_id)
             .and_then(|pending| pending.ask.clone());
+        // The lift never strands the guest: a panic inside the
+        // capability's future would kill this task silently and the
+        // asking extension would wait forever (the lesson from the
+        // contract-test hang) — catch it and answer dismissed, the
+        // askers' fail-closed case.
         let outcome = match ask {
-            Some(ask) => ask.request(&ui_type, payload).await,
+            Some(ask) => {
+                match futures::FutureExt::catch_unwind(std::panic::AssertUnwindSafe(
+                    ask.request(&ui_type, payload),
+                ))
+                .await
+                {
+                    Ok(outcome) => outcome,
+                    Err(_) => InteractionOutcome::Dismissed,
+                }
+            }
             None => InteractionOutcome::Dismissed,
         };
         let frame = HostFrame::InteractionResponse {

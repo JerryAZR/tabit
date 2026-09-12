@@ -329,7 +329,8 @@ pub fn serve(extension: Extension) -> ! {
                         .iter()
                         .find(|h| h.event == event)
                         .map(|h| h.body.clone());
-                    run_hook(&shared, hook_id, handler, payload);
+                    let frame = run_hook(&shared, hook_id, &event, handler, payload);
+                    let _ = emit(&shared, frame);
                 });
             }
             Some("interaction_response") => {
@@ -347,29 +348,35 @@ pub fn serve(extension: Extension) -> ! {
     }
 }
 
-/// One dispatched hook. No subscription for the event is the neutral
-/// decision (a newer host's event point the SDK predates). A failing
-/// or panicking handler answers **skip with the failure message**: an
-/// extension that declared a policy point does not get its calls run
-/// by accident of its own bug — fail closed, loud, in-band. (A
-/// handler that wants fail-open returns [`Decision::run`] on its own
-/// error paths.)
-fn run_hook(shared: &Arc<Shared>, hook_id: String, body: Option<HookBody>, payload: Value) {
+/// One dispatched hook. **A failing hook is treated as absence**
+/// (ruled 2026-09: dead or broken resolve identically — the neutral
+/// decision, run for call points / keep for result points; a failed
+/// *tool call* is the model-visible failure). The handler's own
+/// error paths can choose otherwise; the SDK's failure handling
+/// cannot.
+fn run_hook(
+    _shared: &Arc<Shared>,
+    hook_id: String,
+    event: &str,
+    body: Option<HookBody>,
+    payload: Value,
+) -> Value {
+    let neutral = if event == "tool_result" {
+        json!({"type": "hook_result", "hook_id": hook_id, "decision": "keep"})
+    } else {
+        json!({"type": "hook_result", "hook_id": hook_id, "decision": "run"})
+    };
     let Some(body) = body else {
-        let _ = emit(
-            shared,
-            json!({
-                "type": "hook_result", "hook_id": hook_id, "decision": "run",
-            }),
-        );
-        return;
+        // No subscription: a newer host's event point this SDK
+        // predates — absence.
+        return neutral;
     };
     let ask = Ask {
         call_id: hook_id.clone(),
-        shared: shared.clone(),
+        shared: _shared.clone(),
     };
     let outcome = std::panic::catch_unwind(AssertUnwindSafe(|| body(payload, &ask)));
-    let frame = match outcome {
+    match outcome {
         Ok(Ok(decision)) => match decision {
             Decision::Run => json!({
                 "type": "hook_result", "hook_id": hook_id, "decision": "run",
@@ -382,17 +389,24 @@ fn run_hook(shared: &Arc<Shared>, hook_id: String, body: Option<HookBody>, paylo
                 "type": "hook_result", "hook_id": hook_id, "decision": "keep",
             }),
         },
-        Ok(Err(error)) => json!({
-            "type": "hook_result", "hook_id": hook_id,
-            "decision": "skip", "message": format!("the hook handler failed: {error}"),
-        }),
-        Err(panic) => json!({
-            "type": "hook_result", "hook_id": hook_id,
-            "decision": "skip", "message": format!(
-                "the hook handler panicked: {}", panic_note(panic)),
-        }),
-    };
-    let _ = emit(shared, frame);
+        // Absence, by the ruling — but loud: the failure lands on
+        // stderr where the host's report can find it.
+        Ok(Err(error)) => {
+            let _ = writeln!(
+                std::io::stderr(),
+                "tabit extension: hook handler failed: {error}"
+            );
+            neutral
+        }
+        Err(panic) => {
+            let _ = writeln!(
+                std::io::stderr(),
+                "tabit extension: hook handler panicked: {}",
+                panic_note(panic)
+            );
+            neutral
+        }
+    }
 }
 
 /// One dispatched call: find the body, run it (panics become error
@@ -478,4 +492,79 @@ fn die(reason: &str) -> ! {
 /// depends on nothing above the protocol.
 fn tabit_ext_sdk_lock<T: ?Sized>(mutex: &Mutex<T>) -> std::sync::MutexGuard<'_, T> {
     mutex.lock().unwrap_or_else(|poison| poison.into_inner())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn shared() -> Arc<Shared> {
+        Arc::new(Shared {
+            stdout: std::sync::Mutex::new(()),
+            asks: Mutex::new(HashMap::new()),
+        })
+    }
+
+    fn decision_of(frame: &Value) -> &str {
+        frame["decision"].as_str().unwrap_or_default()
+    }
+
+    /// The failure symmetry (ruled 2026-09): a failing hook is
+    /// treated as absence — the neutral decision for its point, dead
+    /// or broken alike.
+    #[test]
+    fn a_failing_handler_is_absence_run_for_call_points() {
+        let frame = run_hook(
+            &shared(),
+            "h-1".to_string(),
+            "tool_call",
+            Some(Arc::new(|_payload, _ask| Err("boom".to_string()))),
+            json!({}),
+        );
+        assert_eq!(decision_of(&frame), "run");
+    }
+
+    #[test]
+    fn a_failing_handler_is_absence_keep_for_result_points() {
+        let frame = run_hook(
+            &shared(),
+            "h-2".to_string(),
+            "tool_result",
+            Some(Arc::new(|_payload, _ask| Err("boom".to_string()))),
+            json!({}),
+        );
+        assert_eq!(decision_of(&frame), "keep");
+    }
+
+    #[test]
+    #[allow(clippy::panic)]
+    fn a_panicking_handler_is_absence_too() {
+        let frame = run_hook(
+            &shared(),
+            "h-3".to_string(),
+            "tool_call",
+            Some(Arc::new(|_payload, _ask| panic!("handler broke"))),
+            json!({}),
+        );
+        assert_eq!(decision_of(&frame), "run");
+    }
+
+    #[test]
+    fn an_unsubscribed_point_is_absence() {
+        let frame = run_hook(&shared(), "h-4".to_string(), "tool_call", None, json!({}));
+        assert_eq!(decision_of(&frame), "run");
+    }
+
+    #[test]
+    fn a_healthy_decision_crosses_untouched() {
+        let frame = run_hook(
+            &shared(),
+            "h-5".to_string(),
+            "tool_call",
+            Some(Arc::new(|_payload, _ask| Ok(Decision::skip("denied")))),
+            json!({}),
+        );
+        assert_eq!(decision_of(&frame), "skip");
+        assert_eq!(frame["message"], "denied");
+    }
 }

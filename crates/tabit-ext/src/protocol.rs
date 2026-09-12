@@ -3,6 +3,14 @@
 //! a time — each frame lands with the task that exercises it, nothing
 //! ships unconsumed (the same cadence as the host services).
 //!
+//! Versioning (ruled 2026-09): additions grow the vocabulary without
+//! a bump (an old extension never receives what it did not declare;
+//! the host ignores what it does not know); alterations to existing
+//! shapes are the compatibility boundary and bump
+//! [`EXTENSION_PROTOCOL_VERSION`], rejected at the ack. Until
+//! external extensions exist, host and SDK version as one workspace —
+//! the full story is a topic after the first release.
+//!
 //! v1 carries the handshake (`initialize` out, `ack` back with the
 //! capability declarations) and, with checklist task 2, the tool
 //! lane: `tool_call` out, `tool_result` back, plus the interaction

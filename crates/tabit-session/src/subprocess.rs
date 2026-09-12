@@ -62,6 +62,7 @@ pub struct SubprocessBuilder {
     tools: Option<Vec<String>>,
     ephemeral: bool,
     session: Option<PathBuf>,
+    extensions: Option<PathBuf>,
     max_turns: Option<usize>,
     router: Arc<crate::routing::ChildRouter>,
     notice: Option<crate::notice::NoticeSink>,
@@ -81,6 +82,7 @@ impl SubprocessBuilder {
             tools: None,
             ephemeral: true,
             session: None,
+            extensions: Some(ctx.parts().extensions.clone()),
             max_turns: None,
             router: ctx.parts().router.clone(),
             notice: ctx.notice(),
@@ -147,6 +149,7 @@ impl SubprocessBuilder {
             tools,
             ephemeral,
             session,
+            extensions,
             max_turns,
             router,
             notice,
@@ -172,6 +175,10 @@ impl SubprocessBuilder {
         if let Some(tools) = &tools {
             args.push("--tools".to_string());
             args.push(tools.join(","));
+        }
+        if let Some(path) = &extensions {
+            args.push("--extensions".to_string());
+            args.push(path.display().to_string());
         }
         if let Some(path) = &session {
             args.push("--session".to_string());

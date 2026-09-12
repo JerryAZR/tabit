@@ -182,6 +182,7 @@ async fn a_missing_executable_fails_the_spawn_with_the_exe_named() {
         exe: std::path::PathBuf::from("Z:/does-not-exist/tabit-child.exe"),
         tools: Vec::new(),
         max_turns: 4,
+        extensions: std::path::PathBuf::new(),
     });
     let ctx = super::SpawnContext::new(
         parts,

@@ -220,6 +220,34 @@ fn stage(tag: &str, behaviors: &[(&str, &str)]) -> Stage {
     }
 }
 
+/// Stage a scripted multi-turn model: each turn's mock matches its
+/// own marker AND excludes every later turn's — the user text (and
+/// every earlier result) rides in request history forever, so only
+/// mutual exclusion makes "turn N" expressible. The trap this
+/// encodes cost two debugging rounds before it became a helper:
+/// without the excludes, turn 1's mock matches every later request
+/// and the model loops to its turn limit with no error anywhere.
+fn scripted_turns(stage: &Stage, turns: &[(String, String)]) {
+    for (index, (needle, body)) in turns.iter().enumerate() {
+        let later: Vec<String> = turns[index + 1..]
+            .iter()
+            .map(|(needle, _)| needle.clone())
+            .collect();
+        stage.server.mock(move |when, then| {
+            let mut when = when
+                .method(httpmock::Method::POST)
+                .path("/v1/chat/completions")
+                .body_includes(needle.clone());
+            for later in &later {
+                when = when.body_excludes(later.clone());
+            }
+            then.status(200)
+                .header("Content-Type", "text/event-stream")
+                .body(body.clone());
+        });
+    }
+}
+
 /// Drive the handshake and hand back the session id and the
 /// extensions announcement.
 fn handshake(backend: &mut Backend) -> (String, tabit_protocol::ExtensionsCatalog) {
@@ -263,29 +291,19 @@ fn a_model_call_runs_an_extension_tool_and_the_result_feeds_back() {
     // Turn 1: the model calls the extension's tool; turn 2: wrap up.
     // The second request's body must contain the tool result — the
     // proxy roundtrip's output re-entering the model context.
-    stage.server.mock(|when, then| {
-        when.method(httpmock::Method::POST)
-            .path("/v1/chat/completions")
-            .body_includes("call the echo tool 7f3a")
-            // The user text rides in history forever — only the
-            // FIRST turn lacks the tool result.
-            .body_excludes("EXT-ECHOED");
-        then.status(200)
-            .header("Content-Type", "text/event-stream")
-            .body(sse_tool_call(
-                "call-1",
-                "echo",
-                r#"{"text":"from the model"}"#,
-            ));
-    });
-    stage.server.mock(|when, then| {
-        when.method(httpmock::Method::POST)
-            .path("/v1/chat/completions")
-            .body_includes("EXT-ECHOED:from the model");
-        then.status(200)
-            .header("Content-Type", "text/event-stream")
-            .body(sse_text("all done"));
-    });
+    scripted_turns(
+        &stage,
+        &[
+            (
+                "call the echo tool 7f3a".to_string(),
+                sse_tool_call("call-1", "echo", r#"{"text":"from the model"}"#),
+            ),
+            (
+                "EXT-ECHOED:from the model".to_string(),
+                sse_text("all done"),
+            ),
+        ],
+    );
 
     let mut backend = spawn_backend(&stage.work, &stage.extensions, &stage.config, &stage.auth);
     let (session, catalog) = handshake(&mut backend);
@@ -360,29 +378,16 @@ fn the_gate_extension_gates_a_model_bash_call_over_the_wire() {
     }
     // Turn 1: the model calls bash; the gate opens a card; turn 2:
     // wrap up once the denial is in history.
-    stage.server.mock(|when, then| {
-        when.method(httpmock::Method::POST)
-            .path("/v1/chat/completions")
-            .body_includes("gating-check-7f4b")
-            // The user text rides in history forever — only the
-            // first turn lacks the denial.
-            .body_excludes("not today");
-        then.status(200)
-            .header("Content-Type", "text/event-stream")
-            .body(sse_tool_call(
-                "call-1",
-                "bash",
-                r#"{"command":"echo gated"}"#,
-            ));
-    });
-    stage.server.mock(|when, then| {
-        when.method(httpmock::Method::POST)
-            .path("/v1/chat/completions")
-            .body_includes("not today");
-        then.status(200)
-            .header("Content-Type", "text/event-stream")
-            .body(sse_text("understood"));
-    });
+    scripted_turns(
+        &stage,
+        &[
+            (
+                "gating-check-7f4b".to_string(),
+                sse_tool_call("call-1", "bash", r#"{"command":"echo gated"}"#),
+            ),
+            ("not today".to_string(), sse_text("understood")),
+        ],
+    );
 
     let mut backend = spawn_backend(&stage.work, &stage.extensions, &stage.config, &stage.auth);
     let (session, catalog) = handshake(&mut backend);

@@ -23,12 +23,17 @@ item-9 substrate ruling)
 
 Ruled: an extension is an opaque executable speaking a small frozen
 JSONL protocol over stdin/stdout — the subagent substrate,
-generalized. The host spawns the entry command at backend start,
+generalized. The host spawns the entry command at process start,
 handshakes, and from then on tool calls, hook events, interaction
-frames, and host-service requests cross the pipe. One dependency law
-for everything external: frontends, subagents, and extensions are all
-leaf consumers across process boundaries; none load into the host's
-process.
+frames, and host-service requests cross the pipe. **Every tabit
+process boots its own host — the frontend-attached backend and every
+subagent child alike (ruled 2026-09: children pick up extensions;
+the child's root inherits the parent's, crossing as
+`--extensions`).** One dependency law for everything external:
+frontends, subagents, and extensions are all leaf consumers across
+process boundaries; none load into the host's process — that law
+outlaws loading into a parent's process, not a child hosting its
+own set.
 
 Boundaries and reasons:
 
@@ -77,6 +82,18 @@ refactor. They join when the build-phase decision lands with a
 consumer; the byte-stability law below already governs whatever
 that future is.**
 
+## Vocabulary grows additively; altering shapes is a version
+boundary (2026-09, post-release topic deferred)
+
+Changes that ADD vocabulary (new frame types, new optional fields)
+keep past extensions working as-is — an old extension simply never
+receives what it did not declare, and the host ignores what it does
+not know. Changes that ALTER existing shapes (renaming, removing,
+re-typing) are the compatibility boundary and bump the extension
+protocol version, rejected at the ack. Until external extensions
+exist, host and SDK version as one workspace — no skew is possible;
+the full versioning story is a topic after the first release.
+
 ## Model-facing names are flat; identity is the pair (2026-09)
 
 The model sees the declared tool name only — no prefix, no namespace
@@ -123,12 +140,15 @@ per-session policy state keys on. Mid-hook asks ride the same
 interaction lift (the correlation id is the hook's). Registrations
 compose in scan order through `HookStack::merge` — one priority law.
 
-**Policy fails open; execution fails loud.** A dead extension's
-pending hook resolves with the neutral decision (run/keep) — crash
-isolation: one dead package cannot brick the tool phase, and the
-death is reported loudly (stderr, the catalog's dead standing). A
-dead extension's pending *execution* resolves with its error. The
-asymmetry is the ruling.
+**A failing hook is treated as absence; a failed tool call is the
+model-visible failure.** Dead or broken resolve identically (ruled
+2026-09): a hook whose extension died, errored, or panicked resolves
+with the neutral decision for its point (run / keep) — crash
+isolation: one broken package cannot brick the tool phase, and the
+failure is reported loudly (the host's dead standing; the SDK's
+stderr) — while a tool *execution* that dies or errors is the
+call's failure, model-visible. The pair of resolutions is the
+ruling; neither failure is silent.
 
 ## Install, distribution, package layout (2026-09)
 

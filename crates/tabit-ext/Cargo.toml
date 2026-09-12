@@ -14,6 +14,9 @@ path = "src/lib.rs"
 doctest = true
 
 [dependencies]
+# FutureExt::catch_unwind — the interaction lift never strands the
+# guest on a panicking capability future.
+futures = { workspace = true }
 # The interaction capability trait — the lift routes extension asks
 # through the engine's `UserInteraction` verbatim (ui_type + opaque
 # payload), so the ask shapes stay one concern across core and
