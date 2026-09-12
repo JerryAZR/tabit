@@ -23,6 +23,33 @@ Defensive ("unreachable") arms follow a stricter rule:
   persisted state) → graceful, clear error naming the malformed input and
   its cause. Never a silent skip or a placeholder that looks like real data.
 
+## The class line coverage cannot see (2026-09, the preresolved lesson)
+
+The unoffered-tool rejection surfacing bug (fixed 2026-09: a model
+call for a tool the session never offered was committed in-band but
+emitted NO events — `ToolSurface::Preresolved` suppressed both the
+ToolCall and the ToolResult, on a comment claiming turn-time
+surfacing that never existed) shipped through every coverage round.
+Line/region coverage structurally could not catch it, for two
+reasons worth keeping in the ledger's memory:
+
+- **Coverage measures execution, not assertion.** Wrong-surfacing
+  code is live code; a test that runs the settle loop green-lights
+  lines whose observable behavior is wrong.
+- **The justified-residue mechanism absorbs stories, not proofs.**
+  The rounds require each gap to be filled, justified, or deferred —
+  but a justification is a narrative by the code's own author, and
+  the rounds' neighboring entries trusted doc comments ("already
+  surfaced during the model turn") exactly where a test should have
+  pinned the claim.
+
+The check that catches the class is an **observable-invariant
+test**, not coverage: every tool call a model emits must surface as
+a ToolCall+ToolResult pair (or an explicit turn-retry event) —
+never nothing. The session test added with the fix pins the
+unoffered-name case; the same invariant shape belongs in the model
+conformance harness when that grows its event-level scenarios.
+
 ## Methodology
 
 - `cargo llvm-cov --workspace --html --output-dir target/llvm-cov/html`
