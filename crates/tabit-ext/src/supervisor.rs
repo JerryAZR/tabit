@@ -102,29 +102,35 @@ struct ChildFields {
 }
 
 impl ChildState {
-    /// The transition door: Starting → Alive, Starting → Dead, and
-    /// Alive → Dead each fire exactly once (a handshake timeout
-    /// racing a late ack, or a duplicate death signal, resolves to
-    /// `None` — no second report), while death-after-life still
-    /// reports, which a once-ever door would have swallowed.
-    /// Returns the new standing when the transition fired.
-    fn transition(&self, to: Status, tools: Vec<ToolDecl>, hooks: Vec<HookDecl>) -> Option<Status> {
+    /// Record one lifecycle edge: Starting → Alive, Starting → Dead,
+    /// or Alive → Dead (death after life still reports — the edge a
+    /// once-ever door would have swallowed). The supervision task is
+    /// this state's only writer (verdicts and deaths reach it through
+    /// channels), so an invalid edge is a broken invariant, not a
+    /// race to arbitrate: it crashes loudly, never gets silently
+    /// swallowed. The mutex is for snapshot readers
+    /// ([`Supervisor::reports`]); the notify wakes the boot join.
+    /// Returns the standing now recorded.
+    #[allow(clippy::panic)] // the sanctioned crash below (AGENTS.md doctrine)
+    fn transition(&self, to: Status, tools: Vec<ToolDecl>, hooks: Vec<HookDecl>) -> Status {
         let mut fields = tabit_log::lock::lock(&self.inner);
         let from = fields.status.clone().unwrap_or(Status::Starting);
-        let fires = matches!(
+        let valid = matches!(
             (&from, &to),
             (Status::Starting, Status::Alive | Status::Dead { .. })
                 | (Status::Alive, Status::Dead { .. })
         );
-        if !fires {
-            return None;
+        if !valid {
+            panic!(
+                "internal invariant violated: invalid extension lifecycle edge {from:?} -> {to:?}"
+            );
         }
         fields.status = Some(to.clone());
         fields.tools = tools;
         fields.hooks = hooks;
         drop(fields);
         self.resolved.notify_waiters();
-        Some(to)
+        to
     }
 
     /// Wait for the first transition (the handshake verdict, one way
@@ -320,13 +326,11 @@ pub fn launch(
                 drop(dead_reader); // sends on a dead lane fail, never queue
                 let lane = Lane::new(name.clone(), dead_commands);
                 lane.die(&reason);
-                let standing = state.transition(Status::Dead { reason }, Vec::new(), Vec::new());
-                if let Some(status) = standing {
-                    let _ = events_tx.send(ExtensionEvent {
-                        name: name.clone(),
-                        status,
-                    });
-                }
+                let status = state.transition(Status::Dead { reason }, Vec::new(), Vec::new());
+                let _ = events_tx.send(ExtensionEvent {
+                    name: name.clone(),
+                    status,
+                });
                 children.push(Supervised {
                     name,
                     dir,
@@ -642,13 +646,11 @@ async fn supervise(
     }
 
     let Ack { tools, hooks, .. } = ack;
-    let standing = state.transition(Status::Alive, tools, hooks);
-    if let Some(status) = standing {
-        let _ = events.send(ExtensionEvent {
-            name: manifest.name.clone(),
-            status,
-        });
-    }
+    let status = state.transition(Status::Alive, tools, hooks);
+    let _ = events.send(ExtensionEvent {
+        name: manifest.name.clone(),
+        status,
+    });
 
     // Alive: watch for death (the reader's signal) or host shutdown
     // (the closing token — stdin drops, a graceful extension exits,
@@ -797,13 +799,11 @@ fn resolve_dead(
     reason: String,
 ) {
     lane.die("the extension is not running");
-    let standing = state.transition(Status::Dead { reason }, Vec::new(), Vec::new());
-    if let Some(status) = standing {
-        let _ = events.send(ExtensionEvent {
-            name: name.to_string(),
-            status,
-        });
-    }
+    let status = state.transition(Status::Dead { reason }, Vec::new(), Vec::new());
+    let _ = events.send(ExtensionEvent {
+        name: name.to_string(),
+        status,
+    });
 }
 
 async fn write_line(stdin: &mut tokio::process::ChildStdin, line: &str) -> std::io::Result<()> {
