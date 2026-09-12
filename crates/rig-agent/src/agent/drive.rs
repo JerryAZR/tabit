@@ -756,8 +756,10 @@ where
     //     call) + the `ToolResult`.
     //   - `Skipped`: the `ToolResult` only (a `ToolCall` hook returned `Skip`, so
     //     nothing ran — no execution commit — but the model still sees the result).
-    //   - `Preresolved`: neither (an invalid-recovery result, already surfaced
-    //     during the model turn); settles to the loop only.
+    //   - `Preresolved`: the `ToolResult` only (an unoffered-name rejection —
+    //     the model's own output was invalid, the doctrine's loud external
+    //     error; suppressing it made the rejection invisible to frontends,
+    //     the silence that hid the child-guard bug).
     enum ToolSurface {
         // Boxed to keep this enum small next to the empty `Skipped`/`Preresolved`.
         Executed(Box<rig_core::message::ToolCall>),
@@ -781,26 +783,24 @@ where
         // Assign each call a stable internal_call_id and, for calls that will
         // actually execute, an execute span. Emit the MODEL tool-call events now,
         // right after the turn committed: these report what the model emitted and
-        // are *not* execution-lifecycle events. A preresolved call emits no model
-        // tool-call event (its synthetic result was already surfaced during the
-        // model turn) and gets no execute span.
+        // are *not* execution-lifecycle events — a preresolved call (an
+        // unoffered-name rejection) emits its ToolCall event too and gets no
+        // execute span.
         let mut prepared: Vec<PreparedToolCall> = Vec::with_capacity(call_count);
         for pending in calls {
             let internal_call_id = pending.internal_call_id.unwrap_or_else(rig_core::id::generate);
             let (span, preresolved_result) = match pending.preresolved_result {
                 Some(result) => (tracing::Span::none(), Some(result)),
-                None => {
-                    if forward_items {
-                        yield Ok(PhaseEvent::Item(MultiTurnStreamItem::stream_item(
-                            StreamedAssistantContent::ToolCall {
-                                tool_call: pending.tool_call.clone(),
-                                internal_call_id: internal_call_id.clone(),
-                            },
-                        )));
-                    }
-                    (chain_tool_span(new_execute_tool_span()), None)
-                }
+                None => (chain_tool_span(new_execute_tool_span()), None),
             };
+            if forward_items {
+                yield Ok(PhaseEvent::Item(MultiTurnStreamItem::stream_item(
+                    StreamedAssistantContent::ToolCall {
+                        tool_call: pending.tool_call.clone(),
+                        internal_call_id: internal_call_id.clone(),
+                    },
+                )));
+            }
             prepared.push(PreparedToolCall {
                 tool_call: pending.tool_call,
                 preresolved_result,
@@ -942,9 +942,8 @@ where
                 }
             };
             if forward_items {
-                // An executed call also surfaces its execution commit; a skipped
-                // call surfaces only its result; a preresolved call surfaces
-                // nothing here.
+                // An executed call also surfaces its execution commit; a
+                // skipped or preresolved call surfaces only its result.
                 let surface_result = match surface {
                     ToolSurface::Executed(tool_call) => {
                         surface_items.push(MultiTurnStreamItem::ToolExecutionCommitted {
@@ -953,8 +952,7 @@ where
                         });
                         true
                     }
-                    ToolSurface::Skipped => true,
-                    ToolSurface::Preresolved => false,
+                    ToolSurface::Skipped | ToolSurface::Preresolved => true,
                 };
                 if surface_result
                     && let UserContent::ToolResult(tool_result) = &content

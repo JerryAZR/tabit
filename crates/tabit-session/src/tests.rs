@@ -2655,3 +2655,65 @@ async fn an_ephemeral_session_conversates_across_runs() {
     assert_eq!(session.context().len(), 4, "both exchanges in context");
     std::fs::remove_dir_all(store.dir()).ok();
 }
+
+/// A model tool call naming a tool the session never offered is an
+/// external error (invalid model output) — it must fail gracefully
+/// and CLEARLY: an in-band rejection result the model can learn from
+/// (the doctrine's loud path), never a silent drop. This pins the
+/// behavior the child-guard bug hid behind: a toolset lacking a name
+/// made such calls vanish with no event at all.
+#[tokio::test]
+async fn a_model_call_for_an_unoffered_tool_is_rejected_in_band_loudly() {
+    let store = temp_store("unknown-tool");
+    let mut session = Factory::new(vec![
+        tool_turn("c1", "no_such_tool"),
+        text_turn("understood, using the real tools"),
+    ])
+    .into_builder(store.clone())
+    .dynamic_tool(echo_tool())
+    .create("C:/w")
+    .expect("session");
+    let run = session.prompt("go").await;
+    assert_eq!(run.output, "understood, using the real tools");
+    // The rejection surfaced as a tool result on the stream — the
+    // model saw it (the second turn answers to it) and so does any
+    // frontend.
+    let rejection = run
+        .events
+        .iter()
+        .find_map(|event| match event {
+            SessionEvent::ToolResult { name, content, .. } if name == "no_such_tool" => {
+                Some(content.clone())
+            }
+            _ => None,
+        })
+        .unwrap_or_else(|| {
+            panic!(
+                "the unoffered call must surface as a ToolResult, got: {:?}",
+                run.events
+                    .iter()
+                    .map(|event| discriminant(event))
+                    .collect::<Vec<_>>()
+            )
+        });
+    assert!(
+        rejection.contains("unknown or disallowed tool `no_such_tool`"),
+        "{rejection}"
+    );
+    assert!(
+        rejection.contains("echo"),
+        "the rejection names the available tools: {rejection}"
+    );
+}
+
+/// The event names, for the panic above's diagnosis line.
+fn discriminant(event: &SessionEvent) -> &'static str {
+    match event {
+        SessionEvent::ToolCall { .. } => "tool_call",
+        SessionEvent::ToolResult { .. } => "tool_result",
+        SessionEvent::TurnStarted { .. } => "turn_started",
+        SessionEvent::TurnCommitted { .. } => "turn_committed",
+        SessionEvent::RunFinished { .. } => "run_finished",
+        _ => "other",
+    }
+}
