@@ -186,6 +186,18 @@ impl HookContext {
             .cloned()
     }
 
+    /// The run's session identity (the event stream stamp), when the
+    /// host inserted one. The consumer is hook forwarding: an
+    /// extension's policy state is per-session ("always allow" must
+    /// not leak across sessions), and the process-level forwarder
+    /// closure cannot capture per-session state — it reads the
+    /// identity here, per event.
+    pub fn session_id(&self) -> Option<String> {
+        self.capabilities
+            .get::<crate::tool::SessionTag>()
+            .map(|tag| tag.0.to_string())
+    }
+
     fn begin_tool_call_resolution(&self, internal_call_id: &str) -> ToolCallResolutionFrame<'_> {
         self.tool_call_rewrite_frames.begin(internal_call_id)
     }
@@ -431,10 +443,19 @@ pub type ToolCallFn = Box<
     dyn Fn(&HookContext, ToolCall<'_>) -> WasmBoxedFuture<'static, ToolCallAction> + Send + Sync,
 >;
 
+/// The post-result closure shape (same copy-out contract as
+/// [`ToolCallFn`]).
+pub type ToolResultFn = Box<
+    dyn Fn(&HookContext, ToolResultEvent<'_>) -> WasmBoxedFuture<'static, ToolResultAction>
+        + Send
+        + Sync,
+>;
+
 /// One registered closure, tagged by its event point (built by the
 /// [`on`] constructors).
 pub enum OnEvent {
     ToolCall(ToolCallFn),
+    ToolResult(ToolResultFn),
 }
 
 /// The registration constructors: `on::tool_call(|ctx, call| async move { ... })`.
@@ -450,13 +471,26 @@ pub mod on {
     ) -> OnEvent {
         OnEvent::ToolCall(Box::new(f))
     }
+
+    /// The post-result point (`ToolResultAction`): runs after a call
+    /// resolves and before its presentation reaches the model. The
+    /// consumer that arrives with this need is the extension host
+    /// (forwarded hooks); more decisions join as consumers do.
+    pub fn tool_result(
+        f: impl Fn(&HookContext, ToolResultEvent<'_>) -> WasmBoxedFuture<'static, ToolResultAction>
+        + Send
+        + Sync
+        + 'static,
+    ) -> OnEvent {
+        OnEvent::ToolResult(Box::new(f))
+    }
 }
 
-/// One closure registration: the gate point this round's consumers
-/// exist for (the permission seam). More event points join as
-/// consumers do — "not registered" is the filter.
+/// One closure registration: any subset of the event points (each
+/// absent point is the pass-through default).
 pub(crate) struct ClosureHook {
     tool_call: Option<ToolCallFn>,
+    tool_result: Option<ToolResultFn>,
 }
 
 impl AgentHook for ClosureHook {
@@ -466,19 +500,56 @@ impl AgentHook for ClosureHook {
             None => ToolCallAction::run(),
         }
     }
+    async fn on_tool_result(
+        &self,
+        ctx: &HookContext,
+        event: ToolResultEvent<'_>,
+    ) -> ToolResultAction {
+        match &self.tool_result {
+            Some(f) => f(ctx, event).await,
+            None => ToolResultAction::Keep,
+        }
+    }
 }
 
 impl HookStack {
-    /// Register a closure at its event point: `.hook(spec, on::tool_call(|ctx, call| ...))`.
-    /// `on_tool_call` is the pre-call gate point — Skip is absorbing
-    /// (the first deny in priority order wins; later registrations do
-    /// not see the call), Run is neutral.
+    /// Register a closure at its event point: `.hook(spec, on::tool_call(|ctx, call| ...))`
+    /// or `.hook(spec, on::tool_result(|ctx, result| ...))`. `on_tool_call`
+    /// is the pre-call gate point — Skip is absorbing (the first deny
+    /// in priority order wins; later registrations do not see the
+    /// call), Run is neutral.
     pub fn hook(mut self, spec: impl Into<HookSpec>, on: OnEvent) -> Self {
         let spec = spec.into();
         let closure = match on {
-            OnEvent::ToolCall(f) => ClosureHook { tool_call: Some(f) },
+            OnEvent::ToolCall(f) => ClosureHook {
+                tool_call: Some(f),
+                tool_result: None,
+            },
+            OnEvent::ToolResult(f) => ClosureHook {
+                tool_call: None,
+                tool_result: Some(f),
+            },
         };
         self.push_prioritized(spec.id, spec.priority, std::sync::Arc::new(closure));
+        self
+    }
+
+    /// Merge two stacks under one priority law: the records join with
+    /// their priorities interleaved (stable sort; `self`'s
+    /// registrations come first among equals). The composition
+    /// surface assemblies need when several sources contribute hooks
+    /// (core, extensions) — nested stacks (pushing a whole
+    /// [`HookStack`] as one trait hook) resolve wholly inside one
+    /// record, so their priorities never interleave with the outer
+    /// stack's; `merge` is the flattening that keeps the single law.
+    pub fn merge(mut self, mut other: HookStack) -> Self {
+        let base = self.hooks.len() as u64;
+        for record in &mut other.hooks {
+            record.seq += base;
+        }
+        self.hooks.append(&mut other.hooks);
+        self.hooks
+            .sort_by_key(|record| (record.priority, record.seq));
         self
     }
 }

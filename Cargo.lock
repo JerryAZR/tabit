@@ -4723,6 +4723,7 @@ dependencies = [
 name = "tabit"
 version = "0.41.0"
 dependencies = [
+ "futures",
  "httpmock",
  "rig-agent",
  "rig-core",

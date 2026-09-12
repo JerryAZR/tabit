@@ -61,13 +61,15 @@ Current workspace layout:
   mark-dead-and-report — no mid-run respawn; the tool-call dispatch
   surface for proxy tools); the shared child-process helpers
   (tree-kill wrapping, the stderr ring) live here and serve the
-  subagent bridge too
+  subagent bridge too; the hook lane forwards engine hook events
+  over the same pipe (policy fails open on a dead extension)
 - `crates/tabit-ext-sdk` — the extension SDK, the guest side of the
   same pipe: the dispatcher owning the loop (ack, tool-call dispatch
   to bodies, result serialization, ask lifts) so authors write tool
   bodies only; hand-rolled frames sharing no code with the host —
   the protocol doc's reference consumer. Ships the example
-  extensions (`echo-ext`, `shadow-ext`, the clash pair) as its bins
+  extensions (`echo-ext`, `shadow-ext`, the clash pair, `gate-ext` —
+  the permission gate, moved out of core) as its bins
 - `crates/tabit-gui` — the egui frontend (`tabit-gui` binary; the
   `tabit` launcher detach-spawns it; reducer/view contract in ROADMAP
   item 7). Its `CHANGELOG.md` is the frontend protocol's changelog —

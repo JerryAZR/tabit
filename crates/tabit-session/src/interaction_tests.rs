@@ -1,5 +1,5 @@
-//! Interaction tests over the actor: the ask pattern end to end — the
-//! permission card answered over the command link, the ask-the-user
+//! Interaction tests over the actor: the ask pattern end to end — a
+//! policy hook's card answered over the command link, the ask-the-user
 //! tool body, session-memory "Always allow", and abort closing an open
 //! card totally.
 
@@ -12,12 +12,89 @@ use rig_core::completion::Usage;
 use serde_json::json;
 use tabit_protocol::SessionCommand;
 
-/// The gated name with a harmless body: the permission card is the point.
-/// The dev-time gate's factory, mounted through the seam exactly as
-/// the binary assembles it — these tests are the seam's end-to-end
-/// coverage.
+/// A minimal ask-gate over the public hook surface — the seam these
+/// tests cover (a policy hook asking through the run context, the hub
+/// routing, the actor answering). The real permission gate is the
+/// `gate` extension package (EXTENSIONS.md); the binary assembles
+/// hooks exactly the way this factory does.
 fn gated_gate() -> rig_agent::agent::HookStack {
-    crate::permission_gate(crate::PermissionMemory::default())
+    use rig_agent::agent::hook::ToolCallAction;
+    let granted: std::sync::Arc<std::sync::Mutex<std::collections::HashSet<String>>> =
+        std::sync::Arc::default();
+    rig_agent::agent::HookStack::new().hook(
+        ("test-gate", 0),
+        rig_agent::agent::on::tool_call(move |ctx, call| {
+            let granted = granted.clone();
+            let tool = call.tool_name.to_string();
+            let args = call.args.to_string();
+            let interaction = ctx.interaction();
+            Box::pin(async move {
+                if tool != "bash" {
+                    return ToolCallAction::run();
+                }
+                if granted
+                    .lock()
+                    .unwrap_or_else(|poison| poison.into_inner())
+                    .contains(&tool)
+                {
+                    return ToolCallAction::run();
+                }
+                let Some(interaction) = interaction else {
+                    return ToolCallAction::skip(
+                        "`bash` requires permission, but this session has no interactive \
+                         frontend to grant it — the call did not run",
+                    );
+                };
+                let card = tabit_protocol::templates::SelectOneCard {
+                    title: format!("Allow `{tool}` to run?"),
+                    body: args,
+                    options: vec![
+                        tabit_protocol::templates::SelectOption::new("Allow"),
+                        tabit_protocol::templates::SelectOption {
+                            label: "Always allow".to_string(),
+                            description: Some(
+                                "skip prompts for this tool until the session ends".to_string(),
+                            ),
+                        },
+                        tabit_protocol::templates::SelectOption::new("Deny"),
+                    ],
+                    free_text: true,
+                };
+                let payload = serde_json::to_value(card).expect("the select template serializes");
+                let answer = match interaction
+                    .request(tabit_protocol::templates::ui::SELECT_ONE, payload)
+                    .await
+                {
+                    rig_agent::tool::interaction::InteractionOutcome::Answered(payload) => {
+                        serde_json::from_value::<tabit_protocol::templates::SelectAnswer>(payload)
+                            .unwrap_or_default()
+                    }
+                    rig_agent::tool::interaction::InteractionOutcome::Dismissed => {
+                        tabit_protocol::templates::SelectAnswer::default()
+                    }
+                };
+                match answer.selected.first().map(String::as_str) {
+                    Some("Allow") => ToolCallAction::run(),
+                    Some("Always allow") => {
+                        granted
+                            .lock()
+                            .unwrap_or_else(|poison| poison.into_inner())
+                            .insert(tool.clone());
+                        ToolCallAction::run()
+                    }
+                    _ => {
+                        let reason = match answer.text.as_deref() {
+                            Some(text) if !text.trim().is_empty() => format!(": {text}"),
+                            _ => String::new(),
+                        };
+                        ToolCallAction::skip(format!(
+                            "the user denied `{tool}`{reason} — the call did not run"
+                        ))
+                    }
+                }
+            })
+        }),
+    )
 }
 
 fn gated_tool() -> DynamicTool {

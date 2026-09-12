@@ -41,6 +41,7 @@ fn main() {
         "hello" | "mute" | "die-post-ack" | "bad-ack" | "wrong-version" | "late-garbage" => {}
         "die-pre-ack" => std::process::exit(1),
         "tools-echo" | "tools-fail" | "tools-ask" | "tools-shadow" => {}
+        "hooks-allow" | "hooks-skip" | "hooks-ask" | "hooks-hang" => {}
         other => {
             eprintln!("ext-double: unknown behavior `{other}`");
             std::process::exit(2);
@@ -69,6 +70,9 @@ fn main() {
         "tools-fail" => serve_tools(json!([tool_decl("boom")])),
         "tools-ask" => serve_tools(json!([tool_decl("ask")])),
         "tools-shadow" => serve_tools(json!([tool_decl("read")])),
+        behavior @ ("hooks-allow" | "hooks-skip" | "hooks-ask" | "hooks-hang") => {
+            serve_hooks(behavior)
+        }
         _ => {
             emit(json!({
                 "type": "ack", "protocol_version": 1,
@@ -148,6 +152,79 @@ fn serve_tools(tools: Value) {
                 "error": null,
                 "report": format!("EXT-ECHOED:{}", args["text"].as_str().unwrap_or_default()),
                 "details": {"echoed": true},
+            })),
+        }
+    }
+}
+
+/// The hook-lane loop (task 3): one declared `tool_call` hook served
+/// sequentially. The behavior picks the decision path.
+fn serve_hooks(behavior: &str) {
+    emit(json!({
+        "type": "ack", "protocol_version": 1,
+        "tools": [], "hooks": [{"event": "tool_call"}],
+    }));
+    loop {
+        let line = read_line();
+        let Ok(frame) = serde_json::from_str::<Value>(&line) else {
+            continue;
+        };
+        if frame["type"] != "hook" {
+            continue;
+        }
+        let hook_id = frame["hook_id"].as_str().unwrap_or_default().to_string();
+        match behavior {
+            "hooks-skip" => emit(json!({
+                "type": "hook_result", "hook_id": hook_id,
+                "decision": "skip", "message": "the double denies",
+            })),
+            "hooks-hang" => {
+                let _ = hook_id; // never answers: the drain test's wedge
+                loop {
+                    std::thread::park();
+                }
+            }
+            "hooks-ask" => {
+                emit(json!({
+                    "type": "interaction_request",
+                    "call_id": hook_id.clone(),
+                    "id": format!("{hook_id}-ask"),
+                    "ui_type": "native:select_one",
+                    "payload": {
+                        "title": "The hook asks",
+                        "body": "allow this call?",
+                        "options": [
+                            {"label": "Allow"},
+                            {"label": "Deny"},
+                        ],
+                        "free_text": false,
+                    },
+                }));
+                let answer = loop {
+                    let line = read_line();
+                    match serde_json::from_str::<Value>(&line) {
+                        Ok(frame) if frame["type"] == "interaction_response" => break frame,
+                        _ => continue,
+                    }
+                };
+                match &answer["outcome"] {
+                    Value::Null => emit(json!({
+                        "type": "hook_result", "hook_id": hook_id,
+                        "decision": "skip", "message": "dismissed — the call did not run",
+                    })),
+                    other => {
+                        let allowed = other["selected"][0].as_str() == Some("Allow");
+                        emit(json!({
+                            "type": "hook_result", "hook_id": hook_id,
+                            "decision": if allowed { "run" } else { "skip" },
+                            "message": if allowed { Value::Null } else { json!("denied by the answer") },
+                        }));
+                    }
+                }
+            }
+            _ => emit(json!({
+                "type": "hook_result", "hook_id": hook_id,
+                "decision": "run",
             })),
         }
     }

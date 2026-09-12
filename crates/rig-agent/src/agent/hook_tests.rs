@@ -555,3 +555,71 @@ async fn closure_records_order_by_priority_and_deny_is_absorbing() {
         "priority orders; the deny absorbs before `second`"
     );
 }
+
+#[tokio::test]
+async fn on_tool_result_registers_and_resolves() {
+    // The post-result closure point (the extension host is its
+    // consumer): rewrite changes the presentation the stack returns.
+    let stack = HookStack::new().hook(
+        ("rewriter", 0),
+        on::tool_result(|_ctx, _event| Box::pin(async { ToolResultAction::rewrite("rewritten") })),
+    );
+    let presentation = crate::tool::ToolOutput::text("original");
+    let raw = crate::tool::ToolResult::success(crate::tool::ToolOutput::text("original"));
+    let action = AgentHook::on_tool_result(
+        &stack,
+        &HookContext::new(Default::default()),
+        ToolResultEvent {
+            tool_name: "t",
+            tool_call_id: None,
+            internal_call_id: "i",
+            args: "{}",
+            presentation: &presentation,
+            raw_result: &raw,
+            tool_context: &crate::tool::ToolContext::new(),
+        },
+    )
+    .await;
+    assert!(
+        matches!(action, ToolResultAction::Rewrite(ref out) if out.as_text() == Some("rewritten"))
+    );
+}
+
+#[tokio::test]
+async fn merge_interleaves_under_one_priority_law() {
+    let seen = Arc::new(std::sync::Mutex::new(Vec::new()));
+    let note = |label: &'static str| -> crate::agent::ToolCallFn {
+        let seen = seen.clone();
+        Box::new(move |_, _| {
+            let seen = seen.clone();
+            Box::pin(async move {
+                seen.lock().unwrap().push(label);
+                ToolCallAction::run()
+            })
+        })
+    };
+    // Two stacks from two sources: priorities interleave (the inner
+    // -5 runs inside the outer 0s), and equal priorities keep the
+    // outer stack's registration ahead of the merged one's.
+    let outer = HookStack::new().hook(("outer-a", 0), on::tool_call(note("outer-a")));
+    let inner = HookStack::new()
+        .hook(("inner-early", -5), on::tool_call(note("inner-early")))
+        .hook(("inner-b", 0), on::tool_call(note("inner-b")));
+    let merged = outer.merge(inner);
+    assert_eq!(merged.ids(), vec!["inner-early", "outer-a", "inner-b"]);
+    AgentHook::on_tool_call(
+        &merged,
+        &HookContext::new(Default::default()),
+        ToolCall {
+            tool_name: "t",
+            tool_call_id: None,
+            internal_call_id: "i",
+            args: "{}",
+        },
+    )
+    .await;
+    assert_eq!(
+        *seen.lock().unwrap(),
+        vec!["inner-early", "outer-a", "inner-b"]
+    );
+}

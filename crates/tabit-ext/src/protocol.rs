@@ -73,6 +73,42 @@ pub enum HostFrame {
         id: String,
         outcome: Option<serde_json::Value>,
     },
+    /// One hook event forwarded to the extension: `event` is the
+    /// engine's hook point (`tool_call` | `tool_result`), `payload`
+    /// the event facts (the session identity, the tool, the args —
+    /// and for `tool_result`, the presentation and outcome). The
+    /// extension answers with a [`HookResult`] carrying the same id.
+    Hook {
+        hook_id: String,
+        event: String,
+        payload: serde_json::Value,
+    },
+}
+
+/// What a forwarded hook decided (checklist task 3). v1 carries the
+/// consumed decisions only: a policy hook runs the call or skips it
+/// with the in-band message (the denial channel), a result hook keeps
+/// the presentation. Rewrites and stops exist as engine actions but
+/// carry on no wire until a consumer asks for them.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+#[serde(tag = "decision", rename_all = "snake_case")]
+pub enum HookDecision {
+    /// Execute the call (the neutral action).
+    Run,
+    /// Do not execute; the message is the feedback the model sees.
+    Skip { message: String },
+    /// Keep the result's presentation as-is (the neutral action for
+    /// `tool_result` hooks).
+    Keep,
+}
+
+/// A hook decision on the wire, correlated by the forwarded event's
+/// id.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct HookResult {
+    pub hook_id: String,
+    #[serde(flatten)]
+    pub decision: HookDecision,
 }
 
 /// A tool result on the wire: the report text plus the optional
@@ -99,15 +135,17 @@ pub enum ExtFrame {
     /// [`ToolWireResult`], on the wire.
     ToolResult(ToolWireResult),
     /// The extension asks the user mid-call (the capability lift):
-    /// `call_id` routes to the session whose proxy call is executing,
-    /// `id` correlates the answer. `ui_type` + `payload` mirror the
-    /// engine's `UserInteraction` verbatim.
+    /// `call_id` routes to the session whose forwarded call or hook is
+    /// executing, `id` correlates the answer. `ui_type` + `payload`
+    /// mirror the engine's `UserInteraction` verbatim.
     InteractionRequest {
         call_id: String,
         id: String,
         ui_type: String,
         payload: serde_json::Value,
     },
+    /// [`HookResult`], on the wire.
+    HookResult(HookResult),
 }
 
 #[cfg(test)]
@@ -126,7 +164,9 @@ mod tests {
             HostFrame::Initialize { protocol_version } => {
                 assert_eq!(protocol_version, EXTENSION_PROTOCOL_VERSION);
             }
-            HostFrame::ToolCall { .. } | HostFrame::InteractionResponse { .. } => {
+            HostFrame::ToolCall { .. }
+            | HostFrame::InteractionResponse { .. }
+            | HostFrame::Hook { .. } => {
                 panic!("an initialize line parsed as another frame")
             }
         }
@@ -156,7 +196,9 @@ mod tests {
                 assert_eq!(tools.len(), 1);
                 assert_eq!(hooks.len(), 1);
             }
-            ExtFrame::ToolResult(..) | ExtFrame::InteractionRequest { .. } => {
+            ExtFrame::ToolResult(..)
+            | ExtFrame::InteractionRequest { .. }
+            | ExtFrame::HookResult(_) => {
                 panic!("an ack line parsed as another frame")
             }
         }

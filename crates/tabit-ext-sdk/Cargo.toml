@@ -33,6 +33,10 @@ path = "src/bin/clash_a.rs"
 name = "clash-b-ext"
 path = "src/bin/clash_b.rs"
 
+[[bin]]
+name = "gate-ext"
+path = "src/bin/gate.rs"
+
 [dependencies]
 serde_json = { workspace = true }
 

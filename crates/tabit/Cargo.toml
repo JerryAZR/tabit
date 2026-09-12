@@ -20,6 +20,7 @@ tabit-ext = { path = "../tabit-ext", version = "0.41.0" }
 tabit-protocol = { path = "../tabit-protocol", version = "0.41.0" }
 tabit-session = { path = "../tabit-session", version = "0.41.0" }
 tabit-tools = { path = "../tabit-tools", version = "0.41.0" }
+futures = { workspace = true }
 serde_json = { workspace = true }
 tokio = { workspace = true, features = ["rt-multi-thread", "macros"] }
 

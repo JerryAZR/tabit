@@ -60,10 +60,9 @@ const PROTOCOL_VERSION: u64 = 1;
 pub struct Extension {
     /// The tools this process serves.
     pub tools: Vec<ToolDef>,
-    /// The engine hook points it subscribes to (today: `tool_call`,
-    /// `tool_result` — hook *events* are not delivered yet; the
-    /// declaration mounts now so handshakes do not drift later).
-    pub hooks: Vec<String>,
+    /// The hook points it subscribes to (today: `tool_call`,
+    /// `tool_result`).
+    pub hooks: Vec<HookDef>,
 }
 
 impl Extension {
@@ -74,9 +73,8 @@ impl Extension {
         }
     }
 
-    /// Subscribe to hook points (see [`Extension::tools`]'s sibling
-    /// field doc).
-    pub fn with_hooks(mut self, hooks: Vec<String>) -> Self {
+    /// Subscribe to hook points ([`hook`]).
+    pub fn with_hooks(mut self, hooks: Vec<HookDef>) -> Self {
         self.hooks = hooks;
         self
     }
@@ -140,6 +138,53 @@ where
         description: description.to_string(),
         schema,
         body: Box::new(body),
+    }
+}
+
+/// What a hook handler decided — the wire's `HookDecision`, in the
+/// SDK's hand. v1: run the call, skip it with the in-band message,
+/// or keep a result's presentation.
+#[derive(Debug, Clone)]
+pub enum Decision {
+    Run,
+    Skip { message: String },
+    Keep,
+}
+
+impl Decision {
+    pub fn run() -> Self {
+        Decision::Run
+    }
+    pub fn skip(message: impl Into<String>) -> Self {
+        Decision::Skip {
+            message: message.into(),
+        }
+    }
+    pub fn keep() -> Self {
+        Decision::Keep
+    }
+}
+
+/// A hook handler: the event payload plus the ask handle (a policy
+/// may need the human mid-hook).
+pub type HookBody = Arc<dyn Fn(Value, &Ask) -> Result<Decision, String> + Send + Sync>;
+
+/// One declared hook subscription.
+pub struct HookDef {
+    pub event: String,
+    body: HookBody,
+}
+
+/// Subscribe to a hook point: `hook("tool_call", |event, ask| ...)`.
+/// The payload carries the event facts (`session`, `tool`, `args` —
+/// and for `tool_result`, the presentation and outcome).
+pub fn hook<F>(event: &str, body: F) -> HookDef
+where
+    F: Fn(Value, &Ask) -> Result<Decision, String> + Send + Sync + 'static,
+{
+    HookDef {
+        event: event.to_string(),
+        body: Arc::new(body),
     }
 }
 
@@ -213,9 +258,9 @@ struct Shared {
 /// a malformed handshake or an unencodable frame exits loud.
 pub fn serve(extension: Extension) -> ! {
     let Extension { tools, hooks } = extension;
-    // Tool bodies are not clonable (they are the author's closures) —
-    // the worker threads share them behind an Arc.
-    let tools = Arc::new(tools);
+    // Bodies are not clonable (they are the author's closures) — the
+    // worker threads share them behind an Arc.
+    let (tools, hooks) = (Arc::new(tools), Arc::new(hooks));
     let shared = Arc::new(Shared {
         stdout: std::sync::Mutex::new(()),
         asks: Mutex::new(HashMap::new()),
@@ -249,7 +294,10 @@ pub fn serve(extension: Extension) -> ! {
                     "schema": tool.schema,
                 }))
                 .collect::<Vec<_>>(),
-            "hooks": hooks,
+            "hooks": hooks
+                .iter()
+                .map(|hook| json!({"event": hook.event}))
+                .collect::<Vec<_>>(),
         }),
     );
 
@@ -271,6 +319,19 @@ pub fn serve(extension: Extension) -> ! {
                 let (shared, tools) = (shared.clone(), tools.clone());
                 std::thread::spawn(move || run_body(&shared, call_id, name, args, &tools));
             }
+            Some("hook") => {
+                let hook_id = frame["hook_id"].as_str().unwrap_or_default().to_string();
+                let event = frame["event"].as_str().unwrap_or_default().to_string();
+                let payload = frame["payload"].clone();
+                let (shared, hooks) = (shared.clone(), hooks.clone());
+                std::thread::spawn(move || {
+                    let handler = hooks
+                        .iter()
+                        .find(|h| h.event == event)
+                        .map(|h| h.body.clone());
+                    run_hook(&shared, hook_id, handler, payload);
+                });
+            }
             Some("interaction_response") => {
                 let id = frame["id"].as_str().unwrap_or_default().to_string();
                 let outcome = match &frame["outcome"] {
@@ -284,6 +345,54 @@ pub fn serve(extension: Extension) -> ! {
             _ => {} // a newer host's frame: tolerated, ignored
         }
     }
+}
+
+/// One dispatched hook. No subscription for the event is the neutral
+/// decision (a newer host's event point the SDK predates). A failing
+/// or panicking handler answers **skip with the failure message**: an
+/// extension that declared a policy point does not get its calls run
+/// by accident of its own bug — fail closed, loud, in-band. (A
+/// handler that wants fail-open returns [`Decision::run`] on its own
+/// error paths.)
+fn run_hook(shared: &Arc<Shared>, hook_id: String, body: Option<HookBody>, payload: Value) {
+    let Some(body) = body else {
+        let _ = emit(
+            shared,
+            json!({
+                "type": "hook_result", "hook_id": hook_id, "decision": "run",
+            }),
+        );
+        return;
+    };
+    let ask = Ask {
+        call_id: hook_id.clone(),
+        shared: shared.clone(),
+    };
+    let outcome = std::panic::catch_unwind(AssertUnwindSafe(|| body(payload, &ask)));
+    let frame = match outcome {
+        Ok(Ok(decision)) => match decision {
+            Decision::Run => json!({
+                "type": "hook_result", "hook_id": hook_id, "decision": "run",
+            }),
+            Decision::Skip { message } => json!({
+                "type": "hook_result", "hook_id": hook_id,
+                "decision": "skip", "message": message,
+            }),
+            Decision::Keep => json!({
+                "type": "hook_result", "hook_id": hook_id, "decision": "keep",
+            }),
+        },
+        Ok(Err(error)) => json!({
+            "type": "hook_result", "hook_id": hook_id,
+            "decision": "skip", "message": format!("the hook handler failed: {error}"),
+        }),
+        Err(panic) => json!({
+            "type": "hook_result", "hook_id": hook_id,
+            "decision": "skip", "message": format!(
+                "the hook handler panicked: {}", panic_note(panic)),
+        }),
+    };
+    let _ = emit(shared, frame);
 }
 
 /// One dispatched call: find the body, run it (panics become error

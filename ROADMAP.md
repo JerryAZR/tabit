@@ -1032,11 +1032,14 @@ assistant.
 ### 9. Extensions
 
 **DESIGN SETTLED (2026-09, the discussion record lives in
-EXTENSIONS.md); implementation under way — tasks 1–2 shipped (the
+EXTENSIONS.md); implementation under way — tasks 1–3 shipped (the
 `crates/tabit-ext` host: discovery, the frozen pipe, supervision,
-the death policy, the tool lane; `crates/tabit-ext-sdk`: the guest
-dispatcher; proxy assembly + the `extensions_available` catalog in
-the `tabit --json` backend).** The shape:
+the death policy, the tool lane, the hook lane; the engine-side
+`on::tool_result` + `HookStack::merge`; `crates/tabit-ext-sdk`: the
+guest dispatcher and the example packages, `gate-ext` included —
+the permission gate now lives there, `permission.rs` deleted;
+proxy+hook assembly and the `extensions_available` catalog in the
+`tabit --json` backend).** The shape:
 
 - **The substrate: subprocess executables over a frozen JSONL
   extension protocol** — the subagent substrate generalized. One
@@ -1146,9 +1149,18 @@ the `tabit --json` backend).** The shape:
    **template** (fork → develop → build → publish: `tabit.json`,
    skeleton `main.rs`, release workflow, README) is `echo`
    generalized — in-workspace until task 6, then its own repo.
-3. **Hook registration & execution** — pipe-forwarded hook events
-   plus the engine-side work above (`on::tool_result` closure
-   registration, stack merge).
+3. **Hook registration & execution** — *shipped* — pipe-forwarded
+   hook events (`hook`/`hook_result`, v1 decisions run/skip/keep;
+   the payload carries the session identity, tool, args) plus the
+   engine-side work (`on::tool_result` closure registration,
+   `HookStack::merge` — one priority law; `SessionTag` gives the
+   process-level forwarders their per-session key). **The permission
+   gate moved out of the core** (the ruling executed):
+   `permission.rs` deleted, `gate-ext` is the same policy over the
+   same seam, session-keyed "Always allow" memory. Ruled with it:
+   policy fails open on a dead extension (crash isolation — one dead
+   package cannot brick the tool phase; the death is reported
+   loudly), execution fails with its error.
 4. **Scanning** — enabled-extension discovery over the config
    layers; skills symlinks; `providers.toml` fragment merge at
    config load (user config wins).
@@ -1173,9 +1185,10 @@ checklist:
    the replaces-core report, e2e-asserted on the channel), and the
    clash pair (same name — the newcomer refused, the incumbent
    named), all SDK-built in `crates/tabit-ext-sdk/src/bin/`.
-3. `gate` — the permission gate itself, moved out of core (the ruling
-   above; deleting `permission.rs` is the demo): `on::tool_call` +
-   the interaction prompt + session memory.
+3. *shipped* — `gate` (`gate-ext`): the permission gate itself,
+   moved out of core (`permission.rs` deleted — the demo was the
+   deletion); `on::tool_call` + the interaction prompt + session-keyed
+   memory, e2e-proven over the real frontend wire.
 4. `lmstudio` — the provider relay speaking LM Studio's **native**
    REST API (deliberately not the OpenAI-compat endpoint LM Studio
    also serves) behind a `providers.toml` fragment; plus a

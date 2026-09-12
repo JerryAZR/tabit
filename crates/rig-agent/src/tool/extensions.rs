@@ -176,6 +176,13 @@ pub struct SessionCwd(pub std::path::PathBuf);
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct InternalCallId(pub String);
 
+/// The run's session identity (the event stream stamp), inserted by
+/// the host at run start; absent on hosts without sessions. The
+/// consumer is hook forwarding — an extension's per-session policy
+/// state keys on it (see `HookContext::session_id`).
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct SessionTag(pub std::sync::Arc<str>);
+
 impl ToolContext {
     /// Create an empty context.
     pub const fn new() -> Self {

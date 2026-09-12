@@ -41,8 +41,8 @@ use std::time::Duration;
 use crate::manifest::{self, Discovered, Manifest};
 use crate::process::{self, StderrRing, wrap_command};
 use crate::protocol::{
-    Ack, EXTENSION_PROTOCOL_VERSION, ExtFrame, HOOK_POINTS, HookDecl, HostFrame, ToolDecl,
-    ToolWireResult,
+    Ack, EXTENSION_PROTOCOL_VERSION, ExtFrame, HOOK_POINTS, HookDecision, HookDecl, HostFrame,
+    ToolDecl, ToolWireResult,
 };
 use process_wrap::tokio::ChildWrapper;
 use rig_agent::tool::interaction::{InteractionOutcome, UserInteraction};
@@ -179,26 +179,52 @@ impl Lane {
         })
     }
 
-    /// The pipe's last act: fail every pending call, then stay
-    /// dead-flagged for late arrivals.
+    /// The pipe's last act: answer every pending item — executions
+    /// with their failure, policy with its fail-open fallback — then
+    /// stay dead-flagged for late arrivals.
     fn die(&self, reason: &str) {
         self.dead.store(true, Ordering::SeqCst);
         for (call_id, pending) in tabit_log::lock::lock(&self.pending).drain() {
-            let _ = pending.result.send(ToolWireResult {
-                call_id,
-                error: Some(reason.to_string()),
-                report: String::new(),
-                details: None,
-            });
+            match pending.waiter {
+                Waiter::ToolCall(result) => {
+                    let _ = result.send(ToolWireResult {
+                        call_id,
+                        error: Some(reason.to_string()),
+                        report: String::new(),
+                        details: None,
+                    });
+                }
+                Waiter::Hook { result, fallback } => {
+                    let _ = result.send(fallback);
+                }
+            }
         }
     }
 }
 
+/// One outstanding forwarded item, keyed by its correlation id (a
+/// call id or a hook id — the lift routes asks by the same key).
 struct PendingCall {
-    result: tokio::sync::oneshot::Sender<ToolWireResult>,
+    waiter: Waiter,
     /// The calling session's interaction capability — the lift's
-    /// routing target for this call's asks.
+    /// routing target for this call's or hook's asks.
     ask: Option<Arc<dyn UserInteraction>>,
+}
+
+/// What the awaiting side of a forwarded item receives.
+enum Waiter {
+    /// A tool call: the wire result, or the transport failure (the
+    /// lane was dead before the frame left).
+    ToolCall(tokio::sync::oneshot::Sender<ToolWireResult>),
+    /// A hook: the decision, or the transport failure. The fallback is
+    /// what a death answers with — **policy fails open** (crash
+    /// isolation: one dead package cannot brick the tool phase; the
+    /// death itself is reported loudly), where a failed *execution*
+    /// answers with its error. The asymmetry is the ruling.
+    Hook {
+        result: tokio::sync::oneshot::Sender<HookDecision>,
+        fallback: HookDecision,
+    },
 }
 
 /// The proxy surface for one extension — what the binary's tool
@@ -227,8 +253,13 @@ impl ExtensionHandle {
             self.lane.next_call_id.fetch_add(1, Ordering::Relaxed)
         );
         let (tx, rx) = tokio::sync::oneshot::channel();
-        tabit_log::lock::lock(&self.lane.pending)
-            .insert(call_id.clone(), PendingCall { result: tx, ask });
+        tabit_log::lock::lock(&self.lane.pending).insert(
+            call_id.clone(),
+            PendingCall {
+                waiter: Waiter::ToolCall(tx),
+                ask,
+            },
+        );
         // The dead check rides after the insert and inside the same
         // ordering as `die`'s store-then-drain, so a death between
         // insert and check is caught either by the flag or by the
@@ -252,6 +283,65 @@ impl ExtensionHandle {
             Err(_) => {
                 tabit_log::lock::lock(&self.lane.pending).remove(&call_id);
                 Err(format!("extension `{}` closed mid-call", self.lane.name))
+            }
+        }
+    }
+
+    /// Forward one hook event to the extension and await its decision
+    /// (the hook lane, checklist task 3). Same shape as [`call`]: the
+    /// ask capability rides along for mid-hook asks, a dead lane is a
+    /// transport error — the caller owns the policy mapping (the
+    /// binary fails policy open: run/keep), while a death *during* the
+    /// await resolves through the lane's drain with the same fallback.
+    pub async fn hook(
+        &self,
+        event: &str,
+        payload: serde_json::Value,
+        ask: Option<Arc<dyn UserInteraction>>,
+    ) -> Result<HookDecision, String> {
+        let fallback = if event == "tool_result" {
+            HookDecision::Keep
+        } else {
+            HookDecision::Run
+        };
+        let hook_id = format!(
+            "{}-h{}",
+            self.lane.name,
+            self.lane.next_call_id.fetch_add(1, Ordering::Relaxed)
+        );
+        let (tx, rx) = tokio::sync::oneshot::channel();
+        tabit_log::lock::lock(&self.lane.pending).insert(
+            hook_id.clone(),
+            PendingCall {
+                waiter: Waiter::Hook {
+                    result: tx,
+                    fallback: fallback.clone(),
+                },
+                ask,
+            },
+        );
+        if self.lane.dead.load(Ordering::SeqCst) {
+            tabit_log::lock::lock(&self.lane.pending).remove(&hook_id);
+            return Err(format!("extension `{}` is not running", self.lane.name));
+        }
+        let frame = serde_json::to_string(&HostFrame::Hook {
+            hook_id: hook_id.clone(),
+            event: event.to_string(),
+            payload,
+        })
+        .map_err(|error| format!("cannot encode the hook event: {error}"))?;
+        if self.lane.commands.send(frame).is_err() {
+            tabit_log::lock::lock(&self.lane.pending).remove(&hook_id);
+            return Err(format!("extension `{}` is not running", self.lane.name));
+        }
+        match rx.await {
+            Ok(decision) => Ok(decision),
+            Err(_) => {
+                tabit_log::lock::lock(&self.lane.pending).remove(&hook_id);
+                // The lane died and its drain answers every pending
+                // item with the fallback; reaching here means our
+                // entry was gone first — answer the same.
+                Ok(fallback)
             }
         }
     }
@@ -566,8 +656,25 @@ async fn supervise(
                     }
                     Ok(ExtFrame::ToolResult(result)) => {
                         let pending = tabit_log::lock::lock(&lane.pending).remove(&result.call_id);
-                        if let Some(pending) = pending {
-                            let _ = pending.result.send(result);
+                        if let Some(PendingCall {
+                            waiter: Waiter::ToolCall(result_tx),
+                            ..
+                        }) = pending
+                        {
+                            let _ = result_tx.send(result);
+                        }
+                    }
+                    Ok(ExtFrame::HookResult(result)) => {
+                        let pending = tabit_log::lock::lock(&lane.pending).remove(&result.hook_id);
+                        if let Some(PendingCall {
+                            waiter:
+                                Waiter::Hook {
+                                    result: result_tx, ..
+                                },
+                            ..
+                        }) = pending
+                        {
+                            let _ = result_tx.send(result.decision);
                         }
                     }
                     Ok(ExtFrame::InteractionRequest {

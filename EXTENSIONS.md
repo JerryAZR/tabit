@@ -110,6 +110,26 @@ Sibling domains carry their own rules: skills merge last-wins-with-
 warn per the discovery ladder (ROADMAP item 3); providers are
 user-config-wins (below).
 
+## Hook forwarding: the pipe lane, and policy fails open (2026-09,
+task 3)
+
+Forwarded hooks are the tool lane's sibling: `hook { hook_id, event,
+payload }` out, `hook_result { hook_id, decision }` back, v1
+decisions `run`, `skip { message }`, `keep` (rewrites and stops are
+engine actions that carry on no wire until a consumer asks). The
+payload carries the session identity, the tool, the args (and the
+presentation for `tool_result`); the session identity is what
+per-session policy state keys on. Mid-hook asks ride the same
+interaction lift (the correlation id is the hook's). Registrations
+compose in scan order through `HookStack::merge` — one priority law.
+
+**Policy fails open; execution fails loud.** A dead extension's
+pending hook resolves with the neutral decision (run/keep) — crash
+isolation: one dead package cannot brick the tool phase, and the
+death is reported loudly (stderr, the catalog's dead standing). A
+dead extension's pending *execution* resolves with its error. The
+asymmetry is the ruling.
+
 ## Install, distribution, package layout (2026-09)
 
 `tabit install npm:<package> | git:<repo> | path:<dir>`:
@@ -252,20 +272,21 @@ Implications:
   the next run. The verb choice is the machine's, not the
   extension's.
 
-## The permission system is a placeholder; extensions are its
-replacement (2026-08; fate sharpened 2026-09)
+## The permission gate IS an extension package (2026-08 ruling,
+executed 2026-09, checklist task 3)
 
-Ruled: the core ships a basic permission gate only to test the
+The core shipped a basic permission gate only to test the
 interaction path — an ask-set of exactly `bash`, "Always allow" as
-session memory (never persisted, no config write-back). It stays in
-the core until the extension system lands, as the interaction
-prompts' consumer (2026-09: the interaction path needs a first-party
-consumer to stay honest). When extensions land, the gate **moves out
-of the core into an extension package** — hooks over the same seams,
-exactly like `RecorderHook` is today (our own components are
-first-party hook sets, not privileged). The deletable surface is the
-policy; the hub, the wire shapes, and the capability are permanent
-infrastructure the extension inherits.
+session memory. With the hook lane landed, the gate **moved out of
+the core into `gate-ext`** (`crates/tabit-ext-sdk/src/bin/gate.rs`):
+the exact policy over the same seam, `permission.rs` deleted, no
+core code knows a permission exists. The hub, the wire shapes, and
+the capability are the permanent infrastructure the package
+inherits. The package's "Always allow" memory keys on the hook
+payload's session identity (one gate process serves every session —
+without the key, one session's grant would leak into another); the
+session-vs-user durability split stays deferred (v1 is session-only,
+as the core gate was).
 
 ## Tool-call policy mounts through the hook surface (2026-08; seam
 replaced by the hook-surface round the same month)

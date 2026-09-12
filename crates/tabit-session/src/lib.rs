@@ -34,7 +34,8 @@
 //! roundtrip** is the boundary between a turn's tool calls and the next
 //! model call. Steering and the extension framework are future
 //! insertions at that boundary; tool-call policy (the dev-time
-//! permission gate) mounts through the hooks seam
+//! extension policy — the permission gate is the `gate`
+//! package now) mounts through the hooks seam
 //! ([`SessionBuilder::hooks`]), assembled by the binary — the
 //! core carries no policy of its own.
 //!
@@ -72,7 +73,6 @@ mod interaction;
 mod model;
 mod notice;
 mod parser;
-mod permission;
 mod prompt;
 mod registry;
 pub(crate) mod replay;
@@ -104,7 +104,6 @@ pub use error::SessionError;
 pub use interaction::InteractionHub;
 pub use model::validate_selection;
 pub use parser::Parsed;
-pub use permission::{PERMISSION_ASK_TOOLS, PermissionMemory, permission_gate};
 pub use prompt::build_system_prompt;
 pub use registry::ModelRegistry;
 pub use routing::ChildRouter;

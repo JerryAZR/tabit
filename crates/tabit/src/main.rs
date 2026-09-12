@@ -557,15 +557,15 @@ fn assemble_session(
     .map_err(|e| e.to_string())?
     .preamble(preamble)
     .model_factory(registry.factory())
-    // The dev-time permission gate, mounted by the assembly through
-    // the hook surface (closure registration; the gate asks via
-    // ctx.interaction()): session-scoped "Always allow" memory
-    // captured per session build. It stays in core until extensions
-    // land — the interaction prompts' consumer — then moves out into
-    // an extension package through this same mount (EXTENSIONS.md).
-    .hooks(tabit_session::permission_gate(
-        tabit_session::PermissionMemory::default(),
-    ))
+    // The hook surface: whatever the extension mount carries — the
+    // forwarded policy hooks of installed packages (the permission
+    // gate is the `gate` extension now; EXTENSIONS.md) plus any core
+    // stack, composed through the builder's one seam. Children mount
+    // nothing: they never booted extensions (the leaf law).
+    .hooks(match extensions {
+        Some(mounted) if args.parent.is_none() => mounted.hooks(),
+        _ => rig_agent::agent::HookStack::new(),
+    })
     .subagents(subagents)
     .skills(skills);
     // The parent's toolset: the core set, plus the extension mount —

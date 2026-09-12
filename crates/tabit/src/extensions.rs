@@ -22,19 +22,22 @@
 
 use std::sync::Arc;
 
+use rig_agent::agent::hook::{ToolCallAction, ToolResultAction};
+use rig_agent::agent::{HookStack, on};
 use rig_agent::tool::interaction::UserInteraction;
 use rig_agent::tool::{DynamicTool, ToolContext};
 use rig_core::tool::{ToolExecutionError, content_parts};
-use tabit_ext::protocol::ToolDecl;
+use tabit_ext::protocol::{HookDecision, ToolDecl};
 use tabit_ext::supervisor::{ExtensionHandle, ExtensionReport, Status, Supervisor};
 use tabit_protocol::{
     AvailableExtension, AvailableExtensionTool, ExtensionConflict, ExtensionConflictKind,
     ExtensionsCatalog,
 };
 
-/// The boot's mounted extension surface: the proxy tools, the
-/// replacements they caused (the core tools to unmount), and the
-/// catalog snapshot announced once at startup.
+/// The boot's mounted extension surface: the proxy tools, the hook
+/// stack (forwarding closures over the pipes), the replacements the
+/// tools caused (the core tools to unmount), and the catalog snapshot
+/// announced once at startup.
 pub struct Mounted {
     /// The host, held for the backend's life — dropping the mount is
     /// the host's close (the closing token every extension selects
@@ -43,6 +46,9 @@ pub struct Mounted {
     supervisor: Arc<Supervisor>,
     /// The proxy tools — conflict-free by construction.
     tools: Vec<DynamicTool>,
+    /// The forwarded hooks, registered in scan order (any future core
+    /// stack composes through `HookStack::merge` — one priority law).
+    hooks: HookStack,
     /// The catalog the backend announces (`extensions_available`).
     pub catalog: ExtensionsCatalog,
 }
@@ -54,6 +60,7 @@ impl Mounted {
         Mounted {
             supervisor: std::sync::Arc::new(Supervisor::empty()),
             tools: Vec::new(),
+            hooks: HookStack::new(),
             catalog: ExtensionsCatalog::default(),
         }
     }
@@ -61,6 +68,7 @@ impl Mounted {
     /// Assemble from the supervisor's **resolved** reports (call
     /// [`Supervisor::await_resolved`] first — the boot order that
     /// guarantees tools exist at session build).
+    #[allow(clippy::unreachable)] // the sanctioned crash below (AGENTS.md doctrine)
     pub fn mount(supervisor: Arc<Supervisor>, core: &[DynamicTool]) -> Mounted {
         let core_names: Vec<&str> = core.iter().map(|tool| tool.name()).collect();
         let reports = supervisor.reports();
@@ -73,9 +81,43 @@ impl Mounted {
                     .map(|handle| proxy(handle, planned.extension, planned.decl))
             })
             .collect();
+        // The hook stack: every declared point of every alive
+        // extension becomes a forwarding closure, registered in scan
+        // order — deterministic, the registration the engine's order
+        // law consumes.
+        let mut hooks = HookStack::new();
+        for report in &reports {
+            if !matches!(report.status, Status::Alive) {
+                continue;
+            }
+            for declared in &report.hooks {
+                let Some(handle) = supervisor.extension(&report.name) else {
+                    continue;
+                };
+                let spec = (report.name.as_str(), 0);
+                hooks = match declared.event.as_str() {
+                    "tool_call" => hooks.hook(
+                        spec,
+                        on::tool_call(move |ctx, call| {
+                            forward_tool_call(handle.clone(), ctx, call)
+                        }),
+                    ),
+                    "tool_result" => hooks.hook(
+                        spec,
+                        on::tool_result(move |ctx, result| {
+                            forward_tool_result(handle.clone(), ctx, result)
+                        }),
+                    ),
+                    other => {
+                        unreachable!("internal invariant violated: unknown hook point {other}")
+                    }
+                };
+            }
+        }
         Mounted {
             supervisor,
             tools,
+            hooks,
             catalog,
         }
     }
@@ -83,6 +125,12 @@ impl Mounted {
     /// The proxy tools (clonable — shared across sessions).
     pub fn tools(&self) -> &[DynamicTool] {
         &self.tools
+    }
+
+    /// The mounted hooks (clonable — shared across sessions like the
+    /// tools).
+    pub fn hooks(&self) -> HookStack {
+        self.hooks.clone()
     }
 
     /// The names of the core tools this mount replaced — the assembly
@@ -207,6 +255,56 @@ fn proxy(handle: ExtensionHandle, extension: String, decl: ToolDecl) -> DynamicT
             })
         },
     )
+}
+
+/// Forward one pre-call hook to an extension. The payload carries
+/// what a policy needs: the session identity (per-session state), the
+/// tool, the arguments. A dead lane fails **open** — crash isolation:
+/// one dead package cannot brick the tool phase, and the death itself
+/// is reported loudly (stderr, the catalog's dead standing).
+fn forward_tool_call<'a>(
+    handle: ExtensionHandle,
+    ctx: &'a rig_agent::agent::HookContext,
+    call: rig_agent::agent::hook::ToolCall<'a>,
+) -> futures::future::BoxFuture<'static, ToolCallAction> {
+    let payload = serde_json::json!({
+        "session": ctx.session_id(),
+        "tool": call.tool_name,
+        "args": call.args,
+    });
+    let ask = ctx.interaction();
+    Box::pin(async move {
+        match handle.hook("tool_call", payload, ask).await {
+            Ok(HookDecision::Skip { message }) => ToolCallAction::skip(message),
+            // Run is the neutral answer; Keep on a call point is
+            // protocol misuse — treat it as neutral, not fatal.
+            Ok(_) => ToolCallAction::run(),
+            Err(_) => ToolCallAction::run(),
+        }
+    })
+}
+
+/// Forward one post-result hook: the presentation rides the payload
+/// (rendered), and Keep is the only v1 wire decision — result-hook
+/// consumers are observers for now.
+fn forward_tool_result<'a>(
+    handle: ExtensionHandle,
+    ctx: &'a rig_agent::agent::HookContext,
+    result: rig_agent::agent::hook::ToolResultEvent<'a>,
+) -> futures::future::BoxFuture<'static, ToolResultAction> {
+    let payload = serde_json::json!({
+        "session": ctx.session_id(),
+        "tool": result.tool_name,
+        "args": result.args,
+        "presentation": result.presentation.render(),
+    });
+    let ask = ctx.interaction();
+    Box::pin(async move {
+        // Keep either way: the only wire decision, and the fail-open
+        // answer for a dead lane.
+        let _ = handle.hook("tool_result", payload, ask).await;
+        ToolResultAction::keep()
+    })
 }
 
 #[cfg(test)]

@@ -272,6 +272,9 @@ impl Session {
         let mut tool_context = rig_agent::tool::ToolContext::new();
         tool_context.insert(run_token.clone());
         tool_context.insert(rig_agent::tool::SessionCwd(self.cwd.clone()));
+        // The session identity, per run: process-level hook forwarders
+        // (extension policies) read it per event to scope their state.
+        tool_context.insert(rig_agent::tool::SessionTag(self.id.as_str().into()));
         if let Some(hub) = &self.interaction {
             tool_context.insert(hub.capability());
         }

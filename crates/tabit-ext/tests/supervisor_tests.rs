@@ -448,3 +448,116 @@ async fn await_resolved_joins_every_handshake() {
     await_status(&mut events, "aaa-hello", |s| matches!(s, Status::Alive)).await;
     supervisor.shutdown().await;
 }
+
+#[tokio::test]
+async fn a_hook_round_trips_its_decision() {
+    let root = test_dir("hook-allow");
+    install(&root, "allower", "hooks-allow");
+    let (supervisor, mut events) = supervisor::launch(&root, HANDSHAKE_TIMEOUT);
+    await_status(&mut events, "allower", |s| matches!(s, Status::Alive)).await;
+    let handle = supervisor.extension("allower").expect("installed");
+    let decision = handle
+        .hook(
+            "tool_call",
+            serde_json::json!({"session": "s1", "tool": "bash", "args": "{\"command\":\"ls\"}"}),
+            None,
+        )
+        .await
+        .expect("the hook resolves");
+    assert_eq!(decision, tabit_ext::protocol::HookDecision::Run);
+    supervisor.shutdown().await;
+}
+
+#[tokio::test]
+async fn a_hook_skip_carries_its_message() {
+    let root = test_dir("hook-skip");
+    install(&root, "denier", "hooks-skip");
+    let (supervisor, mut events) = supervisor::launch(&root, HANDSHAKE_TIMEOUT);
+    await_status(&mut events, "denier", |s| matches!(s, Status::Alive)).await;
+    let handle = supervisor.extension("denier").expect("installed");
+    let decision = handle
+        .hook("tool_call", serde_json::json!({"tool": "bash"}), None)
+        .await
+        .expect("the hook resolves");
+    assert_eq!(
+        decision,
+        tabit_ext::protocol::HookDecision::Skip {
+            message: "the double denies".to_string()
+        }
+    );
+    supervisor.shutdown().await;
+}
+
+#[tokio::test]
+async fn a_hook_ask_lifts_to_the_capability() {
+    let root = test_dir("hook-ask");
+    install(&root, "asker", "hooks-ask");
+    let (supervisor, mut events) = supervisor::launch(&root, HANDSHAKE_TIMEOUT);
+    await_status(&mut events, "asker", |s| matches!(s, Status::Alive)).await;
+    let handle = supervisor.extension("asker").expect("installed");
+    let seen = Arc::new(Mutex::new(Vec::new()));
+    let interaction = FakeInteraction {
+        answer: Some(serde_json::json!({"selected": ["Allow"]})),
+        seen: seen.clone(),
+    };
+    let decision = handle
+        .hook(
+            "tool_call",
+            serde_json::json!({"tool": "bash"}),
+            Some(Arc::new(interaction)),
+        )
+        .await
+        .expect("the hook resolves");
+    assert_eq!(decision, tabit_ext::protocol::HookDecision::Run);
+    {
+        let seen = seen.lock().expect("seen lock");
+        assert_eq!(seen.len(), 1, "the hook asked exactly once");
+        assert_eq!(seen[0].0, "native:select_one");
+    }
+    // And the dismissed path denies.
+    let interaction = FakeInteraction {
+        answer: None,
+        seen: Arc::new(Mutex::new(Vec::new())),
+    };
+    let decision = handle
+        .hook(
+            "tool_call",
+            serde_json::json!({"tool": "bash"}),
+            Some(Arc::new(interaction)),
+        )
+        .await
+        .expect("the hook resolves");
+    assert!(matches!(
+        decision,
+        tabit_ext::protocol::HookDecision::Skip { .. }
+    ));
+    supervisor.shutdown().await;
+}
+
+#[tokio::test]
+async fn a_death_answers_pending_policy_with_the_fail_open_fallback() {
+    let root = test_dir("hook-hang");
+    install(&root, "wedge", "hooks-hang");
+    let (supervisor, mut events) = supervisor::launch(&root, HANDSHAKE_TIMEOUT);
+    await_status(&mut events, "wedge", |s| matches!(s, Status::Alive)).await;
+    let handle = supervisor.extension("wedge").expect("installed");
+    let pending = {
+        let handle = handle.clone();
+        tokio::spawn(async move {
+            handle
+                .hook("tool_call", serde_json::json!({"tool": "bash"}), None)
+                .await
+        })
+    };
+    // Give the forward a moment to cross, then close the host: the
+    // drain must answer the pending hook with the fail-open fallback
+    // (crash isolation — policy fails open, executions fail loudly).
+    tokio::time::sleep(Duration::from_millis(200)).await;
+    supervisor.shutdown().await;
+    let decision = tokio::time::timeout(BOUND, pending)
+        .await
+        .expect("the drain answers within the bound")
+        .expect("the task lives")
+        .expect("the hook resolves");
+    assert_eq!(decision, tabit_ext::protocol::HookDecision::Run);
+}

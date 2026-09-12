@@ -337,3 +337,96 @@ fn a_core_name_conflict_is_reported_on_the_channel() {
     assert_eq!(conflict.extension, "shadow");
     assert_eq!(conflict.tool, "read");
 }
+
+#[test]
+fn the_gate_extension_gates_a_model_bash_call_over_the_wire() {
+    let stage = stage("gate-e2e", &[]);
+    // The gate package: the SDK-built permission policy, installed
+    // like any extension.
+    {
+        let dir = stage.extensions.join("gate");
+        std::fs::create_dir_all(&dir).expect("gate dir");
+        let manifest = serde_json::json!({
+            "name": "gate",
+            "version": "0.1.0",
+            "description": "the permission gate, moved out of core",
+            "entry": [workspace_bin("gate-ext").display().to_string()],
+        });
+        std::fs::write(
+            dir.join("tabit.json"),
+            serde_json::to_string(&manifest).expect("manifest"),
+        )
+        .expect("manifest");
+    }
+    // Turn 1: the model calls bash; the gate opens a card; turn 2:
+    // wrap up once the denial is in history.
+    stage.server.mock(|when, then| {
+        when.method(httpmock::Method::POST)
+            .path("/v1/chat/completions")
+            .body_includes("gating-check-7f4b")
+            // The user text rides in history forever — only the
+            // first turn lacks the denial.
+            .body_excludes("not today");
+        then.status(200)
+            .header("Content-Type", "text/event-stream")
+            .body(sse_tool_call(
+                "call-1",
+                "bash",
+                r#"{"command":"echo gated"}"#,
+            ));
+    });
+    stage.server.mock(|when, then| {
+        when.method(httpmock::Method::POST)
+            .path("/v1/chat/completions")
+            .body_includes("not today");
+        then.status(200)
+            .header("Content-Type", "text/event-stream")
+            .body(sse_text("understood"));
+    });
+
+    let mut backend = spawn_backend(&stage.work, &stage.extensions, &stage.config, &stage.auth);
+    let (session, catalog) = handshake(&mut backend);
+    // The catalog carries the gate's subscription.
+    let gate = catalog
+        .extensions
+        .iter()
+        .find(|extension| extension.name == "gate")
+        .expect("the gate is in the catalog");
+    assert_eq!(gate.status, "alive");
+    assert_eq!(gate.hooks, vec!["tool_call".to_string()]);
+
+    backend.send(&to_wire_line(&SessionCommand::Message {
+        session: session.clone(),
+        text: "gating-check-7f4b".to_string(),
+    }));
+    loop {
+        match backend.next_frame() {
+            ServerFrame::Event(frame) => match frame.event {
+                SessionEvent::InteractionRequest { id, payload, .. } => {
+                    // The gate's card, over the ordinary frontend wire.
+                    assert_eq!(payload["title"], "Allow `bash` to run?");
+                    backend.send(&to_wire_line(&SessionCommand::InteractionResponse {
+                        session: session.clone(),
+                        id,
+                        payload: serde_json::json!({
+                            "selected": ["Deny"], "text": "not today",
+                        }),
+                    }));
+                }
+                SessionEvent::ToolResult { name, content, .. } => {
+                    assert_eq!(name, "bash");
+                    assert!(content.contains("denied"), "{content}");
+                    assert!(content.contains("not today"), "{content}");
+                    assert!(content.contains("did not run"), "{content}");
+                }
+                SessionEvent::RunFinished { output, .. } => {
+                    assert_eq!(output, "understood");
+                    return;
+                }
+                SessionEvent::RunFailed { message } => panic!("the run failed: {message}"),
+                _ => {}
+            },
+            ServerFrame::Control(control) => panic!("unexpected control frame: {control:?}"),
+        }
+    }
+}
