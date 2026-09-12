@@ -109,7 +109,7 @@ impl UserInteraction for FakeInteraction {
 async fn the_echo_example_declares_and_serves() {
     let root = test_dir("echo");
     install(&root, "echo", env!("CARGO_BIN_EXE_echo-ext"));
-    let (host, mut events) = supervisor::launch(&root, HANDSHAKE_TIMEOUT);
+    let (host, mut events) = supervisor::launch_root(&root, HANDSHAKE_TIMEOUT);
     await_alive(&mut events, "echo").await;
 
     let reports = host.reports();
@@ -132,7 +132,7 @@ async fn the_echo_example_declares_and_serves() {
 async fn the_ask_example_lifts_the_answer() {
     let root = test_dir("ask-answered");
     install(&root, "echo", env!("CARGO_BIN_EXE_echo-ext"));
-    let (host, mut events) = supervisor::launch(&root, HANDSHAKE_TIMEOUT);
+    let (host, mut events) = supervisor::launch_root(&root, HANDSHAKE_TIMEOUT);
     await_alive(&mut events, "echo").await;
     let handle = host.extension("echo").expect("installed");
 
@@ -156,7 +156,7 @@ async fn the_ask_example_lifts_the_answer() {
 async fn the_ask_example_fails_closed_on_dismissal() {
     let root = test_dir("ask-dismissed");
     install(&root, "echo", env!("CARGO_BIN_EXE_echo-ext"));
-    let (host, mut events) = supervisor::launch(&root, HANDSHAKE_TIMEOUT);
+    let (host, mut events) = supervisor::launch_root(&root, HANDSHAKE_TIMEOUT);
     await_alive(&mut events, "echo").await;
     let handle = host.extension("echo").expect("installed");
 
@@ -185,7 +185,7 @@ async fn a_failing_body_is_an_error_not_a_hang() {
     // can handshake side by side.
     install(&root, "clash-a", env!("CARGO_BIN_EXE_clash-a-ext"));
     install(&root, "clash-b", env!("CARGO_BIN_EXE_clash-b-ext"));
-    let (host, mut events) = supervisor::launch(&root, HANDSHAKE_TIMEOUT);
+    let (host, mut events) = supervisor::launch_root(&root, HANDSHAKE_TIMEOUT);
     await_alive(&mut events, "clash-a").await;
     await_alive(&mut events, "clash-b").await;
 
@@ -207,7 +207,7 @@ async fn a_failing_body_is_an_error_not_a_hang() {
 async fn the_gate_extension_gates_bash_per_session() {
     let root = test_dir("gate");
     install(&root, "gate", env!("CARGO_BIN_EXE_gate-ext"));
-    let (host, mut events) = supervisor::launch(&root, HANDSHAKE_TIMEOUT);
+    let (host, mut events) = supervisor::launch_root(&root, HANDSHAKE_TIMEOUT);
     await_alive(&mut events, "gate").await;
 
     let reports = host.reports();

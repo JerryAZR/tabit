@@ -1032,14 +1032,17 @@ assistant.
 ### 9. Extensions
 
 **DESIGN SETTLED (2026-09, the discussion record lives in
-EXTENSIONS.md); implementation under way — tasks 1–3 shipped (the
-`crates/tabit-ext` host: discovery, the frozen pipe, supervision,
-the death policy, the tool lane, the hook lane; the engine-side
+EXTENSIONS.md); implementation under way — tasks 1–4 shipped (the
+`crates/tabit-ext` host: discovery, the enablement gate, the frozen
+pipe, supervision, the death policy, the tool lane, the hook lane,
+the skills mounts; the engine-side
 `on::tool_result` + `HookStack::merge`; `crates/tabit-ext-sdk`: the
 guest dispatcher and the example packages, `gate-ext` included —
-the permission gate now lives there, `permission.rs` deleted;
-proxy+hook assembly and the `extensions_available` catalog in the
-`tabit --json` backend).** The shape:
+the permission gate now lives there, `permission.rs` deleted,
+`lmstudio-ext` (the native-API provider relay) and `skillship-ext`
+(the skills-only package) with them; proxy+hook assembly and the
+`extensions_available` catalog in the `tabit --json` backend).** The
+shape:
 
 - **The substrate: subprocess executables over a frozen JSONL
   extension protocol** — the subagent substrate generalized. One
@@ -1163,9 +1166,20 @@ proxy+hook assembly and the `extensions_available` catalog in the
    failed tool call is the model-visible failure; and children boot
    their own extension hosts (proven e2e: a subagent child serves an
    extension tool from its own mount).
-4. **Scanning** — enabled-extension discovery over the config
-   layers; skills symlinks; `providers.toml` fragment merge at
-   config load (user config wins).
+4. **Scanning** — *shipped* — enabled-extension discovery over the
+   config layers (`settings.toml`'s `[extensions] enabled` allowlist,
+   default off — the entry is the consent record; user + workspace
+   layers union, `$TABIT_SETTINGS` the debug override; refusals
+   report as dead whatever the allowlist says); skills mounts (the
+   package's `skills/` linked at `~/.tabit/skills/<name>/` —
+   symlink-or-junction, idempotent, the user's existing entry wins —
+   the discovery ladder stays extension-unaware); `providers.toml`
+   fragment merge at config load (user config wins on collision, a
+   broken fragment refuses the fragment and never the package, a
+   fragment cannot set `default_model`, fragment-vs-fragment resolves
+   in scan order). One boot scan feeds launch, the merge, and the
+   mounts. Children re-derive enablement from inherited inputs — the
+   same boot path, not a child rule.
 5. **Host APIs** — the request/response envelope and `model_prompt`
    (capped, complete-only, usage tagged with the extension
    identity).
@@ -1191,10 +1205,14 @@ checklist:
    moved out of core (`permission.rs` deleted — the demo was the
    deletion); `on::tool_call` + the interaction prompt + session-keyed
    memory, e2e-proven over the real frontend wire.
-4. `lmstudio` — the provider relay speaking LM Studio's **native**
-   REST API (deliberately not the OpenAI-compat endpoint LM Studio
-   also serves) behind a `providers.toml` fragment; plus a
-   skill-shipping package.
+4. *shipped* — `lmstudio` (`lmstudio-ext`): the provider relay
+   speaking LM Studio's **native** REST API (deliberately not the
+   OpenAI-compat endpoint LM Studio also serves) behind a
+   `providers.toml` fragment — e2e across four processes (backend →
+   relay → scripted native mock), the fragment the merged config's
+   only provider, the model call relayed and translated; plus
+   `skillship` (`skillship-ext`), the skill-shipping package whose
+   `skills/` mounts into discovery and whose names ride the catalog.
 5. `autotitle` — a run-end hook → `model_prompt` → usage tagged with
    the extension identity (the host-API envelope's demo).
 6. The npm:/git: end-to-end; every earlier example rode `path:`.

@@ -37,8 +37,24 @@ path = "src/bin/clash_b.rs"
 name = "gate-ext"
 path = "src/bin/gate.rs"
 
+# The task-4 roster: the skills-only package and the provider relay.
+[[bin]]
+name = "skillship-ext"
+path = "src/bin/skillship.rs"
+
+[[bin]]
+name = "lmstudio-ext"
+path = "src/bin/lmstudio.rs"
+
 [dependencies]
+# The relay example's HTTP halves: tiny_http serves the local
+# openai-completions wire (the small, battle-tested, sync server) and
+# reqwest's blocking client speaks LM Studio's native REST API
+# upstream. The lib surface uses neither — they exist for the example
+# bins, and leave with the template extraction (task 6).
+reqwest = { workspace = true, features = ["blocking", "json"] }
 serde_json = { workspace = true }
+tiny_http = { workspace = true }
 
 [dev-dependencies]
 futures = { workspace = true }

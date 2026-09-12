@@ -94,12 +94,14 @@ mod auth;
 mod error;
 mod model;
 mod provider;
+mod settings;
 mod wire;
 
 pub use auth::{AuthConfig, AuthEntry};
 pub use error::ConfigError;
 pub use model::{Cost, InputModality, Model, SamplingParams, ThinkingLevel};
 pub use provider::Provider;
+pub use settings::{ExtensionsSettings, SettingsConfig};
 pub use wire::WireApi;
 
 use serde::Deserialize;
@@ -216,6 +218,40 @@ impl TabitConfig {
             }
         }
         Err(ConfigError::NotFound { paths: candidates })
+    }
+
+    /// Merge one providers fragment under this config — the
+    /// extension-package contribution path (EXTENSIONS.md: fragments
+    /// are merged at config load, never copied into the user's file).
+    /// **User config wins on id collision**: a fragment whose provider
+    /// id already exists is dropped for that id, warned through
+    /// `warnings`. A fragment cannot set `default_model` (an extension
+    /// steering the default model is not the package's call) — present
+    /// ones warn and are ignored. Returns the provider ids the fragment
+    /// contributed, in the fragment's own (alphabetical) order.
+    pub fn merge_fragment(
+        &mut self,
+        fragment: TabitConfig,
+        origin: &str,
+        warnings: &mut Vec<String>,
+    ) -> Vec<String> {
+        if fragment.default_model.is_some() {
+            warnings.push(format!(
+                "{origin}: providers fragment sets default_model — ignored (fragments carry providers only)"
+            ));
+        }
+        let mut contributed = Vec::new();
+        for (id, provider) in fragment.providers {
+            if self.providers.contains_key(&id) {
+                warnings.push(format!(
+                    "{origin}: provider `{id}` ignored — already defined (user config wins)"
+                ));
+                continue;
+            }
+            self.providers.insert(id.clone(), provider);
+            contributed.push(id);
+        }
+        contributed
     }
 
     /// Look up a provider by its config id.

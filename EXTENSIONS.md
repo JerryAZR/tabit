@@ -1,14 +1,17 @@
 # EXTENSIONS.md
 
 The extension development record. **The substrate is ruled (2026-09,
-below) and its task-1 foundation is implemented — `crates/tabit-ext`:
-discovery, the initialize/ack handshake, supervision, the death
-policy.** Tool, hook, and host-service frames are not implemented
-yet; they land with their checklist tasks (ROADMAP item 9). Every
-entry names the decision, where it is recorded, and what it implies
-for extension authors. Entries record **existing design decisions**;
-nothing about how a particular extension is written leaks in — the
-contract is the protocol.
+below) and implemented through checklist task 4 — `crates/tabit-ext`:
+discovery and the enablement gate, the initialize/ack handshake,
+supervision, the death policy, the tool lane, the hook lane, the
+skills mounts; `crates/tabit-ext-sdk`: the guest dispatcher and the
+example packages (the permission gate included — it lives here now,
+not in core).** Host-service frames (task 5) and install (task 6)
+land with their checklist tasks (ROADMAP item 9). Every entry names
+the decision, where it is recorded, and what it implies for extension
+authors. Entries record **existing design decisions**; nothing about
+how a particular extension is written leaks in — the contract is the
+protocol.
 
 Rules of the ledger:
 
@@ -60,6 +63,31 @@ Boundaries and reasons:
   every waiting adapter with the failure — no call hangs on a dead
   extension. Result deltas, when a consumer exists, ride the same
   inbound router.
+
+## Enablement is a settings allowlist, default off (2026-09, task 4)
+
+A discovered package mounts only when its name is **enabled in
+settings** — `settings.toml`'s `[extensions] enabled` list, the first
+fact in the file item 1 reserved for this. The layers union (the
+debug-override family: `$TABIT_SETTINGS` replaces the user file):
+user `~/.tabit/settings.toml` plus workspace
+`<cwd>/.tabit/settings.toml`. **The entry IS the consent record** —
+the trust ruling's concrete shape: an extension runs native code, so
+it runs only where the user said so, and task 6's install command and
+first-load trust prompt are the UX that writes this list. Disabling
+is removing the name.
+
+What "not enabled" means, precisely: the package is not launched, not
+in the `extensions_available` catalog, its `providers.toml` fragment
+does not merge, and its skills do not mount — absent everywhere, and
+*silent* (the user's setting is not a failure; `tabit extensions
+list`, task 6, is where disabled packages become visible). A REFUSED
+package (bad manifest, failed handshake) still reports as dead
+whatever the allowlist says — a broken package is loud; a disabled
+one is quiet. Children (subagent processes) re-derive enablement from
+their inherited inputs — the same env, the same workspace cwd, the
+same one code path the parent booted through — never a forked child
+rule.
 
 ## Declaration: manifest for install facts, handshake for
 capabilities (2026-09)
@@ -127,6 +155,29 @@ Sibling domains carry their own rules: skills merge last-wins-with-
 warn per the discovery ladder (ROADMAP item 3); providers are
 user-config-wins (below).
 
+## Extension-shipped skills mount as links (2026-09, task 4)
+
+A package's optional `skills/` directory mounts as a **link at
+`~/.tabit/skills/<name>/`** (the extension's name — one slot per
+package, so two packages cannot claim one). The link, not a fifth
+discovery source, is the whole mechanism: the session's four-source
+ladder never learns that extensions exist (the front/back split),
+while the package's skills ride the same discovery, prompt catalog,
+and confined `skill` tool as the user's own. The link is created at
+boot for enabled packages, before the first prompt build reads the
+catalog. Mount rules: a slot already resolving to this package is a
+no-op (idempotent across boots, parents, and children); a dangling
+link (the package moved or was uninstalled) is replaced; any other
+existing entry — the user's own directory — **wins**, warned: the
+host never overwrites the user's files. On Windows the link is a
+directory symlink where the privilege allows and a junction
+otherwise (both canonicalize identically, so discovery and the
+`skill` tool's confinement cannot tell them apart). The wire catalog
+carries the shipped skill names per extension — provenance, again
+without a model-facing prefix. Uninstalling removes the package dir;
+a dangling slot left behind is inert (discovery warns past it) and
+the next mount of that name replaces it.
+
 ## Hook forwarding: the pipe lane, and policy fails open (2026-09,
 task 3)
 
@@ -159,8 +210,9 @@ ruling; neither failure is silent.
   run time, no registry of our own. git shells to `git` (a machine
   running a coding agent has it). `path:` serves local development.
 - Install places the package under `~/.tabit/extensions/<name>/` and
-  enables it in config; `tabit extensions list/uninstall` manage it;
-  update = reinstall.
+  enables it in config (the settings allowlist above — one name, one
+  line: `[extensions] enabled`); `tabit extensions list/uninstall`
+  manage it; update = reinstall.
 - Pickup at the **next backend start** — no mid-run loading (the
   prompt byte-stability law; installing is the user's reload/cache
   decision). Same UX as pi's reload.
@@ -190,11 +242,28 @@ consumer exists.
 An extension that adds a model provider ships a **local relay**
 speaking a known wire format (openai-completions or anthropic — the
 two engines tabit keeps) plus a `providers.toml` fragment pointing at
-the port. Fragments are **merged at config load** (discovery scans
-the extension dirs) — never copied into the user's file; user config
-wins on id collision; uninstall removes the provider by removing the
-directory. The API key, if the relay needs one, is the user's to fill
-in like any provider.
+the port. Fragments are **merged at config load** (the boot scans the
+enabled packages' directories — one scan shared with launch and the
+skills mounts, so the consumers cannot disagree) — never copied into
+the user's file; user config wins on id collision; uninstall removes
+the provider by removing the directory. The example is shipped:
+`lmstudio-ext`, a relay speaking **LM Studio's native REST API**
+upstream (deliberately not LM Studio's OpenAI-compat endpoint — the
+API nothing else in tabit speaks) behind its fragment, complete-only
+upstream with the relay synthesizing the SSE stream, e2e-proven
+against a scripted native double.
+
+Merge mechanics, precisely: a fragment parses and validates as an
+ordinary `providers.toml` (same rules — a broken fragment is
+*refused*, warned, and never kills its package's tools and hooks);
+**a fragment cannot set `default_model`** (an extension steering the
+default model is not the package's call — present ones warn and are
+ignored); fragment-vs-fragment collisions resolve in scan order, so
+the alphabetically-first package is the incumbent — the same
+determinism law as tool registration. The API key, if the relay needs
+one, is the user's to fill in like any provider. The catalog's
+`providers` field carries the ids each fragment contributed — only
+the ones that landed.
 
 The credential line is **attribution, not protection**: every model
 call the host makes runs through the one registry (retry, caching

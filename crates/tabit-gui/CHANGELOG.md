@@ -40,6 +40,18 @@ pair attributed by the model-facing name. The reducer marks the seam
 (same interim as the skills catalog; the redesign worktree owns the
 extension surface).
 
+### wire: `extensions_available` gains `skills` and `providers` (2026-09, additive — no bump)
+
+Task 4 (scanning) shipped extension-contributed skills and provider
+fragments; the catalog entry now carries both as provenance:
+`skills: [string]` (the names the package's shipped `skills/`
+directory mounts under the user's skills dir) and `providers:
+[string]` (the provider ids its `providers.toml` fragment contributed
+to the merged config — only the ids that landed; user config wins on
+collision). Additive vocabulary under v9: the reducer's interim
+no-op arm is unaffected; deserialization is shared through
+`tabit-protocol`.
+
 ## v8
 
 ### wire: `skills_available` — the skills catalog at startup (2026-09)

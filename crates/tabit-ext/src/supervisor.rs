@@ -366,14 +366,27 @@ struct Supervised {
     task: Option<tokio::task::JoinHandle<()>>,
 }
 
-/// Launch every extension installed under `root`: scan, spawn, and
-/// supervise — each in its own task, so a mute extension's handshake
-/// timeout never delays the healthy ones. Returns the supervisor
-/// plus the event channel; dropping the receiver loses later reports
-/// to nowhere, so the binary drains it for its log. Must run on the
-/// runtime the binary serves from (it spawns).
-pub fn launch(
+/// Launch every extension found under `root` — scan plus [`launch`],
+/// the everything-found boot (the host's own tests; the binary filters
+/// by enablement first, so it calls [`launch`] on its own scan).
+pub fn launch_root(
     root: &Path,
+    handshake_timeout: Duration,
+) -> (
+    Supervisor,
+    tokio::sync::mpsc::UnboundedReceiver<ExtensionEvent>,
+) {
+    launch(manifest::scan(root), handshake_timeout)
+}
+
+/// Launch a scan's findings: spawn and supervise each package, report
+/// each refusal — each in its own task, so a mute extension's
+/// handshake timeout never delays the healthy ones. Returns the
+/// supervisor plus the event channel; dropping the receiver loses
+/// later reports to nowhere, so the binary drains it for its log.
+/// Must run on the runtime the binary serves from (it spawns).
+pub fn launch(
+    found: Vec<Discovered>,
     handshake_timeout: Duration,
 ) -> (
     Supervisor,
@@ -382,7 +395,7 @@ pub fn launch(
     let closing = CancellationToken::new();
     let (events_tx, events_rx) = tokio::sync::mpsc::unbounded_channel();
     let mut children = Vec::new();
-    for found in manifest::scan(root) {
+    for found in found {
         match found {
             Discovered::Package { dir, manifest } => {
                 let name = manifest.name.clone();

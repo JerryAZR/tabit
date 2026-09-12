@@ -51,7 +51,11 @@ fn test_dir(tag: &str) -> PathBuf {
 /// Stage one package: the behavior double under the given name.
 /// Locate a workspace binary: `CARGO_BIN_EXE_*` is same-package
 /// only, but every test exe runs from `<target>/<profile>/deps` —
-/// one level up is where cargo puts the workspace's binaries.
+/// one level up is where cargo puts the workspace's binaries. The
+/// file is whatever the last build left there: a filtered
+/// `cargo test -p tabit` does NOT rebuild other crates' bins, so
+/// after editing an extension example, build it (or run the full
+/// gate) before driving it from here.
 fn workspace_bin(name: &str) -> PathBuf {
     std::env::current_exe()
         .expect("current exe")
@@ -121,15 +125,35 @@ struct Backend {
     lines: Receiver<String>,
 }
 
-fn spawn_backend(dir: &Path, extensions_root: &Path, config: &Path, auth: &Path) -> Backend {
-    let mut child = Command::new(env!("CARGO_BIN_EXE_tabit"))
+fn spawn_backend(stage: &Stage, extra_env: &[(&str, String)]) -> Backend {
+    let mut command = Command::new(env!("CARGO_BIN_EXE_tabit"));
+    command
         .arg("--json")
         .arg("--ephemeral")
         .arg("--extensions")
-        .arg(extensions_root)
-        .current_dir(dir)
-        .env("TABIT_CONFIG", config)
-        .env("TABIT_AUTH", auth)
+        .arg(&stage.extensions)
+        .current_dir(&stage.work)
+        .env("TABIT_CONFIG", &stage.config)
+        .env("TABIT_AUTH", &stage.auth)
+        .env("TABIT_SETTINGS", &stage.settings)
+        // A redirected home keeps the whole boot hermetic: the
+        // extension skills mounts, the prompt's home-level AGENTS.md,
+        // and the default roots all key on the home directory, and a
+        // developer's real machine must never leak into (or receive
+        // writes from) a test.
+        .env("USERPROFILE", &stage.home)
+        .env("HOME", &stage.home)
+        // Localhost never proxies: a developer machine's system proxy
+        // (which reqwest reads by default) would otherwise sit between
+        // the engine and the local provider mocks — a hop the tests
+        // never chose, and one that misreports a dead local port as
+        // the proxy's own 502.
+        .env("NO_PROXY", "127.0.0.1,localhost")
+        .env("no_proxy", "127.0.0.1,localhost");
+    for (key, value) in extra_env {
+        command.env(key, value);
+    }
+    let mut child = command
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
@@ -137,6 +161,18 @@ fn spawn_backend(dir: &Path, extensions_root: &Path, config: &Path, auth: &Path)
         .expect("spawn tabit");
     let stdin = child.stdin.take().expect("stdin");
     let stdout = child.stdout.take().expect("stdout");
+    // Drain the backend's stderr into the test output: banners,
+    // extension reports, and any crash report must be visible when a
+    // scenario hangs or dies (an undrained pipe also blocks the
+    // backend once it fills).
+    if let Some(stderr) = child.stderr.take() {
+        std::thread::spawn(move || {
+            use std::io::BufRead as _;
+            for line in BufReader::new(stderr).lines().by_ref().flatten() {
+                eprintln!("[backend] {line}");
+            }
+        });
+    }
     let (tx, rx) = std::sync::mpsc::channel::<String>();
     std::thread::spawn(move || {
         let reader = BufReader::new(stdout);
@@ -180,14 +216,29 @@ impl Drop for Backend {
     }
 }
 
-/// Stage config/auth/extension root/work dir for one scenario.
+/// Stage config/auth/settings/extension root/work dir for one
+/// scenario. The staged packages land in the settings allowlist (the
+/// enablement gate: a discovered package mounts only when named).
 struct Stage {
     #[allow(dead_code)] // kept: the owner of the mock's lifetime
     server: MockServer,
     work: PathBuf,
     config: PathBuf,
     auth: PathBuf,
+    settings: PathBuf,
+    /// The redirected home every spawned backend boots under.
+    home: PathBuf,
     extensions: PathBuf,
+}
+
+/// Write the settings allowlist naming exactly `names`.
+fn write_settings(path: &Path, names: &[&str]) {
+    let list = names
+        .iter()
+        .map(|name| format!("\"{name}\""))
+        .collect::<Vec<_>>()
+        .join(", ");
+    std::fs::write(path, format!("[extensions]\nenabled = [{list}]\n")).expect("settings");
 }
 
 fn stage(tag: &str, behaviors: &[(&str, &str)]) -> Stage {
@@ -209,6 +260,13 @@ fn stage(tag: &str, behaviors: &[(&str, &str)]) -> Stage {
     for (name, behavior) in behaviors {
         install_double(&extensions, name, behavior);
     }
+    let settings = dir.join("settings.toml");
+    write_settings(
+        &settings,
+        &behaviors.iter().map(|(name, _)| *name).collect::<Vec<_>>(),
+    );
+    let home = dir.join("home");
+    std::fs::create_dir_all(&home).expect("redirected home");
     let work = dir.join("work");
     std::fs::create_dir_all(&work).expect("work");
     Stage {
@@ -216,6 +274,8 @@ fn stage(tag: &str, behaviors: &[(&str, &str)]) -> Stage {
         work,
         config,
         auth,
+        settings,
+        home,
         extensions,
     }
 }
@@ -248,15 +308,22 @@ fn scripted_turns(stage: &Stage, turns: &[(String, String)]) {
     }
 }
 
-/// Drive the handshake and hand back the session id and the
-/// extensions announcement.
-fn handshake(backend: &mut Backend) -> (String, tabit_protocol::ExtensionsCatalog) {
+/// Drive the handshake and hand back the session id, the extensions
+/// announcement, and the skills announcement (when one arrives).
+fn handshake(
+    backend: &mut Backend,
+) -> (
+    String,
+    tabit_protocol::ExtensionsCatalog,
+    Option<Vec<tabit_protocol::AvailableSkill>>,
+) {
     backend.send(&to_wire_line(&ClientFrame::Initialize {
         protocol_version: PROTOCOL_VERSION,
         replay: false,
     }));
     let mut session_id = None;
     let mut catalog = None;
+    let mut skills = None;
     loop {
         match backend.next_frame() {
             ServerFrame::Control(ServerControlFrame::InitializeAck { session_id: id, .. }) => {
@@ -272,6 +339,7 @@ fn handshake(backend: &mut Backend) -> (String, tabit_protocol::ExtensionsCatalo
                         conflicts,
                     });
                 }
+                SessionEvent::SkillsAvailable { skills: found } => skills = Some(found),
                 SessionEvent::RunFailed { message } => {
                     panic!("the run failed: {message}");
                 }
@@ -280,7 +348,7 @@ fn handshake(backend: &mut Backend) -> (String, tabit_protocol::ExtensionsCatalo
             ServerFrame::Control(other) => panic!("unexpected control frame: {other:?}"),
         }
         if session_id.is_some() && catalog.is_some() {
-            return (session_id.take().unwrap(), catalog.take().unwrap());
+            return (session_id.take().unwrap(), catalog.take().unwrap(), skills);
         }
     }
 }
@@ -305,8 +373,8 @@ fn a_model_call_runs_an_extension_tool_and_the_result_feeds_back() {
         ],
     );
 
-    let mut backend = spawn_backend(&stage.work, &stage.extensions, &stage.config, &stage.auth);
-    let (session, catalog) = handshake(&mut backend);
+    let mut backend = spawn_backend(&stage, &[]);
+    let (session, catalog, _skills) = handshake(&mut backend);
     assert_eq!(catalog.extensions.len(), 1);
     let extension = &catalog.extensions[0];
     assert_eq!(extension.name, "echoer");
@@ -344,8 +412,8 @@ fn a_model_call_runs_an_extension_tool_and_the_result_feeds_back() {
 #[test]
 fn a_core_name_conflict_is_reported_on_the_channel() {
     let stage = stage("shadow", &[("shadow", "tools-shadow")]);
-    let mut backend = spawn_backend(&stage.work, &stage.extensions, &stage.config, &stage.auth);
-    let (_session, catalog) = handshake(&mut backend);
+    let mut backend = spawn_backend(&stage, &[]);
+    let (_session, catalog, _skills) = handshake(&mut backend);
     assert_eq!(catalog.conflicts.len(), 1);
     let conflict = &catalog.conflicts[0];
     assert!(matches!(
@@ -360,7 +428,8 @@ fn a_core_name_conflict_is_reported_on_the_channel() {
 fn the_gate_extension_gates_a_model_bash_call_over_the_wire() {
     let stage = stage("gate-e2e", &[]);
     // The gate package: the SDK-built permission policy, installed
-    // like any extension.
+    // like any extension — and enabled like any extension.
+    write_settings(&stage.settings, &["gate"]);
     {
         let dir = stage.extensions.join("gate");
         std::fs::create_dir_all(&dir).expect("gate dir");
@@ -389,8 +458,8 @@ fn the_gate_extension_gates_a_model_bash_call_over_the_wire() {
         ],
     );
 
-    let mut backend = spawn_backend(&stage.work, &stage.extensions, &stage.config, &stage.auth);
-    let (session, catalog) = handshake(&mut backend);
+    let mut backend = spawn_backend(&stage, &[]);
+    let (session, catalog, _skills) = handshake(&mut backend);
     // The catalog carries the gate's subscription.
     let gate = catalog
         .extensions
@@ -431,6 +500,297 @@ fn the_gate_extension_gates_a_model_bash_call_over_the_wire() {
                 SessionEvent::RunFailed { message } => panic!("the run failed: {message}"),
                 _ => {}
             },
+            ServerFrame::Control(control) => panic!("unexpected control frame: {control:?}"),
+        }
+    }
+}
+
+// ── task 4: enablement, skills mounts, providers fragments ─────────
+
+/// An unlisted package is the user's setting, not a failure: it boots
+/// nowhere — no catalog announcement, no launch — while the backend
+/// itself runs a normal turn.
+#[test]
+fn a_package_outside_the_allowlist_mounts_nowhere() {
+    let stage = stage("disabled", &[("echoer", "tools-echo")]);
+    write_settings(&stage.settings, &[]);
+    scripted_turns(
+        &stage,
+        &[("solo-run-5c11".to_string(), sse_text("ran alone"))],
+    );
+
+    let mut backend = spawn_backend(&stage, &[]);
+    backend.send(&to_wire_line(&ClientFrame::Initialize {
+        protocol_version: PROTOCOL_VERSION,
+        replay: false,
+    }));
+    let mut session = None;
+    loop {
+        match backend.next_frame() {
+            ServerFrame::Control(ServerControlFrame::InitializeAck { session_id: id, .. }) => {
+                session = Some(id);
+            }
+            ServerFrame::Event(frame) => match frame.event {
+                // The one assertion: the disabled package announces
+                // nothing, anywhere between boot and run end.
+                SessionEvent::ExtensionsAvailable { .. } => {
+                    panic!("a disabled package must not announce")
+                }
+                SessionEvent::RunFinished { output, .. } => {
+                    assert_eq!(output, "ran alone");
+                    return;
+                }
+                SessionEvent::RunFailed { message } => panic!("the run failed: {message}"),
+                _ => {}
+            },
+            ServerFrame::Control(control) => panic!("unexpected control frame: {control:?}"),
+        }
+        if let Some(session) = session.take() {
+            backend.send(&to_wire_line(&SessionCommand::Message {
+                session,
+                text: "solo-run-5c11".to_string(),
+            }));
+        }
+    }
+}
+
+/// The skill-shipping package: its `skills/` directory mounts into the
+/// (redirected) home's skills dir, the ordinary discovery announces
+/// it, and the extension's catalog entry carries the provenance.
+#[test]
+fn a_skill_shipping_package_mounts_its_skills_into_discovery() {
+    let stage = stage("skills", &[]);
+    let package = stage.extensions.join("skillship");
+    std::fs::create_dir_all(package.join("skills/skillship-demo")).expect("skill dir");
+    std::fs::write(
+        package.join("skills/skillship-demo/SKILL.md"),
+        "---\nname: skillship-demo\ndescription: proves extension-shipped skills mount\n---\n# The shipped body\n",
+    )
+    .expect("SKILL.md");
+    std::fs::write(
+        package.join("tabit.json"),
+        serde_json::to_string(&json!({
+            "name": "skillship",
+            "version": "0.1.0",
+            "description": "the skills-only example package",
+            "entry": [workspace_bin("skillship-ext").display().to_string()],
+        }))
+        .expect("manifest"),
+    )
+    .expect("manifest");
+    write_settings(&stage.settings, &["skillship"]);
+    scripted_turns(&stage, &[("never-called".to_string(), sse_text("done"))]);
+
+    let mut backend = spawn_backend(&stage, &[]);
+    let (_session, catalog, skills) = handshake(&mut backend);
+    let extension = catalog
+        .extensions
+        .iter()
+        .find(|extension| extension.name == "skillship")
+        .expect("the package is enabled and announced");
+    assert_eq!(extension.status, "alive");
+    assert_eq!(extension.skills, vec!["skillship-demo".to_string()]);
+
+    // The ordinary discovery ladder found the linked mount. Discovery
+    // canonicalizes, so the announced location is the package's real
+    // path (honest provenance) — the mount itself is the slot in the
+    // redirected home, asserted directly: it resolves to the
+    // package's body.
+    let skills = skills.expect("skills_available arrived");
+    let skill = skills
+        .iter()
+        .find(|skill| skill.name == "skillship-demo")
+        .expect("the shipped skill is discovered");
+    assert!(
+        skill.location.contains("skillship-demo"),
+        "the canonical package path: {}",
+        skill.location
+    );
+    let slot = stage.home.join(".tabit").join("skills").join("skillship");
+    let body = std::fs::read_to_string(slot.join("skillship-demo").join("SKILL.md"))
+        .expect("the home slot resolves into the package");
+    assert!(body.contains("The shipped body"), "{body}");
+}
+
+/// The provider-relay package: its `providers.toml` fragment merges
+/// into an empty user config (the fragment is the only provider), the
+/// model call rides the relay, and the relay translates to LM Studio's
+/// native REST API — four processes: backend, relay, native mock.
+#[test]
+fn a_providers_fragment_relays_a_model_call_over_the_native_api() {
+    let stage = stage("relay", &[]);
+    // An empty user config: everything the backend knows about
+    // providers comes from the fragment.
+    std::fs::write(&stage.config, "").expect("empty user config");
+
+    // A free port for the relay to listen on.
+    let relay_port = {
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").expect("probe bind");
+        let port = listener.local_addr().expect("addr").port();
+        drop(listener);
+        port
+    };
+    let package = stage.extensions.join("lmstudio");
+    std::fs::create_dir_all(&package).expect("package dir");
+    std::fs::write(
+        package.join("tabit.json"),
+        serde_json::to_string(&json!({
+            "name": "lmstudio",
+            "version": "0.1.0",
+            "description": "LM Studio behind its native REST API",
+            "entry": [workspace_bin("lmstudio-ext").display().to_string()],
+        }))
+        .expect("manifest"),
+    )
+    .expect("manifest");
+    std::fs::write(
+        package.join("providers.toml"),
+        format!(
+            "[providers.lmstudio-relay]\nbase_url = \"http://127.0.0.1:{relay_port}/v1\"\napi = \"openai-completions\"\n\n[[providers.lmstudio-relay.models]]\nid = \"local-model\"\n"
+        ),
+    )
+    .expect("fragment");
+    write_settings(&stage.settings, &["lmstudio"]);
+
+    // LM Studio's native answer (the mock plays the native API — the
+    // whole point is that tabit never speaks it directly).
+    let native_answer = json!({
+        "choices": [{
+            "message": {"role": "assistant", "content": "relayed answer"},
+            "finish_reason": "stop",
+        }],
+        "usage": {"prompt_tokens": 4, "completion_tokens": 3, "total_tokens": 7},
+    });
+    let upstream = format!("http://127.0.0.1:{}", stage.server.port());
+    // The first-turn mock matches its own marker AND excludes the
+    // second turn's — the user text rides in history forever, so only
+    // the exclusion keeps "turn 2" expressible (the scripted-turns
+    // lesson, on the native path). No second mock exists: turn 2 is
+    // the unmatched-native call (the mock's 404), the failure beat.
+    stage.server.mock(move |when, then| {
+        when.method(httpmock::Method::POST)
+            .path("/api/v0/chat/completions")
+            .body_includes("relay-check-6d77")
+            .body_excludes("failure-beat-2c91");
+        then.status(200).json_body(native_answer);
+    });
+
+    let mut backend = spawn_backend(
+        &stage,
+        &[
+            ("TABIT_LMSTUDIO_RELAY_PORT", relay_port.to_string()),
+            ("TABIT_LMSTUDIO_URL", upstream),
+        ],
+    );
+    let (session, catalog, _skills) = handshake(&mut backend);
+    let extension = catalog
+        .extensions
+        .iter()
+        .find(|extension| extension.name == "lmstudio")
+        .expect("the relay package is announced");
+    assert_eq!(extension.status, "alive");
+    assert_eq!(extension.providers, vec!["lmstudio-relay".to_string()]);
+
+    let session_id = session.clone();
+    backend.send(&to_wire_line(&SessionCommand::Message {
+        session,
+        text: "relay-check-6d77".to_string(),
+    }));
+    let mut failure_beat_sent = false;
+    loop {
+        match backend.next_frame() {
+            ServerFrame::Event(frame) => match frame.event {
+                SessionEvent::RunFinished { output, .. } => {
+                    assert_eq!(output, "relayed answer");
+                    // Beat 2, sent once: the unmatched native call — the
+                    // mock answers 404, the relay reports the non-success
+                    // upstream, and the failure rides the provider path
+                    // as an ordinary run failure.
+                    assert!(!failure_beat_sent, "one success, then the failure beat");
+                    failure_beat_sent = true;
+                    backend.send(&to_wire_line(&SessionCommand::Message {
+                        session: session_id.clone(),
+                        text: "failure-beat-2c91".to_string(),
+                    }));
+                }
+                SessionEvent::RunFailed { message } => {
+                    assert!(failure_beat_sent, "beat 1 must succeed first");
+                    assert!(message.contains("LM Studio answered"), "{message}");
+                    return;
+                }
+                _ => {}
+            },
+            ServerFrame::Control(control) => panic!("unexpected control frame: {control:?}"),
+        }
+    }
+}
+
+/// The relay's external failures stay graceful and model-visible: an
+/// unreachable upstream answers 502, which rides the provider path as
+/// an ordinary run failure — never a hang, never a crash.
+#[test]
+fn an_unreachable_upstream_fails_the_run_through_the_relay() {
+    let stage = stage("relay-down", &[]);
+    std::fs::write(&stage.config, "").expect("empty user config");
+    let relay_port = {
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").expect("probe bind");
+        let port = listener.local_addr().expect("addr").port();
+        drop(listener);
+        port
+    };
+    let package = stage.extensions.join("lmstudio");
+    std::fs::create_dir_all(&package).expect("package dir");
+    std::fs::write(
+        package.join("tabit.json"),
+        serde_json::to_string(&json!({
+            "name": "lmstudio",
+            "version": "0.1.0",
+            "entry": [workspace_bin("lmstudio-ext").display().to_string()],
+        }))
+        .expect("manifest"),
+    )
+    .expect("manifest");
+    std::fs::write(
+        package.join("providers.toml"),
+        format!(
+            "[providers.lmstudio-relay]\nbase_url = \"http://127.0.0.1:{relay_port}/v1\"\napi = \"openai-completions\"\n\n[[providers.lmstudio-relay.models]]\nid = \"local-model\"\n"
+        ),
+    )
+    .expect("fragment");
+    write_settings(&stage.settings, &["lmstudio"]);
+
+    // A port nothing listens on: the relay is up (its fragment
+    // merged, the package alive) but LM Studio is not.
+    let dead_upstream = {
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").expect("probe bind");
+        let port = listener.local_addr().expect("addr").port();
+        drop(listener);
+        format!("http://127.0.0.1:{port}")
+    };
+    let mut backend = spawn_backend(
+        &stage,
+        &[
+            ("TABIT_LMSTUDIO_RELAY_PORT", relay_port.to_string()),
+            ("TABIT_LMSTUDIO_URL", dead_upstream),
+        ],
+    );
+    let (session, catalog, _skills) = handshake(&mut backend);
+    assert_eq!(
+        catalog.extensions[0].providers,
+        vec!["lmstudio-relay".to_string()]
+    );
+    backend.send(&to_wire_line(&SessionCommand::Message {
+        session,
+        text: "any prompt".to_string(),
+    }));
+    loop {
+        match backend.next_frame() {
+            ServerFrame::Event(frame) => {
+                if let SessionEvent::RunFailed { message } = frame.event {
+                    assert!(message.contains("unreachable"), "{message}");
+                    return;
+                }
+            }
             ServerFrame::Control(control) => panic!("unexpected control frame: {control:?}"),
         }
     }

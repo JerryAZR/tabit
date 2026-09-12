@@ -48,7 +48,12 @@ tokio-util = { version = "0.7", default-features = false }
 
 # The CreationFlags shim's type — version-matched to process-wrap's own
 # windows dependency so they are the same type.
-[target.'cfg(windows)'.dependencies]
+# Junction fallback for skills mounts: a directory symlink needs a
+# privilege (or developer mode) on Windows, a junction does not — both
+# resolve through canonicalization, so downstream code cannot tell
+# them apart.
+junction = { workspace = true }
+
 windows = { version = "0.62.2", default-features = false, features = [
     "Win32_System_Threading",
 ] }

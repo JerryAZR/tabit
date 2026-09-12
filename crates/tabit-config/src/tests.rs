@@ -806,3 +806,174 @@ fn default_model_without_provider_resolves_or_fails_loudly() {
     let config = parse(&ambiguous);
     assert!(config.validation_issues().is_empty());
 }
+
+// ── settings + fragment merge (item 9, task 4) ──────────────────────
+
+#[test]
+fn settings_parse_the_extension_allowlist() {
+    use crate::SettingsConfig;
+    let raw = r#"
+[extensions]
+enabled = ["gate", "lmstudio"]
+"#;
+    let settings: SettingsConfig = toml::from_str(raw).expect("settings parse");
+    let enabled = settings.enabled_extensions();
+    assert!(enabled.contains("gate") && enabled.contains("lmstudio"));
+    assert_eq!(enabled.len(), 2);
+
+    // Empty/absent sections are the default (a bare machine enables
+    // nothing), and unknown keys are loud (typo protection, the
+    // providers.toml rule).
+    assert_eq!(
+        toml::from_str::<SettingsConfig>("").expect("empty settings"),
+        SettingsConfig::default()
+    );
+    assert!(toml::from_str::<SettingsConfig>("[extensions]\nenabled = []\nenobled = []").is_err());
+}
+
+#[test]
+fn settings_union_layers_and_missing_files_are_quiet() {
+    use crate::SettingsConfig;
+    let dir = std::env::temp_dir().join(format!("tabit-settings-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(dir.join("user/.tabit")).expect("user dir");
+    std::fs::create_dir_all(dir.join("work/.tabit")).expect("work dir");
+    std::fs::write(
+        dir.join("user/.tabit/settings.toml"),
+        "[extensions]\nenabled = [\"gate\"]\n",
+    )
+    .expect("user settings");
+
+    // An explicit load of a missing file is an Io error; load_default
+    // treats a missing layer as quiet defaults.
+    assert!(matches!(
+        SettingsConfig::load(dir.join("missing.toml")),
+        Err(crate::ConfigError::Io { .. })
+    ));
+    // SAFETY: process-global env; the variables are restored before
+    // the test ends and nothing else in this crate's tests reads them.
+    unsafe {
+        std::env::set_var("TABIT_SETTINGS", dir.join("missing.toml"));
+    }
+    let merged = SettingsConfig::load_default().expect("missing layers are quiet");
+    assert!(merged.enabled_extensions().is_empty());
+    unsafe {
+        std::env::set_var("TABIT_SETTINGS", dir.join("user/.tabit/settings.toml"));
+    }
+
+    // The env override replaces the user layer's default location, and
+    // the workspace layer unions on top of it.
+    std::fs::write(
+        dir.join("work/.tabit/settings.toml"),
+        "[extensions]\nenabled = [\"lmstudio\"]\n",
+    )
+    .expect("workspace settings");
+    let previous = std::env::current_dir().expect("cwd");
+    std::env::set_current_dir(dir.join("work")).expect("enter the workspace");
+    let merged = SettingsConfig::load_default().expect("layers merge");
+    std::env::set_current_dir(previous).expect("restore the cwd");
+    unsafe {
+        std::env::remove_var("TABIT_SETTINGS");
+    }
+    let enabled = merged.enabled_extensions();
+    assert!(enabled.contains("gate") && enabled.contains("lmstudio"));
+    assert_eq!(enabled.len(), 2, "enablement unions across layers");
+
+    // A broken file at an existing layer is a loud external error.
+    std::fs::write(dir.join("user/.tabit/settings.toml"), "not toml").expect("broken");
+    unsafe {
+        std::env::set_var("TABIT_SETTINGS", dir.join("user/.tabit/settings.toml"));
+    }
+    let broken = SettingsConfig::load(dir.join("user/.tabit/settings.toml"))
+        .expect_err("broken settings fail loudly");
+    assert!(matches!(broken, crate::ConfigError::Parse { .. }));
+    unsafe {
+        std::env::remove_var("TABIT_SETTINGS");
+    }
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+#[test]
+fn fragment_merge_lands_new_providers_and_the_user_wins() {
+    let mut config = parse(VALID);
+    let fragment = parse(
+        r#"
+[providers.lmstudio-relay]
+base_url = "http://127.0.0.1:8391/v1"
+api = "openai-completions"
+
+[[providers.lmstudio-relay.models]]
+id = "local-model"
+
+[providers.lmstudio]
+base_url = "http://127.0.0.1:9999/v1"
+api = "openai-completions"
+"#,
+    );
+    let mut warnings = Vec::new();
+    let contributed = config.merge_fragment(fragment, "extension `relay`", &mut warnings);
+    assert_eq!(contributed, vec!["lmstudio-relay".to_string()]);
+    // User config wins: the fragment's lmstudio did not overwrite.
+    assert_eq!(
+        config
+            .provider("lmstudio")
+            .expect("still the user's")
+            .base_url,
+        "http://127.0.0.1:1234/v1"
+    );
+    assert_eq!(
+        config
+            .provider("lmstudio-relay")
+            .expect("the fragment landed")
+            .models
+            .len(),
+        1
+    );
+    assert_eq!(warnings.len(), 1);
+    let first_warning = &warnings[0];
+    assert!(
+        first_warning.contains("user config wins"),
+        "{first_warning}"
+    );
+}
+
+#[test]
+fn fragment_default_model_is_refused() {
+    let mut config = parse("");
+    let fragment = parse(
+        "default_model = \"m\"\n\n[providers.p]\nbase_url = \"http://p\"\napi = \"openai-completions\"\n",
+    );
+    let mut warnings = Vec::new();
+    let contributed = config.merge_fragment(fragment, "extension `x`", &mut warnings);
+    assert_eq!(contributed, vec!["p".to_string()]);
+    assert!(config.default_model.is_none(), "a fragment never sets it");
+    assert_eq!(warnings.len(), 1);
+    let first_warning = &warnings[0];
+    assert!(first_warning.contains("default_model"), "{first_warning}");
+}
+
+#[test]
+fn fragment_collisions_resolve_in_call_order_so_scan_order_decides() {
+    // Two fragments with one shared id: the first merged (the
+    // alphabetically-first package, at the binary's call site) is the
+    // incumbent — the same determinism law as tool registration.
+    let mut config = parse("");
+    let mut warnings = Vec::new();
+    let first = config.merge_fragment(
+        parse("[providers.shared]\nbase_url = \"http://first\"\napi = \"openai-completions\"\n"),
+        "extension `a`",
+        &mut warnings,
+    );
+    let second = config.merge_fragment(
+        parse("[providers.shared]\nbase_url = \"http://second\"\napi = \"openai-completions\"\n"),
+        "extension `b`",
+        &mut warnings,
+    );
+    assert_eq!(first, vec!["shared".to_string()]);
+    assert!(second.is_empty());
+    assert_eq!(
+        config.provider("shared").expect("incumbent").base_url,
+        "http://first"
+    );
+    assert!(warnings.last().is_some_and(|w| w.contains("`b`")));
+}

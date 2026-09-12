@@ -419,6 +419,41 @@ Remaining residue, classified:
   attribution gap; the parent-side bridge is covered by the wire
   suite.
 
+## Extensions (item 9, tasks 1–4) (2026-09)
+
+Line-coverage re-measurement for the extension host round is deferred
+to the next llvm-cov pass (the standing practice for freshly landed
+crates); the coverage story below is the test map, so the next pass
+re-measures against known intent rather than discovering it.
+
+- `tabit-ext` — supervisor/manifest/protocol: the 21-test supervisor
+  suite (lifecycle edges, death drains, hook lanes, the ask lift) and
+  the manifest suite. `skills.rs` (task 4): mount, idempotency,
+  user-entry-wins, dangling-replace, no-skips — all four rules have a
+  test. Residue: the `create_dir_all`-failure and both-links-fail
+  arms (privilege-less symlink + failing junction + unwritable home
+  cannot be staged portably in-process) and `remove_link`'s
+  remove-dir-then-file fallback.
+- `tabit-config` — `settings.rs`: parse, layer union, env override,
+  missing-layers-quiet, broken-loud (the settings suite);
+  `merge_fragment`: user-wins, default_model refusal, scan-order
+  incumbency (the fragment suite).
+- `tabit` binary — `partition` (enablement split, refusals always
+  launch) and `merge_fragment_into` (broken fragment refuses the
+  fragment, healthy one lands) have unit tests; the boot wiring
+  itself is the e2e suite's surface (`extension_tools.rs`, now 7
+  tests: proxy run, shadow, gate, disabled-negative, skills mount,
+  relay happy + failure beat, unreachable upstream).
+- `lmstudio-ext` — e2e-covered through the real wire (happy path,
+  non-success upstream, unreachable upstream); residue: the relay's
+  404 unknown-path and 400 unreadable-body arms (an HTTP client that
+  posts a body the server cannot read is not stageable through
+  tiny_http itself).
+- The SDK example bins (`skillship-ext`, the task-2 roster): their
+  process shape is exercised by the e2e; the relay's
+  `lmstudio-ext` debug env knobs (port/upstream overrides) are
+  load-bearing in the same tests.
+
 ## Justified residue
 
 The remaining uncovered lines fall into these categories. Where a file is

@@ -528,9 +528,19 @@ async fn a_subprocess_child_boots_its_own_extension_host_and_serves_its_tools() 
             .body(sse_answer("child done"));
     });
     let config_path = stage_child_config("child-ext", &server);
+    // The allowlist entry: the child boots its own host and re-derives
+    // enablement from the inherited settings (the env var the child
+    // inherits — the same one-code-path law as everything else).
+    let settings_path = {
+        let dir = test_dir("child-ext-settings");
+        let path = dir.join("settings.toml");
+        std::fs::write(&path, "[extensions]\nenabled = [\"echoer\"]\n").expect("settings");
+        path
+    };
     #[allow(unsafe_code, clippy::missing_safety_doc)]
     unsafe {
         std::env::set_var("TABIT_CONFIG", &config_path);
+        std::env::set_var("TABIT_SETTINGS", &settings_path);
     }
 
     // The child's extension root: the echo double, installed as a
@@ -638,4 +648,9 @@ id = "m"
         child_echo.is_some(),
         "the child's model called the extension's tool — its host booted"
     );
+    #[allow(unsafe_code, clippy::missing_safety_doc)]
+    unsafe {
+        std::env::remove_var("TABIT_CONFIG");
+        std::env::remove_var("TABIT_SETTINGS");
+    }
 }

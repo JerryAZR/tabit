@@ -122,6 +122,17 @@ fn scan_skills_dir(dir: &Path, level: SkillLevel) -> Vec<SkillEntry> {
     out
 }
 
+/// The skill names a directory tree carries — an extension package's
+/// `skills/` mount read for provenance (the wire catalog's per-
+/// extension skills list). The same rules as discovery (malformed
+/// skips + warns); a missing dir names nothing.
+pub fn names_in(dir: &Path) -> Vec<String> {
+    scan_skills_dir(dir, SkillLevel::User)
+        .into_iter()
+        .map(|entry| entry.name)
+        .collect()
+}
+
 fn scan_into(dir: &Path, level: SkillLevel, out: &mut Vec<SkillEntry>) {
     // A missing skills dir is the normal case on a bare machine —
     // not a diagnostic. Other read failures warn (no silent skips).

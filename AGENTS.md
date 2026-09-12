@@ -28,7 +28,10 @@ Current workspace layout:
 - `crates/rig` — facade crate re-exporting the three above
 - `crates/tabit-protocol` — the frontend protocol vocabulary (commands,
   stamped events, handshake frames; `FRONTEND.md` is the contract)
-- `crates/tabit-config` — provider/model configuration (see `ROADMAP.md`)
+- `crates/tabit-config` — provider/model configuration plus the
+  settings layers (`settings.toml`: the extension allowlist — user +
+  workspace union, `$TABIT_SETTINGS` the debug override; see
+  `ROADMAP.md`)
 - `crates/tabit-log` — the durable-conversation layer between
   providers and agents: the session log (the entry vocabulary and
   tree, format-versioned), the write-behind writer, the parser, the
@@ -57,19 +60,26 @@ Current workspace layout:
 - `crates/tabit-ext` — the extension host (ROADMAP item 9): manifest
   discovery (`tabit.json` under the extensions root), the frozen
   JSONL extension pipe (initialize/ack, the tool lane, the
-  interaction lift), the supervisor (launch, handshake, supervise,
+  interaction lift), the supervisor (launch over the
+  enablement-filtered scan, handshake, supervise,
   mark-dead-and-report — no mid-run respawn; the tool-call dispatch
-  surface for proxy tools); the shared child-process helpers
-  (tree-kill wrapping, the stderr ring) live here and serve the
-  subagent bridge too; the hook lane forwards engine hook events
-  over the same pipe (policy fails open on a dead extension)
+  surface for proxy tools), the skills mounts (a package's `skills/`
+  linked into `~/.tabit/skills/<name>/` — symlink or Windows
+  junction, idempotent, the user's existing entry wins); the shared
+  child-process helpers (tree-kill wrapping, the stderr ring) live
+  here and serve the subagent bridge too; the hook lane forwards
+  engine hook events over the same pipe (policy fails open on a dead
+  extension)
 - `crates/tabit-ext-sdk` — the extension SDK, the guest side of the
   same pipe: the dispatcher owning the loop (ack, tool-call dispatch
   to bodies, result serialization, ask lifts) so authors write tool
   bodies only; hand-rolled frames sharing no code with the host —
   the protocol doc's reference consumer. Ships the example
   extensions (`echo-ext`, `shadow-ext`, the clash pair, `gate-ext` —
-  the permission gate, moved out of core) as its bins
+  the permission gate, moved out of core; `skillship-ext` — the
+  skills-only package; `lmstudio-ext` — the provider relay speaking
+  LM Studio's native REST API behind a `providers.toml` fragment) as
+  its bins
 - `crates/tabit-gui` — the egui frontend (`tabit-gui` binary; the
   `tabit` launcher detach-spawns it; reducer/view contract in ROADMAP
   item 7). Its `CHANGELOG.md` is the frontend protocol's changelog —
