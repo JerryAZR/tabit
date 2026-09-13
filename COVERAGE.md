@@ -428,27 +428,28 @@ re-measures against known intent rather than discovering it.
 
 - `tabit-ext` — supervisor/manifest/protocol: the 21-test supervisor
   suite (lifecycle edges, death drains, hook lanes, the ask lift) and
-  the manifest suite. `skills.rs` (task 4): mount, idempotency,
-  user-entry-wins, dangling-replace, no-skips — all four rules have a
-  test. Residue: the `create_dir_all`-failure and both-links-fail
-  arms (privilege-less symlink + failing junction + unwritable home
-  cannot be staged portably in-process) and `remove_link`'s
-  remove-dir-then-file fallback.
+  the manifest suite. (The task-4 skills mounts module was removed
+  whole with the in-memory ruling — nothing to cover.)
+- `tabit-session::skills` (task 4's share): `entries_in`,
+  `Skills::register`, and `with_extension_defaults` are unit-tested
+  (ladder-override, first-writer-wins); the boot seeding is the e2e's
+  surface.
 - `tabit-config` — `settings.rs`: parse, layer union, env override,
   missing-layers-quiet, broken-loud (the settings suite);
-  `merge_fragment`: user-wins, default_model refusal, scan-order
-  incumbency (the fragment suite).
-- `tabit` binary — `partition` (enablement split, refusals always
+  `merge_fragment`: silent user-wins, fragment-vs-fragment warning,
+  default_model refusal (the fragment suite).
+- `tabit` binary — `partition` (default-on split, refusals always
   launch) and `merge_fragment_into` (broken fragment refuses the
   fragment, healthy one lands) have unit tests; the boot wiring
   itself is the e2e suite's surface (`extension_tools.rs`, now 7
-  tests: proxy run, shadow, gate, disabled-negative, skills mount,
+  tests: proxy run, shadow, gate, disable-negative, skills tables,
   relay happy + failure beat, unreachable upstream).
 - `lmstudio-ext` — e2e-covered through the real wire (happy path,
-  non-success upstream, unreachable upstream); residue: the relay's
-  404 unknown-path and 400 unreadable-body arms (an HTTP client that
-  posts a body the server cannot read is not stageable through
-  tiny_http itself).
+  non-success upstream, unreachable upstream — the last asserted
+  machine-agnostically, any `LM Studio`-named failure); residue: the
+  relay's 404 unknown-path and 400 unreadable-body arms (an HTTP
+  client that posts a body the server cannot read is not stageable
+  through tiny_http itself).
 - The SDK example bins (`skillship-ext`, the task-2 roster): their
   process shape is exercised by the e2e; the relay's
   `lmstudio-ext` debug env knobs (port/upstream overrides) are

@@ -440,13 +440,6 @@ pub struct AvailableExtension {
     pub tools: Vec<AvailableExtensionTool>,
     /// The hook points it subscribed to.
     pub hooks: Vec<String>,
-    /// The skill names its shipped `skills/` directory carries (the
-    /// names the linked skills mount under the user's skills dir).
-    pub skills: Vec<String>,
-    /// The provider ids its `providers.toml` fragment contributed to
-    /// the merged config — only the ids that landed (user config wins
-    /// on collision).
-    pub providers: Vec<String>,
 }
 
 /// One declared tool in [`AvailableExtension`].

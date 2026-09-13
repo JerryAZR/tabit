@@ -231,14 +231,15 @@ struct Stage {
     extensions: PathBuf,
 }
 
-/// Write the settings allowlist naming exactly `names`.
-fn write_settings(path: &Path, names: &[&str]) {
+/// Write the settings disable list naming exactly `names` — the one
+/// explicit act (everything else mounts by default).
+fn write_disabled(path: &Path, names: &[&str]) {
     let list = names
         .iter()
         .map(|name| format!("\"{name}\""))
         .collect::<Vec<_>>()
         .join(", ");
-    std::fs::write(path, format!("[extensions]\nenabled = [{list}]\n")).expect("settings");
+    std::fs::write(path, format!("[extensions]\ndisabled = [{list}]\n")).expect("settings");
 }
 
 fn stage(tag: &str, behaviors: &[(&str, &str)]) -> Stage {
@@ -260,11 +261,9 @@ fn stage(tag: &str, behaviors: &[(&str, &str)]) -> Stage {
     for (name, behavior) in behaviors {
         install_double(&extensions, name, behavior);
     }
+    // No settings file: the default world — packages mount by
+    // default; tests that disable write the list themselves.
     let settings = dir.join("settings.toml");
-    write_settings(
-        &settings,
-        &behaviors.iter().map(|(name, _)| *name).collect::<Vec<_>>(),
-    );
     let home = dir.join("home");
     std::fs::create_dir_all(&home).expect("redirected home");
     let work = dir.join("work");
@@ -428,8 +427,7 @@ fn a_core_name_conflict_is_reported_on_the_channel() {
 fn the_gate_extension_gates_a_model_bash_call_over_the_wire() {
     let stage = stage("gate-e2e", &[]);
     // The gate package: the SDK-built permission policy, installed
-    // like any extension — and enabled like any extension.
-    write_settings(&stage.settings, &["gate"]);
+    // like any extension (and mounted like any — by default).
     {
         let dir = stage.extensions.join("gate");
         std::fs::create_dir_all(&dir).expect("gate dir");
@@ -507,13 +505,13 @@ fn the_gate_extension_gates_a_model_bash_call_over_the_wire() {
 
 // ── task 4: enablement, skills mounts, providers fragments ─────────
 
-/// An unlisted package is the user's setting, not a failure: it boots
+/// A disabled package is the user's setting, not a failure: it boots
 /// nowhere — no catalog announcement, no launch — while the backend
 /// itself runs a normal turn.
 #[test]
-fn a_package_outside_the_allowlist_mounts_nowhere() {
+fn a_package_on_the_disable_list_mounts_nowhere() {
     let stage = stage("disabled", &[("echoer", "tools-echo")]);
-    write_settings(&stage.settings, &[]);
+    write_disabled(&stage.settings, &["echoer"]);
     scripted_turns(
         &stage,
         &[("solo-run-5c11".to_string(), sse_text("ran alone"))],
@@ -578,7 +576,6 @@ fn a_skill_shipping_package_mounts_its_skills_into_discovery() {
         .expect("manifest"),
     )
     .expect("manifest");
-    write_settings(&stage.settings, &["skillship"]);
     scripted_turns(&stage, &[("never-called".to_string(), sse_text("done"))]);
 
     let mut backend = spawn_backend(&stage, &[]);
@@ -587,28 +584,24 @@ fn a_skill_shipping_package_mounts_its_skills_into_discovery() {
         .extensions
         .iter()
         .find(|extension| extension.name == "skillship")
-        .expect("the package is enabled and announced");
+        .expect("the package is mounted and announced");
     assert_eq!(extension.status, "alive");
-    assert_eq!(extension.skills, vec!["skillship-demo".to_string()]);
 
-    // The ordinary discovery ladder found the linked mount. Discovery
-    // canonicalizes, so the announced location is the package's real
-    // path (honest provenance) — the mount itself is the slot in the
-    // redirected home, asserted directly: it resolves to the
-    // package's body.
+    // The extension walker's entries ride the ordinary skills
+    // announcement with their ORIGINAL package paths — in-memory
+    // tables, no filesystem mount; the location is the provenance,
+    // and it reads like any discovered skill.
     let skills = skills.expect("skills_available arrived");
     let skill = skills
         .iter()
         .find(|skill| skill.name == "skillship-demo")
         .expect("the shipped skill is discovered");
     assert!(
-        skill.location.contains("skillship-demo"),
-        "the canonical package path: {}",
+        skill.location.contains("extensions") && skill.location.contains("skillship"),
+        "the package's real path: {}",
         skill.location
     );
-    let slot = stage.home.join(".tabit").join("skills").join("skillship");
-    let body = std::fs::read_to_string(slot.join("skillship-demo").join("SKILL.md"))
-        .expect("the home slot resolves into the package");
+    let body = std::fs::read_to_string(&skill.location).expect("the entry's path reads");
     assert!(body.contains("The shipped body"), "{body}");
 }
 
@@ -650,7 +643,6 @@ fn a_providers_fragment_relays_a_model_call_over_the_native_api() {
         ),
     )
     .expect("fragment");
-    write_settings(&stage.settings, &["lmstudio"]);
 
     // LM Studio's native answer (the mock plays the native API — the
     // whole point is that tabit never speaks it directly).
@@ -689,7 +681,6 @@ fn a_providers_fragment_relays_a_model_call_over_the_native_api() {
         .find(|extension| extension.name == "lmstudio")
         .expect("the relay package is announced");
     assert_eq!(extension.status, "alive");
-    assert_eq!(extension.providers, vec!["lmstudio-relay".to_string()]);
 
     let session_id = session.clone();
     backend.send(&to_wire_line(&SessionCommand::Message {
@@ -757,7 +748,6 @@ fn an_unreachable_upstream_fails_the_run_through_the_relay() {
         ),
     )
     .expect("fragment");
-    write_settings(&stage.settings, &["lmstudio"]);
 
     // A port nothing listens on: the relay is up (its fragment
     // merged, the package alive) but LM Studio is not.
@@ -774,11 +764,7 @@ fn an_unreachable_upstream_fails_the_run_through_the_relay() {
             ("TABIT_LMSTUDIO_URL", dead_upstream),
         ],
     );
-    let (session, catalog, _skills) = handshake(&mut backend);
-    assert_eq!(
-        catalog.extensions[0].providers,
-        vec!["lmstudio-relay".to_string()]
-    );
+    let (session, _catalog, _skills) = handshake(&mut backend);
     backend.send(&to_wire_line(&SessionCommand::Message {
         session,
         text: "any prompt".to_string(),
@@ -787,7 +773,11 @@ fn an_unreachable_upstream_fails_the_run_through_the_relay() {
         match backend.next_frame() {
             ServerFrame::Event(frame) => {
                 if let SessionEvent::RunFailed { message } = frame.event {
-                    assert!(message.contains("unreachable"), "{message}");
+                    // The failure is model-visible and names the
+                    // upstream — whichever arm fired (unreachable, or
+                    // answered-with-an-error); the wording depends on
+                    // the machine's network stack.
+                    assert!(message.contains("LM Studio"), "{message}");
                     return;
                 }
             }

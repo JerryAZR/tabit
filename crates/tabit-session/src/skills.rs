@@ -122,15 +122,14 @@ fn scan_skills_dir(dir: &Path, level: SkillLevel) -> Vec<SkillEntry> {
     out
 }
 
-/// The skill names a directory tree carries — an extension package's
-/// `skills/` mount read for provenance (the wire catalog's per-
-/// extension skills list). The same rules as discovery (malformed
-/// skips + warns); a missing dir names nothing.
-pub fn names_in(dir: &Path) -> Vec<String> {
+/// The skill entries a directory tree carries — an extension
+/// package's `skills/` walked by the host's scan (item 9, task 4:
+/// the extension walker produces what packages provide, with their
+/// original paths; nothing is written to the filesystem). The same
+/// rules as discovery (malformed skips + warns); a missing dir
+/// carries nothing.
+pub fn entries_in(dir: &Path) -> Vec<SkillEntry> {
     scan_skills_dir(dir, SkillLevel::User)
-        .into_iter()
-        .map(|entry| entry.name)
-        .collect()
 }
 
 fn scan_into(dir: &Path, level: SkillLevel, out: &mut Vec<SkillEntry>) {
@@ -291,6 +290,57 @@ impl Skills {
     /// The entry named `name`, when discovered.
     pub fn lookup(&self, name: &str) -> Option<&SkillEntry> {
         self.entries.iter().find(|e| e.name == name)
+    }
+
+    /// Register one entry when its name is free (first writer wins —
+    /// the extension walker's rule: scan order decides, the dropped
+    /// duplicate warns). Returns whether it landed.
+    pub fn register(&mut self, entry: SkillEntry) -> bool {
+        match self.entries.iter().position(|e| e.name == entry.name) {
+            Some(index) => {
+                if let Some(slot) = self.entries.get(index) {
+                    tracing::warn!(
+                        skill = %entry.name,
+                        kept = %slot.skill_file.display(),
+                        dropped = %entry.skill_file.display(),
+                        "skill name collision: the first registration wins"
+                    );
+                }
+                false
+            }
+            None => {
+                self.entries.push(entry);
+                true
+            }
+        }
+    }
+
+    /// Fold the extension walker's contribution under this discovered
+    /// catalog (item 9, task 4): extension-shipped skills join at the
+    /// ladder's **base** — below every user and workspace source, so
+    /// anything the user already has overrides them — and their paths
+    /// stay the package's real ones (provenance by location; the
+    /// catalog, the `skill` tool, and the wire snapshot all read the
+    /// same table).
+    pub fn with_extension_defaults(mut self, extensions: Skills) -> Skills {
+        for entry in extensions.entries {
+            match self.entries.iter().position(|e| e.name == entry.name) {
+                Some(index) => {
+                    if let Some(slot) = self.entries.get(index) {
+                        tracing::warn!(
+                            skill = %entry.name,
+                            kept = %slot.skill_file.display(),
+                            dropped = %entry.skill_file.display(),
+                            "extension skill shadowed by the user's own"
+                        );
+                    }
+                }
+                None => {
+                    self.entries.push(entry);
+                }
+            }
+        }
+        self
     }
 
     /// Whether discovery found nothing.

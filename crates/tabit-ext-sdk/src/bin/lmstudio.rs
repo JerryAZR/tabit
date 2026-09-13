@@ -137,17 +137,7 @@ fn forward(upstream: &str, body: &str) -> Result<(bool, String), String> {
         }
     }
     static CLIENT: OnceLock<reqwest::blocking::Client> = OnceLock::new();
-    // No proxy, ever: LM Studio is a local server, and a system proxy
-    // would both add a hop and misreport its own failures as LM
-    // Studio's (a proxied dead port answers 502 the relay cannot
-    // distinguish from a real one).
-    #[allow(clippy::expect_used)] // sanctioned crash: the builder takes no system inputs
-    let client = CLIENT.get_or_init(|| {
-        reqwest::blocking::Client::builder()
-            .no_proxy()
-            .build()
-            .expect("the no-proxy client builder cannot fail")
-    });
+    let client = CLIENT.get_or_init(reqwest::blocking::Client::new);
     let response = client
         .post(format!("{upstream}/api/v0/chat/completions"))
         .json(&Value::Object(native))

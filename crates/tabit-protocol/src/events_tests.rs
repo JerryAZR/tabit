@@ -159,8 +159,6 @@ fn events_round_trip_through_json() {
                     description: "Echo the text back.".to_string(),
                 }],
                 hooks: vec!["tool_call".to_string()],
-                skills: vec!["shipped-skill".to_string()],
-                providers: vec!["lmstudio-relay".to_string()],
             }],
             conflicts: vec![ExtensionConflict {
                 kind: ExtensionConflictKind::RefusedPeer,
@@ -230,8 +228,6 @@ fn events_round_trip_through_json() {
                 reason: Some("no handshake within 30s".to_string()),
                 tools: Vec::new(),
                 hooks: Vec::new(),
-                skills: Vec::new(),
-                providers: Vec::new(),
             }],
             conflicts: vec![ExtensionConflict {
                 kind: ExtensionConflictKind::ReplacesCore,
@@ -241,7 +237,7 @@ fn events_round_trip_through_json() {
             }],
         })
         .expect("serialize"),
-        r#"{"type":"extensions_available","extensions":[{"name":"shadow","version":"0.1.0","description":null,"dir":"C:/u/.tabit/extensions/shadow","status":"dead","reason":"no handshake within 30s","tools":[],"hooks":[],"skills":[],"providers":[]}],"conflicts":[{"kind":"replaces_core","extension":"shadow","tool":"read","incumbent":null}]}"#
+        r#"{"type":"extensions_available","extensions":[{"name":"shadow","version":"0.1.0","description":null,"dir":"C:/u/.tabit/extensions/shadow","status":"dead","reason":"no handshake within 30s","tools":[],"hooks":[]}],"conflicts":[{"kind":"replaces_core","extension":"shadow","tool":"read","incumbent":null}]}"#
     );
     assert_eq!(
         serde_json::to_string(&SessionEvent::SessionCreated {

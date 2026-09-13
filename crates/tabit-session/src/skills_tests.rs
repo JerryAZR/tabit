@@ -386,3 +386,80 @@ async fn without_a_mounted_catalog_the_tool_refuses() {
         .expect_err("no catalog mounted");
     assert!(error.to_string().contains("did not discover"), "{error}");
 }
+
+// ---- the extension walker's in-memory contribution (item 9, task 4)
+
+#[test]
+fn extension_entries_fold_under_the_ladder() {
+    let root = temp_dir("ext-fold");
+    // The user's own lint, at a real ladder source (~/.tabit/skills).
+    skill_dir(
+        &root.join(".tabit/skills"),
+        "user-lint",
+        "name: lint\ndescription: the user's lint\n",
+        "user body",
+    );
+    let ladder = discover_with_home(Some(&root), Path::new("C:/nowhere"));
+
+    let package = root.join("pkg/skills");
+    write(
+        &package.join("lint/SKILL.md"),
+        "---\nname: lint\ndescription: the extension's lint\n---\nextension lint",
+    );
+    write(
+        &package.join("extra/SKILL.md"),
+        "---\nname: extra\ndescription: only the extension ships this\n---\nextension extra",
+    );
+    let extension = Skills {
+        entries: entries_in(&package),
+    };
+    assert_eq!(extension.entries.len(), 2);
+
+    let merged = ladder.with_extension_defaults(extension);
+    // The user's own entry wins the collision; the extension's unique
+    // skill joins the catalog with its ORIGINAL package path.
+    let lint = merged.lookup("lint").expect("lint present");
+    assert!(
+        lint.skill_file.display().to_string().contains("user-lint"),
+        "{}",
+        lint.skill_file.display()
+    );
+    let extra = merged.lookup("extra").expect("extra joins");
+    assert!(
+        extra.skill_file.display().to_string().contains("pkg"),
+        "{}",
+        extra.skill_file.display()
+    );
+    let _ = fs::remove_dir_all(&root);
+}
+
+#[test]
+fn extension_registration_is_first_writer_wins() {
+    let root = temp_dir("ext-register");
+    let first = root.join("a/skills");
+    let second = root.join("b/skills");
+    write(
+        &first.join("demo/SKILL.md"),
+        "---\nname: demo\ndescription: the incumbent\n---\nfirst",
+    );
+    write(
+        &second.join("demo/SKILL.md"),
+        "---\nname: demo\ndescription: the newcomer\n---\nsecond",
+    );
+
+    let mut extension = Skills::default();
+    for entries in [entries_in(&first), entries_in(&second)] {
+        for entry in entries {
+            extension.register(entry);
+        }
+    }
+    let demo = extension.lookup("demo").expect("one entry");
+    // Scan order decides: the incumbent is package `a`'s entry.
+    assert_eq!(
+        demo.base_dir,
+        first.join("demo").canonicalize().expect("canonical"),
+        "scan order decides"
+    );
+    assert_eq!(extension.entries.len(), 1);
+    let _ = fs::remove_dir_all(&root);
+}

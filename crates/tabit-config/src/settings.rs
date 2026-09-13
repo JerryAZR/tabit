@@ -1,16 +1,16 @@
 //! Settings beyond providers/models: the user/workspace layers that
 //! govern host-level behavior. Today that is one fact — the extension
-//! allowlist (EXTENSIONS.md's enablement ruling: a discovered package
-//! mounts only when its name is enabled; the entry IS the consent
-//! record, which is what task-6's install/trust UX writes).
+//! disable list (EXTENSIONS.md's enablement ruling: an installed
+//! package mounts by default — installing was the consent — and
+//! `disabled` is the opt-out).
 //!
-//! Layers (union — enablement is set membership, not a definition, so
-//! there is nothing to collide): the user file (`$TABIT_SETTINGS`,
+//! Layers (union — disabling is the one explicit act, and any layer
+//! naming a package disables it): the user file (`$TABIT_SETTINGS`,
 //! else `<home>/.tabit/settings.toml` — the `$TABIT_CONFIG`
 //! debug-override pattern) and the workspace file
 //! (`<cwd>/.tabit/settings.toml`). A missing file at either layer is
-//! the normal case (nothing enabled); a file that exists but does not
-//! parse is a loud external error.
+//! the normal case (nothing disabled); a file that exists but does
+//! not parse is a loud external error.
 
 use std::collections::HashSet;
 use std::path::PathBuf;
@@ -31,9 +31,10 @@ pub struct SettingsConfig {
 #[derive(Debug, Clone, PartialEq, Default, Deserialize)]
 #[serde(deny_unknown_fields, default)]
 pub struct ExtensionsSettings {
-    /// The allowlist: a discovered package mounts only when its name is
-    /// listed (EXTENSIONS.md). Disabling is removing the name.
-    pub enabled: Vec<String>,
+    /// The disable list: a discovered package is skipped when its
+    /// name is listed. Everything else mounts — install was the
+    /// consent.
+    pub disabled: Vec<String>,
 }
 
 impl SettingsConfig {
@@ -53,7 +54,7 @@ impl SettingsConfig {
     /// Load the layers and union them: the user file (`$TABIT_SETTINGS`,
     /// else `<home>/.tabit/settings.toml`) plus the workspace file
     /// (`<cwd>/.tabit/settings.toml`). A missing file is not an error —
-    /// a bare machine has settings, they just enable nothing.
+    /// a bare machine has settings, they just disable nothing.
     pub fn load_default() -> Result<Self, ConfigError> {
         let mut merged = Self::default();
         for path in default_settings_paths() {
@@ -70,15 +71,16 @@ impl SettingsConfig {
         Ok(merged)
     }
 
-    /// Union another layer's enablement in (layers add; the allowlist
-    /// has no conflicting-definition case to arbitrate).
+    /// Union another layer's disable list in (any layer naming a
+    /// package disables it — there is no re-enable override, by
+    /// design: disabling is the one explicit act).
     fn absorb(&mut self, other: Self) {
-        self.extensions.enabled.extend(other.extensions.enabled);
+        self.extensions.disabled.extend(other.extensions.disabled);
     }
 
-    /// The resolved allowlist.
-    pub fn enabled_extensions(&self) -> HashSet<String> {
-        self.extensions.enabled.iter().cloned().collect()
+    /// The resolved disable list.
+    pub fn disabled_extensions(&self) -> HashSet<String> {
+        self.extensions.disabled.iter().cloned().collect()
     }
 }
 

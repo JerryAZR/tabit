@@ -53,18 +53,6 @@ pub struct Mounted {
     pub catalog: ExtensionsCatalog,
 }
 
-/// What an enabled package contributes beyond the pipe's tools and
-/// hooks (item 9, task 4): the skill names its `skills/` directory
-/// ships and the provider ids its `providers.toml` fragment landed in
-/// the merged config. Built by the boot, consumed by the catalog —
-/// provenance, per EXTENSIONS.md, so a frontend can attribute without
-/// the model ever seeing a prefix.
-#[derive(Debug, Default, Clone)]
-pub struct Contributions {
-    pub skills: Vec<String>,
-    pub providers: Vec<String>,
-}
-
 impl Mounted {
     /// The empty mount (print mode and extension-less hosts): one
     /// shape for every assembly.
@@ -79,18 +67,12 @@ impl Mounted {
 
     /// Assemble from the supervisor's **resolved** reports (call
     /// [`Supervisor::await_resolved`] first — the boot order that
-    /// guarantees tools exist at session build). `contributions`
-    /// carries the scan-level facts the catalog attributes (skills,
-    /// provider fragments), keyed by extension name.
+    /// guarantees tools exist at session build).
     #[allow(clippy::unreachable)] // the sanctioned crash below (AGENTS.md doctrine)
-    pub fn mount(
-        supervisor: Arc<Supervisor>,
-        core: &[DynamicTool],
-        contributions: &std::collections::HashMap<String, Contributions>,
-    ) -> Mounted {
+    pub fn mount(supervisor: Arc<Supervisor>, core: &[DynamicTool]) -> Mounted {
         let core_names: Vec<&str> = core.iter().map(|tool| tool.name()).collect();
         let reports = supervisor.reports();
-        let (planned, catalog) = plan(&reports, &core_names, contributions);
+        let (planned, catalog) = plan(&reports, &core_names);
         let tools = planned
             .into_iter()
             .filter_map(|planned| {
@@ -174,11 +156,7 @@ struct Planned {
 /// are testable without a single process. Outputs the surviving
 /// (extension, declaration) pairs in registration order and the whole
 /// catalog.
-fn plan(
-    reports: &[ExtensionReport],
-    core_names: &[&str],
-    contributions: &std::collections::HashMap<String, Contributions>,
-) -> (Vec<Planned>, ExtensionsCatalog) {
+fn plan(reports: &[ExtensionReport], core_names: &[&str]) -> (Vec<Planned>, ExtensionsCatalog) {
     let mut planned = Vec::new();
     let mut held: Vec<(String, String)> = Vec::new(); // (tool name, extension)
     let mut conflicts = Vec::new();
@@ -215,34 +193,29 @@ fn plan(
     }
     let extensions = reports
         .iter()
-        .map(|report| {
-            let extra = contributions.get(&report.name);
-            AvailableExtension {
-                name: report.name.clone(),
-                version: report.version.clone(),
-                description: report.description.clone(),
-                dir: report.dir.display().to_string(),
-                status: match report.status {
-                    Status::Alive => "alive".to_string(),
-                    Status::Starting => "starting".to_string(),
-                    Status::Dead { .. } => "dead".to_string(),
-                },
-                reason: match &report.status {
-                    Status::Dead { reason } => Some(reason.clone()),
-                    _ => None,
-                },
-                tools: report
-                    .tools
-                    .iter()
-                    .map(|decl| AvailableExtensionTool {
-                        name: decl.name.clone(),
-                        description: decl.description.clone(),
-                    })
-                    .collect(),
-                hooks: report.hooks.iter().map(|hook| hook.event.clone()).collect(),
-                skills: extra.map(|c| c.skills.clone()).unwrap_or_default(),
-                providers: extra.map(|c| c.providers.clone()).unwrap_or_default(),
-            }
+        .map(|report| AvailableExtension {
+            name: report.name.clone(),
+            version: report.version.clone(),
+            description: report.description.clone(),
+            dir: report.dir.display().to_string(),
+            status: match report.status {
+                Status::Alive => "alive".to_string(),
+                Status::Starting => "starting".to_string(),
+                Status::Dead { .. } => "dead".to_string(),
+            },
+            reason: match &report.status {
+                Status::Dead { reason } => Some(reason.clone()),
+                _ => None,
+            },
+            tools: report
+                .tools
+                .iter()
+                .map(|decl| AvailableExtensionTool {
+                    name: decl.name.clone(),
+                    description: decl.description.clone(),
+                })
+                .collect(),
+            hooks: report.hooks.iter().map(|hook| hook.event.clone()).collect(),
         })
         .collect();
     (
@@ -369,7 +342,7 @@ mod tests {
     #[test]
     fn a_flat_name_assembles_one_tool() {
         let reports = vec![report("echo", &[("echo", "says it back")], true)];
-        let (planned, catalog) = plan(&reports, &["read", "bash"], &Default::default());
+        let (planned, catalog) = plan(&reports, &["read", "bash"]);
         assert_eq!(planned.len(), 1);
         assert_eq!(planned[0].decl.name, "echo");
         assert!(catalog.conflicts.is_empty());
@@ -381,7 +354,7 @@ mod tests {
     #[test]
     fn a_core_name_is_replaced_and_reported() {
         let reports = vec![report("shadow", &[("read", "the shadow read")], true)];
-        let (planned, catalog) = plan(&reports, &["read", "bash"], &Default::default());
+        let (planned, catalog) = plan(&reports, &["read", "bash"]);
         assert_eq!(planned.len(), 1, "the shadow mounts");
         assert_eq!(catalog.conflicts.len(), 1);
         assert_eq!(
@@ -399,7 +372,7 @@ mod tests {
             report("clash-a", &[("clashy", "the incumbent")], true),
             report("clash-b", &[("clashy", "the newcomer")], true),
         ];
-        let (planned, catalog) = plan(&reports, &[], &Default::default());
+        let (planned, catalog) = plan(&reports, &[]);
         assert_eq!(planned.len(), 1, "one name, one tool");
         assert_eq!(planned[0].extension, "clash-a");
         assert_eq!(catalog.conflicts.len(), 1);
@@ -412,7 +385,7 @@ mod tests {
     #[test]
     fn a_dead_extension_lists_but_mounts_nothing() {
         let reports = vec![report("gone", &[("tool", "declared once")], false)];
-        let (planned, catalog) = plan(&reports, &[], &Default::default());
+        let (planned, catalog) = plan(&reports, &[]);
         assert!(planned.is_empty());
         assert_eq!(catalog.extensions[0].status, "dead");
         assert_eq!(

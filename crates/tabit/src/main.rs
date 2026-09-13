@@ -103,8 +103,8 @@ commands in; stamped events out (see the tabit-session protocol module).
 config: providers.toml / auth.toml / settings.toml under ~/.tabit
         (override with TABIT_CONFIG / TABIT_AUTH / TABIT_SETTINGS);
         sessions live in <project>/.tabit/sessions. Extensions install
-        under ~/.tabit/extensions and load only when named in
-        settings.toml's [extensions] enabled list";
+        under ~/.tabit/extensions and load unless named in
+        settings.toml's [extensions] disabled list";
 
 /// What a parsed command line asks for. `-p` and `--rewind` both select
 /// print mode, `--json` selects JSON mode; interactive mode is the
@@ -474,15 +474,20 @@ fn child_router() -> std::sync::Arc<tabit_session::ChildRouter> {
         .clone()
 }
 
-/// The process-wide skills catalog — one discovery per process, the
-/// consistency guarantee between the prompt's listing and the `skill`
-/// tool's lookup (two discoveries could race a directory edit and
-/// disagree; one cannot). Built against the process cwd (the backend
-/// never chdirs — the same fact the session store roots at).
+static SKILLS_CATALOG: std::sync::OnceLock<std::sync::Arc<tabit_session::skills::Skills>> =
+    std::sync::OnceLock::new();
+
+/// The process-wide skills catalog — one catalog per process, the
+/// consistency guarantee between the prompt's listing, the `skill`
+/// tool's lookup, and the wire snapshot (two discoveries could race a
+/// directory edit and disagree; one cannot). Built against the
+/// process cwd (the backend never chdirs — the same fact the session
+/// store roots at). The JSON boot seeds it with the extension
+/// walker's contribution folded under the ladder BEFORE any assembly
+/// reads it; unseeded, the plain ladder discovery is the catalog
+/// (print mode, extension-less hosts).
 fn skills_catalog() -> std::sync::Arc<tabit_session::skills::Skills> {
-    static SKILLS: std::sync::OnceLock<std::sync::Arc<tabit_session::skills::Skills>> =
-        std::sync::OnceLock::new();
-    SKILLS
+    SKILLS_CATALOG
         .get_or_init(|| {
             // A failed `current_dir` assembles nothing anyway (the loud
             // gate lives in `assemble_session`); here it degrades to a
@@ -491,6 +496,21 @@ fn skills_catalog() -> std::sync::Arc<tabit_session::skills::Skills> {
             std::sync::Arc::new(tabit_session::skills::discover(&cwd))
         })
         .clone()
+}
+
+/// Seed the process's catalog (the JSON boot): the ladder discovery
+/// with the extension entries folded under it. Seeding after the
+/// catalog's first reader is an ordering bug, not a condition to
+/// absorb — the boot runs before any assembly by construction.
+#[allow(clippy::panic)] // the sanctioned crash below (AGENTS.md doctrine)
+fn seed_skills_catalog(extension_skills: tabit_session::skills::Skills) {
+    let cwd = std::env::current_dir().unwrap_or_default();
+    let seeded = tabit_session::skills::discover(&cwd).with_extension_defaults(extension_skills);
+    if SKILLS_CATALOG.set(std::sync::Arc::new(seeded)).is_err() {
+        panic!(
+            "internal invariant violated: the skills catalog was read before the boot seeded it"
+        );
+    }
 }
 
 /// The tabit executable subprocess children spawn: this very binary
@@ -802,54 +822,43 @@ fn run() -> Result<i32, String> {
                 (Ok(config), Ok(auth)) => (Arc::new(config), Arc::new(auth)),
                 (Err(detail), _) | (_, Err(detail)) => return json_setup_failure(&detail),
             };
-            // Settings (the extension allowlist's layers): absence is
-            // normal — a bare machine enables nothing — while a broken
-            // file is a loud startup failure.
+            // Settings (the extension disable list's layers): absence
+            // is normal — a bare machine disables nothing, packages
+            // mount by default — while a broken file is a loud
+            // startup failure.
             let settings = match tabit_config::SettingsConfig::load_default() {
                 Ok(settings) => settings,
                 Err(detail) => return json_startup_failure(&detail.to_string()),
             };
-            let enabled = settings.enabled_extensions();
+            let disabled = settings.disabled_extensions();
             // One scan feeds every consumer — launch, the providers
-            // fragment merge, the skills mounts — so they cannot
+            // fragment merge, the skills tables — so they cannot
             // disagree (the same one-scan law as the catalog).
             let found = extension_root(&args)
                 .as_deref()
                 .map(tabit_ext::manifest::scan)
                 .unwrap_or_default();
-            let launchable = partition(found, &enabled);
-            // Providers fragments merge under the user config, and the
-            // contributions map gathers the provenance the catalog
-            // announces (skills names, landed provider ids).
+            let launchable = partition(found, &disabled);
+            // Providers fragments merge under the user config (the
+            // user's own ids win silently; only a fragment colliding
+            // with an earlier fragment warns).
             let mut merged = (*config).clone();
-            let mut contributions = std::collections::HashMap::new();
+            let user_ids: std::collections::HashSet<String> =
+                merged.providers.keys().cloned().collect();
             let mut warnings = Vec::new();
             for (name, dir) in &launchable.packages {
-                let providers = merge_fragment_into(&mut merged, name, dir, &mut warnings);
-                let skills = tabit_session::skills::names_in(&dir.join("skills"));
-                contributions.insert(
-                    name.clone(),
-                    extensions::Contributions { skills, providers },
-                );
-            }
-            // The skills mounts: the enabled packages' `skills/`
-            // directories linked into the user's skills dir — before
-            // any assembly reads the catalog (the prompt build is the
-            // first reader).
-            match skills_home() {
-                Some(home) => warnings.extend(tabit_ext::skills::link(&launchable.packages, &home)),
-                None => {
-                    if !launchable.packages.is_empty() {
-                        warnings.push(
-                            "extension skills are not mounted — the home directory cannot be resolved"
-                                .to_string(),
-                        );
-                    }
-                }
+                merge_fragment_into(&mut merged, name, dir, &user_ids, &mut warnings);
             }
             for warning in &warnings {
                 eprintln!("warning: {warning}");
             }
+            // The skills tables: the extension walker produces what
+            // the packages ship, with their original paths, and the
+            // process's one catalog folds them under the ladder —
+            // seeded before any assembly reads it (the prompt build
+            // is the first reader). No filesystem writes: the
+            // entries' locations ARE the packages' paths.
+            seed_skills_catalog(extension_skills_catalog(&launchable.packages));
             let registry = ModelRegistry::new(Arc::new(merged), auth);
             let runtime = tokio::runtime::Builder::new_current_thread()
                 .enable_all()
@@ -872,11 +881,7 @@ fn run() -> Result<i32, String> {
                 // exactly what a session would mount without
                 // extensions.
                 let core = core_sets(&args).map(|(_, parent)| parent)?;
-                Arc::new(extensions::Mounted::mount(
-                    supervisor,
-                    &core,
-                    &contributions,
-                ))
+                Arc::new(extensions::Mounted::mount(supervisor, &core))
             };
             // Assemble failures (session unreadable, model unbuildable)
             // reject the handshake with the plain reason — not the
@@ -1357,13 +1362,14 @@ fn boot_extensions(
     std::sync::Arc::new(supervisor)
 }
 
-/// The scan split by enablement (item 9, task 4): what the host
-/// launches — every refusal plus the enabled packages — and the
-/// enabled packages themselves (name + dir), the list the providers
-/// fragment merge and the skills mounts apply to. A disabled package
-/// is absent everywhere by design: not launched, not in the catalog,
-/// no fragments, no skills — the user's setting, not a failure, so it
-/// reports nowhere.
+/// The scan minus the disabled (item 9, task 4): what the host
+/// launches — every refusal plus the not-disabled packages — and the
+/// launched packages themselves (name + dir), the list the providers
+/// fragment merge and the skills tables apply to. Packages mount by
+/// default (install was the consent; disabling is the explicit act),
+/// and a disabled package is absent everywhere by design: not
+/// launched, not in the catalog, no fragments, no skills — the user's
+/// setting, not a failure, so it reports nowhere.
 struct Launchable {
     found: Vec<tabit_ext::manifest::Discovered>,
     packages: Vec<(String, PathBuf)>,
@@ -1371,20 +1377,20 @@ struct Launchable {
 
 fn partition(
     found: Vec<tabit_ext::manifest::Discovered>,
-    enabled: &std::collections::HashSet<String>,
+    disabled: &std::collections::HashSet<String>,
 ) -> Launchable {
     let mut launchable = Vec::new();
     let mut packages = Vec::new();
     for found in found {
         match found {
             tabit_ext::manifest::Discovered::Package { dir, manifest } => {
-                if enabled.contains(&manifest.name) {
+                if !disabled.contains(&manifest.name) {
                     packages.push((manifest.name.clone(), dir.clone()));
                     launchable.push(tabit_ext::manifest::Discovered::Package { dir, manifest });
                 }
             }
             // Refusals always launch (as dead reports): a broken
-            // package is loud, whatever the allowlist says.
+            // package is loud, whatever the settings say.
             refused => launchable.push(refused),
         }
     }
@@ -1394,36 +1400,47 @@ fn partition(
     }
 }
 
-/// Merge one enabled package's `providers.toml` fragment into `config`
-/// (EXTENSIONS.md: user config wins on id collision). A broken
+/// Merge one mounted package's `providers.toml` fragment into `config`
+/// (EXTENSIONS.md: the user's own provider ids win silently; only a
+/// fragment colliding with an earlier fragment warns). A broken
 /// fragment refuses the *fragment* — warned, skipped — never the
-/// package, whose tools and hooks are unaffected. Returns the provider
-/// ids it contributed.
+/// package, whose tools and hooks are unaffected.
 fn merge_fragment_into(
     config: &mut TabitConfig,
     name: &str,
     dir: &std::path::Path,
+    user_ids: &std::collections::HashSet<String>,
     warnings: &mut Vec<String>,
-) -> Vec<String> {
+) {
     let path = dir.join("providers.toml");
     if !path.is_file() {
-        return Vec::new();
+        return;
     }
     match TabitConfig::load(&path) {
-        Ok(fragment) => config.merge_fragment(fragment, &format!("extension `{name}`"), warnings),
+        Ok(fragment) => {
+            config.merge_fragment(fragment, &format!("extension `{name}`"), user_ids, warnings);
+        }
         Err(detail) => {
             warnings.push(format!(
                 "extension `{name}`: providers fragment refused: {detail}"
             ));
-            Vec::new()
         }
     }
 }
 
-/// The user-level skills directory extension packages mount into
-/// (`~/.tabit/skills`, the discovery ladder's second source).
-fn skills_home() -> Option<PathBuf> {
-    tabit_config::home_dir().map(|home| home.join(".tabit").join("skills"))
+/// The extension walker's skills contribution (item 9, task 4): every
+/// mounted package's `skills/` tree, entries at their original paths,
+/// first-package-wins on a name collision (scan order — the same
+/// determinism law as tool registration). In-memory tables only; the
+/// catalog, the `skill` tool, and the wire snapshot read them.
+fn extension_skills_catalog(packages: &[(String, PathBuf)]) -> tabit_session::skills::Skills {
+    let mut extension_skills = tabit_session::skills::Skills::default();
+    for (_name, dir) in packages {
+        for entry in tabit_session::skills::entries_in(&dir.join("skills")) {
+            extension_skills.register(entry);
+        }
+    }
+    extension_skills
 }
 
 /// Resolve config/auth into a session per the args (model selection,
@@ -1716,13 +1733,13 @@ mod tests {
                 reason: "invalid manifest".to_string(),
             },
         ];
-        let mut enabled = HashSet::new();
-        enabled.insert("beta".to_string());
-        let launchable = partition(found, &enabled);
-        // The disabled alpha is absent everywhere; the enabled beta
-        // launches and reaches the fragment/skills consumers; the
-        // refusal still reports (a broken package is loud whatever
-        // the allowlist says).
+        let mut disabled = HashSet::new();
+        disabled.insert("alpha".to_string());
+        let launchable = partition(found, &disabled);
+        // The disabled alpha is absent everywhere; beta mounts by
+        // default (install was the consent) and reaches the
+        // fragment/skills consumers; the refusal still reports (a
+        // broken package is loud whatever the settings say).
         assert_eq!(launchable.packages.len(), 1);
         assert_eq!(launchable.packages[0].0, "beta");
         assert_eq!(launchable.found.len(), 2);
@@ -1735,7 +1752,8 @@ mod tests {
                 .iter()
                 .any(|found| matches!(found, Discovered::Refused { .. }))
         );
-        // Nothing enabled: nothing launches but the refusal.
+        // Nothing disabled: everything launches (install was the
+        // consent); the refusal still reports.
         let none = partition(
             vec![
                 package("alpha"),
@@ -1745,6 +1763,22 @@ mod tests {
                 },
             ],
             &HashSet::new(),
+        );
+        assert_eq!(none.packages.len(), 1, "mounted by default");
+        assert_eq!(none.found.len(), 2);
+
+        // Everything disabled: nothing launches but the refusal.
+        let mut all = HashSet::new();
+        all.insert("alpha".to_string());
+        let none = partition(
+            vec![
+                package("alpha"),
+                Discovered::Refused {
+                    dir: PathBuf::from("C:/ext/broken"),
+                    reason: "invalid manifest".to_string(),
+                },
+            ],
+            &all,
         );
         assert!(none.packages.is_empty());
         assert_eq!(none.found.len(), 1);
@@ -1757,9 +1791,9 @@ mod tests {
         std::fs::create_dir_all(&dir).expect("package dir");
         std::fs::write(dir.join("providers.toml"), "not toml").expect("broken fragment");
         let mut config = TabitConfig::default();
+        let user_ids = std::collections::HashSet::new();
         let mut warnings = Vec::new();
-        let contributed = merge_fragment_into(&mut config, "broken", &dir, &mut warnings);
-        assert!(contributed.is_empty());
+        merge_fragment_into(&mut config, "broken", &dir, &user_ids, &mut warnings);
         assert!(config.providers.is_empty());
         assert_eq!(warnings.len(), 1);
         let warning = &warnings[0];
@@ -1772,8 +1806,8 @@ mod tests {
         )
         .expect("fragment");
         let mut warnings = Vec::new();
-        let contributed = merge_fragment_into(&mut config, "broken", &dir, &mut warnings);
-        assert_eq!(contributed, vec!["relay".to_string()]);
+        merge_fragment_into(&mut config, "broken", &dir, &user_ids, &mut warnings);
+        assert!(config.provider("relay").is_some(), "the fragment landed");
         assert!(warnings.is_empty(), "{warnings:?}");
         let _ = std::fs::remove_dir_all(&dir);
     }

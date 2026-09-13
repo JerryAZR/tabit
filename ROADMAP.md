@@ -1035,7 +1035,7 @@ assistant.
 EXTENSIONS.md); implementation under way — tasks 1–4 shipped (the
 `crates/tabit-ext` host: discovery, the enablement gate, the frozen
 pipe, supervision, the death policy, the tool lane, the hook lane,
-the skills mounts; the engine-side
+the skills tables; the engine-side
 `on::tool_result` + `HookStack::merge`; `crates/tabit-ext-sdk`: the
 guest dispatcher and the example packages, `gate-ext` included —
 the permission gate now lives there, `permission.rs` deleted,
@@ -1166,20 +1166,22 @@ shape:
    failed tool call is the model-visible failure; and children boot
    their own extension hosts (proven e2e: a subagent child serves an
    extension tool from its own mount).
-4. **Scanning** — *shipped* — enabled-extension discovery over the
-   config layers (`settings.toml`'s `[extensions] enabled` allowlist,
-   default off — the entry is the consent record; user + workspace
-   layers union, `$TABIT_SETTINGS` the debug override; refusals
-   report as dead whatever the allowlist says); skills mounts (the
-   package's `skills/` linked at `~/.tabit/skills/<name>/` —
-   symlink-or-junction, idempotent, the user's existing entry wins —
-   the discovery ladder stays extension-unaware); `providers.toml`
-   fragment merge at config load (user config wins on collision, a
-   broken fragment refuses the fragment and never the package, a
-   fragment cannot set `default_model`, fragment-vs-fragment resolves
-   in scan order). One boot scan feeds launch, the merge, and the
-   mounts. Children re-derive enablement from inherited inputs — the
-   same boot path, not a child rule.
+4. **Scanning** — *shipped* — enablement over the config layers
+   (`settings.toml`'s `[extensions] disabled` list; packages mount by
+   default — install was the consent — user + workspace layers union,
+   `$TABIT_SETTINGS` the debug override; refusals report as dead
+   whatever the settings say); extension-shipped skills as in-memory
+   tables (the walker produces each package's `skills/` entries at
+   their original paths; they fold into the one skills catalog at the
+   ladder's base — anything the user has overrides them; no
+   filesystem writes, provenance by location, disabling drops the
+   package's entries); `providers.toml` fragment merge at config load
+   (the user's own id wins silently, a fragment colliding with an
+   earlier fragment warns, a broken fragment refuses the fragment and
+   never the package, a fragment cannot set `default_model`).
+   One boot scan feeds launch, the merge, and the tables. Children
+   re-derive the disable list from inherited inputs — the same boot
+   path, not a child rule.
 5. **Host APIs** — the request/response envelope and `model_prompt`
    (capped, complete-only, usage tagged with the extension
    identity).
@@ -1212,7 +1214,7 @@ checklist:
    relay → scripted native mock), the fragment the merged config's
    only provider, the model call relayed and translated; plus
    `skillship` (`skillship-ext`), the skill-shipping package whose
-   `skills/` mounts into discovery and whose names ride the catalog.
+   `skills/` joins the catalog in-memory with its original path.
 5. `autotitle` — a run-end hook → `model_prompt` → usage tagged with
    the extension identity (the host-API envelope's demo).
 6. The npm:/git: end-to-end; every earlier example rode `path:`.

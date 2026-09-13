@@ -27,5 +27,4 @@
 pub mod manifest;
 pub mod process;
 pub mod protocol;
-pub mod skills;
 pub mod supervisor;

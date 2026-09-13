@@ -807,28 +807,35 @@ fn default_model_without_provider_resolves_or_fails_loudly() {
     assert!(config.validation_issues().is_empty());
 }
 
-// ── settings + fragment merge (item 9, task 4) ──────────────────────
+// ── settings + fragment merge (item 9, task 4; default-enable ruling) ──
 
 #[test]
-fn settings_parse_the_extension_allowlist() {
+fn settings_parse_the_extension_disable_list() {
     use crate::SettingsConfig;
     let raw = r#"
 [extensions]
-enabled = ["gate", "lmstudio"]
+disabled = ["clash-b", "broken-gate"]
 "#;
     let settings: SettingsConfig = toml::from_str(raw).expect("settings parse");
-    let enabled = settings.enabled_extensions();
-    assert!(enabled.contains("gate") && enabled.contains("lmstudio"));
-    assert_eq!(enabled.len(), 2);
+    let disabled = settings.disabled_extensions();
+    assert!(disabled.contains("clash-b") && disabled.contains("broken-gate"));
+    assert_eq!(disabled.len(), 2);
 
-    // Empty/absent sections are the default (a bare machine enables
-    // nothing), and unknown keys are loud (typo protection, the
-    // providers.toml rule).
+    // Empty/absent sections are the default (a bare machine disables
+    // nothing — packages mount by default), and unknown keys are loud
+    // (typo protection, the providers.toml rule).
     assert_eq!(
         toml::from_str::<SettingsConfig>("").expect("empty settings"),
         SettingsConfig::default()
     );
-    assert!(toml::from_str::<SettingsConfig>("[extensions]\nenabled = []\nenobled = []").is_err());
+    assert!(
+        toml::from_str::<SettingsConfig>(
+            "[extensions]
+disabled = []
+disembled = []"
+        )
+        .is_err()
+    );
 }
 
 #[test]
@@ -840,7 +847,9 @@ fn settings_union_layers_and_missing_files_are_quiet() {
     std::fs::create_dir_all(dir.join("work/.tabit")).expect("work dir");
     std::fs::write(
         dir.join("user/.tabit/settings.toml"),
-        "[extensions]\nenabled = [\"gate\"]\n",
+        "[extensions]
+disabled = [\"gate\"]
+",
     )
     .expect("user settings");
 
@@ -856,16 +865,19 @@ fn settings_union_layers_and_missing_files_are_quiet() {
         std::env::set_var("TABIT_SETTINGS", dir.join("missing.toml"));
     }
     let merged = SettingsConfig::load_default().expect("missing layers are quiet");
-    assert!(merged.enabled_extensions().is_empty());
+    assert!(merged.disabled_extensions().is_empty());
     unsafe {
         std::env::set_var("TABIT_SETTINGS", dir.join("user/.tabit/settings.toml"));
     }
 
     // The env override replaces the user layer's default location, and
-    // the workspace layer unions on top of it.
+    // the workspace layer unions on top of it (any layer naming a
+    // package disables it).
     std::fs::write(
         dir.join("work/.tabit/settings.toml"),
-        "[extensions]\nenabled = [\"lmstudio\"]\n",
+        "[extensions]
+disabled = [\"lmstudio\"]
+",
     )
     .expect("workspace settings");
     let previous = std::env::current_dir().expect("cwd");
@@ -875,9 +887,9 @@ fn settings_union_layers_and_missing_files_are_quiet() {
     unsafe {
         std::env::remove_var("TABIT_SETTINGS");
     }
-    let enabled = merged.enabled_extensions();
-    assert!(enabled.contains("gate") && enabled.contains("lmstudio"));
-    assert_eq!(enabled.len(), 2, "enablement unions across layers");
+    let disabled = merged.disabled_extensions();
+    assert!(disabled.contains("gate") && disabled.contains("lmstudio"));
+    assert_eq!(disabled.len(), 2, "disabling unions across layers");
 
     // A broken file at an existing layer is a loud external error.
     std::fs::write(dir.join("user/.tabit/settings.toml"), "not toml").expect("broken");
@@ -894,8 +906,11 @@ fn settings_union_layers_and_missing_files_are_quiet() {
 }
 
 #[test]
-fn fragment_merge_lands_new_providers_and_the_user_wins() {
+fn a_user_override_wins_silently_and_a_fragment_lands() {
+    // The user's own provider id: the fragment's same-id entry drops
+    // without a word — an override winning is what the user expects.
     let mut config = parse(VALID);
+    let user_ids: std::collections::HashSet<String> = config.providers.keys().cloned().collect();
     let fragment = parse(
         r#"
 [providers.lmstudio-relay]
@@ -911,9 +926,9 @@ api = "openai-completions"
 "#,
     );
     let mut warnings = Vec::new();
-    let contributed = config.merge_fragment(fragment, "extension `relay`", &mut warnings);
+    let contributed =
+        config.merge_fragment(fragment, "extension `relay`", &user_ids, &mut warnings);
     assert_eq!(contributed, vec!["lmstudio-relay".to_string()]);
-    // User config wins: the fragment's lmstudio did not overwrite.
     assert_eq!(
         config
             .provider("lmstudio")
@@ -929,44 +944,59 @@ api = "openai-completions"
             .len(),
         1
     );
-    assert_eq!(warnings.len(), 1);
-    let first_warning = &warnings[0];
-    assert!(
-        first_warning.contains("user config wins"),
-        "{first_warning}"
-    );
+    assert!(warnings.is_empty(), "{warnings:?}");
 }
 
 #[test]
 fn fragment_default_model_is_refused() {
     let mut config = parse("");
     let fragment = parse(
-        "default_model = \"m\"\n\n[providers.p]\nbase_url = \"http://p\"\napi = \"openai-completions\"\n",
+        "default_model = \"m\"
+
+[providers.p]
+base_url = \"http://p\"
+api = \"openai-completions\"
+",
     );
+    let user_ids: std::collections::HashSet<String> = config.providers.keys().cloned().collect();
     let mut warnings = Vec::new();
-    let contributed = config.merge_fragment(fragment, "extension `x`", &mut warnings);
+    let contributed = config.merge_fragment(fragment, "extension `x`", &user_ids, &mut warnings);
     assert_eq!(contributed, vec!["p".to_string()]);
     assert!(config.default_model.is_none(), "a fragment never sets it");
     assert_eq!(warnings.len(), 1);
-    let first_warning = &warnings[0];
-    assert!(first_warning.contains("default_model"), "{first_warning}");
+    let warning = &warnings[0];
+    assert!(warning.contains("default_model"), "{warning}");
 }
 
 #[test]
-fn fragment_collisions_resolve_in_call_order_so_scan_order_decides() {
+fn fragment_collisions_warn_but_user_overrides_do_not() {
     // Two fragments with one shared id: the first merged (the
     // alphabetically-first package, at the binary's call site) is the
-    // incumbent — the same determinism law as tool registration.
+    // incumbent and the second warns — the user never chose that
+    // collision. The same collision against the USER's id is silent.
     let mut config = parse("");
+    let user_ids: std::collections::HashSet<String> = config.providers.keys().cloned().collect();
     let mut warnings = Vec::new();
     let first = config.merge_fragment(
-        parse("[providers.shared]\nbase_url = \"http://first\"\napi = \"openai-completions\"\n"),
+        parse(
+            "[providers.shared]
+base_url = \"http://first\"
+api = \"openai-completions\"
+",
+        ),
         "extension `a`",
+        &user_ids,
         &mut warnings,
     );
     let second = config.merge_fragment(
-        parse("[providers.shared]\nbase_url = \"http://second\"\napi = \"openai-completions\"\n"),
+        parse(
+            "[providers.shared]
+base_url = \"http://second\"
+api = \"openai-completions\"
+",
+        ),
         "extension `b`",
+        &user_ids,
         &mut warnings,
     );
     assert_eq!(first, vec!["shared".to_string()]);
@@ -975,5 +1005,10 @@ fn fragment_collisions_resolve_in_call_order_so_scan_order_decides() {
         config.provider("shared").expect("incumbent").base_url,
         "http://first"
     );
-    assert!(warnings.last().is_some_and(|w| w.contains("`b`")));
+    assert_eq!(warnings.len(), 1);
+    let warning = &warnings[0];
+    assert!(
+        warning.contains("`b`") && warning.contains("earlier fragment"),
+        "{warning}"
+    );
 }

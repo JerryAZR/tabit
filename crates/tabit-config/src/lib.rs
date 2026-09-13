@@ -223,16 +223,22 @@ impl TabitConfig {
     /// Merge one providers fragment under this config — the
     /// extension-package contribution path (EXTENSIONS.md: fragments
     /// are merged at config load, never copied into the user's file).
-    /// **User config wins on id collision**: a fragment whose provider
-    /// id already exists is dropped for that id, warned through
-    /// `warnings`. A fragment cannot set `default_model` (an extension
-    /// steering the default model is not the package's call) — present
-    /// ones warn and are ignored. Returns the provider ids the fragment
+    /// **The user's own provider wins on id collision, silently** —
+    /// that is exactly what a user with an override expects, not a
+    /// condition worth a warning; `user_ids` is the config's
+    /// pre-merge provider ids (the user's own), so a fragment key the
+    /// user already defined drops quietly while a key an *earlier
+    /// fragment* contributed collides loudly (the user never chose
+    /// that one — the warning names the overstepping origin). A
+    /// fragment cannot set `default_model` (an extension steering the
+    /// default model is not the package's call) — present ones warn
+    /// and are ignored. Returns the provider ids the fragment
     /// contributed, in the fragment's own (alphabetical) order.
     pub fn merge_fragment(
         &mut self,
         fragment: TabitConfig,
         origin: &str,
+        user_ids: &std::collections::HashSet<String>,
         warnings: &mut Vec<String>,
     ) -> Vec<String> {
         if fragment.default_model.is_some() {
@@ -243,9 +249,11 @@ impl TabitConfig {
         let mut contributed = Vec::new();
         for (id, provider) in fragment.providers {
             if self.providers.contains_key(&id) {
-                warnings.push(format!(
-                    "{origin}: provider `{id}` ignored — already defined (user config wins)"
-                ));
+                if !user_ids.contains(&id) {
+                    warnings.push(format!(
+                        "{origin}: provider `{id}` ignored — an earlier fragment already contributed it (scan order decides; disable one of the packages to resolve)"
+                    ));
+                }
                 continue;
             }
             self.providers.insert(id.clone(), provider);

@@ -4,7 +4,7 @@ The extension development record. **The substrate is ruled (2026-09,
 below) and implemented through checklist task 4 — `crates/tabit-ext`:
 discovery and the enablement gate, the initialize/ack handshake,
 supervision, the death policy, the tool lane, the hook lane, the
-skills mounts; `crates/tabit-ext-sdk`: the guest dispatcher and the
+skills tables; `crates/tabit-ext-sdk`: the guest dispatcher and the
 example packages (the permission gate included — it lives here now,
 not in core).** Host-service frames (task 5) and install (task 6)
 land with their checklist tasks (ROADMAP item 9). Every entry names
@@ -64,30 +64,30 @@ Boundaries and reasons:
   extension. Result deltas, when a consumer exists, ride the same
   inbound router.
 
-## Enablement is a settings allowlist, default off (2026-09, task 4)
+## Packages mount by default; disabling is the settings act
+(2026-09, task 4)
 
-A discovered package mounts only when its name is **enabled in
-settings** — `settings.toml`'s `[extensions] enabled` list, the first
-fact in the file item 1 reserved for this. The layers union (the
-debug-override family: `$TABIT_SETTINGS` replaces the user file):
-user `~/.tabit/settings.toml` plus workspace
-`<cwd>/.tabit/settings.toml`. **The entry IS the consent record** —
-the trust ruling's concrete shape: an extension runs native code, so
-it runs only where the user said so, and task 6's install command and
-first-load trust prompt are the UX that writes this list. Disabling
-is removing the name.
+An installed package mounts unless its name is in `settings.toml`'s
+`[extensions] disabled` list — the default is what a user who
+installed the thing wants: install was the consent (task 6's trust
+prompt is the first-load UX for packages that arrived by other
+means). The layers union (the debug-override family:
+`$TABIT_SETTINGS` replaces the user file): user
+`~/.tabit/settings.toml` plus workspace `<cwd>/.tabit/settings.toml`
+— any layer naming a package disables it; disabling is the one
+explicit act, and there is deliberately no re-enable override.
 
-What "not enabled" means, precisely: the package is not launched, not
-in the `extensions_available` catalog, its `providers.toml` fragment
-does not merge, and its skills do not mount — absent everywhere, and
-*silent* (the user's setting is not a failure; `tabit extensions
-list`, task 6, is where disabled packages become visible). A REFUSED
-package (bad manifest, failed handshake) still reports as dead
-whatever the allowlist says — a broken package is loud; a disabled
-one is quiet. Children (subagent processes) re-derive enablement from
-their inherited inputs — the same env, the same workspace cwd, the
-same one code path the parent booted through — never a forked child
-rule.
+What "disabled" means, precisely: the package is not launched, not in
+the `extensions_available` catalog, its `providers.toml` fragment
+does not merge, and its skills do not join the tables — absent
+everywhere, and *silent* (the user's setting is not a failure;
+`tabit extensions list`, task 6, is where disabled packages become
+visible). A REFUSED package (bad manifest, failed handshake) still
+reports as dead whatever the settings say — a broken package is
+loud; a disabled one is quiet. Children (subagent processes) re-derive
+the disable list from their inherited inputs — the same env, the same
+workspace cwd, the same one code path the parent booted through —
+never a forked child rule.
 
 ## Declaration: manifest for install facts, handshake for
 capabilities (2026-09)
@@ -128,9 +128,9 @@ The model sees the declared tool name only — no prefix, no namespace
 noise. The internal identity is *(extension id, tool name)*: the key
 for usage accounting, the load-time conflict report, and the wire
 catalog `extensions_available` (the `skills_available` family — each
-loaded extension with its tools, skills, and provider fragments by
-provenance, so a frontend can attribute without the model ever
-seeing a prefix).
+loaded extension with its tools by provenance, so a frontend can
+attribute without the model ever seeing a prefix; shipped skills
+attribute by their original package paths in `skills_available`).
 
 **One name, one tool, resolved at host assembly.** The host builds
 the model-facing toolset as a name→tool map after all handshakes and
@@ -155,28 +155,23 @@ Sibling domains carry their own rules: skills merge last-wins-with-
 warn per the discovery ladder (ROADMAP item 3); providers are
 user-config-wins (below).
 
-## Extension-shipped skills mount as links (2026-09, task 4)
+## Extension-shipped skills ride in-memory tables (2026-09, task 4)
 
-A package's optional `skills/` directory mounts as a **link at
-`~/.tabit/skills/<name>/`** (the extension's name — one slot per
-package, so two packages cannot claim one). The link, not a fifth
-discovery source, is the whole mechanism: the session's four-source
-ladder never learns that extensions exist (the front/back split),
-while the package's skills ride the same discovery, prompt catalog,
-and confined `skill` tool as the user's own. The link is created at
-boot for enabled packages, before the first prompt build reads the
-catalog. Mount rules: a slot already resolving to this package is a
-no-op (idempotent across boots, parents, and children); a dangling
-link (the package moved or was uninstalled) is replaced; any other
-existing entry — the user's own directory — **wins**, warned: the
-host never overwrites the user's files. On Windows the link is a
-directory symlink where the privilege allows and a junction
-otherwise (both canonicalize identically, so discovery and the
-`skill` tool's confinement cannot tell them apart). The wire catalog
-carries the shipped skill names per extension — provenance, again
-without a model-facing prefix. Uninstalling removes the package dir;
-a dangling slot left behind is inert (discovery warns past it) and
-the next mount of that name replaces it.
+The extension walker (the host's one scan) produces what packages
+provide: each mounted package's `skills/` tree, its entries at their
+**original package paths**. Those entries fold into the process's
+skills catalog — the one table the prompt's listing, the confined
+`skill` tool, and the `skills_available` snapshot all read — at the
+ladder's **base**: below every user and workspace source, so anything
+the user already has overrides them. Nothing is written to the
+filesystem (a symlink layer would only move the walk, add external
+error surface, and lose the package→skill attribution a disable list
+needs). Provenance is by location: an entry's path IS the package
+path, so `skills_available` attributes without a second source of
+truth, and disabling a package is dropping its entries from the
+table. Extension-vs-extension name collisions resolve in scan order
+(first package wins, the duplicate warns) — the same determinism law
+as tool registration.
 
 ## Hook forwarding: the pipe lane, and policy fails open (2026-09,
 task 3)
@@ -209,10 +204,9 @@ ruling; neither failure is silent.
   (fetch metadata, fetch tarball, unpack) — no npm CLI, no Node at
   run time, no registry of our own. git shells to `git` (a machine
   running a coding agent has it). `path:` serves local development.
-- Install places the package under `~/.tabit/extensions/<name>/` and
-  enables it in config (the settings allowlist above — one name, one
-  line: `[extensions] enabled`); `tabit extensions list/uninstall`
-  manage it; update = reinstall.
+- Install places the package under `~/.tabit/extensions/<name>/` —
+  and it mounts (packages mount by default, the entry above);
+  `tabit extensions list/uninstall` manage it; update = reinstall.
 - Pickup at the **next backend start** — no mid-run loading (the
   prompt byte-stability law; installing is the user's reload/cache
   decision). Same UX as pi's reload.
@@ -256,14 +250,14 @@ against a scripted native double.
 Merge mechanics, precisely: a fragment parses and validates as an
 ordinary `providers.toml` (same rules — a broken fragment is
 *refused*, warned, and never kills its package's tools and hooks);
-**a fragment cannot set `default_model`** (an extension steering the
-default model is not the package's call — present ones warn and are
-ignored); fragment-vs-fragment collisions resolve in scan order, so
-the alphabetically-first package is the incumbent — the same
-determinism law as tool registration. The API key, if the relay needs
-one, is the user's to fill in like any provider. The catalog's
-`providers` field carries the ids each fragment contributed — only
-the ones that landed.
+**the user's own provider id wins on collision, silently** — an
+override winning is exactly what a user with both configured expects,
+not a warning; a fragment colliding with an *earlier fragment* warns
+(scan order decides the incumbent — the user never chose that
+collision); **a fragment cannot set `default_model`** (an extension
+steering the default model is not the package's call — present ones
+warn and are ignored). The API key, if the relay needs one, is the
+user's to fill in like any provider.
 
 The credential line is **attribution, not protection**: every model
 call the host makes runs through the one registry (retry, caching

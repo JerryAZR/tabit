@@ -29,9 +29,9 @@ Current workspace layout:
 - `crates/tabit-protocol` — the frontend protocol vocabulary (commands,
   stamped events, handshake frames; `FRONTEND.md` is the contract)
 - `crates/tabit-config` — provider/model configuration plus the
-  settings layers (`settings.toml`: the extension allowlist — user +
-  workspace union, `$TABIT_SETTINGS` the debug override; see
-  `ROADMAP.md`)
+  settings layers (`settings.toml`: the extension disable list —
+  packages mount by default; user + workspace union,
+  `$TABIT_SETTINGS` the debug override; see `ROADMAP.md`)
 - `crates/tabit-log` — the durable-conversation layer between
   providers and agents: the session log (the entry vocabulary and
   tree, format-versioned), the write-behind writer, the parser, the
@@ -63,9 +63,7 @@ Current workspace layout:
   interaction lift), the supervisor (launch over the
   enablement-filtered scan, handshake, supervise,
   mark-dead-and-report — no mid-run respawn; the tool-call dispatch
-  surface for proxy tools), the skills mounts (a package's `skills/`
-  linked into `~/.tabit/skills/<name>/` — symlink or Windows
-  junction, idempotent, the user's existing entry wins); the shared
+  surface for proxy tools); the shared
   child-process helpers (tree-kill wrapping, the stderr ring) live
   here and serve the subagent bridge too; the hook lane forwards
   engine hook events over the same pipe (policy fails open on a dead
@@ -77,9 +75,9 @@ Current workspace layout:
   the protocol doc's reference consumer. Ships the example
   extensions (`echo-ext`, `shadow-ext`, the clash pair, `gate-ext` —
   the permission gate, moved out of core; `skillship-ext` — the
-  skills-only package; `lmstudio-ext` — the provider relay speaking
-  LM Studio's native REST API behind a `providers.toml` fragment) as
-  its bins
+  skill-shipping package; `lmstudio-ext` — the provider relay
+  speaking LM Studio's native REST API behind a `providers.toml`
+  fragment) as its bins
 - `crates/tabit-gui` — the egui frontend (`tabit-gui` binary; the
   `tabit` launcher detach-spawns it; reducer/view contract in ROADMAP
   item 7). Its `CHANGELOG.md` is the frontend protocol's changelog —
