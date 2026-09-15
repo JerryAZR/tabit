@@ -186,6 +186,15 @@ impl HookContext {
             .cloned()
     }
 
+    /// The run's host-service capability, when the host inserted one
+    /// (the extension envelope's dispatch surface — verb zero is the
+    /// ask). Hook forwarders lift it onto every pipe call.
+    pub fn host_services(&self) -> Option<std::sync::Arc<dyn crate::tool::services::HostServices>> {
+        self.capabilities
+            .get::<std::sync::Arc<dyn crate::tool::services::HostServices>>()
+            .cloned()
+    }
+
     /// The run's session identity (the event stream stamp), when the
     /// host inserted one. The consumer is hook forwarding: an
     /// extension's policy state is per-session ("always allow" must

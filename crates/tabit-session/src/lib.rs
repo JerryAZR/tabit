@@ -77,6 +77,7 @@ mod prompt;
 mod registry;
 pub(crate) mod replay;
 mod routing;
+pub mod services;
 mod session;
 pub mod skills;
 mod stats;

@@ -24,7 +24,6 @@ use std::sync::Arc;
 
 use rig_agent::agent::hook::{ToolCallAction, ToolResultAction};
 use rig_agent::agent::{HookStack, on};
-use rig_agent::tool::interaction::UserInteraction;
 use rig_agent::tool::{DynamicTool, ToolContext};
 use rig_core::tool::{ToolExecutionError, content_parts};
 use tabit_ext::protocol::{HookDecision, ToolDecl};
@@ -257,12 +256,16 @@ fn proxy(handle: ExtensionHandle, extension: String, decl: ToolDecl) -> DynamicT
         move |context: &mut ToolContext, args: serde_json::Value| {
             let (handle, tool, extension) = (handle.clone(), tool.clone(), extension.clone());
             Box::pin(async move {
-                // The ask lane: the session's capability rides along;
-                // a non-interactive session answers dismissed (the
-                // lane's fail-closed, same as core tools).
-                let ask = context.get::<Arc<dyn UserInteraction>>().cloned();
+                // The envelope lane: the session's host-service
+                // capability rides along (verb zero asks, verb one
+                // model prompts); without one, asks answer dismissed
+                // and verbs error (the lane's fail-closed, same as
+                // core tools).
+                let services = context
+                    .get::<Arc<dyn rig_agent::tool::services::HostServices>>()
+                    .cloned();
                 let result = handle
-                    .call(&tool, args, ask)
+                    .call(&tool, args, services)
                     .await
                     .map_err(ToolExecutionError::other)?;
                 match result.error {
@@ -291,9 +294,9 @@ fn forward_tool_call<'a>(
         "tool": call.tool_name,
         "args": call.args,
     });
-    let ask = ctx.interaction();
+    let services = ctx.host_services();
     Box::pin(async move {
-        match handle.hook("tool_call", payload, ask).await {
+        match handle.hook("tool_call", payload, services).await {
             Ok(HookDecision::Skip { message }) => ToolCallAction::skip(message),
             // Run is the neutral answer; Keep on a call point is
             // protocol misuse — treat it as neutral, not fatal.
@@ -317,11 +320,11 @@ fn forward_tool_result<'a>(
         "args": result.args,
         "presentation": result.presentation.render(),
     });
-    let ask = ctx.interaction();
+    let services = ctx.host_services();
     Box::pin(async move {
         // Keep either way: the only wire decision, and the fail-open
         // answer for a dead lane.
-        let _ = handle.hook("tool_result", payload, ask).await;
+        let _ = handle.hook("tool_result", payload, services).await;
         ToolResultAction::keep()
     })
 }

@@ -28,7 +28,7 @@
 //! construction and the session's own assembly), [`wire`] (protocol-shape
 //! translations).
 
-mod assemble;
+pub(crate) mod assemble;
 mod builder;
 mod compaction_doors;
 mod mailbox;
@@ -110,13 +110,13 @@ pub struct Session {
     /// The persist-state notice sink (flag 8's degraded/recovered
     /// events), attached by the worker at spawn.
     persist_notices: Arc<NoticeSlot>,
-    /// The cumulative usage ledger as of load (the parser's fold over
-    /// the file's usage facts — usage facts ride records; the ledger
-    /// is derived at open, and **deferred after**: the live manager
-    /// records zero usage (the ruling) until the usage discussion
-    /// returns, so the ledger's live growth rejoins then. Stats at
-    /// close are the as-of-load totals.
-    ledger: crate::stats::UsageLedger,
+    /// The cumulative usage ledger — seeded from the file's usage
+    /// facts at load, grown live by the run's completions AND by
+    /// extension `model_prompt` calls (the host-service capability
+    /// holds the same cell). Shared interior mutability so the
+    /// extension lane can bill mid-run while the actor owns `&mut
+    /// self`; stats read a locked clone.
+    ledger: std::sync::Arc<std::sync::Mutex<crate::stats::UsageLedger>>,
     /// Per-run cancellation token, refreshed by every outer loop; the
     /// abort handle cancels whatever run is current.
     abort: std::sync::Arc<std::sync::Mutex<CancellationToken>>,
@@ -262,7 +262,7 @@ impl Session {
     /// at the usage discussion) with costs derived from the config's
     /// rates.
     pub fn stats(&self) -> SessionStats {
-        let ledger: UsageLedger = self.ledger.clone();
+        let ledger: UsageLedger = tabit_log::lock::lock(&self.ledger).clone();
         let mut stats = SessionStats::default();
         for model_usage in ledger.per_model() {
             let mut model_stats = ModelStats {
@@ -284,6 +284,7 @@ impl Session {
             }
             stats.per_model.push(model_stats);
         }
+        stats.extension_usage = ledger.extension_usage().clone();
         stats.total_usage = ledger.total_usage();
         stats
     }

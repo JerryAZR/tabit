@@ -23,7 +23,10 @@ Current workspace layout:
 - `crates/rig-core` — provider API clients, streaming, tools (providers kept:
   **anthropic + openai** + the shared openai-compatible engine in
   `providers/internal`)
-- `crates/rig-agent` — agent loop / runtime
+- `crates/rig-agent` — agent loop / runtime, plus the host-service
+  capabilities (`tool/services.rs`: `HostServices` — the extension
+  envelope's ask + `model_prompt`, carried by contexts like
+  `UserInteraction`)
 - `crates/rig-derive` — `#[rig_tool]` proc macros
 - `crates/rig` — facade crate re-exporting the three above
 - `crates/tabit-protocol` — the frontend protocol vocabulary (commands,
@@ -77,7 +80,8 @@ Current workspace layout:
   the permission gate, moved out of core; `skillship-ext` — the
   skill-shipping package; `lmstudio-ext` — the provider relay
   speaking LM Studio's native REST API behind a `providers.toml`
-  fragment) as its bins
+  fragment; `autotitle-ext` — the `model_prompt` attribution demo)
+  as its bins
 - `crates/tabit-gui` — the egui frontend (`tabit-gui` binary; the
   `tabit` launcher detach-spawns it; reducer/view contract in ROADMAP
   item 7). Its `CHANGELOG.md` is the frontend protocol's changelog —

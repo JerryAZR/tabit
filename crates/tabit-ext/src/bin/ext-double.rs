@@ -22,8 +22,11 @@
 //! serve it on the pipe:
 //! - `tools-echo`   — tool `echo`: answers with the args as the report
 //! - `tools-fail`   — tool `boom`: answers with an error
-//! - `tools-ask`    — tool `ask`: lifts one interaction, answers
-//!   with the outcome (or "dismissed")
+//! - `tools-ask`    — tool `ask`: lifts one interaction (envelope
+//!   verb zero), answers with the outcome (or "dismissed")
+//! - `tools-model`  — tool `summarize`: calls `model_prompt` (envelope
+//!   verb one, hand-rolled — the any-language proof), answers with
+//!   the completion text (or the verb's error)
 //! - `tools-shadow` — tool `read`: echoes (the name is the point —
 //!   the replaces-core conflict demo)
 //!
@@ -45,7 +48,7 @@ fn main() {
         "hello" | "mute" | "die-post-ack" | "bad-ack" | "wrong-version" | "late-garbage"
         | "late-unknown" => {}
         "die-pre-ack" => std::process::exit(1),
-        "tools-echo" | "tools-fail" | "tools-ask" | "tools-shadow" => {}
+        "tools-echo" | "tools-fail" | "tools-ask" | "tools-shadow" | "tools-model" => {}
         "hooks-allow" | "hooks-skip" | "hooks-ask" | "hooks-hang" => {}
         other => {
             eprintln!("ext-double: unknown behavior `{other}`");
@@ -75,6 +78,7 @@ fn main() {
         "tools-fail" => serve_tools(json!([tool_decl("boom")])),
         "tools-ask" => serve_tools(json!([tool_decl("ask")])),
         "tools-shadow" => serve_tools(json!([tool_decl("read")])),
+        "tools-model" => serve_tools(json!([tool_decl("summarize")])),
         behavior @ ("hooks-allow" | "hooks-skip" | "hooks-ask" | "hooks-hang") => {
             serve_hooks(behavior)
         }
@@ -129,9 +133,10 @@ fn serve_tools(tools: Value) {
             })),
             "tools-ask" => {
                 emit(json!({
-                    "type": "interaction_request",
+                    "type": "service_request",
+                    "request_id": format!("{call_id}-ask"),
                     "call_id": call_id,
-                    "id": format!("{call_id}-ask"),
+                    "verb": "ask",
                     "ui_type": "native:select_any",
                     "payload": {
                         "title": "The extension asks",
@@ -144,20 +149,57 @@ fn serve_tools(tools: Value) {
                 let answer = loop {
                     let line = read_line();
                     match serde_json::from_str::<Value>(&line) {
-                        Ok(frame) if frame["type"] == "interaction_response" => break frame,
+                        Ok(frame) if frame["type"] == "service_response" => break frame,
                         _ => continue,
                     }
                 };
-                let outcome = match &answer["outcome"] {
-                    Value::Null => "dismissed".to_string(),
-                    other => format!(
+                let outcome = if answer["result"].is_null() {
+                    "dismissed".to_string()
+                } else {
+                    format!(
                         "answered: {}",
-                        other["text"].as_str().unwrap_or("<no text>")
-                    ),
+                        answer["result"]["text"].as_str().unwrap_or("<no text>")
+                    )
                 };
                 emit(json!({
                     "type": "tool_result", "call_id": call_id,
                     "error": null, "report": outcome, "details": null,
+                }));
+            }
+            "tools-model" => {
+                // Verb one, hand-rolled: the request rides the envelope,
+                // the reply's result (or error) is the tool's report.
+                emit(json!({
+                    "type": "service_request",
+                    "request_id": format!("{call_id}-svc"),
+                    "call_id": call_id,
+                    "verb": "model_prompt",
+                    "prompt": format!(
+                        "summarize this in five words: {}",
+                        args["text"].as_str().unwrap_or_default()
+                    ),
+                    "max_tokens": 512,
+                }));
+                let reply = loop {
+                    let line = read_line();
+                    match serde_json::from_str::<Value>(&line) {
+                        Ok(frame) if frame["type"] == "service_response" => break frame,
+                        _ => continue,
+                    }
+                };
+                if let Some(error) = reply["error"].as_str() {
+                    emit(json!({
+                        "type": "tool_result", "call_id": call_id,
+                        "error": format!("model_prompt failed: {error}"), "report": "", "details": null,
+                    }));
+                    continue;
+                }
+                let text = reply["result"]["text"].as_str().unwrap_or_default();
+                emit(json!({
+                    "type": "tool_result", "call_id": call_id,
+                    "error": null,
+                    "report": format!("EXT-MODELED:{text}"),
+                    "details": {"usage": reply["result"]["usage"].clone()},
                 }));
             }
             _ => emit(json!({
@@ -199,9 +241,10 @@ fn serve_hooks(behavior: &str) {
             }
             "hooks-ask" => {
                 emit(json!({
-                    "type": "interaction_request",
+                    "type": "service_request",
+                    "request_id": format!("{hook_id}-ask"),
                     "call_id": hook_id.clone(),
-                    "id": format!("{hook_id}-ask"),
+                    "verb": "ask",
                     "ui_type": "native:select_one",
                     "payload": {
                         "title": "The hook asks",
@@ -216,11 +259,11 @@ fn serve_hooks(behavior: &str) {
                 let answer = loop {
                     let line = read_line();
                     match serde_json::from_str::<Value>(&line) {
-                        Ok(frame) if frame["type"] == "interaction_response" => break frame,
+                        Ok(frame) if frame["type"] == "service_response" => break frame,
                         _ => continue,
                     }
                 };
-                match &answer["outcome"] {
+                match &answer["result"] {
                     Value::Null => emit(json!({
                         "type": "hook_result", "hook_id": hook_id,
                         "decision": "skip", "message": "dismissed — the call did not run",

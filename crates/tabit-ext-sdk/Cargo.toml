@@ -42,6 +42,11 @@ path = "src/bin/gate.rs"
 name = "skillship-ext"
 path = "src/bin/skillship.rs"
 
+# Task 5's demo: the attribution showcase.
+[[bin]]
+name = "autotitle-ext"
+path = "src/bin/autotitle.rs"
+
 [[bin]]
 name = "lmstudio-ext"
 path = "src/bin/lmstudio.rs"

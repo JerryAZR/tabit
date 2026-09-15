@@ -454,6 +454,16 @@ re-measures against known intent rather than discovering it.
   process shape is exercised by the e2e; the relay's
   `lmstudio-ext` debug env knobs (port/upstream overrides) are
   load-bearing in the same tests.
+- Task 5 (host services): the envelope's wire round-trips and the
+  fold (protocol tests); dispatch + caller attribution + the
+  no-services fail-closed (supervisor suite, fake HostServices); the
+  capability against a mock factory — bare completion, billing's
+  three views, the fail-closed ask without a hub, the unbilled bad
+  reference (tabit-session `services_tests`); the autotitle contract
+  (once per session, attributed to its name); the four-process e2e
+  (`a_model_prompt_round_trips_through_the_session`). Residue: the
+  hard cap is a constant no mock observes (the mock ignores
+  max_tokens); the empty-response guard arm in the stream fold.
 - The 2026-09 review-round remediation: the fleet-kill bug is pinned
   by the extended mute-sibling test (the healthy sibling must be
   Alive AND serve a call past the broken one's failure — the

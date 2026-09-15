@@ -32,6 +32,7 @@ impl Session {
             &self.id,
             self.preamble.as_deref(),
             &self.tools,
+            None,
         )?);
         self.agent_built_for = selection;
         Ok(())
@@ -72,6 +73,7 @@ impl Session {
             &id,
             builder.preamble.as_deref(),
             &builder.tools,
+            None,
         )?);
         let session = Self {
             config: builder.config,
@@ -87,7 +89,9 @@ impl Session {
             buffer,
             shared_conversation,
             persist_notices: Arc::new(std::sync::OnceLock::new()),
-            ledger: crate::stats::UsageLedger::default(),
+            ledger: std::sync::Arc::new(
+                std::sync::Mutex::new(crate::stats::UsageLedger::default()),
+            ),
             abort: std::sync::Arc::new(std::sync::Mutex::new(CancellationToken::new())),
             mailbox: Mailbox::default(),
             path,
@@ -109,13 +113,14 @@ impl Session {
 /// so this is a pure function of its arguments — the derivation the
 /// cache check in [`Session::ensure_agent`] and the one-shot build in
 /// [`Session::assemble`] share.
-fn build_agent(
+pub(crate) fn build_agent(
     model_factory: &ModelFactory,
     config: &TabitConfig,
     selection: &ModelSelection,
     cache_key: &str,
     preamble: Option<&str>,
     tools: &[DynamicTool],
+    max_tokens_override: Option<u64>,
 ) -> Result<Agent, SessionError> {
     let handle = (model_factory)(&selection.provider, &selection.model, cache_key)?;
     let params = crate::registry::request_params(config, selection);
@@ -128,7 +133,11 @@ fn build_agent(
     }
     // Configured request parameters are pure forwarding (reviewed
     // 2026-08): the model's knobs, nothing interpreted.
-    if let Some(max_tokens) = params.max_tokens {
+    // The override is the hard cap for extension completions — it
+    // wins over any configured value (a runaway `model_prompt` must
+    // not burn the session's budget).
+    let max_tokens = max_tokens_override.or(params.max_tokens);
+    if let Some(max_tokens) = max_tokens {
         builder = builder.max_tokens(max_tokens);
     }
     if let Some(temperature) = params.temperature {

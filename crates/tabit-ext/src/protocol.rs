@@ -3,21 +3,23 @@
 //! a time — each frame lands with the task that exercises it, nothing
 //! ships unconsumed (the same cadence as the host services).
 //!
-//! Versioning (ruled 2026-09): additions grow the vocabulary without
-//! a bump (an old extension never receives what it did not declare;
-//! the host ignores what it does not know); alterations to existing
-//! shapes are the compatibility boundary and bump
-//! [`EXTENSION_PROTOCOL_VERSION`], rejected at the ack. Until
-//! external extensions exist, host and SDK version as one workspace —
-//! the full story is a topic after the first release.
+//! Versioning (ruled 2026-09): compatibility is one-directional — a
+//! newer host keeps an older extension working (the host sends only
+//! what the extension declared), but an extension speaking vocabulary
+//! its host lacks is refused, so additions the EXTENSION can emit
+//! (new extension→host frame types, new verbs) ride the version bump
+//! and older hosts refuse at the ack's exact match; host-side
+//! additions (new optional fields, new host→extension frames) need
+//! no bump. Until external extensions exist, host and SDK version as
+//! one workspace — the full story is a topic after the first
+//! release.
 //!
 //! v1 carries the handshake (`initialize` out, `ack` back with the
-//! capability declarations) and, with checklist task 2, the tool
-//! lane: `tool_call` out, `tool_result` back, plus the interaction
-//! lift (`interaction_request` in, `interaction_response` out) — the
-//! ask shapes mirror the engine's capability exactly (ui_type +
-//! opaque payload), so extensions use the same `native:*` templates
-//! core tools do.
+//! capability declarations), the tool lane (`tool_call` out,
+//! `tool_result` back), the hook lane, and — with checklist task 5 —
+//! the host-service envelope: `service_request` in (verb + payload,
+//! with the interaction ask folded in as verb zero), answered by
+//! `service_response` out by request id.
 
 use serde::{Deserialize, Serialize};
 
@@ -74,12 +76,18 @@ pub enum HostFrame {
         name: String,
         args: serde_json::Value,
     },
-    /// The answer to an extension's `interaction_request`, routed by
-    /// id. `outcome: None` is the dismissal — nobody will ever answer
-    /// (the run ended under the question); askers fail closed.
-    InteractionResponse {
-        id: String,
-        outcome: Option<serde_json::Value>,
+    /// The answer to an extension's [`ExtFrame::ServiceRequest`],
+    /// routed by request id. `result` carries the verb's success
+    /// shape (`None` for the ask's dismissal — nobody will ever
+    /// answer; askers fail closed); `error` is the verb's failure.
+    /// Neither field serializes when absent, so a dismissal is the
+    /// bare frame.
+    ServiceResponse {
+        request_id: String,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        result: Option<serde_json::Value>,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        error: Option<String>,
     },
     /// One hook event forwarded to the extension: `event` is the
     /// engine's hook point (`tool_call` | `tool_result`), `payload`
@@ -119,6 +127,36 @@ pub struct HookResult {
     pub decision: HookDecision,
 }
 
+/// The envelope's verbs: fixed and typed per protocol version (the
+/// task-5 ruling — host verbs are core-served by definition, so there
+/// is no "verb this core does not implement" to name).
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+#[serde(tag = "verb", rename_all = "snake_case")]
+pub enum ServiceVerb {
+    /// Verb zero — the interaction ask (the capability lift, folded
+    /// into the envelope 2026-09): `ui_type` + `payload` mirror the
+    /// engine's `UserInteraction` verbatim, so extensions use the
+    /// same `native:*` templates core tools do. The response's
+    /// `result` is the answer; its absence is the dismissal.
+    Ask {
+        ui_type: String,
+        payload: serde_json::Value,
+    },
+    /// Verb one — one model completion (checklist task 5):
+    /// complete-only (no streaming over the pipe), `max_tokens`
+    /// capped by the host. `model` is an optional provider/model or
+    /// bare-id reference; absent means the session's current model.
+    /// Usage bills to the session, tagged with the calling extension.
+    /// The response's `result` is `{ text, usage }`.
+    ModelPrompt {
+        prompt: String,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        model: Option<String>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        max_tokens: Option<u64>,
+    },
+}
+
 /// A tool result on the wire: the report text plus the optional
 /// details JSON (the engine's two-part result shape), or a failure
 /// message in `error` (the report is meaningless then).
@@ -142,15 +180,20 @@ pub enum ExtFrame {
     },
     /// [`ToolWireResult`], on the wire.
     ToolResult(ToolWireResult),
-    /// The extension asks the user mid-call (the capability lift):
-    /// `call_id` routes to the session whose forwarded call or hook is
-    /// executing, `id` correlates the answer. `ui_type` + `payload`
-    /// mirror the engine's `UserInteraction` verbatim.
-    InteractionRequest {
+    /// The host-service envelope (checklist task 5): one request from
+    /// the extension to the core, answered by
+    /// [`HostFrame::ServiceResponse`] by `request_id`. `call_id` is
+    /// the attribution anchor — the in-flight tool call or hook this
+    /// request belongs to, which routes it to its session (every verb
+    /// rides the pattern the interaction ask established: the ask is
+    /// verb zero, folded 2026-09). The verb set is fixed and typed
+    /// per protocol version (the task-5 ruling); new verbs ride the
+    /// version bump.
+    ServiceRequest {
+        request_id: String,
         call_id: String,
-        id: String,
-        ui_type: String,
-        payload: serde_json::Value,
+        #[serde(flatten)]
+        verb: ServiceVerb,
     },
     /// [`HookResult`], on the wire.
     HookResult(HookResult),
@@ -173,7 +216,7 @@ mod tests {
                 assert_eq!(protocol_version, EXTENSION_PROTOCOL_VERSION);
             }
             HostFrame::ToolCall { .. }
-            | HostFrame::InteractionResponse { .. }
+            | HostFrame::ServiceResponse { .. }
             | HostFrame::Hook { .. } => {
                 panic!("an initialize line parsed as another frame")
             }
@@ -205,7 +248,7 @@ mod tests {
                 assert_eq!(hooks.len(), 1);
             }
             ExtFrame::ToolResult(..)
-            | ExtFrame::InteractionRequest { .. }
+            | ExtFrame::ServiceRequest { .. }
             | ExtFrame::HookResult(_) => {
                 panic!("an ack line parsed as another frame")
             }
@@ -260,39 +303,113 @@ mod tests {
     }
 
     #[test]
-    fn the_interaction_lift_round_trips() {
-        let ask = ExtFrame::InteractionRequest {
+    fn the_service_envelope_round_trips() {
+        // Verb zero, folded: the ask rides the envelope.
+        let ask = ExtFrame::ServiceRequest {
+            request_id: "hello-1-ask-1".to_string(),
             call_id: "hello-1".to_string(),
-            id: "q-7".to_string(),
-            ui_type: "native:select_any".to_string(),
-            payload: serde_json::json!({"title": "T", "body": "B"}),
+            verb: ServiceVerb::Ask {
+                ui_type: "native:select_any".to_string(),
+                payload: serde_json::json!({"title": "T", "body": "B"}),
+            },
         };
         let line = serde_json::to_string(&ask).unwrap();
         assert_eq!(
             line,
-            r#"{"type":"interaction_request","call_id":"hello-1","id":"q-7","ui_type":"native:select_any","payload":{"title":"T","body":"B"}}"#
+            r#"{"type":"service_request","request_id":"hello-1-ask-1","call_id":"hello-1","verb":"ask","ui_type":"native:select_any","payload":{"title":"T","body":"B"}}"#
         );
         match serde_json::from_str::<ExtFrame>(&line).unwrap() {
-            ExtFrame::InteractionRequest { id, .. } => assert_eq!(id, "q-7"),
+            ExtFrame::ServiceRequest {
+                request_id, verb, ..
+            } => {
+                assert_eq!(request_id, "hello-1-ask-1");
+                assert_eq!(
+                    verb,
+                    ServiceVerb::Ask {
+                        ui_type: "native:select_any".to_string(),
+                        payload: serde_json::json!({"title": "T", "body": "B"}),
+                    }
+                );
+            }
             _ => panic!("wrong frame"),
         }
 
-        let answered = HostFrame::InteractionResponse {
-            id: "q-7".to_string(),
-            outcome: Some(serde_json::json!({"text": "yes"})),
+        // Verb one: the model completion request, optional fields
+        // absent by default and round-tripping.
+        let prompt = ExtFrame::ServiceRequest {
+            request_id: "hello-2-svc-1".to_string(),
+            call_id: "hello-2-h3".to_string(),
+            verb: ServiceVerb::ModelPrompt {
+                prompt: "title this session".to_string(),
+                model: None,
+                max_tokens: Some(512),
+            },
         };
-        let line = serde_json::to_string(&answered).unwrap();
+        let line = serde_json::to_string(&prompt).unwrap();
         assert_eq!(
             line,
-            r#"{"type":"interaction_response","id":"q-7","outcome":{"text":"yes"}}"#
+            r#"{"type":"service_request","request_id":"hello-2-svc-1","call_id":"hello-2-h3","verb":"model_prompt","prompt":"title this session","max_tokens":512}"#
         );
-        let dismissed = HostFrame::InteractionResponse {
-            id: "q-7".to_string(),
-            outcome: None,
+        match serde_json::from_str::<ExtFrame>(&line).unwrap() {
+            ExtFrame::ServiceRequest {
+                verb:
+                    ServiceVerb::ModelPrompt {
+                        prompt,
+                        model,
+                        max_tokens,
+                    },
+                ..
+            } => {
+                assert_eq!(prompt, "title this session");
+                assert_eq!(model, None);
+                assert_eq!(max_tokens, Some(512));
+            }
+            _ => panic!("wrong frame"),
+        }
+        // Optional fields parse by default when absent.
+        let bare = r#"{"type":"service_request","request_id":"r","call_id":"c","verb":"model_prompt","prompt":"p"}"#;
+        match serde_json::from_str::<ExtFrame>(bare).unwrap() {
+            ExtFrame::ServiceRequest {
+                verb:
+                    ServiceVerb::ModelPrompt {
+                        model, max_tokens, ..
+                    },
+                ..
+            } => {
+                assert_eq!(model, None);
+                assert_eq!(max_tokens, None);
+            }
+            _ => panic!("wrong frame"),
+        }
+
+        // The response: result on success, error on failure, and the
+        // bare frame for the ask's dismissal.
+        let answered = HostFrame::ServiceResponse {
+            request_id: "hello-1-ask-1".to_string(),
+            result: Some(serde_json::json!({"text": "yes"})),
+            error: None,
+        };
+        assert_eq!(
+            serde_json::to_string(&answered).unwrap(),
+            r#"{"type":"service_response","request_id":"hello-1-ask-1","result":{"text":"yes"}}"#
+        );
+        let failed = HostFrame::ServiceResponse {
+            request_id: "hello-2-svc-1".to_string(),
+            result: None,
+            error: Some("no model is configured".to_string()),
+        };
+        assert_eq!(
+            serde_json::to_string(&failed).unwrap(),
+            r#"{"type":"service_response","request_id":"hello-2-svc-1","error":"no model is configured"}"#
+        );
+        let dismissed = HostFrame::ServiceResponse {
+            request_id: "hello-1-ask-1".to_string(),
+            result: None,
+            error: None,
         };
         assert_eq!(
             serde_json::to_string(&dismissed).unwrap(),
-            r#"{"type":"interaction_response","id":"q-7","outcome":null}"#
+            r#"{"type":"service_response","request_id":"hello-1-ask-1"}"#
         );
     }
 }

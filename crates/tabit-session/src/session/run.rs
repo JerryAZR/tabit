@@ -278,6 +278,18 @@ impl Session {
         if let Some(hub) = &self.interaction {
             tool_context.insert(hub.capability());
         }
+        // The host-service capability extension envelopes dispatch to
+        // (task 5): verb zero is the ask, verb one `model_prompt` —
+        // billed through this session's ledger under the caller's
+        // name. Snapshotted at open like every per-run capability.
+        tool_context.insert(std::sync::Arc::new(crate::services::ExtensionServices::new(
+            self.interaction.as_ref().map(|hub| hub.capability()),
+            self.model_factory.clone(),
+            self.config.clone(),
+            self.selection(),
+            self.ledger.clone(),
+        ))
+            as std::sync::Arc<dyn rig_agent::tool::services::HostServices>);
         // Subagent support, when mounted: the per-run capability is the
         // parts plus THIS parent's identity and channels, snapshot at
         // open (a mid-run model switch reaches the next run's children).
@@ -434,7 +446,7 @@ impl Session {
                     // same numbers; live adds only what is new).
                     {
                         let selection = self.selection();
-                        self.ledger.add(
+                        tabit_log::lock::lock(&self.ledger).add(
                             &selection.provider,
                             &selection.model,
                             selection.thinking_level.as_deref(),

@@ -112,6 +112,7 @@ use std::{collections::HashMap, sync::Arc};
 
 pub mod builtin;
 pub mod interaction;
+pub mod services;
 
 use futures::{Future, FutureExt};
 use indexmap::IndexMap;

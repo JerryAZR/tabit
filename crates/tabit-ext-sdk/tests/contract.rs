@@ -21,7 +21,8 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use futures::future::BoxFuture;
-use rig_agent::tool::interaction::{InteractionOutcome, UserInteraction};
+use rig_agent::tool::interaction::InteractionOutcome;
+use rig_agent::tool::services::HostServices;
 use tabit_ext::supervisor::{self, HANDSHAKE_TIMEOUT, Status};
 
 const BOUND: Duration = Duration::from_secs(15);
@@ -81,26 +82,49 @@ async fn await_alive(
     .expect("the handshake resolves within the bound");
 }
 
-struct FakeInteraction {
+struct FakeServices {
     answer: Option<serde_json::Value>,
+    /// model_prompt callers, recorded (no asserts in futures).
+    prompted: Arc<std::sync::Mutex<Vec<String>>>,
 }
 
-impl UserInteraction for FakeInteraction {
-    fn request(
+// No asserts inside the capability futures: a panic there kills the
+// routing task and wedges the asking extension. Record; the tests
+// assert on the recording.
+impl HostServices for FakeServices {
+    fn ask(
         &self,
         ui_type: &str,
         payload: serde_json::Value,
     ) -> BoxFuture<'static, InteractionOutcome> {
-        // No asserts in here: a panic inside the lifted future kills
-        // the routing task and wedges the asking extension. Record;
-        // the tests assert on the recording.
-        eprintln!("fake interaction: {ui_type} {payload}");
+        eprintln!("fake services: ask {ui_type} {payload}");
         let answer = self.answer.clone();
         Box::pin(async move {
             match answer {
                 Some(payload) => InteractionOutcome::Answered(payload),
                 None => InteractionOutcome::Dismissed,
             }
+        })
+    }
+
+    fn model_prompt(
+        &self,
+        caller: &str,
+        _request: rig_agent::tool::services::ModelPromptRequest,
+    ) -> BoxFuture<'static, Result<rig_agent::tool::services::ModelPromptOk, String>> {
+        self.prompted
+            .lock()
+            .expect("prompted lock")
+            .push(caller.to_string());
+        Box::pin(async move {
+            Ok(rig_agent::tool::services::ModelPromptOk {
+                text: "the contract's canned title".to_string(),
+                usage: rig_agent::tool::services::ServiceUsage {
+                    input_tokens: 5,
+                    output_tokens: 4,
+                    total_tokens: 9,
+                },
+            })
         })
     }
 }
@@ -136,14 +160,15 @@ async fn the_ask_example_lifts_the_answer() {
     await_alive(&mut events, "echo").await;
     let handle = host.extension("echo").expect("installed");
 
-    let interaction: Arc<dyn UserInteraction> = Arc::new(FakeInteraction {
+    let services: Arc<dyn HostServices> = Arc::new(FakeServices {
         answer: Some(serde_json::json!({"text": "yes"})),
+        prompted: Arc::new(std::sync::Mutex::new(Vec::new())),
     });
     let result = handle
         .call(
             "ask",
             serde_json::json!({"question": "is this thing on?"}),
-            Some(interaction),
+            Some(services),
         )
         .await
         .expect("the call resolves");
@@ -160,12 +185,15 @@ async fn the_ask_example_fails_closed_on_dismissal() {
     await_alive(&mut events, "echo").await;
     let handle = host.extension("echo").expect("installed");
 
-    let interaction: Arc<dyn UserInteraction> = Arc::new(FakeInteraction { answer: None });
+    let services: Arc<dyn HostServices> = Arc::new(FakeServices {
+        answer: None,
+        prompted: Arc::new(std::sync::Mutex::new(Vec::new())),
+    });
     let result = handle
         .call(
             "ask",
             serde_json::json!({"question": "is this thing on?"}),
-            Some(interaction),
+            Some(services),
         )
         .await
         .expect("the call resolves");
@@ -236,8 +264,9 @@ async fn the_gate_extension_gates_bash_per_session() {
 
     // Answered "Always allow": runs, and the session remembers — the
     // next bash call in s1 runs with NO capability (no card possible).
-    let answered: Arc<dyn UserInteraction> = Arc::new(FakeInteraction {
+    let answered: Arc<dyn HostServices> = Arc::new(FakeServices {
         answer: Some(serde_json::json!({"selected": ["Always allow"]})),
+        prompted: Arc::new(std::sync::Mutex::new(Vec::new())),
     });
     let decision = handle
         .hook("tool_call", call("bash", "s1"), Some(answered))
@@ -269,4 +298,38 @@ fn tabit_ext_sdk_gate_decision_run(
     decision: &tabit_ext::protocol::HookDecision,
 ) -> tabit_ext::protocol::HookDecision {
     decision.clone()
+}
+
+/// Task 5's demo, contract-proven: the autotitle extension answers a
+/// `tool_result` hook with one `model_prompt` over the envelope — the
+/// host side sees the request attributed to the extension's own name,
+/// and the extension reports the canned completion.
+#[tokio::test]
+async fn the_autotitle_example_prompts_the_model_over_the_envelope() {
+    let root = test_dir("autotitle");
+    install(&root, "autotitle", env!("CARGO_BIN_EXE_autotitle-ext"));
+    let (host, mut events) = supervisor::launch_root(&root, HANDSHAKE_TIMEOUT);
+    await_alive(&mut events, "autotitle").await;
+    let handle = host.extension("autotitle").expect("installed");
+
+    let prompted = Arc::new(std::sync::Mutex::new(Vec::new()));
+    let services: Arc<dyn HostServices> = Arc::new(FakeServices {
+        answer: None,
+        prompted: prompted.clone(),
+    });
+    let result = serde_json::json!({"result": "42 lines changed"});
+    let decision = handle
+        .hook("tool_result", result, Some(services))
+        .await
+        .expect("resolves");
+    assert!(matches!(decision, tabit_ext::protocol::HookDecision::Keep));
+    {
+        let prompted = prompted.lock().expect("prompted lock");
+        assert_eq!(prompted.len(), 1, "one prompt, once per session");
+        assert_eq!(
+            prompted[0], "autotitle",
+            "attributed to the extension's name"
+        );
+    }
+    host.shutdown().await;
 }

@@ -20,7 +20,8 @@ use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 use futures::future::BoxFuture;
-use rig_agent::tool::interaction::{InteractionOutcome, UserInteraction};
+use rig_agent::tool::interaction::InteractionOutcome;
+use rig_agent::tool::services::{HostServices, ModelPromptOk, ModelPromptRequest, ServiceUsage};
 use tabit_ext::supervisor::{self, ExtensionEvent, HANDSHAKE_TIMEOUT, Status};
 
 /// Generous bound for real-process roundtrips (spawn + handshake on a
@@ -329,27 +330,56 @@ async fn shutdown_reclaims_the_extension_tree() {
     );
 }
 
-/// A scripted interaction capability: records what crossed, answers
-/// (or dismisses) on cue.
-struct FakeInteraction {
+/// A scripted host-service capability: records what crossed, answers
+/// asks (or dismisses) and model prompts on cue.
+struct FakeServices {
     answer: Option<serde_json::Value>,
-    seen: Arc<Mutex<Vec<(String, serde_json::Value)>>>,
+    prompt: Option<Result<String, String>>,
+    seen_ask: Arc<Mutex<Vec<(String, serde_json::Value)>>>,
+    seen_prompt: Arc<Mutex<Vec<(String, String)>>>,
 }
 
-impl UserInteraction for FakeInteraction {
-    fn request(
+impl HostServices for FakeServices {
+    fn ask(
         &self,
         ui_type: &str,
         payload: serde_json::Value,
     ) -> BoxFuture<'static, InteractionOutcome> {
         let ui_type = ui_type.to_string();
         let answer = self.answer.clone();
-        let seen = self.seen.clone();
+        let seen = self.seen_ask.clone();
         Box::pin(async move {
             seen.lock().expect("seen lock").push((ui_type, payload));
             match answer {
                 Some(payload) => InteractionOutcome::Answered(payload),
                 None => InteractionOutcome::Dismissed,
+            }
+        })
+    }
+
+    fn model_prompt(
+        &self,
+        caller: &str,
+        request: ModelPromptRequest,
+    ) -> BoxFuture<'static, Result<ModelPromptOk, String>> {
+        let caller = caller.to_string();
+        let answer = self.prompt.clone();
+        let seen = self.seen_prompt.clone();
+        Box::pin(async move {
+            seen.lock()
+                .expect("seen lock")
+                .push((caller, request.prompt));
+            match answer {
+                Some(Ok(text)) => Ok(ModelPromptOk {
+                    text,
+                    usage: ServiceUsage {
+                        input_tokens: 11,
+                        output_tokens: 7,
+                        total_tokens: 18,
+                    },
+                }),
+                Some(Err(message)) => Err(message),
+                None => Err("no scripted prompt".to_string()),
             }
         })
     }
@@ -399,15 +429,17 @@ async fn an_ask_lifts_through_the_interaction_capability() {
     await_status(&mut events, "asker", |s| matches!(s, Status::Alive)).await;
     let handle = supervisor.extension("asker").expect("installed");
     let seen = Arc::new(Mutex::new(Vec::new()));
-    let interaction = FakeInteraction {
+    let services = FakeServices {
         answer: Some(serde_json::json!({"text": "yes"})),
-        seen: seen.clone(),
+        prompt: None,
+        seen_ask: seen.clone(),
+        seen_prompt: Arc::new(Mutex::new(Vec::new())),
     };
     let result = handle
         .call(
             "ask",
             serde_json::json!({"text": "should we?"}),
-            Some(Arc::new(interaction)),
+            Some(Arc::new(services)),
         )
         .await
         .expect("the call resolves");
@@ -435,6 +467,62 @@ async fn an_ask_without_a_capability_fails_closed() {
         .expect("the call resolves");
     assert_eq!(result.error, None);
     assert_eq!(result.report, "dismissed");
+    supervisor.shutdown().await;
+}
+
+#[tokio::test]
+async fn a_model_prompt_dispatches_through_the_envelope() {
+    let root = test_dir("model");
+    install(&root, "modeler", "tools-model");
+    let (supervisor, mut events) = supervisor::launch_root(&root, HANDSHAKE_TIMEOUT);
+    await_status(&mut events, "modeler", |s| matches!(s, Status::Alive)).await;
+    let handle = supervisor.extension("modeler").expect("installed");
+    let seen_prompt = Arc::new(Mutex::new(Vec::new()));
+    let services = FakeServices {
+        answer: None,
+        prompt: Some(Ok("five words exactly right".to_string())),
+        seen_ask: Arc::new(Mutex::new(Vec::new())),
+        seen_prompt: seen_prompt.clone(),
+    };
+    let result = handle
+        .call(
+            "summarize",
+            serde_json::json!({"text": "the long tail of a session"}),
+            Some(Arc::new(services)),
+        )
+        .await
+        .expect("the call resolves");
+    assert_eq!(result.error, None);
+    assert_eq!(result.report, "EXT-MODELED:five words exactly right");
+    assert_eq!(
+        result.details,
+        Some(
+            serde_json::json!({"usage": {"input_tokens": 11, "output_tokens": 7, "total_tokens": 18}})
+        )
+    );
+    {
+        // The caller tag is the supervisor's lane: the extension's
+        // own name — the attribution the verb bills by.
+        let seen = seen_prompt.lock().expect("seen lock");
+        assert_eq!(seen[0].0, "modeler");
+        assert!(seen[0].1.contains("the long tail of a session"), "{seen:?}");
+    }
+    supervisor.shutdown().await;
+}
+
+#[tokio::test]
+async fn a_model_prompt_without_services_fails_with_the_verb_error() {
+    let root = test_dir("model-bare");
+    install(&root, "modeler", "tools-model");
+    let (supervisor, mut events) = supervisor::launch_root(&root, HANDSHAKE_TIMEOUT);
+    await_status(&mut events, "modeler", |s| matches!(s, Status::Alive)).await;
+    let handle = supervisor.extension("modeler").expect("installed");
+    let result = handle
+        .call("summarize", serde_json::json!({"text": "anything"}), None)
+        .await
+        .expect("the call resolves");
+    let error = result.error.expect("the verb errors, not the call");
+    assert!(error.contains("no session context"), "{error}");
     supervisor.shutdown().await;
 }
 
@@ -537,15 +625,17 @@ async fn a_hook_ask_lifts_to_the_capability() {
     await_status(&mut events, "asker", |s| matches!(s, Status::Alive)).await;
     let handle = supervisor.extension("asker").expect("installed");
     let seen = Arc::new(Mutex::new(Vec::new()));
-    let interaction = FakeInteraction {
+    let services = FakeServices {
         answer: Some(serde_json::json!({"selected": ["Allow"]})),
-        seen: seen.clone(),
+        prompt: None,
+        seen_ask: seen.clone(),
+        seen_prompt: Arc::new(Mutex::new(Vec::new())),
     };
     let decision = handle
         .hook(
             "tool_call",
             serde_json::json!({"tool": "bash"}),
-            Some(Arc::new(interaction)),
+            Some(Arc::new(services)),
         )
         .await
         .expect("the hook resolves");
@@ -556,15 +646,17 @@ async fn a_hook_ask_lifts_to_the_capability() {
         assert_eq!(seen[0].0, "native:select_one");
     }
     // And the dismissed path denies.
-    let interaction = FakeInteraction {
+    let services = FakeServices {
         answer: None,
-        seen: Arc::new(Mutex::new(Vec::new())),
+        prompt: None,
+        seen_ask: Arc::new(Mutex::new(Vec::new())),
+        seen_prompt: Arc::new(Mutex::new(Vec::new())),
     };
     let decision = handle
         .hook(
             "tool_call",
             serde_json::json!({"tool": "bash"}),
-            Some(Arc::new(interaction)),
+            Some(Arc::new(services)),
         )
         .await
         .expect("the hook resolves");

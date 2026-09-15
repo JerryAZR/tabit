@@ -778,3 +778,87 @@ fn an_unreachable_upstream_fails_the_run_through_the_relay() {
         }
     }
 }
+
+/// Task 5 over the real wire: the model calls the extension's
+/// `summarize` tool, the extension's `model_prompt` (envelope verb
+/// one, hand-rolled by the double) makes a SECOND provider call
+/// through the session's own model, and the completion's text feeds
+/// the next turn — four processes: backend, extension, provider mock
+/// (twice: the run's turns and the bare prompt).
+#[test]
+fn a_model_prompt_round_trips_through_the_session() {
+    let stage = stage("model-prompt", &[("modeler", "tools-model")]);
+    scripted_turns(
+        &stage,
+        &[
+            (
+                "model-prompt-check-5e21".to_string(),
+                sse_tool_call(
+                    "call-1",
+                    "summarize",
+                    r#"{"text":"a long session summary"}"#,
+                ),
+            ),
+            (
+                "EXT-MODELED:the five word answer".to_string(),
+                sse_text("all done"),
+            ),
+        ],
+    );
+    // The bare prompt's own request: no history rides (the completion
+    // is standalone), so its marker is naturally exclusive.
+    stage.server.mock(move |when, then| {
+        when.method(httpmock::Method::POST)
+            .path("/v1/chat/completions")
+            .body_includes("summarize this in five words");
+        then.status(200)
+            .header("Content-Type", "text/event-stream")
+            .body(sse_text("the five word answer"));
+    });
+
+    let mut backend = spawn_backend(&stage, &[]);
+    let (session, catalog, _skills) = handshake(&mut backend);
+    let extension = catalog
+        .extensions
+        .iter()
+        .find(|extension| extension.name == "modeler")
+        .expect("the package mounts by default and announces");
+    assert_eq!(extension.status, "alive");
+    assert_eq!(extension.tools.len(), 1);
+
+    backend.send(&to_wire_line(&SessionCommand::Message {
+        session,
+        text: "model-prompt-check-5e21".to_string(),
+    }));
+    loop {
+        match backend.next_frame() {
+            ServerFrame::Event(frame) => match frame.event {
+                SessionEvent::ToolResult {
+                    name,
+                    content,
+                    details,
+                    status,
+                    ..
+                } => {
+                    assert_eq!(name, "summarize");
+                    assert!(matches!(status, tabit_protocol::ToolResultStatus::Success));
+                    assert!(
+                        content.contains("EXT-MODELED:the five word answer"),
+                        "{content}"
+                    );
+                    // The verb's usage rides the details — the
+                    // attribution the extension sees.
+                    let usage = details.expect("details carry the usage");
+                    assert_eq!(usage["usage"]["total_tokens"], 5, "{usage}");
+                }
+                SessionEvent::RunFinished { output, .. } => {
+                    assert_eq!(output, "all done");
+                    return;
+                }
+                SessionEvent::RunFailed { message } => panic!("the run failed: {message}"),
+                _ => {}
+            },
+            ServerFrame::Control(control) => panic!("unexpected control frame: {control:?}"),
+        }
+    }
+}

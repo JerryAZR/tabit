@@ -319,6 +319,24 @@ pipe for v1). Usage bills to the session **tagged with the extension
 identity** — spend is visible and attributed (the auto-title shape:
 this verb is what makes the attribution story real).
 
+**Shipped (2026-09)**: the envelope is `service_request { request_id,
+call_id, verb, …payload }` in / `service_response { request_id,
+result?, error? }` out; the ask rides it as verb zero (`ui_type` +
+payload fields; a dismissal is the bare response). The capability —
+`HostServices`, in rig-agent beside `UserInteraction` (the contexts
+are the carriers) — is snapshotted per run into the tool context;
+`model_prompt` is a BARE completion (no preamble, no tools, no
+history, its own standalone conversation and cache route — the
+subagent key ruling applied to extensions), hard-capped at 4096
+output tokens. Billing: one record, three views — the serving model's
+row, the session's totals, and the extension's own tally
+(`extension_usage` in the session's stats; not persisted — no log
+entry carries it, the recorded v1 gap). The demo is `autotitle-ext`
+(tool_result hook → one prompt per session; the title lands on stderr
+until a session-title surface exists). The run-end hook point it
+ultimately wants is its own slice with the ENGINE.md amendment pause
+points require.
+
 ## Interaction is the standard UI-event model (2026-08)
 
 Ruled: the ask-pattern hub — many producers, one outbound queue (the

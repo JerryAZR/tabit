@@ -9,6 +9,7 @@
 //! the session facade.
 
 use rig_core::completion::Usage;
+use std::collections::BTreeMap;
 
 /// The one token-accumulation arithmetic (the ledger's, and the run
 /// summaries' through the session facade).
@@ -38,6 +39,12 @@ pub struct ModelUsage {
 #[derive(Debug, Clone, Default, PartialEq)]
 pub struct UsageLedger {
     per_model: Vec<ModelUsage>,
+    /// Extension-attributed spend (checklist task 5's
+    /// `model_prompt`): the calling extension's name → its totals.
+    /// The same usage also lands in `per_model` (the serving model
+    /// did the work) and the totals — this map is the attribution
+    /// dimension, not a second copy of the spend.
+    extension_usage: BTreeMap<String, Usage>,
     total_usage: Usage,
 }
 
@@ -45,6 +52,29 @@ impl UsageLedger {
     /// An empty ledger.
     pub fn new() -> Self {
         Self::default()
+    }
+
+    /// Attribute one extension completion: the model's row and the
+    /// totals (the billing), plus the caller's own tally (the
+    /// attribution — the same numbers, one more dimension).
+    pub fn add_extension(
+        &mut self,
+        caller: &str,
+        provider: &str,
+        model: &str,
+        level: Option<&str>,
+        usage: Usage,
+    ) {
+        self.add(provider, model, level, usage);
+        add_usage(
+            self.extension_usage.entry(caller.to_string()).or_default(),
+            &usage,
+        );
+    }
+
+    /// Extension-attributed spend, by caller name.
+    pub fn extension_usage(&self) -> &BTreeMap<String, Usage> {
+        &self.extension_usage
     }
 
     /// Attribute one record's usage to a model. Same-model records
@@ -109,6 +139,10 @@ impl ModelStats {
 pub struct SessionStats {
     /// Usage and cost per model that served this session.
     pub per_model: Vec<ModelStats>,
+    /// Extension-attributed spend, by calling extension's name
+    /// (`model_prompt` completions — the live ledger's tally; a
+    /// reload counts only the turns' usage, the recorded v1 gap).
+    pub extension_usage: BTreeMap<String, Usage>,
     /// Totals across all models.
     pub total_usage: Usage,
     /// Total cost in USD (models without rates contribute tokens but no

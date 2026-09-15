@@ -204,45 +204,121 @@ macro_rules! schema_for {
     }};
 }
 
-/// The ask handle a body may use: one question to the user over the
-/// same pipe, answered by id.
+/// The ask handle a body may use: the host-service envelope, bound
+/// to the in-flight call (verb zero is the ask; `model_prompt` is
+/// verb one). Blocking calls on the body's thread, answered by
+/// request id — the same pipe, one correlation namespace.
 pub struct Ask {
     call_id: String,
     shared: Arc<Shared>,
 }
 
+/// One envelope reply as the SDK sees it: the verb's result value
+/// (absent for a dismissal) or its error message.
+struct ServiceReply {
+    result: Option<Value>,
+    error: Option<String>,
+}
+
 impl Ask {
-    /// Ask the user: `ui_type` + opaque payload, mirroring the
-    /// engine's interaction capability verbatim (core tools'
-    /// `native:*` templates qualify). Blocks the body's thread until
-    /// answered; a dismissal (nobody will ever answer) resolves
+    /// Ask the user (envelope verb zero): `ui_type` + opaque payload,
+    /// mirroring the engine's interaction capability verbatim (core
+    /// tools' `native:*` templates qualify). Blocks the body's thread
+    /// until answered; a dismissal (nobody will ever answer) resolves
     /// `None` — fail closed.
     pub fn ask(&self, ui_type: &str, payload: Value) -> Option<Value> {
-        let id = format!(
-            "{}-ask-{}",
-            self.call_id,
-            SHARED_COUNTER.fetch_add(1, Ordering::Relaxed)
-        );
-        let (tx, rx) = std::sync::mpsc::channel::<Option<Value>>();
-        tabit_ext_sdk_lock(&self.shared.asks).insert(id.clone(), tx);
-        let sent = emit(
-            &self.shared,
-            json!({
-                "type": "interaction_request",
-                "call_id": self.call_id,
-                "id": id,
-                "ui_type": ui_type,
-                "payload": payload,
-            }),
-        );
-        if !sent {
-            tabit_ext_sdk_lock(&self.shared.asks).remove(&id);
-            return None;
-        }
-        let answer = rx.recv().ok().flatten();
-        tabit_ext_sdk_lock(&self.shared.asks).remove(&id);
-        answer
+        let id = self.next_request_id("ask");
+        let reply = self
+            .request(
+                &id,
+                json!({"verb": "ask", "ui_type": ui_type, "payload": payload}),
+            )
+            .ok()?;
+        reply.result
     }
+
+    /// One model completion (envelope verb one): complete-only,
+    /// `max_tokens` capped by the host; `model` is an optional
+    /// `provider/model` (or bare-id) reference — absent means the
+    /// session's current model. Usage bills to the session under
+    /// this extension's name and rides the result.
+    pub fn model_prompt(
+        &self,
+        prompt: &str,
+        model: Option<&str>,
+        max_tokens: Option<u64>,
+    ) -> Result<ModelPrompt, String> {
+        let id = self.next_request_id("svc");
+        let mut verb = json!({"verb": "model_prompt", "prompt": prompt});
+        if let Some(model) = model {
+            verb["model"] = json!(model);
+        }
+        if let Some(max_tokens) = max_tokens {
+            verb["max_tokens"] = json!(max_tokens);
+        }
+        let reply = self.request(&id, verb)?;
+        match reply.error {
+            Some(message) => Err(message),
+            None => {
+                let result = reply.result.unwrap_or_else(|| json!({}));
+                Ok(ModelPrompt {
+                    text: result["text"].as_str().unwrap_or_default().to_string(),
+                    input_tokens: result["usage"]["input_tokens"].as_u64().unwrap_or_default(),
+                    output_tokens: result["usage"]["output_tokens"]
+                        .as_u64()
+                        .unwrap_or_default(),
+                    total_tokens: result["usage"]["total_tokens"].as_u64().unwrap_or_default(),
+                })
+            }
+        }
+    }
+
+    /// One envelope roundtrip: emit the request (the call correlation
+    /// plus the verb payload under the `service_request` type), await
+    /// the reply by request id. `Err` is the pipe's end — the host is
+    /// gone and no answer can ever come.
+    fn request(&self, id: &str, mut verb: Value) -> Result<ServiceReply, String> {
+        let (tx, rx) = std::sync::mpsc::channel::<ServiceReply>();
+        tabit_ext_sdk_lock(&self.shared.asks).insert(id.to_string(), tx);
+        // The frame is the envelope plus the verb's own fields (the
+        // verb object carries exactly what it needs — nothing null).
+        let mut frame = json!({
+            "type": "service_request",
+            "request_id": id,
+            "call_id": self.call_id,
+        });
+        if let (Some(fields), Some(verb_fields)) = (frame.as_object_mut(), verb.as_object_mut()) {
+            fields.append(verb_fields);
+        }
+        let sent = emit(&self.shared, frame);
+        if !sent {
+            tabit_ext_sdk_lock(&self.shared.asks).remove(id);
+            return Err("the host closed the pipe".to_string());
+        }
+        let reply = rx
+            .recv()
+            .map_err(|_| "the host closed the pipe".to_string());
+        tabit_ext_sdk_lock(&self.shared.asks).remove(id);
+        reply
+    }
+
+    fn next_request_id(&self, family: &str) -> String {
+        format!(
+            "{}-{}-{}",
+            self.call_id,
+            family,
+            SHARED_COUNTER.fetch_add(1, Ordering::Relaxed)
+        )
+    }
+}
+
+/// A completed `model_prompt` as the SDK hands it to the author.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ModelPrompt {
+    pub text: String,
+    pub input_tokens: u64,
+    pub output_tokens: u64,
+    pub total_tokens: u64,
 }
 
 static SHARED_COUNTER: AtomicU64 = AtomicU64::new(1);
@@ -250,7 +326,7 @@ static SHARED_COUNTER: AtomicU64 = AtomicU64::new(1);
 /// Everything the loop and the worker threads share.
 struct Shared {
     stdout: std::sync::Mutex<()>,
-    asks: Mutex<HashMap<String, std::sync::mpsc::Sender<Option<Value>>>>,
+    asks: Mutex<HashMap<String, std::sync::mpsc::Sender<ServiceReply>>>,
 }
 
 /// The dispatcher: answer the initialize, ack, then serve the pipe
@@ -333,14 +409,18 @@ pub fn serve(extension: Extension) -> ! {
                     let _ = emit(&shared, frame);
                 });
             }
-            Some("interaction_response") => {
-                let id = frame["id"].as_str().unwrap_or_default().to_string();
-                let outcome = match &frame["outcome"] {
-                    Value::Null => None,
-                    other => Some(other.clone()),
+            Some("service_response") => {
+                let id = frame["request_id"].as_str().unwrap_or_default().to_string();
+                let reply = ServiceReply {
+                    result: if frame["result"].is_null() {
+                        None
+                    } else {
+                        Some(frame["result"].clone())
+                    },
+                    error: frame["error"].as_str().map(str::to_string),
                 };
                 if let Some(sender) = tabit_ext_sdk_lock(&shared.asks).get(&id) {
-                    let _ = sender.send(outcome);
+                    let _ = sender.send(reply);
                 }
             }
             _ => {} // a newer host's frame: tolerated, ignored

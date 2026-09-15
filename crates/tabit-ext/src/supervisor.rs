@@ -43,10 +43,11 @@ use crate::manifest::{self, Discovered, Manifest};
 use crate::process::{self, StderrRing, wrap_command};
 use crate::protocol::{
     Ack, EXTENSION_PROTOCOL_VERSION, ExtFrame, HOOK_POINTS, HookDecision, HookDecl, HostFrame,
-    ToolDecl, ToolWireResult,
+    ServiceVerb, ToolDecl, ToolWireResult,
 };
 use process_wrap::tokio::ChildWrapper;
-use rig_agent::tool::interaction::{InteractionOutcome, UserInteraction};
+use rig_agent::tool::interaction::InteractionOutcome;
+use rig_agent::tool::services::{HostServices, ModelPromptOk, ModelPromptRequest, ServiceUsage};
 use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
 use tokio_util::sync::CancellationToken;
 
@@ -204,12 +205,14 @@ impl Lane {
 }
 
 /// One outstanding forwarded item, keyed by its correlation id (a
-/// call id or a hook id — the lift routes asks by the same key).
+/// call id or a hook id — the envelope routes service requests by
+/// the same key).
 struct PendingCall {
     waiter: Waiter,
-    /// The calling session's interaction capability — the lift's
-    /// routing target for this call's or hook's asks.
-    ask: Option<Arc<dyn UserInteraction>>,
+    /// The calling session's host-service capability — the envelope's
+    /// routing target for this call's or hook's requests (verb zero
+    /// included: the ask).
+    services: Option<Arc<dyn HostServices>>,
 }
 
 /// What the awaiting side of a forwarded item receives.
@@ -238,15 +241,16 @@ pub struct ExtensionHandle {
 
 impl ExtensionHandle {
     /// Call one tool on the extension and await its wire result.
-    /// `ask` is the calling session's interaction capability (the
-    /// routing target for the extension's mid-call asks); without
-    /// one, asks answer dismissed — fail closed, exactly as core
+    /// `services` is the calling session's host-service capability
+    /// (the routing target for the extension's mid-call envelope
+    /// requests — asks and model prompts); without one, asks answer
+    /// dismissed and verbs error — fail closed, exactly as core
     /// tools behave on a non-interactive session.
     pub async fn call(
         &self,
         tool: &str,
         args: serde_json::Value,
-        ask: Option<Arc<dyn UserInteraction>>,
+        services: Option<Arc<dyn HostServices>>,
     ) -> Result<ToolWireResult, String> {
         let call_id = format!(
             "{}-{}",
@@ -258,7 +262,7 @@ impl ExtensionHandle {
             call_id.clone(),
             PendingCall {
                 waiter: Waiter::ToolCall(tx),
-                ask,
+                services,
             },
         );
         // The dead check rides after the insert and inside the same
@@ -290,15 +294,16 @@ impl ExtensionHandle {
 
     /// Forward one hook event to the extension and await its decision
     /// (the hook lane, checklist task 3). Same shape as [`call`]: the
-    /// ask capability rides along for mid-hook asks, a dead lane is a
-    /// transport error — the caller owns the policy mapping (the
-    /// binary fails policy open: run/keep), while a death *during* the
-    /// await resolves through the lane's drain with the same fallback.
+    /// session's host-service capability rides along for mid-hook
+    /// envelope requests, a dead lane is a transport error — the
+    /// caller owns the policy mapping (the binary fails policy open:
+    /// run/keep), while a death *during* the await resolves through
+    /// the lane's drain with the same fallback.
     pub async fn hook(
         &self,
         event: &str,
         payload: serde_json::Value,
-        ask: Option<Arc<dyn UserInteraction>>,
+        services: Option<Arc<dyn HostServices>>,
     ) -> Result<HookDecision, String> {
         let fallback = if event == "tool_result" {
             HookDecision::Keep
@@ -318,7 +323,7 @@ impl ExtensionHandle {
                     result: tx,
                     fallback: fallback.clone(),
                 },
-                ask,
+                services,
             },
         );
         if self.lane.dead.load(Ordering::SeqCst) {
@@ -735,13 +740,12 @@ async fn supervise(
                             None => {}
                         }
                     }
-                    Ok(ExtFrame::InteractionRequest {
+                    Ok(ExtFrame::ServiceRequest {
+                        request_id,
                         call_id,
-                        id,
-                        ui_type,
-                        payload,
+                        verb,
                     }) => {
-                        lift_ask(lane.clone(), call_id, id, ui_type, payload);
+                        dispatch_service(lane.clone(), request_id, call_id, verb);
                     }
                     Err(_) => {
                         refuse(
@@ -862,43 +866,91 @@ async fn supervise(
     resolve_dead(&state, &lane, &events, &manifest.name, reason);
 }
 
-/// The interaction lift: route one extension ask to the session whose
-/// proxy call is executing (the pending entry's capability), ask
-/// through the hub, and carry the answer back down the pipe. No
-/// capability (a non-interactive session, or the call already gone)
-/// answers dismissed — fail closed.
-fn lift_ask(
-    lane: Arc<Lane>,
-    call_id: String,
-    id: String,
-    ui_type: String,
-    payload: serde_json::Value,
-) {
+/// The envelope dispatcher: route one extension service request to
+/// the session whose call or hook is in flight (the pending entry's
+/// capability) and carry the answer back down the pipe. The verbs
+/// are fixed (the task-5 ruling); `ask` is verb zero — the hub's
+/// existing lift — and `model_prompt` is verb one, billed through
+/// the same capability. No capability on the pending entry (a
+/// non-interactive session, or the call already gone) answers the
+/// ask dismissed and every other verb with an error — fail closed,
+/// exactly as core tools behave.
+fn dispatch_service(lane: Arc<Lane>, request_id: String, call_id: String, verb: ServiceVerb) {
     tokio::spawn(async move {
-        let ask = tabit_log::lock::lock(&lane.pending)
+        let services = tabit_log::lock::lock(&lane.pending)
             .get(&call_id)
-            .and_then(|pending| pending.ask.clone());
-        // The lifted future is CORE's code — the hub, not the
-        // extension (ruled 2026-09: we wrote it, we do not expect it
-        // to fail; if it panics, an assumption is violated and
-        // continuing is undefined — so panic). In the binary the
-        // crash hook turns it into exit 101; nothing contains it.
-        // The extension's own failures are a different class, handled
-        // on its side of the pipe (the SDK's catch: neutral decision
-        // + stderr).
-        let outcome = match ask {
-            Some(ask) => ask.request(&ui_type, payload).await,
-            None => InteractionOutcome::Dismissed,
+            .and_then(|pending| pending.services.clone());
+        let response = match verb {
+            ServiceVerb::Ask { ui_type, payload } => {
+                // Verb zero: the lift never contains a core panic
+                // (ruled 2026-09 — the future is core's code, and the
+                // crash hook owns core panics).
+                let outcome = match services {
+                    Some(services) => services.ask(&ui_type, payload).await,
+                    None => InteractionOutcome::Dismissed,
+                };
+                HostFrame::ServiceResponse {
+                    request_id,
+                    result: match outcome {
+                        InteractionOutcome::Answered(answer) => Some(answer),
+                        InteractionOutcome::Dismissed => None,
+                    },
+                    error: None,
+                }
+            }
+            ServiceVerb::ModelPrompt {
+                prompt,
+                model,
+                max_tokens,
+            } => {
+                let outcome = match services {
+                    Some(services) => {
+                        services
+                            .model_prompt(
+                                &lane.name,
+                                ModelPromptRequest {
+                                    prompt,
+                                    model,
+                                    max_tokens,
+                                },
+                            )
+                            .await
+                    }
+                    None => Err("no session context is attached to this call".to_string()),
+                };
+                match outcome {
+                    Ok(ModelPromptOk {
+                        text,
+                        usage:
+                            ServiceUsage {
+                                input_tokens,
+                                output_tokens,
+                                total_tokens,
+                            },
+                    }) => HostFrame::ServiceResponse {
+                        request_id,
+                        result: Some(serde_json::json!({
+                            "text": text,
+                            "usage": {
+                                "input_tokens": input_tokens,
+                                "output_tokens": output_tokens,
+                                "total_tokens": total_tokens,
+                            },
+                        })),
+                        error: None,
+                    },
+                    Err(message) => HostFrame::ServiceResponse {
+                        request_id,
+                        result: None,
+                        error: Some(message),
+                    },
+                }
+            }
         };
-        let frame = HostFrame::InteractionResponse {
-            id,
-            outcome: match outcome {
-                InteractionOutcome::Answered(payload) => Some(payload),
-                InteractionOutcome::Dismissed => None,
-            },
-        };
+        // Pure data over a serde type — the impossible failure is the
+        // sanctioned crash, never a silent empty line.
         #[allow(clippy::expect_used)] // sanctioned crash: pure-data serialization
-        let frame = serde_json::to_string(&frame).expect("HostFrame always serializes");
+        let frame = serde_json::to_string(&response).expect("HostFrame always serializes");
         let _ = lane.commands.send(frame);
     });
 }

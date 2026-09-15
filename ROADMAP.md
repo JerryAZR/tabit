@@ -1032,15 +1032,19 @@ assistant.
 ### 9. Extensions
 
 **DESIGN SETTLED (2026-09, the discussion record lives in
-EXTENSIONS.md); implementation under way — tasks 1–4 shipped (the
+EXTENSIONS.md); implementation under way — tasks 1–5 shipped (the
 `crates/tabit-ext` host: discovery and the disable-list gate, the frozen
 pipe, supervision, the death policy, the tool lane, the hook lane,
 the skills tables; the engine-side
 `on::tool_result` + `HookStack::merge`; `crates/tabit-ext-sdk`: the
 guest dispatcher and the example packages, `gate-ext` included —
 the permission gate now lives there, `permission.rs` deleted,
-`lmstudio-ext` (the native-API provider relay) and `skillship-ext`
-(the skills-only package) with them; proxy+hook assembly and the
+`lmstudio-ext` (the native-API provider relay), `skillship-ext`
+(the skills-only package), and `autotitle-ext` (the model_prompt
+attribution demo) with them; the host-service envelope
+(`service_request`/`service_response`, the ask folded in as verb
+zero; `model_prompt` billed per extension) in `rig-agent`'s
+`HostServices` + tabit-session's capability; proxy+hook assembly and the
 `extensions_available` catalog in the `tabit --json` backend).** The
 shape:
 
@@ -1186,9 +1190,21 @@ shape:
    One boot scan feeds launch, the merge, and the tables. Children
    re-derive the disable list from inherited inputs — the same boot
    path, not a child rule.
-5. **Host APIs** — the request/response envelope and `model_prompt`
-   (capped, complete-only, usage tagged with the extension
-   identity).
+5. **Host APIs** — *shipped* — the request/response envelope
+   (`service_request`/`service_response`; the interaction ask folded
+   in as verb zero — at the extension pipe the ask IS a backend
+   capability, its dual-id correlation the attribution pattern every
+   verb rides); `model_prompt` (bare, hard-capped at 4096 output
+   tokens, complete-only; the `HostServices` capability lives in
+   rig-agent beside `UserInteraction`, snapshotted per run into the
+   tool context); usage billed to the session tagged with the calling
+   extension (`extension_usage` in the stats; not persisted — the
+   recorded v1 gap). The verbs are fixed and typed per protocol
+   version (the open-vs-closed ruling: host verbs are core-served by
+   definition; extension-SERVED verbs are a future additive class).
+   Deferred slice: the run-end hook point (`ENGINE.md` amendment,
+   pause points are design events) — autotitle rides `tool_result`
+   until it lands.
 6. **Install & management** — `tabit install npm:/git:/path:`
    (npm as plain registry HTTP; v1 scope: dependency-free packages),
    the disable list's management UX, `list`/`uninstall`. No trust
@@ -1219,8 +1235,12 @@ checklist:
    only provider, the model call relayed and translated; plus
    `skillship` (`skillship-ext`), the skill-shipping package whose
    `skills/` joins the catalog in-memory with its original path.
-5. `autotitle` — a run-end hook → `model_prompt` → usage tagged with
-   the extension identity (the host-API envelope's demo).
+5. *shipped* — `autotitle` (`autotitle-ext`): a `tool_result` hook →
+   one `model_prompt` per session → usage tagged with the extension
+   identity (contract-proven with a fake host, the capability
+   mock-proven, the envelope e2e-proven four-process through the
+   `tools-model` double). Upgrades to the run-end hook when that
+   slice lands.
 6. The npm:/git: end-to-end; every earlier example rode `path:`.
 
 Examples live as real packages (path:-installable) or in-crate test

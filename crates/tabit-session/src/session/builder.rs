@@ -210,7 +210,7 @@ impl SessionBuilder {
             cwd,
             true,
         )?;
-        session.ledger = parsed.stats.clone();
+        session.ledger = std::sync::Arc::new(std::sync::Mutex::new(parsed.stats.clone()));
         // The conversation's owner is born from the parsed tree over
         // the session's one buffer (from_tree is the only preloaded
         // entrance; the context is derived, never parsed).
