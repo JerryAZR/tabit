@@ -288,13 +288,24 @@ policy) and lands in the session's accounting. Extensions get
 results, never credentials.
 
 ## Host services: request-response verbs on the extension pipe
-(2026-09)
+(2026-09; open-vs-closed settled 2026-09)
 
 The reverse direction on the same pipe: the extension calls into the
 core. One envelope (request id + verb + payload → response); each
 service is a designed verb that joins when a consumer exists — the
-cadence every seam uses. The interaction hub is service zero of this
-shape (ask → response by id — it already ships).
+cadence every seam uses. **The verb set is fixed and typed per
+protocol version** (ruled 2026-09): host verbs are core-served by
+definition — there is no "extension invokes a verb this core doesn't
+implement," because no other servicer exists. A future where
+extensions *serve* verbs (cross-extension calls routed by the host,
+a provider/type/opaque-payload namespace) would be a different class
+— well-formed requests to a real provider, with only true unknowns
+failing — and joins additively with its consumer; v1 builds none of
+it. The interaction hub is the **precedent** for the envelope's
+id-correlation shape, not a member of it (ruled 2026-09): the ask is
+the UI path — answered by the user through the frontend, its payload
+the open template namespace — while envelope verbs are
+backend-computed with typed payloads. The ask keeps its own frames.
 
 Verb one: **`model_prompt`** — prompt content + a model ref (or the
 session's), capped `max_tokens`, complete-only (no streaming over the
