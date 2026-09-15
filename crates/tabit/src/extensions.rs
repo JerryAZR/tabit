@@ -54,8 +54,8 @@ pub struct Mounted {
 }
 
 impl Mounted {
-    /// The empty mount (print mode and extension-less hosts): one
-    /// shape for every assembly.
+    /// The empty mount (print mode — the one consumer that mounts no
+    /// extension host): one shape for every assembly.
     pub fn none() -> Mounted {
         Mounted {
             supervisor: std::sync::Arc::new(Supervisor::empty()),
@@ -161,7 +161,18 @@ fn plan(reports: &[ExtensionReport], core_names: &[&str]) -> (Vec<Planned>, Exte
     let mut held: Vec<(String, String)> = Vec::new(); // (tool name, extension)
     let mut conflicts = Vec::new();
     for report in reports {
-        let alive = matches!(report.status, Status::Alive);
+        // Only a LIVE declaration holds a name (ruled 2026-09): a
+        // package that died — at the handshake or since — lists what
+        // it would have served in the catalog, but its declarations
+        // neither replace a core tool (a dead shadow unmounting
+        // `read` would silently remove the tool from the model) nor
+        // refuse a live peer's name (a broken incumbent holding a
+        // name serves no one). When a shadow dies, the core tool it
+        // had replaced is restored — at boot by this gate, mid-run
+        // per the restoration ruling (EXTENSIONS.md).
+        if !matches!(report.status, Status::Alive) {
+            continue;
+        }
         for decl in &report.tools {
             if let Some((_, incumbent)) = held.iter().find(|(name, _)| name == &decl.name) {
                 // Peer collision: the newcomer is refused, the
@@ -183,39 +194,47 @@ fn plan(reports: &[ExtensionReport], core_names: &[&str]) -> (Vec<Planned>, Exte
                 });
             }
             held.push((decl.name.clone(), report.name.clone()));
-            if alive {
-                planned.push(Planned {
-                    extension: report.name.clone(),
-                    decl: decl.clone(),
-                });
-            }
+            planned.push(Planned {
+                extension: report.name.clone(),
+                decl: decl.clone(),
+            });
         }
     }
     let extensions = reports
         .iter()
-        .map(|report| AvailableExtension {
-            name: report.name.clone(),
-            version: report.version.clone(),
-            description: report.description.clone(),
-            dir: report.dir.display().to_string(),
-            status: match report.status {
-                Status::Alive => "alive".to_string(),
-                Status::Starting => "starting".to_string(),
-                Status::Dead { .. } => "dead".to_string(),
-            },
-            reason: match &report.status {
-                Status::Dead { reason } => Some(reason.clone()),
-                _ => None,
-            },
-            tools: report
-                .tools
-                .iter()
-                .map(|decl| AvailableExtensionTool {
-                    name: decl.name.clone(),
-                    description: decl.description.clone(),
-                })
-                .collect(),
-            hooks: report.hooks.iter().map(|hook| hook.event.clone()).collect(),
+        .map(|report| {
+            let status = match report.status {
+                Status::Alive => "alive",
+                // `mount` runs only after `await_resolved` (the boot
+                // order this type's own docs state); an unresolved
+                // report here is the sanctioned crash, not a wire
+                // state — "starting" was never a documented status.
+                #[allow(clippy::unreachable)] // the sanctioned crash below (AGENTS.md doctrine)
+                Status::Starting => {
+                    unreachable!("internal invariant violated: mount before await_resolved")
+                }
+                Status::Dead { .. } => "dead",
+            };
+            AvailableExtension {
+                name: report.name.clone(),
+                version: report.version.clone(),
+                description: report.description.clone(),
+                dir: report.dir.display().to_string(),
+                status: status.to_string(),
+                reason: match &report.status {
+                    Status::Dead { reason } => Some(reason.clone()),
+                    _ => None,
+                },
+                tools: report
+                    .tools
+                    .iter()
+                    .map(|decl| AvailableExtensionTool {
+                        name: decl.name.clone(),
+                        description: decl.description.clone(),
+                    })
+                    .collect(),
+                hooks: report.hooks.iter().map(|hook| hook.event.clone()).collect(),
+            }
         })
         .collect();
     (
@@ -395,5 +414,37 @@ mod tests {
         // The dead declaration still lists in the catalog — what it
         // would have served is the report.
         assert_eq!(catalog.extensions[0].tools.len(), 1);
+    }
+
+    #[test]
+    fn a_dead_shadow_neither_replaces_core_nor_refuses_a_live_peer() {
+        // The liveness gate (ruled 2026-09): only a live declaration
+        // holds a name. A dead shadow must not unmount the core tool
+        // it once declared — nothing would mount in its place and the
+        // model silently loses the tool.
+        let dead_shadow = vec![report("dead-shadow", &[("read", "the shadow read")], false)];
+        let (planned, catalog) = plan(&dead_shadow, &["read", "bash"]);
+        assert!(planned.is_empty());
+        assert!(
+            catalog.conflicts.is_empty(),
+            "a dead declaration fires no conflicts: {:?}",
+            catalog.conflicts
+        );
+
+        // A dead alphabetical incumbent must not refuse a live
+        // newcomer's same-name tool — a broken incumbent holding a
+        // name serves no one.
+        let reports = vec![
+            report("aaa-dead", &[("clashy", "the dead incumbent")], false),
+            report("bbb-live", &[("clashy", "the live newcomer")], true),
+        ];
+        let (planned, catalog) = plan(&reports, &[]);
+        assert_eq!(planned.len(), 1, "the live newcomer mounts");
+        assert_eq!(planned[0].extension, "bbb-live");
+        assert!(
+            catalog.conflicts.is_empty(),
+            "no peer refusal from a dead incumbent: {:?}",
+            catalog.conflicts
+        );
     }
 }

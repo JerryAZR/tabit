@@ -47,8 +47,9 @@ Boundaries and reasons:
   containment/sandboxing, or hot hooks where IPC latency matters).
 - **The trust model is user consent, full stop.** An extension runs
   native code with the user's OS rights — the same trust class as
-  `cargo install` or an npm CLI. Declarations are honesty for the
-  user and gating at load, never containment.
+  `cargo install` or an npm CLI: placing the package is the consent
+  (install or by hand), and there is no separate trust state, prompt,
+  or gate — declarations are honesty for the user, never containment.
 - Crash isolation is the process boundary: a wedged extension is a
   dead child (the reaper pattern), never a stalled host. Hook events
   that cross the pipe pay an IPC roundtrip — local-pipe latency,
@@ -69,9 +70,8 @@ Boundaries and reasons:
 
 An installed package mounts unless its name is in `settings.toml`'s
 `[extensions] disabled` list — the default is what a user who
-installed the thing wants: install was the consent (task 6's trust
-prompt is the first-load UX for packages that arrived by other
-means). The layers union (the debug-override family:
+installed the thing wants: install was the consent. The layers
+union (the debug-override family:
 `$TABIT_SETTINGS` replaces the user file): user
 `~/.tabit/settings.toml` plus workspace `<cwd>/.tabit/settings.toml`
 — any layer naming a package disables it; disabling is the one
@@ -110,17 +110,26 @@ refactor. They join when the build-phase decision lands with a
 consumer; the byte-stability law below already governs whatever
 that future is.**
 
-## Vocabulary grows additively; altering shapes is a version
-boundary (2026-09, post-release topic deferred)
+## Compatibility is one-directional; extension-side additions ride
+the version bump (2026-09 review-round ruling)
 
-Changes that ADD vocabulary (new frame types, new optional fields)
-keep past extensions working as-is — an old extension simply never
-receives what it did not declare, and the host ignores what it does
-not know. Changes that ALTER existing shapes (renaming, removing,
-re-typing) are the compatibility boundary and bump the extension
-protocol version, rejected at the ack. Until external extensions
-exist, host and SDK version as one workspace — no skew is possible;
-the full versioning story is a topic after the first release.
+A **newer host keeps an older extension working**: the host sends
+only what the extension declared at its handshake, and the extension
+side is told to ignore frames it does not know. The reverse is
+refused, not endured: **an extension speaking vocabulary its host
+lacks might not work properly** (vocabulary it depends on is
+missing), so an unparseable line, a well-formed line of an unknown
+frame type, or a result answering the wrong kind of correlation is a
+contract break — death with the snippet, the same as garbage. For
+that refusal to happen at the handshake rather than mid-stream,
+**additions the EXTENSION can emit (new extension→host frame types,
+new required fields) bump the protocol version** and older hosts
+refuse at the ack's exact match; additions only the HOST emits (new
+optional fields, new host→extension frames) need no bump. Altering
+existing shapes is of course the same boundary. Until external
+extensions exist, host and SDK version as one workspace — no skew is
+possible; the full versioning story is a topic after the first
+release.
 
 ## Model-facing names are flat; identity is the pair (2026-09)
 
@@ -150,6 +159,16 @@ policy (pi's rule):
 - Extension vs. extension, same name: the newcomer is refused, naming
   the incumbent. No silent peer precedence — the user resolves by
   disabling one.
+- **Only a LIVE declaration holds a name** (2026-09 review-round
+  ruling): a package that died — at the handshake or since — lists
+  what it would have served in the catalog but neither replaces a
+  core tool nor refuses a live peer. And when an extension that
+  shadowed a built-in tool dies (its process; the core keeps
+  running), **the core tool is restored, with an explicit warning** —
+  at boot by the assembly's liveness gate; mid-run by re-deriving the
+  effective toolset when the next run opens (the same
+  freshness-and-rebuild seam a model switch rides), the designed
+  slice the death event feeds.
 
 Sibling domains carry their own rules: skills merge last-wins-with-
 warn per the discovery ladder (ROADMAP item 3); providers are
@@ -210,8 +229,6 @@ ruling; neither failure is silent.
 - Pickup at the **next backend start** — no mid-run loading (the
   prompt byte-stability law; installing is the user's reload/cache
   decision). Same UX as pi's reload.
-- A newly installed extension prompts for trust at first load (the
-  pi project-trust family): the consent IS the containment.
 
 The package layout tabit standardizes — everything else is the
 package's business:
@@ -219,7 +236,8 @@ package's business:
     ~/.tabit/extensions/<name>/
       tabit.json         # manifest: name, version, entry command
       providers.toml     # optional fragment, merged at config load
-      skills/            # optional; symlinked into ~/.tabit/skills/<name>/
+      skills/            # optional; folds into the in-memory skills
+                         # catalog at boot (no filesystem writes)
       frontend/<target>/ # optional; the named frontend's business
 
 No language list, by design: the protocol is the contract, the

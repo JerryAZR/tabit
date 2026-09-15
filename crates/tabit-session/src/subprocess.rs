@@ -50,6 +50,20 @@ const REAP_GRACE: std::time::Duration = std::time::Duration::from_secs(5);
 /// in this time is dead on arrival — killed at spawn, loudly.
 const HANDSHAKE_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(30);
 
+/// A child that never made it past the handshake: dead on arrival,
+/// killed now (the contract `HANDSHAKE_TIMEOUT`'s doc states). The
+/// reaper registers only after a good handshake, so this is its
+/// pre-ack stand-in — token first (the writer drops stdin), then the
+/// tree kill, then a bounded collect.
+async fn kill_before_ack(
+    process: &mut Box<dyn tabit_ext::process::ChildWrapper>,
+    closing: &CancellationToken,
+) {
+    closing.cancel();
+    let _ = Box::into_pin(process.kill()).await;
+    let _ = process.wait().await;
+}
+
 /// Shapes one subprocess child before the spawn: the child-role flags
 /// as builder knobs. Everything omitted inherits the default
 /// (ephemeral, the parent's cwd).
@@ -318,12 +332,14 @@ impl SubprocessBuilder {
                 outcome.map_err(|_| "the subagent process closed before the handshake".to_string())?
             }
             _ = tokio::time::sleep(HANDSHAKE_TIMEOUT) => {
+                kill_before_ack(&mut process, &closing).await;
                 return Err("the subagent process did not answer the handshake".to_string());
             }
         };
         let child_id = match handshake {
             Handshake::Acked(id) => id,
             Handshake::Rejected(reason) => {
+                kill_before_ack(&mut process, &closing).await;
                 return Err(format!(
                     "the subagent process rejected the handshake: {reason}"
                 ));

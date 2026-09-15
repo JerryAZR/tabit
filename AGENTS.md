@@ -31,7 +31,7 @@ Current workspace layout:
 - `crates/tabit-config` — provider/model configuration plus the
   settings layers (`settings.toml`: the extension disable list —
   packages mount by default; user + workspace union,
-  `$TABIT_SETTINGS` the debug override; see `ROADMAP.md`)
+  `$TABIT_SETTINGS` replaces the user file; see `ROADMAP.md`)
 - `crates/tabit-log` — the durable-conversation layer between
   providers and agents: the session log (the entry vocabulary and
   tree, format-versioned), the write-behind writer, the parser, the
@@ -61,7 +61,7 @@ Current workspace layout:
   discovery (`tabit.json` under the extensions root), the frozen
   JSONL extension pipe (initialize/ack, the tool lane, the
   interaction lift), the supervisor (launch over the
-  enablement-filtered scan, handshake, supervise,
+  disable-filtered scan, handshake, supervise,
   mark-dead-and-report — no mid-run respawn; the tool-call dispatch
   surface for proxy tools); the shared
   child-process helpers (tree-kill wrapping, the stderr ring) live

@@ -454,6 +454,15 @@ re-measures against known intent rather than discovering it.
   process shape is exercised by the e2e; the relay's
   `lmstudio-ext` debug env knobs (port/upstream overrides) are
   load-bearing in the same tests.
+- The 2026-09 review-round remediation: the fleet-kill bug is pinned
+  by the extended mute-sibling test (the healthy sibling must be
+  Alive AND serve a call past the broken one's failure — the
+  assertion the original test stopped short of); the compatibility
+  ruling by `a_well_formed_unknown_frame_type_is_the_same_death`
+  (ext-double `late-unknown`); the liveness gate by the dead-shadow /
+  dead-incumbent `plan` tests. The mid-run restoration slice (a
+  shadow's death restoring the core tool at the next run open) is
+  ruled but unimplemented — its seam is named in EXTENSIONS.md.
 
 ## Justified residue
 

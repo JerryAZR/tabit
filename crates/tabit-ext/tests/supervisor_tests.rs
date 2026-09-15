@@ -181,6 +181,23 @@ async fn garbage_after_the_ack_kills() {
 }
 
 #[tokio::test]
+async fn a_well_formed_unknown_frame_type_is_the_same_death() {
+    // The compatibility ruling (2026-09): tolerance is one-directional
+    // — a newer host keeps an older extension working, but an
+    // extension speaking vocabulary its host lacks is refused, not run
+    // half-working. A valid-JSON line of an unknown type is exactly
+    // that extension.
+    let root = test_dir("late-unknown");
+    install(&root, "future", "late-unknown");
+    let (supervisor, mut events) = supervisor::launch_root(&root, HANDSHAKE_TIMEOUT);
+    await_status(&mut events, "future", |s| matches!(s, Status::Alive)).await;
+    let event = await_status(&mut events, "future", |s| matches!(s, Status::Dead { .. })).await;
+    let reason = dead_reason(&event.status);
+    assert!(reason.contains("unknown-type"), "{reason}");
+    supervisor.shutdown().await;
+}
+
+#[tokio::test]
 async fn scan_refusals_report_without_spawning() {
     let root = test_dir("refused");
     // A name mismatch, an empty entry, and a plain dir that is not an
@@ -233,7 +250,9 @@ async fn a_missing_root_is_an_empty_install() {
 #[tokio::test]
 async fn a_mute_sibling_does_not_delay_the_healthy() {
     let root = test_dir("sibling");
-    install(&root, "aaa-hello", "hello");
+    // The healthy sibling declares a tool so the survival assert can
+    // also drive a call through its lane.
+    install(&root, "aaa-echo", "tools-echo");
     install(&root, "zzz-mute", "mute");
     // The mute sibling's timeout is the whole window: if handshakes
     // serialized, hello would only resolve after it burned. The
@@ -246,7 +265,7 @@ async fn a_mute_sibling_does_not_delay_the_healthy() {
     let start = std::time::Instant::now();
     loop {
         let event = next_event(&mut events).await;
-        if event.name != "aaa-hello" {
+        if event.name != "aaa-echo" {
             continue;
         }
         match event.status {
@@ -263,6 +282,28 @@ async fn a_mute_sibling_does_not_delay_the_healthy() {
         matches!(s, Status::Dead { .. })
     })
     .await;
+    // The isolation invariant, past the failure: one broken package
+    // costs one boot, loudly, and NOTHING more — the healthy sibling
+    // is still Alive and still serves. (The fleet-kill bug this pins:
+    // the broken child's pre-ack failure once cancelled the
+    // supervisor-wide closing token, silently closing every healthy
+    // sibling's pipe with their status stuck at Alive.)
+    let reports = supervisor.reports();
+    let healthy = reports
+        .iter()
+        .find(|r| r.name == "aaa-echo")
+        .expect("listed");
+    assert!(
+        matches!(healthy.status, Status::Alive),
+        "the healthy sibling survives the broken one's failure: {:?}",
+        healthy.status
+    );
+    let handle = supervisor.extension("aaa-echo").expect("the lane lives");
+    let result = handle
+        .call("echo", serde_json::json!({"text": "still here"}), None)
+        .await
+        .expect("the healthy sibling still serves");
+    assert!(result.error.is_none(), "{result:?}");
     supervisor.shutdown().await;
 }
 

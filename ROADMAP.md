@@ -1033,7 +1033,7 @@ assistant.
 
 **DESIGN SETTLED (2026-09, the discussion record lives in
 EXTENSIONS.md); implementation under way — tasks 1–4 shipped (the
-`crates/tabit-ext` host: discovery, the enablement gate, the frozen
+`crates/tabit-ext` host: discovery and the disable-list gate, the frozen
 pipe, supervision, the death policy, the tool lane, the hook lane,
 the skills tables; the engine-side
 `on::tool_result` + `HookStack::merge`; `crates/tabit-ext-sdk`: the
@@ -1051,8 +1051,9 @@ shape:
   in-process runtimes (contradicts the single binary); not WASM for
   v1 (the alternative with a felt-need trigger: real containment or
   hot hooks). The trust model is user consent, full stop — native
-  code, full OS rights, no sandbox; the load-time trust prompt (pi's
-  project-trust family) is the gate.
+  code, full OS rights, no sandbox, no trust state: placing the
+  package is the consent (ruled 2026-09; the load-time prompt
+  concept was removed with that ruling).
 - **Declaration**: `tabit.json` for install facts; capabilities
   declared live at the handshake (initialize/ack — tools, hooks).
   **Prompt contributions are not a v1 capability** (ruled 2026-09):
@@ -1115,11 +1116,14 @@ shape:
    patterns — tree-kill wrapping and the stderr ring moved to
    `tabit-ext` and are shared with the subagent bridge), the
    dead-extension policy (mark dead + report via the supervisor's
-   event channel; no mid-run respawn; mounted contributions would
-   stay by construction — none exist in v1), `crates/tabit-ext` +
-   the `--json` boot (`--extensions <dir>` overrides the root; child
-   roles never boot extensions — one host per backend, the leaf
-   law). The death paths' test vehicle is the in-crate `ext-double`
+   event channel; no mid-run respawn; the mounted contributions stay
+   by construction — proxy tools answer "not running", skills tables
+   and provider fragments are scan-driven and survive),
+   `crates/tabit-ext` +
+   the `--json` boot (`--extensions <dir>` overrides the root; every
+   process boots its own host — the leaf law refined 2026-09 to
+   outlaw loading into a parent's process, not a child hosting its
+   own set). The death paths' test vehicle is the in-crate `ext-double`
    behavior double. Development rides `path:` installs throughout.
 2. **Tool registration & execution** — *shipped* — proxy tools,
    conflict-free name→tool assembly at the host
@@ -1187,8 +1191,8 @@ shape:
    identity).
 6. **Install & management** — `tabit install npm:/git:/path:`
    (npm as plain registry HTTP; v1 scope: dependency-free packages),
-   enable/disable layers, `list`/`uninstall`, the trust prompt at
-   first load.
+   the disable list's management UX, `list`/`uninstall`. No trust
+   machinery (ruled 2026-09: placing the package is the consent).
 
 **Example extensions accompany the tasks (ruled 2026-09) — each demo
 is also the offline test vehicle.** The roster, mapped to the

@@ -1327,12 +1327,11 @@ fn host_wiring(
     }
 }
 
-/// The extension host boot (ROADMAP item 9, task 1): launch every
-/// installed extension, handshake it, supervise for the backend's
-/// life — reports land on stderr (stdout is protocol). Children
-/// Every tabit process boots its own extension host — the
-/// frontend-attached backend AND every subagent child (ruled
-/// 2026-09: children pick up extensions; the leaf law outlaws
+/// The extension host boot: launch the scanned packages, handshake
+/// each, supervise for the backend's life — reports land on stderr
+/// (stdout is protocol). Every tabit process boots its own extension
+/// host — the frontend-attached backend AND every subagent child
+/// (ruled 2026-09: children pick up extensions; the leaf law outlaws
 /// loading into a parent's process, not a child hosting its own
 /// set). Must run on the serving runtime (it spawns).
 fn extension_root(args: &Args) -> Option<PathBuf> {

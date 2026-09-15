@@ -10,6 +10,11 @@ use std::sync::{Arc, Mutex};
 
 use tokio::io::{AsyncBufReadExt, BufReader};
 
+/// The wrapped child's type (what `wrap_command(...).spawn()`
+/// yields) — re-exported so the bridge (a downstream crate without a
+/// direct process-wrap dependency) can name it.
+pub use process_wrap::tokio::ChildWrapper;
+
 /// The stderr ring's depth — the crash report's tail.
 pub const STDERR_RING: usize = 200;
 
@@ -38,7 +43,13 @@ pub fn spawn_stderr_ring(stderr: tokio::process::ChildStderr) -> Arc<StderrRing>
 /// Build the wrapped command: a Job Object on Windows (with
 /// CREATE_NO_WINDOW — no console flash), a process group elsewhere —
 /// `kill` reclaims the child's whole tree (its bash descendants must
-/// not orphan).
+/// not orphan). `KillOnDrop` closes the gap the natural exit path
+/// otherwise leaves: the serving runtime's tasks are cancelled before
+/// their reclamation futures finish, so without kill-on-close a
+/// wedged child (one that ignores stdin EOF) would outlive the
+/// backend. With the wrapper, dropping the process handle kills the
+/// tree — the OS-provided door the explicit reaper path merely
+/// reaches faster.
 #[cfg(windows)]
 pub fn wrap_command(
     exe: &std::path::Path,
@@ -59,6 +70,7 @@ pub fn wrap_command(
         windows::Win32::System::Threading::PROCESS_CREATION_FLAGS(0x0800_0000),
     ));
     wrap.wrap(process_wrap::tokio::JobObject);
+    wrap.wrap(process_wrap::tokio::KillOnDrop);
     wrap
 }
 
@@ -77,5 +89,6 @@ pub fn wrap_command(
         .stderr(std::process::Stdio::piped());
     let mut wrap: process_wrap::tokio::CommandWrap = command.into();
     wrap.wrap(process_wrap::tokio::ProcessGroup::leader());
+    wrap.wrap(process_wrap::tokio::KillOnDrop);
     wrap
 }

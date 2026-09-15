@@ -136,20 +136,13 @@ fn spawn_backend(stage: &Stage, extra_env: &[(&str, String)]) -> Backend {
         .env("TABIT_CONFIG", &stage.config)
         .env("TABIT_AUTH", &stage.auth)
         .env("TABIT_SETTINGS", &stage.settings)
-        // A redirected home keeps the whole boot hermetic: the
-        // extension skills mounts, the prompt's home-level AGENTS.md,
-        // and the default roots all key on the home directory, and a
-        // developer's real machine must never leak into (or receive
-        // writes from) a test.
+        // A redirected home keeps the whole boot hermetic: the default
+        // extension root, home-level skills and AGENTS.md discovery
+        // all key on the home directory, and a developer's real
+        // machine must never leak into (or receive writes from) a
+        // test.
         .env("USERPROFILE", &stage.home)
-        .env("HOME", &stage.home)
-        // Localhost never proxies: a developer machine's system proxy
-        // (which reqwest reads by default) would otherwise sit between
-        // the engine and the local provider mocks — a hop the tests
-        // never chose, and one that misreports a dead local port as
-        // the proxy's own 502.
-        .env("NO_PROXY", "127.0.0.1,localhost")
-        .env("no_proxy", "127.0.0.1,localhost");
+        .env("HOME", &stage.home);
     for (key, value) in extra_env {
         command.env(key, value);
     }

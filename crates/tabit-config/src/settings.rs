@@ -51,16 +51,22 @@ impl SettingsConfig {
         })
     }
 
-    /// Load the layers and union them: the user file (`$TABIT_SETTINGS`,
-    /// else `<home>/.tabit/settings.toml`) plus the workspace file
-    /// (`<cwd>/.tabit/settings.toml`). A missing file is not an error —
-    /// a bare machine has settings, they just disable nothing.
+    /// Load the layers: the user file (`$TABIT_SETTINGS`, else
+    /// `<home>/.tabit/settings.toml` — the env var REPLACES the
+    /// default location, the `$TABIT_CONFIG`/`$TABIT_AUTH` pattern:
+    /// point it at a scratch file and the real one is not read) plus
+    /// the workspace file (`<cwd>/.tabit/settings.toml`). A missing
+    /// file is not an error — a bare machine has settings, they just
+    /// disable nothing.
     pub fn load_default() -> Result<Self, ConfigError> {
         let mut merged = Self::default();
-        for path in default_settings_paths() {
-            if path.is_file() {
-                merged.absorb(Self::load(&path)?);
-            }
+        // The first candidate is the user layer by construction: the
+        // env override when set, else the home file — the env path
+        // replaces the home file, never unions with it.
+        if let Some(path) = default_settings_paths().first()
+            && path.is_file()
+        {
+            merged.absorb(Self::load(path)?);
         }
         if let Ok(cwd) = std::env::current_dir() {
             let workspace = cwd.join(".tabit").join("settings.toml");

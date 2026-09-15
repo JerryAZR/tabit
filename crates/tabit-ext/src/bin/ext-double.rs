@@ -13,6 +13,10 @@
 //! - `bad-ack`       — answer the initialize with garbage
 //! - `wrong-version` — ack speaking protocol version 99
 //! - `late-garbage`  — ack, then emit one unparseable line, then drain
+//! - `late-unknown`  — ack, then emit one WELL-FORMED line of an
+//!   unknown frame type, then drain (the compatibility ruling: an
+//!   extension speaking vocabulary its host lacks is a contract
+//!   break, same death as garbage)
 //!
 //! Tool-lane behaviors (task 2): ack with one declared tool, then
 //! serve it on the pipe:
@@ -38,7 +42,8 @@ use serde_json::{Value, json};
 fn main() {
     let behavior = std::env::args().nth(1).unwrap_or_default();
     match behavior.as_str() {
-        "hello" | "mute" | "die-post-ack" | "bad-ack" | "wrong-version" | "late-garbage" => {}
+        "hello" | "mute" | "die-post-ack" | "bad-ack" | "wrong-version" | "late-garbage"
+        | "late-unknown" => {}
         "die-pre-ack" => std::process::exit(1),
         "tools-echo" | "tools-fail" | "tools-ask" | "tools-shadow" => {}
         "hooks-allow" | "hooks-skip" | "hooks-ask" | "hooks-hang" => {}
@@ -83,6 +88,14 @@ fn main() {
             }
             if behavior == "late-garbage" {
                 emit_raw("garbage after the ack{{");
+            }
+            if behavior == "late-unknown" {
+                // Valid JSON, well-shaped — and a frame type this
+                // host generation does not know: a newer extension on
+                // an older host, the ruled death.
+                emit(json!({
+                    "type": "telemetry", "payload": {"note": "from the future"},
+                }));
             }
             drain();
         }
