@@ -288,7 +288,7 @@ policy) and lands in the session's accounting. Extensions get
 results, never credentials.
 
 ## Host services: request-response verbs on the extension pipe
-(2026-09; open-vs-closed settled 2026-09)
+(2026-09; open-vs-closed and the fold settled 2026-09)
 
 The reverse direction on the same pipe: the extension calls into the
 core. One envelope (request id + verb + payload → response); each
@@ -301,11 +301,17 @@ extensions *serve* verbs (cross-extension calls routed by the host,
 a provider/type/opaque-payload namespace) would be a different class
 — well-formed requests to a real provider, with only true unknowns
 failing — and joins additively with its consumer; v1 builds none of
-it. The interaction hub is the **precedent** for the envelope's
-id-correlation shape, not a member of it (ruled 2026-09): the ask is
-the UI path — answered by the user through the frontend, its payload
-the open template namespace — while envelope verbs are
-backend-computed with typed payloads. The ask keeps its own frames.
+it. **The interaction ask is verb zero** (ruled 2026-09, restored):
+at the extension pipe the ask IS a backend capability — how the
+backend services it (a card routed to the frontend, anything else)
+is invisible to the extension, and the frontend-backend protocol is
+untouched by the fold. Its dual-id shape — the request id, plus the
+correlation to the in-flight call that routes the request to its
+session — is **the** attribution pattern every envelope verb rides
+(`model_prompt` bills to the session the same way). The ask's open
+template payload (`ui_type` + opaque JSON) sits inside the typed
+frame as a field; the open namespace is the frontend-template
+family's, unchanged.
 
 Verb one: **`model_prompt`** — prompt content + a model ref (or the
 session's), capped `max_tokens`, complete-only (no streaming over the
