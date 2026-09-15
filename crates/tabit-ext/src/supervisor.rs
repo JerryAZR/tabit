@@ -878,22 +878,16 @@ fn lift_ask(
         let ask = tabit_log::lock::lock(&lane.pending)
             .get(&call_id)
             .and_then(|pending| pending.ask.clone());
-        // The lift never strands the guest: a panic inside the
-        // capability's future would kill this task silently and the
-        // asking extension would wait forever (the lesson from the
-        // contract-test hang) — catch it and answer dismissed, the
-        // askers' fail-closed case.
+        // The lifted future is CORE's code — the hub, not the
+        // extension (ruled 2026-09: we wrote it, we do not expect it
+        // to fail; if it panics, an assumption is violated and
+        // continuing is undefined — so panic). In the binary the
+        // crash hook turns it into exit 101; nothing contains it.
+        // The extension's own failures are a different class, handled
+        // on its side of the pipe (the SDK's catch: neutral decision
+        // + stderr).
         let outcome = match ask {
-            Some(ask) => {
-                match futures::FutureExt::catch_unwind(std::panic::AssertUnwindSafe(
-                    ask.request(&ui_type, payload),
-                ))
-                .await
-                {
-                    Ok(outcome) => outcome,
-                    Err(_) => InteractionOutcome::Dismissed,
-                }
-            }
+            Some(ask) => ask.request(&ui_type, payload).await,
             None => InteractionOutcome::Dismissed,
         };
         let frame = HostFrame::InteractionResponse {

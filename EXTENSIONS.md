@@ -140,6 +140,11 @@ catalog `extensions_available` (the `skills_available` family — each
 loaded extension with its tools by provenance, so a frontend can
 attribute without the model ever seeing a prefix; shipped skills
 attribute by their original package paths in `skills_available`).
+**The catalog is a boot-time snapshot** (ruled 2026-09): a mid-run
+death does not re-announce — deaths are rare, stderr carries the
+report, and a death event is not trivial wire vocabulary; a
+re-announcement joins when a consumer exists (the GUI redesign is
+the natural trigger).
 
 **One name, one tool, resolved at host assembly.** The host builds
 the model-facing toolset as a name→tool map after all handshakes and
@@ -321,6 +326,13 @@ Implications:
   `call_id` routes to the session whose proxy call is executing; no
   capability on that call (a non-interactive session) answers
   dismissed — fail closed, exactly as core tools behave.
+- **Whose panic is whose** (ruled 2026-09): the lifted ask's future
+  is CORE's code — we wrote it, we do not expect it to fail, and if
+  it does an assumption is violated, so it panics (the crash hook
+  exits the binary; nothing contains it — continuing in that state
+  is undefined). An extension's OWN handler failures are the other
+  class and stay graceful on its side of the pipe: the SDK's catch
+  answers the neutral decision and reports to stderr.
 - The capability reaches sites through **contexts**: the tool body
   via `ToolContext`'s typed map (the `CancellationToken` precedent);
   the tool-call gate by hook construction. Other hook points gain
