@@ -27,11 +27,12 @@
 //! The process architecture is the subagent bridge's
 //! (`subprocess.rs`), minus the route-all router and the drive loop:
 //! a reader task parses stdout (handshake first, tool results and
-//! ask lifts after), a writer task owns stdin (the closing token IS
-//! the pipe drop), and the supervision task owns the process handle
-//! end-to-end — a pre-ack failure kills the tree immediately
-//! (nothing was proven), a post-ack death gets the grace-bounded
-//! reclaim.
+//! ask lifts after), and the pipe's mechanics — the command writer,
+//! the grace reaper, the immediate kill, the crash tail — live in
+//! [`crate::process`], shared with the bridge. Local to here: the
+//! typed-frame reader and the lane machinery; a pre-ack failure
+//! kills the tree immediately (nothing was proven), a post-ack death
+//! gets the grace-bounded reclaim.
 
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
@@ -40,7 +41,7 @@ use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 use crate::manifest::{self, Discovered, Manifest};
-use crate::process::{self, StderrRing, wrap_command};
+use crate::process::{self, wrap_command};
 use crate::protocol::{
     Ack, EXTENSION_PROTOCOL_VERSION, ExtFrame, HOOK_POINTS, HookDecision, HookDecl, HostFrame,
     ServiceVerb, ToolDecl, ToolWireResult,
@@ -48,19 +49,17 @@ use crate::protocol::{
 use process_wrap::tokio::ChildWrapper;
 use rig_agent::tool::interaction::InteractionOutcome;
 use rig_agent::tool::services::{HostServices, ModelPromptOk, ModelPromptRequest, ServiceUsage};
-use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
+use tokio::io::{AsyncBufReadExt, BufReader};
 use tokio_util::sync::CancellationToken;
 
-/// The default handshake window — same value and reason as the
-/// subagent bridge's: slow runtimes (a Python import, a cold Node)
-/// need the room; healthy extensions answer in milliseconds.
-pub const HANDSHAKE_TIMEOUT: Duration = Duration::from_secs(30);
-
-/// How long a closing extension gets to exit on its own before the
-/// tree kill — same value and reason as the subagent bridge's reap
-/// grace (ample for a healthy shutdown; exactly the wedged cases
-/// burn it).
-const REAP_GRACE: Duration = Duration::from_secs(5);
+/// The default handshake window — one value and one reason for every
+/// spawned pipe (extensions here, subagent children in the bridge):
+/// slow runtimes (a Python import, a cold Node) need the room;
+/// healthy children answer in milliseconds. Lives in
+/// [`crate::process`] with the rest of the shared pipe plumbing;
+/// re-exported here for the existing call sites.
+pub use crate::process::HANDSHAKE_TIMEOUT;
+use crate::process::{REAP_GRACE, crash_tail, reap_with_grace, spawn_command_writer};
 
 /// One extension's standing, as the host sees it.
 #[derive(Debug, Clone)]
@@ -591,7 +590,7 @@ async fn supervise(
     state: Arc<ChildState>,
     lane: Arc<Lane>,
     events: tokio::sync::mpsc::UnboundedSender<ExtensionEvent>,
-    mut command_rx: tokio::sync::mpsc::UnboundedReceiver<String>,
+    command_rx: tokio::sync::mpsc::UnboundedReceiver<String>,
 ) {
     // A child of the supervisor's token: this extension's failure
     // closes only its own pipe (fail_before_ack cancels this one),
@@ -665,35 +664,9 @@ async fn supervise(
     };
     let ring = process::spawn_stderr_ring(stderr);
 
-    // The command writer: lines in, stdin out. The closing token IS
-    // the pipe close — deliver what the close raced, then drop.
-    {
-        let writer_closing = closing.clone();
-        tokio::spawn(async move {
-            let mut stdin = stdin;
-            loop {
-                let line = tokio::select! {
-                    _ = writer_closing.cancelled() => {
-                        // Deliver what the close raced, then drop the pipe.
-                        while let Ok(line) = command_rx.try_recv() {
-                            if write_line(&mut stdin, &line).await.is_err() {
-                                return;
-                            }
-                        }
-                        break;
-                    }
-                    line = command_rx.recv() => match line {
-                        Some(line) => line,
-                        None => break,
-                    },
-                };
-                if write_line(&mut stdin, &line).await.is_err() {
-                    break;
-                }
-            }
-            // Drop closes the pipe.
-        });
-    }
+    // The command writer: lines in, stdin out (the shared pipe
+    // contract — the closing token IS the pipe close).
+    spawn_command_writer(stdin, command_rx, closing.clone());
 
     // The frame reader: handshake outcome first, then the tool lane
     // (results resolved, asks lifted). Compatibility is one-directional
@@ -882,7 +855,7 @@ async fn supervise(
             death.unwrap_or_else(|_| "the extension process exited".to_string())
         }
         _ = closing.cancelled() => {
-            reclaim(&mut process).await;
+            reap_with_grace(&mut process).await;
             return; // Host-initiated: not a death report.
         }
         exit = process.wait() => {
@@ -894,7 +867,7 @@ async fn supervise(
             "the extension process exited while its stdout stayed open".to_string()
         }
     };
-    let exit = reclaim(&mut process).await;
+    let exit = reap_with_grace(&mut process).await;
     let reason = match exit {
         Some(exit) => format!("{cause} ({})", exit_describe(exit)),
         None => cause,
@@ -1084,23 +1057,12 @@ async fn fail_before_ack(
     name: &str,
     reason: String,
 ) {
-    closing.cancel();
-    let _ = Box::into_pin(process.kill()).await;
-    let _ = process.wait().await;
+    process::kill_now(process, closing).await;
     resolve_dead(state, lane, events, name, reason);
 }
 
-/// The post-ack close: a bounded window to exit on its own, then the
-/// tree kill.
-async fn reclaim(process: &mut Box<dyn ChildWrapper>) -> Option<std::process::ExitStatus> {
-    match tokio::time::timeout(REAP_GRACE, process.wait()).await {
-        Ok(status) => status.ok(),
-        Err(_) => {
-            let _ = Box::into_pin(process.kill()).await;
-            process.wait().await.ok()
-        }
-    }
-}
+/// The post-ack close lives in [`crate::process::reap_with_grace`]
+/// (the shared pipe contract).
 
 fn resolve_dead(
     state: &Arc<ChildState>,
@@ -1124,12 +1086,6 @@ fn resolve_dead(
     });
 }
 
-async fn write_line(stdin: &mut tokio::process::ChildStdin, line: &str) -> std::io::Result<()> {
-    stdin.write_all(line.as_bytes()).await?;
-    stdin.write_all(b"\n").await?;
-    stdin.flush().await
-}
-
 fn exit_describe(exit: std::process::ExitStatus) -> String {
     match exit.code() {
         Some(code) => format!("exit code {code}"),
@@ -1138,19 +1094,6 @@ fn exit_describe(exit: std::process::ExitStatus) -> String {
 }
 
 /// The crash report's tail: the last few stderr lines.
-fn crash_tail(ring: &StderrRing) -> String {
-    let tail: Vec<String> = tabit_log::lock::lock(ring)
-        .iter()
-        .rev()
-        .take(8)
-        .cloned()
-        .collect::<Vec<_>>()
-        .into_iter()
-        .rev()
-        .collect();
-    tail.join("\n")
-}
-
 fn snippet(line: &str) -> String {
     let head: String = line.chars().take(60).collect();
     if head.len() < line.len() {

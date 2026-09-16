@@ -32,37 +32,16 @@ use rig_agent::completion::Message;
 use std::collections::VecDeque;
 use std::path::PathBuf;
 use std::sync::{Arc, Mutex};
-use tabit_ext::process::{spawn_stderr_ring, wrap_command};
+use tabit_ext::process::{
+    HANDSHAKE_TIMEOUT, crash_tail, reap_with_grace, spawn_command_writer, spawn_stderr_ring,
+    wrap_command,
+};
 use tabit_protocol::{
     ClientFrame, EventFrame, ModelSelection, PROTOCOL_VERSION, ServerFrame, SessionCommand,
     SessionEvent, StreamId,
 };
-use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
+use tokio::io::{AsyncBufReadExt, BufReader};
 use tokio_util::sync::CancellationToken;
-
-/// How long a closing child gets to exit on its own before the tree
-/// kill — ample for the write-behind flush on a healthy disk, and
-/// exactly the pathological cases (a wedged tool body, a stalled
-/// flush) burn it.
-const REAP_GRACE: std::time::Duration = std::time::Duration::from_secs(5);
-
-/// The handshake window: a child that cannot acknowledge `initialize`
-/// in this time is dead on arrival — killed at spawn, loudly.
-const HANDSHAKE_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(30);
-
-/// A child that never made it past the handshake: dead on arrival,
-/// killed now (the contract `HANDSHAKE_TIMEOUT`'s doc states). The
-/// reaper registers only after a good handshake, so this is its
-/// pre-ack stand-in — token first (the writer drops stdin), then the
-/// tree kill, then a bounded collect.
-async fn kill_before_ack(
-    process: &mut Box<dyn tabit_ext::process::ChildWrapper>,
-    closing: &CancellationToken,
-) {
-    closing.cancel();
-    let _ = Box::into_pin(process.kill()).await;
-    let _ = process.wait().await;
-}
 
 /// Shapes one subprocess child before the spawn: the child-role flags
 /// as builder knobs. Everything omitted inherits the default
@@ -225,44 +204,14 @@ impl SubprocessBuilder {
         // timer). Cancelling it IS the close.
         let closing = CancellationToken::new();
 
-        // The command writer: lines in, stdin out. The closing token IS
-        // the stdin close (the drive holds a sender clone, so dropping
-        // senders cannot be the mechanism): on close, everything
+        // The command writer: lines in, stdin out — the shared pipe
+        // contract (`tabit_ext::process`): the closing token IS the
+        // stdin close (the drive holds a sender clone, so dropping
+        // senders cannot be the mechanism); on close, everything
         // already queued (the abort line crossed first) is written,
         // then the pipe drops — EOF, the child's death contract.
-        let (command_tx, mut command_rx) = tokio::sync::mpsc::unbounded_channel::<String>();
-        let writer_closing = closing.clone();
-        let mut stdin = stdin;
-        tokio::spawn(async move {
-            loop {
-                let line = tokio::select! {
-                    _ = writer_closing.cancelled() => {
-                        // Deliver what the close raced (the abort line
-                        // sent before the close, still queued), then
-                        // drop the pipe.
-                        while let Ok(line) = command_rx.try_recv() {
-                            if stdin.write_all(line.as_bytes()).await.is_err()
-                                || stdin.write_all(b"\n").await.is_err()
-                            {
-                                return;
-                            }
-                        }
-                        break;
-                    }
-                    line = command_rx.recv() => match line {
-                        Some(line) => line,
-                        None => break,
-                    },
-                };
-                if stdin.write_all(line.as_bytes()).await.is_err()
-                    || stdin.write_all(b"\n").await.is_err()
-                {
-                    break;
-                }
-                let _ = stdin.flush().await;
-            }
-            // Drop closes the pipe: the child's death contract.
-        });
+        let (command_tx, command_rx) = tokio::sync::mpsc::unbounded_channel::<String>();
+        spawn_command_writer(stdin, command_rx, closing.clone());
 
         // The stderr ring — the crash report's tail.
         let ring = spawn_stderr_ring(stderr);
@@ -332,14 +281,14 @@ impl SubprocessBuilder {
                 outcome.map_err(|_| "the subagent process closed before the handshake".to_string())?
             }
             _ = tokio::time::sleep(HANDSHAKE_TIMEOUT) => {
-                kill_before_ack(&mut process, &closing).await;
+                tabit_ext::process::kill_now(&mut process, &closing).await;
                 return Err("the subagent process did not answer the handshake".to_string());
             }
         };
         let child_id = match handshake {
             Handshake::Acked(id) => id,
             Handshake::Rejected(reason) => {
-                kill_before_ack(&mut process, &closing).await;
+                tabit_ext::process::kill_now(&mut process, &closing).await;
                 return Err(format!(
                     "the subagent process rejected the handshake: {reason}"
                 ));
@@ -358,17 +307,11 @@ impl SubprocessBuilder {
                 status = process.wait() => Some(status),
                 _ = closing_for_reaper.cancelled() => None,
             };
+            // A natural exit reaps itself; the close path gets the
+            // shared grace-then-tree-kill (`reap_with_grace`).
             let status: Option<std::process::ExitStatus> = match status {
                 Some(result) => result.ok(),
-                None => match tokio::time::timeout(REAP_GRACE, process.wait()).await {
-                    Ok(result) => result.ok(),
-                    Err(_) => {
-                        // The grace burned: the tree kill (Job Object /
-                        // process group takes the descendants too).
-                        let _ = Box::into_pin(process.kill()).await;
-                        process.wait().await.ok()
-                    }
-                },
+                None => reap_with_grace(&mut process).await,
             };
             if let Some(status) = status {
                 *crate::lock::lock(&exit_for_reaper) =
@@ -529,21 +472,13 @@ impl SubprocessChild {
         let exit = crate::lock::lock(&self.exit)
             .clone()
             .unwrap_or_else(|| "no exit recorded".to_string());
-        let tail: Vec<String> = crate::lock::lock(&self.stderr_ring)
-            .iter()
-            .rev()
-            .take(8)
-            .cloned()
-            .collect::<Vec<_>>()
-            .into_iter()
-            .rev()
-            .collect();
+        let tail = crash_tail(&self.stderr_ring);
         if tail.is_empty() {
             format!("the subagent process died unexpectedly ({exit})")
         } else {
             format!(
                 "the subagent process died unexpectedly ({exit}); stderr tail:\n{}",
-                tail.join("\n")
+                tail
             )
         }
     }

@@ -17,7 +17,11 @@ doctest = true
 base64 = { workspace = true }
 rig-agent = { path = "../rig-agent", version = "0.41.0", default-features = false, features = ["derive"] }
 rig-derive = { path = "../rig-derive", version = "0.41.0" }
-process-wrap = { version = "9", features = ["std", "job-object", "process-group"] }
+# The std flavor (this crate owns no runtime — tool bodies poll on
+# the engine's sidecar). Version-aligned with tabit-ext's tokio
+# flavor (one major in the tree; the std/tokio split is the crate's
+# own feature choice, not a version fork).
+process-wrap = { version = "10", default-features = false, features = ["std", "job-object", "process-group"] }
 rig-core = { path = "../rig-core", version = "0.41.0", default-features = false }
 serde = { workspace = true, features = ["derive"] }
 serde_json = { workspace = true }

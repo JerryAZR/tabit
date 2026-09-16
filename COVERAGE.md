@@ -1275,3 +1275,22 @@ suites in place.
 - `ask_user` deletion — the tool's residue entries died with it
   (see the interaction section); the round-trip itself stays pinned
   by the actor suite's asking-tool double.
+
+
+## Child-process substrate consolidated (2026-09, the review round's item 5)
+
+The pipe mechanics the extension supervisor and the subagent bridge
+each hand-rolled — the stdin command writer, the grace-then-tree-kill
+reaper, the immediate pre-ack kill, the crash tail fold, the
+REAP_GRACE/HANDSHAKE_TIMEOUT bounds — moved to one home
+(`tabit-ext/src/process.rs`). Coverage is unchanged in shape: the
+helpers have no tests of their own by design — both consumers'
+behavior suites exercise them (the supervisor's death/fleet/cancel
+family, the bridge's handshake-timeout/abort/reap family), and that
+is the net the move rode on. What stayed local, on purpose: each
+site's frame reader (typed lane routing vs verbatim forwarding) and
+each side's cancel/abort contract. The coding `bash` tool shares
+none of the async pieces (std flavor, no stdin, whole output is the
+product); its consolidation was the process-wrap version alignment
+(9/10 skew gone — one major in the lockfile), with `TreeKillGuard`
+still the documented hand-roll (v10's KillOnDrop is tokio-only).

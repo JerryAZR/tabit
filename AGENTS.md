@@ -72,8 +72,9 @@ Current workspace layout:
   disable-filtered scan, handshake, supervise,
   mark-dead-and-report — no mid-run respawn; the tool-call dispatch
   surface for proxy tools); the shared
-  child-process helpers (tree-kill wrapping, the stderr ring) live
-  here and serve the subagent bridge too; the hook lane forwards
+  child-process substrate (tree-kill wrapping, the stderr ring, the
+  command writer, the grace reaper — `src/process.rs`) lives here and
+  serves the subagent bridge too; the hook lane forwards
   engine hook events over the same pipe (policy fails open on a dead
   extension)
 - `crates/tabit-ext-sdk` — the extension SDK, the guest side of the
