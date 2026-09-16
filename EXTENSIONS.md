@@ -62,8 +62,9 @@ Boundaries and reasons:
   from the inbound side, tagged by `call_id`: the extension may run
   calls concurrently and return them in any order. A death answers
   every waiting adapter with the failure — no call hangs on a dead
-  extension. Result deltas, when a consumer exists, ride the same
-  inbound router.
+  extension. Result deltas are ruled out of v1 (below); a future
+  streaming consumer reopens that lane's design on the same inbound
+  router.
 
 ## Packages mount by default; disabling is the settings act
 (2026-09, task 4)
@@ -547,6 +548,18 @@ one aborted call must not cost the extension.
 Extension tools remain drop-safe under the core contract (the
 detached proxy's token-select is the pipe's translation of it, not a
 second mechanism).
+
+**Partial output is not v1** (ruled 2026-09-16): there is no
+result-delta lane and no post-cancel delivery — firing the token
+removes the pending entry and fails the call, so whatever the body
+returns after a cancel is a racing result the host drops. The honest
+long-running recipe is final-report-only: poll `is_cancelled()`
+between units of work; on a flip, stop the work (kill the sandbox,
+close the stream, stop billing) and return — the model sees the
+cancellation failure, not a partial report. What already completed
+survives only where the body itself put it (the extension's own
+files are free to hold it); a later invocation is the retrieval
+path.
 
 ## Tool bodies never stall the harness (2026-08)
 
