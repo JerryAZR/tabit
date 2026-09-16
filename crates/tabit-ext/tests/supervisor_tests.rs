@@ -29,6 +29,12 @@ use tabit_ext::supervisor::{self, ExtensionEvent, HANDSHAKE_TIMEOUT, Status};
 /// slowness).
 const BOUND: Duration = Duration::from_secs(15);
 
+/// A never-fired run token for call sites that test the steady
+/// state (cancellation has its own tests).
+fn run_token() -> tokio_util::sync::CancellationToken {
+    tokio_util::sync::CancellationToken::new()
+}
+
 fn test_dir(tag: &str) -> PathBuf {
     static COUNTER: std::sync::OnceLock<std::sync::Mutex<u32>> = std::sync::OnceLock::new();
     let n = {
@@ -301,7 +307,12 @@ async fn a_mute_sibling_does_not_delay_the_healthy() {
     );
     let handle = supervisor.extension("aaa-echo").expect("the lane lives");
     let result = handle
-        .call("echo", serde_json::json!({"text": "still here"}), None)
+        .call(
+            "echo",
+            serde_json::json!({"text": "still here"}),
+            None,
+            run_token(),
+        )
         .await
         .expect("the healthy sibling still serves");
     assert!(result.error.is_none(), "{result:?}");
@@ -393,7 +404,7 @@ async fn a_tool_call_round_trips_over_the_pipe() {
     await_status(&mut events, "echoer", |s| matches!(s, Status::Alive)).await;
     let handle = supervisor.extension("echoer").expect("installed");
     let result = handle
-        .call("echo", serde_json::json!({"text": "hi"}), None)
+        .call("echo", serde_json::json!({"text": "hi"}), None, run_token())
         .await
         .expect("the call resolves");
     assert_eq!(result.error, None);
@@ -410,7 +421,7 @@ async fn a_failing_tool_carries_its_error() {
     await_status(&mut events, "boomer", |s| matches!(s, Status::Alive)).await;
     let handle = supervisor.extension("boomer").expect("installed");
     let result = handle
-        .call("boom", serde_json::json!({"text": "x"}), None)
+        .call("boom", serde_json::json!({"text": "x"}), None, run_token())
         .await
         .expect("the call resolves");
     assert_eq!(
@@ -440,6 +451,7 @@ async fn an_ask_lifts_through_the_interaction_capability() {
             "ask",
             serde_json::json!({"text": "should we?"}),
             Some(Arc::new(services)),
+            run_token(),
         )
         .await
         .expect("the call resolves");
@@ -462,7 +474,12 @@ async fn an_ask_without_a_capability_fails_closed() {
     await_status(&mut events, "asker", |s| matches!(s, Status::Alive)).await;
     let handle = supervisor.extension("asker").expect("installed");
     let result = handle
-        .call("ask", serde_json::json!({"text": "anyone?"}), None)
+        .call(
+            "ask",
+            serde_json::json!({"text": "anyone?"}),
+            None,
+            run_token(),
+        )
         .await
         .expect("the call resolves");
     assert_eq!(result.error, None);
@@ -489,6 +506,7 @@ async fn a_model_prompt_dispatches_through_the_envelope() {
             "summarize",
             serde_json::json!({"text": "the long tail of a session"}),
             Some(Arc::new(services)),
+            run_token(),
         )
         .await
         .expect("the call resolves");
@@ -518,7 +536,12 @@ async fn a_model_prompt_without_services_fails_with_the_verb_error() {
     await_status(&mut events, "modeler", |s| matches!(s, Status::Alive)).await;
     let handle = supervisor.extension("modeler").expect("installed");
     let result = handle
-        .call("summarize", serde_json::json!({"text": "anything"}), None)
+        .call(
+            "summarize",
+            serde_json::json!({"text": "anything"}),
+            None,
+            run_token(),
+        )
         .await
         .expect("the call resolves");
     let error = result.error.expect("the verb errors, not the call");
@@ -536,7 +559,12 @@ async fn a_call_after_death_fails_fast() {
     // One healthy call, then the host closes (the supervisor drops:
     // stdin EOF, the double exits, the reader drains the lane).
     let result = handle
-        .call("echo", serde_json::json!({"text": "first"}), None)
+        .call(
+            "echo",
+            serde_json::json!({"text": "first"}),
+            None,
+            run_token(),
+        )
         .await
         .expect("the first call resolves");
     assert_eq!(result.report, "EXT-ECHOED:first");
@@ -544,7 +572,12 @@ async fn a_call_after_death_fails_fast() {
     let deadline = std::time::Instant::now() + Duration::from_secs(10);
     loop {
         match handle
-            .call("echo", serde_json::json!({"text": "again"}), None)
+            .call(
+                "echo",
+                serde_json::json!({"text": "again"}),
+                None,
+                run_token(),
+            )
             .await
         {
             Ok(result) => assert_eq!(result.error, None, "still serving before the close lands"),
@@ -590,6 +623,7 @@ async fn a_hook_round_trips_its_decision() {
             "tool_call",
             serde_json::json!({"session": "s1", "tool": "bash", "args": "{\"command\":\"ls\"}"}),
             None,
+            run_token(),
         )
         .await
         .expect("the hook resolves");
@@ -605,7 +639,12 @@ async fn a_hook_skip_carries_its_message() {
     await_status(&mut events, "denier", |s| matches!(s, Status::Alive)).await;
     let handle = supervisor.extension("denier").expect("installed");
     let decision = handle
-        .hook("tool_call", serde_json::json!({"tool": "bash"}), None)
+        .hook(
+            "tool_call",
+            serde_json::json!({"tool": "bash"}),
+            None,
+            run_token(),
+        )
         .await
         .expect("the hook resolves");
     assert_eq!(
@@ -636,6 +675,7 @@ async fn a_hook_ask_lifts_to_the_capability() {
             "tool_call",
             serde_json::json!({"tool": "bash"}),
             Some(Arc::new(services)),
+            run_token(),
         )
         .await
         .expect("the hook resolves");
@@ -657,6 +697,7 @@ async fn a_hook_ask_lifts_to_the_capability() {
             "tool_call",
             serde_json::json!({"tool": "bash"}),
             Some(Arc::new(services)),
+            run_token(),
         )
         .await
         .expect("the hook resolves");
@@ -678,7 +719,12 @@ async fn a_death_answers_pending_policy_with_the_fail_open_fallback() {
         let handle = handle.clone();
         tokio::spawn(async move {
             handle
-                .hook("tool_call", serde_json::json!({"tool": "bash"}), None)
+                .hook(
+                    "tool_call",
+                    serde_json::json!({"tool": "bash"}),
+                    None,
+                    run_token(),
+                )
                 .await
         })
     };
@@ -693,4 +739,47 @@ async fn a_death_answers_pending_policy_with_the_fail_open_fallback() {
         .expect("the task lives")
         .expect("the hook resolves");
     assert_eq!(decision, tabit_ext::protocol::HookDecision::Run);
+}
+
+/// The cancellation contract (the sandboxed-bash consumer's gap):
+/// firing the run token sends `cancel` down the pipe, fails the
+/// call, removes the pending entry — and the guest, which was
+/// parked waiting for exactly that frame, answers into the void
+/// while the LANE survives (a second call succeeds).
+#[tokio::test]
+async fn cancelling_the_run_token_cancels_the_call_across_the_pipe() {
+    let root = test_dir("cancel");
+    install(&root, "hanger", "tools-cancel");
+    let (supervisor, mut events) = supervisor::launch_root(&root, HANDSHAKE_TIMEOUT);
+    await_status(&mut events, "hanger", |s| matches!(s, Status::Alive)).await;
+    let handle = supervisor.extension("hanger").expect("installed");
+
+    let token = tokio_util::sync::CancellationToken::new();
+    let call = {
+        let handle = handle.clone();
+        let token = token.clone();
+        tokio::spawn(async move {
+            handle
+                .call("hang", serde_json::json!({"text": "forever"}), None, token)
+                .await
+        })
+    };
+    // Give the call a moment to cross and park, then abort the run.
+    tokio::time::sleep(Duration::from_millis(300)).await;
+    token.cancel();
+    let outcome = call.await.expect("the task joins").expect_err("cancelled");
+    assert!(outcome.contains("cancelled"), "{outcome}");
+
+    // The lane survived: a follow-up call serves normally.
+    let result = handle
+        .call(
+            "echo",
+            serde_json::json!({"text": "still here"}),
+            None,
+            run_token(),
+        )
+        .await
+        .expect("the lane serves");
+    assert_eq!(result.report, "EXT-ECHOED:still here");
+    supervisor.shutdown().await;
 }

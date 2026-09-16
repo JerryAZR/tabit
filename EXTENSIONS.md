@@ -527,13 +527,26 @@ A free-text denial reason rides the answer (it becomes the denial
 the model sees); it is not a steer. Extensions with user-facing
 input must pick the channel by what the input addresses.
 
-## Tool cancellation is inherited, not extended (standing)
+## Tool cancellation crosses the pipe (2026-09)
 
-The tabit-tools cancellation contract — engine owns *when*, tool
-owns *how*, drop-safety required — governs extension tools
-unchanged. An extension tool that parks on an interaction is parked
-inside its own future: drop is the cancellation, exactly as for
-`bash`. Extension tools must be drop-safe under the same contract.
+The core contract — the engine owns *when* (the run token), the tool
+owns *how* — governs extension tools unchanged, and now REACHES
+them: the proxy carries the run's token, and firing it sends
+`cancel { call_id }` down the pipe, removes the pending entry, and
+fails the call (a hook resolves fail-open — the neutral decision —
+by the absence ruling). **The guest owns how**: long-running bodies
+poll the SDK's `is_cancelled()` between units of work and stop —
+kill the sandbox, close the stream, stop billing; a body that never
+checks finishes into the void, exactly as a core body that ignores
+its token. Racing results are unknown ids (tolerated, dropped);
+racing asks answer dismissed (their pending entry is gone — fail
+closed, the same shape as the run's own retraction). The frame is a
+host-side addition (no version bump); the lane survives a cancel —
+one aborted call must not cost the extension.
+
+Extension tools remain drop-safe under the core contract (the
+detached proxy's token-select is the pipe's translation of it, not a
+second mechanism).
 
 ## Tool bodies never stall the harness (2026-08)
 

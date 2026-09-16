@@ -321,12 +321,27 @@ pub struct ModelPrompt {
     pub total_tokens: u64,
 }
 
+impl Ask {
+    /// Whether the host cancelled this call's run (the run aborted
+    /// under it). THE contract for long-running bodies: poll between
+    /// units of work — kill the process, close the stream, stop —
+    /// and return whatever partial result is honest. A body that
+    /// never checks simply finishes into the void.
+    pub fn is_cancelled(&self) -> bool {
+        tabit_ext_sdk_lock(&self.shared.cancelled).contains(&self.call_id)
+    }
+}
+
 static SHARED_COUNTER: AtomicU64 = AtomicU64::new(1);
 
 /// Everything the loop and the worker threads share.
 struct Shared {
     stdout: std::sync::Mutex<()>,
     asks: Mutex<HashMap<String, std::sync::mpsc::Sender<ServiceReply>>>,
+    /// Call ids the host cancelled (the run aborted under them) —
+    /// long-running bodies poll [`Ask::is_cancelled`] and stop: kill
+    /// the sandbox, drop the wedge, stop billing.
+    cancelled: Mutex<std::collections::HashSet<String>>,
 }
 
 /// The dispatcher: answer the initialize, ack, then serve the pipe
@@ -340,6 +355,7 @@ pub fn serve(extension: Extension) -> ! {
     let shared = Arc::new(Shared {
         stdout: std::sync::Mutex::new(()),
         asks: Mutex::new(HashMap::new()),
+        cancelled: Mutex::new(std::collections::HashSet::new()),
     });
 
     // The handshake: the initialize must be the first line, and its
@@ -408,6 +424,12 @@ pub fn serve(extension: Extension) -> ! {
                     let frame = run_hook(&shared, hook_id, &event, handler, payload);
                     let _ = emit(&shared, frame);
                 });
+            }
+            Some("cancel") => {
+                let id = frame["call_id"].as_str().unwrap_or_default().to_string();
+                if !id.is_empty() {
+                    tabit_ext_sdk_lock(&shared.cancelled).insert(id);
+                }
             }
             Some("service_response") => {
                 let id = frame["request_id"].as_str().unwrap_or_default().to_string();
@@ -582,6 +604,7 @@ mod tests {
         Arc::new(Shared {
             stdout: std::sync::Mutex::new(()),
             asks: Mutex::new(HashMap::new()),
+            cancelled: Mutex::new(std::collections::HashSet::new()),
         })
     }
 
@@ -633,6 +656,26 @@ mod tests {
     fn an_unsubscribed_point_is_absence() {
         let frame = run_hook(&shared(), "h-4".to_string(), "tool_call", None, json!({}));
         assert_eq!(decision_of(&frame), "run");
+    }
+
+    #[test]
+    fn a_host_cancel_flips_the_bodys_view_of_its_call() {
+        // The author surface a sandboxed-bash body polls: false
+        // before the host's cancel frame, true after, keyed to the
+        // call (a sibling call is untouched).
+        let shared = shared();
+        let ask = Ask {
+            call_id: "echo-2".to_string(),
+            shared: shared.clone(),
+        };
+        let sibling = Ask {
+            call_id: "echo-3".to_string(),
+            shared: shared.clone(),
+        };
+        assert!(!ask.is_cancelled());
+        tabit_ext_sdk_lock(&shared.cancelled).insert("echo-2".to_string());
+        assert!(ask.is_cancelled());
+        assert!(!sibling.is_cancelled(), "cancellation is per call");
     }
 
     #[test]

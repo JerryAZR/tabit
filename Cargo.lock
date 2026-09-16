@@ -3945,6 +3945,7 @@ dependencies = [
  "thiserror 2.0.20",
  "tokio",
  "tokio-test",
+ "tokio-util",
  "tracing",
  "tracing-futures",
  "tracing-subscriber",
@@ -4758,6 +4759,7 @@ dependencies = [
  "tabit-session",
  "tabit-tools",
  "tokio",
+ "tokio-util",
 ]
 
 [[package]]
@@ -4813,6 +4815,7 @@ dependencies = [
  "tabit-ext",
  "tiny_http",
  "tokio",
+ "tokio-util",
 ]
 
 [[package]]

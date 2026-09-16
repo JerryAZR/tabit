@@ -27,6 +27,10 @@
 //! - `tools-model`  — tool `summarize`: calls `model_prompt` (envelope
 //!   verb one, hand-rolled — the any-language proof), answers with
 //!   the completion text (or the verb's error)
+//! - `tools-cancel` — tool `hang`: never answers on its own — it
+//!   waits for the host's `cancel` frame (the token-and-detach
+//!   contract's guest half) and then answers CANCELLED; other tools
+//!   echo, proving the lane survives a cancel
 //! - `tools-shadow` — tool `read`: echoes (the name is the point —
 //!   the replaces-core conflict demo)
 //!
@@ -48,7 +52,8 @@ fn main() {
         "hello" | "mute" | "die-post-ack" | "bad-ack" | "wrong-version" | "late-garbage"
         | "late-unknown" => {}
         "die-pre-ack" => std::process::exit(1),
-        "tools-echo" | "tools-fail" | "tools-ask" | "tools-shadow" | "tools-model" => {}
+        "tools-echo" | "tools-fail" | "tools-ask" | "tools-shadow" | "tools-model"
+        | "tools-cancel" => {}
         "hooks-allow" | "hooks-skip" | "hooks-ask" | "hooks-hang" => {}
         other => {
             eprintln!("ext-double: unknown behavior `{other}`");
@@ -79,6 +84,7 @@ fn main() {
         "tools-ask" => serve_tools(json!([tool_decl("ask")])),
         "tools-shadow" => serve_tools(json!([tool_decl("read")])),
         "tools-model" => serve_tools(json!([tool_decl("summarize")])),
+        "tools-cancel" => serve_tools(json!([tool_decl("hang")])),
         behavior @ ("hooks-allow" | "hooks-skip" | "hooks-ask" | "hooks-hang") => {
             serve_hooks(behavior)
         }
@@ -201,6 +207,32 @@ fn serve_tools(tools: Value) {
                     "report": format!("EXT-MODELED:{text}"),
                     "details": {"usage": reply["result"]["usage"].clone()},
                 }));
+            }
+            "tools-cancel" => {
+                // Park on the hang call until the host's cancel frame
+                // arrives for it (other lines are not ours to answer;
+                // the tools lane serves sequentially, so a cancel IS
+                // the next line owed to us).
+                if frame["name"] == "hang" {
+                    loop {
+                        let line = read_line();
+                        match serde_json::from_str::<Value>(&line) {
+                            Ok(frame) if frame["type"] == "cancel" => break,
+                            _ => continue,
+                        }
+                    }
+                    emit(json!({
+                        "type": "tool_result", "call_id": call_id,
+                        "error": null, "report": "CANCELLED", "details": null,
+                    }));
+                } else {
+                    emit(json!({
+                        "type": "tool_result", "call_id": call_id,
+                        "error": null,
+                        "report": format!("EXT-ECHOED:{}", args["text"].as_str().unwrap_or_default()),
+                        "details": null,
+                    }));
+                }
             }
             _ => emit(json!({
                 "type": "tool_result", "call_id": call_id,

@@ -27,6 +27,12 @@ use tabit_ext::supervisor::{self, HANDSHAKE_TIMEOUT, Status};
 
 const BOUND: Duration = Duration::from_secs(15);
 
+/// A never-fired run token for call sites that test the steady
+/// state (cancellation has its own tests).
+fn run_token() -> tokio_util::sync::CancellationToken {
+    tokio_util::sync::CancellationToken::new()
+}
+
 fn test_dir(tag: &str) -> PathBuf {
     static COUNTER: std::sync::OnceLock<std::sync::Mutex<u32>> = std::sync::OnceLock::new();
     let n = {
@@ -143,7 +149,7 @@ async fn the_echo_example_declares_and_serves() {
 
     let handle = host.extension("echo").expect("installed");
     let result = handle
-        .call("echo", serde_json::json!({"text": "hi"}), None)
+        .call("echo", serde_json::json!({"text": "hi"}), None, run_token())
         .await
         .expect("the call resolves");
     assert_eq!(result.error, None);
@@ -169,6 +175,7 @@ async fn the_ask_example_lifts_the_answer() {
             "ask",
             serde_json::json!({"question": "is this thing on?"}),
             Some(services),
+            run_token(),
         )
         .await
         .expect("the call resolves");
@@ -194,6 +201,7 @@ async fn the_ask_example_fails_closed_on_dismissal() {
             "ask",
             serde_json::json!({"question": "is this thing on?"}),
             Some(services),
+            run_token(),
         )
         .await
         .expect("the call resolves");
@@ -224,7 +232,12 @@ async fn a_failing_body_is_an_error_not_a_hang() {
 
     let handle = host.extension("clash-b").expect("installed");
     let result = handle
-        .call("clashy", serde_json::json!({"text": "x"}), None)
+        .call(
+            "clashy",
+            serde_json::json!({"text": "x"}),
+            None,
+            run_token(),
+        )
         .await
         .expect("the call resolves");
     assert_eq!(result.report, "clash-b served: x");
@@ -248,13 +261,16 @@ async fn the_gate_extension_gates_bash_per_session() {
 
     // Outside the ask-set: runs with no card.
     let decision = handle
-        .hook("tool_call", call("read", "s1"), None)
+        .hook("tool_call", call("read", "s1"), None, run_token())
         .await
         .expect("resolves");
     assert_eq!(decision, tabit_ext_sdk_gate_decision_run(&decision));
 
     // No capability: the dismissal fails closed (the skip).
-    match handle.hook("tool_call", call("bash", "s1"), None).await {
+    match handle
+        .hook("tool_call", call("bash", "s1"), None, run_token())
+        .await
+    {
         Ok(decision) => assert!(matches!(
             decision,
             tabit_ext::protocol::HookDecision::Skip { .. }
@@ -269,12 +285,12 @@ async fn the_gate_extension_gates_bash_per_session() {
         prompted: Arc::new(std::sync::Mutex::new(Vec::new())),
     });
     let decision = handle
-        .hook("tool_call", call("bash", "s1"), Some(answered))
+        .hook("tool_call", call("bash", "s1"), Some(answered), run_token())
         .await
         .expect("resolves");
     assert!(matches!(decision, tabit_ext::protocol::HookDecision::Run));
     let decision = handle
-        .hook("tool_call", call("bash", "s1"), None)
+        .hook("tool_call", call("bash", "s1"), None, run_token())
         .await
         .expect("resolves");
     assert!(
@@ -283,7 +299,10 @@ async fn the_gate_extension_gates_bash_per_session() {
     );
 
     // Another session does NOT inherit the grant.
-    match handle.hook("tool_call", call("bash", "s2"), None).await {
+    match handle
+        .hook("tool_call", call("bash", "s2"), None, run_token())
+        .await
+    {
         Ok(decision) => assert!(
             matches!(decision, tabit_ext::protocol::HookDecision::Skip { .. }),
             "the grant must not leak across sessions"
@@ -319,7 +338,7 @@ async fn the_autotitle_example_prompts_the_model_over_the_envelope() {
     });
     let result = serde_json::json!({"result": "42 lines changed"});
     let decision = handle
-        .hook("tool_result", result, Some(services))
+        .hook("tool_result", result, Some(services), run_token())
         .await
         .expect("resolves");
     assert!(matches!(decision, tabit_ext::protocol::HookDecision::Keep));

@@ -577,7 +577,12 @@ assistant.
   append-only tree, how checkout interacts with a compacted chain, and what
   replay reconstructs. All three questions are answered by the 2026-09
   rulings below (the record, the insertion, the flow).
-  `context_window` config wires with the implementation.
+  `context_window` config wires with the implementation. **Deferred (2026-09, subagent-extension ruling): a
+  per-child dials file selector** (`$TABIT_DIALS` / a spawn flag) —
+  the shape that makes compaction rules per-consumer (different
+  thresholds, different summarizer prompts, as data); the dials stay
+  clustered consts until that consumer exists, and the selector is
+  additive to them.
 - **Reference survey (2026-09, the design discussion's evidence base):**
   all five references (pi, codex, opencode, crush, yaca) roll their own but
   converge on one skeleton — threshold from real provider usage minus a

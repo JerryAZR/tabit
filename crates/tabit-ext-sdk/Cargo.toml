@@ -58,6 +58,7 @@ tiny_http = { workspace = true }
 
 [dev-dependencies]
 futures = { workspace = true }
+tokio-util = { version = "0.7", default-features = false }
 rig-agent = { path = "../rig-agent", version = "0.41.0", default-features = false }
 tabit-ext = { path = "../tabit-ext", version = "0.41.0" }
 tokio = { workspace = true, features = ["rt-multi-thread", "macros", "time"] }

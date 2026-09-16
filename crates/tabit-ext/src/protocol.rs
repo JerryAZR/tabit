@@ -89,6 +89,21 @@ pub enum HostFrame {
         #[serde(skip_serializing_if = "Option::is_none")]
         error: Option<String>,
     },
+    /// The run gave up on a forwarded call or hook: the host's asker
+    /// is gone (the run aborted under it), the pending entry is
+    /// already removed, and this frame tells the extension to STOP —
+    /// kill the sandbox, drop the wedge, stop billing. The id is
+    /// whatever correlation was cancelled (a tool `call_id` or a
+    /// `hook_id`). Fire-and-forget by design: a result that races
+    /// home afterwards is an unknown id, tolerated and dropped; a
+    /// mid-call ask answers dismissed (its pending entry is gone —
+    /// fail closed, exactly as the run's own retraction behaves).
+    /// The cancellation CONTRACT mirrors the core tools' (ENGINE.md,
+    /// token-and-detach): the host owns WHEN, the guest owns HOW —
+    /// long-running bodies poll their SDK's `is_cancelled`; a guest
+    /// that never checks simply finishes into the void, same as a
+    /// core body that ignores its token.
+    Cancel { call_id: String },
     /// One hook event forwarded to the extension: `event` is the
     /// engine's hook point (`tool_call` | `tool_result`), `payload`
     /// the event facts (the session identity, the tool, the args —
@@ -217,6 +232,7 @@ mod tests {
             }
             HostFrame::ToolCall { .. }
             | HostFrame::ServiceResponse { .. }
+            | HostFrame::Cancel { .. }
             | HostFrame::Hook { .. } => {
                 panic!("an initialize line parsed as another frame")
             }
@@ -300,6 +316,15 @@ mod tests {
             }
             _ => panic!("wrong frame"),
         }
+    }
+
+    #[test]
+    fn the_cancel_frame_round_trips() {
+        let frame = HostFrame::Cancel {
+            call_id: "echo-3".to_string(),
+        };
+        let line = serde_json::to_string(&frame).unwrap();
+        assert_eq!(line, r#"{"type":"cancel","call_id":"echo-3"}"#);
     }
 
     #[test]

@@ -33,6 +33,9 @@ serde = { workspace = true, features = ["derive"] }
 serde_json = { workspace = true }
 thiserror = { workspace = true }
 tokio = { workspace = true, features = ["rt", "sync"] }
+# The run token (cancellation's WHEN signal) — carried by ToolContext
+# and read by hook contexts for the forwarded lanes.
+tokio-util = { version = "0.7", default-features = false }
 tracing = { workspace = true }
 tracing-futures = { workspace = true, features = ["futures-03"] }
 

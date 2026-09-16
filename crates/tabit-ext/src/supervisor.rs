@@ -245,12 +245,17 @@ impl ExtensionHandle {
     /// (the routing target for the extension's mid-call envelope
     /// requests — asks and model prompts); without one, asks answer
     /// dismissed and verbs error — fail closed, exactly as core
-    /// tools behave on a non-interactive session.
+    /// tools behave on a non-interactive session. `cancel` is the
+    /// run's token: firing it sends [`HostFrame::Cancel`] down the
+    /// pipe (the guest's signal to stop — the token-and-detach
+    /// contract, crossing the process boundary), removes the pending
+    /// entry (racing asks answer dismissed), and fails the call.
     pub async fn call(
         &self,
         tool: &str,
         args: serde_json::Value,
         services: Option<Arc<dyn HostServices>>,
+        cancel: tokio_util::sync::CancellationToken,
     ) -> Result<ToolWireResult, String> {
         let call_id = format!(
             "{}-{}",
@@ -283,13 +288,37 @@ impl ExtensionHandle {
             tabit_log::lock::lock(&self.lane.pending).remove(&call_id);
             return Err(format!("extension `{}` is not running", self.lane.name));
         }
-        match rx.await {
-            Ok(result) => Ok(result),
-            Err(_) => {
+        let outcome = tokio::select! {
+            result = rx => result.map_err(|_| {
                 tabit_log::lock::lock(&self.lane.pending).remove(&call_id);
-                Err(format!("extension `{}` closed mid-call", self.lane.name))
+                format!("extension `{}` closed mid-call", self.lane.name)
+            }),
+            _ = cancel.cancelled() => {
+                self.cancel(&call_id);
+                return Err(format!("extension `{}` call was cancelled", self.lane.name));
+            }
+        };
+        match outcome {
+            Ok(result) => Ok(result),
+            Err(error) => {
+                tabit_log::lock::lock(&self.lane.pending).remove(&call_id);
+                Err(error)
             }
         }
+    }
+
+    /// The cancel bookkeeping: drop the pending entry (racing asks
+    /// lift to nothing and answer dismissed; a racing result is an
+    /// unknown id, tolerated) and tell the guest to stop. Shared by
+    /// the call and hook lanes — the id is whichever correlation.
+    fn cancel(&self, call_id: &str) {
+        tabit_log::lock::lock(&self.lane.pending).remove(call_id);
+        let frame = HostFrame::Cancel {
+            call_id: call_id.to_string(),
+        };
+        #[allow(clippy::expect_used)] // sanctioned crash: pure-data serialization
+        let frame = serde_json::to_string(&frame).expect("HostFrame always serializes");
+        let _ = self.lane.commands.send(frame);
     }
 
     /// Forward one hook event to the extension and await its decision
@@ -304,6 +333,7 @@ impl ExtensionHandle {
         event: &str,
         payload: serde_json::Value,
         services: Option<Arc<dyn HostServices>>,
+        cancel: tokio_util::sync::CancellationToken,
     ) -> Result<HookDecision, String> {
         let fallback = if event == "tool_result" {
             HookDecision::Keep
@@ -340,7 +370,19 @@ impl ExtensionHandle {
             tabit_log::lock::lock(&self.lane.pending).remove(&hook_id);
             return Err(format!("extension `{}` is not running", self.lane.name));
         }
-        match rx.await {
+        // Cancellation resolves the policy FAIL OPEN (the ruling's
+        // symmetry: a hook the host gave up on is treated as
+        // absence, the neutral decision for its point) while telling
+        // the guest to stop — a wedged policy extension must not
+        // outlive the run it was gating.
+        let outcome = tokio::select! {
+            decision = rx => decision,
+            _ = cancel.cancelled() => {
+                self.cancel(&hook_id);
+                return Ok(fallback);
+            }
+        };
+        match outcome {
             Ok(decision) => Ok(decision),
             Err(_) => {
                 tabit_log::lock::lock(&self.lane.pending).remove(&hook_id);

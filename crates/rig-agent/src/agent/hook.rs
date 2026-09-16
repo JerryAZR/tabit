@@ -186,6 +186,14 @@ impl HookContext {
             .cloned()
     }
 
+    /// The run's cancellation token, when the host inserted one (the
+    /// engine's own WHEN signal — forwarded lanes cancel on it).
+    pub fn run_token(&self) -> Option<tokio_util::sync::CancellationToken> {
+        self.capabilities
+            .get::<tokio_util::sync::CancellationToken>()
+            .cloned()
+    }
+
     /// The run's host-service capability, when the host inserted one
     /// (the extension envelope's dispatch surface — verb zero is the
     /// ask). Hook forwarders lift it onto every pipe call.

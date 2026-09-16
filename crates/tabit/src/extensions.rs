@@ -264,8 +264,16 @@ fn proxy(handle: ExtensionHandle, extension: String, decl: ToolDecl) -> DynamicT
                 let services = context
                     .get::<Arc<dyn rig_agent::tool::services::HostServices>>()
                     .cloned();
+                // The run token crosses the pipe: abort detaches this
+                // body (the core contract), the select inside `call`
+                // notices, and the extension receives `cancel` — the
+                // leash a long-running sandboxed body needs.
+                let token = context
+                    .get::<tokio_util::sync::CancellationToken>()
+                    .cloned()
+                    .unwrap_or_default();
                 let result = handle
-                    .call(&tool, args, services)
+                    .call(&tool, args, services, token)
                     .await
                     .map_err(ToolExecutionError::other)?;
                 match result.error {
@@ -295,8 +303,9 @@ fn forward_tool_call<'a>(
         "args": call.args,
     });
     let services = ctx.host_services();
+    let token = ctx.run_token().unwrap_or_default();
     Box::pin(async move {
-        match handle.hook("tool_call", payload, services).await {
+        match handle.hook("tool_call", payload, services, token).await {
             Ok(HookDecision::Skip { message }) => ToolCallAction::skip(message),
             // Run is the neutral answer; Keep on a call point is
             // protocol misuse — treat it as neutral, not fatal.
@@ -321,10 +330,11 @@ fn forward_tool_result<'a>(
         "presentation": result.presentation.render(),
     });
     let services = ctx.host_services();
+    let token = ctx.run_token().unwrap_or_default();
     Box::pin(async move {
         // Keep either way: the only wire decision, and the fail-open
-        // answer for a dead lane.
-        let _ = handle.hook("tool_result", payload, services).await;
+        // answer for a dead lane (a cancel resolves the same way).
+        let _ = handle.hook("tool_result", payload, services, token).await;
         ToolResultAction::keep()
     })
 }
