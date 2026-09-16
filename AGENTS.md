@@ -56,7 +56,7 @@ Current workspace layout:
   override — ROADMAP item 5)
 - `crates/tabit-tools` — coding tools (`read`, `write`, `edit`, `bash`
   — chosen at registration: verified Git Bash, else PowerShell on
-  Windows; `ask_user` — the body is one interaction roundtrip) as
+  Windows) as
   contextual `#[rig_tool]`s (they read the session cwd and run token
   from the per-run `ToolContext`), erasable to DynamicTools (native
   only)

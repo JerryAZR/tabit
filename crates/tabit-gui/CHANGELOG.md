@@ -18,7 +18,42 @@ software/hardware contract, not just the encodings):
 Every `PROTOCOL_VERSION` bump — and every additive change a frontend
 could observe — gets an entry here in the same commit.
 
-## v9 (current)
+## v10 (current)
+
+### wire: `session_created` deleted — one announcement shape (2026-09)
+
+Protocol version 10. The v4 interim is gone (its "kept one version,
+then deleted" window ran out five versions ago; the review round's
+ruling executed it): `new_session` now announces through the stamped
+`session_opened { resumed: false }` — the same shape the boot,
+`open_session`, and subagent children already used. Consequences for
+a frontend: **delete your `session_created` handler** (the GUI
+reducer's new-session fold — row + view switch — moved into its
+`session_opened` arm, conditioned on "not the boot, not a listed
+session"); the new session's selection notes now **follow** the
+announce on its stream (`new_session`'s emission order unified with
+`open_session`'s — announce, then notes); and the fresh-start note
+("no sessions to resume") is the **boot announce's** fact, not every
+`resumed: false` announce's.
+
+### wire: `run_failed` typed; brackets carry Unix-ms timestamps (2026-09)
+
+Same bump, two additive moves (codex's shapes, the review ruling):
+`run_failed` gains `kind` — an open string by the `error`-kind law,
+well-known values `provider` (the provider stream errored mid-run),
+`model` (the run could not open; retry needs a model switch),
+`persist` (the log refused to flush; the run never began), `engine`
+(the internal residual, incl. a subagent child dying) — retry-vs-fatal
+decisions branch on it instead of matching message text. The turn
+brackets (`turn_started.started_at_ms`,
+`turn_committed.completed_at_ms`) and the run terminals
+(`started_at_ms`/`completed_at_ms`) carry Unix-millisecond stamps —
+live runs stamp at emission, replay stamps from the entry's recorded
+time (a replayed turn's two stamps coincide). The old §11 open
+question is settled by this. The reducer ignores the fields today
+(the redesign owns the rendering).
+
+## v9
 
 ### wire: `extensions_available` — the extension catalog at startup (2026-09)
 

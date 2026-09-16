@@ -1137,20 +1137,20 @@ or explicitly-opaque native items), or accept rig-core as the shared
 vocabulary crate (it is ours). Recommendation: own the types — the
 protocol is the foundation; the engine is an implementation detail.
 
-### 14. `RunFailed` is stringly — RESOLVED as a design (v2 kind taxonomy); not yet on the wire
+### 14. `RunFailed` is stringly — RESOLVED and ON THE WIRE (v10, 2026-09)
 
-Kinds: provider / budget / stopped (FRONTEND.md §6). `durability`
-moved out of run_failed entirely (flag 8 folded it into
-`run_finished.durable`); `internal` never reaches the wire — internal
-errors panic by doctrine.
-
-**Status:** the wire's `run_failed` carries `message` alone today;
-the `kind` field lands with the flag-8 write-behind producer (a board
-item — see flag 8's status note).
-
-A display string, not a kind; frontends cannot branch
-retryable-vs-fatal without string matching. Add a small kind enum
-(`provider`, `budget`, `durability`, `internal`).
+**Status:** shipped in protocol v10 — `run_failed { message, kind }`,
+the codex-review ruling. The taxonomy is what the failure paths
+actually produce, not the earlier provider/budget/stopped sketch:
+`provider` (the provider stream errored mid-run — the common case),
+`model` (the run could not open; `fail_before_engine`'s
+agent-construction arm), `persist` (the degraded-buffer guard — the
+run never began), `engine` (the internal residual, incl. a subagent
+child process dying). `kind` is an open string by the `error`-kind
+law (unknown values display generically); FRONTEND.md §6 documents
+the well-known values. `durability` stays out of run_failed entirely
+(flag 8 folded it into `run_finished.durable`); `internal` never
+reaches the wire — internal errors panic by doctrine.
 
 ### 15. Unbounded event channel — tripwire cap (ruled); consumer backpressure deferred
 

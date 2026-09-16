@@ -21,6 +21,7 @@ fn events_round_trip_through_json() {
         },
         SessionEvent::TurnStarted {
             id: TURN.to_string(),
+            started_at_ms: 1_000,
         },
         SessionEvent::TextDelta {
             turn_id: TURN.to_string(),
@@ -40,6 +41,7 @@ fn events_round_trip_through_json() {
         },
         SessionEvent::TurnCommitted {
             id: TURN.to_string(),
+            completed_at_ms: 2_000,
         },
         SessionEvent::ToolResult {
             turn_id: TURN.to_string(),
@@ -92,12 +94,19 @@ fn events_round_trip_through_json() {
             output: "done".to_string(),
             usage: Usage::default(),
             durable: true,
+            started_at_ms: 1_000,
+            completed_at_ms: 9_000,
         },
         SessionEvent::RunFailed {
             message: "provider stream ended early".to_string(),
+            kind: RunFailedKind::PROVIDER.to_string(),
+            started_at_ms: 1_000,
+            completed_at_ms: 9_000,
         },
         SessionEvent::RunAborted {
             output: "partial text".to_string(),
+            started_at_ms: 1_000,
+            completed_at_ms: 9_000,
         },
         SessionEvent::InteractionRequest {
             id: "0199".to_string(),
@@ -125,11 +134,6 @@ fn events_round_trip_through_json() {
                     entry_count: 0,
                 },
             ],
-        },
-        SessionEvent::SessionCreated {
-            id: "0198".to_string(),
-            path: "C:/w/.tabit/sessions/20260822_0198.jsonl".to_string(),
-            model: ModelSelection::new("p", "m"),
         },
         SessionEvent::error_session("no session with id `0195`"),
         SessionEvent::ModelChanged {
@@ -239,15 +243,6 @@ fn events_round_trip_through_json() {
         .expect("serialize"),
         r#"{"type":"extensions_available","extensions":[{"name":"shadow","version":"0.1.0","description":null,"dir":"C:/u/.tabit/extensions/shadow","status":"dead","reason":"no handshake within 30s","tools":[],"hooks":[]}],"conflicts":[{"kind":"replaces_core","extension":"shadow","tool":"read","incumbent":null}]}"#
     );
-    assert_eq!(
-        serde_json::to_string(&SessionEvent::SessionCreated {
-            id: "0198".to_string(),
-            path: "C:/w/s.jsonl".to_string(),
-            model: ModelSelection::new("p", "m"),
-        })
-        .expect("serialize"),
-        r#"{"type":"session_created","id":"0198","path":"C:/w/s.jsonl","model":{"provider":"p","model":"m","thinking_level":null}}"#
-    );
     // The announce's wire spelling: a subagent child carries its
     // parentage and the spawning call's correlation id; a user
     // session carries neither (absent fields never hit the wire).
@@ -278,10 +273,11 @@ fn events_round_trip_through_json() {
     // The wire spelling of the brackets and the truncation warning.
     assert_eq!(
         serde_json::to_string(&SessionEvent::TurnStarted {
-            id: TURN.to_string()
+            id: TURN.to_string(),
+            started_at_ms: 1_000,
         })
         .expect("serialize"),
-        r#"{"type":"turn_started","id":"0192uuidv7turn"}"#
+        r#"{"type":"turn_started","id":"0192uuidv7turn","started_at_ms":1000}"#
     );
     assert_eq!(
         serde_json::to_string(&SessionEvent::TurnTruncated {

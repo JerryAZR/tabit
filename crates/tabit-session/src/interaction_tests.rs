@@ -113,8 +113,8 @@ fn gated_tool() -> DynamicTool {
     )
 }
 
-/// A stand-in for `tabit_tools::ask_user`: the body is one ask over the
-/// ToolContext capability.
+/// An asking-tool double (the deleted `ask_user` tool's shape): the
+/// body is one ask over the ToolContext capability.
 fn asking_tool() -> DynamicTool {
     DynamicTool::new(
         "ask_user",

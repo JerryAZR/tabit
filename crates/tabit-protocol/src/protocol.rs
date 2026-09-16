@@ -14,12 +14,16 @@ use serde::{Deserialize, Serialize};
 
 /// The protocol version this build speaks. Clients declare theirs in
 /// [`ClientFrame::Initialize`]; a mismatch rejects the connection at the
-/// handshake. v8: skills — the `skills_available` startup
-/// announcement (a new event kind; the additive reason the version
-/// moved). v7: compaction — the `compact` command and the
+/// handshake. v10: `session_created` deleted (the supersede ruling
+/// executed after five versions — `session_opened` with
+/// `resumed: false` is the one announcement); `run_failed` carries a
+/// typed `kind`; the turn brackets and run terminals carry Unix-ms
+/// timestamps. v9: extensions — the `extensions_available` startup
+/// announcement. v8: skills — the `skills_available` startup
+/// announcement. v7: compaction — the `compact` command and the
 /// `compaction_started`/`compaction_delta`/`compaction_finished`/
 /// `compaction_failed` event bracket.
-pub const PROTOCOL_VERSION: u32 = 9;
+pub const PROTOCOL_VERSION: u32 = 10;
 
 /// Which session produced an event. The stamp is the session id
 /// itself (v3: the `"main"` alias is retired — one name per session);
@@ -45,8 +49,8 @@ impl StreamId {
 /// flat — the line a transport edge writes:
 /// `{"type":"text_delta","stream":"019…",...}`. The stamp is the
 /// session id (v3) and is **absent for backend-level events** (v4):
-/// a fact the backend itself produced (the session catalog,
-/// `session_created`, host failures) carries no session attribution,
+/// a fact the backend itself produced (the session catalog, host
+/// failures) carries no session attribution,
 /// and frontends fold unstamped frames connection-level (ruled
 /// 2026-08 — no faked session ids).
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -64,7 +68,7 @@ pub struct EventFrame {
 /// their session explicitly (v3, ruled: a deliberate wire break — no
 /// consumer keeps a silent default, so nothing can "forget to
 /// update"); the boot session's id arrives in `initialize_ack`, other
-/// ids from `sessions_available`/`session_created`. The behavior is
+/// ids from `sessions_available`/`session_opened`. The behavior is
 /// total over the two session states:
 ///
 /// | command               | idle                   | running                              |
@@ -120,12 +124,12 @@ pub enum SessionCommand {
         /// The answer payload (see `templates`).
         payload: serde_json::Value,
     },
-    /// Create a fresh session in this backend. The outcome is
-    /// `session_created { id, path, model }` — unstamped,
-    /// backend-level (the payload carries the new id; the
-    /// optional-stream ruling) — or an equally unstamped
-    /// `error { kind: session }` if the session cannot be built.
-    /// Nothing replays; the session is empty.
+    /// Create a fresh session in this backend. The outcome is a
+    /// stamped `session_opened { resumed: false }` for the new
+    /// session (one announcement shape for every path — v10; the
+    /// `session_created` interim died with its one-version window) —
+    /// or an unstamped `error { kind: session }` if the session
+    /// cannot be built. Nothing replays; the session is empty.
     NewSession,
     /// Load a stored session (if needed) and replay it onto the event
     /// channel, stamped with its id — the pass itself is the

@@ -221,11 +221,10 @@ one-huge-line notice). Remaining residue, classified:
 - `file_io.rs` — the fault arms: `create_dir_all` failure, parent
   metadata error, plain-write failure, temp-stage/write/persist
   failures. Same fault-injection class.
-- `lib.rs` (`ask_user`) — the malformed-answer arm (`the user's
-  answer could not be read`): the scripted interaction double returns
-  canned outcomes; a malformed payload is a frontend defect, not a
-  reachable external error in practice. Dies with ask_user's
-  pre-shipping removal (owner ruling, ROADMAP item 4).
+- `lib.rs` (`ask_user`) — deleted 2026-09 (the removal ruling
+  executed, ROADMAP item 4): the tool's residue entries died with it;
+  the interaction round-trip itself stays pinned by the actor suite's
+  asking-tool double (`tabit-session/src/interaction_tests.rs`).
 
 **Deferred — live-verification candidates, not CI:**
 
@@ -300,7 +299,7 @@ Remaining residue, classified:
 - `shell.rs` / `lib.rs` (tools) — the platform-absence and fault arms
   carried from the coding-tools classification, unchanged by the cap
   split and the details production; ask_user's malformed-answer arm
-  still dies with the tool's pre-shipping removal.
+  died with the tool's removal (2026-09).
 - `permission.rs` / `interaction.rs` — test-side assertion arms
   (class 1).
 
@@ -654,25 +653,19 @@ rather than skipping, reachable or not.)
   round-trip tests; the launch path (`tabit` launcher detach-spawn)
   likewise needs a desktop session.
 
-## Interaction (permission + ask_user, 2026-08; remediation pass 2026-08)
+## Interaction (the ask round-trip; 2026-08, remediation pass 2026-08; ask_user deleted + the gate moved to `gate-ext` 2026-09)
 
 - `tabit-session/src/interaction.rs` — **covered**: routing, total
   no-op, retraction, weak-sender dismissal, session memory, prompt
   shape (unit) plus actor-level end-to-end tests (allow, deny,
-  always-allow, ask_user round-trip, abort-with-card-open, two
-  concurrent cards answered in reverse order, frontend death incl. the
-  durable abort-time synthesized tail).
-- `tabit-session/src/permission.rs` — **covered directly** since the
-  remediation pass: the policy is extracted as `gate()` and its whole
-  decision table is unit-pinned (non-asked tools cardless, no-frontend
-  fail-closed naming why, Allow runs, Always allow runs + remembered
-  cardless, Deny delivers its reason verbatim, terminal-retracted ask
-  fails closed) — the actor tests were event-presence-only and could
-  not distinguish allow from deny.
-- `tabit-tools ask_user` — **covered directly** since the remediation
-  pass: all four outcomes against a scripted `UserInteraction` double
-  (text verbatim, option named, dismissal in-band, no-frontend error).
-  The actor-level round-trip remains as the seam test.
+  always-allow, an asking tool's round-trip, abort-with-card-open,
+  two concurrent cards answered in reverse order, frontend death
+  incl. the durable abort-time synthesized tail).
+- The permission gate — the policy's home moved out of core with the
+  extension system (`permission.rs` deleted; `gate-ext` in
+  `crates/tabit-ext-sdk/src/bin/` carries the same decision table,
+  e2e-proven over the real frontend wire — see the extensions
+  sections below).
 - `tabit/bin print-mode stdin reader` (`main.rs` watcher thread,
   card rendering incl. the FIFO card queue) — **JUSTIFIED**: owns real
   stdin; `parse_answer` is unit-covered (numbered buttons + reason,
@@ -1249,3 +1242,36 @@ suites in place.
   (`-Z coverage-options=branch`) whose trybuild fixtures do not
   currently build — regions are read from llvm-cov's own summary
   instead.
+
+
+## Protocol v10 (2026-09, the review round's ruling batch)
+
+- `session_created` deletion — **covered by rewrite**: the endpoint
+  tests' new-session matchers now await the stamped
+  `session_opened` (not-the-boot guards — the boot's announce is
+  still queued when `boot_id` reads the handshake info), the notes
+  test pins announce-then-notes order on the new session's own
+  stream, json.rs's e2e scans past the boot's announce line and pins
+  the stamp; the GUI reducer's new-session fold (row + view switch)
+  moved into the `session_opened` arm, pinned by the two renamed
+  reducer tests, and the fresh-start note is pinned to the first-ever
+  announce only.
+- `run_failed.kind` — **covered**: round-trips in events/protocol
+  tests (`RunFailedKind::PROVIDER`); the producer classification
+  (`run_failure_kind`: Prompt -> provider, residual -> engine) and
+  the two `fail_before_engine` kinds (persist guard, model open)
+  ride the existing failure-path endpoint tests, which now match the
+  typed shape; the subagent child-death synthetic terminal stamps
+  ENGINE (subprocess.rs, covered by the existing dead-child tests).
+- Bracket timestamps — **covered**: round-trips + wire literals
+  (`started_at_ms`/`completed_at_ms`) in the protocol tests; live
+  stamping rides every existing turn/run test (the fields are
+  constructed, not defaulted); replay stamping (entry timestamp ->
+  both brackets, epoch + warn on unparseable) is exercised by the
+  replay suites, which match the new shapes. Residue: none deferred —
+  the corrupt-timestamp warn arm is the one untested line (a
+  malformed RFC 3339 in a valid-JSON entry; the parser threat model
+  tolerates it, the stamp is visibly epoch).
+- `ask_user` deletion — the tool's residue entries died with it
+  (see the interaction section); the round-trip itself stays pinned
+  by the actor suite's asking-tool double.

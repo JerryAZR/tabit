@@ -267,7 +267,7 @@ fn summary_result(summary: RunSummary, child_id: &str) -> Result<ToolOutput, Too
                 .iter()
                 .rev()
                 .find_map(|event| match event {
-                    SessionEvent::RunFailed { message } => Some(message.clone()),
+                    SessionEvent::RunFailed { message, .. } => Some(message.clone()),
                     _ => None,
                 })
                 .unwrap_or_else(|| "unknown failure".to_string());

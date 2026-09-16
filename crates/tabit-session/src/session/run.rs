@@ -149,6 +149,10 @@ impl Session {
             slot.clone()
         };
         let mut sink = EventSink::new(on_event);
+        // The run's bracket timestamps (v10): every terminal and turn
+        // bracket stamps Unix ms; the run's start is captured once
+        // here and threaded to the emission sites.
+        let run_started_ms = crate::ids::now_unix_ms();
         // The degraded-buffer guard (flag 8's second amendment): retry
         // the buffered log before anything drains in — a still-refusing
         // flush blocks this start (the first failed drain ran in
@@ -161,6 +165,8 @@ impl Session {
         if let Err(error) = &guard_outcome {
             self.drain_persist_transitions();
             self.fail_before_engine(
+                tabit_protocol::RunFailedKind::PERSIST,
+                run_started_ms,
                 format!(
                     "the session log is undrained and still refuses to flush: {error} \
                      — the message is kept; free the log and retry to answer it"
@@ -185,6 +191,8 @@ impl Session {
         // takes.
         if let Err(error) = self.ensure_agent() {
             self.fail_before_engine(
+                tabit_protocol::RunFailedKind::MODEL,
+                run_started_ms,
                 format!(
                     "{error} — the message is kept; switch the model and retry to \
                      answer it"
@@ -199,9 +207,11 @@ impl Session {
             };
         }
         let stream = self.open_run(&run_token).await;
-        let mut driven = self.drive(stream, &run_token, &mut sink).await;
+        let mut driven = self
+            .drive(stream, &run_token, run_started_ms, &mut sink)
+            .await;
         driven = self.overflow_intercept(driven).await;
-        let (outcome, output, usage) = self.conclude(driven, &mut sink);
+        let (outcome, output, usage) = self.conclude(driven, run_started_ms, &mut sink);
         RunSummary {
             outcome,
             output,
@@ -248,7 +258,13 @@ impl Session {
     /// provider error does: `user_message` events, then `run_failed`.
     /// The only other pre-drain failure (a zero turn budget) is
     /// rejected when the session is built.
-    fn fail_before_engine(&mut self, message: String, sink: &mut EventSink<'_>) {
+    fn fail_before_engine(
+        &mut self,
+        kind: &'static str,
+        started_at_ms: u64,
+        message: String,
+        sink: &mut EventSink<'_>,
+    ) {
         for (id, queued) in self.mailbox.take_all() {
             // Commit first, then announce — the engine's CONVERGE idiom;
             // the helper is synchronous, so no suspension can interleave,
@@ -260,7 +276,12 @@ impl Session {
         if let Some(hub) = &self.interaction {
             hub.clear_pending();
         }
-        sink.emit(SessionEvent::RunFailed { message });
+        sink.emit(SessionEvent::RunFailed {
+            message,
+            kind: kind.to_string(),
+            started_at_ms,
+            completed_at_ms: crate::ids::now_unix_ms(),
+        });
     }
 
     /// Assemble the engine request for one run: the abort token and
@@ -349,6 +370,7 @@ impl Session {
         &mut self,
         mut stream: rig_agent::agent::StreamingResult,
         run_token: &CancellationToken,
+        started_at_ms: u64,
         sink: &mut EventSink<'_>,
     ) -> DriveOutcome {
         let mut driven = DriveOutcome {
@@ -391,13 +413,21 @@ impl Session {
             match item {
                 Ok(MultiTurnStreamItem::TurnStarted { id }) => {
                     current_turn = Some(id.clone());
-                    sink.emit(SessionEvent::TurnStarted { id });
+                    let started = crate::ids::now_unix_ms();
+                    sink.emit(SessionEvent::TurnStarted {
+                        id,
+                        started_at_ms: started,
+                    });
                 }
                 Ok(MultiTurnStreamItem::TurnCommitted { id, .. }) => {
                     // The engine's own fold is the durable commit; this
                     // is the announcement only (emission-only drive —
                     // the session never folds).
-                    sink.emit(SessionEvent::TurnCommitted { id });
+                    let completed = crate::ids::now_unix_ms();
+                    sink.emit(SessionEvent::TurnCommitted {
+                        id,
+                        completed_at_ms: completed,
+                    });
                 }
                 Ok(MultiTurnStreamItem::ModelTurnRetried { .. }) => {
                     let turn_id = announce(&current_turn);
@@ -429,6 +459,8 @@ impl Session {
                         output: driven.output.clone(),
                         usage: wire_usage(&driven.usage),
                         durable: self.buffer_is_clean(),
+                        started_at_ms,
+                        completed_at_ms: crate::ids::now_unix_ms(),
                     });
                 }
                 Ok(MultiTurnStreamItem::Steer { batch }) => {
@@ -528,6 +560,7 @@ impl Session {
     fn conclude(
         &mut self,
         driven: DriveOutcome,
+        started_at_ms: u64,
         sink: &mut EventSink<'_>,
     ) -> (RunOutcome, String, Usage) {
         let DriveOutcome {
@@ -553,6 +586,8 @@ impl Session {
             }
             sink.emit(SessionEvent::RunAborted {
                 output: output.clone(),
+                started_at_ms,
+                completed_at_ms: crate::ids::now_unix_ms(),
             });
             // The abort SITE (the command link, or the host's death
             // watcher, or a checkout) already discarded the
@@ -563,6 +598,9 @@ impl Session {
         } else if let Some(failure) = failure {
             sink.emit(SessionEvent::RunFailed {
                 message: failure.to_string(),
+                kind: run_failure_kind(&failure).to_string(),
+                started_at_ms,
+                completed_at_ms: crate::ids::now_unix_ms(),
             });
             outcome = RunOutcome::Failed;
         }
@@ -570,6 +608,15 @@ impl Session {
             hub.clear_pending();
         }
         (outcome, output, usage)
+    }
+}
+
+/// The `run_failed` kind for a drive failure: the provider stream
+/// (the class every mid-run error is) or the engine residual.
+fn run_failure_kind(failure: &SessionError) -> &'static str {
+    match failure {
+        SessionError::Prompt(_) => tabit_protocol::RunFailedKind::PROVIDER,
+        _ => tabit_protocol::RunFailedKind::ENGINE,
     }
 }
 

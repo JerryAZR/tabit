@@ -210,11 +210,12 @@ through bash (`ls` deleted with the ruling). **All four shipped**
 (2026-09) — `read` (paging + truncation module), `write` (overwrite
 flag, parent creation, atomic store), `edit` (exact-match, partial
 application, tests-first), `bash` (registration-time Git-for-Windows
-detection, tail-truncate + spill). `ask_user` rides along as frontend
-interaction-test scaffolding — **removed before shipping** (owner
-ruling: it exists to exercise the interaction capability, not as a
-product tool). Permission/approval rides on the existing hook system
-(as a first-party extension — see item 9).
+detection, tail-truncate + spill). `ask_user` rode along as frontend
+interaction-test scaffolding and was **removed 2026-09** per its
+ruling (it existed to exercise the interaction capability, not as a
+product tool; `gate-ext` exercises it e2e now). Permission/approval
+rides on the existing hook system (as a first-party extension — see
+item 9).
 
 **Write rulings (2026-09):** `write(path, content, overwrite?)` —
 creates freely; overwrites only with `overwrite: true` (the model

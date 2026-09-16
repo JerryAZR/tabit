@@ -1,0 +1,126 @@
+== cargo fmt --check ==
+Diff in \\?\C:\Users\Jerry\Projects\agents\tabit\crates\tabit\src\main.rs:491:
+         }
+         // The host's session catalog and creations are frontend
+         // concerns; print mode is a single-session consumer.
+[31m-        SessionEvent::SessionsAvailable { .. }
+[0m[31m-        | SessionEvent::SessionOpened { .. } => {}
+[0m[32m+        SessionEvent::SessionsAvailable { .. } | SessionEvent::SessionOpened { .. } => {}
+[0m         // Non-terminal error conditions (startup degradations,
+         // persistence): stderr is the human surface in print mode —
+         // stdout stays the answer channel.
+Diff in \\?\C:\Users\Jerry\Projects\agents\tabit\crates\tabit-gui\src\reducer.rs:455:
+                 // `new_session` — it gains a row and the view
+                 // switches; a brand-new session is empty, so the
+                 // clean slate IS its state.
+[31m-                if *id != self.active
+[0m[31m-                    && !self.sessions.iter().any(|row| row.id == *id)
+[0m[31m-                {
+[0m[32m+                if *id != self.active && !self.sessions.iter().any(|row| row.id == *id) {
+[0m                     self.sessions.push(SessionRow {
+                         id: id.clone(),
+                         created_at: String::new(),
+Diff in \\?\C:\Users\Jerry\Projects\agents\tabit\crates\tabit-gui\src\reducer.rs:734:
+             }
+             // Consumed by the backend-level fold / the pre-dispatch arm;
+             // unreachable on the active-stream path.
+[31m-            SessionEvent::SessionsAvailable { .. }
+[0m[31m-            | SessionEvent::SessionOpened { .. } => {}
+[0m[32m+            SessionEvent::SessionsAvailable { .. } | SessionEvent::SessionOpened { .. } => {}
+[0m             // The compaction bracket (v7): an interim no-op — the
+             // redesign worktree owns the real rendering (master-side
+             // GUI changes stay minimal until it lands).
+Diff in \\?\C:\Users\Jerry\Projects\agents\tabit\crates\tabit-protocol\src\protocol_tests.rs:182:
+     match serde_json::from_str::<ServerFrame>(line).expect("the unstamped line parses") {
+         ServerFrame::Event(frame) => {
+             assert_eq!(frame.stream, None);
+[31m-            assert!(matches!(frame.event, SessionEvent::Error { ref message, .. } if message.contains("019a")));
+[0m[32m+            assert!(
+[0m[32m+                matches!(frame.event, SessionEvent::Error { ref message, .. } if message.contains("019a"))
+[0m[32m+            );
+[0m         }
+         other => panic!("the event variant, got {other:?}"),
+     }
+Diff in \\?\C:\Users\Jerry\Projects\agents\tabit\crates\tabit-session\src\endpoint_tests.rs:577:
+ 
+ /// Read frames until one matches `want`; returns it (startup
+ /// announcements and unrelated streams pass through unread).
+[31m-async fn until_event(
+[0m[31m-    handle: &mut SessionHost,
+[0m[31m-    want: impl Fn(&SessionEvent) -> bool,
+[0m[31m-) -> EventFrame {
+[0m[32m+async fn until_event(handle: &mut SessionHost, want: impl Fn(&SessionEvent) -> bool) -> EventFrame {
+[0m     tokio::time::timeout(Duration::from_secs(5), async {
+         loop {
+             let frame = handle
+Diff in \\?\C:\Users\Jerry\Projects\agents\tabit\crates\tabit-session\src\endpoint_tests.rs:980:
+             // The boot's announcement and the startup catalog precede
+             // the pass; session-level announcements are not pass
+             // content.
+[31m-            SessionEvent::SessionOpened { .. }
+[0m[31m-            | SessionEvent::SessionsAvailable { .. } => {}
+[0m[32m+            SessionEvent::SessionOpened { .. } | SessionEvent::SessionsAvailable { .. } => {}
+[0m             SessionEvent::ReplayStarted { .. } => pass.push("started".to_string()),
+             SessionEvent::ReplayDone => {
+                 pass.push("done".to_string());
+Diff in \\?\C:\Users\Jerry\Projects\agents\tabit\crates\tabit-session\src\endpoint_tests.rs:1176:
+     // on the same stream: a fact about that session, whose id the
+     // announce just gave.
+     let boot = handle.info().session_id.clone();
+[31m-    let created = until_event(&mut handle, |event| {
+[0m[31m-        matches!(event, SessionEvent::SessionOpened { id, .. } if id != &boot)
+[0m[31m-    })
+[0m[32m+    let created = until_event(
+[0m[32m+        &mut handle,
+[0m[32m+        |event| matches!(event, SessionEvent::SessionOpened { id, .. } if id != &boot),
+[0m[32m+    )
+[0m     .await;
+     let created_id = match created.event {
+         SessionEvent::SessionOpened { id, .. } => id,
+Diff in \\?\C:\Users\Jerry\Projects\agents\tabit\crates\tabit-session\src\endpoint_tests.rs:1251:
+     // session's turn is an instant scripted text — the arrival order
+     // below is the proof of non-blocking).
+     link.send(SessionCommand::NewSession);
+[31m-    let created = match until_event(&mut handle, |event| {
+[0m[31m-        matches!(event, SessionEvent::SessionOpened { id, .. } if id != &boot)
+[0m[31m-    })
+[0m[32m+    let created = match until_event(
+[0m[32m+        &mut handle,
+[0m[32m+        |event| matches!(event, SessionEvent::SessionOpened { id, .. } if id != &boot),
+[0m[32m+    )
+[0m     .await
+     .event
+     {
+Diff in \\?\C:\Users\Jerry\Projects\agents\tabit\crates\tabit-session\src\endpoint_tests.rs:1404:
+         text: "run one".to_string(),
+     });
+     link.send(SessionCommand::NewSession);
+[31m-    let created = match until_event(&mut handle, |event| {
+[0m[31m-        matches!(event, SessionEvent::SessionOpened { id, .. } if id != &boot)
+[0m[31m-    })
+[0m[32m+    let created = match until_event(
+[0m[32m+        &mut handle,
+[0m[32m+        |event| matches!(event, SessionEvent::SessionOpened { id, .. } if id != &boot),
+[0m[32m+    )
+[0m     .await
+     .event
+     {
+Diff in \\?\C:\Users\Jerry\Projects\agents\tabit\crates\tabit-session\src\session\run.rs:207:
+             };
+         }
+         let stream = self.open_run(&run_token).await;
+[31m-        let mut driven = self.drive(stream, &run_token, run_started_ms, &mut sink).await;
+[0m[32m+        let mut driven = self
+[0m[32m+            .drive(stream, &run_token, run_started_ms, &mut sink)
+[0m[32m+            .await;
+[0m         driven = self.overflow_intercept(driven).await;
+         let (outcome, output, usage) = self.conclude(driven, run_started_ms, &mut sink);
+         RunSummary {
+
+== cargo clippy --workspace --all-targets ==
+(exit 0)
+
+== cargo test --workspace --no-fail-fast ==
+2188 passed, 0 failed, 7 ignored — 56 suites
+(73s, exit 0)
+

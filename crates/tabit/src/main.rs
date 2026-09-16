@@ -491,9 +491,7 @@ fn print_event(event: &SessionEvent) {
         }
         // The host's session catalog and creations are frontend
         // concerns; print mode is a single-session consumer.
-        SessionEvent::SessionsAvailable { .. }
-        | SessionEvent::SessionCreated { .. }
-        | SessionEvent::SessionOpened { .. } => {}
+        SessionEvent::SessionsAvailable { .. } | SessionEvent::SessionOpened { .. } => {}
         // Non-terminal error conditions (startup degradations,
         // persistence): stderr is the human surface in print mode —
         // stdout stays the answer channel.
@@ -705,7 +703,6 @@ fn child_tools() -> Vec<rig_agent::tool::DynamicTool> {
         dynamic_contextual(tabit_tools::Write),
         dynamic_contextual(tabit_tools::Edit),
         tabit_tools::shell_tool(),
-        dynamic_contextual(tabit_tools::AskUser),
         tabit_session::skills::skill_tool(),
     ]
 }
@@ -1152,7 +1149,7 @@ fn print_mode(args: &Args, registry: &ModelRegistry) -> Result<i32, String> {
                         outcome.input_tokens += input_tokens;
                         outcome.output_tokens += output_tokens;
                     }
-                    SessionEvent::RunFailed { message } => {
+                    SessionEvent::RunFailed { message, .. } => {
                         outcome.failed = Some(message.clone());
                         // A terminal closes every card (FRONTEND.md §8).
                         lock_armed(&armed).clear();

@@ -121,9 +121,9 @@ not exist):
 - `native:select_any` — given multiple choices, select zero or more,
   with optional free text. Request `{ title, body, options: [{ label,
   description? }], free_text }`, answer `{ selected: [label, ...],
-  text? }` (0..n). With zero options given this is the free-text ask;
-  **the `ask_user` tool is this template** (it may pass options when
-  the model offers choices).
+  text? }` (0..n). With zero options given this is the free-text ask
+  (the deleted `ask_user` tool was this template's reference consumer;
+  the permission gate and extension tools use it the same way).
 
 Both share the one `SelectAnswer` shape: `selected` echoes the chosen
 labels (exactly one for `select_one`), `text` carries the free-text

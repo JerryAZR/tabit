@@ -91,8 +91,8 @@ impl TabitApp {
     }
 
     /// Create a brand-new session in the backend — a command; the old
-    /// sessions stay open behind it (switch back any time). The
-    /// `session_created` event switches the view.
+    /// sessions stay open behind it (switch back any time). The new
+    /// session's `session_opened` announcement switches the view.
     fn new_session(&mut self) {
         if let Some(backend) = &self.backend {
             backend.new_session();

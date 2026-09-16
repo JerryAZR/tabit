@@ -16,7 +16,14 @@ use serde_json::Value;
 pub enum SessionEvent {
     /// The user aborted the run; `output` carries whatever assistant text
     /// had arrived before the abort.
-    RunAborted { output: String },
+    RunAborted {
+        /// Whatever assistant text had arrived before the abort.
+        output: String,
+        /// The run's start, milliseconds since the Unix epoch.
+        started_at_ms: u64,
+        /// The abort's time, milliseconds since the Unix epoch.
+        completed_at_ms: u64,
+    },
     /// A user message was accepted and recorded.
     UserMessage {
         /// The message text.
@@ -56,6 +63,11 @@ pub enum SessionEvent {
     TurnStarted {
         /// The announced turn id.
         id: String,
+        /// When the turn began, milliseconds since the Unix epoch.
+        /// Live runs stamp at emission; replay stamps from the turn
+        /// entry's recorded time (so a replayed bracket's two stamps
+        /// coincide — the entry is one moment).
+        started_at_ms: u64,
     },
     /// The turn closed by `TurnStarted { id }` committed: its content is
     /// final and durably recorded. A turn that ends in `TurnRetried`, a
@@ -63,6 +75,10 @@ pub enum SessionEvent {
     TurnCommitted {
         /// The announced id of the committed turn.
         id: String,
+        /// When the turn committed, milliseconds since the Unix epoch
+        /// (replay: the turn entry's recorded time — see
+        /// [`SessionEvent::TurnStarted`]'s stamp note).
+        completed_at_ms: u64,
     },
     /// A text delta from the assistant.
     TextDelta {
@@ -160,15 +176,27 @@ pub enum SessionEvent {
         usage: Usage,
         /// Whether every commit reached the disk at terminal time.
         durable: bool,
+        /// The run's start, milliseconds since the Unix epoch.
+        started_at_ms: u64,
+        /// The finish's time, milliseconds since the Unix epoch.
+        completed_at_ms: u64,
     },
-    /// An outer loop failed: a provider stream error, or a repair/reload
-    /// failure. Not a command outcome (commands cannot fail); the
-    /// mailbox keeps draining, so later messages still run. (Persist
-    /// degrade is not this: it rides `persist_degraded`/`persist_recovered`
-    /// errors and `run_finished.durable` — flag 8.)
+    /// An outer loop failed: a provider stream error, or an open/persist
+    /// failure (see `kind`). Not a command outcome (commands cannot
+    /// fail); the mailbox keeps draining, so later messages still run.
+    /// (Persist degrade is not this: it rides `persist_degraded`/
+    /// `persist_recovered` errors and `run_finished.durable` — flag 8.)
     RunFailed {
         /// The failure, in display form.
         message: String,
+        /// The failure's class (an open string, the [`ErrorKind`] law:
+        /// unknown kinds display generically). See [`RunFailedKind`]'s
+        /// well-known values.
+        kind: String,
+        /// The run's start, milliseconds since the Unix epoch.
+        started_at_ms: u64,
+        /// The failure's time, milliseconds since the Unix epoch.
+        completed_at_ms: u64,
     },
     /// An error condition that is not a run terminal — config trouble,
     /// persistence degrade, a failed `model`/`checkout` command. One
@@ -254,8 +282,8 @@ pub enum SessionEvent {
     },
     /// A session became visible in this backend: the boot session
     /// (emitted at spawn, ahead of the catalog and any replay), a
-    /// `new_session` (the same facts `session_created` always
-    /// carried), or an `open_session`. One announcement shape for
+    /// `new_session` (a fresh session, `resumed: false`), or an
+    /// `open_session`. One announcement shape for
     /// every path (2026-09 ruling — the handshake ack shrank to
     /// protocol-level facts so the boot session is announced exactly
     /// like every other; a frontend keeps ONE "session became
@@ -287,26 +315,6 @@ pub enum SessionEvent {
         /// `parent` is.
         #[serde(default, skip_serializing_if = "Option::is_none")]
         parent_call: Option<String>,
-    },
-    /// A `new_session` command succeeded: a fresh session exists in
-    /// this backend, empty (nothing replays). Unstamped,
-    /// backend-level — the payload carries the new session's id (the
-    /// optional-stream ruling); its selection notes, if any, follow
-    /// stamped with the new session's id. **Superseded by
-    /// `session_opened`** (2026-09: one "session became visible"
-    /// shape for every path — new sessions are announced with
-    /// `resumed: false`); kept for one version for in-flight
-    /// frontends, then deleted.
-    SessionCreated {
-        /// The new session's id.
-        id: String,
-        /// The new session's file path (materializes at its first
-        /// user message).
-        path: String,
-        /// The selection the new session starts with (a fresh
-        /// resolution — it can differ from the boot's, e.g. a resumed
-        /// boot model vs `default_model`).
-        model: ModelSelection,
     },
     /// The active model changed (a `ModelChange` log entry replayed, or
     /// — from slice 3 — a `model` command applied).
@@ -598,6 +606,32 @@ impl ErrorKind {
     pub const PERSIST_DEGRADED: &'static str = "persist_degraded";
     /// Persistence recovered: pending records reached the disk.
     pub const PERSIST_RECOVERED: &'static str = "persist_recovered";
+}
+
+/// The well-known `run_failed { kind }` values (an open string by the
+/// same law as [`ErrorKind`]: a backend may grow a kind, and a
+/// frontend that does not know it displays the message generically
+/// instead of failing). The taxonomy is what the failure paths
+/// actually produce — not the provider/budget/stopped sketch the v8
+/// contract once promised (that deferral's named dependency, the
+/// write-behind producer, shipped without the field; v10 lands the
+/// real one, the codex-review ruling 2026-09).
+pub struct RunFailedKind;
+
+impl RunFailedKind {
+    /// The provider stream errored mid-run (transport, auth at request
+    /// time, a typed server rejection) — the common case.
+    pub const PROVIDER: &'static str = "provider";
+    /// The run could not open: the selection validated against config
+    /// but could not be constructed in this environment. Retrying
+    /// needs a model switch, not a resend.
+    pub const MODEL: &'static str = "model";
+    /// The session log refused to flush before the run started (the
+    /// degraded-buffer guard) — the run never began.
+    pub const PERSIST: &'static str = "persist";
+    /// An internal failure class with no more specific name. Anything
+    /// unknown to the frontend displays generically anyway.
+    pub const ENGINE: &'static str = "engine";
 }
 
 #[cfg(test)]

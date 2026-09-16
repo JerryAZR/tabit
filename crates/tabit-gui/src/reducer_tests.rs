@@ -113,6 +113,8 @@ fn a_run_lifecycle_from_message_to_terminal() {
             ..Usage::default()
         },
         durable: true,
+        started_at_ms: 1_000,
+        completed_at_ms: 9_000,
     }));
     assert!(!state.running);
     assert_eq!(state.usage.total_tokens, 14);
@@ -221,6 +223,9 @@ fn a_second_turn_opens_a_new_group() {
         output: String::new(),
         usage: Usage::default(),
         durable: true,
+        started_at_ms: 1_000,
+
+        completed_at_ms: 9_000,
     }));
     // The next run's first delta opens a fresh turn.
     state.reduce(user("b"));
@@ -278,6 +283,11 @@ fn run_failure_and_abort_end_the_run() {
     state.reduce(user("a"));
     state.reduce(event(SessionEvent::RunFailed {
         message: "provider died".to_string(),
+        kind: "provider".to_string(),
+
+        started_at_ms: 1_000,
+
+        completed_at_ms: 9_000,
     }));
     assert!(!state.running);
     assert!(matches!(
@@ -289,6 +299,9 @@ fn run_failure_and_abort_end_the_run() {
     state.reduce(delta("partial"));
     state.reduce(event(SessionEvent::RunAborted {
         output: String::new(),
+        started_at_ms: 1_000,
+
+        completed_at_ms: 9_000,
     }));
     assert!(!state.running);
     // Aborted partial text stays visible.
@@ -479,12 +492,23 @@ fn every_run_terminal_closes_all_open_cards() {
             output: String::new(),
             usage: Usage::default(),
             durable: true,
+            started_at_ms: 1_000,
+
+            completed_at_ms: 9_000,
         },
         SessionEvent::RunAborted {
             output: String::new(),
+            started_at_ms: 1_000,
+
+            completed_at_ms: 9_000,
         },
         SessionEvent::RunFailed {
             message: "boom".to_string(),
+            kind: "provider".to_string(),
+
+            started_at_ms: 1_000,
+
+            completed_at_ms: 9_000,
         },
     ] {
         let mut state = GuiState::default();
@@ -546,6 +570,9 @@ fn abort_clears_pending_steers_with_the_cards() {
     assert_eq!(state.pending.len(), 1);
     state.reduce(event(SessionEvent::RunAborted {
         output: String::new(),
+        started_at_ms: 1_000,
+
+        completed_at_ms: 9_000,
     }));
     assert!(state.pending.is_empty(), "abort discards queued steers");
 }
@@ -745,6 +772,9 @@ fn background_events_update_liveness_but_never_the_transcript() {
             output: String::new(),
             usage: Usage::default(),
             durable: true,
+            started_at_ms: 1_000,
+
+            completed_at_ms: 9_000,
         },
     ));
     assert!(
@@ -831,19 +861,25 @@ fn switching_is_optimistic_and_the_replay_pass_rebuilds() {
 }
 
 #[test]
-fn session_created_switches_to_the_empty_new_session() {
+fn a_new_session_announcement_switches_to_the_empty_new_session() {
     let mut state = GuiState::default();
     state.reduce(ack());
     state.reduce(opened(true));
     state.reduce(user("work in the boot session"));
 
-    // Honest shape: the creation frame is backend-level (no stamp;
-    // the payload carries the new id).
-    state.reduce(backend(SessionEvent::SessionCreated {
-        id: "s9".to_string(),
-        path: "sessions/20260822_s9.jsonl".to_string(),
-        model: tabit_protocol::ModelSelection::new("local", "m9"),
-    }));
+    // Honest shape (v10): the new session's ONLY announcement is the
+    // stamped `session_opened` with `resumed: false`.
+    state.reduce(from(
+        "s9",
+        SessionEvent::SessionOpened {
+            id: "s9".to_string(),
+            path: "sessions/20260822_s9.jsonl".to_string(),
+            model: tabit_protocol::ModelSelection::new("local", "m9"),
+            resumed: false,
+            parent: None,
+            parent_call: None,
+        },
+    ));
     // The brand-new session is empty — no replay will come; the switch
     // alone is the whole state, and the facts follow.
     assert_eq!(state.active, "s9");
@@ -907,11 +943,17 @@ fn a_new_session_lands_even_while_the_current_one_runs() {
     state.reduce(user("work in progress"));
     assert!(state.running);
 
-    state.reduce(backend(SessionEvent::SessionCreated {
-        id: "s9".to_string(),
-        path: "sessions/20260822_s9.jsonl".to_string(),
-        model: tabit_protocol::ModelSelection::new("local", "m9"),
-    }));
+    state.reduce(from(
+        "s9",
+        SessionEvent::SessionOpened {
+            id: "s9".to_string(),
+            path: "sessions/20260822_s9.jsonl".to_string(),
+            model: tabit_protocol::ModelSelection::new("local", "m9"),
+            resumed: false,
+            parent: None,
+            parent_call: None,
+        },
+    ));
     assert_eq!(
         state.active, "s9",
         "creation switches immediately, mid-run or not"
@@ -941,6 +983,9 @@ fn a_new_session_lands_even_while_the_current_one_runs() {
             output: "done later".to_string(),
             usage: Usage::default(),
             durable: true,
+            started_at_ms: 1_000,
+
+            completed_at_ms: 9_000,
         },
     ));
     assert!(
@@ -1050,6 +1095,9 @@ fn a_replay_pass_never_marks_the_session_running() {
             output: String::new(),
             usage: Usage::default(),
             durable: true,
+            started_at_ms: 1_000,
+
+            completed_at_ms: 9_000,
         },
     ));
     assert!(!state.running);
@@ -1130,6 +1178,9 @@ fn cards_survive_a_view_switch_and_route_by_their_own_session() {
     // The terminal closes only its own session's cards.
     state.reduce(event(SessionEvent::RunAborted {
         output: String::new(),
+        started_at_ms: 1_000,
+
+        completed_at_ms: 9_000,
     }));
     assert!(state.interactions.is_empty());
 }
@@ -1184,6 +1235,9 @@ fn a_background_question_raises_attention_and_dies_with_its_run() {
         "s2",
         SessionEvent::RunAborted {
             output: String::new(),
+            started_at_ms: 1_000,
+
+            completed_at_ms: 9_000,
         },
     ));
     assert!(
@@ -1203,6 +1257,9 @@ fn a_checkout_pass_rebuilds_the_transcript_and_liveness_stays_settled() {
         output: "first answer".to_string(),
         usage: Usage::default(),
         durable: true,
+        started_at_ms: 1_000,
+
+        completed_at_ms: 9_000,
     }));
     state.reduce(user("two"));
     state.reduce(delta("second answer"));
@@ -1210,6 +1267,9 @@ fn a_checkout_pass_rebuilds_the_transcript_and_liveness_stays_settled() {
         output: "second answer".to_string(),
         usage: Usage::default(),
         durable: true,
+        started_at_ms: 1_000,
+
+        completed_at_ms: 9_000,
     }));
     assert_eq!(state.transcript.len(), 4);
 
@@ -1261,6 +1321,9 @@ fn a_failed_checkout_surfaces_as_an_error_notice() {
         output: String::new(),
         usage: Usage::default(),
         durable: true,
+        started_at_ms: 1_000,
+
+        completed_at_ms: 9_000,
     }));
     state.reduce(event(SessionEvent::Error {
         kind: "checkout".to_string(),

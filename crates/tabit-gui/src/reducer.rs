@@ -63,8 +63,9 @@ pub struct Facts {
     pub resumed: bool,
 }
 
-/// One row of the session switcher: the backend's catalog (`sessions_
-/// available`, `session_created`) plus the liveness this window tracks
+/// One row of the session switcher: the backend's catalog
+/// (`sessions_available`, plus a `new_session`'s `session_opened`) and
+/// the liveness this window tracks
 /// from stamped events (background sessions keep running — the
 /// feature-in-one-review-in-another shape).
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -198,8 +199,9 @@ pub struct GuiState {
     pub phase: Phase,
     pub facts: Option<Facts>,
     /// The stream the transcript renders — the active session's id
-    /// (set at the handshake, at `session_created`, and by the user's
-    /// switch). Events stamped otherwise update liveness only.
+    /// (set at the handshake, on a new session's `session_opened`,
+    /// and by the user's switch). Events stamped otherwise update
+    /// liveness only.
     pub active: String,
     /// Every known session: the startup catalog plus sessions created
     /// over this connection.
@@ -339,7 +341,8 @@ impl GuiState {
     }
 
     /// Point the transcript at `id` with a clean slate. One path for
-    /// the switcher and `session_created` (a brand-new session is
+    /// the switcher and a `new_session`'s announce (a brand-new
+    /// session is
     /// empty — nothing replays, the clean slate IS its state). Cards
     /// survive the switch — they are per-session live state, never
     /// replay content, and the freshly-viewed session's cards must
@@ -379,37 +382,11 @@ impl GuiState {
             .collect();
     }
 
-    /// A `new_session` succeeded. Today the only creator is the user's
-    /// own command, so the view switches to the fresh session; when
-    /// subagent children mint sessions (stage 4), this is the seam
-    /// that decides view-stealing versus background rows. The frame
-    /// carries the new session's facts — selection included.
-    fn session_created(&mut self, id: String, path: String, model: ModelSelection) {
-        // A brand-new session: empty (no replay comes), so the switch
-        // is complete the moment it happens.
-        self.sessions.push(SessionRow {
-            id: id.clone(),
-            created_at: String::new(),
-            entry_count: 0,
-            running: false,
-            attention: false,
-        });
-        if let Some(facts) = self.facts.as_mut() {
-            facts.session_id = id.clone();
-            facts.session_path = path;
-            facts.model = model;
-        }
-        self.switch_view(id, false);
-    }
-
     /// The backend-level fold: unstamped frames are connection facts,
     /// never session-attributed (the optional-stream ruling).
     fn reduce_backend_event(&mut self, event: SessionEvent) {
         match event {
             SessionEvent::SessionsAvailable { sessions } => self.replace_catalog(sessions),
-            SessionEvent::SessionCreated { id, path, model } => {
-                self.session_created(id, path, model)
-            }
             // Backend-level errors (routing failures, build/listing
             // failures): connection-level notices; there is no session
             // row to mark.
@@ -460,17 +437,35 @@ impl GuiState {
                 parent: None,
                 ..
             } => {
+                // The fresh-start note belongs to the BOOT announce
+                // only (the --continue spawn found nothing to resume);
+                // a `new_session`'s `resumed: false` is a deliberate
+                // creation, not a resume that came up empty.
+                let first_announce = self.facts.is_none();
                 self.facts = Some(Facts {
                     session_id: id.clone(),
                     session_path: path.clone(),
                     model: model.clone(),
                     resumed: *resumed,
                 });
-                // The GUI always spawns with `--continue`; a fresh
-                // start behind that ask gets one muted note (the
-                // pinned startup contract: an empty store is not an
-                // error, but it is not silent either).
-                if !resumed {
+                // v10 interim patch (the redesign worktree owns the
+                // real shape): a session that is neither the boot
+                // (active since the ack) nor a catalog row (an
+                // open target the switcher already switched to) is a
+                // `new_session` — it gains a row and the view
+                // switches; a brand-new session is empty, so the
+                // clean slate IS its state.
+                if *id != self.active && !self.sessions.iter().any(|row| row.id == *id) {
+                    self.sessions.push(SessionRow {
+                        id: id.clone(),
+                        created_at: String::new(),
+                        entry_count: 0,
+                        running: false,
+                        attention: false,
+                    });
+                    self.switch_view(id.clone(), false);
+                }
+                if !resumed && first_announce {
                     self.push_notice("no sessions to resume — started fresh".to_string(), false);
                 }
             }
@@ -678,7 +673,7 @@ impl GuiState {
                 // linger into the next run's pairing.
                 self.pending.clear();
             }
-            SessionEvent::RunFailed { message } => {
+            SessionEvent::RunFailed { message, .. } => {
                 self.running = false;
                 self.push_notice(message, true);
             }
@@ -737,9 +732,7 @@ impl GuiState {
             }
             // Consumed by the backend-level fold / the pre-dispatch arm;
             // unreachable on the active-stream path.
-            SessionEvent::SessionsAvailable { .. }
-            | SessionEvent::SessionCreated { .. }
-            | SessionEvent::SessionOpened { .. } => {}
+            SessionEvent::SessionsAvailable { .. } | SessionEvent::SessionOpened { .. } => {}
             // The compaction bracket (v7): an interim no-op — the
             // redesign worktree owns the real rendering (master-side
             // GUI changes stay minimal until it lands).

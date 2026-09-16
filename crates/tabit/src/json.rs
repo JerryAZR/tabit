@@ -1293,22 +1293,45 @@ id = "m"
         tx_in.send(message_line(&boot, "hello")).unwrap();
         await_line(&out, "run_finished").await;
 
-        // A second session, by command: session_created carries its id
-        // and stamps its stream.
+        // A second session, by command: its `session_opened` announce
+        // (v10 — one shape for every path) carries its id and stamps
+        // its own stream. The output buffer is append-only and the
+        // BOOT's announce line is forever the first `session_opened`
+        // line in it — scan for the first announce that is NOT the
+        // boot's own (`await_line` alone cannot express that).
         tx_in.send(r#"{"type":"new_session"}"#.to_string()).unwrap();
-        let created_line = await_line(&out, "session_created").await;
-        let created = match serde_json::from_str::<ServerFrame>(&created_line).expect("frame") {
-            ServerFrame::Event(EventFrame {
-                event: tabit_session::SessionEvent::SessionCreated { id, .. },
-                ..
-            }) => id,
-            other => panic!("expected session_created, got {other:?}"),
+        let deadline = tokio::time::Instant::now() + std::time::Duration::from_secs(5);
+        let (created, created_line) = loop {
+            let found = read_lines(&out)
+                .into_iter()
+                .filter(|line| line.contains("session_opened"))
+                .find_map(|line| match serde_json::from_str::<ServerFrame>(&line) {
+                    Ok(ServerFrame::Event(EventFrame {
+                        stream: Some(stream),
+                        event: tabit_session::SessionEvent::SessionOpened { id, .. },
+                        ..
+                    })) if id != boot => Some((id, stream, line)),
+                    _ => None,
+                });
+            match found {
+                Some((id, stream, line)) => {
+                    assert_eq!(
+                        stream.as_str(),
+                        id,
+                        "the announce is stamped with the new session's own stream"
+                    );
+                    break (id, line);
+                }
+                None => {
+                    assert!(
+                        tokio::time::Instant::now() < deadline,
+                        "the new session's announce must arrive before timeout"
+                    );
+                    tokio::time::sleep(std::time::Duration::from_millis(25)).await;
+                }
+            }
         };
         assert_ne!(created, boot, "the new session is a second stream");
-        // Backend-level: no stream field on the creation line; the
-        // payload names the session (the optional-stream ruling — this
-        // was the assertion that once pinned the faked stamp).
-        assert!(!created_line.contains("stream"));
         assert!(created_line.contains(&format!(r#""id":"{created}""#)));
 
         // The new session answers a message on its own stamp — the

@@ -434,6 +434,9 @@ impl SubprocessChild {
             }));
 
         let mut events: Vec<SessionEvent> = Vec::new();
+        // The synthetic terminal's bracket: the child's run began when
+        // this drive did.
+        let started_at_ms = crate::ids::now_unix_ms();
         loop {
             let cancelled = async {
                 match &token {
@@ -467,6 +470,9 @@ impl SubprocessChild {
                         // mapping the tool's Failed arm already keeps.
                         events.push(SessionEvent::RunFailed {
                             message: self.crash_report(),
+                            kind: tabit_protocol::RunFailedKind::ENGINE.to_string(),
+                            started_at_ms,
+                            completed_at_ms: crate::ids::now_unix_ms(),
                         });
                         return crate::session::RunSummary {
                             outcome: crate::session::RunOutcome::Failed,
@@ -485,12 +491,12 @@ impl SubprocessChild {
                             output.clone(),
                             engine_usage(*usage),
                         )),
-                        SessionEvent::RunAborted { output } => Some((
+                        SessionEvent::RunAborted { output, .. } => Some((
                             crate::session::RunOutcome::Aborted,
                             output.clone(),
                             Default::default(),
                         )),
-                        SessionEvent::RunFailed { message } => Some((
+                        SessionEvent::RunFailed { message, .. } => Some((
                             crate::session::RunOutcome::Failed,
                             message.clone(),
                             Default::default(),

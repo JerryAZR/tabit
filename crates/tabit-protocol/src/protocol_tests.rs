@@ -173,15 +173,18 @@ fn event_frames_serialize_flat_with_the_stream_beside_the_tag() {
 
 #[test]
 fn backend_level_lines_parse_as_events_with_no_stream() {
-    // The optional-stream ruling on the wire: creation carries no
-    // faked stamp, and the untagged ServerFrame still resolves it to
-    // the event variant (a GUI-side regression once left this shape
-    // unparsed-looking; the parse was always fine, the stamp was not).
-    let line = r#"{"type":"session_created","id":"019a","path":"C:/w/.tabit/sessions/x.jsonl","model":{"provider":"p","model":"m","thinking_level":null}}"#;
+    // The optional-stream ruling on the wire: a backend error carries
+    // no faked stamp, and the untagged ServerFrame still resolves it
+    // to the event variant (a GUI-side regression once left this
+    // shape unparsed-looking; the parse was always fine, the stamp
+    // was not).
+    let line = r#"{"type":"error","kind":"session","message":"no session with id `019a`"}"#;
     match serde_json::from_str::<ServerFrame>(line).expect("the unstamped line parses") {
         ServerFrame::Event(frame) => {
             assert_eq!(frame.stream, None);
-            assert!(matches!(frame.event, SessionEvent::SessionCreated { id, .. } if id == "019a"));
+            assert!(
+                matches!(frame.event, SessionEvent::Error { ref message, .. } if message.contains("019a"))
+            );
         }
         other => panic!("the event variant, got {other:?}"),
     }
@@ -235,6 +238,7 @@ fn sampled_event_variants_survive_the_frame_envelope() {
             stream: Some(StreamId::new("s1")),
             event: SessionEvent::TurnStarted {
                 id: "t1".to_string(),
+                started_at_ms: 1_000,
             },
         },
         EventFrame {
@@ -251,6 +255,7 @@ fn sampled_event_variants_survive_the_frame_envelope() {
             stream: Some(StreamId::new("s1")),
             event: SessionEvent::TurnCommitted {
                 id: "t1".to_string(),
+                completed_at_ms: 2_000,
             },
         },
         EventFrame {
@@ -271,18 +276,25 @@ fn sampled_event_variants_survive_the_frame_envelope() {
                 output: "done".to_string(),
                 usage: Usage::default(),
                 durable: true,
+                started_at_ms: 1_000,
+                completed_at_ms: 9_000,
             },
         },
         EventFrame {
             stream: Some(StreamId::new("s1")),
             event: SessionEvent::RunFailed {
                 message: "boom".to_string(),
+                kind: crate::RunFailedKind::PROVIDER.to_string(),
+                started_at_ms: 1_000,
+                completed_at_ms: 9_000,
             },
         },
         EventFrame {
             stream: Some(StreamId::new("s1")),
             event: SessionEvent::RunAborted {
                 output: "partial".to_string(),
+                started_at_ms: 1_000,
+                completed_at_ms: 9_000,
             },
         },
         EventFrame {
@@ -385,6 +397,9 @@ fn server_control_frames_round_trip_and_stay_distinct_from_events() {
         stream: Some(StreamId::new("s1")),
         event: SessionEvent::RunFailed {
             message: "boom".to_string(),
+            kind: crate::RunFailedKind::PROVIDER.to_string(),
+            started_at_ms: 1_000,
+            completed_at_ms: 9_000,
         },
     })
     .expect("serialize");

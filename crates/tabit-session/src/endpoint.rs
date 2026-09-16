@@ -750,26 +750,12 @@ impl HostLoop {
         };
         let id = session.id().to_string();
         let stream = StreamId::new(id.clone());
-        // The selection rides the frame — a fresh session resolves its
-        // own model, which can differ from the boot's, and nothing
+        // One announcement shape for every path (v10): the stamped
+        // `session_opened` carries `resumed: false` for a fresh
+        // session — the selection rides the frame because nothing
         // else on the wire will say so (the session is empty; no
-        // `model_changed` replays).
-        // Backend-level: the payload carries the new session's id (no
-        // faked stamp — the optional-stream ruling).
-        let _ = self.event_tx.send(EventFrame {
-            stream: None,
-            event: SessionEvent::SessionCreated {
-                id: id.clone(),
-                path: session.wire_path(),
-                model: session.selection(),
-            },
-        });
-        for note in notes {
-            let _ = self.event_tx.send(EventFrame {
-                stream: Some(stream.clone()),
-                event: SessionEvent::error_model(note),
-            });
-        }
+        // `model_changed` replays). Selection notes follow on the
+        // same stream, the same order `open_session` uses.
         let _ = self.event_tx.send(EventFrame {
             stream: Some(stream.clone()),
             event: SessionEvent::SessionOpened {
@@ -781,6 +767,12 @@ impl HostLoop {
                 parent_call: None,
             },
         });
+        for note in notes {
+            let _ = self.event_tx.send(EventFrame {
+                stream: Some(stream.clone()),
+                event: SessionEvent::error_model(note),
+            });
+        }
         self.add_worker(id, session);
     }
 

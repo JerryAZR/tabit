@@ -110,8 +110,17 @@ impl Projection {
     ) {
         let turn_id = entry.id.clone();
         self.current_turn = Some(turn_id.clone());
+        // Replay stamps both brackets with the entry's recorded time —
+        // the entry is one moment (the protocol's stamp note).
+        let at_ms = crate::ids::rfc3339_to_unix_ms(&entry.timestamp).unwrap_or_else(|| {
+            tracing::warn!(
+                "replay: entry `{turn_id}` carries an unparseable timestamp — stamped at epoch"
+            );
+            0
+        });
         events.push(SessionEvent::TurnStarted {
             id: turn_id.clone(),
+            started_at_ms: at_ms,
         });
 
         let Message::Assistant { content, .. } = message else {
@@ -192,7 +201,10 @@ impl Projection {
             input_tokens: usage.input_tokens,
             output_tokens: usage.output_tokens,
         });
-        events.push(SessionEvent::TurnCommitted { id: turn_id });
+        events.push(SessionEvent::TurnCommitted {
+            id: turn_id,
+            completed_at_ms: at_ms,
+        });
     }
 
     /// One committed tool result, belonging to the turn whose batch it

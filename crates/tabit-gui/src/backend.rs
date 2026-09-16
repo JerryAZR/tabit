@@ -216,7 +216,7 @@ impl Backend {
     }
 
     /// Create a fresh session in the backend (the outcome arrives as
-    /// `session_created`).
+    /// its stamped `session_opened`, `resumed: false`).
     pub fn new_session(&self) {
         let _ = self.writer.send(to_wire_line(&SessionCommand::NewSession));
     }

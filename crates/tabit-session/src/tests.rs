@@ -534,7 +534,7 @@ async fn announced_turn_ids_are_the_log_entry_ids() -> Result<(), SessionError> 
         .events
         .iter()
         .filter_map(|e| match e {
-            SessionEvent::TurnStarted { id } => Some(id.clone()),
+            SessionEvent::TurnStarted { id, .. } => Some(id.clone()),
             _ => None,
         })
         .collect();
@@ -549,7 +549,7 @@ async fn announced_turn_ids_are_the_log_entry_ids() -> Result<(), SessionError> 
         .events
         .iter()
         .filter_map(|e| match e {
-            SessionEvent::TurnCommitted { id } => Some(id.clone()),
+            SessionEvent::TurnCommitted { id, .. } => Some(id.clone()),
             _ => None,
         })
         .collect();
@@ -648,7 +648,7 @@ async fn truncated_turn_warns_and_the_run_still_completes() -> Result<(), Sessio
         .events
         .iter()
         .filter_map(|e| match e {
-            SessionEvent::TurnStarted { id } => Some(id.as_str()),
+            SessionEvent::TurnStarted { id, .. } => Some(id.as_str()),
             _ => None,
         })
         .collect();
@@ -797,7 +797,7 @@ async fn failed_run_still_records_the_user_message() -> Result<(), SessionError>
     assert!(
         run.events.iter().any(|e| matches!(
             e,
-            SessionEvent::RunFailed { message } if message.contains("boom")
+            SessionEvent::RunFailed { message, .. } if message.contains("boom")
         )),
         "the mock provider error surfaces as an event: {:?}",
         run.events
@@ -842,7 +842,7 @@ async fn malformed_tool_call_exhaustion_fails_the_run_and_leaves_the_session_ali
     assert!(
         run.events.iter().any(|e| matches!(
             e,
-            SessionEvent::RunFailed { message }
+            SessionEvent::RunFailed { message, .. }
                 if message.contains("repeatedly emitted tool calls with malformed arguments")
         )),
         "the exhaustion surfaces with its actionable message: {:?}",
@@ -1054,7 +1054,7 @@ async fn a_selection_that_cannot_construct_fails_the_run_at_open() -> Result<(),
     assert!(
         run.events.iter().any(|event| matches!(
             event,
-            SessionEvent::RunFailed { message } if message.contains("no tls")
+            SessionEvent::RunFailed { message, .. } if message.contains("no tls")
         )),
         "events: {:?}",
         run.events
@@ -1191,7 +1191,7 @@ async fn builder_options_reach_the_request_and_the_budget_enforces() -> Result<(
         .events
         .iter()
         .find_map(|e| match e {
-            SessionEvent::RunFailed { message } => Some(message.clone()),
+            SessionEvent::RunFailed { message, .. } => Some(message.clone()),
             _ => None,
         })
         .expect("a run_failed event");
@@ -1738,7 +1738,7 @@ async fn a_post_tool_stop_discards_the_pending_queue() -> Result<(), SessionErro
     assert_eq!(summary.outcome, crate::session::RunOutcome::Failed);
     assert!(
         summary.events.iter().any(
-            |e| matches!(e, SessionEvent::RunFailed { message } if message.contains("one echo"))
+            |e| matches!(e, SessionEvent::RunFailed { message, .. } if message.contains("one echo"))
         ),
         "the stop reason is the failure: {:?}",
         summary.events
@@ -2415,7 +2415,7 @@ async fn replay_re_emits_the_chain_with_live_ids_and_whole_texts() -> Result<(),
         .events
         .iter()
         .filter_map(|e| match e {
-            SessionEvent::TurnStarted { id } => Some(id.clone()),
+            SessionEvent::TurnStarted { id, .. } => Some(id.clone()),
             _ => None,
         })
         .collect();
@@ -2455,7 +2455,7 @@ async fn replay_re_emits_the_chain_with_live_ids_and_whole_texts() -> Result<(),
     let replay_turns: Vec<String> = replayed
         .iter()
         .filter_map(|e| match e {
-            SessionEvent::TurnStarted { id } => Some(id.clone()),
+            SessionEvent::TurnStarted { id, .. } => Some(id.clone()),
             _ => None,
         })
         .collect();
@@ -2502,7 +2502,7 @@ async fn replay_re_emits_the_chain_with_live_ids_and_whole_texts() -> Result<(),
     let commits: Vec<String> = replayed
         .iter()
         .filter_map(|e| match e {
-            SessionEvent::TurnCommitted { id } => Some(id.clone()),
+            SessionEvent::TurnCommitted { id, .. } => Some(id.clone()),
             _ => None,
         })
         .collect();

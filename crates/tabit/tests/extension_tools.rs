@@ -336,7 +336,7 @@ fn handshake(
                     });
                 }
                 SessionEvent::SkillsAvailable { skills: found } => skills = Some(found),
-                SessionEvent::RunFailed { message } => {
+                SessionEvent::RunFailed { message, .. } => {
                     panic!("the run failed: {message}");
                 }
                 _ => {}
@@ -397,7 +397,7 @@ fn a_model_call_runs_an_extension_tool_and_the_result_feeds_back() {
                     assert_eq!(output, "all done");
                     return;
                 }
-                SessionEvent::RunFailed { message } => panic!("the run failed: {message}"),
+                SessionEvent::RunFailed { message, .. } => panic!("the run failed: {message}"),
                 _ => {}
             },
             ServerFrame::Control(control) => panic!("unexpected control frame: {control:?}"),
@@ -492,7 +492,7 @@ fn the_gate_extension_gates_a_model_bash_call_over_the_wire() {
                     assert_eq!(output, "understood");
                     return;
                 }
-                SessionEvent::RunFailed { message } => panic!("the run failed: {message}"),
+                SessionEvent::RunFailed { message, .. } => panic!("the run failed: {message}"),
                 _ => {}
             },
             ServerFrame::Control(control) => panic!("unexpected control frame: {control:?}"),
@@ -535,7 +535,7 @@ fn a_package_on_the_disable_list_mounts_nowhere() {
                     assert_eq!(output, "ran alone");
                     return;
                 }
-                SessionEvent::RunFailed { message } => panic!("the run failed: {message}"),
+                SessionEvent::RunFailed { message, .. } => panic!("the run failed: {message}"),
                 _ => {}
             },
             ServerFrame::Control(control) => panic!("unexpected control frame: {control:?}"),
@@ -826,7 +826,7 @@ fn a_providers_fragment_relays_a_model_call_over_the_native_api() {
                         text: "failure-beat-2c91".to_string(),
                     }));
                 }
-                SessionEvent::RunFailed { message } => {
+                SessionEvent::RunFailed { message, .. } => {
                     assert!(failure_beat_sent, "beat 1 must succeed first");
                     assert!(message.contains("LM Studio answered"), "{message}");
                     return;
@@ -894,7 +894,7 @@ fn an_unreachable_upstream_fails_the_run_through_the_relay() {
     loop {
         match backend.next_frame() {
             ServerFrame::Event(frame) => {
-                if let SessionEvent::RunFailed { message } = frame.event {
+                if let SessionEvent::RunFailed { message, .. } = frame.event {
                     // The failure is model-visible and names the
                     // upstream — whichever arm fired (unreachable, or
                     // answered-with-an-error); the wording depends on
@@ -984,7 +984,7 @@ fn a_model_prompt_round_trips_through_the_session() {
                     assert_eq!(output, "all done");
                     return;
                 }
-                SessionEvent::RunFailed { message } => panic!("the run failed: {message}"),
+                SessionEvent::RunFailed { message, .. } => panic!("the run failed: {message}"),
                 _ => {}
             },
             ServerFrame::Control(control) => panic!("unexpected control frame: {control:?}"),

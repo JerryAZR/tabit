@@ -11,7 +11,7 @@ render a specific tool's `details` cargo, the interaction template
 payloads — lives in **TOOLS.md**, its companion since the shapes grew
 past one doc (2026-09 ruling).
 
-Wire shapes below are the **v8 contract**. v3 was the multi-session
+Wire shapes below are the **v10 contract**. v3 was the multi-session
 host — session-addressed commands, `new_session`/`open_session` on the
 channel, the `"main"` stream alias retired (the stream stamp is the
 session id). v4 made backend-level frames **unstamped** (§6) and
@@ -19,7 +19,10 @@ generalized interaction requests to `ui_type` + opaque payloads (§8).
 v7 shipped compaction (§5/§6); v8 added the `skills_available`
 startup announcement (§6); v9 added `extensions_available` — the
 extension catalog with provenance and the load-time conflict reports
-(§6). Each version landed as one
+(§6); v10 deleted the `session_created` interim (`session_opened`
+with `resumed: false` is the one announcement), typed `run_failed`
+with a `kind`, and put Unix-ms timestamps on the turn brackets and
+run terminals. Each version landed as one
 protocol-version bump with no compatibility period; always check the
 ack's `protocol_version`. (`tabit --list` prints a human table —
 there is no JSON listing edge.)
@@ -97,11 +100,11 @@ size limit** — tool output can be large; buffer accordingly.
 ← {"type":"replay_done","stream":"019…"}
 → {"type":"message","session":"019…","text":"who are you?"}
 ← {"type":"user_message","stream":"019…","entry_id":"019…","text":"who are you?"}
-← {"type":"turn_started","stream":"019…","id":"019…"}
+← {"type":"turn_started","stream":"019…","id":"019…","started_at_ms":1763312345678}
 ← {"type":"text_delta","stream":"019…","turn_id":"019…","text":"I'm "}
 ← {"type":"text_delta","stream":"019…","turn_id":"019…","text":"tabit."}
-← {"type":"turn_committed","stream":"019…","id":"019…"}
-← {"type":"run_finished","stream":"019…","output":"I'm tabit.","usage":{…},"durable":true}
+← {"type":"turn_committed","stream":"019…","id":"019…","completed_at_ms":1763312347890}
+← {"type":"run_finished","stream":"019…","output":"I'm tabit.","usage":{…},"durable":true,"started_at_ms":1763312345000,"completed_at_ms":1763312348000}
 ```
 
 The example's send lands while the session is idle (after
@@ -114,7 +117,7 @@ sit next to `stream`. The `stream` stamp is the **session id** that
 produced the event (the boot session's id is in the ack) — the
 `"main"` alias is gone. Events from several open sessions interleave
 on the connection; attribute by stamp. A frame with **no `stream`** is
-a backend-level fact (§6 — the catalog, `session_created`, session
+a backend-level fact (§6 — the catalog, session
 errors): fold it connection-level, never session-attributed. **Route
 frames by stamp** (render the sessions you are viewing, ignore the
 rest) and **skip unknown event `type`s** — both are
@@ -217,8 +220,7 @@ value, switch on `type` when recognized) and log the rest.
 All commands are total — there is no rejection. Outcomes are events.
 Session-scoped commands **always name their session** (the boot id is
 in the ack; sessions you learn from `sessions_available`/
-`session_created`, **and subagent children from their
-`session_opened`**). A command naming an unknown or unloaded session
+`session_opened` — subagent children included). A command naming an unknown or unloaded session
 yields `error { kind: session }` — an **unstamped, backend-level**
 frame (the routing failure belongs to no session; the message names
 the id — §6).
@@ -238,7 +240,7 @@ a frame.
 |---|---|---|
 | `message { session, text }` | any time | idle: starts a run — acknowledged directly by `user_message` (milliseconds; no queued event — nothing waits); running: steers at the next turn boundary, acknowledged by `message_queued { id, text }`. |
 | `abort { session }` | any time | running: preempts (`run_aborted`); discards messages queued at abort time (`messages_discarded`, omitted when none) **and any pending checkout** (§7 — no `checked_out` follows it; reset pending-rewind UI here). **Subtree stop (v6):** aborting a session stops its in-flight subagent descendants (every descendant's terminal flushes on its own stream; instances are never destroyed) — the cascade rides the run token each tool already holds, and aborting a child by id stops that child's subtree and leaves the parent's run alive. Children with no active tool call (the future background mode) survive aborts. Post-abort messages queue normally and start the next run. Idle: no-op. |
-| `new_session` | any time | creates a fresh session (same config, tools, and `--model`/`--max-turns` as the boot); `session_created { id, path, model }` follows, unstamped and backend-level (the payload carries the id). Nothing replays (it is empty). Never waits on any session — lifecycle writes no session's file. |
+| `new_session` | any time | creates a fresh session (same config, tools, and `--model`/`--max-turns` as the boot); its `session_opened` follows — stamped with the new session's own stream, `resumed: false` (v10: one announcement shape for every path). Nothing replays (it is empty). Never waits on any session — lifecycle writes no session's file. |
 | `open_session { id }` | any time | loads the session if needed and streams a replay pass stamped with the id — the pass is the acknowledgment. Idempotent: an open session re-replays. Unknown id or unreadable file → unstamped, backend-level `error { kind: session }`. Creating, loading, and switching never wait on the session you are leaving; the one wait is the opened session's **own** in-flight run — its pass arrives at that run's terminal (its live streaming renders immediately; only committed history waits). |
 | `checkout { session, entry_id }` | any time | moves that session's chain to the entry (any entry in the file— an off-chain target is a branch switch); see §7. **On receipt:** the target is verified (unknown entry → immediate `error { kind: checkout }`, nothing else happens) and the still-pending messages are discarded (`messages_discarded`, handed back as drafts). The rewind itself: a run in flight is aborted first (`run_aborted` — the user rewinding has declared its continuation obsolete), then the rewind applies at the session's pause point; idle → applies immediately. |
 | `model { session, provider, model, thinking_level? }` | any time | switches that session's model — the **register write**, never a chain move (§7). A **state write at receive**: the ref is validated against config (unknown provider/model → immediate `error { kind: model }`, nothing moves), then the entry and the live selection land at once and `model_changed` follows immediately — even mid-run (a run in flight finishes untouched on the model it bound at run open; the next run uses the new one). Not intent: abort never touches it, rapid switches each land (last wins). Durability: no later than the next turn (the write-behind log's prompt barrier flushes the buffer — this switch included — before any turn starts); a hard death in the window loses the switch, and resume announces the register that survived. |
@@ -262,7 +264,7 @@ PROTOCOL.md note.
 `initialize_ack`, `initialize_rejected`, and `protocol_error` are
 unstamped control frames; everything else is an event — stamped when
 a session produced it, **unstamped when the backend did** (the
-catalog, `session_created`, and every `kind: session` error — fold
+catalog, and every `kind: session` error — fold
 those connection-level).
 
 **Queueing and transcript**
@@ -272,7 +274,7 @@ those connection-level).
 | `message_queued` | `id`, `text` | a `message` accepted while a run is live (a steer that waits). `id` is the message's entry id, minted here. Idle sends never produce this event. |
 | `user_message` | `entry_id`, `text` | the message drains into a run (opening batch or steer boundary) and becomes history. Consecutive `user_message`s = an opening batch. |
 | `messages_discarded` | `messages: [{ id, text }]` | a clear site: abort (what was queued at abort time — the notice is immediate, at the abort site, ahead of `run_aborted`) or checkout (what was submitted before the checkout; §7, ahead of `run_aborted` and `checked_out`). Omitted when nothing was pending. Salvage as drafts; the backend keeps no copy. |
-| `turn_started` | `id` | a model turn begins; `id` is the turn's entry id, minted here and reused at commit. |
+| `turn_started` | `id`, `started_at_ms` | a model turn begins; `id` is the turn's entry id, minted here and reused at commit. `started_at_ms` is the turn's start, Unix milliseconds (live runs stamp at emission; replay stamps from the turn entry's recorded time, so a replayed bracket's two stamps coincide). |
 | `text_delta` | `turn_id`, `text` | assistant text; appends within the turn. Full-text exactly once in replay. |
 | `reasoning_delta` | `turn_id`, `id`, `reasoning` | model reasoning; `id` correlates blocks within the turn (several may interleave; same-id deltas append). Full-text once per block id in replay. |
 | `tool_call` | `turn_id`, `name`, `call_id`, `internal_call_id`, `arguments` | the model issued a complete tool call, before execution. `arguments` is the raw JSON string, or `null` when unparseable. |
@@ -284,7 +286,7 @@ those connection-level).
 | `tool_result` | `turn_id`, `entry_id`, `name`, `internal_call_id`, `content`, `status`, `details?` | one tool body finished; its result committed. `content` is exactly the text the model saw — already capped at the source, failure text included; render it verbatim. `status` is structure only: `success` or `failed { exit_code? }`; the detail is in `content`, not `status`. `details`, when present, is derived presentation cargo owned by the tool named in `name` — dispatch on `name`, degrade to `content` when absent or unknown. The per-tool shapes are TOOLS.md's (today's producers: `edit`'s diff + outcomes, `bash`'s truncation/spill, `subagent`'s child-session facts). |
 | `completion_call` | `turn_id`, `input_tokens`, `output_tokens` | one model request finished; usage is final for it. |
 | `turn_truncated` | `turn_id` | the committed turn ended truncated: the provider cut generation at its output limit (`finish_reason: length`). Informational, never a failure — the run continues exactly as usual (steers drain into the next turn; the run may end normally). Show it as a note; a steer is how the user asks the model to go on. |
-| `turn_committed` | `id` | the turn is durable history. Same id as `turn_started`. |
+| `turn_committed` | `id`, `completed_at_ms` | the turn is durable history. Same id as `turn_started`; `completed_at_ms` is the commit's time, Unix milliseconds (replay: the entry's recorded time). |
 | `turn_retried` | `turn_id` | the turn was discarded before commit (e.g. malformed tool-call arguments); drop its provisional groups — a fresh `turn_started` follows. |
 | `native_item` | `item` (opaque JSON) | a provider-native output the backend does not model. **Live-only**: never replayed, never an anchor. Render or skip. |
 
@@ -307,9 +309,9 @@ consumes (its `details` cargo) is TOOLS.md's table of shapes.
 
 | event | payload | meaning |
 |---|---|---|
-| `run_finished` | `output`, `usage`, `durable` | the run completed. `output` is the **final turn's** text (your accumulated deltas are authoritative for everything else); `usage` is aggregated across the whole run (the per-request figures are the `completion_call`s). `durable: false` means the write-behind log still holds entries (a `persist_degraded` error explains; they flush on later commits — nag about disk space, don't fail). |
-| `run_aborted` | `output` | aborted. `output` is the final response's text **if it had arrived** — empty for a mid-stream abort. Do not rely on it: the uncommitted turn's text lives only in the deltas you accumulated. |
-| `run_failed` | `message` | the failure in display form (a provider/repair/reload failure — persist degrade is *not* this; it rides the persist kinds and `durable`). Pending messages are not cleared — they drain into the next run. (A ruled `kind` taxonomy — `provider` / `budget` / `stopped` — is not on the wire yet; branch on nothing but the message today.) |
+| `run_finished` | `output`, `usage`, `durable`, `started_at_ms`, `completed_at_ms` | the run completed. `output` is the **final turn's** text (your accumulated deltas are authoritative for everything else); `usage` is aggregated across the whole run (the per-request figures are the `completion_call`s). `durable: false` means the write-behind log still holds entries (a `persist_degraded` error explains; they flush on later commits — nag about disk space, don't fail). The timestamps are Unix milliseconds — the run's start and finish (the turn brackets carry per-turn times). |
+| `run_aborted` | `output`, `started_at_ms`, `completed_at_ms` | aborted. `output` is the final response's text **if it had arrived** — empty for a mid-stream abort. Do not rely on it: the uncommitted turn's text lives only in the deltas you accumulated. Timestamps as on `run_finished` (the abort's time is the completion). |
+| `run_failed` | `message`, `kind`, `started_at_ms`, `completed_at_ms` | the failure in display form, with its class in `kind` (an open string, the `error`-kind law: unknown values display generically). Well-known kinds: `provider` (the provider stream errored mid-run — transport, auth at request time, a typed rejection; the common case), `model` (the run could not open — the selection validates but cannot be constructed here; retry needs a model switch, not a resend), `persist` (the session log refused to flush before the run started — it never began), `engine` (the internal residual, incl. a subagent child process dying). Persist degrade is *not* this; it rides the persist kinds and `durable`. Pending messages are not cleared — they drain into the next run. |
 
 **Session navigation and configuration**
 
@@ -319,7 +321,6 @@ consumes (its `details` cargo) is TOOLS.md's table of shapes.
 | `skills_available` | `skills: [{ name, description, location, level }]` | **(v8)** once, right after `sessions_available`: every skill the four-source discovery merged (home `~/.agents`/`~/.tabit` + workspace `.agents`/`.tabit` skills dirs), the same facts the prompt catalog carries — `level` is `user` or `workspace` (which source won). **Unstamped, backend-level** (one process, one cwd, one skill set); only announced when at least one skill was discovered. Skill *invocation* is no new wire shape: the model calls the `skill` tool, an ordinary `tool_call`/`tool_result` pair on the asking session's stream. |
 | `extensions_available` | `extensions: [{ name, version, description?, dir, status, reason?, tools: [{ name, description }], hooks: [string] }]`, `conflicts: [{ kind, extension, tool, incumbent? }]` | **(v9)** once, right after `skills_available`: every discovered extension with its provenance (`dir`) and standing — `status` is `alive` or `dead` (a refused handshake, a failed scan, or death since; `reason` carries why). **Unstamped, backend-level** (one process, one extension host); only announced when at least one extension was discovered — a refusal counts as discovered. **A boot-time snapshot** (2026-09 ruling): a mid-run extension death does not re-announce — stderr carries the report and the catalog stands until the next backend start. `conflicts` are the boot's name-assembly reports: `kind: "replaces_core"` (an extension tool replaced the core tool of the same name — the signal is mandatory; how loudly you present it is your call) and `kind: "refused_peer"` (the newcomer was refused, `incumbent` names the extension that holds the name). Extension tool *invocation* is no new wire shape: an ordinary `tool_call`/`tool_result` pair, attributed by the model-facing name. |
 | `session_opened` | `id`, `path`, `model`, `resumed`, `parent?`, `parent_call?` | a session became visible in this backend — the boot (at spawn, right after the ack), a `new_session`, an `open_session`, **or a subagent child** (v5). **One announcement shape for every path** (2026-09 ruling — the ack carries protocol-level facts only; the boot is not a special case). Stamped with the session's own stream. Selection notes, if any, follow on the same stream. v5: `path` is **empty for an ephemeral session** (in memory only — nothing to open or replay; subagent children are ephemeral today), and `parent` names the spawning session for a subagent child — absent for every user-facing session. A frontend branches on `parent`: user sessions update their session facts, children render nested (or not at all) — a child announcement must never overwrite the active session's facts. The child's whole run (its `user_message`, deltas, `tool_call`s, terminal) streams on its own stamp; the spawner's transcript sees only the subagent `tool_call`/`tool_result` pair. `parent_call` (v7, additive) is the spawning tool call's `internal_call_id`: the announce pairs the child with the **exact** open `tool_call` event — exact under concurrent subagent calls, where arrival order cannot disambiguate. Absent whenever `parent` is. |
-| `session_created` | `id`, `path`, `model` | a `new_session` succeeded — **unstamped, backend-level** (the payload carries the id; no faked stamp). Its selection notes, if any, follow stamped with the new session's id. Nothing replays (the session is empty). **Superseded by `session_opened`** (kept one version for in-flight frontends, then deleted). |
 | `checked_out` | `entry_id`, `base_id` | checkout succeeded. `base_id` is `null` today: drop everything and rebuild from the replay pass that follows. A non-null `base_id` is the reserved suffix mode (keep through `base_id`, apply the pass) — treat any non-null value as "rebuild from the pass" and you stay correct. |
 | `model_changed` | `provider`, `model`, `thinking_level` | the session's **active model** — a session preference: the file's last `model_change`, latest in time wins (a rewind never moves it). Announced live whenever the session becomes visible: ahead of every replay pass (boot, `open_session`, re-replay, after `checked_out`) — idempotent, the value repeats — and at every `model` command (a state write at receive; §5). **Never inside a pass** (state is announced, not reconstructed). The ack's `model` is the boot session's register. |
 
@@ -598,24 +599,24 @@ interaction is the tool result — the answer or denial the model saw.
   the process's life (lazy loading bounds *startup*; LRU unload is
   deferred). There is no model-discovery command and no in-band
   catalog refresh: `sessions_available` is announced once at startup,
-  sessions created in-band announce themselves (`session_created`),
+  sessions created in-band announce themselves (`session_opened`),
   and sessions appearing on disk from elsewhere need a restart
   (`tabit --list`, a human table, exists for CLI inspection).
-- **No event timestamps.** Entries carry wall-clock times in the
-  session file; events carry none on the wire (§11).
+- **Event timestamps: the brackets carry them (v10).** `turn_started`/
+  `turn_committed` and the run terminals carry Unix-ms stamps (§6);
+  other events carry none — entries keep their wall-clock times in the
+  session file (§10).
 - **One consumer.** Events go to the single connected frontend; no
   fan-out, no second attach.
 
 ## 11. Open questions (known and unsettled)
 
-1. **Event timestamps.** Transcript UIs plausibly want per-entry
-   wall-clock times on `user_message`/`turn_committed` at least.
-2. **Backpressure.** What a stalled reader should experience — needed
+1. **Backpressure.** What a stalled reader should experience — needed
    before long-running GUI use.
-3. **Interaction edge semantics — settled with the permission
+2. **Interaction edge semantics — settled with the permission
    milestone (§8):** run terminals close every pending request; stale
    responses are logged no-ops; requests never replay.
-4. **Subagent streams.** Sibling `stream` ids and their event subset —
+3. **Subagent streams.** Sibling `stream` ids and their event subset —
    reserved, unspecified.
 
 Settled since the review: bad-flag exits stay
