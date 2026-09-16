@@ -92,8 +92,11 @@ never a forked child rule.
 ## Declaration: manifest for install facts, handshake for
 capabilities (2026-09)
 
-The manifest (`tabit.json`) carries install-time facts only — name,
-version, entry command + args, one-line description. Capabilities are
+The manifest (`tabit.json`) carries install-time facts only — name
+(the path relative to the root, so scoped names nest), version, the
+entry command + args (OPTIONAL: absent means a static package that
+never spawns — the install entry below), one-line description, and
+`requires` (name-only dependencies). Capabilities are
 declared live at the handshake (initialize → ack: tools with
 name/description/schema, hook points) — the initialize/ack pattern
 every tabit edge already uses. What the process serves is what it
@@ -220,17 +223,57 @@ stderr) — while a tool *execution* that dies or errors is the
 call's failure, model-visible. The pair of resolutions is the
 ruling; neither failure is silent.
 
-## Install, distribution, package layout (2026-09)
+## Install, distribution, package layout (2026-09; v1 design
+settled 2026-09)
 
 `tabit install npm:<package> | git:<repo> | path:<dir>`:
 
 - npm is the distribution substrate, accessed as plain registry HTTP
   (fetch metadata, fetch tarball, unpack) — no npm CLI, no Node at
   run time, no registry of our own. git shells to `git` (a machine
-  running a coding agent has it). `path:` serves local development.
-- Install places the package under `~/.tabit/extensions/<name>/` —
-  and it mounts (packages mount by default, the entry above);
-  `tabit extensions list/uninstall` manage it; update = reinstall.
+  running a coding agent has it). `path:` copies (local development
+  rides re-install or direct placement). A bare npm name installs
+  latest; `name@<exact>` pins. The registry base is injectable
+  (`$TABIT_NPM_REGISTRY`) so the e2e drives a fake, offline.
+- **Scoped npm names install from day one, by nesting**: a scope
+  directory (`@…`, itself never a package) holds its leaves, and the
+  identity invariant generalizes to *the manifest name equals the
+  package's path relative to the root* — `@scope/pkg` ↔
+  `<root>/@scope/pkg/`. No mangling; the scan's one new rule is
+  recursing into `@`-prefixed children.
+- **The directory is the truth; there is no local registry.** No
+  lockfile, no source tracking, no install database — each manifest
+  carries the facts a registry would duplicate, and hand-placed and
+  npm-installed packages are deliberately indistinguishable once on
+  disk. Update is `tabit install <source>` again (reinstall over the
+  name); every install stages, validates, then moves into place — a
+  failed install never leaves a half package.
+- `requires: ["a"]` — name-only dependencies (the task-6 amendment
+  to "dependency-free"): the installer pulls missing requirements by
+  npm name and refuses cycles; at load, an unmet requirement (not
+  installed, or disabled — "disabled is absent everywhere" makes it
+  unmet) refuses the package at the scan with its reason, **presence
+  not liveness** (an installed-but-dead requirement is the death
+  policy's business; requirements never reorder anything — nothing
+  links). Version ranges wait for the post-release versioning topic.
+- **`entry` is optional — a static package.** Absent: no process, no
+  handshake; the package's contributions are exactly the scan-driven
+  ones (skills tables, providers fragment, `requires` for install)
+  and it announces nothing (its skills attribute by location; a
+  static package runs no code, ever — its contributions are data
+  files). A declared-but-empty entry is still a broken manifest. A
+  *collection* is `requires` + no entry (optionally carrying skills
+  or a fragment — a curated bundle is a legitimate package).
+- `tabit extensions list` reads disk (marking disabled from
+  settings and static from the manifest); `uninstall` removes the
+  directory — **v1 refuses while direct dependents remain, naming
+  them** (one linear pass over the manifests; uninstall those
+  first). The confirmed transitive teardown and `autoremove`
+  (orphan sweep) are deferred follow-ups over the same facts.
+  Orphaned dependencies stay mounted until then.
+- No settings **writer**: disabling stays a hand-edit of
+  `settings.toml`; tabit writes nothing under `~/.tabit` except the
+  extensions root itself.
 - Pickup at the **next backend start** — no mid-run loading (the
   prompt byte-stability law; installing is the user's reload/cache
   decision). Same UX as pi's reload.
@@ -238,8 +281,8 @@ ruling; neither failure is silent.
 The package layout tabit standardizes — everything else is the
 package's business:
 
-    ~/.tabit/extensions/<name>/
-      tabit.json         # manifest: name, version, entry command
+    ~/.tabit/extensions/<name>/          # or @<scope>/<name>/
+      tabit.json         # manifest: name, version, entry?, requires?
       providers.toml     # optional fragment, merged at config load
       skills/            # optional; folds into the in-memory skills
                          # catalog at boot (no filesystem writes)
