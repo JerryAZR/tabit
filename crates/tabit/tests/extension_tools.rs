@@ -146,6 +146,14 @@ fn spawn_backend(stage: &Stage, extra_env: &[(&str, String)]) -> Backend {
     for (key, value) in extra_env {
         command.env(key, value);
     }
+    finish_spawn(command)
+}
+
+/// The common spawn tail: piped stdio, stderr drained into the test
+/// output (banners, extension reports, and any crash report must be
+/// visible when a scenario hangs or dies — an undrained pipe also
+/// blocks the backend once it fills), stdout as a line channel.
+fn finish_spawn(mut command: Command) -> Backend {
     let mut child = command
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
@@ -154,10 +162,6 @@ fn spawn_backend(stage: &Stage, extra_env: &[(&str, String)]) -> Backend {
         .expect("spawn tabit");
     let stdin = child.stdin.take().expect("stdin");
     let stdout = child.stdout.take().expect("stdout");
-    // Drain the backend's stderr into the test output: banners,
-    // extension reports, and any crash report must be visible when a
-    // scenario hangs or dies (an undrained pipe also blocks the
-    // backend once it fills).
     if let Some(stderr) = child.stderr.take() {
         std::thread::spawn(move || {
             use std::io::BufRead as _;
@@ -545,12 +549,14 @@ fn a_package_on_the_disable_list_mounts_nowhere() {
     }
 }
 
-/// The skill-shipping package: its `skills/` directory mounts into the
-/// (redirected) home's skills dir, the ordinary discovery announces
-/// it, and the extension's catalog entry carries the provenance.
+/// The static skill-shipping package (task 6's shape): NO entry, no
+/// process, no announcement — its `skills/` directory folds into the
+/// in-memory tables, the ordinary discovery announces the skill at
+/// its original package path, and the catalog carries nothing for
+/// the package itself.
 #[test]
-fn a_skill_shipping_package_mounts_its_skills_into_discovery() {
-    let stage = stage("skills", &[]);
+fn a_static_skills_package_mounts_without_a_process_or_announcement() {
+    let stage = stage("skills", &[("echoer", "tools-echo")]);
     let package = stage.extensions.join("skillship");
     std::fs::create_dir_all(package.join("skills/skillship-demo")).expect("skill dir");
     std::fs::write(
@@ -563,8 +569,7 @@ fn a_skill_shipping_package_mounts_its_skills_into_discovery() {
         serde_json::to_string(&json!({
             "name": "skillship",
             "version": "0.1.0",
-            "description": "the skills-only example package",
-            "entry": [workspace_bin("skillship-ext").display().to_string()],
+            "description": "the static skills-only package",
         }))
         .expect("manifest"),
     )
@@ -573,17 +578,15 @@ fn a_skill_shipping_package_mounts_its_skills_into_discovery() {
 
     let mut backend = spawn_backend(&stage, &[]);
     let (_session, catalog, skills) = handshake(&mut backend);
-    let extension = catalog
-        .extensions
-        .iter()
-        .find(|extension| extension.name == "skillship")
-        .expect("the package is mounted and announced");
-    assert_eq!(extension.status, "alive");
+    // The process package announces; the static one does not — the
+    // catalog carries exactly the echoer.
+    assert_eq!(catalog.extensions.len(), 1, "{:?}", catalog.extensions);
+    assert_eq!(catalog.extensions[0].name, "echoer");
 
     // The extension walker's entries ride the ordinary skills
     // announcement with their ORIGINAL package paths — in-memory
-    // tables, no filesystem mount; the location is the provenance,
-    // and it reads like any discovered skill.
+    // tables, no filesystem mount, no process; the location is the
+    // provenance, and it reads like any discovered skill.
     let skills = skills.expect("skills_available arrived");
     let skill = skills
         .iter()
@@ -596,6 +599,132 @@ fn a_skill_shipping_package_mounts_its_skills_into_discovery() {
     );
     let body = std::fs::read_to_string(&skill.location).expect("the entry's path reads");
     assert!(body.contains("The shipped body"), "{body}");
+}
+
+/// The task-6 load rule: a package whose `requires` names something
+/// not in the mounted set refuses at the scan and reports dead with
+/// the reason — presence, not liveness.
+#[test]
+fn an_unmet_requirement_refuses_at_boot_with_its_reason() {
+    let stage = stage("unmet", &[("echoer", "tools-echo")]);
+    let package = stage.extensions.join("needy");
+    std::fs::create_dir_all(&package).expect("dir");
+    std::fs::write(
+        package.join("tabit.json"),
+        serde_json::to_string(&json!({
+            "name": "needy",
+            "version": "0.1.0",
+            "entry": [workspace_bin("ext-double").display().to_string(), "hello"],
+            "requires": ["ghost"],
+        }))
+        .expect("manifest"),
+    )
+    .expect("manifest");
+    scripted_turns(&stage, &[("never".to_string(), sse_text("done"))]);
+
+    let mut backend = spawn_backend(&stage, &[]);
+    let (_session, catalog, _skills) = handshake(&mut backend);
+    let needy = catalog
+        .extensions
+        .iter()
+        .find(|extension| extension.name == "needy")
+        .expect("the refusal announces");
+    assert_eq!(needy.status, "dead");
+    let reason = needy.reason.as_deref().expect("the reason carries");
+    assert!(reason.contains("requires extension `ghost`"), "{reason}");
+    // The healthy sibling is untouched.
+    let echoer = catalog
+        .extensions
+        .iter()
+        .find(|extension| extension.name == "echoer")
+        .expect("the sibling stands");
+    assert_eq!(echoer.status, "alive");
+}
+
+/// The task-6 journey: the REAL `tabit install path:<dir>` places a
+/// package (into the redirected home's default root), then the REAL
+/// backend boots over that root and serves it.
+#[test]
+fn install_path_then_boot_serves_the_package() {
+    let dir = test_dir("install-journey");
+    // The source package: the double, in its own directory.
+    let source = dir.join("source/echoer");
+    std::fs::create_dir_all(&source).expect("dir");
+    std::fs::write(
+        source.join("tabit.json"),
+        serde_json::to_string(&json!({
+            "name": "echoer",
+            "version": "0.1.0",
+            "entry": [workspace_bin("ext-double").display().to_string(), "tools-echo"],
+        }))
+        .expect("manifest"),
+    )
+    .expect("manifest");
+
+    // The install: redirected home, so the default root is ours.
+    let home = dir.join("home");
+    std::fs::create_dir_all(&home).expect("home");
+    let install = std::process::Command::new(env!("CARGO_BIN_EXE_tabit"))
+        .arg("install")
+        .arg(format!("path:{}", source.display()))
+        .env("USERPROFILE", &home)
+        .env("HOME", &home)
+        .output()
+        .expect("run tabit install");
+    assert!(
+        install.status.success(),
+        "stdout: {}\nstderr: {}",
+        String::from_utf8_lossy(&install.stdout),
+        String::from_utf8_lossy(&install.stderr)
+    );
+    let root = home.join(".tabit").join("extensions");
+    assert!(root.join("echoer/tabit.json").is_file(), "placed");
+
+    // The boot over the installed root.
+    let server = MockServer::start();
+    let work = dir.join("work");
+    std::fs::create_dir_all(&work).expect("work");
+    let config = dir.join("providers.toml");
+    std::fs::write(
+        &config,
+        format!(
+            "[providers.p]\nbase_url = \"http://127.0.0.1:{}/v1\"\napi = \"openai-completions\"\n\n[[providers.p.models]]\nid = \"m\"\n",
+            server.port()
+        ),
+    )
+    .expect("config");
+    server.mock(move |when, then| {
+        when.method(httpmock::Method::POST)
+            .path("/v1/chat/completions");
+        then.status(200)
+            .header("Content-Type", "text/event-stream")
+            .body(sse_text("done"));
+    });
+    let mut backend = spawn_raw(&work, &root, &config, &home);
+    let (_session, catalog, _skills) = handshake(&mut backend);
+    let echoer = catalog
+        .extensions
+        .iter()
+        .find(|extension| extension.name == "echoer")
+        .expect("the installed package mounts");
+    assert_eq!(echoer.status, "alive");
+}
+
+/// The raw backend spawn the journey test needs: an arbitrary root
+/// and config, not the stage helper's own.
+fn spawn_raw(work: &Path, extensions_root: &Path, config: &Path, home: &Path) -> Backend {
+    let mut command = Command::new(env!("CARGO_BIN_EXE_tabit"));
+    command
+        .arg("--json")
+        .arg("--ephemeral")
+        .arg("--extensions")
+        .arg(extensions_root)
+        .current_dir(work)
+        .env("TABIT_CONFIG", config)
+        .env("TABIT_AUTH", config.with_file_name("auth.toml"))
+        .env("USERPROFILE", home)
+        .env("HOME", home);
+    finish_spawn(command)
 }
 
 /// The provider-relay package: its `providers.toml` fragment merges

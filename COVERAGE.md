@@ -464,6 +464,20 @@ re-measures against known intent rather than discovering it.
   (`a_model_prompt_round_trips_through_the_session`). Residue: the
   hard cap is a constant no mock observes (the mock ignores
   max_tokens); the empty-response guard arm in the stream fold.
+- Task 6 (install): the installer suite (10 tests, offline — httpmock
+  fake registry serving real gzipped-tarball fixtures, a locally
+  built git repository, path copies) covers every source, scoped
+  nesting, replace-over-existing, the requires matrix (pull,
+  skip-present, cycle-with-no-half-tree), stage cleanup on failure,
+  list marks, and both uninstall paths (refusal + scope tidy). The
+  manifest suite covers nesting/static/`enforce_requires`; the
+  binary's partition unit test covers static/no-launch/no-announce
+  and the disabled-requirement case; the e2e adds the real-binary
+  install→boot journey, the unmet-requires boot refusal, and the
+  static skills boot. Residue: the npm version-pin arm
+  (`name@exact`) resolves in the fake but no dedicated test drives
+  it; git clone failure paths surface git's stderr (one covered
+  arm).
 - The 2026-09 review-round remediation: the fleet-kill bug is pinned
   by the extended mute-sibling test (the healthy sibling must be
   Alive AND serve a call past the broken one's failure — the

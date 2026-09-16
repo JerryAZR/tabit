@@ -37,11 +37,6 @@ path = "src/bin/clash_b.rs"
 name = "gate-ext"
 path = "src/bin/gate.rs"
 
-# The task-4 roster: the skills-only package and the provider relay.
-[[bin]]
-name = "skillship-ext"
-path = "src/bin/skillship.rs"
-
 # Task 5's demo: the attribution showcase.
 [[bin]]
 name = "autotitle-ext"

@@ -1,0 +1,30 @@
+[package]
+name = "tabit-ext-install"
+version.workspace = true
+edition.workspace = true
+license = "MIT"
+description = "Tabit extension installation: npm/git/path sources, disk as the single truth."
+
+[lints]
+workspace = true
+
+[lib]
+name = "tabit_ext_install"
+path = "src/lib.rs"
+doctest = true
+
+[dependencies]
+# The npm channel is plain registry HTTP — metadata + tarball fetches
+# only (no npm CLI, no Node at run time). Blocking: the installer is
+# a CLI command, not an async surface.
+reqwest = { workspace = true, features = ["blocking"] }
+serde_json = { workspace = true }
+# npm tarballs are gzipped tar archives; unpack with the standard,
+# battle-tested readers.
+flate2 = "1.1"
+tar = "0.4.44"
+tabit-ext = { path = "../tabit-ext", version = "0.41.0" }
+thiserror = { workspace = true }
+
+[dev-dependencies]
+httpmock = { workspace = true }

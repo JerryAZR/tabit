@@ -80,7 +80,7 @@ fn a_name_that_does_not_match_its_dir_is_refused() {
     assert_eq!(found.len(), 1);
     match &found[0] {
         Discovered::Refused { reason, .. } => {
-            assert!(reason.contains("does not match its directory"));
+            assert!(reason.contains("does not match its path"));
         }
         Discovered::Package { .. } => panic!("mismatched name must refuse"),
     }
@@ -95,7 +95,9 @@ fn an_empty_entry_is_refused() {
         r#"{"name":"noentry","version":"1","entry":[]}"#,
     );
     match &manifest::scan(&root).remove(0) {
-        Discovered::Refused { reason, .. } => assert!(reason.contains("entry command is empty")),
+        Discovered::Refused { reason, .. } => {
+            assert!(reason.contains("declared but empty"), "{reason}")
+        }
         Discovered::Package { .. } => panic!("empty entry must refuse"),
     }
 }
@@ -126,4 +128,92 @@ fn a_dir_without_a_manifest_is_not_an_extension() {
 fn a_missing_root_is_an_empty_install() {
     let root = test_dir("absent").join("never-created");
     assert!(manifest::scan(&root).is_empty());
+}
+
+#[test]
+fn scoped_names_nest_under_their_scope_directory() {
+    let root = test_dir("scoped");
+    write_package(
+        &root,
+        "@scope/alpha",
+        r#"{"name":"@scope/alpha","version":"1","entry":["x"]}"#,
+    );
+    write_package(
+        &root,
+        "@scope/zeta",
+        r#"{"name":"@scope/zeta","version":"1","entry":["x"]}"#,
+    );
+    write_package(
+        &root,
+        "plain",
+        r#"{"name":"plain","version":"1","entry":["x"]}"#,
+    );
+    let found = manifest::scan(&root);
+    let names: Vec<String> = found
+        .iter()
+        .map(|f| f.manifest().expect("all scan in").name.clone())
+        .collect();
+    // Order is alphabetical over the full relative path: the scope
+    // sorts before the plain leaf, its leaves in their own order.
+    assert_eq!(names, vec!["@scope/alpha", "@scope/zeta", "plain"]);
+
+    // A leaf whose manifest forgets the scope refuses (the identity
+    // is the path, not just the leaf).
+    write_package(
+        &root,
+        "@other/leaf",
+        r#"{"name":"leaf","version":"1","entry":["x"]}"#,
+    );
+    let found = manifest::scan(&root);
+    match found.iter().find(|f| f.manifest().is_none()) {
+        Some(Discovered::Refused { reason, .. }) => {
+            assert!(reason.contains("does not match its path"), "{reason}");
+        }
+        _ => panic!("the scope-less leaf must refuse"),
+    }
+}
+
+#[test]
+fn an_absent_entry_is_a_static_package() {
+    let root = test_dir("static");
+    write_package(
+        &root,
+        "collection",
+        r#"{"name":"collection","version":"1","requires":["a","b"]}"#,
+    );
+    match &manifest::scan(&root).remove(0) {
+        Discovered::Package { manifest, .. } => {
+            assert!(manifest.is_static(), "no entry = static");
+            assert!(manifest.entry.is_none());
+            assert_eq!(manifest.requires, vec!["a".to_string(), "b".to_string()]);
+        }
+        Discovered::Refused { reason, .. } => panic!("static packages scan in: {reason}"),
+    }
+}
+
+#[test]
+fn unmet_requirements_refuse_by_presence_not_liveness() {
+    let root = test_dir("requires");
+    write_package(
+        &root,
+        "needy",
+        r#"{"name":"needy","version":"1","entry":["x"],"requires":["there"]}"#,
+    );
+    write_package(&root, "there", r#"{"name":"there","version":"1"}"#);
+
+    // Mounted set carries the requirement: needy scans in.
+    let mounted: std::collections::HashSet<String> = ["there".to_string()].into_iter().collect();
+    let found = manifest::enforce_requires(manifest::scan(&root), &mounted);
+    assert!(found[0].manifest().is_some(), "the requirement is present");
+
+    // The requirement is gone (disabled or uninstalled): needy
+    // refuses, naming it.
+    let mounted: std::collections::HashSet<String> = Default::default();
+    let found = manifest::enforce_requires(manifest::scan(&root), &mounted);
+    match &found[0] {
+        Discovered::Refused { reason, .. } => {
+            assert!(reason.contains("requires extension `there`"), "{reason}");
+        }
+        Discovered::Package { .. } => panic!("the unmet requirement must refuse"),
+    }
 }

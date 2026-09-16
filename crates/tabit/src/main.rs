@@ -65,6 +65,12 @@ struct Args {
     /// The installed-extension root (JSON mode; default
     /// `~/.tabit/extensions`).
     extensions: Option<PathBuf>,
+    /// `tabit install <source>` (task 6): the npm:/git:/path: source.
+    install: Option<String>,
+    /// `tabit extensions list`.
+    extensions_list: bool,
+    /// `tabit extensions uninstall <name>`.
+    extensions_uninstall: Option<String>,
     /// Positional project path — selects GUI mode (`tabit <path>`).
     path: Option<PathBuf>,
 }
@@ -84,6 +90,15 @@ usage: tabit -p <PROMPT>                  print mode: one prompt, one run
                                          --extensions <dir> selects the
                                          extension root (default
                                          ~/.tabit/extensions)
+       tabit install <npm:pkg|git:repo|path:dir>
+                                        install an extension package (npm as
+                                        plain registry HTTP, no npm CLI; scoped
+                                        names nest; missing requirements pull;
+                                        $TABIT_NPM_REGISTRY overrides the
+                                        registry; update = install again)
+       tabit extensions list             list installed extension packages
+       tabit extensions uninstall <name> remove one (refuses while other
+                                        installed packages still require it)
        tabit --list                      list this project's sessions
 
 bare `tabit` or `tabit <path>` launches the GUI detached (vscode-style:
@@ -115,10 +130,16 @@ enum Mode {
     Print,
     Json,
     Gui,
+    Install,
+    Extensions,
 }
 
 fn mode_of(args: &Args) -> Mode {
-    if args.list {
+    if args.install.is_some() {
+        Mode::Install
+    } else if args.extensions_list || args.extensions_uninstall.is_some() {
+        Mode::Extensions
+    } else if args.list {
         Mode::List
     } else if args.json {
         Mode::Json
@@ -136,6 +157,8 @@ impl Mode {
             Mode::Print => "print",
             Mode::Json => "JSON",
             Mode::Gui => "GUI",
+            Mode::Install => "install",
+            Mode::Extensions => "extensions",
         }
     }
 }
@@ -148,6 +171,11 @@ impl Mode {
 fn validate_mode(args: &Args) -> Result<Mode, String> {
     let mode = mode_of(args);
     let present = [
+        args.install.is_some().then_some("install <source>"),
+        args.extensions_list.then_some("extensions list"),
+        args.extensions_uninstall
+            .is_some()
+            .then_some("extensions uninstall <name>"),
         args.print_prompt.is_some().then_some("-p/--print"),
         args.rewind.is_some().then_some("--rewind"),
         args.session.is_some().then_some("--session"),
@@ -189,6 +217,8 @@ fn validate_mode(args: &Args) -> Result<Mode, String> {
             "--max-turns",
         ],
         Mode::Gui => &["<path>"],
+        Mode::Install => &["install <source>"],
+        Mode::Extensions => &["extensions list", "extensions uninstall <name>"],
     };
     if present.iter().any(|flag| !allowed.contains(flag)) {
         return Err(format!(
@@ -224,6 +254,9 @@ where
         tools: None,
         ephemeral: false,
         extensions: None,
+        install: None,
+        extensions_list: false,
+        extensions_uninstall: None,
         path: None,
     };
     let mut it = args;
@@ -290,6 +323,38 @@ where
                     .next()
                     .ok_or("--extensions needs a directory (see --help)")?;
                 parsed.extensions = Some(PathBuf::from(value));
+            }
+            "install" => {
+                if parsed.install.is_some()
+                    || parsed.extensions_list
+                    || parsed.extensions_uninstall.is_some()
+                {
+                    return Err(format!("one subcommand per run\n{USAGE}"));
+                }
+                let source = it.next().ok_or("install needs a source (see --help)")?;
+                parsed.install = Some(source);
+            }
+            "extensions" => {
+                if parsed.install.is_some()
+                    || parsed.extensions_list
+                    || parsed.extensions_uninstall.is_some()
+                {
+                    return Err(format!("one subcommand per run\n{USAGE}"));
+                }
+                match it.next().as_deref() {
+                    Some("list") => parsed.extensions_list = true,
+                    Some("uninstall") => {
+                        let name = it
+                            .next()
+                            .ok_or("extensions uninstall needs a package name (see --help)")?;
+                        parsed.extensions_uninstall = Some(name);
+                    }
+                    other => {
+                        return Err(format!(
+                            "extensions expects list or uninstall <name>, not {other:?}\n{USAGE}"
+                        ));
+                    }
+                }
             }
             other if other.starts_with('-') => {
                 return Err(format!("unknown flag `{other}`\n{USAGE}"));
@@ -813,6 +878,66 @@ fn run() -> Result<i32, String> {
             list_sessions(&store)?;
             Ok(0)
         }
+        Mode::Install => {
+            // The install command owns no config or sessions — the
+            // root and the registry are its whole world.
+            let source_text = args.install.clone().unwrap_or_default();
+            let source = tabit_ext_install::Source::parse(&source_text)?;
+            let root = install_root()?;
+            let registry = std::env::var("TABIT_NPM_REGISTRY")
+                .unwrap_or_else(|_| tabit_ext_install::DEFAULT_REGISTRY.to_string());
+            let installed = tabit_ext_install::Installer::new(root, registry).install(&source)?;
+            println!(
+                "installed: {} (pickup at the next backend start)",
+                installed.packages.join(", ")
+            );
+            Ok(0)
+        }
+        Mode::Extensions => {
+            let root = install_root()?;
+            let installer =
+                tabit_ext_install::Installer::new(&root, tabit_ext_install::DEFAULT_REGISTRY);
+            if args.extensions_list {
+                let disabled = tabit_config::SettingsConfig::load_default()
+                    .map(|settings| settings.disabled_extensions())
+                    .unwrap_or_default();
+                let listed = installer.list();
+                if listed.is_empty() {
+                    println!("no extensions installed under {}", root.display());
+                    return Ok(0);
+                }
+                for (listed, refused) in listed {
+                    match refused {
+                        Some(reason) => {
+                            println!("{:<24} BROKEN   {reason}", listed.name)
+                        }
+                        None => {
+                            let marks = if listed.is_static {
+                                "static"
+                            } else if disabled.contains(&listed.name) {
+                                "disabled"
+                            } else {
+                                "mounted"
+                            };
+                            let requires = if listed.requires.is_empty() {
+                                String::new()
+                            } else {
+                                format!(" (requires {})", listed.requires.join(", "))
+                            };
+                            println!(
+                                "{:<24} {:<9} v{} {marks}{requires}",
+                                listed.name, marks, listed.version
+                            );
+                        }
+                    }
+                }
+                return Ok(0);
+            }
+            let name = args.extensions_uninstall.clone().unwrap_or_default();
+            installer.uninstall(&name)?;
+            println!("uninstalled {name}");
+            Ok(0)
+        }
         Mode::Json => {
             // A fresh install has no providers.toml — perfectly
             // normal, and the most common first run. Fail gracefully:
@@ -1334,6 +1459,15 @@ fn host_wiring(
 /// (ruled 2026-09: children pick up extensions; the leaf law outlaws
 /// loading into a parent's process, not a child hosting its own
 /// set). Must run on the serving runtime (it spawns).
+/// The install target: the default extensions root only (task 6's
+/// ruling — `--extensions` is a backend test/dev override, not an
+/// install destination).
+fn install_root() -> Result<PathBuf, String> {
+    tabit_config::home_dir()
+        .map(|home| home.join(".tabit").join("extensions"))
+        .ok_or_else(|| "cannot resolve the home directory for the extensions root".to_string())
+}
+
 fn extension_root(args: &Args) -> Option<PathBuf> {
     args.extensions
         .clone()
@@ -1361,14 +1495,17 @@ fn boot_extensions(
     std::sync::Arc::new(supervisor)
 }
 
-/// The scan minus the disabled (item 9, task 4): what the host
-/// launches — every refusal plus the not-disabled packages — and the
-/// launched packages themselves (name + dir), the list the providers
-/// fragment merge and the skills tables apply to. Packages mount by
-/// default (install was the consent; disabling is the explicit act),
-/// and a disabled package is absent everywhere by design: not
-/// launched, not in the catalog, no fragments, no skills — the user's
-/// setting, not a failure, so it reports nowhere.
+/// The scan, shaped for boot (item 9, tasks 4+6): what the host
+/// LAUNCHES — every refusal plus the not-disabled PROCESS packages —
+/// and the MOUNTED packages themselves (name + dir), the list the
+/// providers fragment merge, the skills tables, and the requirement
+/// check apply to. Packages mount by default (install was the
+/// consent; disabling is the explicit act), and a disabled package
+/// is absent everywhere by design — including as a requirement
+/// (unmet). **Static packages** (no entry) mount but never launch
+/// and never announce: their contributions are exactly the
+/// scan-driven ones. Unmet `requires` become refusals (presence, not
+/// liveness — the mounted set is the truth, standing never is).
 struct Launchable {
     found: Vec<tabit_ext::manifest::Discovered>,
     packages: Vec<(String, PathBuf)>,
@@ -1378,21 +1515,48 @@ fn partition(
     found: Vec<tabit_ext::manifest::Discovered>,
     disabled: &std::collections::HashSet<String>,
 ) -> Launchable {
-    let mut launchable = Vec::new();
-    let mut packages = Vec::new();
+    let mut mounted = Vec::new();
+    let mut refusals = Vec::new();
     for found in found {
         match found {
             tabit_ext::manifest::Discovered::Package { dir, manifest } => {
                 if !disabled.contains(&manifest.name) {
-                    packages.push((manifest.name.clone(), dir.clone()));
-                    launchable.push(tabit_ext::manifest::Discovered::Package { dir, manifest });
+                    mounted.push(tabit_ext::manifest::Discovered::Package { dir, manifest });
                 }
+                // A disabled package is absent everywhere — not a
+                // refusal (the user's setting reports nowhere), just
+                // gone.
             }
             // Refusals always launch (as dead reports): a broken
             // package is loud, whatever the settings say.
-            refused => launchable.push(refused),
+            refused => refusals.push(refused),
         }
     }
+    // The requirement check runs over the mounted set: disabled or
+    // missing requirements are unmet, dead ones are not.
+    let mounted_names: std::collections::HashSet<String> = mounted
+        .iter()
+        .filter_map(|found| found.manifest().map(|m| m.name.clone()))
+        .collect();
+    let mounted = tabit_ext::manifest::enforce_requires(mounted, &mounted_names);
+    // Split by process-ness: static packages contribute scan facts
+    // only; process packages (and every refusal) reach the launch.
+    let mut launchable = refusals;
+    let mut packages = Vec::new();
+    for found in mounted {
+        match &found {
+            tabit_ext::manifest::Discovered::Package { dir, manifest } => {
+                packages.push((manifest.name.clone(), dir.clone()));
+                if !manifest.is_static() {
+                    launchable.push(found);
+                }
+            }
+            tabit_ext::manifest::Discovered::Refused { .. } => {
+                launchable.push(found);
+            }
+        }
+    }
+    launchable.sort_by(|a, b| a.dir().cmp(b.dir()));
     Launchable {
         found: launchable,
         packages,
@@ -1719,9 +1883,28 @@ mod tests {
                 manifest: Manifest {
                     name: name.to_string(),
                     version: "0.1.0".to_string(),
-                    entry: vec!["bin".to_string()],
+                    entry: Some(vec!["bin".to_string()]),
                     description: None,
+                    requires: Vec::new(),
                 },
+            }
+        }
+        fn static_package(name: &str, requires: &[&str]) -> Discovered {
+            Discovered::Package {
+                dir: PathBuf::from(format!("C:/ext/{name}")),
+                manifest: Manifest {
+                    name: name.to_string(),
+                    version: "0.1.0".to_string(),
+                    entry: None,
+                    description: None,
+                    requires: requires.iter().map(|r| r.to_string()).collect(),
+                },
+            }
+        }
+        fn refused(dir: &str) -> Discovered {
+            Discovered::Refused {
+                dir: PathBuf::from(format!("C:/ext/{dir}")),
+                reason: "invalid manifest".to_string(),
             }
         }
         let found = vec![
@@ -1769,18 +1952,55 @@ mod tests {
         // Everything disabled: nothing launches but the refusal.
         let mut all = HashSet::new();
         all.insert("alpha".to_string());
-        let none = partition(
-            vec![
-                package("alpha"),
-                Discovered::Refused {
-                    dir: PathBuf::from("C:/ext/broken"),
-                    reason: "invalid manifest".to_string(),
-                },
-            ],
-            &all,
-        );
+        let none = partition(vec![package("alpha"), refused("broken")], &all);
         assert!(none.packages.is_empty());
         assert_eq!(none.found.len(), 1);
+
+        // Static packages (task 6): mounted for scan facts and
+        // requirement presence, never launched, never announced.
+        let launchable = partition(
+            vec![package("alpha"), static_package("bundle", &["alpha"])],
+            &HashSet::new(),
+        );
+        assert_eq!(launchable.packages.len(), 2, "the static package mounts");
+        assert_eq!(
+            launchable.found.len(),
+            1,
+            "only the process package launches"
+        );
+        assert_eq!(
+            launchable.found[0].manifest().map(|m| m.name.clone()),
+            Some("alpha".to_string())
+        );
+
+        // An unmet requirement refuses — and the refusal announces
+        // (a static dependent with an unmet requirement reports dead).
+        let launchable = partition(vec![static_package("needy", &["ghost"])], &HashSet::new());
+        assert!(
+            launchable.packages.is_empty(),
+            "the refused package does not mount"
+        );
+        assert_eq!(
+            launchable.found.len(),
+            1,
+            "the refusal launches as a report"
+        );
+        match &launchable.found[0] {
+            Discovered::Refused { reason, .. } => {
+                assert!(reason.contains("requires extension `ghost`"), "{reason}");
+            }
+            _ => panic!("unmet requirements refuse"),
+        }
+
+        // A disabled requirement is unmet ("disabled is absent
+        // everywhere").
+        let mut disabled = HashSet::new();
+        disabled.insert("there".to_string());
+        let launchable = partition(
+            vec![package("there"), static_package("needy", &["there"])],
+            &disabled,
+        );
+        assert!(launchable.packages.is_empty());
     }
 
     #[test]
@@ -1809,6 +2029,32 @@ mod tests {
         assert!(config.provider("relay").is_some(), "the fragment landed");
         assert!(warnings.is_empty(), "{warnings:?}");
         let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn install_subcommands_parse_exclusively() {
+        let parsed = args(&["install", "npm:thing"]).expect("parses");
+        assert_eq!(parsed.install.as_deref(), Some("npm:thing"));
+        assert_eq!(mode_of(&parsed), Mode::Install);
+
+        let parsed = args(&["extensions", "list"]).expect("parses");
+        assert!(parsed.extensions_list);
+        assert_eq!(mode_of(&parsed), Mode::Extensions);
+
+        let parsed = args(&["extensions", "uninstall", "thing"]).expect("parses");
+        assert_eq!(parsed.extensions_uninstall.as_deref(), Some("thing"));
+
+        // The subcommands accept nothing else (and unknown actions
+        // name what was expected).
+        let error = args(&["install", "npm:x", "--json"]).expect_err("exclusive");
+        assert!(error.contains("do not combine"), "{error}");
+        let error = args(&["extensions", "bogus"]).expect_err("unknown action");
+        assert!(error.contains("expects list or uninstall"), "{error}");
+        assert!(args(&["install"]).is_err(), "install needs a source");
+        assert!(
+            args(&["extensions", "uninstall"]).is_err(),
+            "uninstall needs a name"
+        );
     }
 
     #[test]

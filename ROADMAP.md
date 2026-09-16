@@ -1032,15 +1032,15 @@ assistant.
 ### 9. Extensions
 
 **DESIGN SETTLED (2026-09, the discussion record lives in
-EXTENSIONS.md); implementation under way — tasks 1–5 shipped (the
+EXTENSIONS.md); implementation under way — tasks 1–6 shipped — the checklist is complete (the
 `crates/tabit-ext` host: discovery and the disable-list gate, the frozen
 pipe, supervision, the death policy, the tool lane, the hook lane,
 the skills tables; the engine-side
 `on::tool_result` + `HookStack::merge`; `crates/tabit-ext-sdk`: the
 guest dispatcher and the example packages, `gate-ext` included —
 the permission gate now lives there, `permission.rs` deleted,
-`lmstudio-ext` (the native-API provider relay), `skillship-ext`
-(the skills-only package), and `autotitle-ext` (the model_prompt
+`lmstudio-ext` (the native-API provider relay) and
+`autotitle-ext` (the model_prompt
 attribution demo) with them; the host-service envelope
 (`service_request`/`service_response`, the ask folded in as verb
 zero; `model_prompt` billed per extension) in `rig-agent`'s
@@ -1205,10 +1205,22 @@ shape:
    Deferred slice: the run-end hook point (`ENGINE.md` amendment,
    pause points are design events) — autotitle rides `tool_result`
    until it lands.
-6. **Install & management** — `tabit install npm:/git:/path:`
-   (npm as plain registry HTTP; v1 scope: dependency-free packages),
-   the disable list's management UX, `list`/`uninstall`. No trust
-   machinery (ruled 2026-09: placing the package is the consent).
+6. **Install & management** — *shipped* — `tabit install
+   npm:/git:/path:` in `crates/tabit-ext-install` (npm as plain
+   registry HTTP against `$TABIT_NPM_REGISTRY`, offline e2e against
+   a fake registry serving real tarball fixtures; git `clone --depth
+   1` with the repository metadata lifted out; path copies).
+   Scoped names install nested (`@scope/pkg` ↔
+   `<root>/@scope/pkg/`; name = path relative to root); stage-
+   validate-place installs never leave a half package; name-only
+   `requires` pull by npm name with cycle refusal, and unmet
+   requirements refuse at the scan (presence, not liveness);
+   `entry`-less static packages contribute scan facts only (the
+   skillship idle process died with the ruling); `list` marks
+   static/disabled/broken; `uninstall` refuses while direct
+   dependents remain (the transitive teardown and `autoremove`
+   defer). No trust machinery (ruled: placing the package is the
+   consent); no registry or lockfile — the directory is the truth.
 
 **Example extensions accompany the tasks (ruled 2026-09) — each demo
 is also the offline test vehicle.** The roster, mapped to the
@@ -1233,8 +1245,8 @@ checklist:
    `providers.toml` fragment — e2e across four processes (backend →
    relay → scripted native mock), the fragment the merged config's
    only provider, the model call relayed and translated; plus
-   `skillship` (`skillship-ext`), the skill-shipping package whose
-   `skills/` joins the catalog in-memory with its original path.
+   the static skills package — entry-less, no process, its `skills/`
+   joining the catalog in-memory at the original path.
 5. *shipped* — `autotitle` (`autotitle-ext`): a `tool_result` hook →
    one `model_prompt` per session → usage tagged with the extension
    identity (contract-proven with a fake host, the capability

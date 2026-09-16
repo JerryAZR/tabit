@@ -983,7 +983,13 @@ fn refuse(
 /// The entry command: first token names a file in the package dir
 /// when one is there, else resolves on the OS path (a runtime from
 /// PATH, a relative script — the package's declared business).
-fn resolve_entry(dir: &Path, entry: &[String]) -> (PathBuf, Vec<String>) {
+/// `Some` is the caller's invariant: static packages never reach the
+/// spawn (the binary's partition filters them before launch).
+fn resolve_entry(dir: &Path, entry: &Option<Vec<String>>) -> (PathBuf, Vec<String>) {
+    #[allow(clippy::expect_used)]
+    let entry = entry
+        .as_ref()
+        .expect("internal invariant violated: a static package was launched");
     #[allow(clippy::expect_used)]
     let first = entry
         .first()

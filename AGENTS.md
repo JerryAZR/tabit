@@ -60,6 +60,11 @@ Current workspace layout:
   contextual `#[rig_tool]`s (they read the session cwd and run token
   from the per-run `ToolContext`), erasable to DynamicTools (native
   only)
+- `crates/tabit-ext-install` — extension installation (ROADMAP item
+  9, task 6): npm (plain registry HTTP)/git/path sources,
+  stage-validate-place installs, name-only `requires` pulls, list,
+  and the refusal uninstall — the directory is the single truth (no
+  registry, no lockfile)
 - `crates/tabit-ext` — the extension host (ROADMAP item 9): manifest
   discovery (`tabit.json` under the extensions root), the frozen
   JSONL extension pipe (initialize/ack, the tool lane, the
@@ -77,11 +82,10 @@ Current workspace layout:
   bodies only; hand-rolled frames sharing no code with the host —
   the protocol doc's reference consumer. Ships the example
   extensions (`echo-ext`, `shadow-ext`, the clash pair, `gate-ext` —
-  the permission gate, moved out of core; `skillship-ext` — the
-  skill-shipping package; `lmstudio-ext` — the provider relay
-  speaking LM Studio's native REST API behind a `providers.toml`
-  fragment; `autotitle-ext` — the `model_prompt` attribution demo)
-  as its bins
+  the permission gate, moved out of core; `lmstudio-ext` — the
+  provider relay speaking LM Studio's native REST API behind a
+  `providers.toml` fragment; `autotitle-ext` — the `model_prompt`
+  attribution demo) as its bins
 - `crates/tabit-gui` — the egui frontend (`tabit-gui` binary; the
   `tabit` launcher detach-spawns it; reducer/view contract in ROADMAP
   item 7). Its `CHANGELOG.md` is the frontend protocol's changelog —

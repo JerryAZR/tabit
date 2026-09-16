@@ -224,7 +224,7 @@ call's failure, model-visible. The pair of resolutions is the
 ruling; neither failure is silent.
 
 ## Install, distribution, package layout (2026-09; v1 design
-settled 2026-09)
+settled 2026-09, shipped as `crates/tabit-ext-install`)
 
 `tabit install npm:<package> | git:<repo> | path:<dir>`:
 
