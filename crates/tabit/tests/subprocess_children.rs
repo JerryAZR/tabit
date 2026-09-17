@@ -630,6 +630,20 @@ async fn a_subprocess_child_boots_its_own_extension_host_and_serves_its_tools() 
             .header("content-type", "text/event-stream")
             .body(sse_answer("child done"));
     });
+    // The denied sibling (the per-invocation blacklist, ruled
+    // 2026-09): its task marker rides in a request that carries NO
+    // echo tool definition (`--without echo` removed the proxy from
+    // the child's full toolset) — the model is served a plain answer,
+    // discriminating against the served child's marker.
+    server.mock(|when, then| {
+        when.method(POST)
+            .path("/v1/chat/completions")
+            .body_includes("denied-task-8d21")
+            .body_excludes(r#""name":"echo""#);
+        then.status(200)
+            .header("content-type", "text/event-stream")
+            .body(sse_answer("denied child done"));
+    });
     let config_path = stage_child_config("child-ext", &server);
     #[allow(unsafe_code, clippy::missing_safety_doc)]
     unsafe {
@@ -675,7 +689,7 @@ id = "m"
         max_turns: 8,
         router: router.clone(),
         exe: PathBuf::from(env!("CARGO_BIN_EXE_tabit")),
-        extensions: ext_root,
+        extensions: ext_root.clone(),
     });
     let turns = vec![
         vec![
@@ -741,6 +755,53 @@ id = "m"
         child_echo.is_some(),
         "the child's model called the extension's tool — its host booted"
     );
+
+    // The deny crossing: the same child, `--without echo` — the
+    // extension proxy is gone from its toolset, so its request (which
+    // still carries the task marker) has no echo definition and the
+    // plain-answer arm serves it.
+    let deny_ctx = subagent::SpawnContext::new(
+        Arc::new(subagent::SubagentParts {
+            tools: Vec::new(),
+            max_turns: 8,
+            router: ChildRouter::shared(),
+            exe: PathBuf::from(env!("CARGO_BIN_EXE_tabit")),
+            extensions: ext_root,
+        }),
+        parent_id.clone(),
+        ModelSelection::new("p", "m"),
+        parent_cwd.clone(),
+        None,
+    );
+    let mut denied = deny_ctx
+        .spawn_subprocess()
+        .cwd(parent_cwd.clone())
+        .model(ModelSelection::new("p", "m"))
+        .max_turns(8)
+        .ephemeral(true)
+        .without(vec!["echo".to_string()])
+        .spawn()
+        .await
+        .expect("the denied child spawns");
+    let denied_summary = deny_ctx
+        .drive_subprocess(
+            &mut denied,
+            rig_agent::completion::Message::user("denied-task-8d21"),
+            None,
+        )
+        .await;
+    denied.wait_exit().await;
+    assert_eq!(
+        denied_summary.outcome,
+        tabit_session::RunOutcome::Completed,
+        "the denied child completed ({:?})",
+        denied_summary.output
+    );
+    assert_eq!(
+        denied_summary.output, "denied child done",
+        "the denied child's request carried no echo tool to call"
+    );
+
     #[allow(unsafe_code, clippy::missing_safety_doc)]
     unsafe {
         std::env::remove_var("TABIT_CONFIG");

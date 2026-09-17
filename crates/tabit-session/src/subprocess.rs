@@ -53,6 +53,7 @@ pub struct SubprocessBuilder {
     cwd: PathBuf,
     model: Option<ModelSelection>,
     tools: Option<Vec<String>>,
+    without: Option<Vec<String>>,
     ephemeral: bool,
     session: Option<PathBuf>,
     extensions: Option<PathBuf>,
@@ -78,6 +79,7 @@ impl SubprocessBuilder {
             cwd: ctx.parent_cwd().to_path_buf(),
             model: None,
             tools: None,
+            without: None,
             ephemeral: true,
             session: None,
             extensions: Some(ctx.parts().extensions.clone()),
@@ -108,6 +110,17 @@ impl SubprocessBuilder {
     /// startup.
     pub fn tools(mut self, names: Vec<String>) -> Self {
         self.tools = Some(names);
+        self
+    }
+
+    /// Tools the child must NOT run — the deny twin of
+    /// [`SubprocessBuilder::tools`], crossing as `--without`. Applied
+    /// child-side over the full toolset (core and extension proxies
+    /// alike): a spawner offering a read-write agent denies its own
+    /// delegate tool, so the child cannot recurse through it. An
+    /// unknown name fails the child loudly at startup.
+    pub fn without(mut self, names: Vec<String>) -> Self {
+        self.without = Some(names);
         self
     }
 
@@ -157,6 +170,7 @@ impl SubprocessBuilder {
             cwd,
             model,
             tools,
+            without,
             ephemeral,
             session,
             extensions,
@@ -186,6 +200,10 @@ impl SubprocessBuilder {
         if let Some(tools) = &tools {
             args.push("--tools".to_string());
             args.push(tools.join(","));
+        }
+        if let Some(without) = &without {
+            args.push("--without".to_string());
+            args.push(without.join(","));
         }
         if let Some(text) = &preamble {
             args.push("--preamble".to_string());

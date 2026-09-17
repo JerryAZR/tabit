@@ -61,6 +61,11 @@ struct Args {
     parent: Option<String>,
     parent_call: Option<String>,
     tools: Option<String>,
+    /// The deny twin of `--tools`: names removed from this process's
+    /// full toolset — core and extension proxies alike. The spawner's
+    /// per-invocation blacklist: a read-write agent denies its own
+    /// delegate tool so children cannot recurse through it.
+    without: Option<String>,
     ephemeral: bool,
     /// System prompt override — replaces the default preamble
     /// (identity + standing body); the environment block, AGENTS.md
@@ -90,7 +95,10 @@ usage: tabit -p <PROMPT>                  print mode: one prompt, one run
                                          child role adds: --parent <id> (the
                                          spawning session), --parent-call <id>
                                          (its tool call), --tools <a,b,..>
-                                         (an allow-list), --ephemeral (no
+                                         (an allow-list), --without <a,b,..>
+                                         (a deny list — removed from the
+                                         child's core AND extension
+                                         tools), --ephemeral (no
                                          file) — the subagent bridge's flags;
                                          --preamble <text> replaces the
                                          default preamble (identity/body);
@@ -196,6 +204,7 @@ fn validate_mode(args: &Args) -> Result<Mode, String> {
         args.parent.is_some().then_some("--parent"),
         args.parent_call.is_some().then_some("--parent-call"),
         args.tools.is_some().then_some("--tools"),
+        args.without.is_some().then_some("--without"),
         args.ephemeral.then_some("--ephemeral"),
         args.preamble.is_some().then_some("--preamble"),
         args.extensions.is_some().then_some("--extensions"),
@@ -215,6 +224,7 @@ fn validate_mode(args: &Args) -> Result<Mode, String> {
             "--parent",
             "--parent-call",
             "--tools",
+            "--without",
             "--ephemeral",
             "--preamble",
             "--extensions",
@@ -264,6 +274,7 @@ where
         parent: None,
         parent_call: None,
         tools: None,
+        without: None,
         ephemeral: false,
         preamble: None,
         extensions: None,
@@ -329,6 +340,12 @@ where
                     .next()
                     .ok_or("--tools needs a comma-separated list (see --help)")?;
                 parsed.tools = Some(value);
+            }
+            "--without" => {
+                let value = it
+                    .next()
+                    .ok_or("--without needs a comma-separated list (see --help)")?;
+                parsed.without = Some(value);
             }
             "--ephemeral" => parsed.ephemeral = true,
             "--preamble" => {
@@ -603,24 +620,60 @@ fn tabit_exe() -> Result<PathBuf, String> {
     std::env::current_exe().map_err(|e| format!("cannot resolve the tabit executable: {e}"))
 }
 
-/// Restrict the child toolset to an allow-list (the `--tools` flag). A
-/// typo'd name is a loud startup error listing what exists — a
-/// silently-emptied toolset would look like a broken child.
-fn filter_child_tools(
+/// The invocation's tool filter (`--tools` allow, `--without` deny),
+/// split and validated against the process's full candidate set —
+/// core and extension proxies alike. A name nothing offers is a loud
+/// startup error listing what exists: a typo'd filter that quietly
+/// kept or dropped the wrong tool would look like a broken agent.
+/// Allow first, then deny — the surviving set is
+/// allowed-and-not-denied.
+fn tool_filter(
+    args: &Args,
+    candidate: &[rig_agent::tool::DynamicTool],
+) -> Result<(Option<Vec<String>>, Vec<String>), String> {
+    let offered: Vec<&str> = candidate.iter().map(|tool| tool.name()).collect();
+    let split = |spec: &Option<String>, flag: &str| -> Result<Option<Vec<String>>, String> {
+        let Some(raw) = spec.as_deref() else {
+            return Ok(None);
+        };
+        let mut names = Vec::new();
+        for name in raw.split(',').map(str::trim).filter(|s| !s.is_empty()) {
+            if !offered.contains(&name) {
+                return Err(format!(
+                    "{flag}: unknown tool `{name}` — this process offers: {}",
+                    offered.join(", ")
+                ));
+            }
+            names.push(name.to_string());
+        }
+        Ok(Some(names))
+    };
+    Ok((
+        split(&args.tools, "--tools")?,
+        split(&args.without, "--without")?.unwrap_or_default(),
+    ))
+}
+
+/// Keep the tools the invocation's filter admits: allowed (when an
+/// allow-list crossed) and not denied. Pure name matching — both
+/// specs were validated against the full candidate set already, so
+/// subsets (the child core set behind `SubagentParts::tools`) filter
+/// without re-validation; a proxy-only name simply matches nothing
+/// here, which is correct (proxy shaping is the child's business,
+/// via the crossing flags).
+fn retain_filtered(
     tools: Vec<rig_agent::tool::DynamicTool>,
-    spec: &str,
-) -> Result<Vec<rig_agent::tool::DynamicTool>, String> {
-    // Spec splitting is the CLI's; the filter itself is the framework
-    // home's one implementation (subagent::filter_tools — the same
-    // filter the `subagent` tool's allow-list arg rides).
-    let wanted: Vec<String> = spec
-        .split(',')
-        .map(str::trim)
-        .filter(|s| !s.is_empty())
-        .map(str::to_string)
-        .collect();
-    tabit_session::subagent::filter_tools(&tools, &wanted)
-        .map_err(|error| format!("--tools: {error}"))
+    allow: &Option<Vec<String>>,
+    deny: &[String],
+) -> Vec<rig_agent::tool::DynamicTool> {
+    tools
+        .into_iter()
+        .filter(|tool| {
+            let name = tool.name();
+            allow.as_ref().is_none_or(|names| names.iter().any(|n| n == name))
+                && !deny.iter().any(|n| n == name)
+        })
+        .collect()
 }
 
 fn assemble_session(
@@ -658,8 +711,30 @@ fn assemble_session(
     // is enforced by omission). A child-role process (`--parent`)
     // mounts that toolset only: it does not spawn.
     let (children, parent_core) = core_sets(args)?;
+    // The process's candidate toolset: its core set plus the extension
+    // mount — replaced core tools unmount, the proxies join (one
+    // name, one tool, resolved at this assembly). Children resolve
+    // against their own core set (the child set): they boot their own
+    // hosts.
+    let candidate: Vec<rig_agent::tool::DynamicTool> = match extensions {
+        Some(mounted) => {
+            let replaced = mounted.replaced_core();
+            parent_core
+                .into_iter()
+                .filter(|tool| !replaced.iter().any(|name| name == tool.name()))
+                .chain(mounted.tools().iter().cloned())
+                .collect()
+        }
+        None => parent_core,
+    };
+    // The invocation's filter applies once, here, over the full
+    // candidate — `--tools`/`--without` shape extension proxies the
+    // same as core tools (a whitelisted read-only agent gets no
+    // extension write tools; a denied delegate tool cannot recurse).
+    let (allow, deny) = tool_filter(args, &candidate)?;
+    let mounted = retain_filtered(candidate, &allow, &deny);
     let subagents = std::sync::Arc::new(tabit_session::subagent::SubagentParts {
-        tools: children,
+        tools: retain_filtered(children, &allow, &deny),
         max_turns: args.max_turns.unwrap_or(tabit_session::DEFAULT_MAX_TURNS),
         router: child_router(),
         exe: tabit_exe()?,
@@ -688,21 +763,6 @@ fn assemble_session(
     })
     .subagents(subagents)
     .skills(skills);
-    // The process's toolset: its core set, plus the extension mount —
-    // replaced core tools unmount, the proxies join (one name, one
-    // tool, resolved at this assembly). Children resolve against
-    // their own core set (the child set): they boot their own hosts.
-    let mounted: Vec<_> = match extensions {
-        Some(mounted) => {
-            let replaced = mounted.replaced_core();
-            parent_core
-                .into_iter()
-                .filter(|tool| !replaced.iter().any(|name| name == tool.name()))
-                .chain(mounted.tools().iter().cloned())
-                .collect()
-        }
-        None => parent_core,
-    };
     for tool in mounted {
         builder = builder.dynamic_tool(tool);
     }
@@ -739,10 +799,12 @@ fn child_tools() -> Vec<rig_agent::tool::DynamicTool> {
 }
 
 /// The two core toolsets every assembly derives from: the child set
-/// (every coding tool, the `--tools` allow-list applied) and the
-/// parent set (the child set plus the subagent tool). The extension
-/// mount's conflict baseline is the parent set — exactly what the
-/// session would mount without extensions.
+/// (every coding tool) and the parent set (the child set plus the
+/// subagent tool). Pure derivation — the invocation's tool filter
+/// applies later, once, over the full candidate set (core plus
+/// extension proxies; see [`tool_filter`]). The extension mount's
+/// conflict baseline is the parent set — exactly what the session
+/// would mount without extensions.
 fn core_sets(
     args: &Args,
 ) -> Result<
@@ -752,10 +814,7 @@ fn core_sets(
     ),
     String,
 > {
-    let mut children = child_tools();
-    if let Some(spec) = &args.tools {
-        children = filter_child_tools(children, spec)?;
-    }
+    let children = child_tools();
     let mut parent = children.clone();
     if args.parent.is_none() {
         parent.push(tabit_session::subagent::subagent_tool());
@@ -1736,6 +1795,91 @@ mod tests {
 
     fn args(list: &[&str]) -> Result<Args, String> {
         parse_args_from(list.iter().map(|s| s.to_string()))
+    }
+
+    fn bare_args() -> Args {
+        Args {
+            print_prompt: None,
+            session: None,
+            continue_newest: false,
+            list: false,
+            model: None,
+            max_turns: None,
+            rewind: None,
+            json: false,
+            parent: None,
+            parent_call: None,
+            tools: None,
+            without: None,
+            ephemeral: false,
+            preamble: None,
+            extensions: None,
+            install: None,
+            extensions_list: false,
+            extensions_uninstall: None,
+            path: None,
+        }
+    }
+
+    fn named_tool(name: &'static str) -> rig_agent::tool::DynamicTool {
+        rig_agent::tool::DynamicTool::new(
+            name,
+            "a test tool",
+            serde_json::json!({"type": "object"}),
+            move |_ctx, _args| {
+                let output = name;
+                Box::pin(async move {
+                    Ok(rig_agent::tool::ToolOutput::text(output))
+                })
+            },
+        )
+    }
+
+    #[test]
+    fn the_tool_filter_admits_allowed_and_not_denied() {
+        let candidate = vec![
+            named_tool("read"),
+            named_tool("bash"),
+            named_tool("echo"),
+        ];
+        let args = Args {
+            tools: Some("read,echo".to_string()),
+            without: Some("echo".to_string()),
+            ..bare_args()
+        };
+        let (allow, deny) = tool_filter(&args, &candidate).expect("valid filter");
+        let kept = retain_filtered(candidate, &allow, &deny);
+        assert_eq!(
+            kept.iter().map(|tool| tool.name()).collect::<Vec<_>>(),
+            vec!["read"],
+            "allow first, then deny: the intersection survives"
+        );
+
+        // A subset of the candidate (the child core set behind
+        // SubagentParts::tools) filters without re-validation; a
+        // proxy-only allow name matches nothing there.
+        let core_subset = vec![named_tool("read"), named_tool("bash")];
+        let kept = retain_filtered(core_subset, &allow, &deny);
+        assert_eq!(
+            kept.iter().map(|tool| tool.name()).collect::<Vec<_>>(),
+            vec!["read"]
+        );
+    }
+
+    #[test]
+    fn the_tool_filter_rejects_unknown_names_loudly() {
+        let candidate = vec![named_tool("read")];
+        let mut args = Args {
+            tools: Some("bogus".to_string()),
+            ..bare_args()
+        };
+        let error = tool_filter(&args, &candidate).expect_err("unknown allow name");
+        assert!(error.contains("bogus") && error.contains("read"), "{error}");
+
+        args.tools = None;
+        args.without = Some("bogus".to_string());
+        let error = tool_filter(&args, &candidate).expect_err("unknown deny name");
+        assert!(error.contains("--without") && error.contains("read"), "{error}");
     }
 
     #[test]

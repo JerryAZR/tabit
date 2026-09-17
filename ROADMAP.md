@@ -397,8 +397,12 @@ owner's correction removed in-process entirely ("maintaining
 something we don't need; worse, complicating the design for what's
 useless"). **Shipped:** `SessionCwd` (contextual tools), the
 builder's `ephemeral` entrance (plain session machinery the child's
-`--ephemeral` rides), the child-role flags (`--parent`, `--tools`,
-`--ephemeral`, `--preamble` — the spawner owns the child's preamble
+`--ephemeral` rides), the child-role flags (`--parent`; `--tools` /
+`--without` — the per-invocation allow/deny pair, applied once over
+the child's FULL toolset, core and extension proxies alike (ruled
+2026-09: a subagent extension shapes a read-only agent by whitelist
+and a read-write agent by denying its own delegate tool);
+`--ephemeral`; `--preamble` — the spawner owns the child's preamble
 (ruled 2026-09, semantics amended same day): the default base text
 (identity + standing body) is replaced while the environment block,
 AGENTS.md files, and skills catalog append as usual; ordinary
