@@ -62,8 +62,10 @@ use tokio_util::sync::CancellationToken;
 
 /// Default model-call budget for one outer loop — the main session's
 /// and every subagent child's alike (one constant, no separate child
-/// budget).
-pub const DEFAULT_MAX_TURNS: usize = 200;
+/// budget). Set beyond any legitimate run (pi's reference loop caps
+/// nothing); if a run ever needs unlimited, `usize::MAX` is the value
+/// — no option plumbing.
+pub const DEFAULT_MAX_TURNS: usize = 1000;
 
 /// How many of a turn's tool chains run at once (ENGINE.md's tool
 /// phase: chains are independent and bounded). Named and visible —
