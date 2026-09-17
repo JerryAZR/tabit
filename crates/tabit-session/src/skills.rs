@@ -17,7 +17,8 @@
 //! never fatal.
 //!
 //! The model-side surface (ruled, the yaca shape): the catalog rides
-//! the system prompt — name, description, location — and the body
+//! the system prompt — name and description; the model never needs the
+//! skill's path, the `skill` tool resolves it — and the body
 //! enters context only on invocation through the [`skill`] tool,
 //! which abstracts away that skills are host files: the model
 //! expresses intent by name. `rel_path` selects within the named
@@ -374,8 +375,8 @@ impl Skills {
             .collect()
     }
 
-    /// The prompt catalog: one block listing name, description, and
-    /// location per skill. EMPTY when discovery found nothing — the
+    /// The prompt catalog: one block listing name and description per
+    /// skill. EMPTY when discovery found nothing — the
     /// prompt never carries an empty block.
     pub fn render_catalog(&self) -> String {
         if self.entries.is_empty() {
@@ -394,10 +395,6 @@ impl Skills {
             out.push_str(&format!(
                 "    <description>{}</description>\n",
                 xml_escape(&entry.description)
-            ));
-            out.push_str(&format!(
-                "    <location>{}</location>\n",
-                xml_escape(&entry.skill_file.display().to_string())
             ));
             out.push_str("  </skill>\n");
         }

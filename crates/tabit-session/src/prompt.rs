@@ -5,8 +5,8 @@
 //! - **AGENTS.md only.** No CLAUDE.md or other vendor instruction files.
 //! - **No directory walking.** Two candidate locations: the home level
 //!   (`~/.tabit/AGENTS.md`, falling back to `~/.agents/AGENTS.md`) and
-//!   the current working directory. Subdirectories are the model's job —
-//!   the base prompt tells it to check for AGENTS.md as it descends.
+//!   the current working directory. Nothing else is scanned; the base
+//!   prompt does not instruct the model to look for more.
 //! - **No size cap.** Instruction files are included verbatim.
 //! - **Minimal and stable.** A short identity statement, an environment
 //!   block (cwd, platform, UTC date), then the instruction files.
@@ -25,13 +25,7 @@ use crate::ids;
 /// The single supported instruction filename.
 const INSTRUCTION_FILE: &str = "AGENTS.md";
 
-const BASE_PROMPT: &str = "\
-You are tabit, a coding agent running in the user's terminal. You complete \
-tasks by reading files, running commands, and editing code.
-
-When working in a subdirectory, check it for an AGENTS.md file with \
-additional instructions.
-";
+const BASE_PROMPT: &str = "You are tabit, a coding agent.";
 
 /// One discovered instruction file, verbatim.
 #[derive(Debug, Clone, PartialEq, Eq)]
