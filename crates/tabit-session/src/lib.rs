@@ -106,7 +106,7 @@ pub use interaction::InteractionHub;
 pub use model::validate_selection;
 pub use notice::NoticeSink;
 pub use parser::Parsed;
-pub use prompt::build_system_prompt;
+pub use prompt::{build_system_prompt, build_system_prompt_with_base};
 pub use registry::ModelRegistry;
 pub use routing::ChildRouter;
 pub use session::{

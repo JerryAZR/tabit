@@ -125,12 +125,18 @@ fn normalize(path: &Path) -> String {
     path.to_string_lossy().replace('\\', "/")
 }
 
-/// Assemble the prompt: base identity, environment block, then each
-/// instruction file wrapped with its path, then the skills catalog
-/// (when discovery found any).
-fn compose_system_prompt(cwd: &Path, date: &str, files: &[ContextFile], skills: &str) -> String {
+/// Assemble the prompt: base identity/body, environment block, then
+/// each instruction file wrapped with its path, then the skills
+/// catalog (when discovery found any).
+fn compose_system_prompt(
+    base: &str,
+    cwd: &Path,
+    date: &str,
+    files: &[ContextFile],
+    skills: &str,
+) -> String {
     let mut prompt = String::new();
-    prompt.push_str(BASE_PROMPT);
+    prompt.push_str(base);
     prompt.push_str("\n<environment_context>\n");
     prompt.push_str("cwd: ");
     prompt.push_str(&normalize(cwd));
@@ -180,11 +186,25 @@ pub fn build_system_prompt(
     cwd: &Path,
     skills: &crate::skills::Skills,
 ) -> Result<String, SessionError> {
-    build_with_home(tabit_config::home_dir(), cwd, skills)
+    build_with_home(tabit_config::home_dir(), BASE_PROMPT, cwd, skills)
+}
+
+/// Build a session prompt whose base — the identity and standing
+/// body — is `base` instead of the default. The contextual blocks
+/// (environment, instruction files, skills catalog) compose exactly
+/// as in the default build: the preamble override swaps the voice,
+/// not the facts. Same build-once-per-process discipline.
+pub fn build_system_prompt_with_base(
+    base: &str,
+    cwd: &Path,
+    skills: &crate::skills::Skills,
+) -> Result<String, SessionError> {
+    build_with_home(tabit_config::home_dir(), base, cwd, skills)
 }
 
 fn build_with_home(
     home: Option<PathBuf>,
+    base: &str,
     cwd: &Path,
     skills: &crate::skills::Skills,
 ) -> Result<String, SessionError> {
@@ -195,6 +215,7 @@ fn build_with_home(
     })?;
     let files = discover_context_files(&home, cwd)?;
     Ok(compose_system_prompt(
+        base,
         cwd,
         &utc_date(),
         &files,

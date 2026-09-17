@@ -40,7 +40,7 @@ use tabit_protocol::SessionCommand;
 use tabit_session::SessionEvent;
 use tabit_session::{
     ModelRegistry, ModelSelection, Session, SessionBuilder, SessionHost, SessionHostWiring,
-    SessionStore, build_system_prompt,
+    SessionStore, build_system_prompt, build_system_prompt_with_base,
 };
 use tabit_tools::dynamic_contextual;
 
@@ -62,9 +62,10 @@ struct Args {
     parent_call: Option<String>,
     tools: Option<String>,
     ephemeral: bool,
-    /// System prompt override — replaces the built default prompt
-    /// entirely (the subagent bridge's `--preamble` crossing: the
-    /// child's prompt belongs to its spawner). Also valid with `-p`.
+    /// System prompt override — replaces the default preamble
+    /// (identity + standing body); the environment block, AGENTS.md
+    /// files, and skills catalog append as usual. The subagent
+    /// bridge's `--preamble` crossing; also valid with `-p`.
     preamble: Option<String>,
     /// The installed-extension root (JSON mode; default
     /// `~/.tabit/extensions`).
@@ -92,9 +93,11 @@ usage: tabit -p <PROMPT>                  print mode: one prompt, one run
                                          (an allow-list), --ephemeral (no
                                          file) — the subagent bridge's flags;
                                          --preamble <text> replaces the
-                                         default system prompt (also valid
-                                         with -p); --extensions <dir> selects
-                                         the extension root (default
+                                         default preamble (identity/body);
+                                         context appends as usual; also
+                                         valid with -p; --extensions
+                                         <dir> selects the extension
+                                         root (default
                                          ~/.tabit/extensions)
        tabit install <npm:pkg|git:repo|path:dir>
                                         install an extension package (npm as
@@ -635,15 +638,17 @@ fn assemble_session(
     // catalog is the same once-per-process fact — one discovery feeds
     // the prompt's listing, the tool's lookup, and the wire snapshot.
     let skills = skills_catalog();
-    // `--preamble` replaces the built prompt entirely — environment
-    // block, AGENTS.md files, skills catalog included. The child's
-    // prompt belongs to its spawner (ruled 2026-09); the override is
-    // the same full-replacement semantic as `SessionBuilder::preamble`.
+    // `--preamble` replaces the default preamble — the identity and
+    // standing body — while the environment block, AGENTS.md files,
+    // and skills catalog append as usual (ruled 2026-09: the spawner
+    // owns the child's voice; tabit still owns the truthful context).
     let preamble = match &args.preamble {
         Some(text) if text.trim().is_empty() => {
             return Err("the --preamble override is empty".to_string());
         }
-        Some(text) => text.clone(),
+        Some(text) => {
+            build_system_prompt_with_base(text, &cwd, &skills).map_err(|e| e.to_string())?
+        }
         None => build_system_prompt(&cwd, &skills).map_err(|e| e.to_string())?,
     };
 

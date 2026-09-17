@@ -57,10 +57,10 @@ pub struct SubprocessBuilder {
     session: Option<PathBuf>,
     extensions: Option<PathBuf>,
     max_turns: Option<usize>,
-    /// The child's system prompt — replaces the default build
-    /// entirely. The child's prompt belongs to its spawner (ruled
-    /// 2026-09): a subagent extension constructs it, it does not
-    /// re-derive a role variant.
+    /// The child's preamble — replaces the default base text
+    /// (identity + standing body) while the environment block,
+    /// AGENTS.md files, and skills catalog append as usual. The
+    /// child's preamble belongs to its spawner (ruled 2026-09).
     preamble: Option<String>,
     router: Arc<crate::routing::ChildRouter>,
     notice: Option<crate::notice::NoticeSink>,
@@ -125,11 +125,12 @@ impl SubprocessBuilder {
         self
     }
 
-    /// The child's system prompt — crosses as `--preamble` and
-    /// replaces the default build entirely (environment block,
-    /// AGENTS.md files, skills catalog included): the spawner owns
-    /// the child's prompt. Absent, the child builds its own truthful
-    /// default in its cwd.
+    /// The child's preamble — crosses as `--preamble` and replaces
+    /// the default base (identity and standing body); the environment
+    /// block, AGENTS.md files, and skills catalog append as usual.
+    /// The spawner owns the child's voice; tabit still owns the
+    /// truthful context. Absent, the child builds its own default
+    /// preamble in its cwd.
     pub fn preamble(mut self, text: String) -> Self {
         self.preamble = Some(text);
         self

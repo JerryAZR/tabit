@@ -27,7 +27,8 @@ fn context_file(path: &Path, content: &str) -> ContextFile {
 
 #[test]
 fn compose_without_files_is_base_and_env_only() {
-    let prompt = compose_system_prompt(Path::new("C:\\work\\proj"), "2026-08-15", &[], "");
+    let prompt =
+        compose_system_prompt(BASE_PROMPT, Path::new("C:\\work\\proj"), "2026-08-15", &[], "");
     assert!(prompt.starts_with("You are tabit"));
     assert!(prompt.contains("cwd: C:/work/proj\n"));
     assert!(prompt.contains(&format!("platform: {}\n", std::env::consts::OS)));
@@ -36,10 +37,25 @@ fn compose_without_files_is_base_and_env_only() {
 }
 
 #[test]
+fn a_base_override_swaps_the_voice_and_appends_the_context() {
+    // The preamble override's composition: the base text replaces the
+    // default; the environment block and instruction files append
+    // exactly as in the default build.
+    let home = context_file(Path::new("C:/u/.tabit/AGENTS.md"), "home rules");
+    let prompt =
+        compose_system_prompt("custom base", Path::new("C:/work/proj"), "2026-08-15", &[home], "");
+    assert!(prompt.starts_with("custom base"), "{prompt}");
+    assert!(!prompt.contains("You are tabit"), "the default base is gone");
+    assert!(prompt.contains("cwd: C:/work/proj\n"), "{prompt}");
+    assert!(prompt.contains(">\nhome rules\n</file>"), "{prompt}");
+}
+
+#[test]
 fn compose_puts_env_first_then_home_then_cwd() {
     let home = context_file(Path::new("C:/u/.tabit/AGENTS.md"), "home rules");
     let cwd = context_file(Path::new("C:\\work\\proj\\AGENTS.md"), "project rules");
-    let prompt = compose_system_prompt(Path::new("C:/work/proj"), "2026-08-15", &[home, cwd], "");
+    let prompt =
+        compose_system_prompt(BASE_PROMPT, Path::new("C:/work/proj"), "2026-08-15", &[home, cwd], "");
 
     let env = prompt.find("<environment_context>").expect("env block");
     let home_at = prompt.find("home rules").expect("home content");
@@ -150,7 +166,7 @@ fn utc_date_is_bare_ymd() {
 #[test]
 fn build_with_home_requires_a_home() {
     let cwd = temp_dir("no-home-cwd");
-    match build_with_home(None, &cwd, &Default::default()) {
+    match build_with_home(None, BASE_PROMPT, &cwd, &Default::default()) {
         Err(SessionError::Config { .. }) => {}
         other => panic!("expected a Config error, got {other:?}"),
     }
@@ -165,7 +181,8 @@ fn build_with_home_composes_discovered_files() {
     write(&agents_path, "agents-level");
     write(&cwd_path, "project-level");
 
-    let prompt = build_with_home(Some(home.clone()), &cwd, &Default::default()).expect("build");
+    let prompt = build_with_home(Some(home.clone()), BASE_PROMPT, &cwd, &Default::default())
+        .expect("build");
     assert!(prompt.starts_with("You are tabit"));
     assert!(prompt.contains(&format!("cwd: {}\n", normalize(&cwd))));
     assert!(prompt.contains("date: "));

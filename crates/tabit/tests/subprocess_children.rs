@@ -460,15 +460,18 @@ async fn aborting_the_parent_returns_promptly_and_the_child_flushes_its_terminal
     }
 }
 
-/// The preamble crossing, end to end (ruled 2026-09: the child's
-/// prompt belongs to its spawner): a `SubprocessBuilder` override
-/// reaches the child process as `--preamble` and REPLACES the default
-/// build. Three mocks discriminate every outcome, hit counts make the
-/// assertion order-independent — the default-identity mock must never
-/// match (replacement, not extension), the marker mock exactly once
-/// (the crossing), and the child's report names the mock that served.
+/// The preamble crossing, end to end (ruled 2026-09: the spawner owns
+/// the child's voice, tabit still owns the truthful context): a
+/// `SubprocessBuilder` override reaches the child process as
+/// `--preamble`, REPLACES the default base (identity + standing
+/// body), and the context appends as usual. Three mocks discriminate
+/// every outcome — the marker mock (one request, and its regex also
+/// requires the env block after the marker: appended, in order), the
+/// default-identity mock (must never match: replaced, not extended),
+/// and the catch-all (neither). The child's report names the mock
+/// that served it.
 #[tokio::test]
-async fn a_preamble_override_crosses_the_spawn_and_replaces_the_default_prompt() {
+async fn a_preamble_override_replaces_the_preamble_and_appends_the_context() {
     let _guard = env_lock().lock().await;
     let server = MockServer::start();
     let default_mock = server.mock(|when, then| {
@@ -482,7 +485,7 @@ async fn a_preamble_override_crosses_the_spawn_and_replaces_the_default_prompt()
     let marker_mock = server.mock(|when, then| {
         when.method(POST)
             .path("/v1/chat/completions")
-            .body_includes("SUBAGENT-PREAMBLE-MARKER");
+            .body_matches("SUBAGENT-PREAMBLE-MARKER[\\s\\S]*cwd:");
         then.status(200)
             .header("content-type", "text/event-stream")
             .body(sse_answer("custom"));
