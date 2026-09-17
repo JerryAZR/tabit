@@ -150,21 +150,15 @@ impl SpawnContext {
 #[rig_tool(
     description = "Delegate a self-contained task to a subagent — a fresh agent \
                    process with its own context that works the task to completion \
-                   and returns its final answer. Optional controls: model \
-                   (\"provider/model\", or a bare model id for this session's \
-                   provider — route mechanical work to a cheaper model), cwd \
-                   (scope the subagent to another directory; its tools and \
-                   instructions follow it there), tools (an allow-list of tool \
-                   names, e.g. [\"read\", \"bash\"] for read-only research; \
-                   default: this session's toolset). Progress streams to the user \
-                   on the subagent's own channel."
+                   and returns its final answer. It runs this session's model and \
+                   toolset (minus this tool). Optional: cwd — scope the subagent to \
+                   another directory; its tools and instructions follow it there. \
+                   Progress streams to the user on the subagent's own channel."
 )]
 pub async fn subagent(
     #[rig(context)] context: &mut ToolContext,
     task: String,
-    model: Option<String>,
     cwd: Option<String>,
-    tools: Option<Vec<String>>,
 ) -> Result<ToolOutput, ToolExecutionError> {
     let token = context.get::<CancellationToken>().cloned();
     // A pre-cancelled token refuses before spawning (bash's rule in
@@ -182,36 +176,20 @@ pub async fn subagent(
     })?;
     let parts = ctx.parts();
 
-    // Policy, each line replaceable by an extension's own tool.
-    let selection = match &model {
-        Some(spec) => parse_selection(spec, ctx.parent_selection())?,
-        None => ctx.parent_selection().clone(),
-    };
-    let cwd = cwd
-        .map(PathBuf::from)
-        .unwrap_or_else(|| ctx.parent_cwd().to_path_buf());
-    let toolset = match &tools {
-        Some(allow) => filter_tools(&parts.tools, allow)?,
-        None => parts.tools.clone(),
-    };
-
-    // The child process builds its own preamble in its own cwd
-    // (truthful by construction); the task crosses as the first
-    // message. The allow-list validated parent-side; the names cross
-    // as-is. The call's correlation id crosses too: the child's
-    // announce pairs its session with this very tool call.
+    // The child inherits this session's model and runs the default
+    // child toolset (the parent's minus this tool — recursion is
+    // enforced by omission). The child process builds its own preamble
+    // in its own cwd (truthful by construction); the task crosses as
+    // the first message. The call's correlation id crosses too: the
+    // child's announce pairs its session with this very tool call.
     let mut builder = ctx
         .spawn_subprocess()
-        .cwd(cwd)
-        .model(selection)
+        .cwd(cwd.map(PathBuf::from).unwrap_or_else(|| ctx.parent_cwd().to_path_buf()))
+        .model(ctx.parent_selection().clone())
         .max_turns(parts.max_turns)
         .ephemeral(true);
     if let Some(id) = context.get::<InternalCallId>() {
         builder = builder.parent_call(id.0.clone());
-    }
-    if tools.is_some() {
-        let names = toolset.iter().map(|tool| tool.name().to_string()).collect();
-        builder = builder.tools(names);
     }
     let mut child = builder.spawn().await.map_err(ToolExecutionError::other)?;
     let summary = ctx
@@ -223,16 +201,13 @@ pub async fn subagent(
 }
 
 /// Map a run summary to the tool's result — the subprocess drive's
-/// terminal synthesized in the child's own event vocabulary.
+/// terminal synthesized in the child's own event vocabulary. The
+/// cargo carries the pairing fact (`child_id`); the child's turns and
+/// token usage are bookkeeping the model has no use for.
 fn summary_result(summary: RunSummary, child_id: &str) -> Result<ToolOutput, ToolExecutionError> {
     use crate::session::RunOutcome;
     use tabit_protocol::SessionEvent;
 
-    let turns = summary
-        .events
-        .iter()
-        .filter(|event| matches!(event, SessionEvent::TurnStarted { .. }))
-        .count();
     match summary.outcome {
         RunOutcome::Completed => {
             let report = if summary.output.trim().is_empty() {
@@ -245,12 +220,6 @@ fn summary_result(summary: RunSummary, child_id: &str) -> Result<ToolOutput, Too
                 Some(serde_json::json!({
                     "child_id": child_id,
                     "outcome": "completed",
-                    "turns": turns,
-                    "usage": {
-                        "input_tokens": summary.usage.input_tokens,
-                        "output_tokens": summary.usage.output_tokens,
-                        "total_tokens": summary.usage.total_tokens,
-                    },
                 })),
             )
         }
@@ -281,30 +250,6 @@ fn summary_result(summary: RunSummary, child_id: &str) -> Result<ToolOutput, Too
 /// The subagent tool as a session-registerable [`DynamicTool`].
 pub fn subagent_tool() -> DynamicTool {
     rig_agent::tool::dynamic_contextual(Subagent)
-}
-
-/// Parse a model override: `provider/model`, or a bare model id
-/// (this parent's provider). The thinking level is inherited.
-/// Config validation happens in the child at startup — this only
-/// shapes the selection.
-fn parse_selection(
-    spec: &str,
-    parent: &ModelSelection,
-) -> Result<ModelSelection, ToolExecutionError> {
-    let (provider, model) = match spec.split_once('/') {
-        Some((provider, model)) => (provider.trim(), model.trim()),
-        None => (parent.provider.as_str(), spec.trim()),
-    };
-    if provider.is_empty() || model.is_empty() {
-        return Err(ToolExecutionError::other(format!(
-            "cannot read the model override `{spec}` — use `provider/model` or a bare model id"
-        )));
-    }
-    Ok(ModelSelection {
-        provider: provider.to_string(),
-        model: model.to_string(),
-        thinking_level: parent.thinking_level.clone(),
-    })
 }
 
 #[cfg(test)]

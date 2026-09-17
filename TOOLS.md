@@ -80,9 +80,7 @@ The child-session facts of one delegation, on the completed arm.
 ```json
 {
   "child_id": "0192uuidv7child",
-  "outcome": "completed",
-  "turns": 3,
-  "usage": { "input_tokens": 9, "output_tokens": 40, "total_tokens": 49 }
+  "outcome": "completed"
 }
 ```
 
@@ -98,9 +96,6 @@ The child-session facts of one delegation, on the completed arm.
   calls, where arrival order cannot disambiguate. The aborted/failed
   arms return error text with no cargo — the announce already made
   the link, so nothing is lost.
-- `turns` counts the child's `turn_started` events; `usage` is the
-  child's aggregate across its run (same object shape as
-  `run_finished.usage`).
 
 ## Interaction templates
 

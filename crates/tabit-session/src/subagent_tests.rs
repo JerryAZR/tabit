@@ -4,12 +4,6 @@
 //! subprocess_children.rs` (the in-process suite died with the
 //! in-process substrate, owner ruling 2026-09).
 
-use tabit_protocol::ModelSelection;
-
-fn parent_selection() -> ModelSelection {
-    ModelSelection::new("prov", "model-a")
-}
-
 fn named_tool(name: &'static str) -> rig_agent::tool::DynamicTool {
     rig_agent::tool::DynamicTool::new(
         name,
@@ -20,31 +14,6 @@ fn named_tool(name: &'static str) -> rig_agent::tool::DynamicTool {
             Box::pin(async move { Ok(rig_agent::tool::ToolOutput::text(output)) })
         },
     )
-}
-
-#[test]
-fn parse_selection_reads_qualified_and_bare_refs() {
-    let parent = parent_selection();
-    let qualified = super::parse_selection("other/cheap", &parent).expect("qualified");
-    assert_eq!(qualified.provider, "other");
-    assert_eq!(qualified.model, "cheap");
-
-    let bare = super::parse_selection("model-b", &parent).expect("bare");
-    assert_eq!(
-        bare.provider, "prov",
-        "a bare id rides the parent's provider"
-    );
-    assert_eq!(bare.model, "model-b");
-
-    // The thinking level is inherited, not parsed here.
-    assert_eq!(bare.thinking_level, parent.thinking_level);
-
-    for bad in ["", "/x", "x/"] {
-        assert!(
-            super::parse_selection(bad, &parent).is_err(),
-            "`{bad}` must not parse"
-        );
-    }
 }
 
 #[test]
@@ -76,7 +45,7 @@ async fn a_pre_cancelled_token_refuses_before_spawning() {
     let token = tokio_util::sync::CancellationToken::new();
     token.cancel();
     context.insert(token);
-    let error = super::subagent(&mut context, "do a thing".to_string(), None, None, None)
+    let error = super::subagent(&mut context, "do a thing".to_string(), None)
         .await
         .expect_err("a pre-cancelled run refuses");
     let message = error.to_string();
@@ -89,7 +58,7 @@ async fn the_tool_refuses_when_the_capability_is_not_mounted() {
     // reachable only through explicit registration — the error names
     // the missing mount.
     let mut context = rig_agent::tool::ToolContext::new();
-    let error = super::subagent(&mut context, "do a thing".to_string(), None, None, None)
+    let error = super::subagent(&mut context, "do a thing".to_string(), None)
         .await
         .expect_err("no capability mounted");
     let message = error.to_string();

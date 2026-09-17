@@ -20,6 +20,16 @@ could observe — gets an entry here in the same commit.
 
 ## v10 (current)
 
+### behavior: `subagent` details slimmed to the pairing fact (2026-09)
+
+The subagent tool's result cargo is now
+`{ "child_id", "outcome" }` — `turns` and `usage` are gone (owner
+ruling: bookkeeping the model-side flow has no use for). The pairing
+contract is unchanged: `child_id` is still the child's session id,
+matching the `session_opened` announce's `id`/`parent_call` link. A
+frontend that displayed turns/usage per delegation now finds them
+absent; nothing else moved (TOOLS.md updated in the same commit).
+
 ### wire: `session_created` deleted — one announcement shape (2026-09)
 
 Protocol version 10. The v4 interim is gone (its "kept one version,

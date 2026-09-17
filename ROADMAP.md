@@ -147,13 +147,15 @@ The application-level conversation layer pi builds over its agent loop:
 
 ### 3. System prompt builder + skills & AGENTS.md discovery
 
-- **v1 shipped** (`tabit-session::build_system_prompt`): a minimal,
-  stable prompt — short base identity + `<environment_context>` (cwd,
-  platform, UTC date) + discovered instruction files wrapped in
-  `<project_context>`. Built once per process, never rebuilt mid-session:
-  byte-stability keeps provider prompt caches valid, and date-level
-  staleness is accepted (people work overnight). No opinionated
-  guardrails or guidelines in the base prompt.
+- **v1 shipped** (`tabit-session::build_system_prompt`): identity +
+  the ruled opinionated body (2026-09: disagree when wrong, never
+  pick silently, root-cause debugging, evidence-bearing research) +
+  `<environment_context>` (cwd, platform, UTC date) + discovered
+  instruction files wrapped in `<project_context>`. Built once per
+  process, never rebuilt mid-session: byte-stability keeps provider
+  prompt caches valid, and date-level staleness is accepted (people
+  work overnight). The opinions sit before the instruction files —
+  user AGENTS.md keeps the last word by construction.
 - Discovery policy (decided): **AGENTS.md only** (no CLAUDE.md or other
   vendor files); **no directory walking** — the home level
   (`~/.tabit/AGENTS.md`, falling back to `~/.agents/AGENTS.md`) plus the
@@ -381,9 +383,11 @@ deny-lists, empty; model, budget, hooks all per-child), plus exactly
 two new mechanics a worker normally provides: `SpawnContext::announce`
 (the parent-carrying session_opened) and `SpawnContext::drive` (event
 forwarding under the abort leash — the one recipe extensions must not
-hand-roll). The example tool adds: `model` ("provider/model" or bare
-id), `cwd` (scoped: its tools AND its prompt follow), `tools`
-(allow-list; unknown names error loudly), recursion by omission.
+hand-roll). The example tool adds: `cwd` (scoped: its tools AND its
+prompt follow) and recursion by omission — the model and toolset are
+**inherited** (ruled 2026-09: no model/tools knobs; children run the
+parent's model and the default child toolset, budget is the main
+session's default).
 **Substrate closed (2026-09, two rounds — PROTOCOL.md flag 33):**
 subprocess children are the ONE substrate. Round one shipped
 in-process v1 then built subprocess beside it; the routing work

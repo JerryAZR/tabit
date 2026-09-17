@@ -60,8 +60,10 @@ use tabit_config::TabitConfig;
 use tabit_protocol::{ModelSelection, SessionEvent};
 use tokio_util::sync::CancellationToken;
 
-/// Default model-call budget for one outer loop.
-pub const DEFAULT_MAX_TURNS: usize = 32;
+/// Default model-call budget for one outer loop — the main session's
+/// and every subagent child's alike (one constant, no separate child
+/// budget).
+pub const DEFAULT_MAX_TURNS: usize = 200;
 
 /// How many of a turn's tool chains run at once (ENGINE.md's tool
 /// phase: chains are independent and bounded). Named and visible —
