@@ -176,7 +176,7 @@ The application-level conversation layer pi builds over its agent loop:
   **Model-side surface ruled (2026-09, the yaca shape — the owner's
   own prior design): the confined `skill` tool.** It abstracts away
   that skills are host files; the model expresses intent by name.
-  The catalog (name, description, location) rides the system prompt;
+  The catalog (name, description) rides the system prompt;
   the body enters context only on invocation: `{name, rel_path?}`,
   `rel_path` confined to the skill's directory (lexically, then
   symlink-resolved at read time — no escape), a directory `rel_path`

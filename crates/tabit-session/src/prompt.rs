@@ -8,8 +8,12 @@
 //!   the current working directory. Nothing else is scanned; the base
 //!   prompt does not instruct the model to look for more.
 //! - **No size cap.** Instruction files are included verbatim.
-//! - **Minimal and stable.** A short identity statement, an environment
+//! - **Opinionated but stable.** The base prompt is the identity line
+//!   plus a small body of standing instructions (disagree when wrong,
+//!   never pick silently, root-cause debugging), then an environment
 //!   block (cwd, platform, UTC date), then the instruction files.
+//!   The opinions sit before AGENTS.md, so user instruction files keep
+//!   the last word by construction.
 //!   Nothing that goes stale within a session: no clock time, and the
 //!   date is frozen at build time (overnight staleness is accepted) so a
 //!   session's prompt stays byte-stable and the provider's prompt cache
@@ -25,7 +29,30 @@ use crate::ids;
 /// The single supported instruction filename.
 const INSTRUCTION_FILE: &str = "AGENTS.md";
 
-const BASE_PROMPT: &str = "You are tabit, a coding agent.";
+const BASE_PROMPT: &str = "\
+You are tabit, a coding agent for development, debugging, and research.
+
+General:
+- Disagree when you disagree. If the user's premise seems wrong, say so before doing the work.
+- Stop when confused. If a request has multiple plausible interpretations, ask — or state \
+the assumption and proceed. Never pick silently.
+
+Development:
+- Understand the existing architecture before changing it; where none exists, design a clean one.
+- Understand the user's goal first. Build what is asked and what is planned — not for what \
+might come someday.
+- Write code that makes future maintenance painless: intuitive interfaces, scoped responsibilities.
+
+Debugging:
+- Understand the cause of the bug first, then prove it with a failing test (when the codebase \
+has tests). Only fix once the test demonstrates the bug.
+- If fixes keep failing, stop and question the diagnosis — add logging and re-read the scenario \
+before trying again.
+- After fixing, don't call it done: are there other hidden bugs of the same class? \
+Is the architecture or algorithm itself flawed?
+
+Research:
+- Answer the question actually asked, with evidence and references attached.";
 
 /// One discovered instruction file, verbatim.
 #[derive(Debug, Clone, PartialEq, Eq)]
