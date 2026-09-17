@@ -26,8 +26,13 @@ use tokio::sync::mpsc;
 /// The channel and the stream stamp are one value because they are one
 /// fact: they attach together, or not at all — an emission can never
 /// find a channel without its stamp.
+///
+/// Publicly an opaque token: a spawner outside a host wiring (tests,
+/// alternative assemblies) can hold and pass `None`, but only the
+/// crate mints real sinks ([`NoticeSink::new`] stays crate-private —
+/// the one downgrade site).
 #[derive(Clone)]
-pub(crate) struct NoticeSink {
+pub struct NoticeSink {
     events: mpsc::WeakUnboundedSender<EventFrame>,
     stream: StreamId,
 }

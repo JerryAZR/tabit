@@ -104,6 +104,7 @@ pub use entry::{EntryKind, SESSION_FORMAT_VERSION, SessionEntry, SessionHeader};
 pub use error::SessionError;
 pub use interaction::InteractionHub;
 pub use model::validate_selection;
+pub use notice::NoticeSink;
 pub use parser::Parsed;
 pub use prompt::build_system_prompt;
 pub use registry::ModelRegistry;

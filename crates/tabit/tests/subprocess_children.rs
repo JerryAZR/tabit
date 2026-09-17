@@ -101,11 +101,11 @@ fn stage_child_config(tag: &str, server: &MockServer) -> PathBuf {
 
 /// The parent: a scripted in-process model whose first turn calls the
 /// subagent tool, and a second that wraps up. `overrides` picks the
-/// call's shape: `Some` rides the full override surface (the model
-/// ref resolves child-side, the cwd is the parent's own, the empty
-/// allow-list crosses as `--tools ""`), `None` exercises the
-/// inheritance defaults. The child toolset is empty policy — no
-/// allow-list crosses.
+/// call's shape: `Some` passes the cwd override (the parent's own —
+/// the OS-enforced scope under test), `None` exercises the
+/// inheritance defaults. The model and toolset are inherited (no
+/// knobs, ruled 2026-09); the child mounts its own default core
+/// toolset — the mock model never calls tools.
 fn subprocess_parent(
     store: &SessionStore,
     cwd: &Path,
@@ -145,9 +145,7 @@ id = "m"
                 arguments: if overrides {
                     json!({
                         "task": task,
-                        "model": "p/m",
                         "cwd": cwd.display().to_string(),
-                        "tools": [],
                     })
                 } else {
                     json!({"task": task})
@@ -456,6 +454,108 @@ async fn aborting_the_parent_returns_promptly_and_the_child_flushes_its_terminal
     );
 
     handle.close_commands();
+    #[allow(unsafe_code, clippy::missing_safety_doc)]
+    unsafe {
+        std::env::remove_var("TABIT_CONFIG");
+    }
+}
+
+/// The preamble crossing, end to end (ruled 2026-09: the child's
+/// prompt belongs to its spawner): a `SubprocessBuilder` override
+/// reaches the child process as `--preamble` and REPLACES the default
+/// build. Three mocks discriminate every outcome, hit counts make the
+/// assertion order-independent — the default-identity mock must never
+/// match (replacement, not extension), the marker mock exactly once
+/// (the crossing), and the child's report names the mock that served.
+#[tokio::test]
+async fn a_preamble_override_crosses_the_spawn_and_replaces_the_default_prompt() {
+    let _guard = env_lock().lock().await;
+    let server = MockServer::start();
+    let default_mock = server.mock(|when, then| {
+        when.method(POST)
+            .path("/v1/chat/completions")
+            .body_includes("You are tabit");
+        then.status(200)
+            .header("content-type", "text/event-stream")
+            .body(sse_answer("default"));
+    });
+    let marker_mock = server.mock(|when, then| {
+        when.method(POST)
+            .path("/v1/chat/completions")
+            .body_includes("SUBAGENT-PREAMBLE-MARKER");
+        then.status(200)
+            .header("content-type", "text/event-stream")
+            .body(sse_answer("custom"));
+    });
+    let _catch_all = server.mock(|when, then| {
+        when.method(POST).path("/v1/chat/completions");
+        then.status(200)
+            .header("content-type", "text/event-stream")
+            .body(sse_answer("neither"));
+    });
+    let config_path = stage_child_config("preamble", &server);
+    #[allow(unsafe_code, clippy::missing_safety_doc)]
+    unsafe {
+        std::env::set_var("TABIT_CONFIG", &config_path);
+    }
+
+    let child_cwd = test_dir("preamble-child");
+    let ctx = subagent::SpawnContext::new(
+        Arc::new(subagent::SubagentParts {
+            tools: Vec::new(),
+            max_turns: 8,
+            router: ChildRouter::shared(),
+            exe: PathBuf::from(env!("CARGO_BIN_EXE_tabit")),
+            extensions: child_cwd.join(".tabit/no-extensions"),
+        }),
+        "preamble-test-parent".to_string(),
+        ModelSelection::new("p", "m"),
+        child_cwd.clone(),
+        None,
+    );
+    let mut child = ctx
+        .spawn_subprocess()
+        .cwd(child_cwd.clone())
+        .model(ModelSelection::new("p", "m"))
+        .max_turns(8)
+        .ephemeral(true)
+        .preamble(
+            "You are a delegated subagent. SUBAGENT-PREAMBLE-MARKER is your whole policy."
+                .to_string(),
+        )
+        .spawn()
+        .await
+        .expect("the child spawns");
+    let summary = ctx
+        .drive_subprocess(
+            &mut child,
+            rig_agent::completion::Message::user("report"),
+            None,
+        )
+        .await;
+    child.wait_exit().await;
+
+    assert_eq!(
+        summary.outcome,
+        tabit_session::RunOutcome::Completed,
+        "the child completed ({:?})",
+        summary.output
+    );
+    assert_eq!(
+        summary.output, "custom",
+        "the child's model was served by the override-matching mock"
+    );
+    assert_eq!(
+        marker_mock.calls(),
+        1,
+        "exactly one request, carrying the override text"
+    );
+    assert_eq!(
+        default_mock.calls(),
+        0,
+        "the default prompt was replaced, not extended"
+    );
+
     #[allow(unsafe_code, clippy::missing_safety_doc)]
     unsafe {
         std::env::remove_var("TABIT_CONFIG");

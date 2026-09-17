@@ -72,8 +72,10 @@ pub struct SpawnContext {
 
 impl SpawnContext {
     /// Build the per-run context from the session's state and its
-    /// attached channels. Called by the run opener.
-    pub(crate) fn new(
+    /// attached channels. The run opener calls this; tests and
+    /// alternative assemblies (a tool that spawns without a mounted
+    /// run) construct it directly — every argument is public state.
+    pub fn new(
         parts: Arc<SubagentParts>,
         parent_id: String,
         parent_selection: ModelSelection,

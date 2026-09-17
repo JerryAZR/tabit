@@ -57,6 +57,11 @@ pub struct SubprocessBuilder {
     session: Option<PathBuf>,
     extensions: Option<PathBuf>,
     max_turns: Option<usize>,
+    /// The child's system prompt — replaces the default build
+    /// entirely. The child's prompt belongs to its spawner (ruled
+    /// 2026-09): a subagent extension constructs it, it does not
+    /// re-derive a role variant.
+    preamble: Option<String>,
     router: Arc<crate::routing::ChildRouter>,
     notice: Option<crate::notice::NoticeSink>,
 }
@@ -77,6 +82,7 @@ impl SubprocessBuilder {
             session: None,
             extensions: Some(ctx.parts().extensions.clone()),
             max_turns: None,
+            preamble: None,
             router: ctx.parts().router.clone(),
             notice: ctx.notice(),
         }
@@ -119,6 +125,16 @@ impl SubprocessBuilder {
         self
     }
 
+    /// The child's system prompt — crosses as `--preamble` and
+    /// replaces the default build entirely (environment block,
+    /// AGENTS.md files, skills catalog included): the spawner owns
+    /// the child's prompt. Absent, the child builds its own truthful
+    /// default in its cwd.
+    pub fn preamble(mut self, text: String) -> Self {
+        self.preamble = Some(text);
+        self
+    }
+
     /// The spawning tool call's correlation id — crosses as
     /// `--parent-call` so the child's `session_opened` announce pairs
     /// with the `ToolCall` event the frontend already holds (exact
@@ -144,6 +160,7 @@ impl SubprocessBuilder {
             session,
             extensions,
             max_turns,
+            preamble,
             router,
             notice,
         } = self;
@@ -168,6 +185,10 @@ impl SubprocessBuilder {
         if let Some(tools) = &tools {
             args.push("--tools".to_string());
             args.push(tools.join(","));
+        }
+        if let Some(text) = &preamble {
+            args.push("--preamble".to_string());
+            args.push(text.clone());
         }
         if let Some(path) = &extensions {
             args.push("--extensions".to_string());

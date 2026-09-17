@@ -398,7 +398,10 @@ something we don't need; worse, complicating the design for what's
 useless"). **Shipped:** `SessionCwd` (contextual tools), the
 builder's `ephemeral` entrance (plain session machinery the child's
 `--ephemeral` rides), the child-role flags (`--parent`, `--tools`,
-`--ephemeral`; ordinary `--session`/`--continue`/`--model`/
+`--ephemeral`, `--preamble` — the spawner owns the child's prompt
+(ruled 2026-09): full replacement crossing the spawn boundary, the
+same semantic as `SessionBuilder::preamble`; ordinary
+`--session`/`--continue`/`--model`/
 `--max-turns` for persisted children), the bridge (`subprocess.rs`:
 self-spawn under a Job Object/process group with the child cwd as
 the process cwd, frames forwarded as-is, the ruled abort shape),

@@ -62,6 +62,10 @@ struct Args {
     parent_call: Option<String>,
     tools: Option<String>,
     ephemeral: bool,
+    /// System prompt override — replaces the built default prompt
+    /// entirely (the subagent bridge's `--preamble` crossing: the
+    /// child's prompt belongs to its spawner). Also valid with `-p`.
+    preamble: Option<String>,
     /// The installed-extension root (JSON mode; default
     /// `~/.tabit/extensions`).
     extensions: Option<PathBuf>,
@@ -87,8 +91,10 @@ usage: tabit -p <PROMPT>                  print mode: one prompt, one run
                                          (its tool call), --tools <a,b,..>
                                          (an allow-list), --ephemeral (no
                                          file) — the subagent bridge's flags;
-                                         --extensions <dir> selects the
-                                         extension root (default
+                                         --preamble <text> replaces the
+                                         default system prompt (also valid
+                                         with -p); --extensions <dir> selects
+                                         the extension root (default
                                          ~/.tabit/extensions)
        tabit install <npm:pkg|git:repo|path:dir>
                                         install an extension package (npm as
@@ -188,6 +194,7 @@ fn validate_mode(args: &Args) -> Result<Mode, String> {
         args.parent_call.is_some().then_some("--parent-call"),
         args.tools.is_some().then_some("--tools"),
         args.ephemeral.then_some("--ephemeral"),
+        args.preamble.is_some().then_some("--preamble"),
         args.extensions.is_some().then_some("--extensions"),
         args.path.is_some().then_some("<path>"),
     ]
@@ -206,6 +213,7 @@ fn validate_mode(args: &Args) -> Result<Mode, String> {
             "--parent-call",
             "--tools",
             "--ephemeral",
+            "--preamble",
             "--extensions",
         ],
         Mode::Print => &[
@@ -215,6 +223,7 @@ fn validate_mode(args: &Args) -> Result<Mode, String> {
             "--continue",
             "--model",
             "--max-turns",
+            "--preamble",
         ],
         Mode::Gui => &["<path>"],
         Mode::Install => &["install <source>"],
@@ -253,6 +262,7 @@ where
         parent_call: None,
         tools: None,
         ephemeral: false,
+        preamble: None,
         extensions: None,
         install: None,
         extensions_list: false,
@@ -318,6 +328,12 @@ where
                 parsed.tools = Some(value);
             }
             "--ephemeral" => parsed.ephemeral = true,
+            "--preamble" => {
+                let value = it
+                    .next()
+                    .ok_or("--preamble needs the replacement prompt text (see --help)")?;
+                parsed.preamble = Some(value);
+            }
             "--extensions" => {
                 let value = it
                     .next()
@@ -619,7 +635,17 @@ fn assemble_session(
     // catalog is the same once-per-process fact — one discovery feeds
     // the prompt's listing, the tool's lookup, and the wire snapshot.
     let skills = skills_catalog();
-    let preamble = build_system_prompt(&cwd, &skills).map_err(|e| e.to_string())?;
+    // `--preamble` replaces the built prompt entirely — environment
+    // block, AGENTS.md files, skills catalog included. The child's
+    // prompt belongs to its spawner (ruled 2026-09); the override is
+    // the same full-replacement semantic as `SessionBuilder::preamble`.
+    let preamble = match &args.preamble {
+        Some(text) if text.trim().is_empty() => {
+            return Err("the --preamble override is empty".to_string());
+        }
+        Some(text) => text.clone(),
+        None => build_system_prompt(&cwd, &skills).map_err(|e| e.to_string())?,
+    };
 
     // Subagent support (ROADMAP item 5): the process-wide parts, whose
     // toolset is the child toolset — the parent's minus the subagent
@@ -1744,6 +1770,11 @@ mod tests {
 
         let parsed = args(&["--continue", "--rewind", "2"]).expect("valid");
         assert_eq!(parsed.rewind, Some(2));
+
+        // The preamble override parses (and is not a child-only flag:
+        // print mode accepts it too — validate_mode's allow-lists).
+        let parsed = args(&["--json", "--preamble", "You are a research probe"]).expect("valid");
+        assert_eq!(parsed.preamble.as_deref(), Some("You are a research probe"));
 
         let parsed = args(&["--list"]).expect("valid");
         assert!(parsed.list);
