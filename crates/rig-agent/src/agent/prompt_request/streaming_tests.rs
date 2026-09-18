@@ -602,7 +602,8 @@ fn tool_result_output_preserves_multimodal_tool_output() {
     let instruction = serde_json::json!({
         "instruction": "Use the image part to answer."
     });
-    let mut content = rig_core::OneOrMany::one(ToolResultContent::json(instruction.clone()));
+    let mut content =
+        rig_core::OneOrMany::one(ToolResultContent::text(instruction.to_string()));
     content.push(ToolResultContent::image_base64(
         "base64data==",
         Some(ImageMediaType::PNG),
@@ -625,10 +626,10 @@ fn tool_result_output_preserves_multimodal_tool_output() {
 
     let mut items = tool_result.content.iter();
     match items.next() {
-        Some(ToolResultContent::Json { value }) => {
-            assert_eq!(value, &instruction);
+        Some(ToolResultContent::Text(text)) => {
+            assert_eq!(text.text, instruction.to_string());
         }
-        other => panic!("expected structured JSON payload first, got {other:?}"),
+        other => panic!("expected the pre-formatted payload first, got {other:?}"),
     }
 
     match items.next() {

@@ -296,9 +296,12 @@ fn multiple_tool_result_blocks_convert_to_distinct_content_parts() {
         details: None,
         content: OneOrMany::many(vec![
             message::ToolResultContent::text("first"),
-            message::ToolResultContent::json(serde_json::json!({
-                "status": "ok"
-            })),
+            message::ToolResultContent::text(
+                serde_json::json!({
+                    "status": "ok"
+                })
+                .to_string(),
+            ),
             message::ToolResultContent::text("second"),
         ])
         .expect("tool-result content should be non-empty"),

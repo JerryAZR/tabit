@@ -324,11 +324,6 @@ fn responses_tool_result_output(
             message::ToolResultContent::Text(Text { text, .. }) => {
                 rich_output.push(ToolResultOutputContent::InputText { text });
             }
-            message::ToolResultContent::Json { value } => {
-                rich_output.push(ToolResultOutputContent::InputText {
-                    text: value.to_string(),
-                });
-            }
             message::ToolResultContent::Image(message::Image {
                 data,
                 media_type,

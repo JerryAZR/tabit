@@ -304,27 +304,21 @@ fn a_v5_file_with_a_compaction_entry_loads_as_a_leaf() {
 }
 
 #[test]
-fn a_v3_file_still_loads() {
-    let mut body = body(&[user_node("u1", None, "hello")]);
-    // Rewrite the header's version to 3 — a v3 file is a subset of
-    // the v4 vocabulary by construction.
-    body = body.replace(
-        &format!("\"version\":{}", crate::entry::SESSION_FORMAT_VERSION),
-        "\"version\":3",
-    );
-    let parsed = parse(&body, Path::new("test.jsonl")).expect("v3 loads");
-    assert_eq!(parsed.tree.head(), Some("u1"));
-}
-
-#[test]
-fn a_v2_file_is_rejected() {
-    let mut body = body(&[]);
-    body = body.replace(
-        &format!("\"version\":{}", crate::entry::SESSION_FORMAT_VERSION),
-        "\"version\":2",
-    );
-    let error = parse(&body, Path::new("test.jsonl")).expect_err("v2 rejected");
-    assert!(error.to_string().contains("unsupported session format"));
+fn pre_release_versions_are_rejected() {
+    // Backward compatibility was ruled out pre-release: any older
+    // vocabulary fails loudly, naming what this build reads and writes.
+    for stale in [2, 3, 5] {
+        let mut body = body(&[]);
+        body = body.replace(
+            &format!("\"version\":{}", crate::entry::SESSION_FORMAT_VERSION),
+            &format!("\"version\":{stale}"),
+        );
+        let error = parse(&body, Path::new("test.jsonl")).expect_err("stale version rejected");
+        assert!(
+            error.to_string().contains("unsupported session format"),
+            "v{stale}: {error}"
+        );
+    }
 }
 
 #[test]

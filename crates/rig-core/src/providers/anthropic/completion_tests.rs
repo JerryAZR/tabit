@@ -4453,25 +4453,6 @@ async fn raw_completion_emits_request_and_response_trace_logs() {
     assert_eq!(assistant_text(&response).as_deref(), Some("hi"));
 }
 
-#[test]
-fn user_tool_result_json_content_serializes_as_text() {
-    let msg = message::Message::User {
-        content: OneOrMany::one(message::UserContent::tool_result(
-            "toolu_01",
-            OneOrMany::one(message::ToolResultContent::json(json!({"answer": 42}))),
-        )),
-    };
-    let converted: Message = msg.try_into().unwrap();
-    let Content::ToolResult { content, .. } = converted.content.first() else {
-        panic!("expected tool result");
-    };
-    assert_eq!(
-        content.first(),
-        ToolResultContent::Text {
-            text: json!({"answer": 42}).to_string()
-        }
-    );
-}
 
 #[test]
 fn thinking_content_converts_back_to_assistant_reasoning() {

@@ -249,7 +249,10 @@ pub enum ToolResultStatus {
     },
 }
 
-/// Describes one typed item in a tool result.
+/// Describes one typed item in a tool result. The model-visible
+/// modalities: structured cargo is not one — it rides
+/// [`ToolResult::details`], and model-facing JSON is the tool's own
+/// pre-formatted text.
 #[derive(Clone, Debug, Deserialize, Serialize, PartialEq)]
 #[serde(tag = "type", rename_all = "lowercase")]
 pub enum ToolResultContent {
@@ -257,15 +260,6 @@ pub enum ToolResultContent {
     Text(Text),
     /// An image supplied explicitly by the tool.
     Image(Image),
-    /// Structured JSON. A **legacy decode carrier only** — pre-details
-    /// logs store bookkeeping cargo as a content block, and providers
-    /// still stringify it so old sessions resume. Tools cannot produce
-    /// it: structured cargo rides [`ToolResult::details`], and
-    /// model-facing JSON is the tool's own pre-formatted text.
-    Json {
-        /// The structured value.
-        value: serde_json::Value,
-    },
 }
 
 impl ToolResultContent {
@@ -273,30 +267,19 @@ impl ToolResultContent {
     pub fn as_text(&self) -> Option<&str> {
         match self {
             Self::Text(text) => Some(&text.text),
-            Self::Image(_) | Self::Json { .. } => None,
+            Self::Image(_) => None,
         }
     }
 
-    /// Borrow structured JSON content.
-    pub fn as_json(&self) -> Option<&serde_json::Value> {
-        match self {
-            Self::Json { value } => Some(value),
-            Self::Text(_) | Self::Image(_) => None,
-        }
-    }
-
-    /// Deserialize JSON content into a typed value.
-    ///
-    /// Structured JSON is decoded directly. Literal text is parsed only because
-    /// the caller explicitly requested JSON decoding, which supports transcripts
-    /// recorded before structured tool output was preserved canonically. This
-    /// helper never changes the content sent to a model or provider.
+    /// Deserialize text content into a typed value — the caller
+    /// explicitly requested JSON decoding of a tool's pre-formatted
+    /// text. This helper never changes the content sent to a model or
+    /// provider.
     pub fn deserialize_json<T>(&self) -> Result<T, serde_json::Error>
     where
         T: serde::de::DeserializeOwned,
     {
         match self {
-            Self::Json { value } => serde_json::from_value(value.clone()),
             Self::Text(text) => serde_json::from_str(&text.text),
             Self::Image(_) => Err(<serde_json::Error as serde::de::Error>::custom(
                 "cannot decode image tool-result content as JSON",
@@ -960,11 +943,6 @@ impl ToolResultContent {
         ToolResultContent::Text(text.into().into())
     }
 
-    /// Helper constructor for structured JSON tool-result content.
-    pub fn json(value: serde_json::Value) -> Self {
-        ToolResultContent::Json { value }
-    }
-
     /// Helper constructor to make tool result images from a base64-encoded string.
     pub fn image_base64(
         data: impl Into<String>,
@@ -1488,7 +1466,7 @@ mod tests {
     }
 
     #[test]
-    fn tool_result_content_decodes_structured_and_legacy_json() {
+    fn tool_result_content_decodes_preformatted_json_text() {
         let response = ExecutorLikeResponse {
             output: serde_json::json!({"answer": 42}),
             logs: vec!["computed".to_string()],
@@ -1496,24 +1474,13 @@ mod tests {
         };
         let value = serde_json::to_value(&response).expect("serialize response");
 
-        let structured = ToolResultContent::json(value.clone());
-        assert_eq!(structured.as_json(), Some(&value));
-        assert_eq!(structured.as_text(), None);
+        // The tool pre-formats structured content as JSON text; the
+        // explicit decode reads it back.
+        let text = ToolResultContent::Text(Text::new(value.to_string()));
+        assert_eq!(text.as_text(), Some(value.to_string().as_str()));
         assert_eq!(
-            structured
-                .deserialize_json::<ExecutorLikeResponse>()
-                .expect("decode structured response"),
-            response
-        );
-
-        let legacy_json = value.to_string();
-        let legacy_text = ToolResultContent::Text(Text::new(legacy_json.clone()));
-        assert_eq!(legacy_text.as_text(), Some(legacy_json.as_str()));
-        assert_eq!(legacy_text.as_json(), None);
-        assert_eq!(
-            legacy_text
-                .deserialize_json::<ExecutorLikeResponse>()
-                .expect("decode legacy response"),
+            text.deserialize_json::<ExecutorLikeResponse>()
+                .expect("decode pre-formatted response"),
             response
         );
 

@@ -205,7 +205,7 @@ fn tool_result_literal_text_and_structured_json_render_without_reparsing() {
             r#"{"status":"ok"}"#.to_string(),
         ),
         (
-            message::ToolResultContent::json(json!({ "status": "ok" })),
+            message::ToolResultContent::text(json!({ "status": "ok" }).to_string()),
             r#"{"status":"ok"}"#.to_string(),
         ),
     ];
@@ -309,12 +309,10 @@ fn multiple_text_tool_result_blocks_preserve_order_as_rich_function_output() {
 }
 
 #[test]
-fn multiple_text_and_json_tool_result_blocks_preserve_boundaries() {
+fn multiple_text_tool_result_blocks_preserve_boundaries() {
     let content = OneOrMany::many(vec![
         message::ToolResultContent::text("before"),
-        message::ToolResultContent::json(json!({
-            "status": "ok"
-        })),
+        message::ToolResultContent::text(json!({ "status": "ok" }).to_string()),
         message::ToolResultContent::text("after"),
     ])
     .expect("multiple tool-result blocks should be non-empty");
@@ -347,7 +345,7 @@ fn tool_result_images_and_text_preserve_order_as_rich_function_output() {
             Some(message::ImageMediaType::PNG),
             None,
         ),
-        message::ToolResultContent::json(json!({ "after": true })),
+        message::ToolResultContent::text(json!({ "after": true }).to_string()),
     ])
     .expect("mixed tool output is non-empty");
     let input = message::Message::User {

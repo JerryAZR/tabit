@@ -29,7 +29,6 @@ impl fmt::Debug for ToolOutput {
             .map(|content| match content {
                 ToolResultContent::Text(_) => "text",
                 ToolResultContent::Image(_) => "image",
-                ToolResultContent::Json { .. } => "json",
             })
             .collect::<Vec<_>>();
         formatter
@@ -90,20 +89,6 @@ impl ToolOutput {
 
         match self.content.first_ref() {
             ToolResultContent::Text(text) if text.additional_params.is_none() => Some(&text.text),
-            ToolResultContent::Text(_)
-            | ToolResultContent::Image(_)
-            | ToolResultContent::Json { .. } => None,
-        }
-    }
-
-    /// Return structured JSON when this output is exactly one JSON block.
-    pub fn as_json(&self) -> Option<&serde_json::Value> {
-        if self.content.len() != 1 {
-            return None;
-        }
-
-        match self.content.first_ref() {
-            ToolResultContent::Json { value } => Some(value),
             ToolResultContent::Text(_) | ToolResultContent::Image(_) => None,
         }
     }
@@ -189,9 +174,7 @@ mod debug_tests {
         let output = ToolOutput::content(
             OneOrMany::many(vec![
                 ToolResultContent::text("Bearer secret-tool-output"),
-                ToolResultContent::json(serde_json::json!({
-                    "credential": "secret-json-output"
-                })),
+                ToolResultContent::text("Bearer the-second-secret"),
                 ToolResultContent::image_base64(
                     "secret-image-output",
                     Some(ImageMediaType::PNG),
@@ -204,13 +187,8 @@ mod debug_tests {
         let debug = format!("{output:?}");
         assert!(debug.contains("content_count: 3"));
         assert!(debug.contains("text"));
-        assert!(debug.contains("json"));
         assert!(debug.contains("image"));
-        for secret in [
-            "secret-tool-output",
-            "secret-json-output",
-            "secret-image-output",
-        ] {
+        for secret in ["secret-tool-output", "secret-image-output"] {
             assert!(!debug.contains(secret));
         }
     }
@@ -366,7 +344,6 @@ mod tests {
         let content = OneOrMany::many(vec![
             ToolResultContent::text("before"),
             ToolResultContent::image_base64("base64data==", Some(ImageMediaType::PNG), None),
-            ToolResultContent::json(serde_json::json!({"after": true})),
         ])
         .unwrap();
 
@@ -398,7 +375,6 @@ mod tests {
         );
 
         assert_eq!(output.as_text(), None);
-        assert_eq!(output.as_json(), None);
     }
 
     #[test]
@@ -406,29 +382,17 @@ mod tests {
         let output = ToolOutput::content(
             OneOrMany::many(vec![
                 ToolResultContent::text("before"),
-                ToolResultContent::json(serde_json::json!({"after": true})),
+                ToolResultContent::image_base64("ZGF0YQ==", Some(ImageMediaType::PNG), None),
             ])
             .unwrap(),
         );
 
-        // Neither a single text nor a single JSON block, so the ordered
+        // Neither a single text nor a details payload, so the ordered
         // content itself is serialized for telemetry.
         let rendered: serde_json::Value = serde_json::from_str(&output.render()).unwrap();
         assert_eq!(rendered[0]["type"], "text");
         assert_eq!(rendered[0]["text"], "before");
-        assert_eq!(rendered[1]["type"], "json");
-        assert_eq!(rendered[1]["value"], serde_json::json!({"after": true}));
-    }
-
-    #[test]
-    fn as_json_rejects_non_json_singleton_blocks() {
-        assert_eq!(ToolOutput::text("hello").as_json(), None);
-        let image = ToolOutput::one(ToolResultContent::image_base64(
-            "ZGF0YQ==",
-            Some(ImageMediaType::PNG),
-            None,
-        ));
-        assert_eq!(image.as_json(), None);
+        assert_eq!(rendered[1]["type"], "image");
     }
 
     #[test]

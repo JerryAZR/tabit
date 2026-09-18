@@ -339,7 +339,7 @@ fn mcp_content_block_as_json(
     content: &ContentBlock,
 ) -> Result<ToolResultContent, ToolExecutionError> {
     serde_json::to_value(content)
-        .map(ToolResultContent::json)
+        .map(|value| ToolResultContent::text(value.to_string()))
         .map_err(|error| {
             ToolExecutionError::provider(format!(
                 "failed to preserve an MCP content block as JSON: {error}"
@@ -414,7 +414,7 @@ fn mcp_result_output(result: &CallToolResult) -> Result<ToolOutput, ToolExecutio
             // rmcp's `structured`/`structured_error` constructors include this
             // text block solely for older clients. Replace it in place with the
             // typed value; do not duplicate it as model-visible text.
-            mapped.push(ToolResultContent::json(structured.clone()));
+            mapped.push(ToolResultContent::text(structured.to_string()));
             replaced_fallback = true;
         } else {
             mapped.push(mcp_content_block_to_tool_content(block)?);
@@ -428,7 +428,7 @@ fn mcp_result_output(result: &CallToolResult) -> Result<ToolOutput, ToolExecutio
         // structured result. Keep every real block and place the typed value
         // first deterministically; only the canonical compatibility text is
         // replaced rather than duplicated.
-        mapped.insert(0, ToolResultContent::json(structured.clone()));
+        mapped.insert(0, ToolResultContent::text(structured.to_string()));
     }
 
     let mut mapped = mapped.into_iter();
@@ -1004,8 +1004,10 @@ mod tests {
         let expected = blocks
             .iter()
             .map(|block| {
-                RigToolResultContent::json(
-                    serde_json::to_value(block).expect("MCP block is JSON serializable"),
+                RigToolResultContent::text(
+                    serde_json::to_value(block)
+                        .expect("MCP block is JSON serializable")
+                        .to_string(),
                 )
             })
             .collect::<Vec<_>>();
@@ -1018,37 +1020,19 @@ mod tests {
             .collect::<Vec<_>>();
 
         assert_eq!(content, expected);
-        assert!(matches!(
-            &content[0],
-            RigToolResultContent::Json { value }
-                if value["resource"]["uri"] == "file:///reports/summary.txt"
-                    && value["resource"]["mimeType"] == "text/plain"
-                    && value["resource"]["text"] == "full report"
-        ));
-        assert!(matches!(
-            &content[1],
-            RigToolResultContent::Json { value }
-                if value["resource"]["uri"] == "file:///reports/raw.bin"
-                    && value["resource"]["mimeType"] == "application/octet-stream"
-                    && value["resource"]["blob"] == "AAEC"
-        ));
-        assert!(matches!(
-            &content[2],
-            RigToolResultContent::Json { value }
-                if value["mimeType"] == "audio/wav" && value["data"] == "UklGRg=="
-        ));
-        assert!(matches!(
-            &content[4],
-            RigToolResultContent::Json { value }
-                if value["mimeType"] == "image/avif" && value["data"] == "YXZpZg=="
-        ));
-        assert!(matches!(
-            &content[5],
-            RigToolResultContent::Json { value }
-                if value["resource"]["uri"] == "file:///images/chart.avif"
-                    && value["resource"]["mimeType"] == "image/avif"
-                    && value["resource"]["blob"] == "YmxvYi1hdmlm"
-        ));
+        // Unrepresentable blocks pre-format as the block's JSON text —
+        // there is no structured model-visible block.
+        for (index, fragment) in [
+            (0, r#""uri":"file:///reports/summary.txt""#),
+            (1, r#""blob":"AAEC""#),
+            (2, r#""data":"UklGRg==""#),
+            (5, r#""uri":"file:///images/chart.avif""#),
+        ] {
+            let RigToolResultContent::Text(text) = &content[index] else {
+                panic!("block {index} maps to pre-formatted text");
+            };
+            assert!(text.text.contains(fragment), "block {index}: {}", text.text);
+        }
     }
 
     #[test]
@@ -1108,7 +1092,7 @@ mod tests {
             .content
             .push(ContentBlock::text("human-readable note"));
 
-        let mut expected = OneOrMany::one(RigToolResultContent::json(value));
+        let mut expected = OneOrMany::one(RigToolResultContent::text(value.to_string()));
         expected.push(RigToolResultContent::image_base64(
             "aW1hZ2U=",
             Some(ImageMediaType::PNG),
@@ -1223,10 +1207,13 @@ mod tests {
         let mut context = ToolContext::new();
         let result = execute(&fixture, "{}", &mut context).await;
 
-        let mut expected_content = OneOrMany::one(RigToolResultContent::json(json!({
-            "answer": 42,
-            "source": "fixture"
-        })));
+        let mut expected_content = OneOrMany::one(RigToolResultContent::text(
+            json!({
+                "answer": 42,
+                "source": "fixture"
+            })
+            .to_string(),
+        ));
         expected_content.push(RigToolResultContent::text("before"));
         expected_content.push(RigToolResultContent::image_base64(
             "aGVsbG8=",

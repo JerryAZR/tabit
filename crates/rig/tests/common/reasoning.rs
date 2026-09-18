@@ -673,9 +673,6 @@ pub(crate) fn assert_chat_history_preserves_reasoning_tool_roundtrip(
                                     ToolResultContent::Text(text) => {
                                         tool_result_text.push_str(&text.text);
                                     }
-                                    ToolResultContent::Json { value } => {
-                                        tool_result_text.push_str(&value.to_string());
-                                    }
                                     ToolResultContent::Image(_) => {}
                                 }
                             }

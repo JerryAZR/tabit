@@ -500,7 +500,6 @@ impl TryFrom<message::ToolResult> for Message {
             .into_iter()
             .map(|content| match content {
                 message::ToolResultContent::Text(message::Text { text, .. }) => Ok(ToolResultContent::from(text)),
-                message::ToolResultContent::Json { value } => Ok(ToolResultContent::from(value.to_string())),
                 message::ToolResultContent::Image(_) => Err(message::MessageError::ConversionError(
                     "OpenAI Chat Completions does not support images in tool results. Tool results must be text."
                         .into(),

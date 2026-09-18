@@ -332,7 +332,6 @@ fn tool_result_values(message: &Message) -> Vec<serde_json::Value> {
             rig_core::message::ToolResultContent::Text(text) => {
                 Some(serde_json::Value::String(text.text.clone()))
             }
-            rig_core::message::ToolResultContent::Json { value } => Some(value.clone()),
             rig_core::message::ToolResultContent::Image(_) => None,
         })
         .collect()

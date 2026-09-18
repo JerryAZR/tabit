@@ -1264,7 +1264,6 @@ mod tests {
             result.output().as_content().first_ref(),
             ToolResultContent::Image(_)
         ));
-        assert_eq!(result.output().as_json(), None);
     }
 
     struct TypedRichError {
@@ -1655,8 +1654,8 @@ mod migrated_tests {
         const PORTABLE_FIXTURE_IMAGE: &str = "cG9ydGFibGUtZml4dHVyZQ==";
 
         pub fn portable_fixture_output(label: impl Into<String>) -> ToolOutput {
-            let mut content = OneOrMany::one(ToolResultContent::json(
-                serde_json::json!({"label": label.into()}),
+            let mut content = OneOrMany::one(ToolResultContent::text(
+                serde_json::json!({"label": label.into()}).to_string(),
             ));
             content.push(ToolResultContent::image_base64(
                 PORTABLE_FIXTURE_IMAGE,
@@ -2059,7 +2058,7 @@ mod migrated_tests {
     }
 
     #[tokio::test]
-    async fn object_tool_outputs_still_serialize_as_json() {
+    async fn object_tool_outputs_preformat_as_json_text() {
         let mut toolset = ToolSet::default();
         toolset.add_tool(MockObjectOutputTool);
 
@@ -2069,10 +2068,13 @@ mod migrated_tests {
 
         assert_eq!(
             result.output(),
-            &ToolOutput::json(json!({
-                "status": "ok",
-                "count": 42
-            }))
+            &ToolOutput::text(
+                json!({
+                    "status": "ok",
+                    "count": 42
+                })
+                .to_string()
+            )
         );
     }
 
