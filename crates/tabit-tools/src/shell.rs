@@ -24,6 +24,14 @@ pub(crate) struct Interpreter {
     pub(crate) argv0: String,
     /// Flags before the command text.
     pub(crate) args: &'static [&'static str],
+    /// A directory prepended to the child's PATH. The verified
+    /// Git-for-Windows bash carries its own coreutils (`usr\bin`) —
+    /// installers put only `Git\cmd` on the Windows PATH, so an
+    /// inherited-PATH bash would fail every coreutils call (`ls:
+    /// command not found`) depending on who launched tabit. The tool
+    /// verified this root; it guarantees its own toolchain. `None`
+    /// for interpreters that need nothing (PowerShell, Unix bash).
+    pub(crate) path_prepend: Option<std::path::PathBuf>,
 }
 
 #[cfg(windows)]
@@ -65,6 +73,9 @@ mod windows {
             Shell::Bash(path) => Ok(Interpreter {
                 argv0: path.to_string_lossy().into_owned(),
                 args: BASH_ARGS,
+                // bash.exe lives in `<root>\usr\bin` — the coreutils
+                // directory itself.
+                path_prepend: path.parent().map(|dir| dir.to_path_buf()),
             }),
             Shell::Powershell => Err(
                 "this machine has no verified Git Bash — commands here run through the powershell tool"
@@ -79,6 +90,7 @@ mod windows {
         Interpreter {
             argv0: "powershell".to_string(),
             args: POWERSHELL_ARGS,
+            path_prepend: None,
         }
     }
 
@@ -213,6 +225,22 @@ mod windows {
         use super::*;
 
         #[test]
+        #[test]
+        fn the_verified_bash_prepends_its_own_coreutils_dir() {
+            // The regression this pins: a launcher whose PATH carries
+            // `Git\cmd` but not `usr\bin` made every coreutils call
+            // fail (`ls: command not found`) — the child's PATH must
+            // gain the verified root's coreutils directory.
+            let interpreter = bash().expect("a verified bash exists on this machine");
+            let dir = interpreter
+                .path_prepend
+                .as_ref()
+                .expect("bash carries its coreutils directory");
+            assert!(dir.join("bash.exe").is_file(), "the bash dir: {dir:?}");
+            assert!(dir.join("ls.exe").is_file(), "the coreutils dir: {dir:?}");
+        }
+
+        #[test]
         fn git_exe_placements_map_to_roots() {
             assert_eq!(
                 root_from_git_exe(Path::new(r"C:\Program Files\Git\cmd\git.exe")),
@@ -333,6 +361,8 @@ mod unix {
         Ok(Interpreter {
             argv0: "bash".to_string(),
             args: BASH_ARGS,
+            // A Unix bash resolves its own coreutils by construction.
+            path_prepend: None,
         })
     }
 }

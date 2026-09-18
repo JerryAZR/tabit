@@ -765,6 +765,17 @@ async fn run_shell(
             .stdout(std::process::Stdio::piped())
             .stderr(std::process::Stdio::piped())
             .stdin(std::process::Stdio::null());
+        // The verified root's coreutils ride along (bash on Windows):
+        // a GUI-launcher's PATH usually carries `Git\cmd` but not
+        // `Git\usr\bin`, and an inherited-PATH bash would fail every
+        // coreutils call. The tool verified this root — it guarantees
+        // its own toolchain.
+        if let Some(dir) = &interpreter.path_prepend {
+            let inherited = std::env::var_os("PATH").unwrap_or_default();
+            let augmented = std::env::join_paths([dir.as_os_str(), inherited.as_os_str()])
+                .expect("PATH join of an existing directory and the inherited PATH");
+            cmd.env("PATH", augmented);
+        }
         // A session-scoped run works from the session's directory (the
         // subagent ruling); absent the capability the child inherits
         // the process cwd — today's semantics.
