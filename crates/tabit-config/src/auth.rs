@@ -68,24 +68,23 @@ impl AuthConfig {
     /// `api_key_env` may carry the key instead); an empty [`AuthConfig`]
     /// is returned.
     pub fn load_default() -> Result<Self, ConfigError> {
-        for path in default_auth_paths() {
+        // An explicit override is authoritative: when `$TABIT_AUTH` is set,
+        // the home file is never consulted — a missing override file is an
+        // empty config, not a silent fallback (the search-list version read
+        // the developer's real auth file and broke hermeticity).
+        if let Some(from_env) = std::env::var_os("TABIT_AUTH") {
+            let path = PathBuf::from(from_env);
+            if !path.is_file() {
+                return Ok(Self::default());
+            }
+            return Self::load(&path);
+        }
+        if let Some(home) = crate::home_dir() {
+            let path = home.join(".tabit").join("auth.toml");
             if path.is_file() {
-                return Self::load(path);
+                return Self::load(&path);
             }
         }
         Ok(Self::default())
     }
-}
-
-/// The default auth file search path: `$TABIT_AUTH`, then
-/// `<home>/.tabit/auth.toml`.
-fn default_auth_paths() -> Vec<PathBuf> {
-    let mut paths = Vec::new();
-    if let Some(from_env) = std::env::var_os("TABIT_AUTH") {
-        paths.push(PathBuf::from(from_env));
-    }
-    if let Some(home) = crate::home_dir() {
-        paths.push(home.join(".tabit").join("auth.toml"));
-    }
-    paths
 }
