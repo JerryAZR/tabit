@@ -28,11 +28,26 @@ pub struct AuthConfig {
 }
 
 /// The credential for one provider.
-#[derive(Debug, Clone, PartialEq, Deserialize)]
+#[derive(Clone, PartialEq, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct AuthEntry {
     /// The API key.
     pub api_key: String,
+}
+
+impl std::fmt::Debug for AuthEntry {
+    /// Redacts the key material — a Debug of a credential must be safe
+    /// to print (a test panic once surfaced real keys through the
+    /// derived rendering). Provider names and key shapes stay visible:
+    /// `AuthConfig`'s derived Debug nests this impl.
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("AuthEntry")
+            .field(
+                "api_key",
+                &format!("<redacted: {} chars>", self.api_key.chars().count()),
+            )
+            .finish()
+    }
 }
 
 impl AuthConfig {

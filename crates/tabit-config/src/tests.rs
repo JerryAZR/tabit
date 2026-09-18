@@ -438,6 +438,25 @@ oauth = "radius"
 }
 
 #[test]
+fn auth_debug_redacts_key_material() {
+    // A Debug of a credential must be safe to print: provider names
+    // and key shapes stay visible, the material never does (a test
+    // panic once surfaced real keys through the derived rendering).
+    let auth = AuthConfig::from_toml_str(
+        "[providers.zai]
+api_key = \"super-secret-key-material\"
+",
+        Path::new("auth.toml"),
+    )
+    .expect("auth parses");
+
+    let rendered = format!("{auth:?}");
+    assert!(rendered.contains("zai"), "provider names stay: {rendered}");
+    assert!(rendered.contains("redacted: 25 chars"), "{rendered}");
+    assert!(!rendered.contains("super-secret"), "{rendered}");
+}
+
+#[test]
 fn auth_load_default_missing_file_is_empty_not_an_error() {
     let _guard = OVERRIDE_ENV_LOCK.lock().expect("env lock");
     // SAFETY: serialized by OVERRIDE_ENV_LOCK.
