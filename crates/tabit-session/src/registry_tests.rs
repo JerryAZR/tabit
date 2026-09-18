@@ -125,6 +125,77 @@ api_key = "dummy"
 }
 
 #[test]
+fn a_keyless_declaration_is_the_usability_flag() {
+    // No key, no `keyless = true`: the provider is not usable — the
+    // explicit build fails loudly naming both fixes, and there is no
+    // usable provider to fall back to.
+    let flagged = registry_with(TWO_MODELS, "");
+    let error = flagged
+        .build("local", "m", "session")
+        .expect_err("no key and not keyless");
+    match error {
+        SessionError::Config { message } => {
+            assert!(message.contains("requires a key"), "{message}");
+            assert!(message.contains("keyless = true"), "{message}");
+        }
+        other => panic!("expected config error, got {other:?}"),
+    }
+    match flagged.default_selection(None, None) {
+        Err(SessionError::Config { message }) => {
+            assert!(message.contains("usable model provider"), "{message}");
+        }
+        other => panic!("expected the teaching error, got {other:?}"),
+    }
+
+    // Declared keyless: usable, with the stubbed empty credential
+    // riding the same builders as everyone else.
+    let keyless = registry_with(&KEYLESS_MODELS, "");
+    keyless.build("local", "m", "session").expect("keyless builds");
+    let (selection, notes) = keyless.default_selection(None, None).expect("usable");
+    assert_eq!(selection, ModelSelection::new("local", "m"));
+    assert!(notes.is_empty());
+}
+
+const KEYLESS_MODELS: &str = r#"
+[providers.local]
+base_url = "http://127.0.0.1:1234/v1"
+api = "openai-completions"
+keyless = true
+
+[[providers.local.models]]
+id = "m"
+"#;
+
+#[test]
+fn resolution_skips_unusable_providers_and_notes_the_degradation() {
+    // `local` has no key material (unusable); `remote` carries a key.
+    // A default_model pointing at the unusable provider degrades with
+    // a note, and the last-resort pick lands on the usable one.
+    // Prepend: a trailing key would attach to the last table array.
+    let raw = format!(
+        "default_model = {{ provider = \"local\", model = \"m\" }}
+{TWO_MODELS}
+[providers.remote]
+base_url = \"https://remote.example/v1\"
+api = \"openai-completions\"
+
+[[providers.remote.models]]
+id = \"remote-m\""
+    );
+    let registry = registry_with(
+        &raw,
+        r#"
+[providers.remote]
+api_key = "k"
+"#,
+    );
+    let (selection, notes) = registry.default_selection(None, None).expect("usable exists");
+    assert_eq!(selection, ModelSelection::new("remote", "remote-m"));
+    assert_eq!(notes.len(), 1, "the degradation is noted: {notes:?}");
+    assert!(notes[0].contains("not usable"), "{notes:?}");
+}
+
+#[test]
 fn default_selection_falls_back_to_first_model_then_error() {
     let registry = default_registry();
     let (got, notes) = registry.default_selection(None, None).expect("first-seen");
@@ -136,7 +207,9 @@ fn default_selection_falls_back_to_first_model_then_error() {
         .default_selection(None, None)
         .expect_err("nothing configured");
     match err {
-        SessionError::Config { message } => assert!(message.contains("no models"), "{message}"),
+        SessionError::Config { message } => {
+            assert!(message.contains("usable model provider"), "{message}")
+        }
         other => panic!("expected config error, got {other:?}"),
     }
 }
@@ -212,11 +285,15 @@ fn build_errors_name_the_missing_pieces() {
         }
         other => panic!("expected config error, got {other:?}"),
     }
-    // Keyless builds succeed now (local endpoints run keyless;
-    // auth-requiring providers answer 401 at send time).
-    config_only
-        .build("local", "m", "key")
-        .expect("keyless provider builds");
+    // Undeclared keyless fails loudly (the usability flag rules this
+    // state out; `a_keyless_declaration_is_the_usability_flag` covers
+    // both sides).
+    match config_only.build("local", "m", "key") {
+        Err(SessionError::Config { message }) => {
+            assert!(message.contains("requires a key"), "{message}")
+        }
+        other => panic!("expected config error, got {other:?}"),
+    }
 }
 
 #[test]

@@ -246,7 +246,7 @@ fn stage(tag: &str, behaviors: &[(&str, &str)]) -> Stage {
     std::fs::write(
         &config,
         format!(
-            "[providers.p]\nbase_url = \"http://127.0.0.1:{}/v1\"\napi = \"openai-completions\"\n\n[[providers.p.models]]\nid = \"m\"\n",
+            "[providers.p]\nbase_url = \"http://127.0.0.1:{}/v1\"\napi = \"openai-completions\"\nkeyless = true\n\n[[providers.p.models]]\nid = \"m\"\n",
             server.port()
         ),
     )
@@ -688,7 +688,7 @@ fn install_path_then_boot_serves_the_package() {
     std::fs::write(
         &config,
         format!(
-            "[providers.p]\nbase_url = \"http://127.0.0.1:{}/v1\"\napi = \"openai-completions\"\n\n[[providers.p.models]]\nid = \"m\"\n",
+            "[providers.p]\nbase_url = \"http://127.0.0.1:{}/v1\"\napi = \"openai-completions\"\nkeyless = true\n\n[[providers.p.models]]\nid = \"m\"\n",
             server.port()
         ),
     )
@@ -761,7 +761,7 @@ fn a_providers_fragment_relays_a_model_call_over_the_native_api() {
     std::fs::write(
         package.join("providers.toml"),
         format!(
-            "[providers.lmstudio-relay]\nbase_url = \"http://127.0.0.1:{relay_port}/v1\"\napi = \"openai-completions\"\n\n[[providers.lmstudio-relay.models]]\nid = \"local-model\"\n"
+            "[providers.lmstudio-relay]\nbase_url = \"http://127.0.0.1:{relay_port}/v1\"\napi = \"openai-completions\"\nkeyless = true\n\n[[providers.lmstudio-relay.models]]\nid = \"local-model\"\n"
         ),
     )
     .expect("fragment");
@@ -866,7 +866,7 @@ fn an_unreachable_upstream_fails_the_run_through_the_relay() {
     std::fs::write(
         package.join("providers.toml"),
         format!(
-            "[providers.lmstudio-relay]\nbase_url = \"http://127.0.0.1:{relay_port}/v1\"\napi = \"openai-completions\"\n\n[[providers.lmstudio-relay.models]]\nid = \"local-model\"\n"
+            "[providers.lmstudio-relay]\nbase_url = \"http://127.0.0.1:{relay_port}/v1\"\napi = \"openai-completions\"\nkeyless = true\n\n[[providers.lmstudio-relay.models]]\nid = \"local-model\"\n"
         ),
     )
     .expect("fragment");

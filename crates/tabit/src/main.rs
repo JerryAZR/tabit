@@ -907,6 +907,7 @@ fn setup_guide(detail: &str) -> String {
     [providers.lmstudio]
     base_url = "http://127.0.0.1:1234/v1"
     api = "openai-completions"
+    keyless = true
 
     [[providers.lmstudio.models]]
     id = "your-model-id"
@@ -2273,6 +2274,7 @@ mod tests {
 [providers.lmstudio]
 base_url = "http://127.0.0.1:1234/v1"
 api = "openai-completions"
+keyless = true
 
 [[providers.lmstudio.models]]
 id = "m"
@@ -2300,7 +2302,10 @@ id = "m"
         let error = empty
             .default_selection(None, None)
             .expect_err("nothing configured");
-        assert!(error.to_string().contains("no models"), "{error}");
+        assert!(
+        error.to_string().contains("usable model provider"),
+        "{error}"
+    );
     }
 
     #[test]
@@ -2341,6 +2346,7 @@ default_model = { provider = "lmstudio", model = "m" }
 [providers.lmstudio]
 base_url = "http://127.0.0.1:1234/v1"
 api = "openai-completions"
+keyless = true
 
 [[providers.lmstudio.models]]
 id = "m"

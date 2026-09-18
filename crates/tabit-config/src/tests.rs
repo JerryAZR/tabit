@@ -772,16 +772,6 @@ fn resolve_model_ref_survives_a_provider_named_like_an_id_prefix() {
 }
 
 #[test]
-fn first_model_is_first_provider_first_model() {
-    let config = parse(VALID);
-    assert_eq!(
-        config.first_model(),
-        Some(("anthropic".to_string(), "claude-some-model".to_string()))
-    );
-    assert_eq!(parse("").first_model(), None);
-}
-
-#[test]
 fn default_model_without_provider_resolves_or_fails_loudly() {
     // Prepend: a trailing key would attach to the last table array.
     let raw = format!("default_model = {{ model = \"openai/gpt-oss-20b\" }}\n{VALID}");

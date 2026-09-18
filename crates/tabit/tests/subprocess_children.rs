@@ -92,7 +92,7 @@ fn stage_child_config(tag: &str, server: &MockServer) -> PathBuf {
     // No `default_model` needed: the child's resolution falls back to
     // the first configured model, which is this one.
     let toml = format!(
-        "[providers.p]\nbase_url = \"http://127.0.0.1:{}/v1\"\napi = \"openai-completions\"\n\n[[providers.p.models]]\nid = \"m\"\n",
+        "[providers.p]\nbase_url = \"http://127.0.0.1:{}/v1\"\napi = \"openai-completions\"\nkeyless = true\n\n[[providers.p.models]]\nid = \"m\"\n",
         server.port()
     );
     std::fs::write(&config_path, toml).expect("write child config");
@@ -119,6 +119,7 @@ fn subprocess_parent(
 [providers.p]
 base_url = "http://127.0.0.1:1/v1"
 api = "openai-completions"
+keyless = true
 
 [[providers.p.models]]
 id = "m"
@@ -675,6 +676,7 @@ async fn a_subprocess_child_boots_its_own_extension_host_and_serves_its_tools() 
 [providers.p]
 base_url = "http://127.0.0.1:1/v1"
 api = "openai-completions"
+keyless = true
 
 [[providers.p.models]]
 id = "m"

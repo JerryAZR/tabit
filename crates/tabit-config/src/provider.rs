@@ -29,6 +29,14 @@ pub struct Provider {
     /// `auth.toml` entry for the same provider.
     #[serde(default)]
     pub api_key_env: Option<String>,
+    /// This provider needs no API key — a local server (LM Studio,
+    /// llama.cpp, an OpenAI-compatible relay). A provider with neither
+    /// a key nor this declaration is **not a usable model provider**:
+    /// selection fails loudly instead of surfacing a bare 401 at
+    /// request time. Declared keyless, requests run with a stubbed
+    /// empty credential through the same builders as everyone else.
+    #[serde(default)]
+    pub keyless: bool,
     /// Extra headers sent with every request to this provider.
     #[serde(default)]
     pub headers: Option<BTreeMap<String, String>>,

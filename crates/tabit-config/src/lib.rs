@@ -39,6 +39,7 @@
 //! name = "LM Studio"
 //! base_url = "http://127.0.0.1:1234/v1"
 //! api = "openai-completions"
+//! keyless = true  # a local server: usable with a stubbed credential
 //!
 //! [[providers.lmstudio.models]]
 //! id = "openai/gpt-oss-20b"
@@ -348,15 +349,6 @@ impl TabitConfig {
             }
         }
         index
-    }
-
-    /// The first model the loader sees: the alphabetically-first provider's
-    /// first model (`providers` is a `BTreeMap`; model arrays keep file
-    /// order). The fallback default when no preference exists.
-    pub fn first_model(&self) -> Option<(String, String)> {
-        let (provider_id, provider) = self.providers.iter().next()?;
-        let model = provider.models.first()?;
-        Some((provider_id.clone(), model.id.clone()))
     }
 }
 

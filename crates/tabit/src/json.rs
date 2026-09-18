@@ -248,6 +248,7 @@ mod tests {
 [providers.p]
 base_url = "http://127.0.0.1:9999/v1"
 api = "openai-completions"
+keyless = true
 
 [[providers.p.models]]
 id = "m"
@@ -294,6 +295,7 @@ id = "m"
 [providers.p]
 base_url = "http://127.0.0.1:9999/v1"
 api = "openai-completions"
+keyless = true
 
 [[providers.p.models]]
 id = "m"
@@ -1030,6 +1032,7 @@ id = "m"
 [providers.p]
 base_url = "http://127.0.0.1:9999/v1"
 api = "openai-completions"
+keyless = true
 
 [[providers.p.models]]
 id = "m"
@@ -1233,6 +1236,7 @@ id = "m"
 [providers.p]
 base_url = "http://127.0.0.1:9999/v1"
 api = "openai-completions"
+keyless = true
 
 [[providers.p.models]]
 id = "m"

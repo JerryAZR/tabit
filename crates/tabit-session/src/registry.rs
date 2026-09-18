@@ -101,13 +101,14 @@ impl ModelRegistry {
     ///
     /// Precedence: `explicit` (a caller-provided choice, e.g. `--model`),
     /// then `resumed` (the session log's last model), then the configured
-    /// `default_model`, then the first configured model. A `resumed`
-    /// reference that no longer resolves degrades with a note (it is
-    /// a preference, like default_model); only an explicit selection
-    /// fails loudly. The notes are data — the session worker surfaces
-    /// them to the frontend as `error { kind: model }` frames (stderr
-    /// printing at construction is ruled out: events are the only thing
-    /// a frontend can see).
+    /// `default_model`, then the first **usable** model. A `resumed`
+    /// reference that no longer resolves — gone from config, or its
+    /// provider lacking the key material it needs — degrades with a note
+    /// (it is a preference, like `default_model`); only an explicit
+    /// selection fails loudly. The notes are data — the session worker
+    /// surfaces them to the frontend as `error { kind: model }` frames
+    /// (stderr printing at construction is ruled out: events are the only
+    /// thing a frontend can see).
     pub fn default_selection(
         &self,
         explicit: Option<ModelSelection>,
@@ -124,36 +125,86 @@ impl ModelRegistry {
         // selections (the arm above) stay loud; the user asked for
         // exactly that model.
         if let Some(resumed) = resumed {
-            match validate_selection(&resumed, &self.inner.config) {
-                Ok(()) => return Ok((resumed, notes)),
-                Err(error) => notes.push(format!(
+            match self.preference_error(&resumed) {
+                None => return Ok((resumed, notes)),
+                Some(error) => notes.push(format!(
                     "the resumed session's model `{}/{}` is not usable ({}); \
-                     falling back to default_model or the first configured model",
+                     falling back to default_model or the first usable model",
                     resumed.provider, resumed.model, error
                 )),
             }
         }
         // `default_model` is a preference, not a hard reference: a
-        // stale or ambiguous entry degrades to the first configured
+        // stale or ambiguous entry degrades to the first usable
         // model with a note (owner ruling — it must never block
         // startup).
         if let Some(default) = &self.inner.config.default_model {
             match preferred_selection(default, &self.inner.config) {
-                Ok(selection) => return Ok((selection, notes)),
+                Ok(selection) if self.usable(&selection.provider) => {
+                    return Ok((selection, notes))
+                }
+                Ok(_) => notes.push(format!(
+                    "default_model `{}` is not usable (its provider has no key and \
+                     is not declared keyless); falling back to the first usable model",
+                    default.model
+                )),
                 Err(message) => notes.push(format!(
                     "default_model `{}` is not usable ({message}); falling back \
-                     to the first configured model",
+                     to the first usable model",
                     default.model
                 )),
             }
         }
-        self.inner
-            .config
-            .first_model()
+        self.first_usable_model()
             .map(|(provider, model)| (ModelSelection::new(provider, model), notes))
             .ok_or_else(|| SessionError::Config {
-                message: "any model to run with (providers.toml defines no models)".to_string(),
+                message: "a usable model provider — every configured provider lacks a \
+                          key (declare local servers `keyless = true`, or add a key via \
+                          auth.toml / `api_key_env`)"
+                    .to_string(),
             })
+    }
+
+    /// Is this provider runnable — does it have the key material it
+    /// needs? A provider with neither a key nor the `keyless`
+    /// declaration is not a usable model provider.
+    fn usable(&self, provider_id: &str) -> bool {
+        let Some(provider) = self.inner.config.provider(provider_id) else {
+            return false;
+        };
+        provider.keyless
+            || self
+                .inner
+                .config
+                .resolve_api_key(provider_id, &self.inner.auth)
+                .is_some()
+    }
+
+    /// Why a preference (resumed selection) cannot run, if it cannot.
+    fn preference_error(&self, selection: &ModelSelection) -> Option<String> {
+        match validate_selection(selection, &self.inner.config) {
+            Err(error) => Some(error.to_string()),
+            Ok(()) if self.usable(&selection.provider) => None,
+            Ok(()) => Some(format!(
+                "provider `{}` has no key and is not declared keyless",
+                selection.provider
+            )),
+        }
+    }
+
+    /// The last-resort pick: the first usable provider's first model
+    /// (alphabetical provider order), skipping providers that lack the
+    /// key material they need.
+    fn first_usable_model(&self) -> Option<(String, String)> {
+        for (provider_id, provider) in &self.inner.config.providers {
+            if !self.usable(provider_id) {
+                continue;
+            }
+            if let Some(model) = provider.models.first() {
+                return Some((provider_id.clone(), model.id.clone()));
+            }
+        }
+        None
     }
 
     /// Build a model handle for `(provider, model)` through the cached
@@ -177,16 +228,30 @@ impl ModelRegistry {
             .ok_or_else(|| SessionError::Config {
                 message: format!("model `{model_id}` for provider `{provider_id}`"),
             })?;
-        // Keyless is a supported state (ROADMAP item 1: local
-        // endpoints run keyless). A provider that actually requires
-        // auth rejects the first request with its own 401 — an
-        // external error at send time, matching how pi/opencode
-        // surface missing credentials — instead of blocking startup.
-        let api_key = self
+        // Keyless is a supported state (ROADMAP item 1: local endpoints
+        // run keyless) — but only when DECLARED. A provider with
+        // neither a key nor `keyless = true` is not a usable model
+        // provider (owner ruling 2026-09): the selection fails here,
+        // loudly, naming both fixes, instead of surfacing a bare 401
+        // at request time. Declared keyless, the stubbed empty
+        // credential rides the same builders as everyone else.
+        let api_key = match self
             .inner
             .config
             .resolve_api_key(provider_id, &self.inner.auth)
-            .unwrap_or_default();
+        {
+            Some(key) => key,
+            None if provider.keyless => String::new(),
+            None => {
+                return Err(SessionError::Config {
+                    message: format!(
+                        "provider `{provider_id}` requires a key — add one to \
+                         auth.toml, set `api_key_env`, or declare local servers \
+                         `keyless = true`"
+                    ),
+                });
+            }
+        };
         let label = format!("{provider_id}/{}", model.id);
         // Tabit's prompt-cache policy, in full (owner ruling 2026-08: keep
         // it simple, all 1h; a modeled policy — breakpoint cadence, mixed

@@ -144,6 +144,27 @@ The application-level conversation layer pi builds over its agent loop:
   when a consumer exists; per-model `sampling_params`/`thinking_levels`/
   `extra_body` application happens in the registry's build path (with
   item 6).
+- **Keyless flag shipped** (2026-09): a provider declares
+  `keyless = true` when it needs no API key (LM Studio and other local
+  servers). A provider with neither a key nor the declaration is **not
+  a usable model provider**: preference resolution (resumed,
+  `default_model`, last-resort pick) skips it with notes, and explicit
+  selection fails loudly at build naming both fixes. The wire request
+  path is unchanged — keyless providers ride the stubbed empty
+  credential through the same builders (no request-path split).
+- **Provider model auto-discovery: deferred** (2026-09, owner). The
+  OpenAI-compatible `/v1/models` returns ids only — no context
+  windows, no thinking levels — so a discovered model is an id with
+  pure pass-through defaults, not useful enough to ship. Recorded
+  direction: the provider catalog (curated per-model metadata) could
+  ship as an **extension** instead of core machinery. rig-core's
+  `ModelLister` already covers Anthropic and OpenAI; the internal
+  completions engine lacks a lister (the only gap, ~a thin adapter —
+  the wire shape is identical to OpenAI's). **Reload note**: when
+  reload lands, discovery/catalog merge must be a single callable
+  step over `(config, auth)`, not a re-run of the whole
+  initialization flow; if the current init flow obstructs that, the
+  refactor is its own roadmap item at that point.
 
 ### 3. System prompt builder + skills & AGENTS.md discovery
 
