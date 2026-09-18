@@ -57,7 +57,7 @@ where
 /// it — on a Windows machine without one, the shell tool is `powershell`.
 fn bash_dialect_available() -> bool {
     #[cfg(windows)]
-    return matches!(shell::resolved(), shell::Shell::Bash(_));
+    return matches!(shell::resolved(), shell::Shell::Bash { .. });
     #[cfg(not(windows))]
     return true;
 }
@@ -470,7 +470,7 @@ async fn shell_tool_registers_the_resolved_dialect() {
 
     #[cfg(windows)]
     let expected = match shell::resolved() {
-        shell::Shell::Bash(_) => "bash",
+        shell::Shell::Bash { .. } => "bash",
         shell::Shell::Powershell => "powershell",
     };
     #[cfg(not(windows))]

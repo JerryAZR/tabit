@@ -704,6 +704,14 @@ pub async fn bash(
 /// The PowerShell-dialect counterpart of [`bash`], registered on Windows
 /// machines with no verified Git Bash — the model always gets a shell
 /// whose dialect matches the tool's description.
+/// pi's encoding fix: Windows PowerShell 5.1 decodes native command
+/// output with the system's ANSI codepage (GBK on Chinese-locale
+/// machines), so non-ASCII output would mojibake. Sets the console to
+/// UTF-8 for the session; best-effort — a host without the type fails
+/// this statement, not the command.
+const POWERSHELL_UTF8_PREFIX: &str =
+    "try { [Console]::OutputEncoding = [System.Text.Encoding]::UTF8 } catch {}\n";
+
 #[cfg(windows)]
 #[rig_tool(description = "Run a shell command and return its combined output. \
                    Commands run through Windows PowerShell — write PowerShell \
@@ -716,7 +724,13 @@ pub async fn powershell(
     command: String,
     timeout_secs: Option<u64>,
 ) -> Result<ToolOutput, ToolExecutionError> {
-    run_shell(&shell::powershell(), context, command, timeout_secs).await
+    run_shell(
+        &shell::powershell(),
+        context,
+        format!("{POWERSHELL_UTF8_PREFIX}{command}"),
+        timeout_secs,
+    )
+    .await
 }
 
 /// The shell tool this machine registers: `bash` where a Git-for-Windows
@@ -726,7 +740,7 @@ pub async fn powershell(
 pub fn shell_tool() -> DynamicTool {
     #[cfg(windows)]
     return match shell::resolved() {
-        shell::Shell::Bash(_) => dynamic_contextual(Bash),
+        shell::Shell::Bash { .. } => dynamic_contextual(Bash),
         shell::Shell::Powershell => dynamic_contextual(Powershell),
     };
     #[cfg(not(windows))]
