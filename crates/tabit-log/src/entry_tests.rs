@@ -137,13 +137,15 @@ fn unknown_entry_fields_are_rejected() {
 #[test]
 fn header_round_trips_and_rejects_unknown_fields() {
     let header = SessionHeader {
-        version: SESSION_FORMAT_VERSION,
+        version: SESSION_FORMAT_MAJOR,
+        minor: SESSION_FORMAT_MINOR,
         id: "0195c0de-0000-7000-8000-000000000000".to_string(),
         created_at: "2026-08-15T00:00:00Z".to_string(),
         cwd: "C:/work".to_string(),
         parent_session: None,
     };
-    assert_eq!(SESSION_FORMAT_VERSION, 6);
+    assert_eq!(SESSION_FORMAT_MAJOR, 6);
+    assert_eq!(SESSION_FORMAT_MINOR, 0);
     let line = serde_json::to_string(&header).expect("header serializes");
     let back: SessionHeader = serde_json::from_str(&line).expect("header parses back");
     assert_eq!(back, header);

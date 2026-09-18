@@ -15,7 +15,8 @@ fn temp_path(tag: &str) -> PathBuf {
 
 fn header() -> SessionHeader {
     SessionHeader {
-        version: crate::entry::SESSION_FORMAT_VERSION,
+        version: crate::entry::SESSION_FORMAT_MAJOR,
+        minor: crate::entry::SESSION_FORMAT_MINOR,
         id: "sid".to_string(),
         created_at: "t".to_string(),
         cwd: "C:/w".to_string(),

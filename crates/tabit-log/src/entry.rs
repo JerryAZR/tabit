@@ -33,32 +33,38 @@ use rig_core::message::ToolResult;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
-/// The current session file format version. v6: the tool result
-/// carries its bookkeeping cargo in a dedicated `details` field, and
-/// the content blocks are model modalities only (text, image) — the
-/// pre-details JSON block is gone with every reader for it
-/// (unreleased software, backward compatibility ruled out).
-/// v5: the `compaction` node appends as a **leaf at the head-at-insert**
-/// (the tree's parent links are never rewritten — the history view, not
-/// the writer, places the boundary), assistant entries carry a measured
-/// `delta_tokens`, and the compaction node carries its persisted
-/// `tokens_after` (the regime's base measurement). Pre-release
-/// breaks, no migration: v5 and older are rejected loudly. v3: the log
+/// The session file format, major.minor. **Major** increments on a
+/// breaking vocabulary change — older readers reject the file loudly.
+/// **Minor** increments on an additive change — a reader with the same
+/// major and an equal-or-higher minor reads the file (a file with a
+/// *higher* minor than the reader is a newer writer and is rejected:
+/// the reader cannot know the added vocabulary). v6 (2026-09): the
+/// tool result carries its bookkeeping cargo in a dedicated `details`
+/// field, and the content blocks are model modalities only (text,
+/// image). v5: the `compaction` node appends as a **leaf at the
+/// head-at-insert** (the tree's parent links are never rewritten — the
+/// history view, not the writer, places the boundary). v3: the log
 /// splits into conversation nodes (id + parent, the tree) and
 /// parentless side records (`model_change`, `checkout`, `aborted`,
 /// `label`, `custom`) — bookkeeping stops chaining into the tree.
-pub const SESSION_FORMAT_VERSION: u32 = 6;
-/// Session file versions this build can read. Writers always write
-/// [`SESSION_FORMAT_VERSION`]; the pre-release vocabulary breaks at
-/// will and nothing older is readable.
-pub const READABLE_FORMAT_VERSIONS: [u32; 1] = [SESSION_FORMAT_VERSION];
+/// Pre-release there is no migration: a rejected file fails loudly,
+/// and a stable protocol with real breaking changes is when a
+/// migration story gets designed.
+pub const SESSION_FORMAT_MAJOR: u32 = 6;
+pub const SESSION_FORMAT_MINOR: u32 = 0;
 
 /// The first line of a session file.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct SessionHeader {
-    /// Format version; see [`SESSION_FORMAT_VERSION`].
+    /// Format **major** version; see [`SESSION_FORMAT_MAJOR`]. A
+    /// mismatch with this build's major rejects the file.
     pub version: u32,
+    /// Format **minor** version; see [`SESSION_FORMAT_MINOR`]. Absent
+    /// in files written before the minor existed — zero by
+    /// construction.
+    #[serde(default)]
+    pub minor: u32,
     /// Session id (UUIDv7 string).
     pub id: String,
     /// Creation time (RFC 3339).

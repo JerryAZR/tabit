@@ -14,7 +14,7 @@
 //! how it grows is the recorder's door; how it drains is the writer's
 //! queue.
 
-use crate::entry::{SESSION_FORMAT_VERSION, SessionHeader};
+use crate::entry::{SESSION_FORMAT_MAJOR, SESSION_FORMAT_MINOR, SessionHeader};
 use crate::error::SessionError;
 use crate::ids;
 use crate::parser::{self, Parsed};
@@ -74,7 +74,8 @@ impl SessionStore {
     /// no orphan behind.
     pub fn create(&self, cwd: &str) -> SessionWriter {
         let header = SessionHeader {
-            version: SESSION_FORMAT_VERSION,
+            version: SESSION_FORMAT_MAJOR,
+            minor: SESSION_FORMAT_MINOR,
             id: ids::new_session_id(),
             created_at: ids::now_rfc3339(),
             cwd: cwd.to_string(),

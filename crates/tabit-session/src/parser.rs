@@ -23,8 +23,7 @@
 //! fails the open with a named error, not a guess.
 
 use crate::entry::{
-    EntryKind, FileRecord, READABLE_FORMAT_VERSIONS, SESSION_FORMAT_VERSION, SessionHeader,
-    SideKind,
+    EntryKind, FileRecord, SESSION_FORMAT_MAJOR, SESSION_FORMAT_MINOR, SessionHeader, SideKind,
 };
 use crate::error::SessionError;
 use crate::stats::UsageLedger;
@@ -83,11 +82,16 @@ pub fn parse(raw: &str, path: &Path) -> Result<Parsed, SessionError> {
             line: 1,
             source,
         })?;
-    if !READABLE_FORMAT_VERSIONS.contains(&header.version) {
+    if header.version != SESSION_FORMAT_MAJOR || header.minor > SESSION_FORMAT_MINOR {
         return Err(corrupt(format!(
-            "unsupported session format version {} (this tabit reads versions {READABLE_FORMAT_VERSIONS:?}, \
-             writes version {SESSION_FORMAT_VERSION})",
-            header.version
+            "unsupported session format {}.{} (this tabit reads {}.x up to .{}, \
+             writes {}.{})",
+            header.version,
+            header.minor,
+            SESSION_FORMAT_MAJOR,
+            SESSION_FORMAT_MINOR,
+            SESSION_FORMAT_MAJOR,
+            SESSION_FORMAT_MINOR
         )));
     }
 

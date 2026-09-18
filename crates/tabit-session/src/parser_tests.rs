@@ -78,10 +78,12 @@ fn model_change(provider: &str, model: &str) -> SideKind {
     }
 }
 
-/// Serialize records into a file body (header first).
-fn body(records: &[FileRecord]) -> String {
+/// Serialize records into a file body (header first). `minor` rides
+/// along so the version-rule tests can move it.
+fn body_with_minor(records: &[FileRecord], minor: u32) -> String {
     let header = serde_json::json!({
-        "version": crate::entry::SESSION_FORMAT_VERSION,
+        "version": crate::entry::SESSION_FORMAT_MAJOR,
+        "minor": minor,
         "id": "sid",
         "created_at": "t",
         "cwd": "C:/w",
@@ -92,6 +94,10 @@ fn body(records: &[FileRecord]) -> String {
         out.push_str(&serde_json::to_string(record).expect("record"));
     }
     out
+}
+
+fn body(records: &[FileRecord]) -> String {
+    body_with_minor(records, crate::entry::SESSION_FORMAT_MINOR)
 }
 
 fn parse_ok(records: &[FileRecord]) -> Parsed {
@@ -232,7 +238,7 @@ fn a_future_format_version_is_rejected() {
     let raw = format!("{header}\n{rest}");
     match parse(&raw, Path::new("t.jsonl")) {
         Err(SessionError::Corrupt { message, .. }) => {
-            assert!(message.contains("version 99"), "{message}")
+            assert!(message.contains("format 99.0"), "{message}")
         }
         other => panic!("expected version error, got {other:?}"),
     }
@@ -310,7 +316,7 @@ fn pre_release_versions_are_rejected() {
     for stale in [2, 3, 5] {
         let mut body = body(&[]);
         body = body.replace(
-            &format!("\"version\":{}", crate::entry::SESSION_FORMAT_VERSION),
+            &format!("\"version\":{}", crate::entry::SESSION_FORMAT_MAJOR),
             &format!("\"version\":{stale}"),
         );
         let error = parse(&body, Path::new("test.jsonl")).expect_err("stale version rejected");
@@ -319,6 +325,19 @@ fn pre_release_versions_are_rejected() {
             "v{stale}: {error}"
         );
     }
+}
+
+#[test]
+fn a_newer_minor_is_rejected_by_the_older_reader() {
+    // A file from a newer writer carries vocabulary this build cannot
+    // know: same major, higher minor — loud reject, never a silent
+    // partial read.
+    let body = body_with_minor(&[], crate::entry::SESSION_FORMAT_MINOR + 1);
+    let error = parse(&body, Path::new("test.jsonl")).expect_err("newer minor rejected");
+    assert!(
+        error.to_string().contains("unsupported session format"),
+        "{error}"
+    );
 }
 
 #[test]
