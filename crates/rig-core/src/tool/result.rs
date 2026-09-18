@@ -281,7 +281,7 @@ impl ToolExecutionError {
     /// Literal model feedback, when the presentation is exactly one plain text
     /// block.
     ///
-    /// Use [`Self::model_output`] for JSON or multimodal feedback.
+    /// Use [`Self::model_output`] for multimodal feedback.
     pub fn model_feedback(&self) -> Option<&str> {
         self.model_output.as_text()
     }
@@ -578,6 +578,8 @@ mod tests {
 
     #[test]
     fn errors_can_expose_structured_model_output() {
+        // Structured model output is the tool's pre-formatted JSON
+        // text — there is no structured model-visible block.
         let output = ToolOutput::json(serde_json::json!({
             "error": "invalid region",
             "allowed": ["us", "eu"]
@@ -589,7 +591,17 @@ mod tests {
 
         assert_eq!(result.output(), &output);
         assert_eq!(result.error().unwrap().model_output(), &output);
-        assert_eq!(result.error().unwrap().model_feedback(), None);
+        // Model-visible structured output is pre-formatted text now, so
+        // the single-text feedback path surfaces it directly.
+        assert_eq!(
+            result.error().unwrap().model_feedback(),
+            Some(serde_json::json!({
+                "error": "invalid region",
+                "allowed": ["us", "eu"]
+            })
+            .to_string()
+            .as_str())
+        );
     }
 
     #[test]

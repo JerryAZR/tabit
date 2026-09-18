@@ -56,6 +56,7 @@ fn tool_result(id: &str) -> EntryKind {
         result: ToolResult {
             id: id.to_string(),
             call_id: None,
+            details: None,
             content: OneOrMany::one(ToolResultContent::text("ok")),
             status: None,
         },

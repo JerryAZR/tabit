@@ -2103,6 +2103,7 @@ mod tests {
         let image_result = ToolResult {
             id: "img".to_string(),
             call_id: None,
+            details: None,
             content: OneOrMany::many(vec![
                 ToolResultContent::text("label"),
                 ToolResultContent::Image(Image {
@@ -2137,6 +2138,7 @@ mod tests {
             UserContent::ToolResult(ToolResult {
                 id: id.to_string(),
                 call_id: None,
+                details: None,
                 content: OneOrMany::one(ToolResultContent::text("ok")),
                 status: None,
             })

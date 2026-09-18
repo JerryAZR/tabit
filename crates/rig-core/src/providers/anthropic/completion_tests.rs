@@ -533,6 +533,55 @@ fn completion_request_with_history(
     }
 }
 
+/// The details cargo is bookkeeping for frontends and hooks: it rides
+/// the result in the conversation and the log, but the provider wire
+/// carries the model's `content` only — the model never sees details
+/// (ruled 2026-09, pi's model).
+#[test]
+fn tool_result_details_never_reach_the_wire() {
+    let request = completion_request_with_history(
+        vec![
+            message::Message::user("What is the weather in London?"),
+            message::Message::Assistant {
+                id: None,
+                content: OneOrMany::one(message::AssistantContent::tool_call(
+                    "toolu_ok",
+                    "get_weather",
+                    json!({"city": "London"}),
+                )),
+            },
+            message::Message::User {
+                content: OneOrMany::one(message::UserContent::ToolResult(
+                    message::ToolResult {
+                        id: "toolu_ok".to_string(),
+                        call_id: None,
+                        details: Some(json!({"exit_code": 0, "spill": "/tmp/x"})),
+                        content: OneOrMany::one(message::ToolResultContent::text("15 degrees")),
+                        status: None,
+                    },
+                )),
+            },
+        ],
+        None,
+    );
+
+    let converted = AnthropicCompletionRequest::try_from(AnthropicRequestParams {
+        model: "claude-sonnet-4-6",
+        request,
+        prompt_caching: false,
+        automatic_caching: false,
+        automatic_caching_ttl: None,
+    })
+    .expect("the history is well-formed");
+    let serialized = serde_json::to_value(&converted).expect("serialize");
+    let wire = serde_json::to_string(&serialized).expect("wire");
+    assert!(wire.contains("15 degrees"), "content crosses: {wire}");
+    assert!(
+        !wire.contains("spill") && !wire.contains("exit_code"),
+        "details never serialize to the model: {wire}"
+    );
+}
+
 /// A tool result whose id matches no prior assistant `tool_use` is an
 /// orphan: the conversion fails loudly, naming the id and the history
 /// index, instead of forwarding a request Anthropic would reject (or

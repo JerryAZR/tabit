@@ -15,19 +15,15 @@ fn ctx() -> rig_agent::tool::ToolContext {
 }
 
 /// The (text, details) split of a successful multi-part tool result.
+/// Details ride the output's own field — never a content block.
 fn split_parts(result: rig_core::tool::ToolOutput) -> (String, Option<serde_json::Value>) {
-    let result = result.into_content();
     let mut text = String::new();
-    let mut details = None;
-    for part in result {
+    for part in result.as_content().iter() {
         if let Some(t) = part.as_text() {
             text.push_str(t);
         }
-        if let Some(j) = part.as_json() {
-            details = Some(j.clone());
-        }
     }
-    (text, details)
+    (text, result.details().cloned())
 }
 
 /// The text of a successful `read` (text reads are single-part).
@@ -1241,28 +1237,33 @@ async fn bash_one_huge_line_gets_the_honest_notice() {
 
 // --- tool_result.details: the edit tool's presentation cargo ---
 
-/// The edit tool's full content parts: report text plus the details
-/// JSON when anything applied.
+/// The edit tool's full output: the report text in `content`, the
+/// details cargo in the details field.
 async fn edit_parts(
     path: &std::path::Path,
     edits: Vec<EditReplacement>,
-) -> Result<Vec<rig_core::message::ToolResultContent>, ToolExecutionError> {
-    let output = edit(&mut ctx(), path.to_string_lossy().into_owned(), edits).await?;
-    Ok(output.into_content().into_iter().collect())
+) -> Result<rig_core::tool::ToolOutput, ToolExecutionError> {
+    edit(&mut ctx(), path.to_string_lossy().into_owned(), edits).await
 }
 
 #[tokio::test]
 async fn edit_emits_report_text_plus_details_json() {
     let (dir, path) = seed("edit-details", "f.txt", "alpha\nbeta\ngamma\n");
-    let parts = edit_parts(&path, vec![rep("beta", "BETA")])
+    let output = edit_parts(&path, vec![rep("beta", "BETA")])
         .await
         .expect("edit");
-    // Text first (the faithful copy), then the details part.
-    let texts: Vec<&str> = parts.iter().filter_map(|c| c.as_text()).collect();
+    // The report text, then the details cargo in its own field.
+    let texts: Vec<&str> = output
+        .as_content()
+        .iter()
+        .filter_map(|c| c.as_text())
+        .collect();
     assert_eq!(texts.len(), 1, "one text part: {texts:?}");
     assert!(texts[0].starts_with("Edited "), "{}", texts[0]);
-    let details: Vec<&serde_json::Value> = parts.iter().filter_map(|c| c.as_json()).collect();
-    assert_eq!(details.len(), 1, "one details part");
+    assert!(
+        output.details().is_some(),
+        "the details cargo is present"
+    );
     fs::remove_dir_all(&dir).ok();
 }
 
@@ -1273,14 +1274,10 @@ async fn edit_details_carries_the_unified_diff_with_context() {
         "f.txt",
         "l1\nl2\nl3\nl4\nl5\nl6\nl7\nl8\nl9\nl10\n",
     );
-    let parts = edit_parts(&path, vec![rep("l5", "L5")])
+    let output = edit_parts(&path, vec![rep("l5", "L5")])
         .await
         .expect("edit");
-    let details = parts
-        .iter()
-        .find_map(|c| c.as_json())
-        .expect("details")
-        .clone();
+    let details = output.details().expect("details").clone();
     let diff = &details["diff"];
     assert_eq!(diff["first_changed_line"], 5);
     let hunks = diff["hunks"].as_array().expect("hunks");
@@ -1318,17 +1315,13 @@ async fn edit_details_carries_the_unified_diff_with_context() {
 #[tokio::test]
 async fn edit_details_marks_applied_and_rejected_outcomes() {
     let (dir, path) = seed("edit-details-outcomes", "f.txt", "keep\ntwice\ntwice\n");
-    let parts = edit_parts(
+    let output = edit_parts(
         &path,
         vec![rep("keep", "KEEP"), rep("missing", "x"), rep("twice", "x")],
     )
     .await
     .expect("partial application");
-    let details = parts
-        .iter()
-        .find_map(|c| c.as_json())
-        .expect("details")
-        .clone();
+    let details = output.details().expect("details").clone();
     let outcomes = details["outcomes"].as_array().expect("outcomes");
     assert_eq!(outcomes.len(), 3);
     assert_eq!(outcomes[0]["index"], 0);
@@ -1354,7 +1347,11 @@ async fn edit_details_marks_applied_and_rejected_outcomes() {
     );
     // The report still names the failures — details duplicates the same
     // strings, structured.
-    let report = parts.iter().find_map(|c| c.as_text()).expect("report");
+    let report = output
+        .as_content()
+        .iter()
+        .find_map(|c| c.as_text())
+        .expect("report");
     assert!(report.contains("edit[1]"), "{report}");
     fs::remove_dir_all(&dir).ok();
 }
@@ -1373,14 +1370,10 @@ async fn edit_details_merge_adjacent_hunks() {
     let (dir, path) = seed("edit-details-merge", "f.txt", "a\nb\nc\nd\ne\nf\ng\nh\n");
     // Two changes 3 lines apart: their 4-line context windows overlap,
     // so they render as ONE hunk.
-    let parts = edit_parts(&path, vec![rep("a", "A"), rep("e", "E")])
+    let output = edit_parts(&path, vec![rep("a", "A"), rep("e", "E")])
         .await
         .expect("edit");
-    let details = parts
-        .iter()
-        .find_map(|c| c.as_json())
-        .expect("details")
-        .clone();
+    let details = output.details().expect("details").clone();
     let hunks = details["diff"]["hunks"].as_array().expect("hunks");
     assert_eq!(hunks.len(), 1, "overlapping context merges: {hunks:?}");
     fs::remove_dir_all(&dir).ok();
@@ -1393,14 +1386,10 @@ async fn edit_details_separate_distant_hunks_with_correct_starts() {
     // all-equal gap between the ranges.
     let body: String = (1..=40).map(|i| format!("l{i}\n")).collect();
     let (dir, path) = seed("edit-details-distant", "f.txt", &body);
-    let parts = edit_parts(&path, vec![rep("l5", "L5"), rep("l35", "L35")])
+    let output = edit_parts(&path, vec![rep("l5", "L5"), rep("l35", "L35")])
         .await
         .expect("edit");
-    let details = parts
-        .iter()
-        .find_map(|c| c.as_json())
-        .expect("details")
-        .clone();
+    let details = output.details().expect("details").clone();
     let hunks = details["diff"]["hunks"].as_array().expect("hunks");
     assert_eq!(hunks.len(), 2, "distant changes never merge: {hunks:?}");
     assert_eq!(hunks[1]["new_start"], 31, "line 35 minus 4 context lines");
@@ -1414,12 +1403,8 @@ async fn edit_details_mark_a_pure_deletions_first_change() {
     // first_changed_line on; the fallback points at where content
     // vanished.
     let (dir, path) = seed("edit-details-del", "f.txt", "a\nb\nc\n");
-    let parts = edit_parts(&path, vec![rep("b\n", "")]).await.expect("edit");
-    let details = parts
-        .iter()
-        .find_map(|c| c.as_json())
-        .expect("details")
-        .clone();
+    let output = edit_parts(&path, vec![rep("b\n", "")]).await.expect("edit");
+    let details = output.details().expect("details").clone();
     assert!(
         details["diff"]["first_changed_line"].is_number(),
         "a pure deletion still locates the first change: {details}"

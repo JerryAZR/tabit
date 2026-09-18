@@ -2209,6 +2209,7 @@ mod tests {
         let tool_result = ToolResult {
             id: "result_1".to_string(),
             call_id: Some("call_1".to_string()),
+            details: None,
             content: OneOrMany::one(crate::message::ToolResultContent::text("42")),
             status: None,
         };

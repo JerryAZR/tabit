@@ -731,3 +731,56 @@ fn prompt_response_display_formats_the_output_text() {
     let response = PromptResponse::new("hello display", usage(1, 2));
     assert_eq!(format!("{response}"), "hello display");
 }
+
+#[test]
+fn tool_result_output_carries_details_off_the_model_path() {
+    // The cargo rides the result's details field for frontends and
+    // hooks; the model-visible content is the report text only.
+    let output = rig_core::tool::content_parts(
+        "the report".to_string(),
+        Some(serde_json::json!({"child_id": "c1", "outcome": "completed"})),
+    )
+    .expect("content parts");
+
+    let content = super::tool_result_output("call-1".to_string(), None, output);
+    let rig_core::message::UserContent::ToolResult(result) = &content else {
+        panic!("a tool result shaped the content");
+    };
+    assert_eq!(
+        result.details.as_ref(),
+        Some(&serde_json::json!({"child_id": "c1", "outcome": "completed"}))
+    );
+    assert_eq!(result.content.len(), 1, "the model sees the report only");
+    assert!(
+        matches!(
+            result.content.first(),
+            rig_core::message::ToolResultContent::Text(text) if text.text == "the report"
+        ),
+        "no JSON block rides to the model"
+    );
+}
+
+#[test]
+fn hook_replacement_keeps_the_raw_executions_details() {
+    // A result rewrite is presentation-only: the replacement's
+    // content, the raw execution's details.
+    let replacement = rig_core::tool::ToolOutput::text("rewritten");
+    let raw_details = Some(serde_json::json!({"exit_code": 3}));
+
+    let content = super::tool_result_with(
+        "call-1".to_string(),
+        None,
+        rig_core::OneOrMany::one(rig_core::message::ToolResultContent::text(
+            "rewritten",
+        )),
+        raw_details,
+    );
+    let rig_core::message::UserContent::ToolResult(result) = &content else {
+        panic!("a tool result shaped the content");
+    };
+    assert_eq!(result.details.as_ref(), Some(&serde_json::json!({"exit_code": 3})));
+    assert!(matches!(
+        result.content.first(),
+        rig_core::message::ToolResultContent::Text(text) if text.text == "rewritten"
+    ));
+}

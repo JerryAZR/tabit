@@ -29,17 +29,20 @@ pub(crate) fn result_text(result: &rig_core::message::ToolResult) -> String {
         .join("\n")
 }
 
-/// The tool's presentation cargo, when it produced any — the structured
-/// JSON part that rides `tool_result.details` (today: the edit tool's
-/// diff + outcomes). At most one producer part per result; several
-/// would be a tool contract violation, so the first wins loudly by
-/// design of the vocabulary, not silently.
+/// The tool's presentation cargo, when it produced any — the
+/// structured facts riding `tool_result.details` (today: the edit
+/// tool's diff + outcomes). Field-first: details live on the result
+/// itself. The content-block fallback reads pre-details logs, whose
+/// entries stored the cargo as a (legacy) JSON block — the model saw
+/// that block stringified; new logs never carry one.
 pub(crate) fn result_details(result: &rig_core::message::ToolResult) -> Option<serde_json::Value> {
-    result
-        .content
-        .iter()
-        .filter_map(|content| content.as_json().cloned())
-        .next()
+    result.details.clone().or_else(|| {
+        result
+            .content
+            .iter()
+            .filter_map(|content| content.as_json().cloned())
+            .next()
+    })
 }
 
 /// Translate the rig-level structured status into the protocol's wire
@@ -103,5 +106,47 @@ mod tests {
             .expect("two parts"),
         };
         assert_eq!(user_text(&message), "the text");
+    }
+
+    #[test]
+    fn result_details_reads_the_field_first_and_legacy_blocks_second() {
+        use rig_core::message::{ToolResult, ToolResultContent};
+        use rig_core::OneOrMany;
+
+        let make = |details: Option<serde_json::Value>,
+                    content: Vec<ToolResultContent>|
+         -> rig_core::message::ToolResult {
+            ToolResult {
+                id: "call".to_string(),
+                call_id: None,
+                details,
+                content: OneOrMany::many(content).expect("non-empty"),
+                status: None,
+            }
+        };
+
+        // Field-first: the cargo rides its own field.
+        let field = make(
+            Some(serde_json::json!({"child_id": "c1"})),
+            vec![ToolResultContent::text("report")],
+        );
+        assert_eq!(
+            result_details(&field),
+            Some(serde_json::json!({"child_id": "c1"}))
+        );
+
+        // Legacy: a pre-details log stored the cargo as a content block.
+        let legacy = make(
+            None,
+            vec![
+                ToolResultContent::text("report"),
+                ToolResultContent::json(serde_json::json!({"legacy": true})),
+            ],
+        );
+        assert_eq!(result_details(&legacy), Some(serde_json::json!({"legacy": true})));
+
+        // Neither: no cargo.
+        let bare = make(None, vec![ToolResultContent::text("report")]);
+        assert_eq!(result_details(&bare), None);
     }
 }

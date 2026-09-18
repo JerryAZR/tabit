@@ -205,7 +205,11 @@ mod tests {
             .execute(arguments.clone())
             .await
             .expect("the echo callback always succeeds");
-        assert_eq!(output.as_json(), Some(&arguments));
+        assert_eq!(
+            output.as_text(),
+            Some(arguments.to_string().as_str()),
+            "structured output pre-formats as JSON text"
+        );
     }
 
     #[tokio::test]

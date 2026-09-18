@@ -20,6 +20,18 @@ could observe — gets an entry here in the same commit.
 
 ## v10 (current)
 
+### behavior: tool results carry `details` off the model path (2026-09)
+
+The tool-result data model is now pi's shape (owner ruling):
+`content` is what the model sees — text/media the tool pre-formatted
+itself — and `details` is bookkeeping for the frontend and hooks.
+Concretely: detail-bearing tools (edit, bash overflow, subagent) no
+longer deliver the JSON cargo as a second content block stringified
+into the model's transcript; it rides the result's `details` field
+(frontend-visible exactly as before — `tool_result.details` on the
+wire is unchanged, no protocol bump). The GUI's `content` rendering
+no longer shows a JSON tail for those tools.
+
 ### behavior: `subagent` details slimmed to the pairing fact (2026-09)
 
 The subagent tool's result cargo is now

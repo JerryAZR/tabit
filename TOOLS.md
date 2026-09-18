@@ -12,7 +12,10 @@ degrade to generic rendering when the shape is absent or unknown** —
 structure never gates function, `content` always renders on its own.
 `details` is derived presentation cargo — structure only, never prose;
 the human-readable story lives in `content`, which stays the faithful
-copy of what the model saw.
+copy of what the model saw. The split is pi's model (ruled 2026-09):
+**the model sees `content` and nothing else** — tools pre-format what
+the model reads, and `details` is bookkeeping for the frontend and
+hooks; providers never serialize it.
 
 ## `tool_result.details` by tool name
 

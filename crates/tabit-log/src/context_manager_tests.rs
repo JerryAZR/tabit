@@ -79,6 +79,7 @@ fn result(id: &str, text: &str) -> UserContent {
     UserContent::ToolResult(ToolResult {
         id: id.to_string(),
         call_id: None,
+        details: None,
         content: OneOrMany::one(ToolResultContent::text(text)),
         status: None,
     })
@@ -131,6 +132,7 @@ fn sample_tree() -> SessionTree {
                 result: ToolResult {
                     id: "c1".to_string(),
                     call_id: None,
+                    details: None,
                     content: OneOrMany::one(ToolResultContent::text("one")),
                     status: None,
                 },
@@ -144,6 +146,7 @@ fn sample_tree() -> SessionTree {
                 result: ToolResult {
                     id: "c2".to_string(),
                     call_id: None,
+                    details: None,
                     content: OneOrMany::one(ToolResultContent::text("two")),
                     status: None,
                 },

@@ -40,6 +40,7 @@ fn tool_result_entry() -> EntryKind {
         result: ToolResult {
             id: "call-1".to_string(),
             call_id: None,
+            details: None,
             content: OneOrMany::one(ToolResultContent::text("ok")),
             status: None,
         },

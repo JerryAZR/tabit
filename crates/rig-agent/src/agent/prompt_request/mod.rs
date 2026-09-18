@@ -359,26 +359,35 @@ impl PromptResponse {
     }
 }
 
-/// Wrap already-shaped tool-result content for the model (see
-/// [`tool_result_output`] / [`tool_result_message`]).
-fn tool_result_with(
-    id: String,
-    call_id: Option<String>,
-    content: OneOrMany<ToolResultContent>,
-) -> UserContent {
-    match call_id {
-        Some(call_id) => UserContent::tool_result_with_call_id(id, call_id, content),
-        None => UserContent::tool_result(id, content),
-    }
-}
-
 /// Shape a canonical real tool output as a tool result without reparsing text.
+/// The output's `details` rides along for frontends and hooks — it is
+/// never serialized to the model.
 pub(crate) fn tool_result_output(
     id: String,
     call_id: Option<String>,
     output: ToolOutput,
 ) -> UserContent {
-    tool_result_with(id, call_id, output.into_content())
+    let details = output.details().cloned();
+    tool_result_with(id, call_id, output.into_content(), details)
+}
+
+/// Wrap already-shaped tool-result content for the model (see
+/// [`tool_result_output`] / [`tool_result_message`]); `details` is the
+/// bookkeeping cargo the model never sees.
+pub(crate) fn tool_result_with(
+    id: String,
+    call_id: Option<String>,
+    content: OneOrMany<ToolResultContent>,
+    details: Option<serde_json::Value>,
+) -> UserContent {
+    let mut user_content = match call_id {
+        Some(call_id) => UserContent::tool_result_with_call_id(id, call_id, content),
+        None => UserContent::tool_result(id, content),
+    };
+    if let UserContent::ToolResult(tool_result) = &mut user_content {
+        tool_result.details = details;
+    }
+    user_content
 }
 
 /// Shape a **synthetic message** (a hook skip reason, recovery feedback, or a
@@ -397,6 +406,7 @@ pub(crate) fn tool_result_message(
         id,
         call_id,
         OneOrMany::one(ToolResultContent::text(message)),
+        None,
     ) {
         UserContent::ToolResult(mut tool_result) => {
             tool_result.status = Some(ToolResultStatus::Failed { code: None });

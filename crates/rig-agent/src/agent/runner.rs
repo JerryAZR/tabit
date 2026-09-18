@@ -39,7 +39,7 @@ use super::{
     model::ModelHandle,
     prompt_request::{
         streaming::{StreamingError, StreamingResult, StreamingTurnSource},
-        tool_result_output,
+        tool_result_output, tool_result_with,
     },
 };
 use rig_core::{
@@ -711,14 +711,27 @@ pub(crate) async fn run_single_tool(
                 stop_reason: Some(reason),
             }
         }
-        ToolResultDecision::Replace(replacement) => ToolCallOutcome {
-            content: with_execution_status(
-                tool_result_output(tool_call.id.clone(), tool_call.call_id.clone(), replacement),
+        ToolResultDecision::Replace(replacement) => {
+            // The rewrite is presentation-only (the hook contract):
+            // the replacement's model-visible content, the raw
+            // execution's details — bookkeeping is not the hook's to
+            // rewrite.
+            let details = exec.output().details().cloned();
+            let content = with_execution_status(
+                tool_result_with(
+                    tool_call.id.clone(),
+                    tool_call.call_id.clone(),
+                    replacement.into_content(),
+                    details,
+                ),
                 &exec,
-            ),
-            execution,
-            stop_reason: None,
-        },
+            );
+            ToolCallOutcome {
+                content,
+                execution,
+                stop_reason: None,
+            }
+        }
         ToolResultDecision::Keep => {
             let content = tool_result_output(
                 tool_call.id.clone(),

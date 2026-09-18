@@ -55,6 +55,7 @@ fn result_node(id: &str, parent: Option<&str>, call_id: &str) -> FileRecord {
             result: ToolResult {
                 id: call_id.to_string(),
                 call_id: None,
+                details: None,
                 content: OneOrMany::one(ToolResultContent::text("ok")),
                 status: None,
             },

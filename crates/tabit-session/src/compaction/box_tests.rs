@@ -183,6 +183,7 @@ fn valid_boundary_rejects_tool_carrying_outputs_and_mid_turn_positions() {
                     rig_core::message::ToolResult {
                         id: "call-1".to_string(),
                         call_id: None,
+                        details: None,
                         content: rig_core::OneOrMany::one(
                             rig_core::message::ToolResultContent::text("ok"),
                         ),

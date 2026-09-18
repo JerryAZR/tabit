@@ -6,18 +6,19 @@ use serde::Serialize;
 
 use crate::{OneOrMany, message::ToolResultContent, tool::ToolExecutionError};
 
-/// The canonical model-visible output produced by a tool.
-///
-/// Every output is stored as one or more typed [`ToolResultContent`] blocks.
-/// Ordinary serializable Rust values are converted through [`IntoToolOutput`]:
-/// values that serialize as JSON strings become literal text blocks and all
-/// other values become structured JSON blocks. An explicit
-/// [`serde_json::Value`], including a JSON string, stays JSON. Multimodal tools
-/// opt in explicitly with [`Self::content`]. Rig never reparses text as JSON to
-/// guess whether it represents rich content.
+/// The canonical tool output: the model-visible `content` plus the
+/// `details` bookkeeping cargo. The split is pi's model, ruled
+/// 2026-09: **the model sees `content` and nothing else** — text and
+/// media blocks the tool pre-formatted itself; no runtime ever joins,
+/// stringifies, or appends structured fields into what the model
+/// reads. `details` is the extra bookkeeping the frontend and hooks
+/// consume (edit's diff, bash's exit status, a delegation's child id);
+/// it rides the conversation and the durable log inside the result,
+/// but providers never serialize it.
 #[derive(Clone, PartialEq)]
 pub struct ToolOutput {
     content: OneOrMany<ToolResultContent>,
+    details: Option<serde_json::Value>,
 }
 
 impl fmt::Debug for ToolOutput {
@@ -35,6 +36,7 @@ impl fmt::Debug for ToolOutput {
             .debug_struct("ToolOutput")
             .field("content_count", &self.content.len())
             .field("content_kinds", &content_kinds)
+            .field("details", &self.details.is_some())
             .finish()
     }
 }
@@ -45,22 +47,39 @@ impl ToolOutput {
         Self::one(ToolResultContent::text(text))
     }
 
-    /// Construct structured JSON output.
-    ///
-    /// Unlike an ordinary Rust string tool output, an explicit JSON string stays
-    /// a JSON content block.
+    /// Construct text output carrying a JSON serialization of `value` —
+    /// the tool pre-formatting structured model-facing content itself.
+    /// (There is no structured model-visible block: a tool that wants
+    /// the model to read JSON prints JSON.) For bookkeeping cargo the
+    /// frontend and hooks consume, build with [`content_parts`].
     pub fn json(value: serde_json::Value) -> Self {
-        Self::one(ToolResultContent::json(value))
+        Self::text(value.to_string())
     }
 
-    /// Construct explicit model content.
+    /// Construct explicit model content with no details.
     pub fn content(content: OneOrMany<ToolResultContent>) -> Self {
-        Self { content }
+        Self {
+            content,
+            details: None,
+        }
     }
 
-    /// Construct one explicit model-content block.
+    /// Construct one explicit model-content block with no details.
     pub fn one(content: ToolResultContent) -> Self {
         Self::content(OneOrMany::one(content))
+    }
+
+    /// The model-visible content blocks (text, media; a `Json` block
+    /// here is a legacy decode of a pre-details log, never produced by
+    /// the constructors below).
+    pub fn as_content(&self) -> &OneOrMany<ToolResultContent> {
+        &self.content
+    }
+
+    /// The details bookkeeping cargo — frontend/hook-facing, never
+    /// model-visible.
+    pub fn details(&self) -> Option<&serde_json::Value> {
+        self.details.as_ref()
     }
 
     /// Return literal text when this output is exactly one plain text block.
@@ -89,11 +108,6 @@ impl ToolOutput {
         }
     }
 
-    /// Borrow the canonical ordered content blocks.
-    pub fn as_content(&self) -> &OneOrMany<ToolResultContent> {
-        &self.content
-    }
-
     /// Convert this output into the canonical message content sent to a model.
     pub fn into_content(self) -> OneOrMany<ToolResultContent> {
         self.content
@@ -106,8 +120,8 @@ impl ToolOutput {
     pub fn render(&self) -> String {
         if let Some(text) = self.as_text() {
             text.to_string()
-        } else if let Some(value) = self.as_json() {
-            value.to_string()
+        } else if let Some(details) = self.details() {
+            details.to_string()
         } else {
             // `OneOrMany<ToolResultContent>` is plain serde data (strings,
             // JSON values, media-type enums), so serialization cannot fail;
@@ -159,7 +173,8 @@ impl From<OneOrMany<ToolResultContent>> for ToolOutput {
 /// when that type needs a custom presentation. Implement this trait directly
 /// only for output types that do not implement [`Serialize`].
 pub trait IntoToolOutput {
-    /// Convert this value without routing structured data through a string.
+    /// Convert this value into model-visible text (structured values
+    /// serialize as JSON text — the tool pre-formatting its content).
     fn into_tool_output(self) -> Result<ToolOutput, ToolExecutionError>;
 }
 
@@ -219,11 +234,14 @@ where
         if let Some(content) = value.downcast_ref::<OneOrMany<ToolResultContent>>() {
             return Ok(ToolOutput::content(content.clone()));
         }
-        let is_explicit_json = value.is::<serde_json::Value>();
-
         serde_json::to_value(self)
             .map(|value| match value {
-                serde_json::Value::String(text) if !is_explicit_json => ToolOutput::text(text),
+                // A plain string is the tool's own prose; any other
+                // value is the tool pre-formatting structured content
+                // as JSON text — either way the model reads text, and
+                // the JSON block is not a model modality. Bookkeeping
+                // cargo goes through [`content_parts`], never here.
+                serde_json::Value::String(text) => ToolOutput::text(text),
                 value => ToolOutput::json(value),
             })
             .map_err(|error| {
@@ -240,28 +258,49 @@ impl IntoToolOutput for ToolOutput {
 }
 
 /// The standard multi-part tool result: the model-facing report text
-/// first, then the structured details JSON when the tool produced any
-/// (a runtime like tabit's projects text → content, JSON → a
-/// details/presentation-cargo channel). Every multi-part tool result
-/// is built here — one shape, one invariant (the report part is always
-/// present, so the parts never come back empty).
+/// plus the details bookkeeping cargo (`result.details` on the wire;
+/// frontend and hooks consume it, the model never sees it). Every
+/// multi-part tool result is built here — one shape, one invariant
+/// (the report is always present).
 pub fn content_parts(
     report: String,
     details: Option<serde_json::Value>,
 ) -> Result<ToolOutput, ToolExecutionError> {
-    let mut parts = vec![ToolResultContent::text(report)];
-    if let Some(details) = details {
-        parts.push(ToolResultContent::Json { value: details });
-    }
-    // One part minimum by construction above.
-    #[allow(clippy::expect_used)]
-    Ok(ToolOutput::content(
-        OneOrMany::many(parts).expect("the report part is always present"),
-    ))
+    Ok(ToolOutput {
+        content: OneOrMany::one(ToolResultContent::text(report)),
+        details,
+    })
 }
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn content_parts_split_report_and_details() {
+        // The ruled shape: the report is the model-visible content;
+        // the details cargo rides its own field and never becomes a
+        // content block.
+        let output = super::content_parts(
+            "the report".to_string(),
+            Some(serde_json::json!({"exit_code": 0})),
+        )
+        .expect("content parts");
+
+        assert_eq!(output.as_content().len(), 1);
+        assert!(matches!(
+            output.as_content().first_ref(),
+            ToolResultContent::Text(text) if text.text == "the report"
+        ));
+        assert_eq!(
+            output.details(),
+            Some(&serde_json::json!({"exit_code": 0}))
+        );
+
+        // No details: content only.
+        let bare = super::content_parts("just text".to_string(), None).expect("content parts");
+        assert_eq!(bare.details(), None);
+        assert_eq!(bare.as_text(), Some("just text"));
+    }
+
     use crate::message::{DocumentSourceKind, ImageMediaType};
 
     use super::*;
@@ -277,29 +316,32 @@ mod tests {
     }
 
     #[test]
-    fn structured_values_remain_json_until_terminal_rendering() {
+    fn structured_values_preformat_as_json_text() {
+        // The model-visible vocabulary has no structured block: the
+        // conversion itself pre-formats the value as JSON text (the
+        // tool's own formatting, frozen at the conversion).
         let value = serde_json::json!({"status": "ok", "count": 2});
         let output = value.clone().into_tool_output().unwrap();
 
-        assert_eq!(output, ToolOutput::json(value.clone()));
+        assert_eq!(output, ToolOutput::text(value.to_string()));
         assert_eq!(output.render(), value.to_string());
         let content = output.into_content();
         assert!(matches!(
             content.first(),
-            ToolResultContent::Json { value: content_value } if content_value == value
+            ToolResultContent::Text(text) if text.text == value.to_string()
         ));
     }
 
     #[test]
-    fn explicit_json_string_is_distinct_from_literal_text() {
+    fn explicit_json_string_converts_like_any_text() {
+        // No special case: an explicit JSON string is literal text to
+        // the model, same as any other string the tool returns.
         let explicit = serde_json::Value::String("hello".to_string());
 
         let json_output = explicit.clone().into_tool_output().unwrap();
         let text_output = "hello".to_string().into_tool_output().unwrap();
 
-        assert_eq!(json_output, ToolOutput::json(explicit.clone()));
-        assert_eq!(json_output.as_json(), Some(&explicit));
-        assert_eq!(json_output.as_text(), None);
+        assert_eq!(json_output, text_output);
         assert_eq!(text_output, ToolOutput::text("hello"));
         assert_eq!(text_output.as_text(), Some("hello"));
     }
@@ -341,7 +383,7 @@ mod tests {
         );
         assert_eq!(
             ToolOutput::json(serde_json::json!({"ok": true})),
-            ToolOutput::one(ToolResultContent::json(serde_json::json!({"ok": true})))
+            ToolOutput::text(serde_json::json!({"ok": true}).to_string())
         );
     }
 

@@ -33,6 +33,7 @@ fn rig_tool_result(content: message::ToolResultContent) -> message::Message {
         content: OneOrMany::one(message::UserContent::ToolResult(message::ToolResult {
             id: "result-id".to_string(),
             call_id: Some("call-id".to_string()),
+            details: None,
             content: OneOrMany::one(content),
             status: None,
         })),
@@ -247,6 +248,7 @@ fn multiple_text_tool_result_blocks_preserve_order_as_rich_function_output() {
         content: OneOrMany::one(message::UserContent::ToolResult(message::ToolResult {
             id: "result-id".to_string(),
             call_id: Some("call-id".to_string()),
+            details: None,
             content,
             status: None,
         })),
@@ -352,6 +354,7 @@ fn tool_result_images_and_text_preserve_order_as_rich_function_output() {
         content: OneOrMany::one(message::UserContent::ToolResult(message::ToolResult {
             id: "result-id".to_string(),
             call_id: Some("call-id".to_string()),
+            details: None,
             content,
             status: None,
         })),
@@ -3386,6 +3389,7 @@ fn tool_result_without_call_id_errors_on_message_conversion() {
         content: OneOrMany::one(message::UserContent::ToolResult(message::ToolResult {
             id: "result-id".to_string(),
             call_id: None,
+            details: None,
             content: OneOrMany::one(message::ToolResultContent::text("tool output")),
             status: None,
         })),

@@ -216,6 +216,14 @@ pub struct ToolResult {
     pub call_id: Option<String>,
     /// One or more content items produced by the tool.
     pub content: OneOrMany<ToolResultContent>,
+    /// Bookkeeping cargo for frontends and hooks — structured facts
+    /// (a diff, an exit status, a delegation's child id) that the
+    /// model never sees: providers project `content` only. Rides the
+    /// conversation and the durable log so replay re-projects it
+    /// without re-running the tool. Absent on results synthesized
+    /// outside an execution context.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub details: Option<serde_json::Value>,
     /// Structured execution outcome — structure only, never prose (the
     /// human-readable detail is the `content`). `None` on results
     /// synthesized outside an execution context (external histories,
@@ -249,7 +257,11 @@ pub enum ToolResultContent {
     Text(Text),
     /// An image supplied explicitly by the tool.
     Image(Image),
-    /// Structured JSON supplied explicitly by the tool runtime.
+    /// Structured JSON. A **legacy decode carrier only** — pre-details
+    /// logs store bookkeeping cargo as a content block, and providers
+    /// still stringify it so old sessions resume. Tools cannot produce
+    /// it: structured cargo rides [`ToolResult::details`], and
+    /// model-facing JSON is the tool's own pre-formatted text.
     Json {
         /// The structured value.
         value: serde_json::Value,
@@ -702,6 +714,7 @@ impl Message {
             content: OneOrMany::one(UserContent::ToolResult(ToolResult {
                 id: id.into(),
                 call_id: None,
+                details: None,
                 content: OneOrMany::one(ToolResultContent::text(content)),
                 status: None,
             })),
@@ -717,6 +730,7 @@ impl Message {
             content: OneOrMany::one(UserContent::ToolResult(ToolResult {
                 id: id.into(),
                 call_id,
+                details: None,
                 content: OneOrMany::one(ToolResultContent::text(content)),
                 status: None,
             })),
@@ -860,6 +874,7 @@ impl UserContent {
         UserContent::ToolResult(ToolResult {
             id: id.into(),
             call_id: None,
+            details: None,
             content,
             status: None,
         })
@@ -874,6 +889,7 @@ impl UserContent {
         UserContent::ToolResult(ToolResult {
             id: id.into(),
             call_id: Some(call_id),
+            details: None,
             content,
             status: None,
         })
@@ -1322,6 +1338,7 @@ impl From<ToolResultContent> for Message {
             content: OneOrMany::one(UserContent::ToolResult(ToolResult {
                 id: String::new(),
                 call_id: None,
+                details: None,
                 content: OneOrMany::one(tool_result_content),
                 status: None,
             })),
@@ -1367,6 +1384,7 @@ mod tests {
         let plain = serde_json::to_value(ToolResult {
             id: "c".to_string(),
             call_id: None,
+            details: None,
             content: OneOrMany::one(ToolResultContent::text("ok")),
             status: None,
         })
@@ -2060,6 +2078,7 @@ mod tests {
         let tool_result = ToolResult {
             id: "id-1".to_string(),
             call_id: None,
+            details: None,
             content: OneOrMany::one(ToolResultContent::text("ok")),
             status: None,
         };
@@ -2077,6 +2096,7 @@ mod tests {
                 content: OneOrMany::one(UserContent::ToolResult(ToolResult {
                     id: String::new(),
                     call_id: None,
+                    details: None,
                     content: OneOrMany::one(tool_result_content),
                     status: None,
                 }))

@@ -2092,6 +2092,7 @@ async fn rewinding_into_an_open_roundtrip_panics() -> Result<(), SessionError> {
             result: rig_core::message::ToolResult {
                 id: "c1".to_string(),
                 call_id: None,
+                details: None,
                 content: OneOrMany::one(rig_core::message::ToolResultContent::text("one")),
                 status: None,
             },
@@ -2104,6 +2105,7 @@ async fn rewinding_into_an_open_roundtrip_panics() -> Result<(), SessionError> {
             result: rig_core::message::ToolResult {
                 id: "c2".to_string(),
                 call_id: None,
+                details: None,
                 content: OneOrMany::one(rig_core::message::ToolResultContent::text("two")),
                 status: None,
             },

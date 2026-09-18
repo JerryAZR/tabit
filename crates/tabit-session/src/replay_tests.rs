@@ -73,6 +73,7 @@ fn a_chain_projects_to_bracketed_whole_text_events() {
                 result: rig_core::message::ToolResult {
                     id: "call-1".to_string(),
                     call_id: Some("wire-1".to_string()),
+                    details: None,
                     content: OneOrMany::one(ToolResultContent::text("3 files")),
                     status: Some(rig_core::completion::ToolResultStatus::Success),
                 },
@@ -238,6 +239,7 @@ fn failed_results_keep_their_structured_status() {
                 result: rig_core::message::ToolResult {
                     id: "call-1".to_string(),
                     call_id: None,
+                    details: None,
                     content: OneOrMany::one(ToolResultContent::text(
                         "command exited with status 3:\nboom",
                     )),
