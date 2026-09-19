@@ -199,6 +199,7 @@ pub(crate) async fn run(
     token: &CancellationToken,
     config: &TabitConfig,
     selection: &ModelSelection,
+    ledger: &std::sync::Arc<std::sync::Mutex<crate::stats::UsageLedger>>,
     mailbox_empty: bool,
     emit: &mut (dyn FnMut(SessionEvent) + Send),
 ) -> Outcome {
@@ -294,7 +295,7 @@ pub(crate) async fn run(
                 #[allow(clippy::indexing_slicing)]
                 // sanctioned crash: the pass validated this boundary against this view
                 let tokens_after = tail_sums[boundary] + usage.output_tokens;
-                write(cell).commit_compaction(
+                let cost = write(cell).commit_compaction(
                     id.clone(),
                     summary,
                     cut_child_of(&history, boundary).to_string(),
@@ -302,7 +303,24 @@ pub(crate) async fn run(
                     tokens_after,
                     usage,
                 );
-                emit(SessionEvent::CompactionFinished { id });
+                // The summarization request is spend like any turn's:
+                // the ledger bills it live (the parser bills the entry
+                // on reload — the two must agree), and the bracket
+                // carries the fresh report, the recorded dollars, and
+                // the regime's new base.
+                tabit_log::lock::lock(ledger).add(
+                    &selection.provider,
+                    &selection.model,
+                    selection.thinking_level.as_deref(),
+                    usage,
+                    cost,
+                );
+                emit(SessionEvent::CompactionFinished {
+                    id,
+                    usage: crate::session::wire::wire_usage(&usage),
+                    cost,
+                    tokens_after,
+                });
                 passes = pass;
             }
             PassOutcome::Cancelled => {
@@ -678,6 +696,9 @@ pub(crate) struct PreRequestDoor {
     /// session with no host attached (a direct consumer); the bracket
     /// drops, the compaction still runs.
     pub(crate) notice: Option<crate::notice::NoticeSink>,
+    /// The usage ledger — the pass's summarization spend bills live
+    /// (the parser bills the entry on reload; the two must agree).
+    pub(crate) ledger: std::sync::Arc<std::sync::Mutex<crate::stats::UsageLedger>>,
 }
 
 impl PreRequestSource for PreRequestDoor {
@@ -697,6 +718,7 @@ impl PreRequestSource for PreRequestDoor {
                 &self.token,
                 &self.config,
                 &self.selection,
+                &self.ledger,
                 // Condition B carries no mailbox requirement (urgent
                 // is urgent); the queue defers to compaction by
                 // ordering alone — the drain sits at the loop's

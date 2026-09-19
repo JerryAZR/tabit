@@ -314,9 +314,13 @@ fn a_compaction_node_replays_as_the_boundary_marker() {
                 summary: "summarized".to_string(),
                 cut_child: "u2".to_string(),
                 tokens_before: 0,
-                tokens_after: 0,
-                usage: rig_core::completion::Usage::default(),
-                cost: None,
+                tokens_after: 4321,
+                usage: rig_core::completion::Usage {
+                    input_tokens: 900,
+                    output_tokens: 60,
+                    ..rig_core::completion::Usage::default()
+                },
+                cost: Some(0.00096),
             },
         ),
         entry(
@@ -329,9 +333,15 @@ fn a_compaction_node_replays_as_the_boundary_marker() {
     // The full history renders (the file never deletes); the marker
     // sits at the cut — right before the retained tail's first entry
     // — wherever the raw walk carries the compaction record itself.
+    // The marker carries the entry's facts verbatim (v14): the pass's
+    // request report, the recorded dollars, and the regime's base.
     assert!(matches!(
         &events[events.len() - 2],
-        SessionEvent::CompactionFinished { id } if id == "x1"
+        SessionEvent::CompactionFinished { id, usage, cost: Some(cost), tokens_after }
+            if id == "x1"
+                && usage.input_tokens == 900
+                && (cost - 0.00096).abs() < 1e-12
+                && *tokens_after == 4321
     ));
     assert!(matches!(
         events.last(),

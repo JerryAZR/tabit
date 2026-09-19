@@ -36,26 +36,53 @@ pub fn project_events(chain: &[SessionEntry]) -> Vec<SessionEvent> {
     // child — so the transcript shows the boundary where the model's
     // context has it. Nested passes over the same cut stack in walk
     // order (oldest first).
-    let mut cut_markers: HashMap<&str, Vec<String>> = HashMap::new();
+    let mut cut_markers: HashMap<&str, Vec<CompactionFact>> = HashMap::new();
     for entry in chain {
-        if let EntryKind::Compaction { cut_child, .. } = &entry.kind {
+        if let EntryKind::Compaction {
+            cut_child,
+            usage,
+            cost,
+            tokens_after,
+            ..
+        } = &entry.kind
+        {
             cut_markers
                 .entry(cut_child.as_str())
                 .or_default()
-                .push(entry.id.clone());
+                .push(CompactionFact {
+                    id: entry.id.clone(),
+                    usage: crate::session::wire::wire_usage(usage),
+                    cost: *cost,
+                    tokens_after: *tokens_after,
+                });
         }
     }
     let mut projection = Projection::default();
     let mut events = Vec::new();
     for entry in chain {
         if let Some(markers) = cut_markers.get(entry.id.as_str()) {
-            for id in markers {
-                events.push(SessionEvent::CompactionFinished { id: id.clone() });
+            for fact in markers {
+                events.push(SessionEvent::CompactionFinished {
+                    id: fact.id.clone(),
+                    usage: fact.usage,
+                    cost: fact.cost,
+                    tokens_after: fact.tokens_after,
+                });
             }
         }
         projection.entry(entry, &mut events);
     }
     events
+}
+
+/// One replayed compaction marker: the entry's own facts, projected
+/// verbatim (the recorded invoice dollars and the regime's base are
+/// history, never re-derived).
+struct CompactionFact {
+    id: String,
+    usage: tabit_protocol::Usage,
+    cost: Option<f64>,
+    tokens_after: u64,
 }
 
 #[derive(Default)]

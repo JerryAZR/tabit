@@ -460,14 +460,18 @@ fn the_compaction_bracket_and_command_round_trip() {
             text: "## Goal".to_string(),
         }
     );
-    assert_eq!(
-        round_trip(&SessionEvent::CompactionFinished {
-            id: "c1".to_string()
-        }),
-        SessionEvent::CompactionFinished {
-            id: "c1".to_string()
-        }
-    );
+    let finished = SessionEvent::CompactionFinished {
+        id: "c1".to_string(),
+        usage: crate::Usage {
+            input_tokens: 900,
+            output_tokens: 60,
+            total_tokens: 960,
+            ..crate::Usage::default()
+        },
+        cost: Some(0.00096),
+        tokens_after: 4321,
+    };
+    assert_eq!(round_trip(&finished), finished);
     assert_eq!(
         round_trip(&SessionEvent::CompactionFailed {
             id: "c1".to_string(),

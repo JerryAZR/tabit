@@ -3202,8 +3202,47 @@ async fn the_idle_door_compacts_after_a_large_run_and_the_file_holds_the_entry()
             .any(|frame| matches!(frame.event, SessionEvent::CompactionFinished { .. }))
     );
 
-    // The file holds the entry; a reload derives [summary] + tail.
+    // v14: the finished bracket carries the pass's facts — the
+    // summarization request's report and the regime's new base (the
+    // entry's own tokens_after).
     let parsed = crate::parser::parse_file(&path).expect("the file reloads");
+    let entry_after = parsed
+        .tree
+        .path_to_head()
+        .iter()
+        .find_map(|entry| match &entry.kind {
+            crate::EntryKind::Compaction {
+                usage,
+                tokens_after,
+                ..
+            } => Some((*usage, *tokens_after)),
+            _ => None,
+        })
+        .expect("the compaction entry");
+    assert!(frames.iter().any(|frame| matches!(
+        &frame.event,
+        SessionEvent::CompactionFinished { usage, tokens_after, .. }
+            if usage.total_tokens == entry_after.0.total_tokens
+                && *tokens_after == entry_after.1
+                && *tokens_after > 0
+    )));
+
+    // Live and reload bill the same spend: the wire's per-turn and
+    // compaction usages sum to the file's ledger (before v14 the
+    // reload billed the summary and the live ledger did not).
+    let wire_total: u64 = frames
+        .iter()
+        .filter_map(|frame| match &frame.event {
+            SessionEvent::CompletionCall { usage, .. } => Some(usage.total_tokens),
+            SessionEvent::CompactionFinished { usage, .. } => Some(usage.total_tokens),
+            _ => None,
+        })
+        .sum();
+    assert_eq!(
+        parsed.stats.total_usage().total_tokens,
+        wire_total,
+        "live and reload agree on the spend"
+    );
     assert!(
         parsed
             .tree

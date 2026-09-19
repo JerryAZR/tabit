@@ -470,7 +470,7 @@ impl ContextManager {
         tokens_before: u64,
         tokens_after: u64,
         usage: Usage,
-    ) {
+    ) -> Option<f64> {
         let on_branch = self
             .tree
             .path_to_head()
@@ -482,6 +482,7 @@ impl ContextManager {
                  active branch — the compaction box selected a stale cut"
             );
         }
+        let stamped = (self.turn_cost)(&usage);
         let entry = SessionEntry::with_id(
             id,
             self.tree.head().map(str::to_string),
@@ -491,7 +492,7 @@ impl ContextManager {
                 cut_child,
                 tokens_before,
                 tokens_after,
-                cost: (self.turn_cost)(&usage),
+                cost: stamped,
                 usage,
             },
         );
@@ -501,6 +502,7 @@ impl ContextManager {
         // compaction node, exactly the walked order.
         let _ = lock::lock(&self.buffer).enqueue(&[FileRecord::Node(entry.clone())]);
         self.tree.append(entry);
+        stamped
     }
 
     /// The unified commit: chain the entries under the head, enqueue

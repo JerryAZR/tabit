@@ -18,7 +18,25 @@ software/hardware contract, not just the encodings):
 Every `PROTOCOL_VERSION` bump — and every additive change a frontend
 could observe — gets an entry here in the same commit.
 
-## v13 (current)
+## v14 (current)
+
+### wire: `compaction_finished` carries the pass's facts (2026-09)
+
+Protocol version 14. Compaction is a request — its spend is spend
+like any turn's, and its result is a length a frontend wants to
+meter. `compaction_finished` gains `usage` (the summarization
+request's report; multi-pass runs emit one bracket per pass, each
+carrying its own), `cost` (the recorded dollars — same invoice
+ruling as `completion_call.cost`), and `tokens_after` (the
+post-compaction context length: the summary's output tokens plus the
+retained tail's delta sum — the base the next turn starts from). The
+replay marker projects the same values from the session file's entry.
+Backend fix riding along: the live ledger now bills the summarization
+spend at commit — previously only the parser billed it on reload, so
+live stats undercounted compaction until the session was reopened
+(pinned live-vs-reload in the endpoint test).
+
+## v13
 
 ### wire: `completion_call` carries the recorded cost (2026-09)
 

@@ -27,6 +27,7 @@ impl Session {
             selection: self.selection(),
             token: run_token.clone(),
             notice: self.event_tap.get().cloned(),
+            ledger: self.ledger.clone(),
         })
     }
 
@@ -96,6 +97,7 @@ impl Session {
             &token,
             &self.config,
             &self.selection(),
+            &self.ledger,
             mailbox_empty,
             &mut emit,
         )

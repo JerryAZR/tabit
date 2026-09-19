@@ -403,6 +403,19 @@ pub enum SessionEvent {
     CompactionFinished {
         /// The pass bracket id — now a durable entry id.
         id: String,
+        /// The summarization request's usage — the fresh server
+        /// report (v14): compaction is a request, and its tokens are
+        /// spend like any turn's.
+        usage: Usage,
+        /// The dollars the summarization request cost, recorded at
+        /// commit (v14, the invoice ruling — same semantics as
+        /// `completion_call.cost`).
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        cost: Option<f64>,
+        /// The post-compaction context length (v14): the summary's
+        /// output tokens plus the retained tail's delta sum — the base
+        /// the next turn's context starts from.
+        tokens_after: u64,
     },
     /// A compaction pass failed or was cancelled: nothing committed,
     /// the context is unchanged. Not a run terminal — the run (if any)

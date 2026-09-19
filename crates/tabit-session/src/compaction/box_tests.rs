@@ -375,6 +375,68 @@ fn a_stale_tail_total_is_unreachable_the_regime_base_wins() {
     assert_eq!(read(&cell).measured_total(), Some(3_500));
 }
 
+#[tokio::test]
+async fn a_committed_pass_bills_the_ledger_and_carries_its_facts() {
+    // v14: the summarization request is spend like any turn's — the
+    // ledger bills it at commit (the parser bills the entry on
+    // reload; the two must agree), and the finished bracket carries
+    // the fresh report, the recorded dollars, and the regime's base.
+    let cell = cell_with_measured_dialogue(3, 25_000);
+    let agent = AgentBuilder::new(MockCompletionModel::from_stream_turns(
+        summary_stream_turns(),
+    ))
+    .build();
+    let config = config_with_window(80_000);
+    let state = Compaction::new();
+    let token = CancellationToken::new();
+    let ledger = std::sync::Arc::new(std::sync::Mutex::new(crate::stats::UsageLedger::default()));
+    let mut events = Vec::new();
+    let outcome = run(
+        Door::Manual,
+        &cell,
+        &state,
+        &agent,
+        &token,
+        &config,
+        &selection(),
+        &ledger,
+        true,
+        &mut |event| events.push(event),
+    )
+    .await;
+    assert!(
+        matches!(&outcome, Outcome::Compacted { passes: 1, .. }),
+        "{outcome:?}"
+    );
+    let finished = events
+        .iter()
+        .find_map(|event| match event {
+            SessionEvent::CompactionFinished {
+                usage,
+                tokens_after,
+                ..
+            } => Some((*usage, *tokens_after)),
+            _ => None,
+        })
+        .expect("a finished bracket");
+    // The mock's summary stream reports input/output (its total field
+    // stays the unset sentinel — the report is the two legs).
+    let reported = finished.0.input_tokens + finished.0.output_tokens;
+    assert!(reported > 0, "the request's report rides");
+    assert!(finished.1 > 0, "the regime's base rides");
+    let billed = ledger.lock().unwrap_or_else(|p| p.into_inner()).clone();
+    let (billed_usage, billed_cost) = billed
+        .per_model()
+        .first()
+        .map(|row| (row.usage.input_tokens + row.usage.output_tokens, row.cost))
+        .unwrap_or((0, None));
+    assert_eq!(billed_usage, reported, "the ledger bills the pass");
+    assert_eq!(
+        billed_cost, None,
+        "no rate card in this config: no dollars claimed"
+    );
+}
+
 async fn run_manual(
     cell: &ConversationCell,
     agent: &rig_agent::agent::Agent,
@@ -391,6 +453,7 @@ async fn run_manual(
         &token,
         config,
         &selection(),
+        &std::sync::Arc::new(std::sync::Mutex::new(crate::stats::UsageLedger::default())),
         true,
         &mut |event| events.push(event),
     )
@@ -671,6 +734,7 @@ fn a_cancelled_token_kills_the_stream_before_anything_persists() {
         &token,
         &config,
         &selection(),
+        &std::sync::Arc::new(std::sync::Mutex::new(crate::stats::UsageLedger::default())),
         true,
         &mut |event| events.push(event),
     ));
@@ -960,6 +1024,7 @@ async fn an_in_stream_overflow_rejection_shortens_and_retries() {
         &token,
         &config,
         &selection(),
+        &std::sync::Arc::new(std::sync::Mutex::new(crate::stats::UsageLedger::default())),
         true,
         &mut |event| events.push(event),
     )
@@ -1050,6 +1115,7 @@ async fn the_pre_request_leaf_compacts_when_condition_b_holds() {
         selection: selection(),
         token: CancellationToken::new(),
         notice: None,
+        ledger: std::sync::Arc::new(std::sync::Mutex::new(crate::stats::UsageLedger::default())),
     };
     rig_agent::agent::PreRequestSource::at_door(&door).await;
     // The box ran through the leaf: the branch holds a compaction and

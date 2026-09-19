@@ -11,7 +11,7 @@ render a specific tool's `details` cargo, the interaction template
 payloads — lives in **TOOLS.md**, its companion since the shapes grew
 past one doc (2026-09 ruling).
 
-Wire shapes below are the **v13 contract**. v3 was the multi-session
+Wire shapes below are the **v14 contract**. v3 was the multi-session
 host — session-addressed commands, `new_session`/`open_session` on the
 channel, the `"main"` stream alias retired (the stream stamp is the
 session id). v4 made backend-level frames **unstamped** (§6) and
@@ -29,7 +29,8 @@ does not state one); v12 made per-turn usage complete
 `run_finished`'s aggregated usage — per-turn is the home, sums are
 the frontend's; v13 put the recorded dollars on `completion_call`
 (`cost` — stamped at commit from the rates in effect, so history
-survives rate changes). Each version landed as one
+survives rate changes); v14 put the compaction pass's facts on
+`compaction_finished` (usage, cost, `tokens_after`). Each version landed as one
 protocol-version bump with no compatibility period; always check the
 ack's `protocol_version`. (`tabit --list` prints a human table —
 there is no JSON listing edge.)
@@ -288,7 +289,7 @@ those connection-level).
 | `interaction_request` | `id`, `ui_type`, `payload` | a tool gate (permission) or a tool body asks the user; `ui_type` names the widget and `payload` is its cargo (§8 templates own the shapes). Several may be open at once. Answer with `interaction_response`; a run terminal closes the unanswered (§8). |
 | `compaction_started` | `id`, `pass` | **(v7)** a context-summarization pass began: the bracket `id` is the pass's eventual compaction-entry id (born early, like turn ids); `pass` is the 1-based index (multi-pass compaction emits several back-to-back brackets). The summary streams as `compaction_delta`s inside the bracket. May arrive mid-run (between turns — compaction landed between two requests) or at idle. |
 | `compaction_delta` | `id`, `text` | a summary text delta inside the bracket. |
-| `compaction_finished` | `id` | the pass committed: the model-visible context is now `[summary] + retained tail`. Everything before the cut stays in the file — the next replay pass still renders it, with a `compaction_finished` marker at the boundary; checkout to a pre-compaction entry yields the full-history branch. |
+| `compaction_finished` | `id`, `usage`, `cost?`, `tokens_after` | the pass committed: the model-visible context is now `[summary] + retained tail`. Everything before the cut stays in the file — the next replay pass still renders it, with a `compaction_finished` marker at the boundary; checkout to a pre-compaction entry yields the full-history branch. v14: the bracket carries the pass's facts — `usage` is the summarization request's report (compaction is spend like any turn; multi-pass runs emit one bracket per pass, each with its own), `cost` its recorded dollars (the invoice ruling), and `tokens_after` the post-compaction context length: the summary's output tokens plus the retained tail's delta sum, the base the next turn starts from. |
 | `compaction_failed` | `id`, `message` | the pass failed or was cancelled: nothing committed, the context is unchanged. Not a run terminal — the run (if any) continues; the automatic doors retry when their conditions next hold. |
 | `tool_result` | `turn_id`, `entry_id`, `name`, `internal_call_id`, `content`, `status`, `details?` | one tool body finished; its result committed. `content` is exactly the text the model saw — already capped at the source, failure text included; render it verbatim. `status` is structure only: `success` or `failed { exit_code? }`; the detail is in `content`, not `status`. `details`, when present, is derived presentation cargo owned by the tool named in `name` — dispatch on `name`, degrade to `content` when absent or unknown. The per-tool shapes are TOOLS.md's (today's producers: `edit`'s diff + outcomes, `bash`'s truncation/spill, `subagent`'s child-session facts). |
 | `completion_call` | `turn_id`, `usage`, `cost?` | one model request finished; its usage is final — the fresh server report (v12). The full five-field `Usage` rides here per request (cache legs included); anything aggregated (a run, a session) is your sum over these — aborted and failed runs count too. v13 adds `cost`: the dollars the turn cost, **recorded at commit** from the rates then in effect (the invoice ruling — spend already happened; a later rate cut does not rewrite it). Absent when the provider reported nothing or the model carries no rate card; the same value rides the session file, so replays after resume show exact history. `model_changed.cost` still carries the current rates, for what future turns will cost. |
