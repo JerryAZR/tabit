@@ -1234,13 +1234,9 @@ fn print_mode(args: &Args, registry: &ModelRegistry) -> Result<i32, String> {
             handle.close_commands();
             while let Some(frame) = handle.next_event().await {
                 match &frame.event {
-                    SessionEvent::CompletionCall {
-                        input_tokens,
-                        output_tokens,
-                        ..
-                    } => {
-                        outcome.input_tokens += input_tokens;
-                        outcome.output_tokens += output_tokens;
+                    SessionEvent::CompletionCall { usage, .. } => {
+                        outcome.input_tokens += usage.input_tokens;
+                        outcome.output_tokens += usage.output_tokens;
                     }
                     SessionEvent::RunFailed { message, .. } => {
                         outcome.failed = Some(message.clone());

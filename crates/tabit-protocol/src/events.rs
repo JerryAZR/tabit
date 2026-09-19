@@ -147,14 +147,18 @@ pub enum SessionEvent {
         /// The announced id of the discarded turn.
         turn_id: String,
     },
-    /// A completion request finished; its usage is final for that request.
+    /// A completion request finished; its usage is final for that
+    /// request. The fresh server report — the natural home of usage
+    /// (v12): the full five-field `Usage` rides here, per request, and
+    /// anything aggregated (a run, a session) is a sum a frontend does
+    /// over these.
     CompletionCall {
         /// The turn the request belongs to.
         turn_id: String,
-        /// Input tokens reported by the provider.
-        input_tokens: u64,
-        /// Output tokens reported by the provider.
-        output_tokens: u64,
+        /// Token usage reported by the provider, including the cache
+        /// breakdown (the billing legs — with `model_changed.cost`'s
+        /// rates, per-turn cost is computable at display).
+        usage: Usage,
     },
     /// A committed turn ended truncated: the provider cut generation short at
     /// its output limit (`finish_reason: length`). Informational, not a
@@ -172,8 +176,6 @@ pub enum SessionEvent {
     RunFinished {
         /// The final assistant text.
         output: String,
-        /// Aggregated usage across the whole run.
-        usage: Usage,
         /// Whether every commit reached the disk at terminal time.
         durable: bool,
         /// The run's start, milliseconds since the Unix epoch.

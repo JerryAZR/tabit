@@ -8,10 +8,9 @@ use super::{Session, TOOL_CONCURRENCY};
 use crate::entry::{FileRecord, SideKind, SideRecord};
 use crate::error::SessionError;
 use crate::lock::lock;
-use crate::stats::add_usage;
 use futures::StreamExt;
 use rig_agent::agent::{MultiTurnStreamItem, StreamingError};
-use rig_agent::completion::{Message, Usage};
+use rig_agent::completion::Message;
 use rig_agent::streaming::{StreamedUserContent, StreamingChat};
 use std::sync::Arc;
 use tabit_protocol::SessionEvent;
@@ -37,8 +36,6 @@ pub struct RunSummary {
     pub outcome: RunOutcome,
     /// The final assistant text.
     pub output: String,
-    /// Aggregated usage across the whole run.
-    pub usage: Usage,
     /// Everything the run emitted, in order.
     pub events: Vec<SessionEvent>,
 }
@@ -92,7 +89,6 @@ impl Session {
         let mut total = RunSummary {
             outcome: RunOutcome::Completed,
             output: String::new(),
-            usage: Usage::default(),
             events: Vec::new(),
         };
         loop {
@@ -110,10 +106,9 @@ impl Session {
                 break;
             }
             let run = self.run_one(on_event).await;
-            // The last terminal decides the outcome; usage and events
+            // The last terminal decides the outcome; events
             // accumulate across runs.
             total.output = run.output;
-            add_usage(&mut total.usage, &run.usage);
             total.events.extend(run.events);
             total.outcome = run.outcome;
             if matches!(run.outcome, RunOutcome::Aborted) {
@@ -176,7 +171,6 @@ impl Session {
             return RunSummary {
                 outcome: RunOutcome::Failed,
                 output: String::new(),
-                usage: Usage::default(),
                 events: sink.events,
             };
         }
@@ -202,7 +196,6 @@ impl Session {
             return RunSummary {
                 outcome: RunOutcome::Failed,
                 output: String::new(),
-                usage: Usage::default(),
                 events: sink.events,
             };
         }
@@ -211,11 +204,10 @@ impl Session {
             .drive(stream, &run_token, run_started_ms, &mut sink)
             .await;
         driven = self.overflow_intercept(driven).await;
-        let (outcome, output, usage) = self.conclude(driven, run_started_ms, &mut sink);
+        let (outcome, output) = self.conclude(driven, run_started_ms, &mut sink);
         RunSummary {
             outcome,
             output,
-            usage,
             events: sink.events,
         }
     }
@@ -375,7 +367,6 @@ impl Session {
     ) -> DriveOutcome {
         let mut driven = DriveOutcome {
             output: String::new(),
-            usage: Usage::default(),
             aborted: false,
             failure: None,
         };
@@ -454,10 +445,8 @@ impl Session {
                 }
                 Ok(MultiTurnStreamItem::FinalResponse(response)) => {
                     driven.output = response.output;
-                    driven.usage = response.usage;
                     sink.emit(SessionEvent::RunFinished {
                         output: driven.output.clone(),
-                        usage: wire_usage(&driven.usage),
                         durable: self.buffer_is_clean(),
                         started_at_ms,
                         completed_at_ms: crate::ids::now_unix_ms(),
@@ -487,8 +476,7 @@ impl Session {
                     }
                     sink.emit(SessionEvent::CompletionCall {
                         turn_id: turn_id.clone(),
-                        input_tokens: call.usage.input_tokens,
-                        output_tokens: call.usage.output_tokens,
+                        usage: wire_usage(&call.usage),
                     });
                     // A truncation-class finish reason is a warning, not a
                     // failure (ENGINE.md behavior delta 9): the flow
@@ -562,10 +550,9 @@ impl Session {
         driven: DriveOutcome,
         started_at_ms: u64,
         sink: &mut EventSink<'_>,
-    ) -> (RunOutcome, String, Usage) {
+    ) -> (RunOutcome, String) {
         let DriveOutcome {
             output,
-            usage,
             aborted,
             failure,
         } = driven;
@@ -607,7 +594,7 @@ impl Session {
         if let Some(hub) = &self.interaction {
             hub.clear_pending();
         }
-        (outcome, output, usage)
+        (outcome, output)
     }
 }
 
@@ -655,11 +642,10 @@ impl<'a> EventSink<'a> {
 }
 
 /// What the drive loop learned before the stream ended: the run's final
-/// output and usage, and how the stream stopped (abort preemption, or the
+/// output, and how the stream stopped (abort preemption, or the
 /// provider failure that ended it).
 struct DriveOutcome {
     output: String,
-    usage: Usage,
     aborted: bool,
     failure: Option<SessionError>,
 }

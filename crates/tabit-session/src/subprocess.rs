@@ -441,7 +441,6 @@ impl SubprocessChild {
                     return crate::session::RunSummary {
                         outcome: crate::session::RunOutcome::Aborted,
                         output: String::new(),
-                        usage: Default::default(),
                         events,
                     };
                 }
@@ -460,7 +459,6 @@ impl SubprocessChild {
                         return crate::session::RunSummary {
                             outcome: crate::session::RunOutcome::Failed,
                             output: String::new(),
-                            usage: Default::default(),
                             events,
                         };
                     };
@@ -469,30 +467,23 @@ impl SubprocessChild {
                     }
                     let event = frame.event;
                     let terminal = match &event {
-                        SessionEvent::RunFinished { output, usage, .. } => Some((
-                            crate::session::RunOutcome::Completed,
-                            output.clone(),
-                            engine_usage(*usage),
-                        )),
-                        SessionEvent::RunAborted { output, .. } => Some((
-                            crate::session::RunOutcome::Aborted,
-                            output.clone(),
-                            Default::default(),
-                        )),
-                        SessionEvent::RunFailed { message, .. } => Some((
-                            crate::session::RunOutcome::Failed,
-                            message.clone(),
-                            Default::default(),
-                        )),
+                        SessionEvent::RunFinished { output, .. } => {
+                            Some((crate::session::RunOutcome::Completed, output.clone()))
+                        }
+                        SessionEvent::RunAborted { output, .. } => {
+                            Some((crate::session::RunOutcome::Aborted, output.clone()))
+                        }
+                        SessionEvent::RunFailed { message, .. } => {
+                            Some((crate::session::RunOutcome::Failed, message.clone()))
+                        }
                         _ => None,
                     };
                     events.push(event);
-                    if let Some((outcome, output, usage)) = terminal {
+                    if let Some((outcome, output)) = terminal {
                         self.close();
                         return crate::session::RunSummary {
                             outcome,
                             output,
-                            usage,
                             events,
                         };
                     }
@@ -543,18 +534,4 @@ impl Drop for SubprocessChild {
 /// message carries no text parts; the child treats it as the task).
 fn message_text(message: &Message) -> String {
     crate::session::wire::user_text(message)
-}
-
-/// The wire usage folded back into the engine's shape (the reverse of
-/// the wire fold — the shared five fields, the engine-internal rest
-/// zeroed).
-fn engine_usage(usage: tabit_protocol::Usage) -> rig_agent::completion::Usage {
-    rig_agent::completion::Usage {
-        input_tokens: usage.input_tokens,
-        output_tokens: usage.output_tokens,
-        total_tokens: usage.total_tokens,
-        cached_input_tokens: usage.cached_input_tokens,
-        cache_creation_input_tokens: usage.cache_creation_input_tokens,
-        ..Default::default()
-    }
 }

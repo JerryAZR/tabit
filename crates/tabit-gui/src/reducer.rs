@@ -233,7 +233,8 @@ pub struct GuiState {
     /// renders the active stream's cards; background cards raise the
     /// row's attention flag.
     pub interactions: Vec<InteractionCard>,
-    /// Sum of `run_finished` usage across runs.
+    /// Sum of `completion_call` usage across turns (v12: per-turn is
+    /// the primitive; aborted and failed runs count too).
     pub usage: Usage,
     /// The backend refused the handshake (e.g. first-run setup
     /// needed) — never retried automatically; the reason is the
@@ -637,9 +638,12 @@ impl GuiState {
                     self.transcript.pop();
                 }
             }
-            SessionEvent::CompletionCall { .. } => {
-                // Per-request usage; the run terminal carries the
-                // aggregate. v1 keeps the aggregate only.
+            SessionEvent::CompletionCall { usage, .. } => {
+                // The fresh server report (v12): per-turn usage is the
+                // primitive — the session total sums these, so aborted
+                // and failed runs count too (the old run-terminal sum
+                // silently dropped them).
+                self.usage = add(self.usage, usage);
             }
             SessionEvent::SkillsAvailable { .. } => {
                 // Interim (v8): the skills catalog arrives
@@ -660,9 +664,8 @@ impl GuiState {
                     error: false,
                 });
             }
-            SessionEvent::RunFinished { usage, .. } => {
+            SessionEvent::RunFinished { .. } => {
                 self.running = false;
-                self.usage = add(self.usage, usage);
             }
             SessionEvent::RunAborted { .. } => {
                 // Streamed partial text stays visible — the deltas the

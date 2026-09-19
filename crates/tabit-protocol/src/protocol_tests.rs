@@ -1,5 +1,4 @@
 use super::*;
-use crate::Usage;
 
 fn round_trip<T>(value: &T) -> T
 where
@@ -274,7 +273,6 @@ fn sampled_event_variants_survive_the_frame_envelope() {
             stream: Some(StreamId::new("s1")),
             event: SessionEvent::RunFinished {
                 output: "done".to_string(),
-                usage: Usage::default(),
                 durable: true,
                 started_at_ms: 1_000,
                 completed_at_ms: 9_000,

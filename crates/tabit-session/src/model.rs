@@ -12,7 +12,9 @@ fn resolved_model<'a>(
     selection: &ModelSelection,
     config: &'a TabitConfig,
 ) -> Option<&'a tabit_config::Model> {
-    config.provider(&selection.provider)?.model(&selection.model)
+    config
+        .provider(&selection.provider)?
+        .model(&selection.model)
 }
 
 /// Validate that the selection resolves in the config (provider,

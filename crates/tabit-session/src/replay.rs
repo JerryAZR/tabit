@@ -198,8 +198,7 @@ impl Projection {
 
         events.push(SessionEvent::CompletionCall {
             turn_id: turn_id.clone(),
-            input_tokens: usage.input_tokens,
-            output_tokens: usage.output_tokens,
+            usage: crate::session::wire::wire_usage(&usage),
         });
         events.push(SessionEvent::TurnCommitted {
             id: turn_id,

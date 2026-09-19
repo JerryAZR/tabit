@@ -108,7 +108,7 @@ fn a_chain_projects_to_bracketed_whole_text_events() {
             SessionEvent::ReasoningDelta { id, .. } => format!("think:{id}"),
             SessionEvent::TextDelta { text, .. } => format!("text:{text}"),
             SessionEvent::ToolCall { name, .. } => format!("call:{name}"),
-            SessionEvent::CompletionCall { input_tokens, .. } => format!("usage:{input_tokens}"),
+            SessionEvent::CompletionCall { usage, .. } => format!("usage:{}", usage.input_tokens),
             SessionEvent::TurnCommitted { id, .. } => format!("commit:{id}"),
             SessionEvent::ToolResult { name, .. } => format!("result:{name}"),
             other => format!("other:{other:?}"),

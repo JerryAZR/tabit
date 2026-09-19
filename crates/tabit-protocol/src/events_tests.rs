@@ -84,15 +84,18 @@ fn events_round_trip_through_json() {
         },
         SessionEvent::CompletionCall {
             turn_id: TURN.to_string(),
-            input_tokens: 10,
-            output_tokens: 4,
+            usage: Usage {
+                input_tokens: 10,
+                output_tokens: 4,
+                total_tokens: 14,
+                ..Default::default()
+            },
         },
         SessionEvent::TurnTruncated {
             turn_id: TURN.to_string(),
         },
         SessionEvent::RunFinished {
             output: "done".to_string(),
-            usage: Usage::default(),
             durable: true,
             started_at_ms: 1_000,
             completed_at_ms: 9_000,

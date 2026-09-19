@@ -104,14 +104,17 @@ fn a_run_lifecycle_from_message_to_terminal() {
     state.reduce(delta("tabit."));
     assert_eq!(segments(&state), vec!["text:I'm tabit."]);
 
-    state.reduce(event(SessionEvent::RunFinished {
-        output: "I'm tabit.".to_string(),
+    state.reduce(event(SessionEvent::CompletionCall {
+        turn_id: "t1".to_string(),
         usage: Usage {
             input_tokens: 10,
             output_tokens: 4,
             total_tokens: 14,
             ..Usage::default()
         },
+    }));
+    state.reduce(event(SessionEvent::RunFinished {
+        output: "I'm tabit.".to_string(),
         durable: true,
         started_at_ms: 1_000,
         completed_at_ms: 9_000,
@@ -221,7 +224,6 @@ fn a_second_turn_opens_a_new_group() {
     }));
     state.reduce(event(SessionEvent::RunFinished {
         output: String::new(),
-        usage: Usage::default(),
         durable: true,
         started_at_ms: 1_000,
 
@@ -490,7 +492,6 @@ fn every_run_terminal_closes_all_open_cards() {
     for terminal in [
         SessionEvent::RunFinished {
             output: String::new(),
-            usage: Usage::default(),
             durable: true,
             started_at_ms: 1_000,
 
@@ -769,7 +770,6 @@ fn background_events_update_liveness_but_never_the_transcript() {
         "s2",
         SessionEvent::RunFinished {
             output: String::new(),
-            usage: Usage::default(),
             durable: true,
             started_at_ms: 1_000,
 
@@ -980,7 +980,6 @@ fn a_new_session_lands_even_while_the_current_one_runs() {
         BOOT,
         SessionEvent::RunFinished {
             output: "done later".to_string(),
-            usage: Usage::default(),
             durable: true,
             started_at_ms: 1_000,
 
@@ -1092,7 +1091,6 @@ fn a_replay_pass_never_marks_the_session_running() {
         "s2",
         SessionEvent::RunFinished {
             output: String::new(),
-            usage: Usage::default(),
             durable: true,
             started_at_ms: 1_000,
 
@@ -1254,7 +1252,6 @@ fn a_checkout_pass_rebuilds_the_transcript_and_liveness_stays_settled() {
     state.reduce(delta("first answer"));
     state.reduce(event(SessionEvent::RunFinished {
         output: "first answer".to_string(),
-        usage: Usage::default(),
         durable: true,
         started_at_ms: 1_000,
 
@@ -1264,7 +1261,6 @@ fn a_checkout_pass_rebuilds_the_transcript_and_liveness_stays_settled() {
     state.reduce(delta("second answer"));
     state.reduce(event(SessionEvent::RunFinished {
         output: "second answer".to_string(),
-        usage: Usage::default(),
         durable: true,
         started_at_ms: 1_000,
 
@@ -1318,7 +1314,6 @@ fn a_failed_checkout_surfaces_as_an_error_notice() {
     state.reduce(user("one"));
     state.reduce(event(SessionEvent::RunFinished {
         output: String::new(),
-        usage: Usage::default(),
         durable: true,
         started_at_ms: 1_000,
 

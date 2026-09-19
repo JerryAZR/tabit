@@ -335,9 +335,12 @@ async fn single_turn_prompt_persists_and_projects() -> Result<(), SessionError> 
 
     let run: RunSummary = session.prompt("hi").await;
     assert_eq!(run.output, "hello there");
-    assert_eq!(
-        run.usage.input_tokens, 100,
-        "usage aggregates from the terminal record"
+    // Usage no longer rides the summary (v12): the per-turn events and
+    // the stats ledger are its homes.
+    assert!(
+        run.events.iter().any(|event| matches!(event,
+                SessionEvent::CompletionCall { usage, .. } if usage.input_tokens == 100)),
+        "the fresh server report rides the per-turn event"
     );
 
     // Log: initial model change, user message, assistant turn with usage.

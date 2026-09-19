@@ -69,7 +69,6 @@ fn summary(outcome: crate::session::RunOutcome, output: &str) -> crate::session:
     crate::session::RunSummary {
         outcome,
         output: output.to_string(),
-        usage: Default::default(),
         events: Vec::new(),
     }
 }

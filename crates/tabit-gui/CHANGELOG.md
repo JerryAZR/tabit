@@ -18,7 +18,27 @@ software/hardware contract, not just the encodings):
 Every `PROTOCOL_VERSION` bump — and every additive change a frontend
 could observe — gets an entry here in the same commit.
 
-## v11 (current)
+## v12 (current)
+
+### wire: per-turn usage is complete; run-level aggregation deleted (2026-09)
+
+Protocol version 12. Usage's home is the fresh server report:
+`completion_call` now carries the full five-field `Usage` (input,
+output, total, cached-read, cache-write — the cache legs were missing,
+so client-side per-turn cost was incomputable for cached providers).
+`run_finished`'s aggregated `usage` is **gone** — summing turn usages
+within a run is bookkeeping the display side does over the per-turn
+events (owner ruling: per-turn is the natural home; the run-end report
+would need extra bookkeeping). With `model_changed.cost`'s rates (v11),
+per-turn and per-session dollars are computable at display. Side
+effect worth knowing: sums over turns now count aborted and failed
+runs — the old run-terminal sum silently dropped them (the GUI's
+session total migrated and no longer undercounts). Backend internals
+followed the ruling: `RunSummary` and the drive loop no longer
+aggregate usage at all; the stats ledger (log-derived, feeds print
+mode and closing stats) is unchanged.
+
+## v11
 
 ### wire: `model_changed` carries the resolved model facts (2026-09)
 
