@@ -3189,7 +3189,7 @@ async fn the_idle_door_compacts_after_a_large_run_and_the_file_holds_the_entry()
         .expect("a terminal");
     let bracket_at = frames
         .iter()
-        .position(|frame| matches!(frame.event, SessionEvent::CompactionStarted { .. }))
+        .position(|frame| matches!(frame.event, SessionEvent::CompactionBegin))
         .expect("the idle door fired");
     assert!(bracket_at > terminal_at, "compaction follows the runs");
     assert!(frames.iter().any(|frame| matches!(
@@ -3199,7 +3199,7 @@ async fn the_idle_door_compacts_after_a_large_run_and_the_file_holds_the_entry()
     assert!(
         frames
             .iter()
-            .any(|frame| matches!(frame.event, SessionEvent::CompactionFinished { .. }))
+            .any(|frame| matches!(frame.event, SessionEvent::CompactionEnd { .. }))
     );
 
     // v14: the finished bracket carries the pass's facts — the
@@ -3221,10 +3221,11 @@ async fn the_idle_door_compacts_after_a_large_run_and_the_file_holds_the_entry()
         .expect("the compaction entry");
     assert!(frames.iter().any(|frame| matches!(
         &frame.event,
-        SessionEvent::CompactionFinished { usage, tokens_after, .. }
+        SessionEvent::CompactionStep { usage, .. }
             if usage.total_tokens == entry_after.0.total_tokens
-                && *tokens_after == entry_after.1
-                && *tokens_after > 0
+    )) && frames.iter().any(|frame| matches!(
+        &frame.event,
+        SessionEvent::CompactionEnd { tokens_after } if *tokens_after == entry_after.1 && *tokens_after > 0
     )));
 
     // Live and reload bill the same spend: the wire's per-turn and
@@ -3234,7 +3235,7 @@ async fn the_idle_door_compacts_after_a_large_run_and_the_file_holds_the_entry()
         .iter()
         .filter_map(|frame| match &frame.event {
             SessionEvent::CompletionCall { usage, .. } => Some(usage.total_tokens),
-            SessionEvent::CompactionFinished { usage, .. } => Some(usage.total_tokens),
+            SessionEvent::CompactionStep { usage, .. } => Some(usage.total_tokens),
             _ => None,
         })
         .sum();
@@ -3305,7 +3306,7 @@ async fn the_compact_command_forces_the_box_on_an_idle_session() {
     // stayed quiet — the window is enormous).
     let bracket_at = frames
         .iter()
-        .position(|frame| matches!(frame.event, SessionEvent::CompactionStarted { .. }))
+        .position(|frame| matches!(frame.event, SessionEvent::CompactionBegin))
         .expect("the manual door ran the box");
     let terminal_at = frames
         .iter()
@@ -3377,7 +3378,7 @@ async fn an_overflow_failure_is_intercepted_compacted_and_the_run_retried() {
     let brackets: Vec<usize> = frames
         .iter()
         .enumerate()
-        .filter(|(_, frame)| matches!(frame.event, SessionEvent::CompactionStarted { .. }))
+        .filter(|(_, frame)| matches!(frame.event, SessionEvent::CompactionBegin))
         .map(|(at, _)| at)
         .collect();
     assert_eq!(brackets.len(), 1, "the intercept compacted once");
@@ -3447,7 +3448,7 @@ async fn an_unrepairable_overflow_leaves_the_failure_standing() {
     assert!(
         !frames
             .iter()
-            .any(|frame| matches!(frame.event, SessionEvent::CompactionStarted { .. })),
+            .any(|frame| matches!(frame.event, SessionEvent::CompactionBegin)),
         "nothing to compact — no bracket"
     );
     std::fs::remove_dir_all(store.dir()).ok();

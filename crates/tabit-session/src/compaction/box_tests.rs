@@ -408,22 +408,28 @@ async fn a_committed_pass_bills_the_ledger_and_carries_its_facts() {
         matches!(&outcome, Outcome::Compacted { passes: 1, .. }),
         "{outcome:?}"
     );
-    let finished = events
+    let step = events
         .iter()
         .find_map(|event| match event {
-            SessionEvent::CompactionFinished {
-                usage,
-                tokens_after,
-                ..
-            } => Some((*usage, *tokens_after)),
+            SessionEvent::CompactionStep { usage, .. } => Some(*usage),
             _ => None,
         })
-        .expect("a finished bracket");
+        .expect("a committed step");
     // The mock's summary stream reports input/output (its total field
     // stays the unset sentinel — the report is the two legs).
-    let reported = finished.0.input_tokens + finished.0.output_tokens;
+    let reported = step.input_tokens + step.output_tokens;
     assert!(reported > 0, "the request's report rides");
-    assert!(finished.1 > 0, "the regime's base rides");
+    assert!(
+        events.first() == Some(&SessionEvent::CompactionBegin),
+        "the envelope opens with begin"
+    );
+    assert!(
+        events.iter().any(|event| matches!(
+            event,
+            SessionEvent::CompactionEnd { tokens_after: t } if *t > 0
+        )),
+        "the envelope closes with the regime's base"
+    );
     let billed = ledger.lock().unwrap_or_else(|p| p.into_inner()).clone();
     let (billed_usage, billed_cost) = billed
         .per_model()
@@ -487,14 +493,14 @@ async fn a_manual_pass_commits_the_entry_and_truncates_the_context() {
         matches!(&outcome, Outcome::Compacted { passes: 1, .. }),
         "{outcome:?}"
     );
-    // The bracket: started, the delta, finished.
+    // The envelope: begin, the delta, the step, the end.
     assert!(matches!(
         events.first(),
-        Some(SessionEvent::CompactionStarted { .. })
+        Some(SessionEvent::CompactionBegin)
     ));
     assert!(matches!(
         events.last(),
-        Some(SessionEvent::CompactionFinished { .. })
+        Some(SessionEvent::CompactionEnd { .. })
     ));
     assert!(events.iter().any(|event| matches!(
         event,
@@ -597,20 +603,23 @@ async fn a_violating_summarizer_is_discarded_and_the_request_retried() {
         matches!(&outcome, Outcome::Compacted { passes: 1, .. }),
         "{outcome:?}"
     );
-    // The discarded attempt closed its bracket as failed; the retry
-    // opened a fresh one and committed.
-    assert!(events.iter().any(|event| matches!(
-        event,
-        SessionEvent::CompactionFailed { message, .. } if message.contains("discarded and the request retried")
-    )));
+    // The discarded attempt announced itself as retried; the
+    // invocation continued and its last committed event is the step
+    // (the envelope's end follows — the outcome test below covers it).
+    assert!(
+        events
+            .iter()
+            .any(|event| matches!(event, SessionEvent::CompactionRetried))
+    );
     assert!(events.iter().any(|event| matches!(
         &event,
         SessionEvent::CompactionDelta { text, .. } if text.contains("recovered")
     )));
-    assert!(matches!(
-        events.last(),
-        Some(SessionEvent::CompactionFinished { .. })
-    ));
+    assert!(
+        events
+            .iter()
+            .any(|event| matches!(event, SessionEvent::CompactionStep { .. }))
+    );
 }
 
 #[tokio::test]
@@ -635,13 +644,21 @@ async fn a_persistently_violating_summarizer_fails_the_pass_and_persists_nothing
         &outcome,
         Outcome::Failed { message, passes: 0 } if message.contains("every attempt")
     ));
-    // Both attempts announced their discard.
+    // Both attempts announced their discard (retried); the invocation
+    // then failed once, at its level.
+    assert_eq!(
+        events
+            .iter()
+            .filter(|event| matches!(event, SessionEvent::CompactionRetried))
+            .count(),
+        2
+    );
     assert_eq!(
         events
             .iter()
             .filter(|event| matches!(event, SessionEvent::CompactionFailed { .. }))
             .count(),
-        2
+        1
     );
     // Nothing committed: no compaction node exists.
     assert_eq!(compactions_of(&cell), 0);
@@ -770,11 +787,11 @@ async fn a_broken_tool_call_is_the_same_violation_discarded_and_retried() {
         matches!(&outcome, Outcome::Compacted { passes: 1, .. }),
         "{outcome:?}"
     );
-    assert!(events.iter().any(|event| matches!(
-        event,
-        SessionEvent::CompactionFailed { message, .. }
-            if message.contains("discarded and the request retried")
-    )));
+    assert!(
+        events
+            .iter()
+            .any(|event| matches!(event, SessionEvent::CompactionRetried))
+    );
 }
 
 #[tokio::test]
@@ -851,11 +868,29 @@ async fn a_history_far_over_the_window_compacts_in_strictly_shrinking_passes() {
         ),
         "{outcome:?}"
     );
-    let started = events
-        .iter()
-        .filter(|event| matches!(event, SessionEvent::CompactionStarted { .. }))
-        .count();
-    assert_eq!(started, 2);
+    // One envelope, two steps inside (v15: the invocation brackets
+    // once; passes are steps).
+    assert_eq!(
+        events
+            .iter()
+            .filter(|event| matches!(event, SessionEvent::CompactionBegin))
+            .count(),
+        1
+    );
+    assert_eq!(
+        events
+            .iter()
+            .filter(|event| matches!(event, SessionEvent::CompactionStep { .. }))
+            .count(),
+        2
+    );
+    assert_eq!(
+        events
+            .iter()
+            .filter(|event| matches!(event, SessionEvent::CompactionEnd { .. }))
+            .count(),
+        1
+    );
 }
 
 #[tokio::test]
@@ -930,11 +965,31 @@ async fn a_huge_late_growth_the_cut_cannot_shed_stops_the_loop_loud() {
             if reason.contains("cannot shrink")),
         "{outcome:?}"
     );
-    let started = events
-        .iter()
-        .filter(|event| matches!(event, SessionEvent::CompactionStarted { .. }))
-        .count();
-    assert_eq!(started, 2, "every pass ran and committed");
+    // One envelope; both passes are steps inside it, and the guard's
+    // oversized exit still closes it with the final length.
+    assert_eq!(
+        events
+            .iter()
+            .filter(|event| matches!(event, SessionEvent::CompactionBegin))
+            .count(),
+        1,
+        "one invocation"
+    );
+    assert_eq!(
+        events
+            .iter()
+            .filter(|event| matches!(event, SessionEvent::CompactionStep { .. }))
+            .count(),
+        2,
+        "every pass ran and committed"
+    );
+    assert_eq!(
+        events
+            .iter()
+            .filter(|event| matches!(event, SessionEvent::CompactionEnd { .. }))
+            .count(),
+        1
+    );
     assert_eq!(compactions_of(&cell), 2, "what landed stands");
 }
 

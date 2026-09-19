@@ -376,54 +376,58 @@ pub enum SessionEvent {
         /// The ask, opaque to the core.
         payload: serde_json::Value,
     },
-    /// A compaction pass began (v7): the summarization model call is
-    /// running. The bracket id is the pass's eventual compaction entry
-    /// id (born early, like turn ids); the summary streams as
-    /// `compaction_delta`s inside the bracket. A mid-run pass emits
-    /// between turn events — compaction landed between turns.
-    CompactionStarted {
-        /// The pass's bracket id (its eventual entry id).
-        id: String,
-        /// The 1-based pass index — multi-pass compaction emits several
-        /// back-to-back brackets.
-        pass: u32,
-    },
-    /// A summary text delta inside a compaction bracket.
+    /// A compaction invocation began (v15): the envelope for every
+    /// following compaction event until `compaction_end` or
+    /// `compaction_failed`. No id — the session's stream stamp scopes
+    /// it (invocations are serial per session by construction), and
+    /// the events inside are contiguous and ordered. A multi-pass
+    /// invocation emits one `compaction_step` per pass inside.
+    CompactionBegin,
+    /// A summary text delta inside the open pass (positional: the
+    /// deltas between steps belong to the pass that next commits, or —
+    /// after a `compaction_retried` — were the discarded attempt's,
+    /// which drop).
     CompactionDelta {
-        /// The pass bracket id (`compaction_started.id`).
-        id: String,
         /// The delta text.
         text: String,
     },
-    /// A compaction pass finished: the summary committed as a
-    /// compaction entry. The model-visible context is now `[summary] +
-    /// retained tail`; everything before the cut stays in the file
-    /// (checkout there yields the full-history branch) and is visible
-    /// again on the next replay pass.
-    CompactionFinished {
-        /// The pass bracket id — now a durable entry id.
+    /// One pass of the invocation committed: the summary is durable
+    /// as a compaction entry. Spend like any request's (v15): the
+    /// fresh report and the recorded dollars meter exactly like
+    /// `completion_call`s — a frontend's totals are one fold over
+    /// both event kinds.
+    CompactionStep {
+        /// The pass's entry id — minted at pass start, durable at
+        /// commit; a checkout anchor and the replay marker's
+        /// correlation.
         id: String,
         /// The summarization request's usage — the fresh server
-        /// report (v14): compaction is a request, and its tokens are
-        /// spend like any turn's.
+        /// report.
         usage: Usage,
-        /// The dollars the summarization request cost, recorded at
-        /// commit (v14, the invoice ruling — same semantics as
-        /// `completion_call.cost`).
+        /// The dollars the request cost, recorded at commit (the
+        /// invoice ruling — same semantics as `completion_call.cost`).
         #[serde(default, skip_serializing_if = "Option::is_none")]
         cost: Option<f64>,
-        /// The post-compaction context length (v14): the summary's
-        /// output tokens plus the retained tail's delta sum — the base
-        /// the next turn's context starts from.
+    },
+    /// A violating attempt was discarded and the request resent (v15)
+    /// — the compaction sibling of `turn_retried`. The attempt's
+    /// deltas drop; the invocation continues.
+    CompactionRetried,
+    /// The invocation completed: the model-visible context is now
+    /// `[summary] + retained tail`; everything before the cut stays in
+    /// the file (checkout there yields the full-history branch) and is
+    /// visible again on the next replay pass.
+    CompactionEnd {
+        /// The final context length: the last pass's summary output
+        /// plus the retained tail's delta sum — the base the next
+        /// turn's context starts from.
         tokens_after: u64,
     },
-    /// A compaction pass failed or was cancelled: nothing committed,
-    /// the context is unchanged. Not a run terminal — the run (if any)
-    /// continues, and the automatic doors retry when the conditions
-    /// next hold.
+    /// The invocation failed or was cancelled: its committed steps
+    /// stand, nothing further commits, the context is their result.
+    /// Not a run terminal — the run (if any) continues, and the
+    /// automatic doors retry when the conditions next hold.
     CompactionFailed {
-        /// The pass bracket id.
-        id: String,
         /// Why, in display form.
         message: String,
     },

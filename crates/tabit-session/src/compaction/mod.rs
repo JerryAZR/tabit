@@ -267,21 +267,27 @@ pub(crate) async fn run(
             // mean the loop gave up while still over condition B.
             return match passes {
                 0 => Outcome::NothingToCompact,
-                more => Outcome::Oversized {
-                    reason: "no further feasible cut with the context still over \
-                             the urgent bound"
-                        .to_string(),
-                    passes: more,
-                    tokens_after: tokens_now,
-                },
+                more => {
+                    emit(SessionEvent::CompactionEnd {
+                        tokens_after: tokens_now,
+                    });
+                    Outcome::Oversized {
+                        reason: "no further feasible cut with the context still over \
+                                 the urgent bound"
+                            .to_string(),
+                        passes: more,
+                        tokens_after: tokens_now,
+                    }
+                }
             };
         };
         let pass = passes + 1;
         let id = crate::ids::new_entry_id();
-        emit(SessionEvent::CompactionStarted {
-            id: id.clone(),
-            pass,
-        });
+        // The envelope opens with the first real request — a
+        // nothing-to-compact door-knock stays silent (v15).
+        if pass == 1 {
+            emit(SessionEvent::CompactionBegin);
+        }
         match one_pass(&history, boundary, state, agent, token, &id, emit).await {
             PassOutcome::Committed {
                 summary,
@@ -315,17 +321,15 @@ pub(crate) async fn run(
                     usage,
                     cost,
                 );
-                emit(SessionEvent::CompactionFinished {
+                emit(SessionEvent::CompactionStep {
                     id,
                     usage: crate::session::wire::wire_usage(&usage),
                     cost,
-                    tokens_after,
                 });
                 passes = pass;
             }
             PassOutcome::Cancelled => {
                 emit(SessionEvent::CompactionFailed {
-                    id,
                     message: "cancelled".to_string(),
                 });
                 return Outcome::Cancelled { passes };
@@ -333,29 +337,24 @@ pub(crate) async fn run(
             // A violating response is discarded and the request resent
             // (bounded): sampling variance usually corrects a one-off
             // tool call; a model that insists fails the pass. The
-            // failed bracket announces the discard — the retry opens a
-            // fresh one.
+            // The discarded attempt's deltas drop; the invocation
+            // continues (turn_retried's sibling).
             PassOutcome::Violated => {
-                emit(SessionEvent::CompactionFailed {
-                    id,
-                    message: "the summarizer attempted a tool call — the response \
-                              is discarded and the request retried"
-                        .to_string(),
-                });
+                emit(SessionEvent::CompactionRetried);
                 if violation_retries < dials::VIOLATION_RETRY_CAP {
                     violation_retries += 1;
                     continue;
                 }
-                return Outcome::Failed {
-                    message: "the summarizer attempted a tool call on every \
-                              attempt — compaction state rejects every tool call"
-                        .to_string(),
-                    passes,
-                };
+                let message = "the summarizer attempted a tool call on every \
+                               attempt — compaction state rejects every tool call"
+                    .to_string();
+                emit(SessionEvent::CompactionFailed {
+                    message: message.clone(),
+                });
+                return Outcome::Failed { message, passes };
             }
             PassOutcome::Failed { message } => {
                 emit(SessionEvent::CompactionFailed {
-                    id,
                     message: message.clone(),
                 });
                 return Outcome::Failed { message, passes };
@@ -374,6 +373,7 @@ pub(crate) async fn run(
         // The primary exit: the context now fits the urgent bound —
         // compaction happened, good to continue.
         if tokens_after + dials::URGENT_RESERVE_TOKENS <= window {
+            emit(SessionEvent::CompactionEnd { tokens_after });
             return Outcome::Compacted {
                 passes,
                 tokens_after,
@@ -385,6 +385,7 @@ pub(crate) async fn run(
         // pathological one is measurement ping-pong the guard's `>=`
         // cannot see. What landed stands; not good to continue.
         if passes >= dials::MAX_PASSES {
+            emit(SessionEvent::CompactionEnd { tokens_after });
             return Outcome::Oversized {
                 reason: format!(
                     "the pass cap ({}) reached with the context still over the \
@@ -402,6 +403,7 @@ pub(crate) async fn run(
             // The cannot-shrink guard: a pass that committed without
             // shrinking the measurement would spin the loop forever —
             // stop loud, with the passes that did land left in place.
+            emit(SessionEvent::CompactionEnd { tokens_after });
             return Outcome::Oversized {
                 reason: format!(
                     "compaction cannot shrink the context further ({tokens_after} measured \
@@ -536,10 +538,7 @@ async fn one_pass(
                 token.cancelled(),
                 &mut |item| {
                     if let StreamedAssistantContent::Text(delta) = item {
-                        emit(SessionEvent::CompactionDelta {
-                            id: bracket_id.clone(),
-                            text: delta.text,
-                        });
+                        emit(SessionEvent::CompactionDelta { text: delta.text });
                     }
                 },
             )

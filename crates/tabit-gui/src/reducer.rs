@@ -740,12 +740,14 @@ impl GuiState {
             // Consumed by the backend-level fold / the pre-dispatch arm;
             // unreachable on the active-stream path.
             SessionEvent::SessionsAvailable { .. } | SessionEvent::SessionOpened { .. } => {}
-            // The compaction bracket (v7): an interim no-op — the
+            // The compaction envelope (v15): an interim no-op — the
             // redesign worktree owns the real rendering (master-side
             // GUI changes stay minimal until it lands).
-            SessionEvent::CompactionStarted { .. }
+            SessionEvent::CompactionBegin
             | SessionEvent::CompactionDelta { .. }
-            | SessionEvent::CompactionFinished { .. }
+            | SessionEvent::CompactionStep { .. }
+            | SessionEvent::CompactionRetried
+            | SessionEvent::CompactionEnd { .. }
             | SessionEvent::CompactionFailed { .. } => {}
         }
     }

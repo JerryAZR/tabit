@@ -18,7 +18,31 @@ software/hardware contract, not just the encodings):
 Every `PROTOCOL_VERSION` bump — and every additive change a frontend
 could observe — gets an entry here in the same commit.
 
-## v14 (current)
+## v15 (current)
+
+### wire: the compaction envelope (2026-09)
+
+Protocol version 15, owner-ruled shape. The v7 per-pass bracket family
+is replaced by an invocation envelope: `compaction_begin` (bare — the
+stream stamp scopes it; invocations are serial per session) →
+`compaction_delta { text }` (positional within the open pass) → one
+`compaction_step { id, usage, cost? }` per committed pass (the entry
+id, the fresh report, the recorded dollars — meters like a
+`completion_call`) → `compaction_retried` for discarded attempts
+(`turn_retried`'s sibling; its deltas drop) → `compaction_end
+{ tokens_after }` with the final context length (also on oversized
+exits — the passes stand) or `compaction_failed { message }`.
+"Is compaction ongoing" is now a first-class state: the envelope. A
+door that finds nothing worth folding stays silent. Replay projects
+**degenerate one-pass envelopes** per compaction entry (the file
+records no invocation grouping): begin → whole-text delta → step →
+end at each cut boundary. Implementation notes: one cost computation
+per pass (the commit's stamp feeds entry, ledger, and event);
+`tokens_after` is the box's pre-existing measurement reused, not
+recomputed; per-pass length stays off the step until a frontend
+demands it (owner ruling: cheap either way, wait for demand).
+
+## v14
 
 ### wire: `compaction_finished` carries the pass's facts (2026-09)
 

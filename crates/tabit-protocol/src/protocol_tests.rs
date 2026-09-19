@@ -439,28 +439,23 @@ fn the_compaction_bracket_and_command_round_trip() {
         }
     );
 
-    // The event bracket.
+    // The compaction envelope (v15): begin, positional deltas, a step
+    // per committed pass (the entry id, the fresh report, the recorded
+    // dollars), retried discards, the end's final length, and the
+    // invocation-level failure.
     assert_eq!(
-        round_trip(&SessionEvent::CompactionStarted {
-            id: "c1".to_string(),
-            pass: 2,
-        }),
-        SessionEvent::CompactionStarted {
-            id: "c1".to_string(),
-            pass: 2,
-        }
+        round_trip(&SessionEvent::CompactionBegin),
+        SessionEvent::CompactionBegin
     );
     assert_eq!(
         round_trip(&SessionEvent::CompactionDelta {
-            id: "c1".to_string(),
             text: "## Goal".to_string(),
         }),
         SessionEvent::CompactionDelta {
-            id: "c1".to_string(),
             text: "## Goal".to_string(),
         }
     );
-    let finished = SessionEvent::CompactionFinished {
+    let step = SessionEvent::CompactionStep {
         id: "c1".to_string(),
         usage: crate::Usage {
             input_tokens: 900,
@@ -469,16 +464,21 @@ fn the_compaction_bracket_and_command_round_trip() {
             ..crate::Usage::default()
         },
         cost: Some(0.00096),
-        tokens_after: 4321,
     };
-    assert_eq!(round_trip(&finished), finished);
+    assert_eq!(round_trip(&step), step);
+    assert_eq!(
+        round_trip(&SessionEvent::CompactionRetried),
+        SessionEvent::CompactionRetried
+    );
+    assert_eq!(
+        round_trip(&SessionEvent::CompactionEnd { tokens_after: 4321 }),
+        SessionEvent::CompactionEnd { tokens_after: 4321 }
+    );
     assert_eq!(
         round_trip(&SessionEvent::CompactionFailed {
-            id: "c1".to_string(),
             message: "cancelled".to_string(),
         }),
         SessionEvent::CompactionFailed {
-            id: "c1".to_string(),
             message: "cancelled".to_string(),
         }
     );

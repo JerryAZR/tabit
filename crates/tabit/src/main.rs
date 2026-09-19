@@ -518,10 +518,13 @@ fn print_event(event: &SessionEvent) {
         // The compaction bracket (v7): stdout stays the answer channel,
         // so the boundaries note on stderr and the summary stays quiet
         // in print mode.
-        SessionEvent::CompactionStarted { .. } => {
+        SessionEvent::CompactionBegin => {
             let _ = writeln!(std::io::stderr(), "[compacting the conversation…]");
         }
-        SessionEvent::CompactionDelta { .. } | SessionEvent::CompactionFinished { .. } => {}
+        SessionEvent::CompactionDelta { .. }
+        | SessionEvent::CompactionStep { .. }
+        | SessionEvent::CompactionRetried
+        | SessionEvent::CompactionEnd { .. } => {}
         SessionEvent::CompactionFailed { message, .. } => {
             let _ = writeln!(std::io::stderr(), "warning: compaction failed: {message}");
         }

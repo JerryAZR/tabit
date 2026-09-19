@@ -35,11 +35,15 @@ pub fn project_events(chain: &[SessionEntry]) -> Vec<SessionEvent> {
     // walk; its marker renders at the cut — just before the cut
     // child — so the transcript shows the boundary where the model's
     // context has it. Nested passes over the same cut stack in walk
-    // order (oldest first).
+    // order (oldest first). v15: each marker projects as a degenerate
+    // one-pass envelope (the file records no invocation grouping —
+    // begin/step/end per entry; consumers summing steps and reading
+    // the final length are unaffected).
     let mut cut_markers: HashMap<&str, Vec<CompactionFact>> = HashMap::new();
     for entry in chain {
         if let EntryKind::Compaction {
             cut_child,
+            summary,
             usage,
             cost,
             tokens_after,
@@ -51,6 +55,7 @@ pub fn project_events(chain: &[SessionEntry]) -> Vec<SessionEvent> {
                 .or_default()
                 .push(CompactionFact {
                     id: entry.id.clone(),
+                    summary: summary.clone(),
                     usage: crate::session::wire::wire_usage(usage),
                     cost: *cost,
                     tokens_after: *tokens_after,
@@ -62,10 +67,19 @@ pub fn project_events(chain: &[SessionEntry]) -> Vec<SessionEvent> {
     for entry in chain {
         if let Some(markers) = cut_markers.get(entry.id.as_str()) {
             for fact in markers {
-                events.push(SessionEvent::CompactionFinished {
+                // The whole summary as one delta (replay's whole-text
+                // doctrine), the facts verbatim — the recorded dollars
+                // and the regime's base are history, never re-derived.
+                events.push(SessionEvent::CompactionBegin);
+                events.push(SessionEvent::CompactionDelta {
+                    text: fact.summary.clone(),
+                });
+                events.push(SessionEvent::CompactionStep {
                     id: fact.id.clone(),
                     usage: fact.usage,
                     cost: fact.cost,
+                });
+                events.push(SessionEvent::CompactionEnd {
                     tokens_after: fact.tokens_after,
                 });
             }
@@ -75,11 +89,10 @@ pub fn project_events(chain: &[SessionEntry]) -> Vec<SessionEvent> {
     events
 }
 
-/// One replayed compaction marker: the entry's own facts, projected
-/// verbatim (the recorded invoice dollars and the regime's base are
-/// history, never re-derived).
+/// One replayed compaction marker: the entry's own facts.
 struct CompactionFact {
     id: String,
+    summary: String,
     usage: tabit_protocol::Usage,
     cost: Option<f64>,
     tokens_after: u64,

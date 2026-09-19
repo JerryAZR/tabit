@@ -20,10 +20,10 @@ use serde::{Deserialize, Serialize};
 /// typed `kind`; the turn brackets and run terminals carry Unix-ms
 /// timestamps. v9: extensions — the `extensions_available` startup
 /// announcement. v8: skills — the `skills_available` startup
-/// announcement. v7: compaction — the `compact` command and the
-/// `compaction_started`/`compaction_delta`/`compaction_finished`/
-/// `compaction_failed` event bracket.
-pub const PROTOCOL_VERSION: u32 = 14;
+/// announcement. v7: compaction — the `compact` command and
+/// its event family (reshaped in v15 into the
+/// `compaction_begin`/`compaction_step`/`compaction_end` envelope).
+pub const PROTOCOL_VERSION: u32 = 15;
 
 /// Which session produced an event. The stamp is the session id
 /// itself (v3: the `"main"` alias is retired — one name per session);

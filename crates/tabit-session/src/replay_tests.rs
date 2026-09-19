@@ -333,15 +333,22 @@ fn a_compaction_node_replays_as_the_boundary_marker() {
     // The full history renders (the file never deletes); the marker
     // sits at the cut — right before the retained tail's first entry
     // — wherever the raw walk carries the compaction record itself.
-    // The marker carries the entry's facts verbatim (v14): the pass's
-    // request report, the recorded dollars, and the regime's base.
+    // The marker is a degenerate one-pass envelope (v15) carrying the
+    // entry's facts verbatim: the whole summary, the request report,
+    // the recorded dollars, and the regime's base.
     assert!(matches!(
-        &events[events.len() - 2],
-        SessionEvent::CompactionFinished { id, usage, cost: Some(cost), tokens_after }
-            if id == "x1"
-                && usage.input_tokens == 900
-                && (cost - 0.00096).abs() < 1e-12
-                && *tokens_after == 4321
+        &events[events.len() - 5..],
+        [
+            SessionEvent::CompactionBegin,
+            SessionEvent::CompactionDelta { text },
+            SessionEvent::CompactionStep { id, usage, cost: Some(cost) },
+            SessionEvent::CompactionEnd { tokens_after },
+            SessionEvent::UserMessage { .. },
+        ] if text == "summarized"
+            && id == "x1"
+            && usage.input_tokens == 900
+            && (cost - 0.00096).abs() < 1e-12
+            && *tokens_after == 4321
     ));
     assert!(matches!(
         events.last(),
