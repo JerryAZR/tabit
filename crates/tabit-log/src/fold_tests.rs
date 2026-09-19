@@ -37,6 +37,7 @@ fn assistant_tool_calls(ids: &[&str]) -> EntryKind {
         message: Message::Assistant { id: None, content },
         usage: rig_core::completion::Usage::default(),
         delta_tokens: None,
+        cost: None,
     }
 }
 
@@ -48,6 +49,7 @@ fn assistant_text(text: &str) -> EntryKind {
         },
         usage: rig_core::completion::Usage::default(),
         delta_tokens: None,
+        cost: None,
     }
 }
 
@@ -163,6 +165,7 @@ fn a_non_assistant_message_carries_no_calls() {
         },
         usage: rig_core::completion::Usage::default(),
         delta_tokens: None,
+        cost: None,
     })];
     assert!(tail_is_closed(&entries).is_ok());
     assert_eq!(calls_of(&Message::user("x")).len(), 0);
@@ -207,6 +210,7 @@ fn compaction(summary: &str) -> EntryKind {
         tokens_before: 0,
         tokens_after: 0,
         usage: rig_core::completion::Usage::default(),
+        cost: None,
     }
 }
 

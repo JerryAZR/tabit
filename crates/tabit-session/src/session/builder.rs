@@ -218,6 +218,7 @@ impl SessionBuilder {
             crate::context_manager::ContextManager::from_tree(
                 parsed.tree.clone(),
                 session.buffer.clone(),
+                session.cost_resolver(),
             );
         let selection = session.selection();
         let same_model = matches!(

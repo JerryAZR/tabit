@@ -1,7 +1,8 @@
-//! Selection validation and fact resolution — the `(provider, model,
-//! thinking level)` shape itself is protocol vocabulary
-//! ([`ModelSelection`] in tabit-protocol); construction lives in the
-//! [`crate::ModelRegistry`], resolution against tabit config here.
+//! Selection validation, fact resolution, and the cost arithmetic —
+//! the `(provider, model, thinking level)` shape itself is protocol
+//! vocabulary ([`ModelSelection`] in tabit-protocol); construction
+//! lives in the [`crate::ModelRegistry`], resolution against tabit
+//! config here.
 
 use crate::error::SessionError;
 use tabit_config::TabitConfig;
@@ -79,3 +80,30 @@ pub(crate) fn resolve_facts(selection: &ModelSelection, config: &TabitConfig) ->
 #[cfg(test)]
 #[path = "model_tests.rs"]
 mod tests;
+
+/// The dollars of a usage report under a rate card: the four billing
+/// legs, per million tokens.
+pub(crate) fn cost_of(usage: &rig_core::completion::Usage, cost: &tabit_config::Cost) -> f64 {
+    (usage.input_tokens as f64 / 1_000_000.0) * cost.input
+        + (usage.output_tokens as f64 / 1_000_000.0) * cost.output
+        + (usage.cached_input_tokens as f64 / 1_000_000.0) * cost.cache_read
+        + (usage.cache_creation_input_tokens as f64 / 1_000_000.0) * cost.cache_write
+}
+
+/// The dollars one completion cost, from the rates in effect — the
+/// invoice ruling (owner 2026-09): spend already happened, so the
+/// number is stamped at commit and never recomputed at read; a later
+/// rate cut does not refund it. `None` when the provider reported
+/// nothing (zeros are the not-reported sentinel) or the model carries
+/// no rate card.
+pub(crate) fn turn_cost(
+    config: &TabitConfig,
+    selection: &ModelSelection,
+    usage: &rig_core::completion::Usage,
+) -> Option<f64> {
+    if usage.total_tokens == 0 {
+        return None;
+    }
+    let rates = resolved_model(selection, config)?.cost?;
+    Some(cost_of(usage, &rates))
+}

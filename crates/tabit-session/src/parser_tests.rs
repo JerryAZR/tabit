@@ -42,6 +42,7 @@ fn assistant_node(id: &str, parent: Option<&str>, calls: &[(&str, &str)]) -> Fil
             message: Message::Assistant { id: None, content },
             usage: Usage::default(),
             delta_tokens: None,
+            cost: None,
         },
     ))
 }
@@ -126,6 +127,7 @@ fn a_clean_session_parses_into_tree_context_register_and_stats() {
     let messages = crate::context_manager::ContextManager::from_tree(
         parsed.tree.clone(),
         std::sync::Arc::new(std::sync::Mutex::new(tabit_log::NullBuffer)),
+        tabit_log::uncosted(),
     )
     .messages();
     assert_eq!(messages.len(), 4);
@@ -145,6 +147,7 @@ fn consecutive_results_merge_into_one_user_message() {
     let messages = crate::context_manager::ContextManager::from_tree(
         parsed.tree.clone(),
         std::sync::Arc::new(std::sync::Mutex::new(tabit_log::NullBuffer)),
+        tabit_log::uncosted(),
     )
     .messages();
     assert_eq!(messages.len(), 3, "user + assistant + ONE merged batch");
@@ -158,9 +161,10 @@ fn consecutive_results_merge_into_one_user_message() {
 fn usage_counts_all_branches_and_discarded_attempts() {
     let mut assistant = assistant_node("a1", Some("u1"), &[]);
     if let FileRecord::Node(entry) = &mut assistant
-        && let EntryKind::AssistantMessage { usage, .. } = &mut entry.kind
+        && let EntryKind::AssistantMessage { usage, cost, .. } = &mut entry.kind
     {
         usage.total_tokens = 10;
+        *cost = Some(0.10);
     }
     let mut discarded_usage = Usage::new();
     discarded_usage.total_tokens = 4;
@@ -170,11 +174,15 @@ fn usage_counts_all_branches_and_discarded_attempts() {
         assistant,
         side(SideKind::Discarded {
             usage: discarded_usage,
+            cost: Some(0.04),
         }),
     ]);
     assert_eq!(parsed.stats.total_usage().total_tokens, 14);
     assert_eq!(parsed.stats.per_model().len(), 1);
     assert_eq!(parsed.stats.per_model()[0].usage.total_tokens, 14);
+    // The recorded invoice facts bill as written — never recomputed.
+    assert_eq!(parsed.stats.per_model()[0].cost, Some(0.14));
+    assert_eq!(parsed.stats.total_cost(), Some(0.14));
 }
 
 #[test]
@@ -238,7 +246,7 @@ fn a_future_format_version_is_rejected() {
     let raw = format!("{header}\n{rest}");
     match parse(&raw, Path::new("t.jsonl")) {
         Err(SessionError::Corrupt { message, .. }) => {
-            assert!(message.contains("format 99.0"), "{message}")
+            assert!(message.contains("format 99.1"), "{message}")
         }
         other => panic!("expected version error, got {other:?}"),
     }
@@ -268,6 +276,7 @@ fn branch_switching_via_checkout_rebuilds_head_and_context() {
     let texts: Vec<String> = crate::context_manager::ContextManager::from_tree(
         parsed.tree.clone(),
         std::sync::Arc::new(std::sync::Mutex::new(tabit_log::NullBuffer)),
+        tabit_log::uncosted(),
     )
     .messages()
     .iter()
@@ -304,6 +313,7 @@ fn a_v5_file_with_a_compaction_entry_loads_as_a_leaf() {
     let messages = crate::context_manager::ContextManager::from_tree(
         parsed.tree.clone(),
         std::sync::Arc::new(std::sync::Mutex::new(tabit_log::NullBuffer)),
+        tabit_log::uncosted(),
     )
     .messages();
     assert_eq!(messages.len(), 3, "summary + u2 + a2: {messages:?}");
@@ -373,6 +383,7 @@ fn a_compaction_entry_carrying_usage_counts_into_stats() {
                     output_tokens: 5,
                     ..Default::default()
                 },
+                cost: None,
             },
         )),
     ]);
@@ -393,6 +404,7 @@ fn compaction_node(id: &str, parent: Option<&str>, cut_child: &str) -> FileRecor
             tokens_before: 42,
             usage: rig_core::completion::Usage::default(),
             tokens_after: 0,
+            cost: None,
         },
     ))
 }

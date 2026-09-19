@@ -80,8 +80,13 @@ impl Projection {
                     entry_id: entry.id.clone(),
                 });
             }
-            EntryKind::AssistantMessage { message, usage, .. } => {
-                self.assistant_turn(entry, message, *usage, events);
+            EntryKind::AssistantMessage {
+                message,
+                usage,
+                cost,
+                ..
+            } => {
+                self.assistant_turn(entry, message, *usage, *cost, events);
             }
             EntryKind::ToolResult { result } => {
                 self.tool_result(entry, result, events);
@@ -106,6 +111,7 @@ impl Projection {
         entry: &SessionEntry,
         message: &Message,
         usage: rig_core::completion::Usage,
+        cost: Option<f64>,
         events: &mut Vec<SessionEvent>,
     ) {
         let turn_id = entry.id.clone();
@@ -199,6 +205,9 @@ impl Projection {
         events.push(SessionEvent::CompletionCall {
             turn_id: turn_id.clone(),
             usage: crate::session::wire::wire_usage(&usage),
+            // The invoice fact as recorded — replay shows the dollars
+            // that were spent, not a re-derivation.
+            cost,
         });
         events.push(SessionEvent::TurnCommitted {
             id: turn_id,

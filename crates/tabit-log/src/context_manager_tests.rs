@@ -52,9 +52,54 @@ impl WriteBuffer for BufferTap {
     }
 }
 
-fn manager() -> (ContextManager, BufferTap) {
+#[test]
+fn the_injected_cost_stamp_rides_the_committed_entry() {
+    // The invoice ruling at the fold: the resolver's dollars land on
+    // the entry at commit — the durable fact the parser bills and the
+    // replay pass carries. The default (`uncosted`) writes none.
     let tap = BufferTap::default();
-    (ContextManager::empty(tap.shared()), tap)
+    let costed: super::TurnCost = std::sync::Arc::new(|_| Some(0.42));
+    let mut manager = ContextManager::empty(tap.shared(), costed);
+    manager.fold_turn_with_id(
+        assistant_text("answer"),
+        "t-cost".to_string(),
+        reported(100, 50),
+    );
+    let records = tap.records();
+    let entry = records
+        .iter()
+        .find_map(|record| match record {
+            FileRecord::Node(entry) => Some(entry),
+            _ => None,
+        })
+        .expect("a committed node");
+    match &entry.kind {
+        EntryKind::AssistantMessage {
+            cost: Some(cost), ..
+        } => {
+            assert!((cost - 0.42).abs() < 1e-12);
+        }
+        other => panic!("the entry carries the stamped cost: {other:?}"),
+    }
+
+    let (mut bare, tap) = fresh_manager();
+    bare.fold_turn_with_id(
+        assistant_text("answer"),
+        "t-bare".to_string(),
+        reported(1, 1),
+    );
+    assert!(tap.records().iter().all(|record| match record {
+        FileRecord::Node(entry) => !matches!(
+            &entry.kind,
+            EntryKind::AssistantMessage { cost: Some(_), .. }
+        ),
+        _ => true,
+    }));
+}
+
+fn fresh_manager() -> (ContextManager, BufferTap) {
+    let tap = BufferTap::default();
+    (ContextManager::empty(tap.shared(), super::uncosted()), tap)
 }
 
 fn user(text: &str) -> Message {
@@ -122,6 +167,7 @@ fn sample_tree() -> SessionTree {
                 message: assistant,
                 usage: Usage::new(),
                 delta_tokens: None,
+                cost: None,
             },
         ),
         SessionEntry::with_id(
@@ -169,7 +215,7 @@ fn sample_tree() -> SessionTree {
 
 #[test]
 fn fold_user_commits_record_and_tree_together() {
-    let (mut manager, tap) = manager();
+    let (mut manager, tap) = fresh_manager();
     manager.fold(user("hello"));
     assert_eq!(manager.messages(), vec![user("hello")]);
     let records = tap.records();
@@ -182,7 +228,7 @@ fn fold_user_commits_record_and_tree_together() {
 
 #[test]
 fn fold_records_the_deferred_usage_fact() {
-    let (mut manager, tap) = manager();
+    let (mut manager, tap) = fresh_manager();
     manager.fold(assistant_text("done"));
     let records = tap.records();
     let EntryKind::AssistantMessage { usage, .. } = &node(&records[0]).kind else {
@@ -195,7 +241,7 @@ fn fold_records_the_deferred_usage_fact() {
 #[test]
 #[should_panic(expected = "commits only through fold_all")]
 fn fold_refuses_a_tool_calling_assistant() {
-    let (mut manager, _tap) = manager();
+    let (mut manager, _tap) = fresh_manager();
     manager.fold(Message::Assistant {
         id: None,
         content: OneOrMany::one(call("c1")),
@@ -207,7 +253,7 @@ fn a_system_message_carries_verbatim_as_its_own_node() {
     // Seeded standalone histories carry mid-conversation system
     // messages; the request builder hoists them, and the view
     // reproduces the verbatim message (reload folds the same list).
-    let (mut manager, tap) = manager();
+    let (mut manager, tap) = fresh_manager();
     manager.fold(Message::System {
         content: "you are a codename keeper".to_string(),
     });
@@ -221,7 +267,7 @@ fn a_system_message_carries_verbatim_as_its_own_node() {
 
 #[test]
 fn fold_all_commits_the_roundtrip_as_one_blob() {
-    let (mut manager, tap) = manager();
+    let (mut manager, tap) = fresh_manager();
     manager.fold(user("go"));
     let assistant = Message::Assistant {
         id: None,
@@ -260,21 +306,21 @@ fn fold_all_commits_the_roundtrip_as_one_blob() {
 #[test]
 #[should_panic(expected = "must lead with an assistant turn")]
 fn fold_all_refuses_a_non_assistant_head() {
-    let (mut manager, _tap) = manager();
+    let (mut manager, _tap) = fresh_manager();
     manager.fold_all(vec![user("go")]);
 }
 
 #[test]
 #[should_panic(expected = "carries no tool calls")]
 fn fold_all_refuses_a_call_free_head() {
-    let (mut manager, _tap) = manager();
+    let (mut manager, _tap) = fresh_manager();
     manager.fold_all(vec![assistant_text("plain")]);
 }
 
 #[test]
 #[should_panic(expected = "1 call(s) unanswered")]
 fn fold_all_refuses_an_incomplete_batch() {
-    let (mut manager, _tap) = manager();
+    let (mut manager, _tap) = fresh_manager();
     manager.fold_all(vec![
         Message::Assistant {
             id: None,
@@ -287,7 +333,7 @@ fn fold_all_refuses_an_incomplete_batch() {
 #[test]
 #[should_panic(expected = "answers no open call")]
 fn fold_all_refuses_an_orphan_result() {
-    let (mut manager, _tap) = manager();
+    let (mut manager, _tap) = fresh_manager();
     manager.fold_all(vec![
         Message::Assistant {
             id: None,
@@ -300,7 +346,7 @@ fn fold_all_refuses_an_orphan_result() {
 #[test]
 #[should_panic(expected = "answers no open call")]
 fn fold_all_refuses_a_duplicate_answer() {
-    let (mut manager, _tap) = manager();
+    let (mut manager, _tap) = fresh_manager();
     manager.fold_all(vec![
         Message::Assistant {
             id: None,
@@ -313,7 +359,7 @@ fn fold_all_refuses_a_duplicate_answer() {
 #[test]
 #[should_panic(expected = "carry only tool results")]
 fn fold_all_refuses_plain_text_in_the_results() {
-    let (mut manager, _tap) = manager();
+    let (mut manager, _tap) = fresh_manager();
     manager.fold_all(vec![
         Message::Assistant {
             id: None,
@@ -328,7 +374,7 @@ fn fold_all_refuses_plain_text_in_the_results() {
 #[test]
 #[should_panic(expected = "only result messages")]
 fn fold_all_refuses_an_assistant_in_the_tail() {
-    let (mut manager, _tap) = manager();
+    let (mut manager, _tap) = fresh_manager();
     manager.fold_all(vec![
         Message::Assistant {
             id: None,
@@ -344,7 +390,7 @@ fn from_tree_reproduces_the_incremental_history() {
     // The same conversation built two ways — folded live, and born from
     // the resulting tree — derives the same view: reload and live are
     // one derivation.
-    let (mut live, _tap) = manager();
+    let (mut live, _tap) = fresh_manager();
     live.fold(user("go"));
     live.fold_all(vec![
         Message::Assistant {
@@ -356,14 +402,14 @@ fn from_tree_reproduces_the_incremental_history() {
     live.fold(user("again"));
 
     let tap = BufferTap::default();
-    let reloaded = ContextManager::from_tree(live.tree.clone(), tap.shared());
+    let reloaded = ContextManager::from_tree(live.tree.clone(), tap.shared(), super::uncosted());
     assert_eq!(reloaded.messages(), live.messages());
 }
 
 #[test]
 fn checkout_moves_the_view_to_the_target() {
     let tap = BufferTap::default();
-    let mut manager = ContextManager::from_tree(sample_tree(), tap.shared());
+    let mut manager = ContextManager::from_tree(sample_tree(), tap.shared(), super::uncosted());
     assert_eq!(manager.messages().len(), 4); // u1, a1, merged r1+r2, u2
     manager.checkout(Some("u1")).expect("u1 is a closed target");
     assert_eq!(manager.messages(), vec![user("go")]);
@@ -372,7 +418,7 @@ fn checkout_moves_the_view_to_the_target() {
 #[test]
 fn checkout_to_root_empties_the_view() {
     let tap = BufferTap::default();
-    let mut manager = ContextManager::from_tree(sample_tree(), tap.shared());
+    let mut manager = ContextManager::from_tree(sample_tree(), tap.shared(), super::uncosted());
     manager.checkout(None).expect("root is always valid");
     assert!(manager.messages().is_empty());
 }
@@ -380,7 +426,7 @@ fn checkout_to_root_empties_the_view() {
 #[test]
 fn checkout_unknown_target_is_a_graceful_error() {
     let tap = BufferTap::default();
-    let mut manager = ContextManager::from_tree(sample_tree(), tap.shared());
+    let mut manager = ContextManager::from_tree(sample_tree(), tap.shared(), super::uncosted());
     let Err(error) = manager.checkout(Some("nope")) else {
         panic!("an unknown target must error");
     };
@@ -394,7 +440,7 @@ fn checkout_unknown_target_is_a_graceful_error() {
 #[should_panic(expected = "refused")]
 fn checkout_into_an_open_roundtrip_panics() {
     let tap = BufferTap::default();
-    let mut manager = ContextManager::from_tree(sample_tree(), tap.shared());
+    let mut manager = ContextManager::from_tree(sample_tree(), tap.shared(), super::uncosted());
     // a1 carries two calls; the branch ending at it is mid-roundtrip.
     manager.checkout(Some("a1")).expect("unchecked");
 }
@@ -403,7 +449,7 @@ fn checkout_into_an_open_roundtrip_panics() {
 #[should_panic(expected = "refused")]
 fn checkout_into_a_mid_batch_result_panics() {
     let tap = BufferTap::default();
-    let mut manager = ContextManager::from_tree(sample_tree(), tap.shared());
+    let mut manager = ContextManager::from_tree(sample_tree(), tap.shared(), super::uncosted());
     // r1 answers c1 but leaves c2 open — mid-batch.
     manager.checkout(Some("r1")).expect("unchecked");
 }
@@ -414,7 +460,7 @@ fn the_buffer_serves_the_manager_and_the_session() {
     // one lock, one outbox, both producers.
     let tap = BufferTap::default();
     let shared = tap.shared();
-    let mut manager = ContextManager::empty(tap.shared());
+    let mut manager = ContextManager::empty(tap.shared(), super::uncosted());
     manager.fold(user("hello"));
     {
         let mut session_side = lock::lock(&shared);
@@ -435,7 +481,7 @@ fn the_buffer_serves_the_manager_and_the_session() {
 
 #[test]
 fn commit_compaction_appends_at_the_head() {
-    let (mut manager, tap) = manager();
+    let (mut manager, tap) = fresh_manager();
     manager.fold(user("first"));
     manager.fold(assistant_text("first answer"));
     manager.fold(user("second"));
@@ -484,7 +530,7 @@ fn commit_compaction_appends_at_the_head() {
 
 #[test]
 fn commit_compaction_refuses_a_cut_child_off_the_branch() {
-    let (mut manager, _tap) = manager();
+    let (mut manager, _tap) = fresh_manager();
     manager.fold(user("first"));
     manager.fold(assistant_text("first answer"));
     assert!(
@@ -504,7 +550,7 @@ fn commit_compaction_refuses_a_cut_child_off_the_branch() {
 
 #[test]
 fn a_second_compaction_composes_as_another_leaf() {
-    let (mut manager, _tap) = manager();
+    let (mut manager, _tap) = fresh_manager();
     manager.fold(user("first"));
     manager.fold(assistant_text("first answer"));
     manager.fold(user("second"));
@@ -547,7 +593,7 @@ fn a_second_compaction_composes_as_another_leaf() {
 
 #[test]
 fn fold_turn_with_id_commits_the_reported_usage() {
-    let (mut manager, _tap) = manager();
+    let (mut manager, _tap) = fresh_manager();
     let usage = Usage {
         input_tokens: 90,
         output_tokens: 10,
@@ -567,7 +613,7 @@ fn fold_turn_with_id_commits_the_reported_usage() {
 
 #[test]
 fn fold_all_with_ids_commits_the_reported_usage() {
-    let (mut manager, _tap) = manager();
+    let (mut manager, _tap) = fresh_manager();
     let usage = Usage {
         input_tokens: 70,
         output_tokens: 30,
@@ -598,7 +644,7 @@ fn fold_all_with_ids_commits_the_reported_usage() {
 #[test]
 #[should_panic(expected = "fold_turn_with_id")]
 fn fold_with_id_refuses_an_assistant_turn() {
-    let (mut manager, _tap) = manager();
+    let (mut manager, _tap) = fresh_manager();
     manager.fold_with_id(assistant_text("smuggled"), "turn-1".to_string());
 }
 
@@ -631,7 +677,7 @@ fn a_total_below_its_predecessor_is_uncounted_and_re_anchors() {
     // anchors at the smaller total. Debug-diagnosed, never a
     // warning — the user switched models for their own reasons and
     // nobody can act on the discontinuity.
-    let (mut manager, _tap) = manager();
+    let (mut manager, _tap) = fresh_manager();
     manager.fold_turn_with_id(assistant_text("one"), "t1".to_string(), reported(90, 10));
     // The switch: total 80 against a predecessor of 100.
     manager.fold_turn_with_id(
@@ -647,7 +693,7 @@ fn a_total_below_its_predecessor_is_uncounted_and_re_anchors() {
 
 #[test]
 fn turn_deltas_telescope_against_the_predecessor_total() {
-    let (mut manager, _tap) = manager();
+    let (mut manager, _tap) = fresh_manager();
     // The first turn's delta is its whole measured total (predecessor
     // 0 at session start — the system prompt folds in, measured).
     manager.fold_turn_with_id(assistant_text("one"), "t1".to_string(), reported(90, 10));
@@ -664,7 +710,7 @@ fn turn_deltas_telescope_against_the_predecessor_total() {
 
 #[test]
 fn an_unmeasured_turn_rides_the_next_measured_delta() {
-    let (mut manager, _tap) = manager();
+    let (mut manager, _tap) = fresh_manager();
     manager.fold_turn_with_id(assistant_text("one"), "t1".to_string(), reported(90, 10));
     // Zero-usage: the sentinel — no delta commits, the turn is
     // uncounted.
@@ -677,7 +723,7 @@ fn an_unmeasured_turn_rides_the_next_measured_delta() {
 
 #[test]
 fn the_first_turn_after_compaction_deltas_against_the_regime_base() {
-    let (mut manager, _tap) = manager();
+    let (mut manager, _tap) = fresh_manager();
     manager.fold(user("first"));
     manager.fold_turn_with_id(
         assistant_text("first answer"),
@@ -738,7 +784,7 @@ fn the_deltas_telescope_to_the_head_measurement() {
         };
 
     // A plain measured session: the sum IS the measurement.
-    let (mut manager, _tap) = manager();
+    let (mut manager, _tap) = fresh_manager();
     manager.fold_turn_with_id(assistant_text("one"), "t1".to_string(), reported(90, 10));
     manager.fold(user("next"));
     manager.fold_turn_with_id(assistant_text("two"), "t2".to_string(), reported(150, 10));
@@ -791,7 +837,7 @@ fn the_deltas_telescope_to_the_head_measurement() {
 fn a_seeded_assistant_stays_unmeasured() {
     // fold() keeps the seed door: no server measured the turn, and
     // zeros are the type's not-reported sentinel.
-    let (mut manager, _tap) = manager();
+    let (mut manager, _tap) = fresh_manager();
     manager.fold(assistant_text("a seeded turn"));
     let branch = manager.active_branch();
     let EntryKind::AssistantMessage { usage, .. } = &branch[0].kind else {
@@ -803,7 +849,7 @@ fn a_seeded_assistant_stays_unmeasured() {
 #[test]
 #[should_panic(expected = "tool-carrying assistant commits only through")]
 fn fold_refuses_a_tool_carrying_assistant() {
-    let (mut manager, _tap) = manager();
+    let (mut manager, _tap) = fresh_manager();
     manager.fold(Message::Assistant {
         id: None,
         content: OneOrMany::one(call("c1")),
@@ -813,7 +859,7 @@ fn fold_refuses_a_tool_carrying_assistant() {
 #[test]
 #[should_panic(expected = "stale cut")]
 fn commit_compaction_refuses_a_cut_child_off_the_active_branch() {
-    let (mut manager, _tap) = manager();
+    let (mut manager, _tap) = fresh_manager();
     // Build a branch, then branch away from it: the abandoned child
     // is a node in the tree but not on the active branch.
     manager.fold(user("go"));
@@ -847,7 +893,7 @@ fn commit_compaction_refuses_a_cut_child_off_the_active_branch() {
 
 #[test]
 fn the_debug_impl_names_the_tree() {
-    let (mut manager, _tap) = manager();
+    let (mut manager, _tap) = fresh_manager();
     manager.fold(user("hi"));
     let rendered = format!("{manager:?}");
     assert!(rendered.contains("ContextManager"), "{rendered}");

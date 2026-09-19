@@ -11,7 +11,7 @@ render a specific tool's `details` cargo, the interaction template
 payloads — lives in **TOOLS.md**, its companion since the shapes grew
 past one doc (2026-09 ruling).
 
-Wire shapes below are the **v12 contract**. v3 was the multi-session
+Wire shapes below are the **v13 contract**. v3 was the multi-session
 host — session-addressed commands, `new_session`/`open_session` on the
 channel, the `"main"` stream alias retired (the stream stamp is the
 session id). v4 made backend-level frames **unstamped** (§6) and
@@ -27,7 +27,9 @@ run terminals; v11 put the resolved model facts on `model_changed`
 does not state one); v12 made per-turn usage complete
 (`completion_call` carries the full five-field `Usage`) and deleted
 `run_finished`'s aggregated usage — per-turn is the home, sums are
-the frontend's. Each version landed as one
+the frontend's; v13 put the recorded dollars on `completion_call`
+(`cost` — stamped at commit from the rates in effect, so history
+survives rate changes). Each version landed as one
 protocol-version bump with no compatibility period; always check the
 ack's `protocol_version`. (`tabit --list` prints a human table —
 there is no JSON listing edge.)
@@ -289,7 +291,7 @@ those connection-level).
 | `compaction_finished` | `id` | the pass committed: the model-visible context is now `[summary] + retained tail`. Everything before the cut stays in the file — the next replay pass still renders it, with a `compaction_finished` marker at the boundary; checkout to a pre-compaction entry yields the full-history branch. |
 | `compaction_failed` | `id`, `message` | the pass failed or was cancelled: nothing committed, the context is unchanged. Not a run terminal — the run (if any) continues; the automatic doors retry when their conditions next hold. |
 | `tool_result` | `turn_id`, `entry_id`, `name`, `internal_call_id`, `content`, `status`, `details?` | one tool body finished; its result committed. `content` is exactly the text the model saw — already capped at the source, failure text included; render it verbatim. `status` is structure only: `success` or `failed { exit_code? }`; the detail is in `content`, not `status`. `details`, when present, is derived presentation cargo owned by the tool named in `name` — dispatch on `name`, degrade to `content` when absent or unknown. The per-tool shapes are TOOLS.md's (today's producers: `edit`'s diff + outcomes, `bash`'s truncation/spill, `subagent`'s child-session facts). |
-| `completion_call` | `turn_id`, `usage` | one model request finished; its usage is final — the fresh server report (v12). The full five-field `Usage` rides here per request (cache legs included), so per-turn cost is computable at display with `model_changed.cost`'s rates; anything aggregated (a run, a session) is your sum over these — aborted and failed runs count too. |
+| `completion_call` | `turn_id`, `usage`, `cost?` | one model request finished; its usage is final — the fresh server report (v12). The full five-field `Usage` rides here per request (cache legs included); anything aggregated (a run, a session) is your sum over these — aborted and failed runs count too. v13 adds `cost`: the dollars the turn cost, **recorded at commit** from the rates then in effect (the invoice ruling — spend already happened; a later rate cut does not rewrite it). Absent when the provider reported nothing or the model carries no rate card; the same value rides the session file, so replays after resume show exact history. `model_changed.cost` still carries the current rates, for what future turns will cost. |
 | `turn_truncated` | `turn_id` | the committed turn ended truncated: the provider cut generation at its output limit (`finish_reason: length`). Informational, never a failure — the run continues exactly as usual (steers drain into the next turn; the run may end normally). Show it as a note; a steer is how the user asks the model to go on. |
 | `turn_committed` | `id`, `completed_at_ms` | the turn is durable history. Same id as `turn_started`; `completed_at_ms` is the commit's time, Unix milliseconds (replay: the entry's recorded time). |
 | `turn_retried` | `turn_id` | the turn was discarded before commit (e.g. malformed tool-call arguments); drop its provisional groups — a fresh `turn_started` follows. |

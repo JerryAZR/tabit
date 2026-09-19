@@ -5,8 +5,9 @@
 //! (abandoned spend is still spend). Attribution is the caller's: the
 //! parser and the recorder track which model served at the moment of
 //! each record (the `model_change` register) and call [`UsageLedger::add`].
-//! Costs stay out — they are config-derived, computed at read time by
-//! the session facade.
+//! Dollars ride as recorded invoice facts (stamped at commit from the
+//! rates in effect, the owner's invoice ruling 2026-09) — never
+//! re-derived from the config's current rates at read.
 
 use rig_core::completion::Usage;
 use std::collections::BTreeMap;
@@ -33,6 +34,9 @@ pub struct ModelUsage {
     pub thinking_level: Option<String>,
     /// Summed usage attributed to this model.
     pub usage: Usage,
+    /// Summed recorded dollars (`None` until a turn states cost — a
+    /// model without a rate card bills tokens only).
+    pub cost: Option<f64>,
 }
 
 /// The cumulative token ledger for one session.
@@ -46,6 +50,17 @@ pub struct UsageLedger {
     /// dimension, not a second copy of the spend.
     extension_usage: BTreeMap<String, Usage>,
     total_usage: Usage,
+    /// Recorded dollars across all models (`None` until a turn states
+    /// cost).
+    total_cost: Option<f64>,
+}
+
+/// Presence-preserving accumulation: `None` until a fact arrives, then
+/// the sum of what was stated.
+fn accrue(target: &mut Option<f64>, add: Option<f64>) {
+    if let Some(add) = add {
+        *target = Some(target.unwrap_or(0.0) + add);
+    }
 }
 
 impl UsageLedger {
@@ -64,8 +79,9 @@ impl UsageLedger {
         model: &str,
         level: Option<&str>,
         usage: Usage,
+        cost: Option<f64>,
     ) {
-        self.add(provider, model, level, usage);
+        self.add(provider, model, level, usage, cost);
         add_usage(
             self.extension_usage.entry(caller.to_string()).or_default(),
             &usage,
@@ -77,24 +93,37 @@ impl UsageLedger {
         &self.extension_usage
     }
 
-    /// Attribute one record's usage to a model. Same-model records
-    /// accumulate into one entry (first-seen thinking level on display).
-    pub fn add(&mut self, provider: &str, model: &str, level: Option<&str>, usage: Usage) {
+    /// Attribute one record's usage and recorded dollars to a model.
+    /// Same-model records accumulate into one entry (first-seen
+    /// thinking level on display).
+    pub fn add(
+        &mut self,
+        provider: &str,
+        model: &str,
+        level: Option<&str>,
+        usage: Usage,
+        cost: Option<f64>,
+    ) {
         match self
             .per_model
             .iter_mut()
             .find(|entry| entry.provider == provider && entry.model == model)
         {
-            Some(entry) => add_usage(&mut entry.usage, &usage),
+            Some(entry) => {
+                add_usage(&mut entry.usage, &usage);
+                accrue(&mut entry.cost, cost);
+            }
             None => self.per_model.push(ModelUsage {
                 provider: provider.to_string(),
                 model: model.to_string(),
                 thinking_level: level.map(str::to_string),
                 // Usage is Copy: the entry starts at this record's totals.
                 usage,
+                cost,
             }),
         }
         add_usage(&mut self.total_usage, &usage);
+        accrue(&mut self.total_cost, cost);
     }
 
     /// The per-model accumulation, in first-seen order.
@@ -105,6 +134,12 @@ impl UsageLedger {
     /// Totals across all models.
     pub fn total_usage(&self) -> Usage {
         self.total_usage
+    }
+
+    /// Recorded dollars across all models (`None` until a turn states
+    /// cost).
+    pub fn total_cost(&self) -> Option<f64> {
+        self.total_cost
     }
 }
 

@@ -141,13 +141,16 @@ impl HostServices for ExtensionServices {
                 return Err("the completion ended without a response".to_string());
             }
             // Bill: the serving model's row, plus the extension's own
-            // tally — spend is visible and attributed.
+            // tally — spend is visible and attributed. Dollars are the
+            // invoice fact (stamped now, never re-derived).
+            let cost = crate::model::turn_cost(&config, &selection, &usage);
             tabit_log::lock::lock(&ledger).add_extension(
                 &caller,
                 &selection.provider,
                 &selection.model,
                 selection.thinking_level.as_deref(),
                 usage,
+                cost,
             );
             Ok(ModelPromptOk {
                 text,

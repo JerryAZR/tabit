@@ -467,17 +467,23 @@ impl Session {
                     // same numbers; live adds only what is new).
                     {
                         let selection = self.selection();
+                        // The invoice fact: dollars from the rates in
+                        // effect, stamped now — commit and ledger bill
+                        // the same value.
+                        let cost = crate::model::turn_cost(&self.config, &selection, &call.usage);
                         tabit_log::lock::lock(&self.ledger).add(
                             &selection.provider,
                             &selection.model,
                             selection.thinking_level.as_deref(),
                             call.usage,
+                            cost,
                         );
+                        sink.emit(SessionEvent::CompletionCall {
+                            turn_id: turn_id.clone(),
+                            usage: wire_usage(&call.usage),
+                            cost,
+                        });
                     }
-                    sink.emit(SessionEvent::CompletionCall {
-                        turn_id: turn_id.clone(),
-                        usage: wire_usage(&call.usage),
-                    });
                     // A truncation-class finish reason is a warning, not a
                     // failure (ENGINE.md behavior delta 9): the flow
                     // continues untouched — steers drain into the next

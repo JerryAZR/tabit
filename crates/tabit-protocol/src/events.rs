@@ -156,9 +156,18 @@ pub enum SessionEvent {
         /// The turn the request belongs to.
         turn_id: String,
         /// Token usage reported by the provider, including the cache
-        /// breakdown (the billing legs — with `model_changed.cost`'s
-        /// rates, per-turn cost is computable at display).
+        /// breakdown (the billing legs).
         usage: Usage,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        /// The dollars the turn cost, recorded at commit from the
+        /// rates in effect (v13, the invoice ruling): spend already
+        /// happened — a later rate change does not rewrite it. Absent
+        /// when the provider reported nothing or the model carries no
+        /// rate card. Session totals are sums over these; the same
+        /// value rides the session file's entry, so a resume replays
+        /// exact history. `model_changed.cost` still carries the
+        /// current rates for what future turns will cost.
+        cost: Option<f64>,
     },
     /// A committed turn ended truncated: the provider cut generation short at
     /// its output limit (`finish_reason: length`). Informational, not a

@@ -328,6 +328,72 @@ async fn a_fresh_session_materializes_at_the_first_user_message() -> Result<(), 
 }
 
 #[tokio::test]
+async fn recorded_cost_survives_a_rate_change_on_reload() -> Result<(), SessionError> {
+    // The invoice ruling (owner 2026-09): the dollars a turn cost are
+    // stamped at commit; a later rate cut does not refund them. Run
+    // under one rate card, resume under a halved one — history is not
+    // rewritten.
+    let store = temp_store("invoice");
+    let config = |rate: f64| {
+        std::sync::Arc::new(
+            TabitConfig::from_toml_str(
+                &format!(
+                    r#"
+[providers.p]
+base_url = "http://127.0.0.1:9999/v1"
+api = "openai-completions"
+
+[[providers.p.models]]
+id = "m"
+
+[providers.p.models.cost]
+input = {rate}
+output = {rate}
+cache_read = 0.0
+cache_write = 0.0
+"#
+                ),
+                std::path::Path::new("test.toml"),
+            )
+            .expect("config"),
+        )
+    };
+    let factory = Factory::new(vec![text_turn_reported("answer", 100, 50)]);
+    let mut session = factory
+        .clone()
+        .into_builder_with_config(store.clone(), config(1.0), ModelSelection::new("p", "m"))
+        .create("C:/w")?;
+    session.prompt("hi").await;
+    let spent = session.stats().total_cost;
+    assert!(
+        (spent - 0.00015).abs() < 1e-12,
+        "100+50 tokens at $1/M: {spent}"
+    );
+    let path = file_path(&session).to_path_buf();
+
+    // The file carries the invoice fact.
+    let parsed = store.open_path(&path)?;
+    let recorded = parsed
+        .stats
+        .total_cost()
+        .expect("the file bills the dollars");
+    assert!((recorded - spent).abs() < 1e-12, "{recorded} vs {spent}");
+
+    // Resume under a halved rate card: the spend that left is the
+    // spend that left.
+    let (resumed, _) = Factory::new(vec![text_turn("never runs")])
+        .into_builder_with_config(store.clone(), config(0.5), ModelSelection::new("p", "m"))
+        .resume(&path)?;
+    let resumed_cost = resumed.stats().total_cost;
+    assert!(
+        (resumed_cost - spent).abs() < 1e-12,
+        "a rate cut does not refund the past: {resumed_cost} vs {spent}"
+    );
+    std::fs::remove_dir_all(store.dir()).ok();
+    Ok(())
+}
+
+#[tokio::test]
 async fn single_turn_prompt_persists_and_projects() -> Result<(), SessionError> {
     let store = temp_store("single");
     let factory = Factory::new(vec![text_turn("hello there")]);
@@ -765,6 +831,7 @@ async fn a_dangling_tool_roundtrip_fails_the_resume_loudly() -> Result<(), Sessi
             },
             usage: Usage::default(),
             delta_tokens: None,
+            cost: None,
         },
     );
     let error =
@@ -2025,6 +2092,7 @@ async fn rewind_targets_steers_like_prompts() -> Result<(), SessionError> {
             },
             usage: Usage::default(),
             delta_tokens: None,
+            cost: None,
         },
     );
     write_node(
@@ -2086,6 +2154,7 @@ async fn rewinding_into_an_open_roundtrip_panics() -> Result<(), SessionError> {
             },
             usage: Usage::default(),
             delta_tokens: None,
+            cost: None,
         },
     );
     let first_result = write_node(
@@ -2194,6 +2263,7 @@ async fn rewind_to_the_root_leaves_the_register_untouched() -> Result<(), Sessio
             },
             usage: Usage::default(),
             delta_tokens: None,
+            cost: None,
         },
     );
     let path = writer.path().to_path_buf();
@@ -2277,6 +2347,7 @@ async fn a_ghost_model_in_history_does_not_block_a_rewind() -> Result<(), Sessio
             },
             usage: Usage::default(),
             delta_tokens: None,
+            cost: None,
         },
     );
     let path = writer.path().to_path_buf();

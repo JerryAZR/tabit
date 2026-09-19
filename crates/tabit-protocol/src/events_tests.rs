@@ -90,6 +90,7 @@ fn events_round_trip_through_json() {
                 total_tokens: 14,
                 ..Default::default()
             },
+            cost: Some(0.000014),
         },
         SessionEvent::TurnTruncated {
             turn_id: TURN.to_string(),

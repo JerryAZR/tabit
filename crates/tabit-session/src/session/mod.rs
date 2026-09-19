@@ -52,7 +52,7 @@ use crate::notice::NoticeSlot;
 use crate::stats::{ModelStats, SessionStats, UsageLedger};
 use mailbox::Mailbox;
 use rig_agent::agent::Agent;
-use rig_agent::completion::{Message, Usage};
+use rig_agent::completion::Message;
 use rig_agent::tool::DynamicTool;
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
@@ -261,35 +261,25 @@ impl Session {
         crate::lock::read(&self.conversation).messages()
     }
 
-    /// Usage and cost totals — the cumulative ledger as of load
-    /// (usage facts are deferred live, the ruling; the totals resume
-    /// at the usage discussion) with costs derived from the config's
-    /// rates.
+    /// Usage and cost totals — the cumulative ledger as loaded and
+    /// lived: dollars are the recorded invoice facts (stamped at
+    /// commit, the ruling — a later rate change never rewrites them),
+    /// never re-derived from the config's current rates.
     pub fn stats(&self) -> SessionStats {
         let ledger: UsageLedger = tabit_log::lock::lock(&self.ledger).clone();
         let mut stats = SessionStats::default();
         for model_usage in ledger.per_model() {
-            let mut model_stats = ModelStats {
+            stats.per_model.push(ModelStats {
                 provider: model_usage.provider.clone(),
                 model: model_usage.model.clone(),
                 thinking_level: model_usage.thinking_level.clone(),
                 usage: model_usage.usage,
-                cost: None,
-            };
-            if let Some(cost) = self
-                .config
-                .provider(&model_stats.provider)
-                .and_then(|p| p.model(&model_stats.model))
-                .and_then(|m| m.cost)
-            {
-                let dollars = cost_of(&model_stats.usage, &cost);
-                stats.total_cost += dollars;
-                model_stats.cost = Some(dollars);
-            }
-            stats.per_model.push(model_stats);
+                cost: model_usage.cost,
+            });
         }
         stats.extension_usage = ledger.extension_usage().clone();
         stats.total_usage = ledger.total_usage();
+        stats.total_cost = ledger.total_cost().unwrap_or(0.0);
         stats
     }
 
@@ -302,11 +292,4 @@ impl Session {
     pub fn replay_events(&self) -> Vec<SessionEvent> {
         crate::replay::project_events(&crate::lock::read(&self.conversation).active_branch())
     }
-}
-
-fn cost_of(usage: &Usage, cost: &tabit_config::Cost) -> f64 {
-    (usage.input_tokens as f64 / 1_000_000.0) * cost.input
-        + (usage.output_tokens as f64 / 1_000_000.0) * cost.output
-        + (usage.cached_input_tokens as f64 / 1_000_000.0) * cost.cache_read
-        + (usage.cache_creation_input_tokens as f64 / 1_000_000.0) * cost.cache_write
 }

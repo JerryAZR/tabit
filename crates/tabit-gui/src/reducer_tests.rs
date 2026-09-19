@@ -112,6 +112,7 @@ fn a_run_lifecycle_from_message_to_terminal() {
             total_tokens: 14,
             ..Usage::default()
         },
+        cost: Some(0.000014),
     }));
     state.reduce(event(SessionEvent::RunFinished {
         output: "I'm tabit.".to_string(),

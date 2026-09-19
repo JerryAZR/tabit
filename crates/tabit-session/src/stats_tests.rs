@@ -11,8 +11,8 @@ fn usage(tokens: u64) -> Usage {
 #[test]
 fn same_model_records_accumulate_into_one_entry() {
     let mut ledger = UsageLedger::new();
-    ledger.add("p", "m", Some("high"), usage(10));
-    ledger.add("p", "m", None, usage(5));
+    ledger.add("p", "m", Some("high"), usage(10), Some(0.01));
+    ledger.add("p", "m", None, usage(5), None);
     assert_eq!(ledger.per_model().len(), 1);
     assert_eq!(ledger.per_model()[0].usage.total_tokens, 15);
     assert_eq!(
@@ -21,18 +21,23 @@ fn same_model_records_accumulate_into_one_entry() {
         "the first-seen level stays on display"
     );
     assert_eq!(ledger.total_usage().total_tokens, 15);
+    assert_eq!(ledger.per_model()[0].cost, Some(0.01));
+    assert_eq!(ledger.total_cost(), Some(0.01));
 }
 
 #[test]
 fn different_models_split_into_entries() {
     let mut ledger = UsageLedger::new();
-    ledger.add("p", "m1", None, usage(10));
-    ledger.add("q", "m2", None, usage(7));
-    ledger.add("p", "m1", None, usage(3));
+    ledger.add("p", "m1", None, usage(10), None);
+    ledger.add("q", "m2", None, usage(7), Some(0.02));
+    ledger.add("p", "m1", None, usage(3), Some(0.03));
     assert_eq!(ledger.per_model().len(), 2);
     assert_eq!(ledger.per_model()[0].usage.total_tokens, 13);
     assert_eq!(ledger.per_model()[1].usage.total_tokens, 7);
     assert_eq!(ledger.total_usage().total_tokens, 20);
+    assert_eq!(ledger.per_model()[0].cost, Some(0.03));
+    assert_eq!(ledger.per_model()[1].cost, Some(0.02));
+    assert_eq!(ledger.total_cost(), Some(0.05));
 }
 
 #[test]
@@ -40,4 +45,9 @@ fn an_empty_ledger_reports_nothing() {
     let ledger = UsageLedger::new();
     assert!(ledger.per_model().is_empty());
     assert_eq!(ledger.total_usage().total_tokens, 0);
+    assert_eq!(
+        ledger.total_cost(),
+        None,
+        "no fact stated, no dollars claimed"
+    );
 }

@@ -18,7 +18,27 @@ software/hardware contract, not just the encodings):
 Every `PROTOCOL_VERSION` bump — and every additive change a frontend
 could observe — gets an entry here in the same commit.
 
-## v12 (current)
+## v13 (current)
+
+### wire: `completion_call` carries the recorded cost (2026-09)
+
+Protocol version 13, the invoice ruling: the dollars a turn cost are a
+fact stamped at commit (rates in effect × the provider's report), not
+something to re-derive at read. `completion_call` gains `cost`
+(optional; absent when the provider reported nothing or the model has
+no rate card). Consequences: a frontend's session-total dollars are
+sums of these recorded values — after a rate change and a resume, the
+history still shows what was actually spent (replay carries the same
+recorded value from the session file); `model_changed.cost`'s rates
+are the **current** card, for what future turns will cost. The session
+file format moved to 6.1 (same major): `assistant_message` and
+`compaction` entries carry the stamp, so the backend's own stats
+(print mode's epilogue, closing stats) report recorded dollars instead
+of re-deriving from today's rates. Backend-side, one injected resolver
+(tabit-session computes, tabit-log stamps — the log layer stays
+config-free) feeds the entry stamp, the ledger, and the wire event.
+
+## v12
 
 ### wire: per-turn usage is complete; run-level aggregation deleted (2026-09)
 

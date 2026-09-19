@@ -19,6 +19,12 @@ fn entry(id: &str, kind: EntryKind) -> SessionEntry {
 }
 
 fn assistant(content: Vec<AssistantContent>, usage: Usage) -> EntryKind {
+    assistant_costed(content, usage, None)
+}
+
+/// [`assistant`] with the recorded dollars — the invoice fact the pass
+/// must carry verbatim (never a re-derivation).
+fn assistant_costed(content: Vec<AssistantContent>, usage: Usage, cost: Option<f64>) -> EntryKind {
     EntryKind::AssistantMessage {
         message: Message::Assistant {
             id: None,
@@ -26,6 +32,7 @@ fn assistant(content: Vec<AssistantContent>, usage: Usage) -> EntryKind {
         },
         usage,
         delta_tokens: None,
+        cost,
     }
 }
 
@@ -108,7 +115,9 @@ fn a_chain_projects_to_bracketed_whole_text_events() {
             SessionEvent::ReasoningDelta { id, .. } => format!("think:{id}"),
             SessionEvent::TextDelta { text, .. } => format!("text:{text}"),
             SessionEvent::ToolCall { name, .. } => format!("call:{name}"),
-            SessionEvent::CompletionCall { usage, .. } => format!("usage:{}", usage.input_tokens),
+            SessionEvent::CompletionCall { usage, cost, .. } => {
+                format!("usage:{}:${:?}", usage.input_tokens, cost.unwrap_or(0.0))
+            }
             SessionEvent::TurnCommitted { id, .. } => format!("commit:{id}"),
             SessionEvent::ToolResult { name, .. } => format!("result:{name}"),
             other => format!("other:{other:?}"),
@@ -124,12 +133,12 @@ fn a_chain_projects_to_bracketed_whole_text_events() {
             "think:t1-reasoning-2",
             "text:let me look",
             "call:ls",
-            "usage:10",
+            "usage:10:$0.0",
             "commit:t1",
             "result:ls",
             "start:t2",
             "text:all done",
-            "usage:20",
+            "usage:20:$0.0",
             "commit:t2",
         ]
     );
@@ -150,6 +159,38 @@ fn a_chain_projects_to_bracketed_whole_text_events() {
             && internal_call_id == "wire-1"
             && content == "3 files"
     ));
+}
+
+#[test]
+fn the_recorded_cost_rides_the_pass_verbatim() {
+    // The invoice ruling on the replay side: the pass shows the
+    // dollars that were spent at commit time — a later rate change
+    // never rewrites history through the projection.
+    let chain = vec![
+        entry(
+            "u1",
+            EntryKind::UserMessage {
+                message: Message::user("go"),
+            },
+        ),
+        entry(
+            "t1",
+            assistant_costed(
+                vec![AssistantContent::text("done")],
+                Usage {
+                    input_tokens: 100,
+                    output_tokens: 50,
+                    ..Usage::new()
+                },
+                Some(0.00015),
+            ),
+        ),
+    ];
+    let events = project_events(&chain);
+    assert!(events.iter().any(|event| matches!(
+        event,
+        SessionEvent::CompletionCall { cost: Some(cost), .. } if (cost - 0.00015).abs() < 1e-12
+    )));
 }
 
 #[test]
@@ -275,6 +316,7 @@ fn a_compaction_node_replays_as_the_boundary_marker() {
                 tokens_before: 0,
                 tokens_after: 0,
                 usage: rig_core::completion::Usage::default(),
+                cost: None,
             },
         ),
         entry(

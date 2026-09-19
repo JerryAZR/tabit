@@ -116,16 +116,16 @@ pub fn parse(raw: &str, path: &Path) -> Result<Parsed, SessionError> {
         match record {
             FileRecord::Node(entry) => {
                 match &entry.kind {
-                    EntryKind::AssistantMessage { usage, .. } => {
+                    EntryKind::AssistantMessage { usage, cost, .. } => {
                         let (provider, model, level) = &attribution;
-                        stats.add(provider, model, level.as_deref(), *usage);
+                        stats.add(provider, model, level.as_deref(), *usage, *cost);
                     }
                     // The summarization call's spend is real spend; the
                     // summary itself enters the walked context, not the
                     // stats' shape.
-                    EntryKind::Compaction { usage, .. } => {
+                    EntryKind::Compaction { usage, cost, .. } => {
                         let (provider, model, level) = &attribution;
-                        stats.add(provider, model, level.as_deref(), *usage);
+                        stats.add(provider, model, level.as_deref(), *usage, *cost);
                     }
                     EntryKind::UserMessage { .. } | EntryKind::ToolResult { .. } => {}
                 }
@@ -159,9 +159,9 @@ pub fn parse(raw: &str, path: &Path) -> Result<Parsed, SessionError> {
                     tree.move_head(to.as_deref()).map_err(tree_fault)?;
                 }
                 SideKind::Aborted | SideKind::Label { .. } | SideKind::Custom { .. } => {}
-                SideKind::Discarded { usage } => {
+                SideKind::Discarded { usage, cost } => {
                     let (provider, model, level) = &attribution;
-                    stats.add(provider, model, level.as_deref(), usage);
+                    stats.add(provider, model, level.as_deref(), usage, cost);
                 }
             },
         }

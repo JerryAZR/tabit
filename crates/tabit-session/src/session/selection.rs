@@ -65,6 +65,13 @@ impl Session {
         self.model_register().facts(selection)
     }
 
+    /// The commit-time cost stamp over this session's config and
+    /// register cell (the reload path hands it to the context manager
+    /// it installs).
+    pub(crate) fn cost_resolver(&self) -> tabit_log::TurnCost {
+        cost_resolver(self.config.clone(), self.selection.clone())
+    }
+
     /// The receive-time model validator — the checkout probe's sibling
     /// for the `model` command: validates a selection against this
     /// session's config without touching the session, so the worker
@@ -135,5 +142,18 @@ pub(super) fn register_record(selection: &ModelSelection) -> FileRecord {
             model: selection.model.clone(),
             thinking_level: selection.thinking_level.clone(),
         },
+    })
+}
+
+/// The commit-time cost stamp (the invoice ruling): config + the live
+/// register → dollars at call time. One construction for the context
+/// manager's injected resolver and every other stamp site.
+pub(super) fn cost_resolver(
+    config: Arc<TabitConfig>,
+    selection: Arc<Mutex<ModelSelection>>,
+) -> tabit_log::TurnCost {
+    Arc::new(move |usage| {
+        let selection = lock(&selection).clone();
+        crate::model::turn_cost(&config, &selection, usage)
     })
 }

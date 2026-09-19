@@ -51,7 +51,7 @@ use serde_json::Value;
 /// and a stable protocol with real breaking changes is when a
 /// migration story gets designed.
 pub const SESSION_FORMAT_MAJOR: u32 = 6;
-pub const SESSION_FORMAT_MINOR: u32 = 0;
+pub const SESSION_FORMAT_MINOR: u32 = 1;
 
 /// The first line of a session file.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -173,6 +173,13 @@ pub enum EntryKind {
         /// delta telescopes over it.
         #[serde(default, skip_serializing_if = "Option::is_none")]
         delta_tokens: Option<u64>,
+        /// The dollars the turn cost, stamped at commit from the rates
+        /// in effect (the invoice ruling, owner 2026-09: spend already
+        /// happened — a later rate cut does not refund it, so cost is
+        /// recorded, never recomputed at read). Absent when the
+        /// provider reported no usage or the model carries no rates.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        cost: Option<f64>,
     },
     /// The result of one executed tool call. Consecutive `tool_result`
     /// entries after an `assistant_message` form that turn's tool batch;
@@ -211,6 +218,11 @@ pub enum EntryKind {
         tokens_after: u64,
         /// The summarization call's provider-reported usage.
         usage: Usage,
+        /// The dollars the summarization call cost, stamped at commit
+        /// (same ruling as `assistant_message.cost` — real spend is a
+        /// fact, not a re-derivation).
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        cost: Option<f64>,
     },
 }
 
@@ -261,6 +273,10 @@ pub enum SideKind {
     Discarded {
         /// The provider-reported usage of the discarded attempt.
         usage: Usage,
+        /// The dollars the discarded attempt cost, stamped when
+        /// recorded (same invoice semantics as the entry family).
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        cost: Option<f64>,
     },
     /// A human-facing bookmark. Reserved; not part of model context.
     Label {

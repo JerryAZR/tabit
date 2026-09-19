@@ -69,6 +69,21 @@ pub struct ContextManager {
     tree: SessionTree,
     /// The shared write buffer: commits queue here, the session drains.
     buffer: SharedBuffer,
+    /// The dollars of a completion, stamped at commit (the invoice
+    /// ruling): this crate is engine-free and config-free, so the
+    /// session injects the arithmetic — rates in effect × the
+    /// provider's report. [`TurnCost::uncosted`] for contexts with no
+    /// billing story (seeds, tests).
+    turn_cost: TurnCost,
+}
+
+/// The injected cost resolver: usage → dollars-at-call-time, or `None`
+/// when nothing is stated (no provider report, no configured rates).
+pub type TurnCost = std::sync::Arc<dyn Fn(&Usage) -> Option<f64> + Send + Sync>;
+
+/// The no-billing resolver: every turn uncosted.
+pub fn uncosted() -> TurnCost {
+    std::sync::Arc::new(|_| None)
 }
 
 impl std::fmt::Debug for ContextManager {
@@ -82,17 +97,22 @@ impl std::fmt::Debug for ContextManager {
 impl ContextManager {
     /// A fresh conversation over a shared buffer. The writer's `create`
     /// pre-queues the header; nothing is written until a drain.
-    pub fn empty(buffer: SharedBuffer) -> Self {
+    pub fn empty(buffer: SharedBuffer, turn_cost: TurnCost) -> Self {
         Self {
             tree: SessionTree::empty(),
             buffer,
+            turn_cost,
         }
     }
 
     /// Reload: born from a parsed file's tree, with a buffer positioned
     /// at the file's end. The only way existing state enters.
-    pub fn from_tree(tree: SessionTree, buffer: SharedBuffer) -> Self {
-        Self { tree, buffer }
+    pub fn from_tree(tree: SessionTree, buffer: SharedBuffer, turn_cost: TurnCost) -> Self {
+        Self {
+            tree,
+            buffer,
+            turn_cost,
+        }
     }
 
     /// Seed a standalone (in-memory) conversation from an existing
@@ -102,9 +122,10 @@ impl ContextManager {
     /// one roundtrip. Nothing persists (a [`NullBuffer`] underneath).
     #[allow(clippy::panic)] // sanctioned crash: an invalid seed, failed loud (AGENTS.md doctrine)
     pub fn seeded(messages: Vec<Message>) -> Self {
-        let mut seeded = Self::empty(std::sync::Arc::new(std::sync::Mutex::new(
-            crate::writer::NullBuffer,
-        )));
+        let mut seeded = Self::empty(
+            std::sync::Arc::new(std::sync::Mutex::new(crate::writer::NullBuffer)),
+            uncosted(),
+        );
         let mut batch: Vec<Message> = Vec::new();
         for message in messages {
             let opens_roundtrip = matches!(&message, Message::Assistant { content, .. }
@@ -279,6 +300,7 @@ impl ContextManager {
                     // not-reported sentinel.
                     usage: usage.unwrap_or_default(),
                     delta_tokens: self.turn_delta(usage.as_ref()),
+                    cost: usage.as_ref().and_then(|u| (self.turn_cost)(u)),
                 }
             }
             // A System message carries verbatim as its own message
@@ -378,6 +400,7 @@ impl ContextManager {
             EntryKind::AssistantMessage {
                 message: assistant,
                 delta_tokens: self.turn_delta(Some(&usage)),
+                cost: (self.turn_cost)(&usage),
                 usage,
             },
             assistant_id,
@@ -468,6 +491,7 @@ impl ContextManager {
                 cut_child,
                 tokens_before,
                 tokens_after,
+                cost: (self.turn_cost)(&usage),
                 usage,
             },
         );

@@ -3214,6 +3214,7 @@ async fn the_idle_door_compacts_after_a_large_run_and_the_file_holds_the_entry()
     let messages = crate::ContextManager::from_tree(
         parsed.tree,
         Arc::new(std::sync::Mutex::new(tabit_log::NullBuffer)),
+        tabit_log::uncosted(),
     )
     .messages();
     assert!(matches!(
@@ -3364,6 +3365,7 @@ async fn an_overflow_failure_is_intercepted_compacted_and_the_run_retried() {
     let messages = crate::ContextManager::from_tree(
         parsed.tree,
         Arc::new(std::sync::Mutex::new(tabit_log::NullBuffer)),
+        tabit_log::uncosted(),
     )
     .messages();
     assert!(matches!(

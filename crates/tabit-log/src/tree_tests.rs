@@ -132,6 +132,7 @@ fn compaction_node(id: &str, parent: Option<&str>, cut_child: &str) -> SessionEn
             tokens_before: 0,
             tokens_after: 0,
             usage: rig_core::completion::Usage::default(),
+            cost: None,
         },
     )
 }
