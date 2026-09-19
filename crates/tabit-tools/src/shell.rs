@@ -24,14 +24,6 @@ pub(crate) struct Interpreter {
     pub(crate) argv0: String,
     /// Flags before the command text.
     pub(crate) args: &'static [&'static str],
-    /// A directory prepended to the child's PATH. The verified
-    /// Git-for-Windows bash carries its own coreutils (`usr\bin`) —
-    /// installers put only `Git\cmd` on the Windows PATH, so an
-    /// inherited-PATH bash would fail every coreutils call (`ls:
-    /// command not found`) depending on who launched tabit. The tool
-    /// verified this root; it guarantees its own toolchain. `None`
-    /// for interpreters that need nothing (PowerShell, Unix bash).
-    pub(crate) path_prepend: Option<std::path::PathBuf>,
 }
 
 #[cfg(windows)]
@@ -68,10 +60,7 @@ mod windows {
     /// probe-verified Git-for-Windows `bash.exe`.
     #[derive(Clone, Debug)]
     pub(crate) enum Shell {
-        Bash {
-            argv: PathBuf,
-            path_prepend: Option<PathBuf>,
-        },
+        Bash(PathBuf),
         Powershell,
     }
 
@@ -84,10 +73,9 @@ mod windows {
     /// bash-dialect command must not run under PowerShell.
     pub(crate) fn bash() -> Result<Interpreter, String> {
         match resolved() {
-            Shell::Bash { argv, path_prepend } => Ok(Interpreter {
-                argv0: argv.to_string_lossy().into_owned(),
+            Shell::Bash(path) => Ok(Interpreter {
+                argv0: path.to_string_lossy().into_owned(),
                 args: BASH_ARGS,
-                path_prepend: path_prepend.clone(),
             }),
             Shell::Powershell => Err(
                 "this machine has no verified Git Bash — commands here run through the powershell tool"
@@ -102,17 +90,16 @@ mod windows {
         Interpreter {
             argv0: "powershell".to_string(),
             args: POWERSHELL_ARGS,
-            path_prepend: None,
         }
     }
 
     fn resolve() -> Shell {
         for root in candidate_roots() {
-            let Some((bash, prepend)) = git_bash_exe(&root) else {
+            let Some(bash) = git_bash_exe(&root) else {
                 continue;
             };
             if spawn_probe(&bash, &["-c", "exit 0"], PROBE_TIMEOUT) {
-                return Shell::Bash { argv: bash, path_prepend: prepend };
+                return Shell::Bash(bash);
             }
         }
         Shell::Powershell
@@ -195,19 +182,17 @@ mod windows {
     /// The bash of a Git-for-Windows root: `usr\bin\bash.exe` is the real
     /// MSYS2 binary; `bin\bash.exe` (a small wrapper on current installs)
     /// is the fallback.
-    fn git_bash_exe(root: &Path) -> Option<(PathBuf, Option<PathBuf>)> {
-        // `bin\bash.exe` initializes the full Git Bash environment from
+    fn git_bash_exe(root: &Path) -> Option<PathBuf> {
+        // `bin\bash.exe` only, deliberately no `usr\bin\bash.exe`
+        // fallback: bin initializes the full Git Bash environment from
         // its own location — PATH with coreutils, HOME, the MSYS setup —
         // even from an empty environment (verified: `env -i` still runs
-        // `ls`). The raw `usr\bin\bash.exe` inherits PATH verbatim and
-        // is only the fallback, where run_shell's PATH prepend covers
-        // the coreutils instead.
+        // `ls`), while the raw usr\bin bash inherits the launcher's
+        // environment wholesale, which is exactly the bug class this
+        // module exists to prevent (pi launches bin\bash.exe for the
+        // same reason).
         let bin = root.join("bin").join("bash.exe");
-        if bin.is_file() {
-            return Some((bin, None));
-        }
-        let usr_bin = root.join("usr").join("bin").join("bash.exe");
-        usr_bin.is_file().then(|| (usr_bin.clone(), Some(usr_bin)))
+        bin.is_file().then_some(bin)
     }
 
     /// Run one throwaway command and see it exit cleanly — the health gate
@@ -243,29 +228,20 @@ mod windows {
         use super::*;
 
         #[test]
-        #[test]
-        fn the_resolved_bash_is_self_sufficient() {
+        fn the_resolved_bash_is_the_self_initializing_launcher() {
             // The regression this pins: a launcher whose PATH carries
             // `Git\cmd` but not `usr\bin` made every coreutils call
-            // fail (`ls: command not found`). The resolved interpreter
-            // must be self-sufficient under ANY launcher env — either
-            // the self-initializing `bin\bash.exe`, or the raw
-            // `usr\bin\bash.exe` with its coreutils directory declared
-            // for run_shell's PATH prepend.
+            // fail (`ls: command not found`) under the raw usr\bin
+            // bash. Only the self-initializing bin\bash.exe resolves.
             let interpreter = bash().expect("a verified bash exists on this machine");
-            match interpreter.path_prepend.as_ref() {
-                Some(dir) => {
-                    assert!(
-                        dir.join("ls.exe").is_file() && dir.join("bash.exe").is_file(),
-                        "the prepended directory is the coreutils dir: {dir:?}"
-                    );
-                }
-                None => assert!(
-                    interpreter.argv0.replace('/', "\\").ends_with(r"\bin\bash.exe"),
-                    "no prepend means the self-initializing bin\\bash.exe: {:?}",
-                    interpreter.argv0
-                ),
-            }
+            assert!(
+                interpreter
+                    .argv0
+                    .replace('/', "\\")
+                    .ends_with(r"\bin\bash.exe"),
+                "{:?}",
+                interpreter.argv0
+            );
         }
 
         #[test]
@@ -292,38 +268,23 @@ mod windows {
         }
 
         #[test]
-        fn git_bash_exe_requires_a_bash_file() {
+        fn git_bash_exe_requires_the_bin_launcher() {
             let dir =
                 std::env::temp_dir().join(format!("tabit-shell-tests-{}", std::process::id()));
-            // The raw usr\bin fallback: the returned prepend is its own
-            // coreutils directory (run_shell's PATH guarantee).
+
+            // The raw usr\bin bash is not a usable bash: no fallback.
             let with_usr = dir.join("usr-root");
             std::fs::create_dir_all(with_usr.join("usr").join("bin")).expect("dirs");
             std::fs::write(with_usr.join("usr").join("bin").join("bash.exe"), b"").expect("write");
-            let usr_bash = with_usr.join("usr").join("bin").join("bash.exe");
-            assert_eq!(
-                git_bash_exe(&with_usr),
-                Some((usr_bash.clone(), Some(usr_bash)))
-            );
+            assert_eq!(git_bash_exe(&with_usr), None);
 
-            // The preferred bin\bash.exe: self-initializing, no prepend.
+            // The self-initializing bin launcher is the one bash.
             let with_bin = dir.join("bin-root");
             std::fs::create_dir_all(with_bin.join("bin")).expect("dirs");
             std::fs::write(with_bin.join("bin").join("bash.exe"), b"").expect("write");
             assert_eq!(
                 git_bash_exe(&with_bin),
-                Some((with_bin.join("bin").join("bash.exe"), None))
-            );
-
-            // bin wins when both exist.
-            let both = dir.join("both-root");
-            std::fs::create_dir_all(both.join("bin")).expect("dirs");
-            std::fs::create_dir_all(both.join("usr").join("bin")).expect("dirs");
-            std::fs::write(both.join("bin").join("bash.exe"), b"").expect("write");
-            std::fs::write(both.join("usr").join("bin").join("bash.exe"), b"").expect("write");
-            assert_eq!(
-                git_bash_exe(&both),
-                Some((both.join("bin").join("bash.exe"), None))
+                Some(with_bin.join("bin").join("bash.exe"))
             );
 
             let empty = dir.join("empty-root");
@@ -368,14 +329,14 @@ mod windows {
         #[test]
         fn resolved_shell_is_never_a_guess() {
             match resolved() {
-                Shell::Bash { argv, .. } => {
+                Shell::Bash(path) => {
                     assert!(
-                        argv.is_file(),
+                        path.is_file(),
                         "resolved bash must exist: {}",
-                        argv.display()
+                        path.display()
                     );
                     assert!(
-                        argv.file_name()
+                        path.file_name()
                             .is_some_and(|n| n.eq_ignore_ascii_case("bash.exe"))
                     );
                 }
@@ -404,8 +365,6 @@ mod unix {
         Ok(Interpreter {
             argv0: "bash".to_string(),
             args: BASH_ARGS,
-            // A Unix bash resolves its own coreutils by construction.
-            path_prepend: None,
         })
     }
 }
