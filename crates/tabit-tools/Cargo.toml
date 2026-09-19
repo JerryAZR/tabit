@@ -21,7 +21,7 @@ rig-derive = { path = "../rig-derive", version = "0.41.0" }
 # the engine's sidecar). Version-aligned with tabit-ext's tokio
 # flavor (one major in the tree; the std/tokio split is the crate's
 # own feature choice, not a version fork).
-process-wrap = { version = "10", default-features = false, features = ["std", "job-object", "process-group"] }
+process-wrap = { version = "10", default-features = false, features = ["std", "creation-flags", "job-object", "process-group"] }
 rig-core = { path = "../rig-core", version = "0.41.0", default-features = false }
 serde = { workspace = true, features = ["derive"] }
 serde_json = { workspace = true }
@@ -33,6 +33,11 @@ tokio-util = { version = "0.7", default-features = false }
 
 [target.'cfg(windows)'.dependencies]
 windows-registry = "0.6"
+# The CreationFlags shim's type — version-matched to process-wrap's own
+# windows dependency so they are the same type.
+windows = { version = "0.62.2", default-features = false, features = [
+    "Win32_System_Threading",
+] }
 
 [dev-dependencies]
 futures = { workspace = true }

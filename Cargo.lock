@@ -4879,6 +4879,7 @@ dependencies = [
  "tempfile",
  "tokio",
  "tokio-util",
+ "windows",
  "windows-registry",
 ]
 

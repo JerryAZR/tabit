@@ -408,12 +408,17 @@ impl Installer {
 /// `git clone --depth 1` into the stage; git's own stderr rides along
 /// on failure (a machine running a coding agent has git).
 fn git_clone(url: &str, stage: &Path) -> Result<(), String> {
-    let output = std::process::Command::new("git")
-        .arg("clone")
-        .arg("--depth")
-        .arg("1")
-        .arg(url)
-        .arg(stage)
+    let mut git = std::process::Command::new("git");
+    git.arg("clone").arg("--depth").arg("1").arg(url).arg(stage);
+    // CREATE_NO_WINDOW: a console-less caller (the backend) would
+    // otherwise flash a terminal for the clone — a real terminal shares
+    // its console and never sees the flag's effect.
+    #[cfg(windows)]
+    {
+        use std::os::windows::process::CommandExt;
+        git.creation_flags(0x0800_0000);
+    }
+    let output = git
         .output()
         .map_err(|error| format!("cannot run git: {error}"))?;
     if !output.status.success() {

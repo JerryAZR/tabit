@@ -792,6 +792,17 @@ async fn run_shell(
     // not available in the std flavor).
     #[cfg(unix)]
     wrapped.wrap(process_wrap::std::ProcessGroup::leader());
+    // CREATE_NO_WINDOW, layered before JobObject: the wrapper sets its
+    // own creation flags (CREATE_SUSPENDED) and clobbers the command's,
+    // so the shim is the one way the flag survives (same layering as
+    // tabit-ext's wrap_command). Without it every tool call flashes a
+    // console window — the backend runs console-less (the GUI spawns it
+    // with CREATE_NO_WINDOW), so Windows allocates a fresh console for
+    // each console-subsystem child (bash.exe, powershell.exe).
+    #[cfg(windows)]
+    wrapped.wrap(process_wrap::std::CreationFlags(
+        windows::Win32::System::Threading::PROCESS_CREATION_FLAGS(0x0800_0000),
+    ));
     #[cfg(windows)]
     wrapped.wrap(process_wrap::std::JobObject);
     let mut child = wrapped.spawn().map_err(|e| {

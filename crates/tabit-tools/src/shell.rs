@@ -29,6 +29,7 @@ pub(crate) struct Interpreter {
 #[cfg(windows)]
 mod windows {
     use super::*;
+    use std::os::windows::process::CommandExt;
     use std::path::{Path, PathBuf};
     use std::sync::OnceLock;
     use std::time::{Duration, Instant};
@@ -53,6 +54,12 @@ mod windows {
     /// `exit 0` within two seconds is not a bash worth registering.
     const PROBE_TIMEOUT: Duration = Duration::from_secs(2);
     const REGISTRY_SUBKEY: &str = "SOFTWARE\\GitForWindows";
+    /// CREATE_NO_WINDOW for the registration-time probes: they spawn
+    /// console binaries (`where.exe`, `bash.exe`) from a console-less
+    /// backend, and without the flag each one flashes a terminal window
+    /// (run_shell's shim covers the tool calls; these are the one-shot
+    /// lookups).
+    const CREATE_NO_WINDOW: u32 = 0x0800_0000;
 
     static RESOLVED: OnceLock<Shell> = OnceLock::new();
 
@@ -117,7 +124,12 @@ mod windows {
     /// prints one match per line in PATH order; the shape filter below
     /// keeps only Git-for-Windows placements.
     fn git_exe_roots() -> Vec<PathBuf> {
-        let Ok(output) = std::process::Command::new("where.exe").arg("git").output() else {
+        let mut where_git = std::process::Command::new("where.exe");
+        let Ok(output) = where_git
+            .arg("git")
+            .creation_flags(CREATE_NO_WINDOW)
+            .output()
+        else {
             return Vec::new();
         };
         String::from_utf8_lossy(&output.stdout)
@@ -179,9 +191,8 @@ mod windows {
         roots
     }
 
-    /// The bash of a Git-for-Windows root: `usr\bin\bash.exe` is the real
-    /// MSYS2 binary; `bin\bash.exe` (a small wrapper on current installs)
-    /// is the fallback.
+    /// The bash of a Git-for-Windows root: `bin\bash.exe` only — the
+    /// self-initializing launcher (the why lives in the comment below).
     fn git_bash_exe(root: &Path) -> Option<PathBuf> {
         // `bin\bash.exe` only, deliberately no `usr\bin\bash.exe`
         // fallback: bin initializes the full Git Bash environment from
@@ -201,6 +212,7 @@ mod windows {
     pub(crate) fn spawn_probe(program: &Path, args: &[&str], timeout: Duration) -> bool {
         let Ok(mut child) = std::process::Command::new(program)
             .args(args)
+            .creation_flags(CREATE_NO_WINDOW)
             .stdin(std::process::Stdio::null())
             .stdout(std::process::Stdio::null())
             .stderr(std::process::Stdio::null())
