@@ -1319,25 +1319,33 @@ file never recorded what the model saw. It was the exact divergence
 class that had forced output-mode feedback to become durable during
 the sweep.
 
-### 34. The compaction wire — RESOLVED (v7 shipped; the policy record is ROADMAP item 6)
+### 34. The compaction wire — RESOLVED (v7 shipped, reshaped in v15; the policy record is ROADMAP item 6)
 
-Compaction's frontend surface (2026-09): the event bracket
-`compaction_started { id, pass }` → `compaction_delta { id, text }`
-(streamed summary — the frontend is already a streaming consumer; a
-silent multi-second model call was ruled the bad UX) →
-`compaction_finished { id }`, plus `compaction_failed` for a failed
-or cancelled pass (not a run terminal — the run continues). The
-bracket id is the pass's eventual compaction-entry id, born early
-like turn ids. The `compact { session, directives? }` command is the
-manual door: forced, guarded only by the short-history skip, parked
-when a run is live (compaction never aborts a run — it does not move
-the chain), `directives` reserved and uninterpreted in v7. Replay
-renders `compaction_finished` markers at each boundary; the history
-before a compaction still replays whole (the file never deletes).
-The deeper rulings — the doors, the cut machinery, the tree
-insertion (session format v4), overflow recovery with the
-wall-taught window — are ROADMAP item 6's record; the flow facts are
-ENGINE.md's compaction amendment; the contract is FRONTEND.md §5/§6.
+Compaction's frontend surface (2026-09): originally the v7 per-pass
+bracket; **v15 reshaped it into the invocation envelope** (owner
+ruling after the v14 review): `compaction_begin` (bare — the stream
+stamp scopes it; invocations are serial per session) →
+`compaction_delta { text }` (streamed summary, positional in the open
+pass — a streaming consumer was ruled over a silent multi-second
+call) → one `compaction_step { id, usage, cost? }` per committed pass
+(the entry id born early like turn ids; the request's fresh report
+and recorded dollars, metering like a `completion_call`) →
+`compaction_retried` (a discarded violating attempt — its deltas
+drop) → `compaction_end { tokens_after }` (the final context length;
+also on oversized exits) or `compaction_failed { message }`
+(invocation-level; not a run terminal — the run continues). No
+invocation id (nothing to disambiguate) and no pass index on the
+step (order gives it). The `compact { session, directives? }` command
+is the manual door: forced, guarded only by the short-history skip,
+parked when a run is live (compaction never aborts a run — it does
+not move the chain), `directives` reserved and uninterpreted. Replay
+renders degenerate one-pass envelopes per compaction entry at each
+boundary; the history before a compaction still replays whole (the
+file never deletes). The deeper rulings — the doors, the cut
+machinery, the tree insertion (session format v4), overflow recovery
+with the wall-taught window — are ROADMAP item 6's record; the flow
+facts are ENGINE.md's compaction amendment; the contract is
+FRONTEND.md §5/§6.
 
 ### 25. Abort discards the interrupted attempt's usage unbilled — OPEN (parked with the usage deferral)
 
