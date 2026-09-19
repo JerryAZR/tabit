@@ -688,10 +688,8 @@ fn line_stats(lf: &str, accepted: &[Match]) -> (usize, usize, usize) {
 /// crate-level cancellation contract).
 #[rig_tool(description = "Run a shell command and return its combined output. \
                    Commands run through bash (POSIX syntax; on Windows this is \
-                   Git Bash). Non-zero exits report the exit code. Output is \
-                   capped at 16 KiB; oversized output saves to a file. \
-                   Commands time out after 30 seconds unless timeout_secs \
-                   says otherwise.")]
+                   Git Bash). Commands time out after 30 seconds unless \
+                   timeout_secs says otherwise.")]
 pub async fn bash(
     #[rig(context)] context: &mut ToolContext,
     command: String,
@@ -716,9 +714,8 @@ const POWERSHELL_UTF8_PREFIX: &str =
 #[rig_tool(description = "Run a shell command and return its combined output. \
                    Commands run through Windows PowerShell — write PowerShell \
                    syntax (Get-ChildItem, $env:NAME, Select-String, ...). \
-                   Non-zero exits report the exit code. Output is capped at \
-                   16 KiB; oversized output saves to a file. Commands time \
-                   out after 30 seconds unless timeout_secs says otherwise.")]
+                   Commands time out after 30 seconds unless timeout_secs \
+                   says otherwise.")]
 pub async fn powershell(
     #[rig(context)] context: &mut ToolContext,
     command: String,
