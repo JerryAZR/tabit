@@ -140,6 +140,14 @@ fn events_round_trip_through_json() {
             provider: "p".to_string(),
             model: "m".to_string(),
             thinking_level: Some("high".to_string()),
+            context_window: Some(200_000),
+            name: Some("The M model".to_string()),
+            cost: Some(crate::Cost {
+                input: 1.0,
+                output: 4.0,
+                cache_read: 0.1,
+                cache_write: 0.4,
+            }),
         },
         SessionEvent::error_persist_degraded(3, "records are pending on disk"),
         SessionEvent::SkillsAvailable {
@@ -286,4 +294,40 @@ fn events_round_trip_through_json() {
         .expect("serialize"),
         r#"{"type":"turn_truncated","turn_id":"0192uuidv7turn"}"#
     );
+}
+
+#[test]
+fn model_changed_carries_resolved_facts_and_omits_unknowns() {
+    // The register announcement resolves the model record (v11): the
+    // facts a frontend renders ride with the ids; unknown facts stay
+    // off the wire entirely — absent means unknown, never zero.
+    let rich = SessionEvent::model_changed(
+        &crate::ModelSelection::new("p", "m"),
+        crate::ModelFacts {
+            context_window: Some(1_000_000),
+            name: Some("The M model".to_string()),
+            cost: Some(crate::Cost {
+                input: 1.0,
+                output: 4.0,
+                cache_read: 0.1,
+                cache_write: 0.4,
+            }),
+        },
+    );
+    let wire = serde_json::to_string(&rich).expect("wire");
+    assert!(
+        wire.contains(r#""context_window":1000000"#),
+        "the window rides: {wire}"
+    );
+    assert!(wire.contains(r#""name":"The M model""#), "{wire}");
+    assert!(wire.contains(r#""cost":{"input":1.0"#), "{wire}");
+
+    let bare = SessionEvent::model_changed(
+        &crate::ModelSelection::new("p", "m"),
+        crate::ModelFacts::default(),
+    );
+    let wire = serde_json::to_string(&bare).expect("wire");
+    assert!(!wire.contains("context_window"), "absent, not zero: {wire}");
+    assert!(!wire.contains("cost"), "{wire}");
+    assert!(!wire.contains("name"), "{wire}");
 }

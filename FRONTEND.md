@@ -11,7 +11,7 @@ render a specific tool's `details` cargo, the interaction template
 payloads — lives in **TOOLS.md**, its companion since the shapes grew
 past one doc (2026-09 ruling).
 
-Wire shapes below are the **v10 contract**. v3 was the multi-session
+Wire shapes below are the **v11 contract**. v3 was the multi-session
 host — session-addressed commands, `new_session`/`open_session` on the
 channel, the `"main"` stream alias retired (the stream stamp is the
 session id). v4 made backend-level frames **unstamped** (§6) and
@@ -22,7 +22,9 @@ extension catalog with provenance and the load-time conflict reports
 (§6); v10 deleted the `session_created` interim (`session_opened`
 with `resumed: false` is the one announcement), typed `run_failed`
 with a `kind`, and put Unix-ms timestamps on the turn brackets and
-run terminals. Each version landed as one
+run terminals; v11 put the resolved model facts on `model_changed`
+(`context_window`, `name`, `cost` — optional, absent means the config
+does not state one). Each version landed as one
 protocol-version bump with no compatibility period; always check the
 ack's `protocol_version`. (`tabit --list` prints a human table —
 there is no JSON listing edge.)
@@ -94,7 +96,7 @@ size limit** — tool output can be large; buffer accordingly.
    "model":{"provider":"…","model":"…","thinking_level":null},"resumed":true}
 ← {"type":"sessions_available","sessions":[
      {"id":"019…","created_at":"2026-08-22T…","entry_count":14}, … ]}
-← {"type":"model_changed","stream":"019…","provider":"…","model":"…","thinking_level":null}
+← {"type":"model_changed","stream":"019…","provider":"…","model":"…","thinking_level":null,"context_window":200000,"name":"…","cost":{"input":1.0,"output":4.0,"cache_read":0.1,"cache_write":0.4}}
 ← {"type":"replay_started","stream":"019…","total":14}
 ← … the transcript as finalized events …
 ← {"type":"replay_done","stream":"019…"}
@@ -322,7 +324,7 @@ consumes (its `details` cargo) is TOOLS.md's table of shapes.
 | `extensions_available` | `extensions: [{ name, version, description?, dir, status, reason?, tools: [{ name, description }], hooks: [string] }]`, `conflicts: [{ kind, extension, tool, incumbent? }]` | **(v9)** once, right after `skills_available`: every discovered extension with its provenance (`dir`) and standing — `status` is `alive` or `dead` (a refused handshake, a failed scan, or death since; `reason` carries why). **Unstamped, backend-level** (one process, one extension host); only announced when at least one extension was discovered — a refusal counts as discovered. **A boot-time snapshot** (2026-09 ruling): a mid-run extension death does not re-announce — stderr carries the report and the catalog stands until the next backend start. `conflicts` are the boot's name-assembly reports: `kind: "replaces_core"` (an extension tool replaced the core tool of the same name — the signal is mandatory; how loudly you present it is your call) and `kind: "refused_peer"` (the newcomer was refused, `incumbent` names the extension that holds the name). Extension tool *invocation* is no new wire shape: an ordinary `tool_call`/`tool_result` pair, attributed by the model-facing name. |
 | `session_opened` | `id`, `path`, `model`, `resumed`, `parent?`, `parent_call?` | a session became visible in this backend — the boot (at spawn, right after the ack), a `new_session`, an `open_session`, **or a subagent child** (v5). **One announcement shape for every path** (2026-09 ruling — the ack carries protocol-level facts only; the boot is not a special case). Stamped with the session's own stream. Selection notes, if any, follow on the same stream. v5: `path` is **empty for an ephemeral session** (in memory only — nothing to open or replay; subagent children are ephemeral today), and `parent` names the spawning session for a subagent child — absent for every user-facing session. A frontend branches on `parent`: user sessions update their session facts, children render nested (or not at all) — a child announcement must never overwrite the active session's facts. The child's whole run (its `user_message`, deltas, `tool_call`s, terminal) streams on its own stamp; the spawner's transcript sees only the subagent `tool_call`/`tool_result` pair. `parent_call` (v7, additive) is the spawning tool call's `internal_call_id`: the announce pairs the child with the **exact** open `tool_call` event — exact under concurrent subagent calls, where arrival order cannot disambiguate. Absent whenever `parent` is. |
 | `checked_out` | `entry_id`, `base_id` | checkout succeeded. `base_id` is `null` today: drop everything and rebuild from the replay pass that follows. A non-null `base_id` is the reserved suffix mode (keep through `base_id`, apply the pass) — treat any non-null value as "rebuild from the pass" and you stay correct. |
-| `model_changed` | `provider`, `model`, `thinking_level` | the session's **active model** — a session preference: the file's last `model_change`, latest in time wins (a rewind never moves it). Announced live whenever the session becomes visible: ahead of every replay pass (boot, `open_session`, re-replay, after `checked_out`) — idempotent, the value repeats — and at every `model` command (a state write at receive; §5). **Never inside a pass** (state is announced, not reconstructed). The ack's `model` is the boot session's register. |
+| `model_changed` | `provider`, `model`, `thinking_level`, `context_window?`, `name?`, `cost?` | the session's **active model** — a session preference: the file's last `model_change`, latest in time wins (a rewind never moves it). Announced live whenever the session becomes visible: ahead of every replay pass (boot, `open_session`, re-replay, after `checked_out`) — idempotent, the value repeats — and at every `model` command (a state write at receive; §5). **Never inside a pass** (state is announced, not reconstructed). The ack's `model` is the boot session's register. v11: the announcement also carries the model record resolved against config — `context_window` (tokens; a context meter's denominator), `name` (a display name; fall back to the model id), and `cost` (`{ input, output, cache_read, cache_write }`, USD per million tokens). Each field is optional and **absent means the config does not state it** (never zero); a register stale against an edited config announces the ids with no facts, and the next validated switch repairs it. |
 
 **Errors: one generic carrier with a `kind`.** Anything that goes
 wrong outside a run terminal rides `error { kind, message, … }`. A

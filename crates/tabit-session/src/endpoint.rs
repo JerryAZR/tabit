@@ -266,7 +266,10 @@ impl Worker {
                 // question: the next run open derives the agent, and
                 // every pass announces the cell.
                 self.model_register.write(selection.clone());
-                self.notices.emit(SessionEvent::model_changed(&selection));
+                self.notices.emit(SessionEvent::model_changed(
+                    &selection,
+                    self.model_register.facts(&selection),
+                ));
             }
             // The manual compaction door: parks as pending intent and
             // runs at the beat (idle position, ahead of queued
@@ -1047,9 +1050,10 @@ fn execute_checkout(
 /// repeats; replayed history itself never carries `model_changed` (the
 /// register ruling: state is announced live, not reconstructed).
 fn emit_replay(session: &Session, event_tx: &mpsc::UnboundedSender<EventFrame>, stream: &StreamId) {
+    let selection = session.selection();
     let _ = event_tx.send(EventFrame {
         stream: Some(stream.clone()),
-        event: SessionEvent::model_changed(&session.selection()),
+        event: SessionEvent::model_changed(&selection, session.model_facts(&selection)),
     });
     let events = session.replay_events();
     let total = events.len() as u64;

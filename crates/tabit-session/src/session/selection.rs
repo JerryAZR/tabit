@@ -7,7 +7,8 @@ use crate::error::SessionError;
 use crate::lock::lock;
 use crate::model::validate_selection;
 use std::sync::{Arc, Mutex};
-use tabit_protocol::ModelSelection;
+use tabit_config::TabitConfig;
+use tabit_protocol::{ModelFacts, ModelSelection};
 
 /// Validates a selection against a session's config without touching
 /// the session — the `model` command's receive-time check (the
@@ -47,12 +48,21 @@ impl Session {
 
     /// The shared register handle — the `model` command's write path at
     /// receive (validate with [`Self::model_probe`] first; the write
-    /// itself cannot fail).
+    /// itself cannot fail) and the facts resolver for its
+    /// announcements.
     pub(crate) fn model_register(&self) -> ModelRegister {
         ModelRegister {
             selection: self.selection.clone(),
             buffer: self.buffer.clone(),
+            config: self.config.clone(),
         }
+    }
+
+    /// The announcement facts for a selection (protocol v11): resolved
+    /// against this session's config by the register — the same
+    /// resolution the receive-time announcement uses.
+    pub(crate) fn model_facts(&self, selection: &ModelSelection) -> ModelFacts {
+        self.model_register().facts(selection)
     }
 
     /// The receive-time model validator — the checkout probe's sibling
@@ -88,6 +98,7 @@ impl Session {
 pub(crate) struct ModelRegister {
     selection: Arc<Mutex<ModelSelection>>,
     buffer: crate::writer::SharedBuffer,
+    config: Arc<TabitConfig>,
 }
 
 impl ModelRegister {
@@ -103,6 +114,14 @@ impl ModelRegister {
             tracing::warn!(%error, "model_change record failed to flush; queued for retry");
         }
         *cell = selection;
+    }
+
+    /// The announcement facts for a selection (protocol v11) — the
+    /// register resolves what it announces: the model record's context
+    /// window, display name, and cost, or all-None when the record is
+    /// gone from config (see [`crate::model::resolve_facts`]).
+    pub(crate) fn facts(&self, selection: &ModelSelection) -> ModelFacts {
+        crate::model::resolve_facts(selection, &self.config)
     }
 }
 

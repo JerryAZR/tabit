@@ -625,11 +625,10 @@ fn replay_brackets_are_inert_and_model_changed_updates_the_facts() {
     state.reduce(opened(true));
     let before = state.facts.as_ref().expect("facts").model.clone();
     state.reduce(event(SessionEvent::ReplayStarted { total: 3 }));
-    state.reduce(event(SessionEvent::ModelChanged {
-        provider: "other".to_string(),
-        model: "m2".to_string(),
-        thinking_level: None,
-    }));
+    state.reduce(event(SessionEvent::model_changed(
+        &tabit_protocol::ModelSelection::new("other", "m2"),
+        tabit_protocol::ModelFacts::default(),
+    )));
     state.reduce(event(SessionEvent::ReplayDone));
     // The brackets changed nothing; the model change moved the facts —
     // the picker follows history, not just the handshake.

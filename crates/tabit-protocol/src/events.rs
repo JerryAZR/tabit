@@ -326,6 +326,17 @@ pub enum SessionEvent {
         /// Active thinking level name, when the model defines levels.
         #[serde(default, skip_serializing_if = "Option::is_none")]
         thinking_level: Option<String>,
+        /// The model's context window in tokens, when config states
+        /// one (v11) — a context meter's denominator.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        context_window: Option<u64>,
+        /// The model's display name, when config states one (v11);
+        /// frontends fall back to the model id.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        name: Option<String>,
+        /// Per-million-token pricing, when config states it (v11).
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        cost: Option<crate::model::Cost>,
     },
     /// A provider-native output item rig does not model, preserved
     /// verbatim for forwarding.
@@ -574,15 +585,19 @@ impl SessionEvent {
     }
 
     /// The register announcement: a `model_changed` carrying a
-    /// selection — at every receive-time write (the `model` command's
-    /// own outcome) and before every replay pass (a session becoming
-    /// visible always tells its model). One construction site for both
-    /// the weak notice path and the worker's strong sends.
-    pub fn model_changed(selection: &ModelSelection) -> Self {
+    /// selection and its resolved facts — at every receive-time write
+    /// (the `model` command's own outcome) and before every replay
+    /// pass (a session becoming visible always tells its model). One
+    /// construction site for both the weak notice path and the
+    /// worker's strong sends.
+    pub fn model_changed(selection: &ModelSelection, facts: crate::model::ModelFacts) -> Self {
         Self::ModelChanged {
             provider: selection.provider.clone(),
             model: selection.model.clone(),
             thinking_level: selection.thinking_level.clone(),
+            context_window: facts.context_window,
+            name: facts.name,
+            cost: facts.cost,
         }
     }
 }

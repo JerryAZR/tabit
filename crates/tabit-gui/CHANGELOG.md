@@ -18,7 +18,25 @@ software/hardware contract, not just the encodings):
 Every `PROTOCOL_VERSION` bump — and every additive change a frontend
 could observe — gets an entry here in the same commit.
 
-## v10 (current)
+## v11 (current)
+
+### wire: `model_changed` carries the resolved model facts (2026-09)
+
+Protocol version 11. The register announcement now resolves the model
+record against config and carries what it finds: `context_window`
+(tokens — a context meter's denominator), `name` (the configured
+display name; fall back to the model id), and `cost`
+(`{ input, output, cache_read, cache_write }`, USD per million
+tokens). All three are optional and absent means the config does not
+state it — never zero, and never an error: a register left stale by a
+config edit announces the ids with no facts, and the next validated
+switch repairs it. Owner ruling: one version bump carried the whole
+record (max_tokens deliberately stays off — no reported need). Both
+doors announce the same shape: the replay pass's lead (boot, open,
+re-replay, checkout) and the `model` command's outcome. The GUI does
+not render the facts yet; the picker still follows the ids.
+
+## v10
 
 ### behavior: tool results carry `details` off the model path (2026-09)
 

@@ -698,10 +698,14 @@ impl GuiState {
                 // switch). No independent fold — a checkout executes at
                 // a pause point, so liveness is already settled.
             }
+            // The v11 facts fields (context window, name, cost) are not
+            // rendered yet — the picker follows the ids; display rides
+            // a later GUI change.
             SessionEvent::ModelChanged {
                 provider,
                 model,
                 thinking_level,
+                ..
             } => {
                 if let Some(facts) = self.facts.as_mut() {
                     facts.model = tabit_protocol::ModelSelection {

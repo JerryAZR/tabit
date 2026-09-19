@@ -1787,6 +1787,7 @@ fn model_changes(frames: &[EventFrame]) -> Vec<(String, String, Option<String>)>
                 provider,
                 model,
                 thinking_level,
+                ..
             } => Some((provider.clone(), model.clone(), thinking_level.clone())),
             _ => None,
         })
@@ -1809,6 +1810,106 @@ fn last_model(
                 selection.thinking_level,
             )
         })
+}
+
+#[tokio::test]
+async fn model_announcements_carry_the_resolved_facts() {
+    // The register announcement resolves the model record (protocol
+    // v11): both doors — the replay pass's lead and the `model`
+    // command's outcome — carry the config's context window, display
+    // name, and cost; an unknown record announces all-None (absent on
+    // the wire), never an error.
+    let store = temp_store("endpoint-model-facts");
+    let config = std::sync::Arc::new(
+        tabit_config::TabitConfig::from_toml_str(
+            r#"
+[providers.p]
+base_url = "http://127.0.0.1:9999/v1"
+api = "openai-completions"
+
+[[providers.p.models]]
+id = "m"
+name = "The M model"
+context_window = 1_000_000
+
+[providers.p.models.cost]
+input = 1.0
+output = 4.0
+cache_read = 0.1
+cache_write = 0.4
+
+[[providers.p.models]]
+id = "bare"
+"#,
+            std::path::Path::new("test.toml"),
+        )
+        .expect("valid config"),
+    );
+    let session = Factory::new(Vec::new())
+        .into_builder_with_config(store.clone(), config, ModelSelection::new("p", "m"))
+        .create("C:/w")
+        .expect("session");
+    let mut handle = SessionHost::spawn(session, Vec::new(), plain_wiring(&store));
+    let id = boot_id(&handle);
+    let mut frames = Vec::new();
+
+    // The replay pass's lead announcement resolves the record.
+    handle.replay(&id);
+    collect_until(&mut handle, &mut frames, |event| {
+        matches!(event, SessionEvent::ModelChanged { .. })
+    })
+    .await;
+    let boot = frames.iter().find_map(|frame| match &frame.event {
+        SessionEvent::ModelChanged {
+            model,
+            context_window,
+            name,
+            cost,
+            ..
+        } if model == "m" => Some((*context_window, name.clone(), *cost)),
+        _ => None,
+    });
+    assert_eq!(
+        boot,
+        Some((
+            Some(1_000_000),
+            Some("The M model".to_string()),
+            Some(tabit_protocol::Cost {
+                input: 1.0,
+                output: 4.0,
+                cache_read: 0.1,
+                cache_write: 0.4
+            }),
+        )),
+        "the pass's lead carries the resolved record"
+    );
+
+    // The receive-time announcement: a record with no facts states
+    // none — absent, not zero.
+    handle.model(&id, ModelSelection::new("p", "bare"));
+    collect_until(&mut handle, &mut frames, |event| {
+        matches!(
+            event,
+            SessionEvent::ModelChanged { model, .. } if model == "bare"
+        )
+    })
+    .await;
+    let bare = frames.iter().rev().find_map(|frame| match &frame.event {
+        SessionEvent::ModelChanged {
+            model,
+            context_window,
+            name,
+            cost,
+            ..
+        } if model == "bare" => Some((*context_window, name.clone(), *cost)),
+        _ => None,
+    });
+    assert_eq!(
+        bare,
+        Some((None, None, None)),
+        "an unknown record announces all-None facts"
+    );
+    std::fs::remove_dir_all(store.dir()).ok();
 }
 
 #[tokio::test]
