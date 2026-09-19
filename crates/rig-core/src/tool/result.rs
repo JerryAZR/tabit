@@ -595,12 +595,14 @@ mod tests {
         // the single-text feedback path surfaces it directly.
         assert_eq!(
             result.error().unwrap().model_feedback(),
-            Some(serde_json::json!({
-                "error": "invalid region",
-                "allowed": ["us", "eu"]
-            })
-            .to_string()
-            .as_str())
+            Some(
+                serde_json::json!({
+                    "error": "invalid region",
+                    "allowed": ["us", "eu"]
+                })
+                .to_string()
+                .as_str()
+            )
         );
     }
 

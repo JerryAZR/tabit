@@ -268,10 +268,7 @@ mod tests {
             output.as_content().first_ref(),
             ToolResultContent::Text(text) if text.text == "the report"
         ));
-        assert_eq!(
-            output.details(),
-            Some(&serde_json::json!({"exit_code": 0}))
-        );
+        assert_eq!(output.details(), Some(&serde_json::json!({"exit_code": 0})));
 
         // No details: content only.
         let bare = super::content_parts("just text".to_string(), None).expect("content parts");
@@ -301,12 +298,13 @@ mod tests {
         let value = serde_json::json!({"status": "ok", "count": 2});
         let output = value.clone().into_tool_output().unwrap();
 
-        assert_eq!(output, ToolOutput::text(value.to_string()));
-        assert_eq!(output.render(), value.to_string());
+        let rendered = value.to_string();
+        assert_eq!(output, ToolOutput::text(rendered.clone()));
+        assert_eq!(output.render(), rendered);
         let content = output.into_content();
         assert!(matches!(
             content.first(),
-            ToolResultContent::Text(text) if text.text == value.to_string()
+            ToolResultContent::Text(text) if text.text == rendered
         ));
     }
 

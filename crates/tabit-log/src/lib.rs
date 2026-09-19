@@ -47,8 +47,8 @@ pub mod writer;
 
 pub use context_manager::{CheckoutError, ContextManager, ConversationCell};
 pub use entry::{
-    EntryKind, FileRecord, SESSION_FORMAT_MAJOR, SESSION_FORMAT_MINOR, SessionEntry, SessionHeader, SideKind,
-    SideRecord,
+    EntryKind, FileRecord, SESSION_FORMAT_MAJOR, SESSION_FORMAT_MINOR, SessionEntry, SessionHeader,
+    SideKind, SideRecord,
 };
 pub use fold::{calls_of, fold_branch, tail_is_closed, user_message_boundaries};
 pub use ids::{filename_timestamp, new_entry_id, new_session_id, now_rfc3339};

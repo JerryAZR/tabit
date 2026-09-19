@@ -602,8 +602,7 @@ fn tool_result_output_preserves_multimodal_tool_output() {
     let instruction = serde_json::json!({
         "instruction": "Use the image part to answer."
     });
-    let mut content =
-        rig_core::OneOrMany::one(ToolResultContent::text(instruction.to_string()));
+    let mut content = rig_core::OneOrMany::one(ToolResultContent::text(instruction.to_string()));
     content.push(ToolResultContent::image_base64(
         "base64data==",
         Some(ImageMediaType::PNG),

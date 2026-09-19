@@ -186,7 +186,10 @@ pub async fn subagent(
     // child's announce pairs its session with this very tool call.
     let mut builder = ctx
         .spawn_subprocess()
-        .cwd(cwd.map(PathBuf::from).unwrap_or_else(|| ctx.parent_cwd().to_path_buf()))
+        .cwd(
+            cwd.map(PathBuf::from)
+                .unwrap_or_else(|| ctx.parent_cwd().to_path_buf()),
+        )
         .model(ctx.parent_selection().clone())
         .max_turns(parts.max_turns)
         .ephemeral(true);

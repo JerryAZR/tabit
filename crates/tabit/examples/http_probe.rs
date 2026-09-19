@@ -4,7 +4,13 @@ use std::error::Error;
 async fn main() {
     let url = "https://open.bigmodel.cn/api/coding/paas/v4/chat/completions";
     let client = reqwest::Client::new();
-    match client.post(url).header("content-type", "application/json").body("{}").send().await {
+    match client
+        .post(url)
+        .header("content-type", "application/json")
+        .body("{}")
+        .send()
+        .await
+    {
         Ok(r) => println!("OK status={}", r.status()),
         Err(e) => {
             println!("ERR: {e}");

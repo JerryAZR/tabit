@@ -100,7 +100,9 @@ pub use endpoint::{
     OpenSessionSource, SessionCommandLink, SessionHost, SessionHostWiring, SessionInfo,
     SessionSource,
 };
-pub use entry::{EntryKind, SESSION_FORMAT_MAJOR, SESSION_FORMAT_MINOR, SessionEntry, SessionHeader};
+pub use entry::{
+    EntryKind, SESSION_FORMAT_MAJOR, SESSION_FORMAT_MINOR, SessionEntry, SessionHeader,
+};
 pub use error::SessionError;
 pub use interaction::InteractionHub;
 pub use model::validate_selection;

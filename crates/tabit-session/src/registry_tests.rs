@@ -149,8 +149,10 @@ fn a_keyless_declaration_is_the_usability_flag() {
 
     // Declared keyless: usable, with the stubbed empty credential
     // riding the same builders as everyone else.
-    let keyless = registry_with(&KEYLESS_MODELS, "");
-    keyless.build("local", "m", "session").expect("keyless builds");
+    let keyless = registry_with(KEYLESS_MODELS, "");
+    keyless
+        .build("local", "m", "session")
+        .expect("keyless builds");
     let (selection, notes) = keyless.default_selection(None, None).expect("usable");
     assert_eq!(selection, ModelSelection::new("local", "m"));
     assert!(notes.is_empty());
@@ -189,7 +191,9 @@ id = \"remote-m\""
 api_key = "k"
 "#,
     );
-    let (selection, notes) = registry.default_selection(None, None).expect("usable exists");
+    let (selection, notes) = registry
+        .default_selection(None, None)
+        .expect("usable exists");
     assert_eq!(selection, ModelSelection::new("remote", "remote-m"));
     assert_eq!(notes.len(), 1, "the degradation is noted: {notes:?}");
     assert!(notes[0].contains("not usable"), "{notes:?}");

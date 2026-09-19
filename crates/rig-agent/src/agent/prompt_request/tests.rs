@@ -764,21 +764,21 @@ fn tool_result_output_carries_details_off_the_model_path() {
 fn hook_replacement_keeps_the_raw_executions_details() {
     // A result rewrite is presentation-only: the replacement's
     // content, the raw execution's details.
-    let replacement = rig_core::tool::ToolOutput::text("rewritten");
     let raw_details = Some(serde_json::json!({"exit_code": 3}));
 
     let content = super::tool_result_with(
         "call-1".to_string(),
         None,
-        rig_core::OneOrMany::one(rig_core::message::ToolResultContent::text(
-            "rewritten",
-        )),
+        rig_core::OneOrMany::one(rig_core::message::ToolResultContent::text("rewritten")),
         raw_details,
     );
     let rig_core::message::UserContent::ToolResult(result) = &content else {
         panic!("a tool result shaped the content");
     };
-    assert_eq!(result.details.as_ref(), Some(&serde_json::json!({"exit_code": 3})));
+    assert_eq!(
+        result.details.as_ref(),
+        Some(&serde_json::json!({"exit_code": 3}))
+    );
     assert!(matches!(
         result.content.first(),
         rig_core::message::ToolResultContent::Text(text) if text.text == "rewritten"

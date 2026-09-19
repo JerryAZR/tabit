@@ -670,7 +670,9 @@ fn retain_filtered(
         .into_iter()
         .filter(|tool| {
             let name = tool.name();
-            allow.as_ref().is_none_or(|names| names.iter().any(|n| n == name))
+            allow
+                .as_ref()
+                .is_none_or(|names| names.iter().any(|n| n == name))
                 && !deny.iter().any(|n| n == name)
         })
         .collect()
@@ -1829,20 +1831,14 @@ mod tests {
             serde_json::json!({"type": "object"}),
             move |_ctx, _args| {
                 let output = name;
-                Box::pin(async move {
-                    Ok(rig_agent::tool::ToolOutput::text(output))
-                })
+                Box::pin(async move { Ok(rig_agent::tool::ToolOutput::text(output)) })
             },
         )
     }
 
     #[test]
     fn the_tool_filter_admits_allowed_and_not_denied() {
-        let candidate = vec![
-            named_tool("read"),
-            named_tool("bash"),
-            named_tool("echo"),
-        ];
+        let candidate = vec![named_tool("read"), named_tool("bash"), named_tool("echo")];
         let args = Args {
             tools: Some("read,echo".to_string()),
             without: Some("echo".to_string()),
@@ -1880,7 +1876,10 @@ mod tests {
         args.tools = None;
         args.without = Some("bogus".to_string());
         let error = tool_filter(&args, &candidate).expect_err("unknown deny name");
-        assert!(error.contains("--without") && error.contains("read"), "{error}");
+        assert!(
+            error.contains("--without") && error.contains("read"),
+            "{error}"
+        );
     }
 
     #[test]
@@ -2303,9 +2302,9 @@ id = "m"
             .default_selection(None, None)
             .expect_err("nothing configured");
         assert!(
-        error.to_string().contains("usable model provider"),
-        "{error}"
-    );
+            error.to_string().contains("usable model provider"),
+            "{error}"
+        );
     }
 
     #[test]

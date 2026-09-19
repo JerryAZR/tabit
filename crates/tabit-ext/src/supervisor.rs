@@ -1061,9 +1061,8 @@ async fn fail_before_ack(
     resolve_dead(state, lane, events, name, reason);
 }
 
-/// The post-ack close lives in [`crate::process::reap_with_grace`]
-/// (the shared pipe contract).
-
+// The post-ack close lives in [`crate::process::reap_with_grace`]
+// (the shared pipe contract).
 fn resolve_dead(
     state: &Arc<ChildState>,
     lane: &Arc<Lane>,

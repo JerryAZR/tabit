@@ -1260,10 +1260,7 @@ async fn edit_emits_report_text_plus_details_json() {
         .collect();
     assert_eq!(texts.len(), 1, "one text part: {texts:?}");
     assert!(texts[0].starts_with("Edited "), "{}", texts[0]);
-    assert!(
-        output.details().is_some(),
-        "the details cargo is present"
-    );
+    assert!(output.details().is_some(), "the details cargo is present");
     fs::remove_dir_all(&dir).ok();
 }
 

@@ -102,8 +102,8 @@ mod tests {
 
     #[test]
     fn result_details_reads_the_details_field() {
-        use rig_core::message::{ToolResult, ToolResultContent};
         use rig_core::OneOrMany;
+        use rig_core::message::{ToolResult, ToolResultContent};
 
         let field = ToolResult {
             id: "call".to_string(),

@@ -551,15 +551,13 @@ fn tool_result_details_never_reach_the_wire() {
                 )),
             },
             message::Message::User {
-                content: OneOrMany::one(message::UserContent::ToolResult(
-                    message::ToolResult {
-                        id: "toolu_ok".to_string(),
-                        call_id: None,
-                        details: Some(json!({"exit_code": 0, "spill": "/tmp/x"})),
-                        content: OneOrMany::one(message::ToolResultContent::text("15 degrees")),
-                        status: None,
-                    },
-                )),
+                content: OneOrMany::one(message::UserContent::ToolResult(message::ToolResult {
+                    id: "toolu_ok".to_string(),
+                    call_id: None,
+                    details: Some(json!({"exit_code": 0, "spill": "/tmp/x"})),
+                    content: OneOrMany::one(message::ToolResultContent::text("15 degrees")),
+                    status: None,
+                })),
             },
         ],
         None,
@@ -4452,7 +4450,6 @@ async fn raw_completion_emits_request_and_response_trace_logs() {
     assert_eq!(response.id, "msg_trace");
     assert_eq!(assistant_text(&response).as_deref(), Some("hi"));
 }
-
 
 #[test]
 fn thinking_content_converts_back_to_assistant_reasoning() {

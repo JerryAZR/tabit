@@ -140,9 +140,7 @@ impl ModelRegistry {
         // startup).
         if let Some(default) = &self.inner.config.default_model {
             match preferred_selection(default, &self.inner.config) {
-                Ok(selection) if self.usable(&selection.provider) => {
-                    return Ok((selection, notes))
-                }
+                Ok(selection) if self.usable(&selection.provider) => return Ok((selection, notes)),
                 Ok(_) => notes.push(format!(
                     "default_model `{}` is not usable (its provider has no key and \
                      is not declared keyless); falling back to the first usable model",
