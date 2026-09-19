@@ -447,7 +447,11 @@ async fn portable_structs_are_named_and_erased_correctly() {
     set.add_dynamic_tool(dynamic_contextual(Bash));
     let defs = set.get_tool_definitions();
     let read_def = defs.iter().find(|d| d.name == "read").expect("read def");
-    assert!(read_def.description.contains("UTF-8"));
+    // The description carries standing behavior only; the overflow story
+    // (cap, paging, formats, size limits) is explained at the moment it
+    // happens, in the result text.
+    assert!(read_def.description.contains("directory lists its entries"));
+    assert!(!read_def.description.contains("KiB"));
     assert_eq!(read_def.parameters["properties"]["path"]["type"], "string");
     let bash_def = defs.iter().find(|d| d.name == "bash").expect("bash def");
     let required = bash_def.parameters["required"].as_array();

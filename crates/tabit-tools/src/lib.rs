@@ -117,14 +117,9 @@ fn session_cwd(context: &ToolContext) -> Option<std::path::PathBuf> {
 /// deferred). Directories list their entries inline. Binary and
 /// UTF-16/32 text files are rejected loudly. Relative paths resolve
 /// against the session's working directory.
-#[rig_tool(description = "Read a file (absolute or relative path; relative \
-                   paths resolve against the session's working directory). \
-                   Text files: UTF-8, output capped at 50 KiB in whole lines, \
-                   the truncation notice carries the offset to continue \
-                   from; optional offset (1-indexed line number) and limit \
-                   (line count) page large files. Images (PNG, JPEG, GIF, \
-                   WebP): sent to the model as an image, up to 3 MiB. \
-                   Reading a directory lists its entries.")]
+#[rig_tool(description = "Read a file (relative paths resolve against the \
+                   session's working directory). Images are sent to the \
+                   model as an image. Reading a directory lists its entries.")]
 pub async fn read(
     #[rig(context)] context: &mut ToolContext,
     path: String,
