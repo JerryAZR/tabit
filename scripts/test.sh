@@ -12,7 +12,8 @@
 #                                the workspace set is always included:
 #                                `-p crate` ADDS to it (cargo's rule), and
 #                                a bare name filters within every suite.
-#   scripts/test.sh --gate       fmt --check + clippy + test — the full
+#   scripts/test.sh --gate       fmt --check + clippy + build -p tabit
+#                               + test — the full
 #                                green gate, same quiet reporting
 #
 # A hung test fails the gate instead of parking it forever (the
@@ -91,6 +92,18 @@ gate() {
     grep -E -A 8 '^(warning|error)' "$LOG"
     echo "(exit $status)"
     if [ "$status" -ne 0 ]; then failed=1; fi
+    echo
+
+    # The shipped-binary build, package-resolved: workspace builds
+    # unify features, so a package-only feature gap (the TLS class:
+    # reqwest with no rustls) hides from every other leg. ~17s warm.
+    echo "== cargo build -p tabit =="
+    if cargo build -p tabit >"$LOG" 2>&1; then
+        echo ok
+    else
+        failed=1
+        cat "$LOG"
+    fi
     echo
 
     run cargo test --workspace --no-fail-fast "$@" || failed=1
