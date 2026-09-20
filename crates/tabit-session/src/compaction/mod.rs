@@ -288,7 +288,7 @@ pub(crate) async fn run(
         if pass == 1 {
             emit(SessionEvent::CompactionBegin);
         }
-        match one_pass(&history, boundary, state, agent, token, &id, emit).await {
+        match one_pass(&history, boundary, state, agent, token, emit).await {
             PassOutcome::Committed {
                 summary,
                 usage,
@@ -519,18 +519,16 @@ async fn one_pass(
     state: &Compaction,
     agent: &Agent,
     token: &CancellationToken,
-    id: &str,
     emit: &mut (dyn FnMut(SessionEvent) + Send),
 ) -> PassOutcome {
     let mut boundary = initial_boundary;
     loop {
         let mut view = tabit_log::fold_branch(&history[..boundary]);
         view.push(Message::user(dials::SUMMARIZATION_INSTRUCTION));
-        // The live view: summary text streams as bracket deltas. Tool
-        // call items pass through here too — the verdict on them is
-        // the assembled classification below (the common predicate),
-        // never this forwarding.
-        let bracket_id = id.to_string();
+        // The live view: summary text streams as positional deltas
+        // (v15 — no bracket id). Tool call items pass through here too
+        // — the verdict on them is the assembled classification below
+        // (the common predicate), never this forwarding.
         let outcome = agent
             .completion_turn(
                 view,
