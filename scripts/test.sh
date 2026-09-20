@@ -69,8 +69,10 @@ run() {
     return "$status"
 }
 
-# The full green gate: fmt --check, clippy (warnings shown even on
-# success — they are the interesting part), then the test leg.
+# The full green gate: fmt --check, clippy at CI strictness
+# (-D warnings — the local gate must fail exactly where CI fails, a
+# warning-only local pass once shipped a dead variable CI caught),
+# then the test leg.
 gate() {
     local failed=0 status
 
@@ -83,8 +85,8 @@ gate() {
     fi
     echo
 
-    echo "== cargo clippy --workspace --all-targets =="
-    cargo clippy --workspace --all-targets >"$LOG" 2>&1
+    echo "== cargo clippy --workspace --all-targets -- -D warnings =="
+    cargo clippy --workspace --all-targets -- -D warnings >"$LOG" 2>&1
     status=$?
     grep -E -A 8 '^(warning|error)' "$LOG"
     echo "(exit $status)"
