@@ -701,7 +701,10 @@ pub async fn bash(
 /// output with the system's ANSI codepage (GBK on Chinese-locale
 /// machines), so non-ASCII output would mojibake. Sets the console to
 /// UTF-8 for the session; best-effort — a host without the type fails
-/// this statement, not the command.
+/// this statement, not the command. Gated with its only consumer (the
+/// powershell tool is Windows-only; an ungated const is Linux dead
+/// code under CI's -D warnings).
+#[cfg(windows)]
 const POWERSHELL_UTF8_PREFIX: &str =
     "try { [Console]::OutputEncoding = [System.Text.Encoding]::UTF8 } catch {}\n";
 
