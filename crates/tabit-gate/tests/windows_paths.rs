@@ -74,25 +74,43 @@ fn allows_writes_inside_cwd_via_git_bash_path() {
 
 // --- different drives are different paths -------------------------------------
 
+/// The drive letter that is NOT `path`'s — the mirror tests need a
+/// genuinely different drive, and CI checks out onto whatever drive
+/// the runner hands it (`D:\a\...` on windows-latest), so a hardcoded
+/// counterpart would be the SAME drive there.
+fn other_drive(path: &str) -> char {
+    if path
+        .chars()
+        .next()
+        .is_some_and(|d| d.eq_ignore_ascii_case(&'D'))
+    {
+        'C'
+    } else {
+        'D'
+    }
+}
+
 #[test]
 fn does_not_extend_cwd_write_allow_to_a_mirrored_path_on_another_drive() {
-    let mirrored = format!("D:{}\\evil.txt", &cwd()[2..]);
+    let cwd = cwd();
+    let mirrored = format!("{}:{}\\evil.txt", other_drive(&cwd), &cwd[2..]);
     let result = check_write(&mirrored, &config::default_config());
     assert_action(
         &result,
         Action::Deny,
-        "D:\\...\\evil.txt is not the CWD allow",
+        "a mirrored path on another drive is not the CWD allow",
     );
 }
 
 #[test]
 fn does_not_extend_home_ask_to_a_mirrored_path_on_another_drive() {
-    let mirrored = format!("D:{}\\.aws\\credentials", &home()[2..]);
+    let home = home();
+    let mirrored = format!("{}:{}\\.aws\\credentials", other_drive(&home), &home[2..]);
     let result = check_read(&mirrored, &config::default_config());
     assert_action(
         &result,
         Action::Allow,
-        "read default is allow; the D: path is not HOME",
+        "read default is allow; the other-drive path is not HOME",
     );
 }
 
