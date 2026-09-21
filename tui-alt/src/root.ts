@@ -37,6 +37,7 @@ import { TranscriptRegistry } from "./components/transcript-registry";
 import { CardView } from "./card-view";
 import { InputController } from "./input-controller";
 import { AtPathCompletionProvider } from "./path-completion";
+import { APP_KEYBINDING_IDS, applyKeybindings, loadTuiToml } from "./keybindings";
 import type { FooterFacts, InteractionCard, ModeView, PendingMessage, SkillInfo } from "./mode";
 import type { InteractiveMode } from "./mode";
 import { editorTheme } from "./theme";
@@ -90,9 +91,21 @@ export class AltRoot implements ModeView {
 		this.setStatus("connecting…");
 	}
 
-	/** Wire the mode after construction; the editor's submit path needs it. */
+	/** Wire the mode after construction; the editor's submit path needs it.
+	 *  Installs the keybinding registry (tui.toml overrides applied) before
+	 *  any input listener attaches. */
 	bind(mode: InteractiveMode, onQuit: () => void): void {
 		this.#mode = mode;
+		const { config, warnings } = loadTuiToml();
+		const manager = applyKeybindings(config);
+		for (const warning of warnings) this.addNote(warning, "warn");
+		mode.setKeybindings(
+			APP_KEYBINDING_IDS.map(id => ({
+				action: id.replace("tui.app.", ""),
+				keys: manager.getKeys(id),
+				description: manager.getDefinition(id).description ?? "",
+			})),
+		);
 		this.editor.onSubmit = (text: string) => mode.submit(text);
 		this.tui.setFocus(this.editor);
 		this.#input = new InputController({

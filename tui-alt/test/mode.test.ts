@@ -283,11 +283,12 @@ describe("InteractiveMode", () => {
 		expect(view.tools.has("i1")).toBe(false);
 	});
 
-	test("the slash space: /compact rides the wire; /exit quits; skills never send", () => {
+	test("the slash space: /compact rides the wire; /help lists; /exit quits; skills never send", () => {
 		const { backend, view, mode, feed, control } = harness();
 		ack(control);
 		let quit = 0;
 		mode.onQuit = () => quit++;
+		mode.setKeybindings([{ action: "interrupt", keys: ["escape", "ctrl+c"], description: "Interrupt the running turn" }]);
 		feed({
 			type: "skills_available",
 			skills: [
@@ -299,6 +300,11 @@ describe("InteractiveMode", () => {
 
 		mode.submit("/compact");
 		expect(backend.sent).toEqual([{ kind: "compact", session: SESSION }]);
+
+		mode.submit("/help");
+		const info = view.notes.filter(n => n.kind === "info").map(n => n.text);
+		expect(info.some(t => t.includes("/compact"))).toBe(true);
+		expect(info.some(t => t.includes("escape / ctrl+c"))).toBe(true);
 
 		mode.submit("/exit");
 		mode.submit("/quit");

@@ -2,19 +2,18 @@
  * The keyboard entry seam: the one module that turns raw input into app
  * actions, running before focused-component dispatch (so Ctrl+C is an
  * *input* that aborts a run and never a signal that kills the detached
- * backend child). Priorities, top to bottom:
+ * backend child). Actions resolve through the global keybinding registry
+ * (`keybindings.ts` — named ids, user overrides from tui.toml), in the
+ * same registry the editor and select lists consult. Priorities, top to
+ * bottom:
  *
- *   1. interrupt a running turn        (ctrl+c / esc)
- *   2. toggle all thinking blocks      (ctrl+o)
- *   3. quit, only on an empty editor   (ctrl+c / ctrl+d — pi's rule)
+ *   1. interrupt a running turn        (tui.app.interrupt)
+ *   2. toggle all thinking blocks      (tui.app.toggleCollapsibles)
+ *   3. quit, only on an empty editor   (tui.app.quit — pi's rule)
  *   4. everything else falls through to the focused component
- *
- * M1 migrates these onto the engine's `Keybindings` registry (named
- * actions + user overrides); the chain stays until the action count
- * justifies the registry.
  */
 
-import { matchesKey, type Editor, type TuiAltScreen, type TuiInputListenerResult } from "@earendil-works/pi-tui";
+import { getKeybindings, type Editor, type TuiAltScreen, type TuiInputListenerResult } from "@earendil-works/pi-tui";
 
 export interface InputControllerDeps {
 	tui: TuiAltScreen;
@@ -45,19 +44,16 @@ export class InputController {
 
 	#handle(data: string): TuiInputListenerResult {
 		const { editor, isRunning, interrupt, toggleAllCollapsibles, onQuit } = this.#deps;
-		if (matchesKey(data, "ctrl+c") && isRunning()) {
+		const kb = getKeybindings();
+		if (kb.matches(data, "tui.app.interrupt") && isRunning()) {
 			interrupt();
 			return { consume: true };
 		}
-		if (matchesKey(data, "escape") && isRunning()) {
-			interrupt();
-			return { consume: true };
-		}
-		if (matchesKey(data, "ctrl+o")) {
+		if (kb.matches(data, "tui.app.toggleCollapsibles")) {
 			toggleAllCollapsibles();
 			return { consume: true };
 		}
-		const idleQuit = (matchesKey(data, "ctrl+c") || matchesKey(data, "ctrl+d")) && !isRunning() && editor.getText() === "";
+		const idleQuit = kb.matches(data, "tui.app.quit") && !isRunning() && editor.getText() === "";
 		if (idleQuit) {
 			onQuit();
 			return { consume: true };

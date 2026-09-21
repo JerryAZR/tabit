@@ -82,6 +82,13 @@ export interface SkillInfo {
 	description: string;
 }
 
+/** One resolved app keybinding, for `/help` display. */
+export interface KeybindingFact {
+	action: string;
+	keys: string[];
+	description: string;
+}
+
 /**
  * The rendering seam: implemented by the alt-screen root with live engine
  * components, and by tests as a recorder. The mode never holds rendered
@@ -150,6 +157,7 @@ export class InteractiveMode {
 	#rates: ModelCost | undefined;
 	#pending: PendingMessage[] = [];
 	#skills: SkillInfo[] = [];
+	#keybindings: KeybindingFact[] = [];
 	readonly #cards = new Map<string, InteractionCard>();
 	readonly #deltas: PendingDelta[] = [];
 	#flushTimer: ReturnType<typeof setTimeout> | undefined;
@@ -168,6 +176,12 @@ export class InteractiveMode {
 		return this.#session;
 	}
 
+	/** Resolved app keybindings, for `/help`. Called by the entry after
+	 *  the registry is installed. */
+	setKeybindings(facts: KeybindingFact[]): void {
+		this.#keybindings = facts;
+	}
+
 	get running(): boolean {
 		return this.#running;
 	}
@@ -177,9 +191,9 @@ export class InteractiveMode {
 	}
 
 	/** Editor submit: slash space first (`/compact` is a wire command;
-	 *  `exit`/`quit` end the TUI; skills are display-only — no wire
-	 *  invocation exists, so selecting one warns instead of sending),
-	 *  else a plain message. */
+	 *  `/help` lists keys and commands; `exit`/`quit` end the TUI; skills
+	 *  are display-only — no wire invocation exists, so selecting one
+	 *  warns instead of sending), else a plain message. */
 	submit(text: string): void {
 		if (!this.#session || text === "") return;
 		if (text.startsWith("/")) {
@@ -192,10 +206,21 @@ export class InteractiveMode {
 				this.onQuit?.();
 				return;
 			}
+			if (name === "help") {
+				this.#showHelp();
+				return;
+			}
 			this.#view.addNote(`/${name} is not invocable yet — listed for discovery only`, "warn");
 			return;
 		}
 		this.#backend.message(this.#session, text);
+	}
+
+	#showHelp(): void {
+		this.#view.addNote("commands ·  /compact ·  /help ·  /exit ·  /quit ·  skills and @paths under / and @", "info");
+		for (const fact of this.#keybindings) {
+			this.#view.addNote(`keys ·  ${fact.description}: ${fact.keys.join(" / ")}`, "info");
+		}
 	}
 
 	interrupt(): void {
