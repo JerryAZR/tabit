@@ -197,27 +197,37 @@ export class InteractiveMode {
 	submit(text: string): void {
 		if (!this.#session || text === "") return;
 		if (text.startsWith("/")) {
-			const name = text.slice(1).trim();
-			if (name === "compact") {
-				this.#backend.compact(this.#session);
-				return;
-			}
-			if (name === "exit" || name === "quit") {
-				this.onQuit?.();
-				return;
-			}
-			if (name === "help") {
-				this.#showHelp();
-				return;
-			}
-			this.#view.addNote(`/${name} is not invocable yet — listed for discovery only`, "warn");
+			const entry = this.#slashEntries().find(candidate => candidate.name === text.slice(1).trim());
+			if (entry?.run !== undefined) entry.run();
+			else this.#view.addNote(`/${entry?.name ?? text.slice(1).trim()} is not invocable yet — listed for discovery only`, "warn");
 			return;
 		}
 		this.#backend.message(this.#session, text);
 	}
 
+	/**
+	 * The slash command set — the one home. The dropdown reads it and the
+	 * interpreter runs it, so a command cannot exist in one and not the
+	 * other (the /help-shipped-but-unlisted miss was exactly that split).
+	 * An entry without `run` is display-only: listed, warned on select.
+	 */
+	slashCommands(): Array<{ name: string; description: string; displayOnly: boolean }> {
+		return this.#slashEntries().map(({ name, description, run }) => ({ name, description, displayOnly: run === undefined }));
+	}
+
+	#slashEntries(): Array<{ name: string; description: string; run?: () => void }> {
+		return [
+			{ name: "compact", description: "summarize the context now", run: () => this.#backend.compact(this.#session!) },
+			{ name: "help", description: "list keys and commands", run: () => this.#showHelp() },
+			{ name: "exit", description: "quit the TUI (shuts the backend down)", run: () => this.onQuit?.() },
+			{ name: "quit", description: "quit the TUI (shuts the backend down)", run: () => this.onQuit?.() },
+			...this.#skills.map(skill => ({ name: skill.name, description: skill.description })),
+		];
+	}
+
 	#showHelp(): void {
-		this.#view.addNote("commands ·  /compact ·  /help ·  /exit ·  /quit ·  skills and @paths under / and @", "info");
+		const names = this.#slashEntries().map(entry => `/${entry.name}`).join(" ·  ");
+		this.#view.addNote(`commands ·  ${names} — @ paths complete files`, "info");
 		for (const fact of this.#keybindings) {
 			this.#view.addNote(`keys ·  ${fact.description}: ${fact.keys.join(" / ")}`, "info");
 		}

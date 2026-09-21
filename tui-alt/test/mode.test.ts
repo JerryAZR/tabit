@@ -321,6 +321,21 @@ describe("InteractiveMode", () => {
 		expect(view.notes.filter(n => n.kind === "warn")).toHaveLength(3);
 	});
 
+	test("the command table is the one home: the dropdown list and interpreter cannot diverge", () => {
+		const { mode, feed, control } = harness();
+		ack(control);
+		// Static commands first, none display-only — each carries its behavior.
+		const before = mode.slashCommands();
+		expect(before.map(c => c.name)).toEqual(["compact", "help", "exit", "quit"]);
+		expect(before.some(c => c.displayOnly)).toBe(false);
+
+		// Skills join the same table as display-only entries.
+		feed({ type: "skills_available", skills: [{ name: "my-skill", description: "d", location: "l", level: "user" }] });
+		const after = mode.slashCommands();
+		expect(after).toHaveLength(5);
+		expect(after.find(c => c.name === "my-skill")).toMatchObject({ displayOnly: true });
+	});
+
 	test("select_one cards answer exactly once, with the label; run terminals close leftovers", () => {
 		const { backend, view, mode, feed, control } = harness();
 		ack(control);
