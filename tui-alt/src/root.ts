@@ -36,9 +36,12 @@ import { UserBlock } from "./components/user-block";
 import { TranscriptRegistry } from "./components/transcript-registry";
 import { CardView } from "./card-view";
 import { InputController } from "./input-controller";
-import type { FooterFacts, InteractionCard, ModeView, PendingMessage } from "./mode";
+import type { FooterFacts, InteractionCard, ModeView, PendingMessage, SkillInfo } from "./mode";
 import type { InteractiveMode } from "./mode";
 import { editorTheme } from "./theme";
+
+/** The type column in the `/` dropdown: fixed-width so descriptions align. */
+const TYPE_COLUMN = { command: "command", skill: "skill  " } as const;
 
 export class AltRoot implements ModeView {
 	readonly tui: TuiAltScreen;
@@ -63,7 +66,7 @@ export class AltRoot implements ModeView {
 		// backend was spawned in, where tools run. (session_opened.path is
 		// the session *log file*, not a working directory — data for the
 		// future session UI, never a completion root.)
-		this.editor.setAutocompleteProvider(new CombinedAutocompleteProvider([], process.cwd()));
+		this.#attachProvider([]);
 		this.#pendingQueue = new PendingQueue(() => this.#touch());
 		this.#status = new StatusBar(this.tui, () => this.#touch());
 		this.#footer = new FooterBar(() => this.#touch());
@@ -146,6 +149,25 @@ export class AltRoot implements ModeView {
 		this.editor.addToHistory(text);
 		this.#chat.addChild(new UserBlock(text));
 		this.#touch();
+	}
+
+	/** The skill catalog landed: rebuild the provider with the `/` list —
+	 *  the one wire-backed command plus the skills (display-only; there is
+	 *  no wire invocation for skills yet, the mode warns on select). The
+	 *  type tag leads the description so the dropdown reads as two
+	 *  columns: name | type · description. */
+	setSkills(skills: SkillInfo[]): void {
+		this.#attachProvider([
+			{ name: "compact", description: `${TYPE_COLUMN.command} · summarize the context now` },
+			...skills.map(skill => ({
+				name: skill.name,
+				description: `${TYPE_COLUMN.skill} · ${skill.description}`.trimEnd(),
+			})),
+		]);
+	}
+
+	#attachProvider(commands: ConstructorParameters<typeof CombinedAutocompleteProvider>[0]): void {
+		this.editor.setAutocompleteProvider(new CombinedAutocompleteProvider(commands, process.cwd()));
 	}
 
 	addNote(text: string, kind: "info" | "warn" | "error"): void {

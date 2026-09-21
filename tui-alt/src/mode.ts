@@ -77,6 +77,11 @@ export interface FooterFacts {
 	running: boolean;
 }
 
+export interface SkillInfo {
+	name: string;
+	description: string;
+}
+
 /**
  * The rendering seam: implemented by the alt-screen root with live engine
  * components, and by tests as a recorder. The mode never holds rendered
@@ -85,6 +90,9 @@ export interface FooterFacts {
 export interface ModeView {
 	beginReplay(): void;
 	endReplay(): void;
+	/** The skill catalog (from `skills_available`) — the editor's `/`
+	 *  completion lists them; invocation is display-only (no wire command). */
+	setSkills(skills: SkillInfo[]): void;
 	addUser(entryId: string, text: string): void;
 	addNote(text: string, kind: "info" | "warn" | "error"): void;
 	/** Lazy: creates the turn's assistant block on the first increment. */
@@ -107,6 +115,7 @@ export interface ModeView {
 export interface BackendLink {
 	message(session: string, text: string): void;
 	abort(session: string): void;
+	compact(session: string): void;
 	interactionResponse(session: string, id: string, payload: unknown): void;
 }
 
@@ -140,6 +149,7 @@ export class InteractiveMode {
 	#contextUsed: number | undefined;
 	#rates: ModelCost | undefined;
 	#pending: PendingMessage[] = [];
+	#skills: SkillInfo[] = [];
 	readonly #cards = new Map<string, InteractionCard>();
 	readonly #deltas: PendingDelta[] = [];
 	#flushTimer: ReturnType<typeof setTimeout> | undefined;
@@ -164,9 +174,20 @@ export class InteractiveMode {
 		return this.#replaying;
 	}
 
-	/** Editor submit: steers when running, starts a run when idle. */
+	/** Editor submit: slash space first (`/compact` is a wire command;
+	 *  skills are display-only — no wire invocation exists, so selecting
+	 *  one warns instead of sending), else a plain message. */
 	submit(text: string): void {
 		if (!this.#session || text === "") return;
+		if (text.startsWith("/")) {
+			const name = text.slice(1).trim();
+			if (name === "compact") {
+				this.#backend.compact(this.#session);
+				return;
+			}
+			this.#view.addNote(`/${name} is not invocable yet — listed for discovery only`, "warn");
+			return;
+		}
 		this.#backend.message(this.#session, text);
 	}
 
@@ -411,6 +432,8 @@ export class InteractiveMode {
 			this.#view.addNote(`${event.sessions.length} session(s) on disk`, "info");
 		},
 		skills_available: event => {
+			this.#skills = event.skills.map(skill => ({ name: skill.name, description: skill.description ?? "" }));
+			this.#view.setSkills(this.#skills);
 			this.#view.addNote(`${event.skills.length} skill(s) loaded: ${event.skills.map(s => s.name).join(", ")}`, "info");
 		},
 		extensions_available: event => {

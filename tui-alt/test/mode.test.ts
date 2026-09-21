@@ -8,7 +8,7 @@
 
 import { describe, expect, test } from "bun:test";
 
-import { InteractiveMode, type BackendLink, type FooterFacts, type InteractionCard, type ModeView, type PendingMessage } from "../src/mode";
+import { InteractiveMode, type BackendLink, type FooterFacts, type InteractionCard, type ModeView, type PendingMessage, type SkillInfo } from "../src/mode";
 import { parseServerFrame, type ParsedServerFrame } from "../src/protocol";
 
 const SESSION = "0199aaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
@@ -21,6 +21,9 @@ class FakeBackend implements BackendLink {
 	}
 	abort(session: string): void {
 		this.sent.push({ kind: "abort", session });
+	}
+	compact(session: string): void {
+		this.sent.push({ kind: "compact", session });
 	}
 	interactionResponse(session: string, id: string, payload: unknown): void {
 		this.sent.push({ kind: "interaction_response", session, id, payload });
@@ -99,6 +102,10 @@ class RecordingView implements ModeView {
 	}
 	setFooter(facts: FooterFacts): void {
 		this.footer = facts;
+	}
+	skills: SkillInfo[] = [];
+	setSkills(skills: SkillInfo[]): void {
+		this.skills = skills;
 	}
 	showCard(card: InteractionCard): void {
 		this.cards.push(card);
@@ -274,6 +281,33 @@ describe("InteractiveMode", () => {
 		expect(view.assistantText.get("t1")).toBeUndefined();
 		expect(view.reasoningText.get("t1:r1")).toBeUndefined();
 		expect(view.tools.has("i1")).toBe(false);
+	});
+
+	test("the slash space: /compact rides the wire; skills and unknowns never send", () => {
+		const { backend, view, mode, feed, control } = harness();
+		ack(control);
+		feed({
+			type: "skills_available",
+			skills: [
+				{ name: "code-quality-checklist", description: "A checklist for code quality", location: "l", level: "user" },
+				{ name: "tests-quality-checklist", description: "A checklist for tests", location: "l2", level: "user" },
+			],
+		});
+		expect(view.skills.map(s => s.name)).toEqual(["code-quality-checklist", "tests-quality-checklist"]);
+
+		mode.submit("/compact");
+		expect(backend.sent).toEqual([{ kind: "compact", session: SESSION }]);
+
+		mode.submit("/code-quality-checklist");
+		expect(backend.sent).toHaveLength(1); // no wire invocation for skills
+		expect(view.notes.at(-1)?.kind).toBe("warn");
+		expect(view.notes.at(-1)?.text).toContain("not invocable");
+
+		mode.submit("/no-such-command");
+		expect(backend.sent).toHaveLength(1); // unknown slash names warn too
+		mode.submit("/compact extra"); // arguments are not the bare command
+		expect(backend.sent).toHaveLength(1);
+		expect(view.notes.filter(n => n.kind === "warn")).toHaveLength(3);
 	});
 
 	test("select_one cards answer exactly once, with the label; run terminals close leftovers", () => {

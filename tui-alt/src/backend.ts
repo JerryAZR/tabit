@@ -122,6 +122,11 @@ export class Backend {
 		this.send({ type: "abort", session });
 	}
 
+	/** Manual compaction — parks behind a running run, executes at its end. */
+	compact(session: string): void {
+		this.send({ type: "compact", session });
+	}
+
 	interactionResponse(session: string, id: string, payload: unknown): void {
 		this.send({ type: "interaction_response", session, id, payload });
 	}
