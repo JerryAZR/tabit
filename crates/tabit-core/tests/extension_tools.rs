@@ -911,3 +911,145 @@ fn a_model_prompt_round_trips_through_the_session() {
         }
     }
 }
+
+// ── the built-in permission gate (pi-sanity's policy, in-process) ──
+
+/// The empty-stage handshake: `extensions_available` never announces
+/// with nothing installed, so `handshake` would wait out its bound —
+/// the ack alone carries the boot session id.
+fn handshake_bare(backend: &mut Backend) -> String {
+    backend.send(&to_wire_line(&ClientFrame::Initialize {
+        protocol_version: PROTOCOL_VERSION,
+        replay: false,
+    }));
+    loop {
+        match backend.next_frame() {
+            ServerFrame::Control(ServerControlFrame::InitializeAck { session_id, .. }) => {
+                return session_id;
+            }
+            ServerFrame::Control(other) => panic!("unexpected control frame: {other:?}"),
+            ServerFrame::Event(_) => {}
+        }
+    }
+}
+
+/// The gate mounts by default: a command the shipped rules ASK on
+/// (`git push --force` — the force-push flag rule) opens one card on
+/// the ordinary frontend wire; a Block answer (with free text) skips
+/// the call in-band and the model is told — the run continues and
+/// wraps up on the scripted second turn.
+#[test]
+fn the_builtin_gate_asks_on_a_risky_bash_and_a_block_skips() {
+    let stage = stage("gate-ask", &[]);
+    scripted_turns(
+        &stage,
+        &[
+            (
+                "gate-check-9a31".to_string(),
+                sse_tool_call("call-1", "bash", r#"{"command":"git push --force"}"#),
+            ),
+            ("not today".to_string(), sse_text("understood")),
+        ],
+    );
+
+    let mut backend = spawn_backend(&stage, &[]);
+    let session = handshake_bare(&mut backend);
+    backend.send(&to_wire_line(&SessionCommand::Message {
+        session: session.clone(),
+        text: "gate-check-9a31".to_string(),
+    }));
+
+    loop {
+        match backend.next_frame() {
+            ServerFrame::Event(frame) => match frame.event {
+                SessionEvent::InteractionRequest { id, payload, .. } => {
+                    // The gate's card: the force-push reason and the
+                    // command details, over the ordinary ask lane.
+                    assert_eq!(payload["title"], "Force push rewrites history");
+                    assert!(
+                        payload["body"].to_string().contains("git push"),
+                        "the card shows the checked command: {payload}"
+                    );
+                    backend.send(&to_wire_line(&SessionCommand::InteractionResponse {
+                        session: session.clone(),
+                        id,
+                        payload: json!({
+                            "selected": ["Block"], "text": "not today",
+                        }),
+                    }));
+                }
+                SessionEvent::ToolResult { name, content, .. } => {
+                    assert_eq!(name, "bash");
+                    assert!(content.contains("permission gate"), "{content}");
+                    assert!(content.contains("not today"), "{content}");
+                    assert!(content.contains("did not run"), "{content}");
+                }
+                SessionEvent::RunFinished { output, .. } => {
+                    assert_eq!(output, "understood");
+                    return;
+                }
+                SessionEvent::RunFailed { message, .. } => panic!("the run failed: {message}"),
+                _ => {}
+            },
+            ServerFrame::Control(control) => panic!("unexpected control frame: {control:?}"),
+        }
+    }
+}
+
+/// The opt-out: `[gate] enabled = false` in settings.toml unmounts
+/// the gate — the same risky command runs straight through to the
+/// real shell (here: git failing in a non-repo — the point is the
+/// absence of a card and of a skip, not git's exit).
+#[test]
+fn a_disabled_gate_mounts_nowhere() {
+    let stage = stage("gate-off", &[]);
+    std::fs::write(&stage.settings, "[gate]\nenabled = false\n").expect("settings");
+    // Turn 2's needle is a fragment of the REAL bash output (git's
+    // non-repo error) — the ungated run's tool result is what tells
+    // turn 2 apart from turn 1, whose mock excludes it.
+    scripted_turns(
+        &stage,
+        &[
+            (
+                "gate-off-check-4c22".to_string(),
+                sse_tool_call("call-1", "bash", r#"{"command":"git push --force"}"#),
+            ),
+            ("not a git repository".to_string(), sse_text("done")),
+        ],
+    );
+
+    let mut backend = spawn_backend(&stage, &[]);
+    let session = handshake_bare(&mut backend);
+    backend.send(&to_wire_line(&SessionCommand::Message {
+        session: session.clone(),
+        text: "gate-off-check-4c22".to_string(),
+    }));
+
+    loop {
+        match backend.next_frame() {
+            ServerFrame::Event(frame) => match frame.event {
+                SessionEvent::InteractionRequest { .. } => {
+                    panic!("a disabled gate opens no card")
+                }
+                SessionEvent::ToolResult { name, content, .. } => {
+                    assert_eq!(name, "bash");
+                    assert!(
+                        content.contains("not a git repository"),
+                        "the real git ran and failed in the non-repo: {content}"
+                    );
+                    assert!(
+                        !content.contains("permission gate"),
+                        "nothing skipped the call: {content}"
+                    );
+                }
+                SessionEvent::RunFinished { output, .. } => {
+                    assert_eq!(output, "done");
+                    return;
+                }
+                SessionEvent::RunFailed { message, .. } => panic!("the run failed: {message}"),
+                _ => {}
+            },
+            ServerFrame::Control(control) => panic!("unexpected control frame: {control:?}"),
+        }
+    }
+}

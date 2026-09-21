@@ -20,6 +20,18 @@ could observe — gets an entry here in the same commit.
 
 ## v15 (current)
 
+### behavior: the built-in permission gate ships (2026-09)
+
+`tabit-core` now mounts pi-sanity's heuristic permission gate by
+default (an in-process hook, not an extension): ordinary workflow
+runs silently, risky operations (force-push, writes outside the
+workspace, credential files, …) open a `native:select_one` card —
+`Allow` / `Block` with free text as the block reason — and `deny`
+rules skip the call in-band. Frontends see `interaction_request`
+frames in ordinary usage for the first time; the settings opt-out is
+`[gate] enabled = false` in settings.toml. No `PROTOCOL_VERSION`
+bump — no new wire shape, the gate rides the existing ask lane.
+
 ### behavior: the backend binary is `tabit-core` (2026-09)
 
 The headless backend was renamed: what frontends spawn is now

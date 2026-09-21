@@ -5027,6 +5027,7 @@ dependencies = [
  "tabit-config",
  "tabit-ext",
  "tabit-ext-install",
+ "tabit-gate",
  "tabit-protocol",
  "tabit-session",
  "tabit-tools",

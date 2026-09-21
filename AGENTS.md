@@ -33,8 +33,10 @@ Current workspace layout:
   stamped events, handshake frames; `FRONTEND.md` is the contract)
 - `crates/tabit-config` — provider/model configuration plus the
   settings layers (`settings.toml`: the extension disable list —
-  packages mount by default; user + workspace union,
-  `$TABIT_SETTINGS` replaces the user file; see `ROADMAP.md`)
+  packages mount by default; the built-in gate opt-out
+  (`[gate] enabled = false`) — the gate mounts by default; user +
+  workspace union, `$TABIT_SETTINGS` replaces the user file; see
+  `ROADMAP.md`)
 - `crates/tabit-log` — the durable-conversation layer between
   providers and agents: the session log (the entry vocabulary and
   tree, format-versioned), the write-behind writer, the parser, the
@@ -60,13 +62,13 @@ Current workspace layout:
   contextual `#[rig_tool]`s (they read the session cwd and run token
   from the per-run `ToolContext`), erasable to DynamicTools (native
   only)
-- `crates/tabit-gate` — the default permission gate (being ported
-  2026-09): pi-sanity's heuristic policy (static checks,
-  allow-when-unsure — a careless-mistake catcher, never a security
-  boundary) as a pure core crate; brush-parser replaces the unbash
-  parser. The `AgentHook` member, the ask, and the settings opt-out
-  assemble in the `tabit-core` binary — `tabit-session` stays a
-  mechanism with no policy
+- `crates/tabit-gate` — the default permission gate: pi-sanity's
+  heuristic policy ported verbatim (static checks, allow-when-unsure —
+  a careless-mistake catcher, never a security boundary; brush-parser
+  replaces the unbash parser) as a pure core crate. The `AgentHook`
+  member, the `native:select_one` ask, and the settings.toml
+  `[gate] enabled = false` opt-out assemble in the `tabit-core`
+  binary — `tabit-session` stays a mechanism with no policy
 - `crates/tabit-ext-install` — extension installation (ROADMAP item
   9, task 6): npm (plain registry HTTP)/git/path sources,
   stage-validate-place installs, name-only `requires` pulls, list,

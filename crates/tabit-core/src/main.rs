@@ -29,6 +29,11 @@
 //! ```
 
 mod extensions;
+// serde_json's `Value` indexing returns Null for missing keys — it
+// never panics — and the ask-answer reads live on that ergonomics
+// (the same allowance the extension SDK's bins carry).
+#[allow(clippy::indexing_slicing)]
+mod gate;
 mod json;
 
 use std::io::Write as _;
@@ -137,7 +142,9 @@ config: providers.toml / auth.toml / settings.toml under ~/.tabit
         (override with TABIT_CONFIG / TABIT_AUTH / TABIT_SETTINGS);
         sessions live in <project>/.tabit/sessions. Extensions install
         under ~/.tabit/extensions and load unless named in
-        settings.toml's [extensions] disabled list";
+        settings.toml's [extensions] disabled list. The built-in
+        permission gate mounts by default; [gate] enabled = false in
+        settings.toml opts out";
 
 /// What a parsed command line asks for. `-p` and `--rewind` both select
 /// print mode, `--json` selects JSON mode; no mode selected is a usage
@@ -748,6 +755,28 @@ fn assemble_session(
         extensions: extension_root(args).unwrap_or_default(),
     });
 
+    // The hook surface: the built-in permission gate (pi-sanity's
+    // policy, in-process — a default must not fail open on a dead
+    // extension; settings.toml's [gate] enabled = false opts out)
+    // ahead of whatever the extension mount carries — forwarded
+    // policy hooks of installed packages — composed through the
+    // builder's one seam. Children mount their own (they boot their
+    // own hosts, the 2026-09 ruling).
+    let gate_enabled = tabit_config::SettingsConfig::load_default()
+        .map_err(|e| e.to_string())?
+        .gate
+        .enabled;
+    let hooks = {
+        let mut stack = if gate_enabled {
+            gate::PermissionGate::stack()
+        } else {
+            rig_agent::agent::HookStack::new()
+        };
+        if let Some(mounted) = extensions {
+            stack = stack.merge(mounted.hooks());
+        }
+        stack
+    };
     let mut builder = SessionBuilder::new(
         store,
         registry.config().clone(),
@@ -757,15 +786,7 @@ fn assemble_session(
     .map_err(|e| e.to_string())?
     .preamble(preamble)
     .model_factory(registry.factory())
-    // The hook surface: whatever the extension mount carries — the
-    // forwarded policy hooks of installed packages (the permission
-    // gate is the `gate` extension now; EXTENSIONS.md) plus any core
-    // stack, composed through the builder's one seam — children mount
-    // their own (they boot their own hosts, the 2026-09 ruling).
-    .hooks(match extensions {
-        Some(mounted) => mounted.hooks(),
-        None => rig_agent::agent::HookStack::new(),
-    })
+    .hooks(hooks)
     .subagents(subagents)
     .skills(skills);
     for tool in mounted {
