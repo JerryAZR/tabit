@@ -110,14 +110,16 @@ pub fn check_path_permission(
     // Check each override in order (last match wins — no break).
     for override_rule in &permission.overrides {
         for pattern in &override_rule.path {
-            // Loader-emitted patterns are already preprocessed and
-            // always absolute: left untouched (their load-time
-            // anchoring is load-bearing). Glob-global patterns
-            // (`**/...`) are likewise matched as written, anywhere.
-            // Other hand-built raw patterns get the same
+            // Relative globs (`**/...`) are matched as written,
+            // anywhere — preprocessing them would anchor them to the
+            // cwd, changing their meaning. Everything else (absolute
+            // patterns included) goes through the idempotent
+            // preprocessing: loader-emitted patterns preprocess to
+            // themselves, and hand-built raw patterns get the same
             // {{VAR}}/tilde/env expansion and normalization the loader
-            // applies.
-            let pattern = if pattern.starts_with('/') || pattern.starts_with('*') {
+            // applies (a trailing slash on an absolute pattern, for
+            // instance, strips exactly as it would at load).
+            let pattern = if pattern.starts_with('*') {
                 pattern.clone()
             } else {
                 preprocess_config_pattern(pattern, context)

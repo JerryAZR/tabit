@@ -158,11 +158,17 @@ fn trailing_slash_in_a_pattern_is_normalized_away() {
     // exactly matches; an unnormalized pattern would not.
     let pattern = format!("{}/", tmpdir());
     let config = only_matches(&[pattern.as_str()]);
-    let result = check_read(tmpdir(), &config);
+    let path = tmpdir();
+    let result = check_read(&path, &config);
     assert_action(
         &result,
         Action::Allow,
-        "the pattern's trailing slash is stripped",
+        &format!(
+            "the pattern's trailing slash is stripped (pattern={pattern:?} path={path:?} \
+             tmpdir={:?} reason={:?})",
+            std::env::var("TMPDIR").ok().unwrap_or_default(),
+            result.reason
+        ),
     );
 }
 
