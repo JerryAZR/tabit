@@ -42,6 +42,9 @@ export interface InteractionCard {
 
 export interface FooterFacts {
 	session: string | undefined;
+	/** The session's working directory (from `session_opened`) — the
+	 *  editor's file-completion root. Undefined for ephemeral sessions. */
+	path: string | undefined;
 	model: string | undefined;
 	/** Config's display name for the model (v11) — absent means unstated. */
 	modelName: string | undefined;
@@ -125,6 +128,7 @@ export class InteractiveMode {
 	#model: string | undefined;
 	#modelName: string | undefined;
 	#contextWindow: number | undefined;
+	#path: string | undefined;
 	#resumed = false;
 	#inputTokens = 0;
 	#outputTokens = 0;
@@ -232,6 +236,7 @@ export class InteractiveMode {
 	#emitFooter(): void {
 		this.#view.setFooter({
 			session: this.#session,
+			path: this.#path,
 			model: this.#model,
 			modelName: this.#modelName,
 			contextWindow: this.#contextWindow,
@@ -426,6 +431,8 @@ export class InteractiveMode {
 			}
 			this.#session = event.id;
 			this.#model = event.model.model;
+			// Empty path = ephemeral session (nothing on disk to complete against).
+			this.#path = event.path === "" ? undefined : event.path;
 			this.#resumed = event.resumed;
 			// Per-session facts reset here: the model_changed ahead of the
 			// following replay restates the resolved record, and the pass

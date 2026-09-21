@@ -143,6 +143,7 @@ describe("InteractiveMode", () => {
 		ack(control);
 		feed({ type: "session_opened", id: SESSION, path: "/w", model: { provider: "p", model: "m1" }, resumed: false });
 		feed({ type: "model_changed", provider: "p", model: "m1", thinking_level: null, context_window: 200000, name: "Model One", cost: { input: 1, output: 4, cache_read: 0.1, cache_write: 0.4 } });
+		expect(view.footer?.path).toBe("/w"); // the editor's completion root
 		feed({ type: "user_message", entry_id: "e1", text: "hi" });
 		expect(view.footer?.running).toBe(true);
 		expect(view.status).toBe("working — esc interrupts");
@@ -177,6 +178,20 @@ describe("InteractiveMode", () => {
 		expect(view.footer?.running).toBe(false);
 		expect(view.footer?.inputTokens).toBe(10);
 		expect(mode.running).toBe(false);
+	});
+
+	test("the session path fact: real path flows, ephemeral stays undefined", () => {
+		const { view, feed, control } = harness();
+		ack(control);
+		feed({ type: "session_opened", id: SESSION, path: "C:\\proj\\.tabit\\s\\a.jsonl", model: { provider: "p", model: "m1" }, resumed: false });
+		// Note: `path` here is the session file's parent cwd on the wire
+		// (the session's working directory).
+		expect(view.footer?.path).toBe("C:\\proj\\.tabit\\s\\a.jsonl");
+
+		const ephemeral = harness();
+		ack(ephemeral.control);
+		ephemeral.feed({ type: "session_opened", id: SESSION, path: "", model: { provider: "p", model: "m1" }, resumed: false });
+		expect(ephemeral.view.footer?.path).toBeUndefined(); // nothing to complete against
 	});
 
 	test("usage accounting: sums across turns and terminals, absent costs stay absent, replay re-sums after reset", async () => {

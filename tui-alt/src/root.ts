@@ -15,6 +15,7 @@
  */
 
 import {
+	CombinedAutocompleteProvider,
 	Container,
 	Editor,
 	ProcessTerminal,
@@ -135,6 +136,9 @@ export class AltRoot implements ModeView {
 	}
 
 	addUser(_entryId: string, text: string): void {
+		// Up/down history: every user message, live or replay-backfilled
+		// (pi's shape — in-memory, session-scoped).
+		this.editor.addToHistory(text);
 		this.#chat.addChild(new UserBlock(text));
 		this.#touch();
 	}
@@ -191,7 +195,15 @@ export class AltRoot implements ModeView {
 
 	setFooter(facts: FooterFacts): void {
 		this.#footer.set(facts);
+		// File completion attaches once the session's cwd is known — the
+		// engine's combined provider does the rest (empty commands list:
+		// path completion only, until slash commands exist).
+		if (facts.path !== undefined && !this.#providerAttached) {
+			this.#providerAttached = true;
+			this.editor.setAutocompleteProvider(new CombinedAutocompleteProvider([], facts.path));
+		}
 	}
+	#providerAttached = false;
 
 	showCard(card: InteractionCard): void {
 		this.#cardSlot.clear();

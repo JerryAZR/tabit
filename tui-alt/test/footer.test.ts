@@ -12,6 +12,7 @@ import type { FooterFacts } from "../src/mode";
 
 const facts = (over: Partial<FooterFacts> = {}): FooterFacts => ({
 	session: "s1",
+	path: undefined,
 	model: "kimi-for-coding",
 	modelName: undefined,
 	contextWindow: undefined,
