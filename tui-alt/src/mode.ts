@@ -42,8 +42,9 @@ export interface InteractionCard {
 
 export interface FooterFacts {
 	session: string | undefined;
-	/** The session's working directory (from `session_opened`) — the
-	 *  editor's file-completion root. Undefined for ephemeral sessions. */
+	/** The session log file's path (from `session_opened`) — the future
+	 *  session UI's open target; undefined for ephemeral sessions. Never
+	 *  a working directory. */
 	path: string | undefined;
 	model: string | undefined;
 	/** Config's display name for the model (v11) — absent means unstated. */

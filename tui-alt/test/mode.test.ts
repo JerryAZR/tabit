@@ -180,18 +180,16 @@ describe("InteractiveMode", () => {
 		expect(mode.running).toBe(false);
 	});
 
-	test("the session path fact: real path flows, ephemeral stays undefined", () => {
+	test("the session log path fact: real path flows, ephemeral stays undefined", () => {
 		const { view, feed, control } = harness();
 		ack(control);
 		feed({ type: "session_opened", id: SESSION, path: "C:\\proj\\.tabit\\s\\a.jsonl", model: { provider: "p", model: "m1" }, resumed: false });
-		// Note: `path` here is the session file's parent cwd on the wire
-		// (the session's working directory).
-		expect(view.footer?.path).toBe("C:\\proj\\.tabit\\s\\a.jsonl");
+		expect(view.footer?.path).toBe("C:\\proj\\.tabit\\s\\a.jsonl"); // the log file — session UI data, not a cwd
 
 		const ephemeral = harness();
 		ack(ephemeral.control);
 		ephemeral.feed({ type: "session_opened", id: SESSION, path: "", model: { provider: "p", model: "m1" }, resumed: false });
-		expect(ephemeral.view.footer?.path).toBeUndefined(); // nothing to complete against
+		expect(ephemeral.view.footer?.path).toBeUndefined();
 	});
 
 	test("usage accounting: sums across turns and terminals, absent costs stay absent, replay re-sums after reset", async () => {

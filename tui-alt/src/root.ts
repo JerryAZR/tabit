@@ -59,6 +59,11 @@ export class AltRoot implements ModeView {
 			scrollToEndIndicator: () => " ↓  jump to latest ",
 		});
 		this.editor = new Editor(this.tui, editorTheme);
+		// File completion roots at the TUI's own cwd — the directory the
+		// backend was spawned in, where tools run. (session_opened.path is
+		// the session *log file*, not a working directory — data for the
+		// future session UI, never a completion root.)
+		this.editor.setAutocompleteProvider(new CombinedAutocompleteProvider([], process.cwd()));
 		this.#pendingQueue = new PendingQueue(() => this.#touch());
 		this.#status = new StatusBar(this.tui, () => this.#touch());
 		this.#footer = new FooterBar(() => this.#touch());
@@ -195,15 +200,7 @@ export class AltRoot implements ModeView {
 
 	setFooter(facts: FooterFacts): void {
 		this.#footer.set(facts);
-		// File completion attaches once the session's cwd is known — the
-		// engine's combined provider does the rest (empty commands list:
-		// path completion only, until slash commands exist).
-		if (facts.path !== undefined && !this.#providerAttached) {
-			this.#providerAttached = true;
-			this.editor.setAutocompleteProvider(new CombinedAutocompleteProvider([], facts.path));
-		}
 	}
-	#providerAttached = false;
 
 	showCard(card: InteractionCard): void {
 		this.#cardSlot.clear();
