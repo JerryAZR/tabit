@@ -311,7 +311,13 @@ async fn escapes_are_refused_with_nothing_read() {
     for bad in [
         "../outside.txt",
         "a/../../outside.txt",
+        // The absolute-path case is platform-shaped: `C:/Windows/system32`
+        // is a legal relative name on Unix and fails as not-found, not as
+        // an escape.
+        #[cfg(windows)]
         "C:/Windows/system32",
+        #[cfg(unix)]
+        "/etc/passwd",
     ] {
         let error = skill(&mut context, "safe".to_string(), Some(bad.to_string()))
             .await
