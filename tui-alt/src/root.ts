@@ -36,6 +36,7 @@ import { UserBlock } from "./components/user-block";
 import { TranscriptRegistry } from "./components/transcript-registry";
 import { CardView } from "./card-view";
 import { InputController } from "./input-controller";
+import { AtPathCompletionProvider } from "./path-completion";
 import type { FooterFacts, InteractionCard, ModeView, PendingMessage, SkillInfo } from "./mode";
 import type { InteractiveMode } from "./mode";
 import { editorTheme } from "./theme";
@@ -159,6 +160,8 @@ export class AltRoot implements ModeView {
 	setSkills(skills: SkillInfo[]): void {
 		this.#attachProvider([
 			{ name: "compact", description: `${TYPE_COLUMN.command} · summarize the context now` },
+			{ name: "exit", description: `${TYPE_COLUMN.command} · quit the TUI (shuts the backend down)` },
+			{ name: "quit", description: `${TYPE_COLUMN.command} · quit the TUI (shuts the backend down)` },
 			...skills.map(skill => ({
 				name: skill.name,
 				description: `${TYPE_COLUMN.skill} · ${skill.description}`.trimEnd(),
@@ -167,7 +170,8 @@ export class AltRoot implements ModeView {
 	}
 
 	#attachProvider(commands: ConstructorParameters<typeof CombinedAutocompleteProvider>[0]): void {
-		this.editor.setAutocompleteProvider(new CombinedAutocompleteProvider(commands, process.cwd()));
+		const combined = new CombinedAutocompleteProvider(commands, process.cwd());
+		this.editor.setAutocompleteProvider(new AtPathCompletionProvider(combined, process.cwd()));
 	}
 
 	addNote(text: string, kind: "info" | "warn" | "error"): void {

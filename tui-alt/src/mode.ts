@@ -155,6 +155,8 @@ export class InteractiveMode {
 	#flushTimer: ReturnType<typeof setTimeout> | undefined;
 	/** Set on `initialize_rejected`; the entry turns it into the exit path. */
 	onFatal: ((reason: string) => void) | undefined;
+	/** Set by the entry: the graceful shutdown path (`/exit`, `/quit`). */
+	onQuit: (() => void) | undefined;
 
 	constructor(backend: BackendLink, view: ModeView) {
 		this.#backend = backend;
@@ -175,14 +177,19 @@ export class InteractiveMode {
 	}
 
 	/** Editor submit: slash space first (`/compact` is a wire command;
-	 *  skills are display-only — no wire invocation exists, so selecting
-	 *  one warns instead of sending), else a plain message. */
+	 *  `exit`/`quit` end the TUI; skills are display-only — no wire
+	 *  invocation exists, so selecting one warns instead of sending),
+	 *  else a plain message. */
 	submit(text: string): void {
 		if (!this.#session || text === "") return;
 		if (text.startsWith("/")) {
 			const name = text.slice(1).trim();
 			if (name === "compact") {
 				this.#backend.compact(this.#session);
+				return;
+			}
+			if (name === "exit" || name === "quit") {
+				this.onQuit?.();
 				return;
 			}
 			this.#view.addNote(`/${name} is not invocable yet — listed for discovery only`, "warn");

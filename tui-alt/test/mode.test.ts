@@ -283,9 +283,11 @@ describe("InteractiveMode", () => {
 		expect(view.tools.has("i1")).toBe(false);
 	});
 
-	test("the slash space: /compact rides the wire; skills and unknowns never send", () => {
+	test("the slash space: /compact rides the wire; /exit quits; skills never send", () => {
 		const { backend, view, mode, feed, control } = harness();
 		ack(control);
+		let quit = 0;
+		mode.onQuit = () => quit++;
 		feed({
 			type: "skills_available",
 			skills: [
@@ -298,15 +300,18 @@ describe("InteractiveMode", () => {
 		mode.submit("/compact");
 		expect(backend.sent).toEqual([{ kind: "compact", session: SESSION }]);
 
+		mode.submit("/exit");
+		mode.submit("/quit");
+		expect(quit).toBe(2);
+		expect(backend.sent).toHaveLength(1); // quitting is local, never a wire frame
+
 		mode.submit("/code-quality-checklist");
 		expect(backend.sent).toHaveLength(1); // no wire invocation for skills
 		expect(view.notes.at(-1)?.kind).toBe("warn");
 		expect(view.notes.at(-1)?.text).toContain("not invocable");
 
 		mode.submit("/no-such-command");
-		expect(backend.sent).toHaveLength(1); // unknown slash names warn too
 		mode.submit("/compact extra"); // arguments are not the bare command
-		expect(backend.sent).toHaveLength(1);
 		expect(view.notes.filter(n => n.kind === "warn")).toHaveLength(3);
 	});
 

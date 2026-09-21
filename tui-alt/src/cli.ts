@@ -131,6 +131,7 @@ async function main(): Promise<void> {
 	mode = new InteractiveMode(backend, root);
 	root.bind(mode, () => backend.shutdown());
 	mode.onFatal = reason => die(`the backend rejected the handshake:\n\n${reason}\n`, 1);
+	mode.onQuit = () => backend.shutdown();
 
 	root.tui.start();
 }
