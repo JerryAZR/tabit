@@ -217,3 +217,9 @@ that fallback is the suspect.
   never a fabricated answer (FRONTEND.md §8).
 - Dark-implicit theme (engine defaults + semantic styling added in M1);
   all-MIT, no GPL anywhere.
+- **`@` completion stays pi-faithful** (owner ruling 2026-09): accepting a
+  directory consumes the `@` and closes the list — continuing deeper is
+  the two-Tab rhythm (the manual path prefix works without `@`). The
+  known deviation stays parked: re-inserting `@` on directory accept
+  would auto-continue the list (Claude Code style); applied only if the
+  interaction ever proves a problem in use.
