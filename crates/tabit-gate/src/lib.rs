@@ -70,7 +70,19 @@
 //! LIMITATIONS.md blind spots (obfuscation, `eval`, `xargs` … are
 //! deliberately unparsed-checked); do not redesign, tighten, or
 //! "improve" the rules. Deviations are allowed in exactly one place:
-//! the parser adapter (unbash node types → `brush_parser::ast`).
+//! the parser adapter (unbash node types → `brush_parser::ast`); the
+//! glob matcher in [`path_permission`] is the same kind of
+//! substitution one step out (picomatch → a small pinned
+//! implementation over `regex`).
+
+// The gate does positional, length-guarded byte indexing throughout
+// its path/string algorithms (drive prefixes, word slicing, segment
+// scans — ASCII-domain checks always precede the index), and the
+// Node-path subset mirrors Node's index-based reference algorithms.
+#![allow(clippy::indexing_slicing)]
+
+pub use tool_checker::{build_tool_details, check_tool_call};
+pub use types::{Action, CheckResult};
 
 pub mod arg_parser;
 pub mod bash_walker;
