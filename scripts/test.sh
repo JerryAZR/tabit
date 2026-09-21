@@ -97,8 +97,8 @@ gate() {
     # The shipped-binary build, package-resolved: workspace builds
     # unify features, so a package-only feature gap (the TLS class:
     # reqwest with no rustls) hides from every other leg. ~17s warm.
-    echo "== cargo build -p tabit =="
-    if cargo build -p tabit >"$LOG" 2>&1; then
+    echo "== cargo build -p tabit-core =="
+    if cargo build -p tabit-core >"$LOG" 2>&1; then
         echo ok
     else
         failed=1

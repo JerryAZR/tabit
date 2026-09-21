@@ -650,11 +650,11 @@ error rather than skipping, reachable or not.)
   unit-test surface; verification is the owner's end-to-end pass (the
   GUI exists precisely because tests cannot verify UX — ROADMAP item
   7's rationale for building it before the v2 backend).
-- `backend.rs` — **justified**: spawns a real `tabit --json` child
-  and owns OS pipes/threads; exercisable only in a live session.
-  The protocol parse it performs is covered by tabit-protocol's
-  round-trip tests; the launch path (`tabit` launcher detach-spawn)
-  likewise needs a desktop session.
+- `backend.rs` — **justified**: spawns a real `tabit-core --json`
+  child and owns OS pipes/threads; exercisable only in a live
+  session. The protocol parse it performs is covered by
+  tabit-protocol's round-trip tests; the backend-binary resolution
+  (sibling lookup) likewise needs a desktop session.
 
 ## Interaction (the ask round-trip; 2026-08, remediation pass 2026-08; ask_user deleted + the gate moved to `gate-ext` 2026-09)
 

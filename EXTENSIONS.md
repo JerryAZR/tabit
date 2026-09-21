@@ -82,7 +82,7 @@ What "disabled" means, precisely: the package is not launched, not in
 the `extensions_available` catalog, its `providers.toml` fragment
 does not merge, and its skills do not join the tables — absent
 everywhere, and *silent* (the user's setting is not a failure;
-`tabit extensions list`, task 6, is where disabled packages become
+`tabit-core extensions list`, task 6, is where disabled packages become
 visible). A REFUSED package (bad manifest, failed handshake) still
 reports as dead whatever the settings say — a broken package is
 loud; a disabled one is quiet. Children (subagent processes) re-derive
@@ -227,7 +227,7 @@ ruling; neither failure is silent.
 ## Install, distribution, package layout (2026-09; v1 design
 settled 2026-09, shipped as `crates/tabit-ext-install`)
 
-`tabit install npm:<package> | git:<repo> | path:<dir>`:
+`tabit-core install npm:<package> | git:<repo> | path:<dir>`:
 
 - npm is the distribution substrate, accessed as plain registry HTTP
   (fetch metadata, fetch tarball, unpack) — no npm CLI, no Node at
@@ -246,7 +246,7 @@ settled 2026-09, shipped as `crates/tabit-ext-install`)
   lockfile, no source tracking, no install database — each manifest
   carries the facts a registry would duplicate, and hand-placed and
   npm-installed packages are deliberately indistinguishable once on
-  disk. Update is `tabit install <source>` again (reinstall over the
+  disk. Update is `tabit-core install <source>` again (reinstall over the
   name); every install stages, validates, then moves into place — a
   failed install never leaves a half package.
 - `requires: ["a"]` — name-only dependencies (the task-6 amendment
@@ -265,7 +265,7 @@ settled 2026-09, shipped as `crates/tabit-ext-install`)
   files). A declared-but-empty entry is still a broken manifest. A
   *collection* is `requires` + no entry (optionally carrying skills
   or a fragment — a curated bundle is a legitimate package).
-- `tabit extensions list` reads disk (marking disabled from
+- `tabit-core extensions list` reads disk (marking disabled from
   settings and static from the manifest); `uninstall` removes the
   directory — **v1 refuses while direct dependents remain, naming
   them** (one linear pass over the manifests; uninstall those

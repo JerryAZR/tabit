@@ -39,19 +39,16 @@ pub struct TabitApp {
     display: Display,
     backend: Option<Backend>,
     cwd: Option<PathBuf>,
-    /// The exact backend executable, handed over by the launcher.
-    tabit: Option<PathBuf>,
 }
 
 impl TabitApp {
-    pub fn new(cwd: Option<PathBuf>, tabit: Option<PathBuf>, ctx: egui::Context) -> Self {
+    pub fn new(cwd: Option<PathBuf>, ctx: egui::Context) -> Self {
         theme::apply(&ctx);
         let mut app = Self {
             state: GuiState::default(),
             display: Display::default(),
             backend: None,
             cwd,
-            tabit,
         };
         app.start_backend(ctx);
         app
@@ -62,16 +59,13 @@ impl TabitApp {
     /// reason and the reinstall hint.
     fn start_backend(&mut self, ctx: egui::Context) {
         let cwd = self.cwd.clone();
-        let tabit = self.tabit.clone();
-        match backend::spawn(cwd.as_deref(), tabit.as_deref(), move || {
-            ctx.request_repaint()
-        }) {
+        match backend::spawn(cwd.as_deref(), move || ctx.request_repaint()) {
             Ok(backend) => self.backend = Some(backend),
             Err(error) => {
                 self.state.phase = Phase::Exited {
                     clean: false,
                     reason: format!(
-                        "could not start the backend: {error}. If it persists, reinstall tabit"
+                        "could not start the backend: {error}. If it persists, reinstall tabit-core"
                     ),
                 };
             }

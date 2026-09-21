@@ -1,10 +1,9 @@
 //! The tabit GUI: one window, many sessions, one active view — one
-//! `tabit --json` child (the multi-session host).
+//! `tabit-core --json` child (the multi-session host).
 //!
-//! Users do not run this binary directly — the `tabit` launcher
-//! spawns it detached (`tabit [path]`, ROADMAP item 7). The optional
-//! argument is the project directory to run the backend in;
-//! `TABIT_BIN` overrides the backend binary for development.
+//! The optional argument is the project directory to run the backend
+//! in; the backend binary is resolved as this executable's sibling
+//! `tabit-core` (or the `TABIT_CORE_BIN` development override).
 
 #![cfg_attr(
     test,
@@ -27,7 +26,7 @@ mod theme;
 use std::path::PathBuf;
 
 fn main() -> eframe::Result {
-    let (cwd, tabit) = match parse_args() {
+    let cwd = match parse_args() {
         Ok(parsed) => parsed,
         Err(usage) => {
             eprintln!("tabit-gui: {usage}");
@@ -41,51 +40,34 @@ fn main() -> eframe::Result {
     eframe::run_native(
         "tabit",
         options,
-        Box::new(move |cc| {
-            Ok(Box::new(app::TabitApp::new(
-                cwd,
-                tabit,
-                cc.egui_ctx.clone(),
-            )))
-        }),
+        Box::new(move |cc| Ok(Box::new(app::TabitApp::new(cwd, cc.egui_ctx.clone())))),
     )
 }
 
-/// The GUI's own two flags: an optional project directory (positional)
-/// and `--tabit <path>` (the launcher's exact backend executable).
+/// The GUI's one flag: an optional project directory (positional).
 /// Strict — anything unexpected is a loud error, never a silent no-op.
-fn parse_args() -> Result<(Option<PathBuf>, Option<PathBuf>), String> {
+fn parse_args() -> Result<Option<PathBuf>, String> {
     parse_args_from(std::env::args().skip(1))
 }
 
-fn parse_args_from<I>(args: I) -> Result<(Option<PathBuf>, Option<PathBuf>), String>
+fn parse_args_from<I>(args: I) -> Result<Option<PathBuf>, String>
 where
     I: IntoIterator,
     I::Item: Into<String>,
 {
     let mut cwd = None;
-    let mut tabit = None;
-    let mut args = args.into_iter().map(Into::into);
-    while let Some(arg) = args.next() {
-        match arg.as_str() {
-            "--tabit" => {
-                let value = args.next().ok_or("--tabit needs a path")?;
-                tabit = Some(PathBuf::from(value));
-            }
-            other if other.starts_with('-') => {
-                return Err(format!("unknown flag `{other}`"));
-            }
-            positional => {
-                if cwd.is_some() {
-                    return Err(format!(
-                        "unexpected second argument `{positional}` — one project path"
-                    ));
-                }
-                cwd = Some(PathBuf::from(positional));
-            }
+    for arg in args.into_iter().map(Into::into) {
+        if arg.starts_with('-') {
+            return Err(format!("unknown flag `{arg}`"));
         }
+        if cwd.is_some() {
+            return Err(format!(
+                "unexpected second argument `{arg}` — one project path"
+            ));
+        }
+        cwd = Some(PathBuf::from(arg));
     }
-    Ok((cwd, tabit))
+    Ok(cwd)
 }
 
 fn egui_opts() -> egui::ViewportBuilder {
@@ -100,27 +82,19 @@ mod tests {
     use super::parse_args_from;
 
     #[test]
-    fn launcher_args_parse() {
-        let (cwd, tabit) =
-            parse_args_from(["--tabit", "C:/bin/tabit.exe", "."]).expect("valid launch");
+    fn project_path_parses_positionally() {
+        let cwd = parse_args_from(["."]).expect("valid launch");
         assert_eq!(cwd.as_deref(), Some(std::path::Path::new(".")));
-        assert_eq!(
-            tabit.as_deref(),
-            Some(std::path::Path::new("C:/bin/tabit.exe"))
-        );
-        // Dev mode: no launcher, no path — backend.rs resolves the binary.
-        let (cwd, tabit) = parse_args_from([""; 0]).expect("bare");
+        // Bare: no path, the backend runs in the GUI's cwd.
+        let cwd = parse_args_from([""; 0]).expect("bare");
         assert_eq!(cwd, None);
-        assert_eq!(tabit, None);
     }
 
     #[test]
     fn unexpected_args_are_loud_errors() {
-        // A missing --tabit value, unknown flags, and a second
-        // positional are user mistakes, not silent no-ops.
-        assert!(parse_args_from(["--tabit"]).is_err());
+        // Unknown flags and a second positional are user mistakes,
+        // not silent no-ops.
         assert!(parse_args_from(["--bogus"]).is_err());
         assert!(parse_args_from([".", "extra"]).is_err());
-        assert!(parse_args_from(["--tabit", "t", ".", "extra"]).is_err());
     }
 }

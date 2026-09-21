@@ -21,7 +21,7 @@ use std::process::Command;
 
 #[test]
 fn an_internal_error_crashes_with_code_101_and_a_stderr_report() {
-    let output = Command::new(env!("CARGO_BIN_EXE_tabit"))
+    let output = Command::new(env!("CARGO_BIN_EXE_tabit-core"))
         .env("TABIT_CRASH_TEST", "1")
         .output()
         .expect("spawn the tabit binary");

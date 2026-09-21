@@ -20,6 +20,19 @@ could observe — gets an entry here in the same commit.
 
 ## v15 (current)
 
+### behavior: the backend binary is `tabit-core` (2026-09)
+
+The headless backend was renamed: what frontends spawn is now
+`tabit-core --json`, not `tabit --json` — no `PROTOCOL_VERSION` bump
+(the wire is unchanged; only the executable's name moved). The
+backend's launcher mode is gone with the rename: no `tabit [path]`
+detach-spawn, no `--tabit <path>` handoff, no `TABIT_BIN` — a
+frontend resolves the backend itself, as a sibling binary
+(`tabit-core` installed next to the frontend) with `TABIT_CORE_BIN`
+as the development override. Out-of-tree frontends must update their
+spawn (the GUI's `backend.rs` is the reference); the `tabit`
+name is reserved for the frontend that ships primary.
+
 ### wire: the compaction envelope (2026-09)
 
 Protocol version 15, owner-ruled shape. The v7 per-pass bracket family

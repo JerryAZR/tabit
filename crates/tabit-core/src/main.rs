@@ -10,23 +10,22 @@
         clippy::unwrap_used
     )
 )]
-//! `tabit` — a minimal coding agent.
+//! `tabit-core` — the tabit backend: headless, no UI, no frontend
+//! references (frontends spawn this binary, never the other way).
 //!
-//! Two modes today: print mode (`-p`) — one prompt in, one outer loop
-//! out, events print as they happen — and JSON mode (`--json`) — the
-//! session protocol as LF-JSONL over stdio, for scripts and future
-//! frontends. The session persists project-locally, and the printed
-//! session path resumes the conversation later. Interactive TUI mode —
-//! the eventual default, like every other agent — is not implemented
-//! yet.
+//! Two modes: print mode (`-p`) — one prompt in, one outer loop out,
+//! events print as they happen — and JSON mode (`--json`) — the
+//! session protocol as LF-JSONL over stdio, for scripts and frontends.
+//! The session persists project-locally, and the printed session path
+//! resumes the conversation later.
 //!
 //! ```text
-//! tabit -p "list the rust files in this project"     # new session
-//! tabit --continue -p "now count lines in each"      # resume the newest
-//! tabit --session <path> -p "what did we conclude?"  # resume a specific one
-//! tabit --continue --rewind 1                        # rewind, then exit
-//! tabit --json                                       # protocol on stdio
-//! tabit --list                                       # show this project's sessions
+//! tabit-core -p "list the rust files in this project"     # new session
+//! tabit-core --continue -p "now count lines in each"      # resume the newest
+//! tabit-core --session <path> -p "what did we conclude?"  # resume a specific one
+//! tabit-core --continue --rewind 1                        # rewind, then exit
+//! tabit-core --json                                       # protocol on stdio
+//! tabit-core --list                                       # show this project's sessions
 //! ```
 
 mod extensions;
@@ -79,19 +78,20 @@ struct Args {
     install: Option<String>,
     /// `tabit extensions list`.
     extensions_list: bool,
-    /// `tabit extensions uninstall <name>`.
+    /// `tabit-core extensions uninstall <name>`.
     extensions_uninstall: Option<String>,
-    /// Positional project path — selects GUI mode (`tabit <path>`).
-    path: Option<PathBuf>,
 }
 
 const USAGE: &str = "\
-usage: tabit -p <PROMPT>                  print mode: one prompt, one run
-       tabit --continue -p <PROMPT>       resume this project's newest session
-       tabit --session <path> -p <PROMPT> resume a specific session file
-       tabit --continue --rewind <n>      rewind n user messages, then exit;
+usage: tabit-core -p <PROMPT>            print mode: one prompt, one run
+       tabit-core --continue -p <PROMPT> resume this project's newest session
+       tabit-core --session <path> -p <PROMPT>
+                                         resume a specific session file
+       tabit-core --continue --rewind <n>
+                                         rewind n user messages, then exit;
                                          add -p <PROMPT> to branch with it
-       tabit --json [session flags]       JSON protocol on stdio (scriptable)
+       tabit-core --json [session flags]
+                                         JSON protocol on stdio (scriptable)
                                          child role adds: --parent <id> (the
                                          spawning session), --parent-call <id>
                                          (its tool call), --tools <a,b,..>
@@ -107,27 +107,28 @@ usage: tabit -p <PROMPT>                  print mode: one prompt, one run
                                          <dir> selects the extension
                                          root (default
                                          ~/.tabit/extensions)
-       tabit install <npm:pkg|git:repo|path:dir>
+       tabit-core install <npm:pkg|git:repo|path:dir>
                                         install an extension package (npm as
                                         plain registry HTTP, no npm CLI; scoped
                                         names nest; missing requirements pull;
                                         $TABIT_NPM_REGISTRY overrides the
                                         registry; update = install again)
-       tabit extensions list             list installed extension packages
-       tabit extensions uninstall <name> remove one (refuses while other
+       tabit-core extensions list        list installed extension packages
+       tabit-core extensions uninstall <name>
+                                        remove one (refuses while other
                                         installed packages still require it)
-       tabit --list                      list this project's sessions
+       tabit-core --list                 list this project's sessions
 
-bare `tabit` or `tabit <path>` launches the GUI detached (vscode-style:
-the terminal is free immediately and the GUI survives its close). The
-GUI spawns one `tabit --json` backend and drives it over the protocol
-(many sessions live in one backend).
+a modeless invocation (bare `tabit-core`) is a usage error — this
+binary is the headless backend; the tabit frontend is a separate
+binary that spawns `tabit-core --json`.
 
 print mode: Esc aborts the running turn (line-buffered stdin: Esc then
 Enter). JSON mode: LF-JSONL frames — initialize, then message/abort
 commands in; stamped events out (see the tabit-session protocol module).
 
-       tabit --model <model-id|provider/model> select the model for this run
+       tabit-core --model <model-id|provider/model>
+                                       select the model for this run
                                        (default: the resumed session's model,
                                        then default_model in providers.toml,
                                        then the first configured model)
@@ -139,31 +140,32 @@ config: providers.toml / auth.toml / settings.toml under ~/.tabit
         settings.toml's [extensions] disabled list";
 
 /// What a parsed command line asks for. `-p` and `--rewind` both select
-/// print mode, `--json` selects JSON mode; interactive mode is the
-/// default once the TUI exists.
+/// print mode, `--json` selects JSON mode; no mode selected is a usage
+/// error (there is no default — the interactive frontend is a separate
+/// binary).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum Mode {
     List,
     Print,
     Json,
-    Gui,
     Install,
     Extensions,
 }
 
-fn mode_of(args: &Args) -> Mode {
+/// `None` = nothing on the line selects a mode.
+fn mode_of(args: &Args) -> Option<Mode> {
     if args.install.is_some() {
-        Mode::Install
+        Some(Mode::Install)
     } else if args.extensions_list || args.extensions_uninstall.is_some() {
-        Mode::Extensions
+        Some(Mode::Extensions)
     } else if args.list {
-        Mode::List
+        Some(Mode::List)
     } else if args.json {
-        Mode::Json
+        Some(Mode::Json)
     } else if args.print_prompt.is_some() || args.rewind.is_some() {
-        Mode::Print
+        Some(Mode::Print)
     } else {
-        Mode::Gui
+        None
     }
 }
 
@@ -173,7 +175,6 @@ impl Mode {
             Mode::List => "list",
             Mode::Print => "print",
             Mode::Json => "JSON",
-            Mode::Gui => "GUI",
             Mode::Install => "install",
             Mode::Extensions => "extensions",
         }
@@ -186,7 +187,11 @@ impl Mode {
 /// checks (which kept missing combinations: `--model` with a path,
 /// `--session` alone, `--list --continue`, …).
 fn validate_mode(args: &Args) -> Result<Mode, String> {
-    let mode = mode_of(args);
+    let Some(mode) = mode_of(args) else {
+        return Err(format!(
+            "nothing to do — pass -p for print mode, --json for the protocol edge, or a subcommand; this binary is the headless backend, the frontend is separate\n{USAGE}"
+        ));
+    };
     let present = [
         args.install.is_some().then_some("install <source>"),
         args.extensions_list.then_some("extensions list"),
@@ -208,7 +213,6 @@ fn validate_mode(args: &Args) -> Result<Mode, String> {
         args.ephemeral.then_some("--ephemeral"),
         args.preamble.is_some().then_some("--preamble"),
         args.extensions.is_some().then_some("--extensions"),
-        args.path.is_some().then_some("<path>"),
     ]
     .into_iter()
     .flatten()
@@ -238,7 +242,6 @@ fn validate_mode(args: &Args) -> Result<Mode, String> {
             "--max-turns",
             "--preamble",
         ],
-        Mode::Gui => &["<path>"],
         Mode::Install => &["install <source>"],
         Mode::Extensions => &["extensions list", "extensions uninstall <name>"],
     };
@@ -281,7 +284,6 @@ where
         install: None,
         extensions_list: false,
         extensions_uninstall: None,
-        path: None,
     };
     let mut it = args;
     while let Some(arg) = it.next() {
@@ -396,12 +398,9 @@ where
                 return Err(format!("unknown flag `{other}`\n{USAGE}"));
             }
             positional => {
-                if parsed.path.is_some() {
-                    return Err(format!(
-                        "unexpected second argument `{positional}` — GUI mode takes one path\n{USAGE}"
-                    ));
-                }
-                parsed.path = Some(PathBuf::from(positional));
+                return Err(format!(
+                    "unexpected argument `{positional}` — this binary takes flags, not paths (the frontend is separate)\n{USAGE}"
+                ));
             }
         }
     }
@@ -615,12 +614,13 @@ fn seed_skills_catalog(extension_skills: tabit_session::skills::Skills) {
     }
 }
 
-/// The tabit executable subprocess children spawn: this very binary
-/// (the pi self-spawn pattern). `current_exe`, no exceptions — an
-/// inherited `TABIT_BIN` (the frontend's dev override for finding the
-/// backend) must not diverge children from the running image.
+/// The tabit-core executable subprocess children spawn: this very
+/// binary (the pi self-spawn pattern). `current_exe`, no exceptions —
+/// an inherited `TABIT_CORE_BIN` (a frontend's dev override for
+/// finding the backend) must not diverge children from the running
+/// image.
 fn tabit_exe() -> Result<PathBuf, String> {
-    std::env::current_exe().map_err(|e| format!("cannot resolve the tabit executable: {e}"))
+    std::env::current_exe().map_err(|e| format!("cannot resolve the tabit-core executable: {e}"))
 }
 
 /// The invocation's tool filter (`--tools` allow, `--without` deny),
@@ -827,81 +827,6 @@ fn core_sets(
     Ok((children, parent))
 }
 
-/// The `tabit-gui` executable: explicit override, else the sibling of
-/// this binary (cargo installs workspace binaries side by side).
-fn gui_bin() -> Option<PathBuf> {
-    if let Ok(path) = std::env::var("TABIT_GUI_BIN") {
-        return Some(PathBuf::from(path));
-    }
-    std::env::current_exe()
-        .ok()
-        .and_then(|exe| {
-            exe.parent()
-                .map(|dir| dir.join(format!("tabit-gui{}", std::env::consts::EXE_SUFFIX)))
-        })
-        .filter(|path| path.is_file())
-}
-
-/// Launch the GUI detached (vscode-style: it survives this terminal)
-/// and return immediately. Stderr goes to `<project>/.tabit/gui.log`
-/// so GUI crashes are diagnosable after the fact.
-fn launch_gui(path: Option<&std::path::Path>) -> Result<i32, String> {
-    use std::process::{Command, Stdio};
-    let bin = gui_bin().ok_or_else(|| {
-        "the tabit-gui executable was not found next to tabit; set TABIT_GUI_BIN or install both binaries together"
-            .to_string()
-    })?;
-    let cwd = match path {
-        Some(path) => path.to_path_buf(),
-        None => std::env::current_dir().map_err(|e| e.to_string())?,
-    };
-    let log_dir = cwd.join(".tabit");
-    std::fs::create_dir_all(&log_dir).map_err(|e| e.to_string())?;
-    let log = std::fs::OpenOptions::new()
-        .create(true)
-        .append(true)
-        .open(log_dir.join("gui.log"))
-        .map_err(|e| e.to_string())?;
-
-    // The GUI never guesses where the backend is: hand it the exact
-    // executable that launched it ("can't find tabit" is not a valid
-    // failure mode in the supported flow).
-    let tabit_exe =
-        std::env::current_exe().map_err(|e| format!("cannot resolve the tabit executable: {e}"))?;
-    let mut command = Command::new(bin);
-    command
-        .arg("--tabit")
-        .arg(&tabit_exe)
-        .current_dir(&cwd)
-        .stdin(Stdio::null())
-        .stdout(Stdio::null())
-        .stderr(Stdio::from(log));
-    detach(&mut command);
-    command
-        .spawn()
-        .map_err(|e| format!("could not start the GUI: {e}"))?;
-    println!("opening tabit in {} …", cwd.display());
-    Ok(0)
-}
-
-/// Put the child in its own process group so closing this terminal
-/// (SIGHUP to the foreground group on Unix, the console job on
-/// Windows) cannot reach it — the survive-the-terminal trick.
-#[cfg(windows)]
-fn detach(command: &mut std::process::Command) {
-    use std::os::windows::process::CommandExt;
-    const CREATE_NEW_PROCESS_GROUP: u32 = 0x0000_0200;
-    const DETACHED_PROCESS: u32 = 0x0000_0008;
-    command.creation_flags(CREATE_NEW_PROCESS_GROUP | DETACHED_PROCESS);
-}
-
-#[cfg(unix)]
-fn detach(command: &mut std::process::Command) {
-    use std::os::unix::process::CommandExt;
-    // 0 = a fresh process group.
-    command.process_group(0);
-}
-
 /// The first-run setup guide: a fresh install has no config, which is
 /// normal — the failure message must teach, not scare.
 fn setup_guide(detail: &str) -> String {
@@ -953,19 +878,13 @@ fn json_reject(reason: String) -> Result<i32, String> {
 
 fn run() -> Result<i32, String> {
     let args = parse_args()?;
-    if mode_of(&args) == Mode::Gui {
-        // The GUI loads its own config in its own process; the
-        // launcher needs nothing but the binary.
-        return launch_gui(args.path.as_deref());
-    }
     let config = TabitConfig::load_default().map_err(|e| e.to_string());
     let auth = AuthConfig::load_default().map_err(|e| e.to_string());
 
-    match mode_of(&args) {
-        // Unreachable: GUI returns before the config load above. Loud
-        // rather than silent.
-        #[allow(clippy::unreachable)]
-        Mode::Gui => unreachable!("GUI mode handled before config load"),
+    // Sanctioned crash (AGENTS.md doctrine): parse rejects modeless
+    // invocations, so the match always has a mode here.
+    #[allow(clippy::expect_used)]
+    match mode_of(&args).expect("parse validated a mode") {
         Mode::List => {
             let store = SessionStore::project_default();
             list_sessions(&store)?;
@@ -1819,7 +1738,6 @@ mod tests {
             install: None,
             extensions_list: false,
             extensions_uninstall: None,
-            path: None,
         }
     }
 
@@ -1882,18 +1800,18 @@ mod tests {
     }
 
     #[test]
-    fn a_set_tabit_bin_never_overrides_self_reference() {
+    fn a_set_tabit_core_bin_never_overrides_self_reference() {
         // Pins the ruling: backend self-reference is current_exe, no
-        // exceptions — a frontend's TABIT_BIN (stale or not) must not
-        // diverge subagent children from the running image.
+        // exceptions — a frontend's TABIT_CORE_BIN (stale or not) must
+        // not diverge subagent children from the running image.
         // SAFETY: process-global state; no other test in this binary
         // reads the variable, and it is removed before the assertion.
         unsafe {
-            std::env::set_var("TABIT_BIN", "a-stale-override");
+            std::env::set_var("TABIT_CORE_BIN", "a-stale-override");
         }
         let resolved = tabit_exe().expect("current_exe resolves in a test binary");
         unsafe {
-            std::env::remove_var("TABIT_BIN");
+            std::env::remove_var("TABIT_CORE_BIN");
         }
         assert_eq!(
             resolved,
@@ -1938,28 +1856,27 @@ mod tests {
         assert!(args(&["--rewind", "x"]).is_err());
         let unknown = args(&["--bogus"]).expect_err("unknown flag");
         assert!(unknown.contains("--bogus"), "{unknown}");
-        let gui = args(&["hello"]).expect("a positional path parses");
-        assert_eq!(gui.path.as_deref(), Some(std::path::Path::new("hello")));
-        let second = args(&["hello", "world"]).expect_err("two positionals");
-        assert!(second.contains("second argument"), "{second}");
+        // Positionals are not paths anymore — the frontend is separate.
+        let positional = args(&["hello"]).expect_err("a positional is a usage error");
+        assert!(positional.contains("unexpected argument"), "{positional}");
     }
 
     #[test]
     fn print_mode_is_selected_by_prompt_or_rewind() {
-        assert_eq!(mode_of(&args(&[]).expect("bare")), Mode::Gui);
-        assert_eq!(
-            mode_of(&args(&["."]).expect("path")),
-            Mode::Gui,
-            "a positional path selects GUI mode"
+        assert!(
+            args(&[]).is_err(),
+            "a modeless invocation is a usage error, not a default mode"
         );
-        assert!(args(&["a", "b"]).is_err(), "two paths are rejected");
-        assert_eq!(mode_of(&args(&["-p", "hi"]).expect("print")), Mode::Print);
+        assert_eq!(
+            mode_of(&args(&["-p", "hi"]).expect("print")),
+            Some(Mode::Print)
+        );
         assert_eq!(
             mode_of(&args(&["--rewind", "1"]).expect("rewind")),
-            Mode::Print
+            Some(Mode::Print)
         );
-        assert_eq!(mode_of(&args(&["--json"]).expect("json")), Mode::Json);
-        assert_eq!(mode_of(&args(&["--list"]).expect("list")), Mode::List);
+        assert_eq!(mode_of(&args(&["--json"]).expect("json")), Some(Mode::Json));
+        assert_eq!(mode_of(&args(&["--list"]).expect("list")), Some(Mode::List));
     }
 
     #[test]
@@ -1967,37 +1884,32 @@ mod tests {
         // One allow-list per mode, so every combination class is covered,
         // including ones the old per-pair checks missed.
         let cases: &[&[&str]] = &[
-            &[".", "-p", "hi"],       // path × print
-            &[".", "--json"],         // path × json
-            &[".", "--list"],         // path × list
-            &[".", "--model", "p/m"], // path × model (missed before)
-            &[".", "--continue"],     // path × continue (missed before)
-            &[".", "--session", "s"], // path × session (missed before)
-            &["--json", "-p", "hi"],  // json × print
+            &["--json", "-p", "hi"], // json × print
             &["--json", "--rewind", "1"],
             &["--list", "-p", "hi"], // list is exclusive (was a silent win)
             &["--list", "--continue"],
-            &["--session", "s"], // session alone is modeless
         ];
         for case in cases {
             let error = args(case).expect_err("foreign flags must not parse");
             assert!(error.contains("do not combine"), "case {case:?}: {error}");
         }
 
+        // Session flags with no mode select nothing — the modeless
+        // usage error (there is no default mode anymore).
+        let modeless = args(&["--session", "s"]).expect_err("session alone is modeless");
+        assert!(modeless.contains("nothing to do"), "{modeless}");
+
         // The shared flags still combine within print and json modes.
         args(&["--continue", "--session", "s", "--model", "p/m", "-p", "hi"])
             .expect("print accepts the shared flags");
         args(&["--continue", "--json", "--max-turns", "5"]).expect("json accepts the shared flags");
-        // GUI mode takes only the optional path.
-        args(&[]).expect("bare tabit is GUI mode");
-        args(&["."]).expect("a path alone is GUI mode");
     }
 
     #[test]
     fn json_mode_parses_and_print_conflicts_at_parse_time() {
         let parsed = args(&["--continue", "--json"]).expect("valid");
         assert!(parsed.json && parsed.continue_newest);
-        assert_eq!(mode_of(&parsed), Mode::Json);
+        assert_eq!(mode_of(&parsed), Some(Mode::Json));
 
         // json × print is a parse error now (validate_mode), not a
         // run-time dispatch check.
@@ -2211,11 +2123,11 @@ mod tests {
     fn install_subcommands_parse_exclusively() {
         let parsed = args(&["install", "npm:thing"]).expect("parses");
         assert_eq!(parsed.install.as_deref(), Some("npm:thing"));
-        assert_eq!(mode_of(&parsed), Mode::Install);
+        assert_eq!(mode_of(&parsed), Some(Mode::Install));
 
         let parsed = args(&["extensions", "list"]).expect("parses");
         assert!(parsed.extensions_list);
-        assert_eq!(mode_of(&parsed), Mode::Extensions);
+        assert_eq!(mode_of(&parsed), Some(Mode::Extensions));
 
         let parsed = args(&["extensions", "uninstall", "thing"]).expect("parses");
         assert_eq!(parsed.extensions_uninstall.as_deref(), Some("thing"));

@@ -126,7 +126,7 @@ struct Backend {
 }
 
 fn spawn_backend(stage: &Stage, extra_env: &[(&str, String)]) -> Backend {
-    let mut command = Command::new(env!("CARGO_BIN_EXE_tabit"));
+    let mut command = Command::new(env!("CARGO_BIN_EXE_tabit-core"));
     command
         .arg("--json")
         .arg("--ephemeral")
@@ -664,7 +664,7 @@ fn install_path_then_boot_serves_the_package() {
     // The install: redirected home, so the default root is ours.
     let home = dir.join("home");
     std::fs::create_dir_all(&home).expect("home");
-    let install = std::process::Command::new(env!("CARGO_BIN_EXE_tabit"))
+    let install = std::process::Command::new(env!("CARGO_BIN_EXE_tabit-core"))
         .arg("install")
         .arg(format!("path:{}", source.display()))
         .env("USERPROFILE", &home)
@@ -713,7 +713,7 @@ fn install_path_then_boot_serves_the_package() {
 /// The raw backend spawn the journey test needs: an arbitrary root
 /// and config, not the stage helper's own.
 fn spawn_raw(work: &Path, extensions_root: &Path, config: &Path, home: &Path) -> Backend {
-    let mut command = Command::new(env!("CARGO_BIN_EXE_tabit"));
+    let mut command = Command::new(env!("CARGO_BIN_EXE_tabit-core"));
     command
         .arg("--json")
         .arg("--ephemeral")

@@ -1,21 +1,21 @@
 [package]
-name = "tabit"
+name = "tabit-core"
 version.workspace = true
 edition.workspace = true
 license = "MIT"
-description = "Tabit: a minimal coding agent (print mode)."
+description = "Tabit: the headless backend (print mode + the JSON protocol edge)."
 
 [lints]
 workspace = true
 
 [[bin]]
-name = "tabit"
+name = "tabit-core"
 path = "src/main.rs"
 
 [dependencies]
 rig-agent = { path = "../rig-agent", version = "0.41.0", default-features = false }
 # rustls must be named here: with default-features off and no unifying
-# build, `-p tabit` ships reqwest without any TLS stack and every https
+# build, `-p tabit-core` ships reqwest without any TLS stack and every https
 # provider request dies in hyper-util with "invalid URL, scheme is not http".
 rig-core = { path = "../rig-core", version = "0.41.0", default-features = false, features = ["rustls"] }
 tabit-config = { path = "../tabit-config", version = "0.41.0" }

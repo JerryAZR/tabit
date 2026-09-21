@@ -133,7 +133,7 @@ id = "m"
         tools: Vec::new(),
         max_turns: 8,
         router,
-        exe: PathBuf::from(env!("CARGO_BIN_EXE_tabit")),
+        exe: PathBuf::from(env!("CARGO_BIN_EXE_tabit-core")),
         // Children boot their own hosts — pin an empty root so the
         // suite stays hermetic against the machine's real installs.
         extensions: cwd.join(".tabit/no-extensions"),
@@ -509,7 +509,7 @@ async fn a_preamble_override_replaces_the_preamble_and_appends_the_context() {
             tools: Vec::new(),
             max_turns: 8,
             router: ChildRouter::shared(),
-            exe: PathBuf::from(env!("CARGO_BIN_EXE_tabit")),
+            exe: PathBuf::from(env!("CARGO_BIN_EXE_tabit-core")),
             extensions: child_cwd.join(".tabit/no-extensions"),
         }),
         "preamble-test-parent".to_string(),
@@ -690,7 +690,7 @@ id = "m"
         tools: Vec::new(),
         max_turns: 8,
         router: router.clone(),
-        exe: PathBuf::from(env!("CARGO_BIN_EXE_tabit")),
+        exe: PathBuf::from(env!("CARGO_BIN_EXE_tabit-core")),
         extensions: ext_root.clone(),
     });
     let turns = vec![
@@ -767,7 +767,7 @@ id = "m"
             tools: Vec::new(),
             max_turns: 8,
             router: ChildRouter::shared(),
-            exe: PathBuf::from(env!("CARGO_BIN_EXE_tabit")),
+            exe: PathBuf::from(env!("CARGO_BIN_EXE_tabit-core")),
             extensions: ext_root,
         }),
         parent_id.clone(),

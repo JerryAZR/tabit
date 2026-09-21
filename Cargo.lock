@@ -4732,7 +4732,20 @@ dependencies = [
 ]
 
 [[package]]
-name = "tabit"
+name = "tabit-config"
+version = "0.41.0"
+dependencies = [
+ "rig-core",
+ "serde",
+ "serde_json",
+ "thiserror 2.0.20",
+ "tokio",
+ "toml",
+ "url",
+]
+
+[[package]]
+name = "tabit-core"
 version = "0.41.0"
 dependencies = [
  "futures",
@@ -4749,19 +4762,6 @@ dependencies = [
  "tabit-tools",
  "tokio",
  "tokio-util",
-]
-
-[[package]]
-name = "tabit-config"
-version = "0.41.0"
-dependencies = [
- "rig-core",
- "serde",
- "serde_json",
- "thiserror 2.0.20",
- "tokio",
- "toml",
- "url",
 ]
 
 [[package]]

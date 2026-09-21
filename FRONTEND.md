@@ -35,7 +35,7 @@ into the invocation envelope — `compaction_begin` → `compaction_step` × N �
 `compaction_end`/`compaction_failed`, with `compaction_retried` for discarded
 attempts. Each version landed as one
 protocol-version bump with no compatibility period; always check the
-ack's `protocol_version`. (`tabit --list` prints a human table —
+ack's `protocol_version`. (`tabit-core --list` prints a human table —
 there is no JSON listing edge.)
 
 ## 1. Architecture: two processes, one pipe
@@ -43,7 +43,7 @@ there is no JSON listing edge.)
 You spawn the backend; you never link it as a library.
 
 ```
-tabit --json [--continue | --session <path>] [--model <ref>]
+tabit-core --json [--continue | --session <path>] [--model <ref>]
 ```
 
 - **stdout** carries protocol lines to you; **stdin** takes protocol
@@ -62,10 +62,10 @@ tabit --json [--continue | --session <path>] [--model <ref>]
   project-root discovery (do not assume a git repo). Spawn the
   backend in the project directory. `--model <ref>` is `provider/model` or a bare model id
   when unambiguous; `--max-turns <n>` also exists (and applies to
-  sessions created later in the same process). The `tabit` launcher
-  hands the GUI its exact executable via `--tabit <path>` — "can't
-  find the backend" is not a failure mode in the supported flow
-  (`TABIT_BIN` remains a development override).
+  sessions created later in the same process). The backend binary is
+  `tabit-core` — installed alongside the frontend (a sibling binary),
+  so "can't find the backend" is not a failure mode in the supported
+  flow (`TABIT_CORE_BIN` remains a development override).
 - **Local or remote, same edge.** Locally the backend is a child
   process; remotely it is the same child spawned on the far side of
   `ssh` with stdio forwarded. Nothing in the protocol distinguishes
@@ -614,7 +614,7 @@ interaction is the tool result — the answer or denial the model saw.
   catalog refresh: `sessions_available` is announced once at startup,
   sessions created in-band announce themselves (`session_opened`),
   and sessions appearing on disk from elsewhere need a restart
-  (`tabit --list`, a human table, exists for CLI inspection).
+  (`tabit-core --list`, a human table, exists for CLI inspection).
 - **Event timestamps: the brackets carry them (v10).** `turn_started`/
   `turn_committed` and the run terminals carry Unix-ms stamps (§6);
   other events carry none — entries keep their wall-clock times in the

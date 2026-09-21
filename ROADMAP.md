@@ -861,12 +861,12 @@ assistant.
 
 ### 7. CLI / interface layer
 
-- **Print mode shipped** (`crates/tabit`): one prompt in, live events out,
+- **Print mode shipped** (`crates/tabit-core`): one prompt in, live events out,
   project-local sessions, `-p <PROMPT>` / `--continue` /
   `--session <path>` / `--list` / `--rewind <n>`, `--model provider/model`
-  or `default_model` in providers.toml. The GUI is the default mode
-  (shipped — bare `tabit [path]` launches it);
-  `-p` and `--rewind` opt out into print mode.
+  or `default_model` in providers.toml. (The GUI-as-default clause was
+  superseded 2026-09 by the backend rename: `tabit-core` is headless,
+  the frontend is a separate binary, and the launcher mode is gone.)
 - The protocol's design record — locked decisions plus every open
   flag with options — lives in PROTOCOL.md; flags are resolved in
   discussion order there.
@@ -932,7 +932,7 @@ assistant.
   terminal frontend found its own non-ratatui track (the TUI ruling
   below). The GUI is an egui app (eframe shell, egui style theming)
   speaking the item-7 protocol over the existing stdio edge: it spawns
-  one `tabit --json` child process — the multi-session host (PROTOCOL.md
+  one `tabit-core --json` child process — the multi-session host (PROTOCOL.md
   v3): sessions are created, opened, and switched by channel commands,
   never by process tricks (the GUI-respawn interim is deleted). Process
   separation is the point, twice over: internal errors panic by doctrine,
@@ -950,7 +950,7 @@ assistant.
   and overlays are ours on egui layout primitives.
   **Build order** (the GUI is the owner's feedback instrument, so it
   starts before the v2 backend completes): `tabit-protocol` extraction
-  → walking-skeleton GUI on the shipped v1 wire (spawn `tabit --json`,
+  → walking-skeleton GUI on the shipped v1 wire (spawn `tabit-core --json`,
   transcript, input, steer, abort, crash handling) → v2 backend slices
   land behind it, the GUI growing each slice (ids → turn anchors,
   replay → restart-safe transcript, checkout → rewind buttons, model
@@ -999,7 +999,7 @@ assistant.
   the terminal frontend rides the JS ecosystem instead: **the omp
   fork of pi-tui (`@oh-my-pi/pi-tui`, MIT — Mario Zechner's own
   next-gen line, not a third-party fork) under Bun**, spawning
-  `tabit --json` as a child process (the stdio edge GUI, print, and
+  `tabit-core --json` as a child process (the stdio edge GUI, print, and
   JSON mode already ride — zero backend changes), distributed via
   the npm registry as per-platform optional packages (esbuild
   pattern; no postinstall) carrying a Bun-compiled standalone TUI
@@ -1024,16 +1024,22 @@ assistant.
   text ceiling proves too low for the transcript quality wanted. The
   reducer stays framework-free and pure, so a future switch rewrites
   only the view layer.
-- **Entry-point architecture (ruled): `tabit` is a launcher, the GUI
-  spawns the core.** `tabit [path]` spawns `tabit-gui <path>`
+- **Entry-point architecture (ruled; superseded 2026-09 by the
+  backend rename): `tabit` is a launcher, the GUI spawns the core.**
+  `tabit [path]` spawns `tabit-gui <path>`
   detached — own process group on Unix, detach flags on Windows, the
   vscode survive-the-terminal trick — and exits immediately; `-p` /
   `--json` keep their foreground modes; bare `tabit` stops erroring
-  and opens the GUI. Per window the GUI owns one `tabit --json` child
+  and opens the GUI. Per window the GUI owns one `tabit-core --json` child
   per session: crash isolation follows the panic doctrine, and local
   and ssh spawning are the same shape. Singleton handoff (vscode's
   running-instance IPC) deliberately deferred — each launch is an
-  independent window.
+  independent window. (The 2026-09 amendment: the backend is
+  `tabit-core`, carries no launcher and no frontend references —
+  spawning runs frontend → backend only, matching the crate
+  dependency rule. The detach story waits for the GUI's revival; the
+  `tabit` name is reserved for the frontend that ships primary — the
+  TUI candidates lead.)
 - **GUI design contract (ruled for the polish pass).** Reducer/view
   separation is strict: the reducer is pure, framework-free, and
   unit-tested; the egui pass is a projection containing no business
@@ -1090,7 +1096,7 @@ attribution demo) with them; the host-service envelope
 (`service_request`/`service_response`, the ask folded in as verb
 zero; `model_prompt` billed per extension) in `rig-agent`'s
 `HostServices` + tabit-session's capability; proxy+hook assembly and the
-`extensions_available` catalog in the `tabit --json` backend).** The
+`extensions_available` catalog in the `tabit-core --json` backend).** The
 shape:
 
 - **The substrate: subprocess executables over a frozen JSONL
@@ -1116,7 +1122,7 @@ shape:
   extension-replaces-core must be reported by the backend (how
   loudly is the frontend's call); extension-vs-extension collisions
   refuse the newcomer, naming the incumbent.
-- **Install**: `tabit install npm:<pkg> | git:<repo> | path:<dir>` —
+- **Install**: `tabit-core install npm:<pkg> | git:<repo> | path:<dir>` —
   npm as plain registry HTTP (no npm CLI, no embedded runtime, no
   registry of our own), git via `git`, pickup at next backend start
   (byte-stability law). No language list: the protocol is the
@@ -1250,7 +1256,7 @@ shape:
    Deferred slice: the run-end hook point (`ENGINE.md` amendment,
    pause points are design events) — autotitle rides `tool_result`
    until it lands.
-6. **Install & management** — *shipped* — `tabit install
+6. **Install & management** — *shipped* — `tabit-core install
    npm:/git:/path:` in `crates/tabit-ext-install` (npm as plain
    registry HTTP against `$TABIT_NPM_REGISTRY`, offline e2e against
    a fake registry serving real tarball fixtures; git `clone --depth

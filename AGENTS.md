@@ -87,18 +87,22 @@ Current workspace layout:
   provider relay speaking LM Studio's native REST API behind a
   `providers.toml` fragment; `autotitle-ext` — the `model_prompt`
   attribution demo) as its bins
-- `crates/tabit-gui` — the egui frontend (`tabit-gui` binary; the
-  `tabit` launcher detach-spawns it; reducer/view contract in ROADMAP
-  item 7). Its `CHANGELOG.md` is the frontend protocol's changelog —
+- `crates/tabit-gui` — the egui frontend (`tabit-gui` binary; spawns
+  a `tabit-core --json` child, resolved as its sibling binary or via
+  `TABIT_CORE_BIN`; reducer/view contract in ROADMAP item 7).
+  Its `CHANGELOG.md` is the frontend protocol's changelog —
   every `PROTOCOL_VERSION` bump or frontend-observable change (wire
   or behavior) gets an entry in the same commit; FRONTEND.md stays
   the frozen mechanics contract, TOOLS.md its companion for the
   built-in tool `details` shapes and interaction templates)
-- `crates/tabit` — the `tabit` binary: bare `tabit [path]` is the
-  launcher mode (detach-spawns the GUI and exits — the supported
-  entry point), print mode (`-p <PROMPT>`, `--rewind <n>`) and JSON
+- `crates/tabit-core` — the backend binary (`tabit-core`): headless,
+  no UI and no frontend references — frontends spawn it, never the
+  other way. Print mode (`-p <PROMPT>`, `--rewind <n>`) and JSON
   mode (`--json` — the stdio protocol edge) over the session host
-  (create / `--continue` / `--session <path>` / `--list`)
+  (create / `--continue` / `--session <path>` / `--list`). The
+  `tabit` name is reserved for the frontend that ships primary
+  (2026-09: the TUI candidates outpace the GUI; no in-repo binary
+  carries it yet)
 
 ## Design rules
 
