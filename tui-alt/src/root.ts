@@ -173,6 +173,7 @@ export class AltRoot implements ModeView {
 	setSkills(skills: SkillInfo[]): void {
 		this.#attachProvider([
 			{ name: "compact", description: `${TYPE_COLUMN.command} · summarize the context now` },
+			{ name: "help", description: `${TYPE_COLUMN.command} · list keys and commands` },
 			{ name: "exit", description: `${TYPE_COLUMN.command} · quit the TUI (shuts the backend down)` },
 			{ name: "quit", description: `${TYPE_COLUMN.command} · quit the TUI (shuts the backend down)` },
 			...skills.map(skill => ({
