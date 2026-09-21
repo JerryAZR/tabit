@@ -656,7 +656,7 @@ error rather than skipping, reachable or not.)
   tabit-protocol's round-trip tests; the backend-binary resolution
   (sibling lookup) likewise needs a desktop session.
 
-## Interaction (the ask round-trip; 2026-08, remediation pass 2026-08; ask_user deleted + the gate moved to `gate-ext` 2026-09)
+## Interaction (the ask round-trip; 2026-08, remediation pass 2026-08; ask_user deleted 2026-09, the gate moved to `gate-ext` then superseded by the built-in `tabit-gate` the same month)
 
 - `tabit-session/src/interaction.rs` — **covered**: routing, total
   no-op, retraction, weak-sender dismissal, session memory, prompt
@@ -665,10 +665,13 @@ error rather than skipping, reachable or not.)
   two concurrent cards answered in reverse order, frontend death
   incl. the durable abort-time synthesized tail).
 - The permission gate — the policy's home moved out of core with the
-  extension system (`permission.rs` deleted; `gate-ext` in
-  `crates/tabit-ext-sdk/src/bin/` carries the same decision table,
-  e2e-proven over the real frontend wire — see the extensions
-  sections below).
+  extension system (`permission.rs` deleted) and returned 2026-09 as
+  the built-in `tabit-gate` crate (pi-sanity's policy; its own test
+  corpus is the port plan). The two gate-ext e2e vehicle tests (the
+  SDK contract's session-memory walk and the backend wire test's
+  card-denial round-trip) were deleted with the package — **deferred
+  gap**: the extension SDK's reference consumer restores both when it
+  is developed.
 - `tabit/bin print-mode stdin reader` (`main.rs` watcher thread,
   card rendering incl. the FIFO card queue) — **JUSTIFIED**: owns real
   stdin; `parse_answer` is unit-covered (numbered buttons + reason,

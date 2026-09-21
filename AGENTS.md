@@ -60,6 +60,13 @@ Current workspace layout:
   contextual `#[rig_tool]`s (they read the session cwd and run token
   from the per-run `ToolContext`), erasable to DynamicTools (native
   only)
+- `crates/tabit-gate` — the default permission gate (being ported
+  2026-09): pi-sanity's heuristic policy (static checks,
+  allow-when-unsure — a careless-mistake catcher, never a security
+  boundary) as a pure core crate; brush-parser replaces the unbash
+  parser. The `AgentHook` member, the ask, and the settings opt-out
+  assemble in the `tabit-core` binary — `tabit-session` stays a
+  mechanism with no policy
 - `crates/tabit-ext-install` — extension installation (ROADMAP item
   9, task 6): npm (plain registry HTTP)/git/path sources,
   stage-validate-place installs, name-only `requires` pulls, list,
@@ -82,11 +89,12 @@ Current workspace layout:
   to bodies, result serialization, ask lifts) so authors write tool
   bodies only; hand-rolled frames sharing no code with the host —
   the protocol doc's reference consumer. Ships the example
-  extensions (`echo-ext`, `shadow-ext`, the clash pair, `gate-ext` —
-  the permission gate, moved out of core; `lmstudio-ext` — the
-  provider relay speaking LM Studio's native REST API behind a
+  extensions (`echo-ext`, `shadow-ext`, the clash pair, `lmstudio-ext` —
+  the provider relay speaking LM Studio's native REST API behind a
   `providers.toml` fragment; `autotitle-ext` — the `model_prompt`
-  attribution demo) as its bins
+  attribution demo) as its bins — `gate-ext` was deleted 2026-09
+  (the gate returns as the built-in `tabit-gate`; examples will ride
+  the extension SDK when it is developed)
 - `crates/tabit-gui` — the egui frontend (`tabit-gui` binary; spawns
   a `tabit-core --json` child, resolved as its sibling binary or via
   `TABIT_CORE_BIN`; reducer/view contract in ROADMAP item 7).

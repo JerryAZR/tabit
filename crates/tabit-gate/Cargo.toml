@@ -1,0 +1,17 @@
+[package]
+name = "tabit-gate"
+version.workspace = true
+edition.workspace = true
+license = "MIT"
+description = "The default permission gate: pi-sanity's policy ported to Rust (static, heuristic, allow-when-unsure)."
+
+[lints]
+workspace = true
+
+[dependencies]
+brush-parser = "0.4"
+serde = { workspace = true }
+serde_json = { workspace = true }
+
+[dev-dependencies]
+tempfile = "3"

@@ -470,15 +470,21 @@ executed 2026-09, checklist task 3)
 The core shipped a basic permission gate only to test the
 interaction path — an ask-set of exactly `bash`, "Always allow" as
 session memory. With the hook lane landed, the gate **moved out of
-the core into `gate-ext`** (`crates/tabit-ext-sdk/src/bin/gate.rs`):
-the exact policy over the same seam, `permission.rs` deleted, no
-core code knows a permission exists. The hub, the wire shapes, and
-the capability are the permanent infrastructure the package
-inherits. The package's "Always allow" memory keys on the hook
-payload's session identity (one gate process serves every session —
-without the key, one session's grant would leak into another); the
-session-vs-user durability split stays deferred (v1 is session-only,
-as the core gate was).
+the core into `gate-ext`**: the exact policy over the same seam,
+`permission.rs` deleted, no core code knows a permission exists. The
+hub, the wire shapes, and the capability are the permanent
+infrastructure the package inherited. The package's "Always allow"
+memory keyed on the hook payload's session identity (one gate
+process serves every session — without the key, one session's grant
+would leak into another); the session-vs-user durability split
+stayed deferred (v1 is session-only, as the core gate was).
+(Superseded 2026-09: the gate returned as a **built-in, in-process
+hook** — the `tabit-gate` crate carrying pi-sanity's heuristic
+policy, assembled by the `tabit-core` binary — and `gate-ext` was
+deleted: a default safety feature must not fail open with a dead
+extension process, and example extensions will ride the extension
+SDK when it is developed. The move-out ruling's machinery — the
+hook lane, the ask lift, the session-keyed memory — all stand.)
 
 ## Tool-call policy mounts through the hook surface (2026-08; seam
 replaced by the hook-surface round the same month)
