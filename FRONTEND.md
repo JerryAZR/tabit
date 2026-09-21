@@ -99,8 +99,8 @@ arrive as events. Input tolerance: blank lines are skipped, a trailing
 size limit** — tool output can be large; buffer accordingly.
 
 ```
-→ {"type":"initialize","protocol_version":5,"replay":true}
-← {"type":"initialize_ack","protocol_version":5,"session_id":"019…"}
+→ {"type":"initialize","protocol_version":15,"replay":true}
+← {"type":"initialize_ack","protocol_version":15,"session_id":"019…"}
 ← {"type":"session_opened","stream":"019…","id":"019…","path":"…",
    "model":{"provider":"…","model":"…","thinking_level":null},"resumed":true}
 ← {"type":"sessions_available","sessions":[
@@ -296,7 +296,6 @@ those connection-level).
 | `compaction_retried` | — | **(v15)** a violating attempt was discarded and the request resent (`turn_retried`'s sibling): the attempt's deltas drop, the invocation continues. |
 | `compaction_end` | `tokens_after` | **(v15)** the invocation completed (including an oversized exit — its passes stand): the model-visible context is now `[summary] + retained tail`, and `tokens_after` is the final length (the last pass's summary output plus the retained tail's delta sum — the base the next turn starts from). Everything before the cut stays in the file; the next replay pass still renders it, with the envelope at the boundary; checkout to a pre-compaction entry yields the full-history branch. |
 | `compaction_failed` | `message` | the invocation failed or was cancelled: committed steps stand, nothing further commits. Not a run terminal — the run (if any) continues, and the automatic doors retry when the conditions next hold. |
-| `compaction_failed` | `id`, `message` | the pass failed or was cancelled: nothing committed, the context is unchanged. Not a run terminal — the run (if any) continues; the automatic doors retry when their conditions next hold. |
 | `tool_result` | `turn_id`, `entry_id`, `name`, `internal_call_id`, `content`, `status`, `details?` | one tool body finished; its result committed. `content` is exactly the text the model saw — already capped at the source, failure text included; render it verbatim. `status` is structure only: `success` or `failed { exit_code? }`; the detail is in `content`, not `status`. `details`, when present, is derived presentation cargo owned by the tool named in `name` — dispatch on `name`, degrade to `content` when absent or unknown. The per-tool shapes are TOOLS.md's (today's producers: `edit`'s diff + outcomes, `bash`'s truncation/spill, `subagent`'s child-session facts). |
 | `completion_call` | `turn_id`, `usage`, `cost?` | one model request finished; its usage is final — the fresh server report (v12). The full five-field `Usage` rides here per request (cache legs included); anything aggregated (a run, a session) is your sum over these — aborted and failed runs count too. v13 adds `cost`: the dollars the turn cost, **recorded at commit** from the rates then in effect (the invoice ruling — spend already happened; a later rate cut does not rewrite it). Absent when the provider reported nothing or the model carries no rate card; the same value rides the session file, so replays after resume show exact history. `model_changed.cost` still carries the current rates, for what future turns will cost. |
 | `turn_truncated` | `turn_id` | the committed turn ended truncated: the provider cut generation at its output limit (`finish_reason: length`). Informational, never a failure — the run continues exactly as usual (steers drain into the next turn; the run may end normally). Show it as a note; a steer is how the user asks the model to go on. |
@@ -347,7 +346,7 @@ report (§3.5); you never mine it for user-facing meaning.
 
 | kind | extra fields | meaning |
 |---|---|---|
-| `model` | — | model configuration degraded: a startup preference (stale `default_model`, a resumed session's model gone) fell back. A warning — the session continues, with the fallback named in the message. (`model`-command failures join this kind when the command ships, stage 3.) |
+| `model` | — | model configuration degraded: a startup preference (stale `default_model`, a resumed session's model gone) fell back, or a `model` command named a ref config does not know (§5 — the immediate error on an invalid switch). A warning in the fallback case — the session continues, with the fallback named in the message. |
 | `session` | — | a session command failed: `open_session` named an unknown id or an unreadable file, a command targeted an unknown session, `new_session` could not build, or the startup listing failed. **Unstamped, backend-level** — every `session`-kind error is (the failure belongs to no session; the message names the id). |
 | `checkout` | — | the checkout target does not exist in the session (§7). Stamped — it names an entry inside a real session. |
 | `persist_degraded` | `pending` | the write-behind log could not flush: `pending` entries are committed in memory but not on disk (disk full is the usual cause). Every later commit retries; nothing is lost unless the process is force-stopped while degraded (then the pending entries go — model output and register records; a stuck start's own messages come back as drafts when the run is refused). Nag about disk space. |
@@ -640,6 +639,5 @@ pin); cut points follow the roundtrip-unit rule
 (§7); synthesized tool results carry no marker (§7); all
 non-terminal errors ride the generic `error { kind }` carrier (§6).
 Model discovery stays config-side (`--model` refs resolve at startup;
-no discovery command is shipped), and the write-behind log with its
-prompt barrier remains a ruled-but-unshipped design (§6's reserved
-note — flag 8's producer is a board item).
+no discovery command is shipped). The write-behind log with its prompt
+barrier shipped (§6; PROTOCOL.md flag 8).

@@ -624,9 +624,12 @@ named, the classification applies to its current lcov-uncovered ranges.
 (Removed from this list after the defensive-arm audit: the SSE
 retry-`None` branches — the premise was wrong, `ExponentialBackoff`
 returns `None` on max-retries exhaustion and the close-and-surface
-handling is exercised by `reconnect_gives_up_after_max_retries`; and the
-eventsource-stream parser-error arm — it now surfaces a named error
-rather than skipping, reachable or not.)
+handling is exercised by `reconnect_gives_up_after_max_retries` (that
+test died with the SSE-reconnect removal — sources never reconnect
+now, `http_client/sse.rs`; the exhaustion arm it vouched for lives on
+in `retry.rs`'s `execute_retries_retryable_statuses_until_success`);
+and the eventsource-stream parser-error arm — it now surfaces a named
+error rather than skipping, reachable or not.)
 
 ## Maintenance
 

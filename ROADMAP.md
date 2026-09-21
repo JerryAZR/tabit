@@ -379,7 +379,13 @@ carry the actual shape:
   spilled, bash-style) at a subagent budget; abort never looks like
   success; usage/audit ride `tool_result.details`
   (`{child_id, outcome, turns, usage, truncated}`) — the same
-  presentation-cargo channel edit and bash already use.
+  presentation-cargo channel edit and bash already use. (Amended
+  2026-09, v12: the shipped cargo is `{child_id, outcome}` only — the
+  pairing fact, TOOLS.md's shape. The `usage` leg is dead under the
+  per-turn ruling: usage rides the child's own `completion_call`
+  events and sums are the frontend's, so a details figure would be a
+  second, drifting copy. `turns`/`truncated` wait on the capping
+  budget, still unshipped.)
 - **Abort linkage is required plumbing**: the body selects on the child
   pump vs the parent run token (abort detaches the sidecar task; an
   unlinked child would keep spending tokens). `bash` is the reference
