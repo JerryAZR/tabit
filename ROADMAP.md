@@ -999,8 +999,12 @@ assistant.
   pattern; no postinstall) carrying a Bun-compiled standalone TUI
   exe plus the cargo-built core — the installer is whatever the
   user has (`npm i -g` / `bun i -g`), no JS runtime at run time.
-  Single repo, single tag, single version: the lockstepped pair is
-  the strict protocol handshake made atomic. Fallback ladder: stock
+  Command name (ruled 2026-09): `tabit-tui` for now — when the
+  primary frontend is decided, that frontend (GUI or TUI) takes the
+  bare `tabit` name; until then `tabit` stays the cargo GUI
+  launcher. Single repo, single tag, single version: the
+  lockstepped pair is the strict protocol handshake made atomic.
+  Fallback ladder: stock
   pi-tui on plain Node, then opentui (its Node ≥ 26.4 engines floor
   breaks the one-line install today). Next: the §7 walking-slice
   spike on Windows Terminal before product commitment; the TUI
