@@ -31,6 +31,16 @@ const BOUND: Duration = Duration::from_secs(15);
 
 /// A never-fired run token for call sites that test the steady
 /// state (cancellation has its own tests).
+/// The launch context tests serve: grammar that records what crossed
+/// (commands and events both), and placeholder host facts.
+fn test_host() -> tabit_ext::LaunchContext {
+    tabit_ext::LaunchContext {
+        routes: tabit_ext::GrammarRoutes::noop(),
+        core_path: "tabit-core".to_string(),
+        cwd: ".".to_string(),
+    }
+}
+
 fn run_token() -> tokio_util::sync::CancellationToken {
     tokio_util::sync::CancellationToken::new()
 }
@@ -105,7 +115,7 @@ fn dead_reason(status: &Status) -> &str {
 async fn a_healthy_extension_handshakes_alive() {
     let root = test_dir("alive");
     install(&root, "hello", "hello");
-    let (supervisor, mut events) = supervisor::launch_root(&root, HANDSHAKE_TIMEOUT);
+    let (supervisor, mut events) = supervisor::launch_root(&root, HANDSHAKE_TIMEOUT, test_host());
     let event = await_status(&mut events, "hello", |s| matches!(s, Status::Alive)).await;
     assert_eq!(event.name, "hello");
     let reports = supervisor.reports();
@@ -123,7 +133,7 @@ async fn a_healthy_extension_handshakes_alive() {
 async fn an_exit_before_the_ack_is_dead() {
     let root = test_dir("pre-ack");
     install(&root, "early", "die-pre-ack");
-    let (supervisor, mut events) = supervisor::launch_root(&root, HANDSHAKE_TIMEOUT);
+    let (supervisor, mut events) = supervisor::launch_root(&root, HANDSHAKE_TIMEOUT, test_host());
     let event = await_status(&mut events, "early", |s| matches!(s, Status::Dead { .. })).await;
     assert!(dead_reason(&event.status).contains("before the handshake"));
     supervisor.shutdown().await;
@@ -133,7 +143,7 @@ async fn an_exit_before_the_ack_is_dead() {
 async fn an_exit_after_the_ack_marks_dead() {
     let root = test_dir("post-ack");
     install(&root, "ghost", "die-post-ack");
-    let (supervisor, mut events) = supervisor::launch_root(&root, HANDSHAKE_TIMEOUT);
+    let (supervisor, mut events) = supervisor::launch_root(&root, HANDSHAKE_TIMEOUT, test_host());
     await_status(&mut events, "ghost", |s| matches!(s, Status::Alive)).await;
     let event = await_status(&mut events, "ghost", |s| matches!(s, Status::Dead { .. })).await;
     let reason = dead_reason(&event.status);
@@ -146,7 +156,8 @@ async fn an_exit_after_the_ack_marks_dead() {
 async fn a_silent_handshake_times_out() {
     let root = test_dir("mute");
     install(&root, "mute", "mute");
-    let (supervisor, mut events) = supervisor::launch_root(&root, Duration::from_millis(300));
+    let (supervisor, mut events) =
+        supervisor::launch_root(&root, Duration::from_millis(300), test_host());
     let event = await_status(&mut events, "mute", |s| matches!(s, Status::Dead { .. })).await;
     assert!(dead_reason(&event.status).contains("no handshake"));
     supervisor.shutdown().await;
@@ -156,7 +167,7 @@ async fn a_silent_handshake_times_out() {
 async fn garbage_in_the_ack_is_refused() {
     let root = test_dir("bad-ack");
     install(&root, "bad", "bad-ack");
-    let (supervisor, mut events) = supervisor::launch_root(&root, HANDSHAKE_TIMEOUT);
+    let (supervisor, mut events) = supervisor::launch_root(&root, HANDSHAKE_TIMEOUT, test_host());
     let event = await_status(&mut events, "bad", |s| matches!(s, Status::Dead { .. })).await;
     assert!(dead_reason(&event.status).contains("unparseable"));
     supervisor.shutdown().await;
@@ -166,7 +177,7 @@ async fn garbage_in_the_ack_is_refused() {
 async fn a_version_mismatch_is_refused() {
     let root = test_dir("version");
     install(&root, "future", "wrong-version");
-    let (supervisor, mut events) = supervisor::launch_root(&root, HANDSHAKE_TIMEOUT);
+    let (supervisor, mut events) = supervisor::launch_root(&root, HANDSHAKE_TIMEOUT, test_host());
     let event = await_status(&mut events, "future", |s| matches!(s, Status::Dead { .. })).await;
     assert!(
         dead_reason(&event.status).contains("speaks extension protocol version 99"),
@@ -180,7 +191,7 @@ async fn a_version_mismatch_is_refused() {
 async fn garbage_after_the_ack_kills() {
     let root = test_dir("late");
     install(&root, "late", "late-garbage");
-    let (supervisor, mut events) = supervisor::launch_root(&root, HANDSHAKE_TIMEOUT);
+    let (supervisor, mut events) = supervisor::launch_root(&root, HANDSHAKE_TIMEOUT, test_host());
     await_status(&mut events, "late", |s| matches!(s, Status::Alive)).await;
     let event = await_status(&mut events, "late", |s| matches!(s, Status::Dead { .. })).await;
     assert!(dead_reason(&event.status).contains("unparseable"));
@@ -196,7 +207,7 @@ async fn a_well_formed_unknown_frame_type_is_the_same_death() {
     // that extension.
     let root = test_dir("late-unknown");
     install(&root, "future", "late-unknown");
-    let (supervisor, mut events) = supervisor::launch_root(&root, HANDSHAKE_TIMEOUT);
+    let (supervisor, mut events) = supervisor::launch_root(&root, HANDSHAKE_TIMEOUT, test_host());
     await_status(&mut events, "future", |s| matches!(s, Status::Alive)).await;
     let event = await_status(&mut events, "future", |s| matches!(s, Status::Dead { .. })).await;
     let reason = dead_reason(&event.status);
@@ -225,7 +236,7 @@ async fn scan_refusals_report_without_spawning() {
     .expect("manifest");
     std::fs::create_dir_all(root.join("plain")).expect("dir");
 
-    let (supervisor, mut events) = supervisor::launch_root(&root, HANDSHAKE_TIMEOUT);
+    let (supervisor, mut events) = supervisor::launch_root(&root, HANDSHAKE_TIMEOUT, test_host());
     let mut reported = Vec::new();
     for _ in 0..2 {
         let event = next_event(&mut events).await;
@@ -248,7 +259,7 @@ async fn scan_refusals_report_without_spawning() {
 #[tokio::test]
 async fn a_missing_root_is_an_empty_install() {
     let root = test_dir("absent").join("never-created");
-    let (supervisor, mut events) = supervisor::launch_root(&root, HANDSHAKE_TIMEOUT);
+    let (supervisor, mut events) = supervisor::launch_root(&root, HANDSHAKE_TIMEOUT, test_host());
     assert!(supervisor.reports().is_empty());
     assert!(events.try_recv().is_err());
     supervisor.shutdown().await;
@@ -268,7 +279,7 @@ async fn a_mute_sibling_does_not_delay_the_healthy() {
     // serialization; the fail-fast on Dead below keeps a real
     // timeout diagnosable instead of burning the bound.
     let timeout = Duration::from_secs(5);
-    let (supervisor, mut events) = supervisor::launch_root(&root, timeout);
+    let (supervisor, mut events) = supervisor::launch_root(&root, timeout, test_host());
     let start = std::time::Instant::now();
     loop {
         let event = next_event(&mut events).await;
@@ -332,7 +343,7 @@ async fn shutdown_reclaims_the_extension_tree() {
     unsafe {
         std::env::set_var("EXT_DOUBLE_MARKER", &marker);
     }
-    let (supervisor, mut events) = supervisor::launch_root(&root, HANDSHAKE_TIMEOUT);
+    let (supervisor, mut events) = supervisor::launch_root(&root, HANDSHAKE_TIMEOUT, test_host());
     await_status(&mut events, "hello", |s| matches!(s, Status::Alive)).await;
     supervisor.shutdown().await;
     assert!(
@@ -400,7 +411,7 @@ impl HostServices for FakeServices {
 async fn a_tool_call_round_trips_over_the_pipe() {
     let root = test_dir("call");
     install(&root, "echoer", "tools-echo");
-    let (supervisor, mut events) = supervisor::launch_root(&root, HANDSHAKE_TIMEOUT);
+    let (supervisor, mut events) = supervisor::launch_root(&root, HANDSHAKE_TIMEOUT, test_host());
     await_status(&mut events, "echoer", |s| matches!(s, Status::Alive)).await;
     let handle = supervisor.extension("echoer").expect("installed");
     let result = handle
@@ -417,7 +428,7 @@ async fn a_tool_call_round_trips_over_the_pipe() {
 async fn a_failing_tool_carries_its_error() {
     let root = test_dir("fail");
     install(&root, "boomer", "tools-fail");
-    let (supervisor, mut events) = supervisor::launch_root(&root, HANDSHAKE_TIMEOUT);
+    let (supervisor, mut events) = supervisor::launch_root(&root, HANDSHAKE_TIMEOUT, test_host());
     await_status(&mut events, "boomer", |s| matches!(s, Status::Alive)).await;
     let handle = supervisor.extension("boomer").expect("installed");
     let result = handle
@@ -436,7 +447,7 @@ async fn a_failing_tool_carries_its_error() {
 async fn an_ask_lifts_through_the_interaction_capability() {
     let root = test_dir("ask");
     install(&root, "asker", "tools-ask");
-    let (supervisor, mut events) = supervisor::launch_root(&root, HANDSHAKE_TIMEOUT);
+    let (supervisor, mut events) = supervisor::launch_root(&root, HANDSHAKE_TIMEOUT, test_host());
     await_status(&mut events, "asker", |s| matches!(s, Status::Alive)).await;
     let handle = supervisor.extension("asker").expect("installed");
     let seen = Arc::new(Mutex::new(Vec::new()));
@@ -470,7 +481,7 @@ async fn an_ask_lifts_through_the_interaction_capability() {
 async fn an_ask_without_a_capability_fails_closed() {
     let root = test_dir("no-ask");
     install(&root, "asker", "tools-ask");
-    let (supervisor, mut events) = supervisor::launch_root(&root, HANDSHAKE_TIMEOUT);
+    let (supervisor, mut events) = supervisor::launch_root(&root, HANDSHAKE_TIMEOUT, test_host());
     await_status(&mut events, "asker", |s| matches!(s, Status::Alive)).await;
     let handle = supervisor.extension("asker").expect("installed");
     let result = handle
@@ -491,7 +502,7 @@ async fn an_ask_without_a_capability_fails_closed() {
 async fn a_model_prompt_dispatches_through_the_envelope() {
     let root = test_dir("model");
     install(&root, "modeler", "tools-model");
-    let (supervisor, mut events) = supervisor::launch_root(&root, HANDSHAKE_TIMEOUT);
+    let (supervisor, mut events) = supervisor::launch_root(&root, HANDSHAKE_TIMEOUT, test_host());
     await_status(&mut events, "modeler", |s| matches!(s, Status::Alive)).await;
     let handle = supervisor.extension("modeler").expect("installed");
     let seen_prompt = Arc::new(Mutex::new(Vec::new()));
@@ -532,7 +543,7 @@ async fn a_model_prompt_dispatches_through_the_envelope() {
 async fn a_model_prompt_without_services_fails_with_the_verb_error() {
     let root = test_dir("model-bare");
     install(&root, "modeler", "tools-model");
-    let (supervisor, mut events) = supervisor::launch_root(&root, HANDSHAKE_TIMEOUT);
+    let (supervisor, mut events) = supervisor::launch_root(&root, HANDSHAKE_TIMEOUT, test_host());
     await_status(&mut events, "modeler", |s| matches!(s, Status::Alive)).await;
     let handle = supervisor.extension("modeler").expect("installed");
     let result = handle
@@ -553,7 +564,7 @@ async fn a_model_prompt_without_services_fails_with_the_verb_error() {
 async fn a_call_after_death_fails_fast() {
     let root = test_dir("late-call");
     install(&root, "echoer", "tools-echo");
-    let (supervisor, mut events) = supervisor::launch_root(&root, HANDSHAKE_TIMEOUT);
+    let (supervisor, mut events) = supervisor::launch_root(&root, HANDSHAKE_TIMEOUT, test_host());
     await_status(&mut events, "echoer", |s| matches!(s, Status::Alive)).await;
     let handle = supervisor.extension("echoer").expect("installed");
     // One healthy call, then the host closes (the supervisor drops:
@@ -595,7 +606,8 @@ async fn await_resolved_joins_every_handshake() {
     let root = test_dir("resolved");
     install(&root, "aaa-hello", "hello");
     install(&root, "zzz-mute", "mute");
-    let (supervisor, mut events) = supervisor::launch_root(&root, Duration::from_millis(300));
+    let (supervisor, mut events) =
+        supervisor::launch_root(&root, Duration::from_millis(300), test_host());
     supervisor.await_resolved().await;
     // Both verdicts stand — the join did not return on the first.
     let reports = supervisor.reports();
@@ -615,7 +627,7 @@ async fn await_resolved_joins_every_handshake() {
 async fn a_hook_round_trips_its_decision() {
     let root = test_dir("hook-allow");
     install(&root, "allower", "hooks-allow");
-    let (supervisor, mut events) = supervisor::launch_root(&root, HANDSHAKE_TIMEOUT);
+    let (supervisor, mut events) = supervisor::launch_root(&root, HANDSHAKE_TIMEOUT, test_host());
     await_status(&mut events, "allower", |s| matches!(s, Status::Alive)).await;
     let handle = supervisor.extension("allower").expect("installed");
     let decision = handle
@@ -635,7 +647,7 @@ async fn a_hook_round_trips_its_decision() {
 async fn a_hook_skip_carries_its_message() {
     let root = test_dir("hook-skip");
     install(&root, "denier", "hooks-skip");
-    let (supervisor, mut events) = supervisor::launch_root(&root, HANDSHAKE_TIMEOUT);
+    let (supervisor, mut events) = supervisor::launch_root(&root, HANDSHAKE_TIMEOUT, test_host());
     await_status(&mut events, "denier", |s| matches!(s, Status::Alive)).await;
     let handle = supervisor.extension("denier").expect("installed");
     let decision = handle
@@ -660,7 +672,7 @@ async fn a_hook_skip_carries_its_message() {
 async fn a_hook_ask_lifts_to_the_capability() {
     let root = test_dir("hook-ask");
     install(&root, "asker", "hooks-ask");
-    let (supervisor, mut events) = supervisor::launch_root(&root, HANDSHAKE_TIMEOUT);
+    let (supervisor, mut events) = supervisor::launch_root(&root, HANDSHAKE_TIMEOUT, test_host());
     await_status(&mut events, "asker", |s| matches!(s, Status::Alive)).await;
     let handle = supervisor.extension("asker").expect("installed");
     let seen = Arc::new(Mutex::new(Vec::new()));
@@ -712,7 +724,7 @@ async fn a_hook_ask_lifts_to_the_capability() {
 async fn a_death_answers_pending_policy_with_the_fail_open_fallback() {
     let root = test_dir("hook-hang");
     install(&root, "wedge", "hooks-hang");
-    let (supervisor, mut events) = supervisor::launch_root(&root, HANDSHAKE_TIMEOUT);
+    let (supervisor, mut events) = supervisor::launch_root(&root, HANDSHAKE_TIMEOUT, test_host());
     await_status(&mut events, "wedge", |s| matches!(s, Status::Alive)).await;
     let handle = supervisor.extension("wedge").expect("installed");
     let pending = {
@@ -750,7 +762,7 @@ async fn a_death_answers_pending_policy_with_the_fail_open_fallback() {
 async fn cancelling_the_run_token_cancels_the_call_across_the_pipe() {
     let root = test_dir("cancel");
     install(&root, "hanger", "tools-cancel");
-    let (supervisor, mut events) = supervisor::launch_root(&root, HANDSHAKE_TIMEOUT);
+    let (supervisor, mut events) = supervisor::launch_root(&root, HANDSHAKE_TIMEOUT, test_host());
     await_status(&mut events, "hanger", |s| matches!(s, Status::Alive)).await;
     let handle = supervisor.extension("hanger").expect("installed");
 
@@ -782,4 +794,168 @@ async fn cancelling_the_run_token_cancels_the_call_across_the_pipe() {
         .expect("the lane serves");
     assert_eq!(result.report, "EXT-ECHOED:still here");
     supervisor.shutdown().await;
+}
+
+/// What the recording routes captured, in arrival order.
+#[derive(Default, Clone)]
+struct Recorded {
+    commands: std::sync::Arc<std::sync::Mutex<Vec<String>>>,
+    events: std::sync::Arc<std::sync::Mutex<Vec<String>>>,
+}
+
+impl Recorded {
+    fn host(&self) -> tabit_ext::LaunchContext {
+        let commands = self.commands.clone();
+        let events = self.events.clone();
+        tabit_ext::LaunchContext {
+            routes: tabit_ext::GrammarRoutes::new(
+                std::sync::Arc::new(move |command| {
+                    commands
+                        .lock()
+                        .unwrap()
+                        .push(serde_json::to_string(&command).unwrap());
+                }),
+                std::sync::Arc::new(move |origin, event| {
+                    events.lock().unwrap().push(format!(
+                        "{origin}|{}",
+                        serde_json::to_string(&event).unwrap()
+                    ));
+                }),
+            ),
+            core_path: "tabit-core".to_string(),
+            cwd: ".".to_string(),
+        }
+    }
+
+    fn commands(&self) -> Vec<String> {
+        self.commands.lock().unwrap().clone()
+    }
+
+    fn events(&self) -> Vec<String> {
+        self.events.lock().unwrap().clone()
+    }
+}
+
+/// The routing generalization over the real pipe: the extension's
+/// command and emission route through the host glue; the ask
+/// registers, the routed answer crosses back down the pipe (mirrored
+/// out by the double as an event), settlement is announced, and the
+/// broadcast mirror honors the watch list.
+#[tokio::test]
+async fn the_shared_grammar_flows_both_directions_over_the_pipe() {
+    let root = test_dir("grammar");
+    install(&root, "grammar-ext", "grammar");
+    let recorded = Recorded::default();
+    let (supervisor, mut events) =
+        supervisor::launch_root(&root, HANDSHAKE_TIMEOUT, recorded.host());
+    await_status(&mut events, "grammar-ext", |s| matches!(s, Status::Alive)).await;
+
+    // The double's opening emissions crossed: one command, one ask.
+    let commands = recorded.commands();
+    assert_eq!(commands.len(), 1, "one command routed: {commands:?}");
+    assert!(commands[0].contains("steered by the extension"));
+    let events_so_far = recorded.events();
+    let ask = events_so_far
+        .iter()
+        .find(|e| e.contains("interaction_request") && e.contains("g-1"))
+        .expect("the ask emission routed, origin-stamped");
+    assert!(ask.starts_with("grammar-ext|"), "origin-stamped: {ask}");
+
+    // Broadcast honors the watch list: a watched kind mirrors (the
+    // double echoes it back out), an unwatched kind does not.
+    let watched = tabit_protocol::EventFrame {
+        stream: None,
+        origin: None,
+        event: tabit_protocol::SessionEvent::SessionOpened {
+            id: "0198".to_string(),
+            path: String::new(),
+            cwd: String::new(),
+            model: tabit_protocol::ModelSelection::new("p", "m"),
+            resumed: false,
+            parent: None,
+            parent_call: None,
+        },
+    };
+    supervisor.broadcast(&watched);
+    let unwatched = tabit_protocol::EventFrame {
+        stream: None,
+        origin: None,
+        event: tabit_protocol::SessionEvent::CompactionBegin,
+    };
+    supervisor.broadcast(&unwatched);
+    let echoed = wait_for(|| {
+        recorded
+            .events()
+            .iter()
+            .any(|e| e.contains("session_opened") && e.contains("0198"))
+    })
+    .await;
+    assert!(
+        echoed,
+        "the watched kind mirrored back: {:?}",
+        recorded.events()
+    );
+    assert!(
+        !wait_for_short(|| recorded
+            .events()
+            .iter()
+            .any(|e| e.contains("compaction_begin")))
+        .await,
+        "the unwatched kind never mirrors"
+    );
+
+    // The answer routes back by id, and settlement is announced.
+    assert!(supervisor.asks().respond(
+        "g-1",
+        serde_json::json!({"selected": [], "text": "go ahead"})
+    ));
+    let settled = wait_for(|| {
+        recorded
+            .events()
+            .iter()
+            .any(|e| e.contains("interaction_settled") && e.contains("g-1"))
+    })
+    .await;
+    assert!(settled, "settlement announced: {:?}", recorded.events());
+    let answered = wait_for(|| {
+        recorded
+            .events()
+            .iter()
+            .any(|e| e.contains("interaction_response") && e.contains("go ahead"))
+    })
+    .await;
+    assert!(
+        answered,
+        "the routed answer crossed the pipe (mirrored by the double): {:?}",
+        recorded.events()
+    );
+
+    // Death settles the asks: none are open, but the sweep is the
+    // contract — clear_extension on a live registry is quiet.
+    supervisor.asks().clear_extension("grammar-ext");
+    supervisor.shutdown().await;
+}
+
+/// Poll until true, bounded by the test bound.
+async fn wait_for(check: impl Fn() -> bool) -> bool {
+    let deadline = std::time::Instant::now() + BOUND;
+    while std::time::Instant::now() < deadline {
+        if check() {
+            return true;
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+    }
+    false
+}
+
+/// The negative poll: nothing should appear within a short window.
+async fn wait_for_short(check: impl Fn() -> bool) -> bool {
+    let deadline = std::time::Instant::now() + std::time::Duration::from_millis(300);
+    while std::time::Instant::now() < deadline {
+        if check() {
+            return true;
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+    }
+    false
 }

@@ -11,7 +11,7 @@ render a specific tool's `details` cargo, the interaction template
 payloads — lives in **TOOLS.md**, its companion since the shapes grew
 past one doc (2026-09 ruling).
 
-Wire shapes below are the **v17 contract**. v3 was the multi-session
+Wire shapes below are the **v18 contract**. v3 was the multi-session
 host — session-addressed commands, `new_session`/`open_session` on the
 channel, the `"main"` stream alias retired (the stream stamp is the
 session id). v4 made backend-level frames **unstamped** (§6) and
@@ -37,7 +37,12 @@ attempts; v16 made the session's world visible — `session_opened` and the
 catalog rows carry `cwd` (rows also `path`), and `compact.directives` became
 real free text (appended to the summarization instruction for that
 invocation); v17 added `interaction_settled { id }` — the settle close
-for interaction cards (§8). Each version landed as one
+for interaction cards (§8); v18 rode the routing generalization —
+stamped events may carry `origin` (the speaking extension, on
+re-emitted emissions), and `interaction_response.session` became
+optional (omitted only on the backend's routed-back answers to
+extension asks; frontends keep echoing the card's stamp). Each
+version landed as one
 protocol-version bump with no compatibility period; always check the
 ack's `protocol_version`. (`tabit-core --list` prints a human table —
 there is no JSON listing edge.)

@@ -18,7 +18,24 @@ software/hardware contract, not just the encodings):
 Every `PROTOCOL_VERSION` bump — and every additive change a frontend
 could observe — gets an entry here in the same commit.
 
-## v17 (current)
+## v18 (current)
+
+### wire: the routing generalization — `origin` on events, optional `interaction_response.session` (2026-09)
+
+Stamped event frames may now carry `origin` — the id of the
+extension that emitted them into the shared grammar (the host
+re-emits extension emissions origin-stamped; everything the backend
+itself produces stays `origin`-less). `interaction_response`'s
+`session` became optional: omitted only on the backend's
+routed-back answers to extension-asked questions (the id is the
+correlation); a frontend answering a card keeps echoing the card's
+stamp, and an id-first dispatch makes any session value it names
+irrelevant for backend-level cards. Extension protocol bumped to v2
+beside this (the grammar rides the extension pipe flat).
+*Migration:* none required — both changes are additive-tolerant; a
+frontend wanting extension attribution reads `origin`.
+
+## v17
 
 ### wire: `interaction_settled { id }` — settle close for interaction cards (2026-09)
 

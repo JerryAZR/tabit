@@ -7,6 +7,7 @@ const BOOT: &str = "s1";
 
 fn event(event: SessionEvent) -> InMsg {
     InMsg::Event(Box::new(EventFrame {
+        origin: None,
         stream: Some(StreamId::new(BOOT)),
         event,
     }))
@@ -15,6 +16,7 @@ fn event(event: SessionEvent) -> InMsg {
 /// An event from some other session (a background stream).
 fn from(stream: &str, event: SessionEvent) -> InMsg {
     InMsg::Event(Box::new(EventFrame {
+        origin: None,
         stream: Some(StreamId::new(stream)),
         event,
     }))
@@ -24,6 +26,7 @@ fn from(stream: &str, event: SessionEvent) -> InMsg {
 /// ruling) — the honest shape for the catalog and session creation.
 fn backend(event: SessionEvent) -> InMsg {
     InMsg::Event(Box::new(EventFrame {
+        origin: None,
         stream: None,
         event,
     }))

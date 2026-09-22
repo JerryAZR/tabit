@@ -14,19 +14,24 @@
 //! one workspace — the full story is a topic after the first
 //! release.
 //!
-//! v1 carries the handshake (`initialize` out, `ack` back with the
+//! v1 carried the handshake (`initialize` out, `ack` back with the
 //! capability declarations), the tool lane (`tool_call` out,
-//! `tool_result` back), the hook lane, and — with checklist task 5 —
-//! the host-service envelope: `service_request` in (verb + payload,
-//! with the interaction ask folded in as verb zero), answered by
-//! `service_response` out by request id.
+//! `tool_result` back), the hook lane, and the host-service envelope:
+//! `service_request` in (verb + payload, with the interaction ask
+//! folded in as verb zero), answered by `service_response` out by
+//! request id. v2 adds the shared grammar (ruled 2026-09, the routing
+//! generalization): the frontend protocol's commands and events ride
+//! the pipe flat as bare lines — commands and emissions out, watched
+//! events and routed answers in — and `initialize` grows the host
+//! facts an owned-session spawner needs (`core_path`, `cwd`), with
+//! `ack` declaring the watched event kinds.
 
 use serde::{Deserialize, Serialize};
 
 /// The extension protocol this host speaks. An extension acking a
 /// different version is refused at the handshake — the pipe is a
 /// frozen contract, not a negotiated one.
-pub const EXTENSION_PROTOCOL_VERSION: u32 = 1;
+pub const EXTENSION_PROTOCOL_VERSION: u32 = 2;
 
 /// One tool the extension serves, declared at the handshake. The
 /// schema is the model-facing JSON Schema; the host turns it into a
@@ -53,11 +58,20 @@ pub const HOOK_POINTS: &[&str] = &["tool_call", "tool_result"];
 
 /// The capabilities one process serves, declared once at the
 /// handshake (the byte-stability law: no re-declaration, no drift).
+/// `watch` (v2) is not a capability — it is the subscription list:
+/// the event kinds (the frontend grammar's `type` tags) whose frames
+/// the extension wants mirrored onto its pipe. Fine-grained by ruling
+/// (one kind, one entry — no bundles), derived by an SDK from the
+/// callbacks its author registered. A kind the host does not emit
+/// matches nothing and harms nothing (tolerated, not refused: a typo
+/// watches silently, the load-time report is the diagnostic).
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Ack {
     pub protocol_version: u32,
     pub tools: Vec<ToolDecl>,
     pub hooks: Vec<HookDecl>,
+    #[serde(default)]
+    pub watch: Vec<String>,
 }
 
 /// Host → extension frames.
@@ -65,8 +79,19 @@ pub struct Ack {
 #[serde(tag = "type", rename_all = "snake_case")]
 pub enum HostFrame {
     /// Open the pipe. First line the extension reads; everything
-    /// else follows only after its ack.
-    Initialize { protocol_version: u32 },
+    /// else follows only after its ack. The v2 host facts:
+    /// `core_path` is the running backend's own executable (the
+    /// thing to spawn for owned sessions — the host IS the binary,
+    /// so there is nothing to resolve), `cwd` the backend's working
+    /// directory (owned children default there unless the spawner
+    /// says otherwise).
+    Initialize {
+        protocol_version: u32,
+        #[serde(default)]
+        core_path: String,
+        #[serde(default)]
+        cwd: String,
+    },
     /// One tool invocation; the extension answers with a
     /// [`ToolWireResult`] carrying the same `call_id`. Calls may be
     /// outstanding concurrently — the id is the correlation — and
@@ -192,6 +217,9 @@ pub enum ExtFrame {
         protocol_version: u32,
         tools: Vec<ToolDecl>,
         hooks: Vec<HookDecl>,
+        /// The subscription list ([`Ack::watch`]).
+        #[serde(default)]
+        watch: Vec<String>,
     },
     /// [`ToolWireResult`], on the wire.
     ToolResult(ToolWireResult),
@@ -222,13 +250,24 @@ mod tests {
     fn host_frames_carry_the_type_tag() {
         let line = serde_json::to_string(&HostFrame::Initialize {
             protocol_version: EXTENSION_PROTOCOL_VERSION,
+            core_path: "C:/bin/tabit-core.exe".to_string(),
+            cwd: "C:/work/proj".to_string(),
         })
         .unwrap();
-        assert_eq!(line, r#"{"type":"initialize","protocol_version":1}"#);
+        assert_eq!(
+            line,
+            r#"{"type":"initialize","protocol_version":2,"core_path":"C:/bin/tabit-core.exe","cwd":"C:/work/proj"}"#
+        );
         let back: HostFrame = serde_json::from_str(&line).unwrap();
         match back {
-            HostFrame::Initialize { protocol_version } => {
+            HostFrame::Initialize {
+                protocol_version,
+                core_path,
+                cwd,
+            } => {
                 assert_eq!(protocol_version, EXTENSION_PROTOCOL_VERSION);
+                assert_eq!(core_path, "C:/bin/tabit-core.exe");
+                assert_eq!(cwd, "C:/work/proj");
             }
             HostFrame::ToolCall { .. }
             | HostFrame::ServiceResponse { .. }
@@ -242,7 +281,7 @@ mod tests {
     #[test]
     fn ack_round_trips_with_declarations() {
         let frame = ExtFrame::Ack {
-            protocol_version: 1,
+            protocol_version: 2,
             tools: vec![ToolDecl {
                 name: "echo".to_string(),
                 description: "says it back".to_string(),
@@ -251,17 +290,21 @@ mod tests {
             hooks: vec![HookDecl {
                 event: "tool_call".to_string(),
             }],
+            watch: vec![
+                "session_opened".to_string(),
+                "interaction_settled".to_string(),
+            ],
         };
         let line = serde_json::to_string(&frame).unwrap();
         assert_eq!(
             line,
-            r#"{"type":"ack","protocol_version":1,"tools":[{"name":"echo","description":"says it back","schema":{"type":"object"}}],"hooks":[{"event":"tool_call"}]}"#
+            r#"{"type":"ack","protocol_version":2,"tools":[{"name":"echo","description":"says it back","schema":{"type":"object"}}],"hooks":[{"event":"tool_call"}],"watch":["session_opened","interaction_settled"]}"#
         );
         let back: ExtFrame = serde_json::from_str(&line).unwrap();
         match back {
-            ExtFrame::Ack { tools, hooks, .. } => {
+            ExtFrame::Ack { tools, watch, .. } => {
                 assert_eq!(tools.len(), 1);
-                assert_eq!(hooks.len(), 1);
+                assert_eq!(watch, vec!["session_opened", "interaction_settled"]);
             }
             ExtFrame::ToolResult(..)
             | ExtFrame::ServiceRequest { .. }
@@ -269,6 +312,39 @@ mod tests {
                 panic!("an ack line parsed as another frame")
             }
         }
+    }
+
+    #[test]
+    fn the_shared_grammar_parses_flat_beside_the_lanes() {
+        // A command line is not an extension frame — the cascade's
+        // second step parses it.
+        assert!(
+            serde_json::from_str::<ExtFrame>(r#"{"type":"compact","session":"0197"}"#).is_err()
+        );
+        let command: tabit_protocol::SessionCommand =
+            serde_json::from_str(r#"{"type":"compact","session":"0197"}"#).unwrap();
+        assert!(matches!(
+            command,
+            tabit_protocol::SessionCommand::Compact { .. }
+        ));
+
+        // An event line parses as neither lane frame nor command.
+        assert!(serde_json::from_str::<ExtFrame>(
+            r#"{"type":"interaction_request","id":"req-1","ui_type":"native:select_one","payload":{}}"#
+        )
+        .is_err());
+        assert!(serde_json::from_str::<tabit_protocol::SessionCommand>(
+            r#"{"type":"interaction_request","id":"req-1","ui_type":"native:select_one","payload":{}}"#
+        )
+        .is_err());
+        let event: tabit_protocol::SessionEvent = serde_json::from_str(
+            r#"{"type":"interaction_request","id":"req-1","ui_type":"native:select_one","payload":{}}"#,
+        )
+        .unwrap();
+        assert!(matches!(
+            event,
+            tabit_protocol::SessionEvent::InteractionRequest { .. }
+        ));
     }
 
     #[test]

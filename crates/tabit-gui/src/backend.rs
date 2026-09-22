@@ -255,7 +255,7 @@ impl Backend {
         let _ = self
             .writer
             .send(to_wire_line(&SessionCommand::InteractionResponse {
-                session: session.to_string(),
+                session: Some(session.to_string()),
                 id: id.to_string(),
                 payload: payload.clone(),
             }));

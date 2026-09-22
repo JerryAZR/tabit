@@ -318,6 +318,10 @@ pub struct SessionHost {
     events: Option<mpsc::UnboundedReceiver<EventFrame>>,
     shutdown: CancellationToken,
     commands: mpsc::UnboundedSender<HostCommand>,
+    /// The backend-level emission handle (origin-stamped, unstamped
+    /// by stream) — the routing generalization's entry for grammar
+    /// speakers that are not sessions.
+    backend_sink: crate::notice::BackendSink,
     workers: Arc<Mutex<HashMap<String, Worker>>>,
     closing_stats: Arc<Mutex<HashMap<String, SessionStats>>>,
 }
@@ -363,6 +367,7 @@ impl SessionHost {
         let boot_id = info.session_id.clone();
         let boot_stream = StreamId::new(boot_id.clone());
         let (event_tx, event_rx) = mpsc::unbounded_channel::<EventFrame>();
+        let backend_sink = crate::notice::BackendSink::new(&event_tx);
         let (command_tx, mut command_rx) = mpsc::unbounded_channel::<HostCommand>();
         let shutdown = CancellationToken::new();
         // The workers' token is the host's to pull, and only after the
@@ -383,6 +388,7 @@ impl SessionHost {
         // carrier in place of the announcement — no catalog follows
         // (ruled: external errors ride the channel; PROTOCOL.md v3).
         let _ = event_tx.send(EventFrame {
+            origin: None,
             stream: Some(boot_stream.clone()),
             event: SessionEvent::SessionOpened {
                 id: info.session_id.clone(),
@@ -396,6 +402,7 @@ impl SessionHost {
         });
         for note in startup_notes {
             let _ = event_tx.send(EventFrame {
+                origin: None,
                 stream: Some(boot_stream.clone()),
                 event: SessionEvent::error_model(note),
             });
@@ -415,6 +422,7 @@ impl SessionHost {
                     .map(|dir| dir.display().to_string())
                     .unwrap_or_default();
                 let _ = event_tx.send(EventFrame {
+                    origin: None,
                     stream: None,
                     event: SessionEvent::SessionsAvailable {
                         sessions: summaries
@@ -432,6 +440,7 @@ impl SessionHost {
             }
             Err(error) => {
                 let _ = event_tx.send(EventFrame {
+                    origin: None,
                     stream: None,
                     event: SessionEvent::error_session(format!("could not list sessions: {error}")),
                 });
@@ -443,6 +452,7 @@ impl SessionHost {
         // empty announcement is noise with no state to clear.
         if !wiring.skills.is_empty() {
             let _ = event_tx.send(EventFrame {
+                origin: None,
                 stream: None,
                 event: SessionEvent::SkillsAvailable {
                     skills: wiring.skills.clone(),
@@ -455,6 +465,7 @@ impl SessionHost {
         // belong to the boot that produced them.
         if !wiring.extensions.extensions.is_empty() {
             let _ = event_tx.send(EventFrame {
+                origin: None,
                 stream: None,
                 event: SessionEvent::ExtensionsAvailable {
                     extensions: wiring.extensions.extensions.clone(),
@@ -541,6 +552,7 @@ impl SessionHost {
             events: Some(event_rx),
             shutdown,
             commands: command_tx,
+            backend_sink,
             workers,
             closing_stats,
         }
@@ -549,6 +561,16 @@ impl SessionHost {
     /// The boot session's facts, captured when the host took over.
     pub fn info(&self) -> &SessionInfo {
         &self.info
+    }
+
+    /// The backend-level emission handle: an origin-stamped,
+    /// stream-less event from a grammar speaker that is not a session
+    /// (the routing generalization — extensions emit into the shared
+    /// grammar, and the origin field is the attribution). The handle
+    /// is weak like every notice holder: it cannot outlive the
+    /// frontend's stream.
+    pub fn backend_sink(&self) -> crate::notice::BackendSink {
+        self.backend_sink.clone()
     }
 
     /// Submit a user message to a session: steers the run in flight or
@@ -691,10 +713,20 @@ fn session_address(command: &SessionCommand) -> &str {
         SessionCommand::Message { session, .. }
         | SessionCommand::Abort { session }
         | SessionCommand::Continue { session }
-        | SessionCommand::InteractionResponse { session, .. }
         | SessionCommand::Checkout { session, .. }
         | SessionCommand::Model { session, .. }
         | SessionCommand::Compact { session, .. } => session,
+        // A session-less answer names no session: the backend's own
+        // routed-back answers never reach the host loop (the glue's
+        // id-first dispatch claims them), so one arriving here is a
+        // channel answering a card it cannot name — routed to the
+        // empty address, which is nobody's session and fails routing
+        // like any unknown address.
+        SessionCommand::InteractionResponse { session: None, .. } => "",
+        SessionCommand::InteractionResponse {
+            session: Some(session),
+            ..
+        } => session,
         // Matched before the session-scoped arm in `handle`;
         // unreachable by construction. Sanctioned crash: see the
         // error doctrine in AGENTS.md.
@@ -745,6 +777,7 @@ impl HostLoop {
                     // The child's consumption is its own report.
                 } else {
                     let _ = self.event_tx.send(EventFrame {
+                        origin: None,
                         stream: None,
                         event: SessionEvent::error_session(format!(
                             "unknown session `{address}` — not open in this backend \
@@ -764,6 +797,7 @@ impl HostLoop {
             Ok(built) => built,
             Err(message) => {
                 let _ = self.event_tx.send(EventFrame {
+                    origin: None,
                     stream: None,
                     event: SessionEvent::error_session(format!(
                         "could not build a new session: {message}"
@@ -781,6 +815,7 @@ impl HostLoop {
         // `model_changed` replays). Selection notes follow on the
         // same stream, the same order `open_session` uses.
         let _ = self.event_tx.send(EventFrame {
+            origin: None,
             stream: Some(stream.clone()),
             event: SessionEvent::SessionOpened {
                 id: id.clone(),
@@ -794,6 +829,7 @@ impl HostLoop {
         });
         for note in notes {
             let _ = self.event_tx.send(EventFrame {
+                origin: None,
                 stream: Some(stream.clone()),
                 event: SessionEvent::error_model(note),
             });
@@ -813,6 +849,7 @@ impl HostLoop {
             Ok(loaded) => loaded,
             Err(message) => {
                 let _ = self.event_tx.send(EventFrame {
+                    origin: None,
                     stream: None,
                     event: SessionEvent::error_session(format!(
                         "could not open session `{id}`: {message}"
@@ -823,6 +860,7 @@ impl HostLoop {
         };
         let stream = StreamId::new(id.to_string());
         let _ = self.event_tx.send(EventFrame {
+            origin: None,
             stream: Some(stream.clone()),
             event: SessionEvent::SessionOpened {
                 id: id.to_string(),
@@ -836,6 +874,7 @@ impl HostLoop {
         });
         for note in notes {
             let _ = self.event_tx.send(EventFrame {
+                origin: None,
                 stream: Some(stream.clone()),
                 event: SessionEvent::error_model(note),
             });
@@ -929,6 +968,7 @@ fn spawn_worker(
                         // tell.
                         let _ = event_tx.send(EventFrame {
                             stream: Some(stream.clone()),
+                            origin: None,
                             event,
                         });
                     })
@@ -1049,12 +1089,14 @@ fn execute_checkout(
     let res = session.rewind_to_entry(&entry_id);
     if let Err(error) = res {
         let _ = event_tx.send(EventFrame {
+            origin: None,
             stream: Some(stream.clone()),
             event: SessionEvent::error_checkout(error.to_string()),
         });
         return;
     }
     let _ = event_tx.send(EventFrame {
+        origin: None,
         stream: Some(stream.clone()),
         event: SessionEvent::CheckedOut {
             entry_id,
@@ -1078,22 +1120,26 @@ fn execute_checkout(
 fn emit_replay(session: &Session, event_tx: &mpsc::UnboundedSender<EventFrame>, stream: &StreamId) {
     let selection = session.selection();
     let _ = event_tx.send(EventFrame {
+        origin: None,
         stream: Some(stream.clone()),
         event: SessionEvent::model_changed(&selection, session.model_facts(&selection)),
     });
     let events = session.replay_events();
     let total = events.len() as u64;
     let _ = event_tx.send(EventFrame {
+        origin: None,
         stream: Some(stream.clone()),
         event: SessionEvent::ReplayStarted { total },
     });
     for event in events {
         let _ = event_tx.send(EventFrame {
             stream: Some(stream.clone()),
+            origin: None,
             event,
         });
     }
     let _ = event_tx.send(EventFrame {
+        origin: None,
         stream: Some(stream.clone()),
         event: SessionEvent::ReplayDone,
     });

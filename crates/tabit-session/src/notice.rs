@@ -59,6 +59,7 @@ impl NoticeSink {
         events
             .send(EventFrame {
                 stream: Some(self.stream.clone()),
+                origin: None,
                 event,
             })
             .is_ok()
@@ -82,3 +83,39 @@ impl NoticeSink {
 /// before the attach means the same as a dead channel after it —
 /// nobody is there to tell.
 pub(crate) type NoticeSlot = std::sync::OnceLock<NoticeSink>;
+
+/// The backend's weak handle on the same channel, for emissions that
+/// are nobody's session: an extension speaking the shared grammar
+/// emits events origin-stamped and unstamped by stream (the routing
+/// generalization — routing is participant-blind, the origin field is
+/// the attribution). Same weak discipline as [`NoticeSink`]: the
+/// stream ends with the frontend, and a dead channel means nobody is
+/// left to tell.
+#[derive(Clone)]
+pub struct BackendSink {
+    events: mpsc::WeakUnboundedSender<EventFrame>,
+}
+
+impl BackendSink {
+    /// The one downgrade site for backend-level emissions.
+    pub(crate) fn new(events: &mpsc::UnboundedSender<EventFrame>) -> Self {
+        Self {
+            events: events.downgrade(),
+        }
+    }
+
+    /// Emit an extension's event, origin-stamped and backend-level
+    /// (no stream). Returns whether the channel was live.
+    pub fn emit(&self, origin: &str, event: SessionEvent) -> bool {
+        let Some(events) = self.events.upgrade() else {
+            return false;
+        };
+        events
+            .send(EventFrame {
+                stream: None,
+                origin: Some(origin.to_string()),
+                event,
+            })
+            .is_ok()
+    }
+}

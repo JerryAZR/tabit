@@ -60,7 +60,7 @@ fn a_learned_descendant_routes_to_the_owning_child() {
     assert!(router.deliver(
         "grandchild",
         SessionCommand::InteractionResponse {
-            session: "grandchild".to_string(),
+            session: Some("grandchild".to_string()),
             id: "req-1".to_string(),
             payload: serde_json::json!({}),
         },

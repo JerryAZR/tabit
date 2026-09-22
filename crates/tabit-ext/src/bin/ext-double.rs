@@ -18,6 +18,15 @@
 //!   extension speaking vocabulary its host lacks is a contract
 //!   break, same death as garbage)
 //!
+//! Grammar behaviors (the routing generalization):
+//! - `grammar` — ack watching `session_opened` and
+//!   `interaction_settled`; emit one `message` command and one
+//!   `interaction_request` (id `g-1`); then echo every inbound line
+//!   that is not a lane frame back out as an `error { kind:
+//!   session }` event whose message is the line verbatim — so the
+//!   tests can see exactly what the host mirrored or routed down
+//!   the pipe.
+//!
 //! Tool-lane behaviors (task 2): ack with one declared tool, then
 //! serve it on the pipe:
 //! - `tools-echo`   — tool `echo`: answers with the args as the report
@@ -53,7 +62,7 @@ fn main() {
         | "late-unknown" => {}
         "die-pre-ack" => std::process::exit(1),
         "tools-echo" | "tools-fail" | "tools-ask" | "tools-shadow" | "tools-model"
-        | "tools-cancel" => {}
+        | "tools-cancel" | "grammar" => {}
         "hooks-allow" | "hooks-skip" | "hooks-ask" | "hooks-hang" => {}
         other => {
             eprintln!("ext-double: unknown behavior `{other}`");
@@ -80,6 +89,7 @@ fn main() {
             drain();
         }
         "tools-echo" => serve_tools(json!([tool_decl("echo")])),
+        "grammar" => serve_grammar(),
         "tools-fail" => serve_tools(json!([tool_decl("boom")])),
         "tools-ask" => serve_tools(json!([tool_decl("ask")])),
         "tools-shadow" => serve_tools(json!([tool_decl("read")])),
@@ -90,8 +100,8 @@ fn main() {
         }
         _ => {
             emit(json!({
-                "type": "ack", "protocol_version": 1,
-                "tools": [], "hooks": [],
+                "type": "ack", "protocol_version": 2,
+                "tools": [], "hooks": [], "watch": [],
             }));
             if behavior == "die-post-ack" {
                 marker_and_exit(0);
@@ -113,12 +123,50 @@ fn main() {
     marker_and_exit(0);
 }
 
+/// The grammar behavior: speak the shared grammar both ways and
+/// mirror everything the host sends back as reportable events.
+fn serve_grammar() {
+    emit(json!({
+        "type": "ack", "protocol_version": 2,
+        "tools": [], "hooks": [],
+        "watch": ["session_opened", "interaction_settled"],
+    }));
+    emit(json!({
+        "type": "message", "session": "boot-session",
+        "text": "steered by the extension",
+    }));
+    emit(json!({
+        "type": "interaction_request", "id": "g-1",
+        "ui_type": "native:select_any",
+        "payload": {"title": "The extension asks", "body": "grammar demo", "options": [], "free_text": true},
+    }));
+    // Everything inbound that is not a lane frame is the grammar
+    // coming home: mirror it out as an error event so the test's
+    // event recorder sees it.
+    loop {
+        let line = read_line();
+        let Ok(frame) = serde_json::from_str::<Value>(&line) else {
+            continue;
+        };
+        let kind = frame["type"].as_str().unwrap_or_default().to_string();
+        if matches!(
+            kind.as_str(),
+            "tool_call" | "hook" | "cancel" | "service_response"
+        ) {
+            continue;
+        }
+        emit(json!({
+            "type": "error", "kind": "session", "message": line.trim(),
+        }));
+    }
+}
+
 /// The tool-lane loop: one declared tool served sequentially — the
 /// pipe is one lane, and this double keeps it honest.
 fn serve_tools(tools: Value) {
     emit(json!({
-        "type": "ack", "protocol_version": 1,
-        "tools": tools, "hooks": [],
+        "type": "ack", "protocol_version": 2,
+        "tools": tools, "hooks": [], "watch": [],
     }));
     let behavior = std::env::args().nth(1).unwrap_or_default();
     loop {
@@ -248,8 +296,8 @@ fn serve_tools(tools: Value) {
 /// sequentially. The behavior picks the decision path.
 fn serve_hooks(behavior: &str) {
     emit(json!({
-        "type": "ack", "protocol_version": 1,
-        "tools": [], "hooks": [{"event": "tool_call"}],
+        "type": "ack", "protocol_version": 2,
+        "tools": [], "hooks": [{"event": "tool_call"}], "watch": [],
     }));
     loop {
         let line = read_line();

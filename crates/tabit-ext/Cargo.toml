@@ -34,7 +34,11 @@ process-wrap = { version = "10", default-features = false, features = [
 ] }
 serde = { workspace = true, features = ["derive"] }
 serde_json = { workspace = true }
+# The shared grammar on the pipe: commands in, emissions out, watched
+# events back (the routing generalization rides tabit-protocol's
+# vocabulary verbatim, flat beside the lane frames).
 tabit-log = { path = "../tabit-log", version = "0.41.0" }
+tabit-protocol = { path = "../tabit-protocol", version = "0.41.0" }
 thiserror = { workspace = true }
 tokio = { workspace = true, features = [
     "io-util",

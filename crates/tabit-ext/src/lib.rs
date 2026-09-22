@@ -24,7 +24,11 @@
 //! frames for tool calls, hook events, and host services land with
 //! the tasks that exercise them.
 
+pub mod grammar;
 pub mod manifest;
 pub mod process;
 pub mod protocol;
 pub mod supervisor;
+
+pub use grammar::{BackendAsks, GrammarRoutes};
+pub use supervisor::LaunchContext;

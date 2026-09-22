@@ -54,7 +54,7 @@ use serde_json::{Value, json};
 
 /// The extension protocol this SDK speaks — must match the host's
 /// exactly (the pipe is a frozen contract, not a negotiated one).
-const PROTOCOL_VERSION: u64 = 1;
+const PROTOCOL_VERSION: u64 = 2;
 
 /// One extension's whole declaration.
 pub struct Extension {
@@ -390,6 +390,11 @@ pub fn serve(extension: Extension) -> ! {
                 .iter()
                 .map(|hook| json!({"event": hook.event}))
                 .collect::<Vec<_>>(),
+            // v2: the watch list (the event kinds whose frames this
+            // extension wants mirrored). The current SDK watches
+            // nothing — the wrapper API that derives it from bound
+            // callbacks is the SDK rebuild's work.
+            "watch": [],
         }),
     );
 

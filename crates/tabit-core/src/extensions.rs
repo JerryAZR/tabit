@@ -64,6 +64,13 @@ impl Mounted {
         }
     }
 
+    /// The supervised extension host this assembly mounted — the
+    /// routing-generalization glue reads its ask registry and mirror
+    /// surface from here.
+    pub fn supervisor(&self) -> &std::sync::Arc<Supervisor> {
+        &self.supervisor
+    }
+
     /// Assemble from the supervisor's **resolved** reports (call
     /// [`Supervisor::await_resolved`] first — the boot order that
     /// guarantees tools exist at session build).

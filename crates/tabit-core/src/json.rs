@@ -9,14 +9,41 @@
 
 use std::io::{BufRead, Write};
 use tabit_protocol::EventFrame;
-use tabit_protocol::{ClientFrame, PROTOCOL_VERSION, ServerControlFrame, ServerFrame};
+use tabit_protocol::{
+    ClientFrame, PROTOCOL_VERSION, ServerControlFrame, ServerFrame, SessionCommand,
+};
 use tabit_session::{SessionCommandLink, SessionHost, SessionInfo};
 use tokio::sync::mpsc;
 
 /// Serve the backend over `reader`/`writer` until the client closes its
 /// input. Returns the process exit code: 0 normally, 1 on a handshake
 /// version mismatch (the connection is rejected and closed).
-pub async fn serve<R, W>(mut host: SessionHost, reader: R, writer: W) -> i32
+pub async fn serve<R, W>(host: SessionHost, reader: R, writer: W) -> i32
+where
+    R: BufRead + Send + 'static,
+    W: Write + Send + 'static,
+{
+    // The plain glue: commands go to the host's own link, nothing is
+    // mirrored (print-mode-style edges and the in-crate tests — no
+    // extension host in sight).
+    let link = host.command_link();
+    let dispatch: std::sync::Arc<dyn Fn(SessionCommand) + Send + Sync> =
+        std::sync::Arc::new(move |command| link.send(command));
+    let mirror: std::sync::Arc<dyn Fn(&EventFrame) + Send + Sync> = std::sync::Arc::new(|_| {});
+    serve_with_glue(host, reader, writer, dispatch, mirror).await
+}
+
+/// [`serve`] with the routing-generalization glue supplied: where
+/// commands route (id-first through the extension ask registry, then
+/// the host) and what mirrors each event frame (the extension watch
+/// lanes).
+pub async fn serve_with_glue<R, W>(
+    mut host: SessionHost,
+    reader: R,
+    writer: W,
+    dispatch: std::sync::Arc<dyn Fn(SessionCommand) + Send + Sync>,
+    mirror: std::sync::Arc<dyn Fn(&EventFrame) + Send + Sync>,
+) -> i32
 where
     R: BufRead + Send + 'static,
     W: Write + Send + 'static,
@@ -37,8 +64,9 @@ where
     // stdout, draining one ordered channel so the handshake ack can
     // never land behind an event.
     let reader_tx = writer_tx.clone();
-    let reader_task =
-        tokio::task::spawn_blocking(move || read_loop(reader, link, reader_tx, &info, gate_tx));
+    let reader_task = tokio::task::spawn_blocking(move || {
+        read_loop(reader, link, dispatch, reader_tx, &info, gate_tx)
+    });
     let writer_task = tokio::spawn(write_loop(writer_rx, writer));
 
     // The live forwarder: host events reach stdout as they happen, for
@@ -50,6 +78,7 @@ where
         host.take_events(),
         writer_tx.clone(),
         gate_rx,
+        mirror,
     ));
 
     // A panicked reader thread is a broken edge: exit nonzero.
@@ -82,6 +111,7 @@ async fn forward_events(
     stream: Option<mpsc::UnboundedReceiver<EventFrame>>,
     out: mpsc::UnboundedSender<ServerFrame>,
     mut gate: tokio::sync::watch::Receiver<bool>,
+    mirror: std::sync::Arc<dyn Fn(&EventFrame) + Send + Sync>,
 ) {
     let Some(mut stream) = stream else {
         return;
@@ -97,6 +127,10 @@ async fn forward_events(
         }
     }
     while let Some(frame) = stream.recv().await {
+        // The participant-blind fan-out: the primary frontend is
+        // subscriber zero (this write); every watching extension's
+        // lane takes the same line from the mirror.
+        mirror(&frame);
         let _ = out.send(ServerFrame::Event(frame));
     }
 }
@@ -107,6 +141,7 @@ async fn forward_events(
 fn read_loop<R: BufRead>(
     mut reader: R,
     link: SessionCommandLink,
+    dispatch: std::sync::Arc<dyn Fn(SessionCommand) + Send + Sync>,
     out: mpsc::UnboundedSender<ServerFrame>,
     info: &SessionInfo,
     gate: tokio::sync::watch::Sender<bool>,
@@ -173,7 +208,7 @@ fn read_loop<R: BufRead>(
                     },
                 );
             }
-            Ok(ClientFrame::Command(command)) if initialized => link.send(command),
+            Ok(ClientFrame::Command(command)) if initialized => dispatch(command),
             Ok(ClientFrame::Command(_)) => {
                 control(
                     &out,
@@ -540,10 +575,12 @@ id = "m"
             .iter()
             .filter_map(|frame| match frame {
                 ServerFrame::Event(EventFrame {
+                    origin: None,
                     event: tabit_session::SessionEvent::UserMessage { text, .. },
                     ..
                 }) if kind == "user" => Some(text.as_str()),
                 ServerFrame::Event(EventFrame {
+                    origin: None,
                     event: tabit_session::SessionEvent::TextDelta { text, .. },
                     ..
                 }) if kind == "delta" => Some(text.as_str()),
@@ -640,6 +677,7 @@ id = "m"
         };
         let opened = frames.iter().find_map(|frame| match frame {
             ServerFrame::Event(EventFrame {
+                origin: None,
                 event: tabit_session::SessionEvent::SessionOpened { id, model, .. },
                 ..
             }) => Some((id.clone(), model.clone())),
@@ -654,6 +692,7 @@ id = "m"
         assert!(matches!(
             frames.last(),
             Some(ServerFrame::Event(EventFrame {
+                origin: None,
                 event: tabit_session::SessionEvent::RunFinished { output, .. },
                 ..
             })) if output == "hello"
@@ -712,6 +751,7 @@ id = "m"
                 matches!(
                     frame,
                     ServerFrame::Event(EventFrame {
+                        origin: None,
                         event: tabit_session::SessionEvent::Error { kind, .. },
                         ..
                     }) if kind == "model"
@@ -728,6 +768,7 @@ id = "m"
                 matches!(
                     frame,
                     ServerFrame::Event(EventFrame {
+                        origin: None,
                         event: tabit_session::SessionEvent::UserMessage { .. },
                         ..
                     })
@@ -921,6 +962,7 @@ id = "m"
             frames.iter().any(|frame| matches!(
                 frame,
                 ServerFrame::Event(EventFrame {
+                    origin: None,
                     event: tabit_session::SessionEvent::SessionOpened { .. },
                     ..
                 })
@@ -1118,6 +1160,7 @@ id = "m"
                 matches!(
                     frame,
                     ServerFrame::Event(EventFrame {
+                        origin: None,
                         event: tabit_session::SessionEvent::SessionsAvailable { sessions },
                         ..
                     }) if sessions.iter().any(|s| s.id == session_id)
@@ -1129,6 +1172,7 @@ id = "m"
         // never lists the directory to learn either.
         let opened = frames.iter().find_map(|frame| match frame {
             ServerFrame::Event(EventFrame {
+                origin: None,
                 event: tabit_session::SessionEvent::SessionOpened { cwd, path, .. },
                 ..
             }) => Some((cwd.clone(), path.clone())),
@@ -1137,6 +1181,7 @@ id = "m"
         let (opened_cwd, _opened_path) = opened.expect("session_opened on the wire");
         assert!(!opened_cwd.is_empty(), "the boot announces its cwd");
         if let ServerFrame::Event(EventFrame {
+            origin: None,
             event: tabit_session::SessionEvent::SessionsAvailable { sessions },
             ..
         }) = &frames[catalog_at]
@@ -1202,6 +1247,7 @@ id = "m"
         assert!(
             frames.iter().any(|frame| matches!(frame,
                 ServerFrame::Event(EventFrame {
+                    origin: None,
                     event: tabit_session::SessionEvent::TextDelta { text, .. },
                     ..
                 }) if text == "first answer"
@@ -1219,6 +1265,7 @@ id = "m"
             !frames.iter().any(|frame| matches!(
                 frame,
                 ServerFrame::Event(EventFrame {
+                    origin: None,
                     event: tabit_session::SessionEvent::ReplayStarted { .. },
                     ..
                 })
@@ -1333,6 +1380,7 @@ id = "m"
                 .filter(|line| line.contains("session_opened"))
                 .find_map(|line| match serde_json::from_str::<ServerFrame>(&line) {
                     Ok(ServerFrame::Event(EventFrame {
+                        origin: None,
                         stream: Some(stream),
                         event: tabit_session::SessionEvent::SessionOpened { id, .. },
                         ..
@@ -1501,6 +1549,7 @@ id = "m"
             .into_iter()
             .find_map(|line| match serde_json::from_str::<ServerFrame>(&line) {
                 Ok(ServerFrame::Event(EventFrame {
+                    origin: None,
                     event: tabit_session::SessionEvent::UserMessage { text, entry_id },
                     ..
                 })) if text == "hi" => Some(entry_id),

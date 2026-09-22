@@ -40,6 +40,7 @@ use std::io::Write as _;
 use std::path::PathBuf;
 use std::sync::Arc;
 use tabit_config::{AuthConfig, TabitConfig};
+use tabit_protocol::EventFrame;
 use tabit_protocol::SessionCommand;
 use tabit_session::SessionEvent;
 use tabit_session::{
@@ -1031,9 +1032,36 @@ fn run() -> Result<i32, String> {
             // concurrently inside their supervision tasks, so a
             // broken package costs one boot, loudly, and never
             // delays a healthy sibling.
+            // The grammar bridges: extensions speak the shared grammar
+            // from their first post-ack line, but the session host (the
+            // grammar's other end) spawns after the extension boot —
+            // the channels hold whatever crosses in between, and the
+            // drain tasks started after the spawn serve it in order.
+            let (grammar_cmd_tx, mut grammar_cmd_rx) =
+                tokio::sync::mpsc::unbounded_channel::<SessionCommand>();
+            let (grammar_evt_tx, mut grammar_evt_rx) =
+                tokio::sync::mpsc::unbounded_channel::<(String, SessionEvent)>();
+            let launch_context = tabit_ext::LaunchContext {
+                routes: tabit_ext::GrammarRoutes::new(
+                    std::sync::Arc::new(move |command| {
+                        let _ = grammar_cmd_tx.send(command);
+                    }),
+                    std::sync::Arc::new(move |origin, event| {
+                        let _ = grammar_evt_tx.send((origin.to_string(), event));
+                    }),
+                ),
+                // The host IS the binary: owned-session spawners get
+                // the running executable, never a resolution search.
+                core_path: std::env::current_exe()
+                    .map(|path| path.display().to_string())
+                    .unwrap_or_default(),
+                cwd: std::env::current_dir()
+                    .map(|path| path.display().to_string())
+                    .unwrap_or_default(),
+            };
             let mounted = {
                 let supervisor = runtime.block_on(async {
-                    let supervisor = boot_extensions(launchable.found);
+                    let supervisor = boot_extensions(launchable.found, launch_context);
                     supervisor.await_resolved().await;
                     supervisor
                 });
@@ -1063,10 +1091,47 @@ fn run() -> Result<i32, String> {
             let wiring = host_wiring(&args, &registry, SessionStore::project_default(), &mounted);
             Ok(runtime.block_on(async {
                 let handle = SessionHost::spawn(session, startup_notes, wiring);
-                json::serve(
+                let asks = mounted.supervisor().asks();
+                let link = handle.command_link();
+                let backend_sink = handle.backend_sink();
+                // Id-first dispatch (participant-blind by id): an
+                // answer claiming a backend ask routes to its
+                // extension; everything else is a session command.
+                let dispatch: std::sync::Arc<dyn Fn(SessionCommand) + Send + Sync> =
+                    std::sync::Arc::new(move |command| {
+                        if let SessionCommand::InteractionResponse { id, payload, .. } = &command {
+                            if asks.respond(id, payload.clone()) {
+                                return;
+                            }
+                        }
+                        link.send(command);
+                    });
+                // The emission bridge: extension-emitted events fan out
+                // origin-stamped on the host's channel.
+                let sink = backend_sink;
+                tokio::spawn(async move {
+                    while let Some((origin, event)) = grammar_evt_rx.recv().await {
+                        sink.emit(&origin, event);
+                    }
+                });
+                // The command bridge drains through the same dispatch.
+                let bridge_dispatch = dispatch.clone();
+                tokio::spawn(async move {
+                    while let Some(command) = grammar_cmd_rx.recv().await {
+                        bridge_dispatch(command);
+                    }
+                });
+                let mirror: std::sync::Arc<dyn Fn(&EventFrame) + Send + Sync> =
+                    std::sync::Arc::new({
+                        let supervisor = mounted.supervisor().clone();
+                        move |frame| supervisor.broadcast(frame)
+                    });
+                json::serve_with_glue(
                     handle,
                     std::io::BufReader::new(std::io::stdin()),
                     std::io::stdout(),
+                    dispatch,
+                    mirror,
                 )
                 .await
             }))
@@ -1408,7 +1473,7 @@ fn parse_answer(session: &str, id: &str, options: &[String], line: &str) -> Sess
     };
     let payload = serde_json::to_value(answer).expect("template payloads always serialize");
     SessionCommand::InteractionResponse {
-        session: session.to_string(),
+        session: Some(session.to_string()),
         id: id.to_string(),
         payload,
     }
@@ -1506,10 +1571,11 @@ fn extension_root(args: &Args) -> Option<PathBuf> {
 }
 fn boot_extensions(
     found: Vec<tabit_ext::manifest::Discovered>,
+    host: tabit_ext::LaunchContext,
 ) -> std::sync::Arc<tabit_ext::supervisor::Supervisor> {
     // Reports land on stderr (stdout is protocol).
     let (supervisor, mut events) =
-        tabit_ext::supervisor::launch(found, tabit_ext::supervisor::HANDSHAKE_TIMEOUT);
+        tabit_ext::supervisor::launch(found, tabit_ext::supervisor::HANDSHAKE_TIMEOUT, host);
     tokio::spawn(async move {
         while let Some(event) = events.recv().await {
             match &event.status {

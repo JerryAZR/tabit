@@ -23,7 +23,7 @@ use serde::{Deserialize, Serialize};
 /// announcement. v7: compaction — the `compact` command and
 /// its event family (reshaped in v15 into the
 /// `compaction_begin`/`compaction_step`/`compaction_end` envelope).
-pub const PROTOCOL_VERSION: u32 = 17;
+pub const PROTOCOL_VERSION: u32 = 18;
 
 /// Which session produced an event. The stamp is the session id
 /// itself (v3: the `"main"` alias is retired — one name per session);
@@ -59,6 +59,13 @@ pub struct EventFrame {
     /// backend-level events.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub stream: Option<StreamId>,
+    /// Who produced the event when it was not the backend itself —
+    /// an extension emitting into the shared grammar (v18, the
+    /// routing generalization: routing is participant-blind, so the
+    /// stamp is attribution, not permission). `None` on everything
+    /// the backend emits.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub origin: Option<String>,
     /// The event itself; its `type` tag flattens next to `stream`.
     #[serde(flatten)]
     pub event: SessionEvent,
@@ -114,11 +121,17 @@ pub enum SessionCommand {
     /// asker went away with its run — terminals close everything). The
     /// `payload` is the answer shaped by the asking template's
     /// convention (v4) — always an answer; the frontend never
-    /// expresses dismissal (that is backend-derived).
+    /// expresses dismissal (that is backend-derived). `session` is the
+    /// echo of the request frame's stamp (v3's always-explicit rule);
+    /// v18 makes it optional for the one answerer that has no session
+    /// to name — the backend itself, routing an answer back to an
+    /// extension's ask over its pipe (the id is the correlation; the
+    /// routing generalization is participant-blind).
     InteractionResponse {
-        /// The session whose request is being answered (the echo of
-        /// the request frame's stamp — v3's always-explicit rule).
-        session: String,
+        /// The session whose request is being answered; absent only on
+        /// the backend's routed-back answers.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        session: Option<String>,
         /// The request id being answered.
         id: String,
         /// The answer payload (see `templates`).

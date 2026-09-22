@@ -40,6 +40,7 @@ use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
+use crate::grammar::{BackendAsks, GrammarRoutes};
 use crate::manifest::{self, Discovered, Manifest};
 use crate::process::{self, wrap_command};
 use crate::protocol::{
@@ -163,6 +164,9 @@ struct Lane {
     commands: tokio::sync::mpsc::UnboundedSender<String>,
     pending: Mutex<HashMap<String, PendingCall>>,
     next_call_id: AtomicU64,
+    /// The watched event kinds (the ack's subscription list) — written
+    /// once at the handshake, read by every broadcast.
+    watch: Mutex<std::collections::HashSet<String>>,
     /// Set at the pipe's end (EOF or garbage), before the pending
     /// drain — a call registering after death fails fast instead of
     /// awaiting a result that can never come.
@@ -176,8 +180,19 @@ impl Lane {
             commands,
             pending: Mutex::new(HashMap::new()),
             next_call_id: AtomicU64::new(1),
+            watch: Mutex::new(std::collections::HashSet::new()),
             dead: AtomicBool::new(false),
         })
+    }
+
+    /// Record the ack's subscription list — the one write.
+    fn set_watch(&self, kinds: impl IntoIterator<Item = String>) {
+        tabit_log::lock::lock(&self.watch).extend(kinds);
+    }
+
+    /// Whether this lane wants frames of one event kind.
+    fn watches(&self, kind: &str) -> bool {
+        tabit_log::lock::lock(&self.watch).contains(kind)
     }
 
     /// The pipe's last act: answer every pending item — executions
@@ -401,6 +416,10 @@ impl ExtensionHandle {
 pub struct Supervisor {
     closing: CancellationToken,
     children: Vec<Supervised>,
+    /// The extension-asked questions' registry — the glue's id-first
+    /// dispatch consults it before routing a response to the session
+    /// host.
+    asks: Arc<BackendAsks>,
 }
 
 struct Supervised {
@@ -420,11 +439,25 @@ struct Supervised {
 pub fn launch_root(
     root: &Path,
     handshake_timeout: Duration,
+    host: LaunchContext,
 ) -> (
     Supervisor,
     tokio::sync::mpsc::UnboundedReceiver<ExtensionEvent>,
 ) {
-    launch(manifest::scan(root), handshake_timeout)
+    launch(manifest::scan(root), handshake_timeout, host)
+}
+
+/// The host facts and routes one launch serves every pipe with (the
+/// routing generalization): where the shared grammar goes, the binary
+/// path owned-session spawners need, and the backend cwd.
+pub struct LaunchContext {
+    /// Where parsed commands and extension emissions go.
+    pub routes: GrammarRoutes,
+    /// The running backend's own executable path (`initialize`'s
+    /// `core_path` — the host IS the binary).
+    pub core_path: String,
+    /// The backend's working directory.
+    pub cwd: String,
 }
 
 /// Launch a scan's findings: spawn and supervise each package, report
@@ -436,12 +469,14 @@ pub fn launch_root(
 pub fn launch(
     found: Vec<Discovered>,
     handshake_timeout: Duration,
+    host: LaunchContext,
 ) -> (
     Supervisor,
     tokio::sync::mpsc::UnboundedReceiver<ExtensionEvent>,
 ) {
     let closing = CancellationToken::new();
     let (events_tx, events_rx) = tokio::sync::mpsc::unbounded_channel();
+    let asks = Arc::new(BackendAsks::new(host.routes.clone()));
     let mut children = Vec::new();
     for found in found {
         match found {
@@ -464,6 +499,10 @@ pub fn launch(
                     lane.clone(),
                     events_tx.clone(),
                     command_rx,
+                    host.core_path.clone(),
+                    host.cwd.clone(),
+                    host.routes.clone(),
+                    asks.clone(),
                 ));
                 children.push(Supervised {
                     name,
@@ -502,7 +541,14 @@ pub fn launch(
             }
         }
     }
-    (Supervisor { closing, children }, events_rx)
+    (
+        Supervisor {
+            closing,
+            children,
+            asks,
+        },
+        events_rx,
+    )
 }
 
 impl Supervisor {
@@ -513,6 +559,34 @@ impl Supervisor {
         Supervisor {
             closing: CancellationToken::new(),
             children: Vec::new(),
+            asks: Arc::new(BackendAsks::new(GrammarRoutes::noop())),
+        }
+    }
+
+    /// The extension-ask registry — the id-first dispatch surface for
+    /// the glue.
+    pub fn asks(&self) -> Arc<BackendAsks> {
+        self.asks.clone()
+    }
+
+    /// Fan one event frame out to every watching extension (the
+    /// participant-blind mirror: the primary frontend is subscriber
+    /// zero on the pump's side; these lanes are the rest). The frame
+    /// is serialized once; a lane takes the line iff its watch list
+    /// contains the event's kind. Fire-and-forget — a dead or slow
+    /// lane's writer drops the line, never blocks the pump.
+    pub fn broadcast(&self, frame: &tabit_protocol::EventFrame) {
+        let Ok(value) = serde_json::to_value(frame) else {
+            return;
+        };
+        let Some(kind) = value.get("type").and_then(serde_json::Value::as_str) else {
+            return;
+        };
+        let line = tabit_protocol::to_wire_line(frame);
+        for child in &self.children {
+            if !child.lane.dead.load(Ordering::SeqCst) && child.lane.watches(kind) {
+                let _ = child.lane.commands.send(line.clone());
+            }
         }
     }
 
@@ -591,6 +665,10 @@ async fn supervise(
     lane: Arc<Lane>,
     events: tokio::sync::mpsc::UnboundedSender<ExtensionEvent>,
     command_rx: tokio::sync::mpsc::UnboundedReceiver<String>,
+    core_path: String,
+    cwd: String,
+    routes: GrammarRoutes,
+    asks: Arc<BackendAsks>,
 ) {
     // A child of the supervisor's token: this extension's failure
     // closes only its own pipe (fail_before_ack cancels this one),
@@ -684,6 +762,8 @@ async fn supervise(
     let (death_tx, mut death_rx) = tokio::sync::oneshot::channel::<String>();
     {
         let lane = lane.clone();
+        let routes = routes.clone();
+        let asks = asks.clone();
         tokio::spawn(async move {
             let mut lines = BufReader::new(stdout).lines();
             let mut handshake_tx = Some(handshake_tx);
@@ -694,12 +774,14 @@ async fn supervise(
                         protocol_version,
                         tools,
                         hooks,
+                        watch,
                     }) => {
                         if let Some(tx) = handshake_tx.take() {
                             let _ = tx.send(Handshake::Acked(Ack {
                                 protocol_version,
                                 tools,
                                 hooks,
+                                watch,
                             }));
                         }
                         // A re-ack after a good one: tolerated, ignored.
@@ -762,7 +844,31 @@ async fn supervise(
                     }) => {
                         dispatch_service(lane.clone(), request_id, call_id, verb);
                     }
+                    // Not a lane frame: the shared grammar rides the
+                    // same lines (flat, byte-identical with the
+                    // frontend edge). Commands are actions; events are
+                    // emissions — an interaction request additionally
+                    // registers its ask so the routed answer finds this
+                    // lane. A line parseable as none of the three is
+                    // the contract break it always was.
                     Err(_) => {
+                        if let Ok(command) =
+                            serde_json::from_str::<tabit_protocol::SessionCommand>(&line)
+                        {
+                            routes.command(command);
+                            continue;
+                        }
+                        if let Ok(event) =
+                            serde_json::from_str::<tabit_protocol::SessionEvent>(&line)
+                        {
+                            if let tabit_protocol::SessionEvent::InteractionRequest { id, .. } =
+                                &event
+                            {
+                                asks.register(&lane.name, id.clone(), lane.commands.clone());
+                            }
+                            routes.event(&lane.name, event);
+                            continue;
+                        }
                         refuse(
                             &mut handshake_tx,
                             &mut death_tx,
@@ -781,6 +887,7 @@ async fn supervise(
             // verdict crosses.
             let reason = "the extension process died mid-call".to_string();
             lane.die(&reason);
+            asks.clear_extension(&lane.name);
             if let Some(tx) = handshake_tx.take() {
                 let _ = tx.send(Handshake::Failed("closed before the handshake".to_string()));
             } else if let Some(tx) = death_tx.take() {
@@ -796,6 +903,8 @@ async fn supervise(
     #[allow(clippy::expect_used)] // sanctioned crash: pure-data serialization
     let initialize = serde_json::to_string(&HostFrame::Initialize {
         protocol_version: EXTENSION_PROTOCOL_VERSION,
+        core_path,
+        cwd,
     })
     .expect("HostFrame::Initialize always serializes");
     let _ = lane.commands.send(initialize);
@@ -837,7 +946,13 @@ async fn supervise(
         return;
     }
 
-    let Ack { tools, hooks, .. } = ack;
+    let Ack {
+        tools,
+        hooks,
+        watch,
+        ..
+    } = ack;
+    lane.set_watch(watch);
     let status = state.transition(Status::Alive, tools, hooks);
     let _ = events.send(ExtensionEvent {
         name: manifest.name.clone(),
@@ -878,6 +993,9 @@ async fn supervise(
     } else {
         format!("{reason}\nstderr tail:\n{tail}")
     };
+    // The reader never saw this death (stdout stayed open), so its
+    // ask-settling did not run: settle here.
+    asks.clear_extension(&manifest.name);
     resolve_dead(&state, &lane, &events, &manifest.name, reason);
 }
 
@@ -1071,6 +1189,11 @@ fn resolve_dead(
     reason: String,
 ) {
     lane.die("the extension is not running");
+    // (Ask settling lives at the death sites that can see the asks
+    // registry: the reader end and the exit branch.) The pre-ack and
+    // spawn-failure paths funnel here and cannot carry open asks. — announced, so no channel holds a card that can never be
+    // answered. (Callers without an asks registry — the spawn-failure
+    // path — cannot have open asks either; the settle is idempotent.)
     // The declared capabilities survive the death — the catalog's
     // "what it would have served" report. (Pre-ack deaths never
     // recorded any; post-ack deaths keep their ack's declarations.)

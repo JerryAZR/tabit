@@ -26,8 +26,8 @@ use std::time::Duration;
 use httpmock::MockServer;
 use serde_json::json;
 use tabit_protocol::{
-    ClientFrame, PROTOCOL_VERSION, ServerControlFrame, ServerFrame, SessionCommand, SessionEvent,
-    to_wire_line,
+    ClientFrame, EventFrame, PROTOCOL_VERSION, ServerControlFrame, ServerFrame, SessionCommand,
+    SessionEvent, to_wire_line,
 };
 
 /// The line-read bound: real processes, real pipes — generous for a
@@ -971,7 +971,7 @@ fn the_builtin_gate_asks_on_a_risky_bash_and_a_block_skips() {
                         "the card shows the checked command: {payload}"
                     );
                     backend.send(&to_wire_line(&SessionCommand::InteractionResponse {
-                        session: session.clone(),
+                        session: Some(session.clone()),
                         id,
                         payload: json!({
                             "selected": ["Block"], "text": "not today",
@@ -1052,4 +1052,86 @@ fn a_disabled_gate_mounts_nowhere() {
             ServerFrame::Control(control) => panic!("unexpected control frame: {control:?}"),
         }
     }
+}
+
+/// The routing generalization over the real json edge: the grammar
+/// double's emissions surface origin-stamped at the frontend, the
+/// watched boot announcement mirrors onto its pipe (it echoes the
+/// line back out), and the frontend's answer routes to the extension
+/// by id — with the settlement announced and the routed response
+/// crossing back down the pipe (mirrored out again by the double).
+#[test]
+fn the_shared_grammar_crosses_the_json_edge_end_to_end() {
+    let stage = stage("grammar-e2e", &[("grammar-ext", "grammar")]);
+    let mut backend = spawn_backend(&stage, &[]);
+    let (session, _catalog, _skills) = handshake(&mut backend);
+
+    // Frames until a predicate holds, bounded — the emissions race
+    // the handshake, so scan rather than assume order.
+    fn until<F: Fn(&EventFrame) -> bool>(backend: &mut Backend, want: &str, pred: F) -> EventFrame {
+        let deadline = std::time::Instant::now() + BOUND;
+        while std::time::Instant::now() < deadline {
+            let frame = match backend.next_frame() {
+                ServerFrame::Event(frame) => frame,
+                other => panic!("unexpected frame while waiting for {want}: {other:?}"),
+            };
+            if pred(&frame) {
+                return frame;
+            }
+        }
+        panic!("no {want} within the bound");
+    }
+
+    // The ask surfaced: backend-level (no stream), origin-stamped.
+    let ask = until(
+        &mut backend,
+        "origin-stamped interaction_request",
+        |frame| {
+            matches!(
+                &frame.event,
+                SessionEvent::InteractionRequest { id, .. } if id == "g-1"
+            ) && frame.stream.is_none()
+                && frame.origin.as_deref() == Some("grammar-ext")
+        },
+    );
+    assert!(ask.origin.as_deref() == Some("grammar-ext"));
+
+    // The watch mirror round-tripped: the double watched
+    // `session_opened`, the forwarder mirrored the boot's
+    // announcement, and the double echoed the line back out as an
+    // origin-stamped error event.
+    until(
+        &mut backend,
+        "the mirrored session_opened echoed back",
+        |frame| {
+            matches!(&frame.event, SessionEvent::Error { message, .. } if message
+                .contains("session_opened"))
+                && frame.origin.as_deref() == Some("grammar-ext")
+        },
+    );
+
+    // The answer routes by id — the session it names is irrelevant
+    // (id-first dispatch), the settlement is announced, and the
+    // routed response crosses back down the pipe (the double mirrors
+    // it out).
+    backend.send(&to_wire_line(&SessionCommand::InteractionResponse {
+        session: Some(session),
+        id: "g-1".to_string(),
+        payload: json!({"selected": [], "text": "go ahead from the frontend"}),
+    }));
+    until(
+        &mut backend,
+        "the settlement announced",
+        |frame| matches!(&frame.event, SessionEvent::InteractionSettled { id } if id == "g-1"),
+    );
+    until(
+        &mut backend,
+        "the routed answer echoed back from the extension",
+        |frame| {
+            matches!(&frame.event, SessionEvent::Error { message, .. } if message
+                .contains("interaction_response")
+                && message.contains("go ahead from the frontend"))
+                && frame.origin.as_deref() == Some("grammar-ext")
+        },
+    );
 }

@@ -135,6 +135,63 @@ extensions exist, host and SDK version as one workspace — no skew is
 possible; the full versioning story is a topic after the first
 release.
 
+## The wire: the frontend grammar rides the pipe flat (2026-09, the
+routing generalization)
+
+Ruled over the SDK discussion: the extension pipe carries the
+**frontend protocol's vocabulary verbatim, as bare lines**, beside
+the extension's own lanes — no wrapper frames, no second grammar.
+Dispatch on the inbound side is a parse cascade: the extension lanes
+(`ack`, `tool_result`, `hook_result`, `service_request`) first, then
+any session command, then any session event; a line parseable as
+none of the three is the contract break it always was (death with
+the snippet). The two tag namespaces are disjoint and stay so.
+
+The four directions, one sentence each:
+
+- **Commands out** (extension → host): any session command,
+  session-addressed with the same scope a frontend has — no
+  registration, no special cases. The extension learns session ids
+  from the events it watches (`session_opened`, the ack's boot id).
+  Effects arrive as events; collision semantics (a compact landing
+  mid-compaction, abort racing a checkout) are whatever the doors
+  and parked-intent machinery already do — a second commander adds
+  no new case.
+- **Events out** (extension → frontend and subscribers): any session
+  event, re-emitted by the host **origin-stamped** (`origin` names
+  the speaking extension; the stamp is attribution, not permission —
+  the trust model is install-consent). An emitted
+  `interaction_request` additionally registers its ask in the
+  backend registry below.
+- **Events in** (host → extension): the stamped event stream,
+  mirrored per the **watch list** — the ack declares the event kinds
+  (`watch`, the wire `type` tags) whose frames the extension wants.
+  Fine-grained by ruling: one kind, one entry, no bundles; an
+  unknown kind matches nothing (tolerated, not refused). The primary
+  frontend is subscriber zero — the same frames, unfiltered, on
+  stdout; the pump's fan-out is participant-blind.
+- **Answers back**: the frontend's `interaction_response` is routed
+  **id-first** — an id registered by an extension ask delivers the
+  serialized command line back down that extension's pipe
+  (`session` omitted; the id is the correlation) and announces
+  `interaction_settled { id }` (v17) to every subscriber. Unknown
+  ids fall through to the session host's own hub (the total no-op).
+  An extension dying settles its open asks — announced, so no
+  channel holds a card that can never be answered.
+
+Handshake additions (extension protocol **v2**): `initialize`
+carries `core_path` (the running backend's own executable — the host
+IS the binary, so an owned-session spawner never resolves anything)
+and `cwd`; `ack` carries the watch list. Versioning unchanged: each
+edge enforces at its own handshake — a mismatched extension dies at
+the ack before any line it could emit reaches the core.
+
+The service envelope's ask (verb zero) is **superseded** by direct
+event emission: an extension that can emit an `interaction_request`
+needs no wrapper. The verb is deleted with the SDK rebuild that
+builds on this shape (it rides v2's window; nothing new should use
+it).
+
 ## Model-facing names are flat; identity is the pair (2026-09)
 
 The model sees the declared tool name only — no prefix, no namespace

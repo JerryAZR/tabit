@@ -5045,6 +5045,7 @@ dependencies = [
  "serde",
  "serde_json",
  "tabit-log",
+ "tabit-protocol",
  "thiserror 2.0.20",
  "tokio",
  "tokio-util",

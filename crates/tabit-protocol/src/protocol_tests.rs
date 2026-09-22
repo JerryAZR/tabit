@@ -49,7 +49,7 @@ fn commands_round_trip_with_snake_case_tags() {
             session: "0197".to_string(),
         },
         SessionCommand::InteractionResponse {
-            session: "0197".to_string(),
+            session: Some("0197".to_string()),
             id: "0197-ask".to_string(),
             payload: serde_json::json!({
                 "option": "Deny",
@@ -57,7 +57,7 @@ fn commands_round_trip_with_snake_case_tags() {
             }),
         },
         SessionCommand::InteractionResponse {
-            session: "0197".to_string(),
+            session: Some("0197".to_string()),
             id: "0198-ask".to_string(),
             payload: serde_json::json!({"text": "use python"}),
         },
@@ -144,7 +144,7 @@ fn commands_round_trip_with_snake_case_tags() {
     );
     assert_eq!(
         serde_json::to_string(&SessionCommand::InteractionResponse {
-            session: "s1".to_string(),
+            session: Some("s1".to_string()),
             id: "0197".to_string(),
             payload: serde_json::json!({"option": "Deny"}),
         })
@@ -156,6 +156,7 @@ fn commands_round_trip_with_snake_case_tags() {
 #[test]
 fn event_frames_serialize_flat_with_the_stream_beside_the_tag() {
     let frame = EventFrame {
+        origin: None,
         stream: Some(StreamId::new("0197-session")),
         event: SessionEvent::TextDelta {
             turn_id: "t1".to_string(),
@@ -195,6 +196,7 @@ fn checked_out_carries_its_suffix_seam_as_an_explicit_null() {
     // the reserved suffix upgrade flips it to Some without a shape
     // change the day a measured problem wants it.
     let frame = EventFrame {
+        origin: None,
         stream: Some(StreamId::new("s1")),
         event: SessionEvent::CheckedOut {
             entry_id: "e9".to_string(),
@@ -214,6 +216,7 @@ fn checked_out_carries_its_suffix_seam_as_an_explicit_null() {
         )
         .expect("suffix shape"),
         EventFrame {
+            origin: None,
             stream: Some(StreamId::new("s1")),
             event: SessionEvent::CheckedOut {
                 entry_id: "e9".to_string(),
@@ -227,6 +230,7 @@ fn checked_out_carries_its_suffix_seam_as_an_explicit_null() {
 fn sampled_event_variants_survive_the_frame_envelope() {
     let frames = vec![
         EventFrame {
+            origin: None,
             stream: Some(StreamId::new("s1")),
             event: SessionEvent::UserMessage {
                 text: "hi".to_string(),
@@ -234,6 +238,7 @@ fn sampled_event_variants_survive_the_frame_envelope() {
             },
         },
         EventFrame {
+            origin: None,
             stream: Some(StreamId::new("s1")),
             event: SessionEvent::TurnStarted {
                 id: "t1".to_string(),
@@ -241,6 +246,7 @@ fn sampled_event_variants_survive_the_frame_envelope() {
             },
         },
         EventFrame {
+            origin: None,
             stream: Some(StreamId::new("s1")),
             event: SessionEvent::ToolCall {
                 turn_id: "t1".to_string(),
@@ -251,6 +257,7 @@ fn sampled_event_variants_survive_the_frame_envelope() {
             },
         },
         EventFrame {
+            origin: None,
             stream: Some(StreamId::new("s1")),
             event: SessionEvent::TurnCommitted {
                 id: "t1".to_string(),
@@ -258,6 +265,7 @@ fn sampled_event_variants_survive_the_frame_envelope() {
             },
         },
         EventFrame {
+            origin: None,
             stream: Some(StreamId::new("s1")),
             event: SessionEvent::ToolResult {
                 turn_id: "t1".to_string(),
@@ -270,6 +278,7 @@ fn sampled_event_variants_survive_the_frame_envelope() {
             },
         },
         EventFrame {
+            origin: None,
             stream: Some(StreamId::new("s1")),
             event: SessionEvent::RunFinished {
                 output: "done".to_string(),
@@ -279,6 +288,7 @@ fn sampled_event_variants_survive_the_frame_envelope() {
             },
         },
         EventFrame {
+            origin: None,
             stream: Some(StreamId::new("s1")),
             event: SessionEvent::RunFailed {
                 message: "boom".to_string(),
@@ -288,6 +298,7 @@ fn sampled_event_variants_survive_the_frame_envelope() {
             },
         },
         EventFrame {
+            origin: None,
             stream: Some(StreamId::new("s1")),
             event: SessionEvent::RunAborted {
                 output: "partial".to_string(),
@@ -296,6 +307,7 @@ fn sampled_event_variants_survive_the_frame_envelope() {
             },
         },
         EventFrame {
+            origin: None,
             stream: Some(StreamId::new("s1")),
             event: SessionEvent::CheckedOut {
                 entry_id: "0197".to_string(),
@@ -303,6 +315,7 @@ fn sampled_event_variants_survive_the_frame_envelope() {
             },
         },
         EventFrame {
+            origin: None,
             stream: Some(StreamId::new("s1")),
             event: SessionEvent::InteractionRequest {
                 id: "0199".to_string(),
@@ -392,6 +405,7 @@ fn server_control_frames_round_trip_and_stay_distinct_from_events() {
     assert_eq!(frame, ServerFrame::Control(error));
 
     let event_line = serde_json::to_string(&EventFrame {
+        origin: None,
         stream: Some(StreamId::new("s1")),
         event: SessionEvent::RunFailed {
             message: "boom".to_string(),
