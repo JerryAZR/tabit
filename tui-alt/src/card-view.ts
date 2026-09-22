@@ -19,6 +19,8 @@
 
 import { getKeybindings, matchesKey, type Component } from "@earendil-works/pi-tui";
 
+import { dim } from "./theme";
+
 import type { InteractionCard } from "./mode";
 
 export type Answer = (selected: string[], text: string | null) => void;
@@ -117,8 +119,9 @@ class ChoiceCardView implements Component {
 	}
 
 	render(width: number): string[] {
-		const lines: string[] = [`┌─  ${this.card.title}`];
-		for (const bodyLine of this.card.body.split("\n")) lines.push(`│  ${bodyLine}`);
+		const rule = dim("─".repeat(Math.max(1, width)));
+		const lines: string[] = [rule, ` ${this.card.title}`];
+		for (const bodyLine of this.card.body.split("\n")) lines.push(` ${bodyLine}`);
 		// pi's SelectList row language: the cursor prefix is the selection
 		// indicator — no toggle boxes on single-select (space is inert
 		// there; the toggled set exists only for select_any).
@@ -126,13 +129,13 @@ class ChoiceCardView implements Component {
 		this.card.options.forEach((option, index) => {
 			const cursor = index === this.#cursor ? "❯ " : "  ";
 			const mark = multi ? (this.#toggled.has(index) ? "[×] " : "[ ] ") : "";
-			lines.push(`│  ${cursor}${mark}${index + 1}. ${option}`);
+			lines.push(` ${cursor}${mark}${index + 1}. ${option}`);
 		});
 		if (this.#noteMode || this.#note !== "") {
-			lines.push(`│  note: ${this.#note}${this.#noteMode ? "▏" : ""}`);
-			lines.push("│  enter sends · esc/tab back to choices · ctrl+u clears");
+			lines.push(` note: ${this.#note}${this.#noteMode ? "▏" : ""}`);
+			lines.push(" enter sends · esc/tab back to choices · ctrl+u clears");
 		}
-		lines.push(`└${"─".repeat(Math.max(4, width - 2))}`);
+		lines.push(rule);
 		return lines;
 	}
 }
@@ -167,11 +170,12 @@ class NoteCardView implements Component {
 	}
 
 	render(width: number): string[] {
-		const lines: string[] = [`┌─  ${this.card.title}`];
-		for (const bodyLine of this.card.body.split("\n")) lines.push(`│  ${bodyLine}`);
-		lines.push(`│  ${this.#note}▏`);
-		lines.push("│  enter sends · ctrl+u clears");
-		lines.push(`└${"─".repeat(Math.max(4, width - 2))}`);
+		const rule = dim("─".repeat(Math.max(1, width)));
+		const lines: string[] = [rule, ` ${this.card.title}`];
+		for (const bodyLine of this.card.body.split("\n")) lines.push(` ${bodyLine}`);
+		lines.push(` ${this.#note}▏`);
+		lines.push(" enter sends · ctrl+u clears");
+		lines.push(rule);
 		return lines;
 	}
 

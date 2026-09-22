@@ -1,0 +1,1 @@
+# permission guard test (bash)
