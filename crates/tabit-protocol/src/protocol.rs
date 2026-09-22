@@ -23,7 +23,7 @@ use serde::{Deserialize, Serialize};
 /// announcement. v7: compaction — the `compact` command and
 /// its event family (reshaped in v15 into the
 /// `compaction_begin`/`compaction_step`/`compaction_end` envelope).
-pub const PROTOCOL_VERSION: u32 = 15;
+pub const PROTOCOL_VERSION: u32 = 16;
 
 /// Which session produced an event. The stamp is the session id
 /// itself (v3: the `"main"` alias is retired — one name per session);
@@ -184,15 +184,17 @@ pub enum SessionCommand {
     /// runs at the session's next beat; mid-run it parks and runs when
     /// the run ends (compaction never aborts a run — it does not move
     /// the chain, so there is nothing to make obsolete). Outcomes: the
-    /// `compaction_*` bracket. `directives` is reserved for typed
-    /// compaction overrides (kept-tail size, summarizer focus); no
-    /// directive is defined yet, and the box ignores the field today.
+    /// `compaction_*` bracket. `directives` is the user's free-text
+    /// guidance for THIS invocation (v16): appended to the
+    /// summarization instruction, never persisted, never replayed —
+    /// "focus on details relevant to task X which we will start
+    /// next".
     Compact {
         /// The target session id.
         session: String,
-        /// Reserved directives (see the variant docs).
+        /// Free-text summarizer directives (see the variant docs).
         #[serde(default, skip_serializing_if = "Option::is_none")]
-        directives: Option<serde_json::Value>,
+        directives: Option<String>,
     },
 }
 

@@ -108,7 +108,12 @@ fn fires_matches_the_ruled_formulas() {
     assert!(fires(Door::Idle, 700, 1_000, true));
     assert!(fires(Door::PreRequest, 700, 1_000, true));
     // Forced doors.
-    assert!(fires(Door::Manual, 0, 1_000_000, false));
+    assert!(fires(
+        Door::Manual { directives: None },
+        0,
+        1_000_000,
+        false
+    ));
     assert!(fires(Door::Overflow, 0, 1_000_000, false));
 }
 
@@ -392,7 +397,7 @@ async fn a_committed_pass_bills_the_ledger_and_carries_its_facts() {
     let ledger = std::sync::Arc::new(std::sync::Mutex::new(crate::stats::UsageLedger::default()));
     let mut events = Vec::new();
     let outcome = run(
-        Door::Manual,
+        Door::Manual { directives: None },
         &cell,
         &state,
         &agent,
@@ -452,7 +457,7 @@ async fn run_manual(
     let token = CancellationToken::new();
     let mut events = Vec::new();
     let outcome = run(
-        Door::Manual,
+        Door::Manual { directives: None },
         cell,
         &state,
         agent,
@@ -744,7 +749,7 @@ fn a_cancelled_token_kills_the_stream_before_anything_persists() {
     token.cancel();
     let mut events = Vec::new();
     let outcome = futures::executor::block_on(run(
-        Door::Manual,
+        Door::Manual { directives: None },
         &cell,
         &state,
         &agent,
@@ -1072,7 +1077,7 @@ async fn an_in_stream_overflow_rejection_shortens_and_retries() {
     let token = CancellationToken::new();
     let mut events = Vec::new();
     let outcome = run(
-        Door::Manual,
+        Door::Manual { directives: None },
         &cell,
         &state,
         &agent,
@@ -1183,4 +1188,53 @@ async fn the_pre_request_leaf_compacts_when_condition_b_holds() {
     );
     let messages = read(&cell).messages();
     assert!(messages.len() < branch.len(), "the walk truncated");
+}
+
+#[tokio::test]
+async fn manual_directives_ride_the_summarization_request() {
+    // v16: the compact command's free-text directives are appended to
+    // the standing summarization instruction — per invocation only,
+    // never persisted, never a dial.
+    let cell = cell_with_measured_dialogue(3, 25_000);
+    let model = MockCompletionModel::from_stream_turns(summary_stream_turns());
+    let agent = AgentBuilder::new(model.clone()).build();
+    let config = config_with_window(80_000);
+    let state = Compaction::new();
+    let token = CancellationToken::new();
+    let ledger = std::sync::Arc::new(std::sync::Mutex::new(crate::stats::UsageLedger::default()));
+    let outcome = run(
+        Door::Manual {
+            directives: Some("focus on details relevant to task X".to_string()),
+        },
+        &cell,
+        &state,
+        &agent,
+        &token,
+        &config,
+        &selection(),
+        &ledger,
+        true,
+        &mut |_| {},
+    )
+    .await;
+    assert!(
+        matches!(&outcome, Outcome::Compacted { passes: 1, .. }),
+        "{outcome:?}"
+    );
+    let requests = model.requests();
+    let prompt = &requests
+        .last()
+        .expect("the summarization request")
+        .chat_history
+        .last();
+    let text = match prompt {
+        Message::User { .. } => format!("{prompt:?}"),
+        other => panic!("the instruction is the user prompt: {other:?}"),
+    };
+    assert!(text.contains("Directives from the user"), "{text}");
+    assert!(
+        text.contains("focus on details relevant to task X"),
+        "{text}"
+    );
+    assert!(text.contains("context checkpoint"), "{text}");
 }

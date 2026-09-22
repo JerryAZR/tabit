@@ -848,6 +848,38 @@ disembled = []"
 }
 
 #[test]
+fn the_gate_is_enabled_by_default_and_any_layer_can_opt_out() {
+    use crate::SettingsConfig;
+    // Absent = on (the gate is the default; opting out is the act).
+    assert!(SettingsConfig::default().gate.enabled);
+    assert!(
+        toml::from_str::<SettingsConfig>("")
+            .expect("empty settings")
+            .gate
+            .enabled
+    );
+    // An explicit section with just the flag, and a [gate] section
+    // without it (the default still wins).
+    let off: SettingsConfig =
+        toml::from_str("[gate]\nenabled = false\n").expect("the opt-out parses");
+    assert!(!off.gate.enabled);
+    let bare: SettingsConfig = toml::from_str("[gate]\n").expect("a bare section parses");
+    assert!(bare.gate.enabled);
+    // Merging: any layer disabling wins (the disable-list shape —
+    // one explicit act, no re-enable override).
+    let mut merged = SettingsConfig::default();
+    merged.absorb(off);
+    assert!(!merged.gate.enabled, "a disabling layer wins");
+    merged.absorb(bare);
+    assert!(
+        !merged.gate.enabled,
+        "a later enabling layer cannot undo it"
+    );
+    // Typo protection as everywhere.
+    assert!(toml::from_str::<SettingsConfig>("[gate]\nenabld = false").is_err());
+}
+
+#[test]
 fn settings_union_layers_and_missing_files_are_quiet() {
     use crate::SettingsConfig;
     let dir = std::env::temp_dir().join(format!("tabit-settings-{}", std::process::id()));

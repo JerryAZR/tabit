@@ -128,6 +128,12 @@ labels (exactly one for `select_one`), `text` carries the free-text
 answer when invited. A `free_text` answer is delivered to the model
 when present (a denial reason shapes the retry), not just logged.
 
+The built-in permission gate (`tabit-gate`, pi-sanity's policy) asks
+through `native:select_one` with its own labels — `Allow` / `Block`
+plus free text (the block reason rides the skip the model sees). A
+dismissed or unanswerable card is a block, never a silent run; see
+AGENTS.md's crate list for the policy's scope.
+
 `ui_type` namespaces: `native:*` renders in every conforming
 frontend; `ext:<id>:*` types arrive with extensions. Unknown types:
 report, don't swallow — surface a notice, never fabricate an answer

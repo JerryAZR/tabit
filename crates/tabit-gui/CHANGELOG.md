@@ -18,7 +18,48 @@ software/hardware contract, not just the encodings):
 Every `PROTOCOL_VERSION` bump — and every additive change a frontend
 could observe — gets an entry here in the same commit.
 
-## v15 (current)
+## v16 (current)
+
+### wire: the session's world — cwd everywhere, real compact directives (2026-09)
+
+Three frontend-reported gaps. `session_opened` carries `cwd` (the
+session's working directory — the boot's is the backend's cwd, a
+subagent child's is its spawn cwd), and `sessions_available` rows
+carry `path` (the session file) and `cwd` (derived from the store
+root) — a frontend never lists the session directory to learn either.
+`compact { directives }` graduated from a reserved, ignored field to
+free text appended to the summarization instruction for that
+invocation only (never persisted, never replayed); the parked slot
+keeps last-wins semantics. Protocol version 16; the catalog remains
+one-shot at startup.
+
+## v15
+
+
+### behavior: the built-in permission gate ships (2026-09)
+
+`tabit-core` now mounts pi-sanity's heuristic permission gate by
+default (an in-process hook, not an extension): ordinary workflow
+runs silently, risky operations (force-push, writes outside the
+workspace, credential files, …) open a `native:select_one` card —
+`Allow` / `Block` with free text as the block reason — and `deny`
+rules skip the call in-band. Frontends see `interaction_request`
+frames in ordinary usage for the first time; the settings opt-out is
+`[gate] enabled = false` in settings.toml. No `PROTOCOL_VERSION`
+bump — no new wire shape, the gate rides the existing ask lane.
+
+### behavior: the backend binary is `tabit-core` (2026-09)
+
+The headless backend was renamed: what frontends spawn is now
+`tabit-core --json`, not `tabit --json` — no `PROTOCOL_VERSION` bump
+(the wire is unchanged; only the executable's name moved). The
+backend's launcher mode is gone with the rename: no `tabit [path]`
+detach-spawn, no `--tabit <path>` handoff, no `TABIT_BIN` — a
+frontend resolves the backend itself, as a sibling binary
+(`tabit-core` installed next to the frontend) with `TABIT_CORE_BIN`
+as the development override. Out-of-tree frontends must update their
+spawn (the GUI's `backend.rs` is the reference); the `tabit`
+name is reserved for the frontend that ships primary.
 
 ### wire: the compaction envelope (2026-09)
 

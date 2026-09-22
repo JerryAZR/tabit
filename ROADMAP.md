@@ -236,9 +236,11 @@ application, tests-first), `bash` (registration-time Git-for-Windows
 detection, tail-truncate + spill). `ask_user` rode along as frontend
 interaction-test scaffolding and was **removed 2026-09** per its
 ruling (it existed to exercise the interaction capability, not as a
-product tool; `gate-ext` exercises it e2e now). Permission/approval
-rides on the existing hook system (as a first-party extension — see
-item 9).
+product tool; the interaction capability's e2e exercises live in the
+extension contract tests). Permission/approval is the built-in
+`tabit-gate` crate (2026-09: pi-sanity's policy as an in-process
+hook, assembled by the binary — `gate-ext`, the first-party
+extension that carried it between rulings, was deleted).
 
 **Write rulings (2026-09):** `write(path, content, overwrite?)` —
 creates freely; overwrites only with `overwrite: true` (the model
@@ -379,7 +381,13 @@ carry the actual shape:
   spilled, bash-style) at a subagent budget; abort never looks like
   success; usage/audit ride `tool_result.details`
   (`{child_id, outcome, turns, usage, truncated}`) — the same
-  presentation-cargo channel edit and bash already use.
+  presentation-cargo channel edit and bash already use. (Amended
+  2026-09, v12: the shipped cargo is `{child_id, outcome}` only — the
+  pairing fact, TOOLS.md's shape. The `usage` leg is dead under the
+  per-turn ruling: usage rides the child's own `completion_call`
+  events and sums are the frontend's, so a details figure would be a
+  second, drifting copy. `turns`/`truncated` wait on the capping
+  budget, still unshipped.)
 - **Abort linkage is required plumbing**: the body selects on the child
   pump vs the parent run token (abort detaches the sidecar task; an
   unlinked child would keep spending tokens). `bash` is the reference
@@ -855,12 +863,12 @@ assistant.
 
 ### 7. CLI / interface layer
 
-- **Print mode shipped** (`crates/tabit`): one prompt in, live events out,
+- **Print mode shipped** (`crates/tabit-core`): one prompt in, live events out,
   project-local sessions, `-p <PROMPT>` / `--continue` /
   `--session <path>` / `--list` / `--rewind <n>`, `--model provider/model`
-  or `default_model` in providers.toml. The GUI is the default mode
-  (shipped — bare `tabit [path]` launches it);
-  `-p` and `--rewind` opt out into print mode.
+  or `default_model` in providers.toml. (The GUI-as-default clause was
+  superseded 2026-09 by the backend rename: `tabit-core` is headless,
+  the frontend is a separate binary, and the launcher mode is gone.)
 - The protocol's design record — locked decisions plus every open
   flag with options — lives in PROTOCOL.md; flags are resolved in
   discussion order there.
@@ -926,7 +934,7 @@ assistant.
   terminal frontend found its own non-ratatui track (the TUI ruling
   below). The GUI is an egui app (eframe shell, egui style theming)
   speaking the item-7 protocol over the existing stdio edge: it spawns
-  one `tabit --json` child process — the multi-session host (PROTOCOL.md
+  one `tabit-core --json` child process — the multi-session host (PROTOCOL.md
   v3): sessions are created, opened, and switched by channel commands,
   never by process tricks (the GUI-respawn interim is deleted). Process
   separation is the point, twice over: internal errors panic by doctrine,
@@ -944,7 +952,7 @@ assistant.
   and overlays are ours on egui layout primitives.
   **Build order** (the GUI is the owner's feedback instrument, so it
   starts before the v2 backend completes): `tabit-protocol` extraction
-  → walking-skeleton GUI on the shipped v1 wire (spawn `tabit --json`,
+  → walking-skeleton GUI on the shipped v1 wire (spawn `tabit-core --json`,
   transcript, input, steer, abort, crash handling) → v2 backend slices
   land behind it, the GUI growing each slice (ids → turn anchors,
   replay → restart-safe transcript, checkout → rewind buttons, model
@@ -993,7 +1001,7 @@ assistant.
   the terminal frontend rides the JS ecosystem instead: **the omp
   fork of pi-tui (`@oh-my-pi/pi-tui`, MIT — Mario Zechner's own
   next-gen line, not a third-party fork) under Bun**, spawning
-  `tabit --json` as a child process (the stdio edge GUI, print, and
+  `tabit-core --json` as a child process (the stdio edge GUI, print, and
   JSON mode already ride — zero backend changes), distributed via
   the npm registry as per-platform optional packages (esbuild
   pattern; no postinstall) carrying a Bun-compiled standalone TUI
@@ -1022,16 +1030,22 @@ assistant.
   text ceiling proves too low for the transcript quality wanted. The
   reducer stays framework-free and pure, so a future switch rewrites
   only the view layer.
-- **Entry-point architecture (ruled): `tabit` is a launcher, the GUI
-  spawns the core.** `tabit [path]` spawns `tabit-gui <path>`
+- **Entry-point architecture (ruled; superseded 2026-09 by the
+  backend rename): `tabit` is a launcher, the GUI spawns the core.**
+  `tabit [path]` spawns `tabit-gui <path>`
   detached — own process group on Unix, detach flags on Windows, the
   vscode survive-the-terminal trick — and exits immediately; `-p` /
   `--json` keep their foreground modes; bare `tabit` stops erroring
-  and opens the GUI. Per window the GUI owns one `tabit --json` child
+  and opens the GUI. Per window the GUI owns one `tabit-core --json` child
   per session: crash isolation follows the panic doctrine, and local
   and ssh spawning are the same shape. Singleton handoff (vscode's
   running-instance IPC) deliberately deferred — each launch is an
-  independent window.
+  independent window. (The 2026-09 amendment: the backend is
+  `tabit-core`, carries no launcher and no frontend references —
+  spawning runs frontend → backend only, matching the crate
+  dependency rule. The detach story waits for the GUI's revival; the
+  `tabit` name is reserved for the frontend that ships primary — the
+  TUI candidates lead.)
 - **GUI design contract (ruled for the polish pass).** Reducer/view
   separation is strict: the reducer is pure, framework-free, and
   unit-tested; the egui pass is a projection containing no business
@@ -1080,15 +1094,17 @@ EXTENSIONS.md); implementation under way — tasks 1–6 shipped — the checkli
 pipe, supervision, the death policy, the tool lane, the hook lane,
 the skills tables; the engine-side
 `on::tool_result` + `HookStack::merge`; `crates/tabit-ext-sdk`: the
-guest dispatcher and the example packages, `gate-ext` included —
-the permission gate now lives there, `permission.rs` deleted,
+guest dispatcher and the example packages —
+the permission gate lived there as `gate-ext` between the 2026-09
+move-out ruling and its supersession the same month (the gate is the
+built-in `tabit-gate` crate now; the package was deleted),
 `lmstudio-ext` (the native-API provider relay) and
 `autotitle-ext` (the model_prompt
 attribution demo) with them; the host-service envelope
 (`service_request`/`service_response`, the ask folded in as verb
 zero; `model_prompt` billed per extension) in `rig-agent`'s
 `HostServices` + tabit-session's capability; proxy+hook assembly and the
-`extensions_available` catalog in the `tabit --json` backend).** The
+`extensions_available` catalog in the `tabit-core --json` backend).** The
 shape:
 
 - **The substrate: subprocess executables over a frozen JSONL
@@ -1114,7 +1130,7 @@ shape:
   extension-replaces-core must be reported by the backend (how
   loudly is the frontend's call); extension-vs-extension collisions
   refuse the newcomer, naming the incumbent.
-- **Install**: `tabit install npm:<pkg> | git:<repo> | path:<dir>` —
+- **Install**: `tabit-core install npm:<pkg> | git:<repo> | path:<dir>` —
   npm as plain registry HTTP (no npm CLI, no embedded runtime, no
   registry of our own), git via `git`, pickup at next backend start
   (byte-stability law). No language list: the protocol is the
@@ -1210,8 +1226,10 @@ shape:
    `HookStack::merge` — one priority law; `SessionTag` gives the
    process-level forwarders their per-session key). **The permission
    gate moved out of the core** (the ruling executed):
-   `permission.rs` deleted, `gate-ext` is the same policy over the
-   same seam, session-keyed "Always allow" memory. Ruled with it
+   `permission.rs` deleted, `gate-ext` was the same policy over the
+   same seam, session-keyed "Always allow" memory. (Superseded
+   2026-09: the default gate is the built-in `tabit-gate` in-process
+   hook — a default must not fail open on a dead extension.) Ruled with it
    (sharpened 2026-09): a failing hook is treated as absence — dead
    or broken alike, the neutral decision for its point — while a
    failed tool call is the model-visible failure; and children boot
@@ -1248,7 +1266,7 @@ shape:
    Deferred slice: the run-end hook point (`ENGINE.md` amendment,
    pause points are design events) — autotitle rides `tool_result`
    until it lands.
-6. **Install & management** — *shipped* — `tabit install
+6. **Install & management** — *shipped* — `tabit-core install
    npm:/git:/path:` in `crates/tabit-ext-install` (npm as plain
    registry HTTP against `$TABIT_NPM_REGISTRY`, offline e2e against
    a fake registry serving real tarball fixtures; git `clone --depth
@@ -1278,10 +1296,12 @@ checklist:
    the replaces-core report, e2e-asserted on the channel), and the
    clash pair (same name — the newcomer refused, the incumbent
    named), all SDK-built in `crates/tabit-ext-sdk/src/bin/`.
-3. *shipped* — `gate` (`gate-ext`): the permission gate itself,
+3. *shipped, then superseded 2026-09* — `gate`: the permission gate
    moved out of core (`permission.rs` deleted — the demo was the
-   deletion); `on::tool_call` + the interaction prompt + session-keyed
-   memory, e2e-proven over the real frontend wire.
+   deletion), lived as the `gate-ext` package, and now returns as the
+   built-in `tabit-gate` in-process hook (pi-sanity's policy); the
+   package and its two e2e vehicle tests were deleted — the SDK's
+   reference consumer restores that coverage.
 4. *shipped* — `lmstudio` (`lmstudio-ext`): the provider relay
    speaking LM Studio's **native** REST API (deliberately not the
    OpenAI-compat endpoint LM Studio also serves) behind a

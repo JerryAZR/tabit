@@ -33,10 +33,6 @@ path = "src/bin/clash_a.rs"
 name = "clash-b-ext"
 path = "src/bin/clash_b.rs"
 
-[[bin]]
-name = "gate-ext"
-path = "src/bin/gate.rs"
-
 # Task 5's demo: the attribution showcase.
 [[bin]]
 name = "autotitle-ext"

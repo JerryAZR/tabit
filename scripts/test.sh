@@ -12,7 +12,8 @@
 #                                the workspace set is always included:
 #                                `-p crate` ADDS to it (cargo's rule), and
 #                                a bare name filters within every suite.
-#   scripts/test.sh --gate       fmt --check + clippy + test — the full
+#   scripts/test.sh --gate       fmt --check + clippy + build -p tabit
+#                               + test — the full
 #                                green gate, same quiet reporting
 #
 # A hung test fails the gate instead of parking it forever (the
@@ -69,8 +70,10 @@ run() {
     return "$status"
 }
 
-# The full green gate: fmt --check, clippy (warnings shown even on
-# success — they are the interesting part), then the test leg.
+# The full green gate: fmt --check, clippy at CI strictness
+# (-D warnings — the local gate must fail exactly where CI fails, a
+# warning-only local pass once shipped a dead variable CI caught),
+# then the test leg.
 gate() {
     local failed=0 status
 
@@ -83,12 +86,24 @@ gate() {
     fi
     echo
 
-    echo "== cargo clippy --workspace --all-targets =="
-    cargo clippy --workspace --all-targets >"$LOG" 2>&1
+    echo "== cargo clippy --workspace --all-targets -- -D warnings =="
+    cargo clippy --workspace --all-targets -- -D warnings >"$LOG" 2>&1
     status=$?
     grep -E -A 8 '^(warning|error)' "$LOG"
     echo "(exit $status)"
     if [ "$status" -ne 0 ]; then failed=1; fi
+    echo
+
+    # The shipped-binary build, package-resolved: workspace builds
+    # unify features, so a package-only feature gap (the TLS class:
+    # reqwest with no rustls) hides from every other leg. ~17s warm.
+    echo "== cargo build -p tabit-core =="
+    if cargo build -p tabit-core >"$LOG" 2>&1; then
+        echo ok
+    else
+        failed=1
+        cat "$LOG"
+    fi
     echo
 
     run cargo test --workspace --no-fail-fast "$@" || failed=1

@@ -1,4 +1,4 @@
-//! The backend child process: spawn `tabit --json`, run the
+//! The backend child process: spawn `tabit-core --json`, run the
 //! handshake, own the pipes. One [`Backend`] per window; the window
 //! (not the backend) owns the lifecycle — crash isolation is the
 //! point (AGENTS.md error doctrine: backend panics must not take the
@@ -21,7 +21,7 @@ use crate::reducer::InMsg;
 /// runaway output.
 const STDERR_RING: usize = 200;
 
-/// A live `tabit --json` child with its pipe threads.
+/// A live `tabit-core --json` child with its pipe threads.
 pub struct Backend {
     writer: Sender,
     stderr: Arc<Mutex<Vec<String>>>,
@@ -30,26 +30,22 @@ pub struct Backend {
 
 type Sender = std::sync::mpsc::Sender<String>;
 
-/// Where to find the `tabit` binary. The supported flow needs no
-/// guessing: the launcher hands its exact path over with `--tabit`.
-/// The fallbacks (env override, sibling, PATH) serve direct
-/// `cargo run -p tabit-gui` development.
-fn tabit_bin(launcher_provided: Option<&Path>) -> PathBuf {
-    if let Some(path) = launcher_provided {
-        return path.to_path_buf();
-    }
-    if let Ok(path) = std::env::var("TABIT_BIN") {
+/// Where to find the `tabit-core` binary: the dev override
+/// (`TABIT_CORE_BIN`), the sibling of this executable (cargo installs
+/// workspace binaries side by side), then PATH — in that order.
+fn backend_bin() -> PathBuf {
+    if let Ok(path) = std::env::var("TABIT_CORE_BIN") {
         return PathBuf::from(path);
     }
     if let Ok(exe) = std::env::current_exe()
         && let Some(dir) = exe.parent()
     {
-        let sibling = dir.join(format!("tabit{}", std::env::consts::EXE_SUFFIX));
+        let sibling = dir.join(format!("tabit-core{}", std::env::consts::EXE_SUFFIX));
         if sibling.is_file() {
             return sibling;
         }
     }
-    PathBuf::from("tabit")
+    PathBuf::from("tabit-core")
 }
 
 /// Spawn a backend in `cwd` (the project directory), booting the
@@ -59,12 +55,8 @@ fn tabit_bin(launcher_provided: Option<&Path>) -> PathBuf {
 /// contract). Creating and switching sessions are channel commands
 /// (protocol v3) — never respawns. `repaint` is called after every
 /// message so the UI wakes immediately.
-pub fn spawn(
-    cwd: Option<&Path>,
-    tabit: Option<&Path>,
-    repaint: impl Fn() + Send + 'static,
-) -> std::io::Result<Backend> {
-    let mut command = Command::new(tabit_bin(tabit));
+pub fn spawn(cwd: Option<&Path>, repaint: impl Fn() + Send + 'static) -> std::io::Result<Backend> {
+    let mut command = Command::new(backend_bin());
     command.arg("--json").arg("--continue");
     command
         .stdin(Stdio::piped())

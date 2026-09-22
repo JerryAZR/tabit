@@ -458,7 +458,7 @@ histories).
   `error { kind: model }` at the failure moment) or whether
   `run_failed` alone suffices.
 - **Session listing stays one-shot.** Scan on startup and explicit
-  reload (`tabit --list`, a human table — local or over ssh); no
+  reload (`tabit-core --list`, a human table — local or over ssh); no
   watch, no long-lived listing command.
 - **`interaction_request` — shipped** (2026-08, with the permission
   milestone; the full ruling lives in Locked design above). The
@@ -503,8 +503,9 @@ histories).
   architecture for no UX gain over a button. Two adjacent rulings:
   a resumed session's model that no longer resolves is a preference —
   warn and fall back (pi's behavior; explicit `--model` stays loud);
-  and the launcher hands the GUI its exact executable (`--tabit
-  <path>`), so backend-binary resolution is never a failure mode.
+  and the backend ships as a sibling binary (`tabit-core` next to the
+  frontend; `TABIT_CORE_BIN` overrides for development), so
+  backend-binary resolution is never a failure mode.
 - **Death classification is pinned** (ruled 2026-08, after the first
   GUI review): every way the backend can end is classified by cause,
   and each cause has exactly one response. The GUI never infers

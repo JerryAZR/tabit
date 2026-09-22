@@ -33,8 +33,10 @@ Current workspace layout:
   stamped events, handshake frames; `FRONTEND.md` is the contract)
 - `crates/tabit-config` — provider/model configuration plus the
   settings layers (`settings.toml`: the extension disable list —
-  packages mount by default; user + workspace union,
-  `$TABIT_SETTINGS` replaces the user file; see `ROADMAP.md`)
+  packages mount by default; the built-in gate opt-out
+  (`[gate] enabled = false`) — the gate mounts by default; user +
+  workspace union, `$TABIT_SETTINGS` replaces the user file; see
+  `ROADMAP.md`)
 - `crates/tabit-log` — the durable-conversation layer between
   providers and agents: the session log (the entry vocabulary and
   tree, format-versioned), the write-behind writer, the parser, the
@@ -60,6 +62,13 @@ Current workspace layout:
   contextual `#[rig_tool]`s (they read the session cwd and run token
   from the per-run `ToolContext`), erasable to DynamicTools (native
   only)
+- `crates/tabit-gate` — the default permission gate: pi-sanity's
+  heuristic policy ported verbatim (static checks, allow-when-unsure —
+  a careless-mistake catcher, never a security boundary; brush-parser
+  replaces the unbash parser) as a pure core crate. The `AgentHook`
+  member, the `native:select_one` ask, and the settings.toml
+  `[gate] enabled = false` opt-out assemble in the `tabit-core`
+  binary — `tabit-session` stays a mechanism with no policy
 - `crates/tabit-ext-install` — extension installation (ROADMAP item
   9, task 6): npm (plain registry HTTP)/git/path sources,
   stage-validate-place installs, name-only `requires` pulls, list,
@@ -82,23 +91,28 @@ Current workspace layout:
   to bodies, result serialization, ask lifts) so authors write tool
   bodies only; hand-rolled frames sharing no code with the host —
   the protocol doc's reference consumer. Ships the example
-  extensions (`echo-ext`, `shadow-ext`, the clash pair, `gate-ext` —
-  the permission gate, moved out of core; `lmstudio-ext` — the
-  provider relay speaking LM Studio's native REST API behind a
+  extensions (`echo-ext`, `shadow-ext`, the clash pair, `lmstudio-ext` —
+  the provider relay speaking LM Studio's native REST API behind a
   `providers.toml` fragment; `autotitle-ext` — the `model_prompt`
-  attribution demo) as its bins
-- `crates/tabit-gui` — the egui frontend (`tabit-gui` binary; the
-  `tabit` launcher detach-spawns it; reducer/view contract in ROADMAP
-  item 7). Its `CHANGELOG.md` is the frontend protocol's changelog —
+  attribution demo) as its bins — `gate-ext` was deleted 2026-09
+  (the gate returns as the built-in `tabit-gate`; examples will ride
+  the extension SDK when it is developed)
+- `crates/tabit-gui` — the egui frontend (`tabit-gui` binary; spawns
+  a `tabit-core --json` child, resolved as its sibling binary or via
+  `TABIT_CORE_BIN`; reducer/view contract in ROADMAP item 7).
+  Its `CHANGELOG.md` is the frontend protocol's changelog —
   every `PROTOCOL_VERSION` bump or frontend-observable change (wire
   or behavior) gets an entry in the same commit; FRONTEND.md stays
   the frozen mechanics contract, TOOLS.md its companion for the
   built-in tool `details` shapes and interaction templates)
-- `crates/tabit` — the `tabit` binary: bare `tabit [path]` is the
-  launcher mode (detach-spawns the GUI and exits — the supported
-  entry point), print mode (`-p <PROMPT>`, `--rewind <n>`) and JSON
+- `crates/tabit-core` — the backend binary (`tabit-core`): headless,
+  no UI and no frontend references — frontends spawn it, never the
+  other way. Print mode (`-p <PROMPT>`, `--rewind <n>`) and JSON
   mode (`--json` — the stdio protocol edge) over the session host
-  (create / `--continue` / `--session <path>` / `--list`)
+  (create / `--continue` / `--session <path>` / `--list`). The
+  `tabit` name is reserved for the frontend that ships primary
+  (2026-09: the TUI candidates outpace the GUI; no in-repo binary
+  carries it yet)
 
 ## Design rules
 

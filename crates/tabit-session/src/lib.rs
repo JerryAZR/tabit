@@ -33,11 +33,11 @@
 //! loop**; a **turn** is one model call within it; the **tool-use
 //! roundtrip** is the boundary between a turn's tool calls and the next
 //! model call. Steering and the extension framework are future
-//! insertions at that boundary; tool-call policy (the dev-time
-//! extension policy — the permission gate is the `gate`
-//! package now) mounts through the hooks seam
-//! ([`SessionBuilder::hooks`]), assembled by the binary — the
-//! core carries no policy of its own.
+//! insertions at that boundary; tool-call policy mounts through the
+//! hooks seam ([`SessionBuilder::hooks`]), assembled by the binary —
+//! this crate carries no policy of its own. (The default gate is the
+//! `tabit-gate` crate's in-process hook, assembled by the `tabit-core`
+//! binary since 2026-09; the earlier `gate` extension was deleted.)
 //!
 //! # Example
 //!

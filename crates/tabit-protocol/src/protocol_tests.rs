@@ -429,13 +429,13 @@ fn the_compaction_bracket_and_command_round_trip() {
         }
     );
     let with_directives: SessionCommand =
-        serde_json::from_str(r#"{"type":"compact","session":"s1","directives":{"keep_tail":512}}"#)
+        serde_json::from_str(r#"{"type":"compact","session":"s1","directives":"focus on task X"}"#)
             .expect("parse");
     assert_eq!(
         round_trip(&with_directives),
         SessionCommand::Compact {
             session: "s1".to_string(),
-            directives: Some(serde_json::json!({"keep_tail": 512})),
+            directives: Some("focus on task X".to_string()),
         }
     );
 

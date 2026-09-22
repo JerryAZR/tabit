@@ -25,6 +25,9 @@ use crate::error::ConfigError;
 pub struct SettingsConfig {
     /// Extension host settings.
     pub extensions: ExtensionsSettings,
+    /// The built-in permission gate (`tabit-gate`): on by default,
+    /// any layer may turn it off.
+    pub gate: GateSettings,
 }
 
 /// Extension host settings.
@@ -35,6 +38,22 @@ pub struct ExtensionsSettings {
     /// name is listed. Everything else mounts — install was the
     /// consent.
     pub disabled: Vec<String>,
+}
+
+/// The built-in permission gate's settings.
+#[derive(Debug, Clone, Copy, PartialEq, Deserialize)]
+#[serde(deny_unknown_fields, default)]
+pub struct GateSettings {
+    /// Whether the gate mounts. `true` unless a settings layer says
+    /// otherwise — the gate is the default; opting out is the
+    /// explicit act (the same shape as the extension disable list).
+    pub enabled: bool,
+}
+
+impl Default for GateSettings {
+    fn default() -> Self {
+        Self { enabled: true }
+    }
 }
 
 impl SettingsConfig {
@@ -79,9 +98,12 @@ impl SettingsConfig {
 
     /// Union another layer's disable list in (any layer naming a
     /// package disables it — there is no re-enable override, by
-    /// design: disabling is the one explicit act).
-    fn absorb(&mut self, other: Self) {
+    /// design: disabling is the one explicit act) and intersect the
+    /// gate flag (any layer disabling the gate wins — the same
+    /// one-explicit-act shape).
+    pub(crate) fn absorb(&mut self, other: Self) {
         self.extensions.disabled.extend(other.extensions.disabled);
+        self.gate.enabled &= other.gate.enabled;
     }
 
     /// The resolved disable list.

@@ -82,7 +82,7 @@ What "disabled" means, precisely: the package is not launched, not in
 the `extensions_available` catalog, its `providers.toml` fragment
 does not merge, and its skills do not join the tables — absent
 everywhere, and *silent* (the user's setting is not a failure;
-`tabit extensions list`, task 6, is where disabled packages become
+`tabit-core extensions list`, task 6, is where disabled packages become
 visible). A REFUSED package (bad manifest, failed handshake) still
 reports as dead whatever the settings say — a broken package is
 loud; a disabled one is quiet. Children (subagent processes) re-derive
@@ -227,7 +227,7 @@ ruling; neither failure is silent.
 ## Install, distribution, package layout (2026-09; v1 design
 settled 2026-09, shipped as `crates/tabit-ext-install`)
 
-`tabit install npm:<package> | git:<repo> | path:<dir>`:
+`tabit-core install npm:<package> | git:<repo> | path:<dir>`:
 
 - npm is the distribution substrate, accessed as plain registry HTTP
   (fetch metadata, fetch tarball, unpack) — no npm CLI, no Node at
@@ -246,7 +246,7 @@ settled 2026-09, shipped as `crates/tabit-ext-install`)
   lockfile, no source tracking, no install database — each manifest
   carries the facts a registry would duplicate, and hand-placed and
   npm-installed packages are deliberately indistinguishable once on
-  disk. Update is `tabit install <source>` again (reinstall over the
+  disk. Update is `tabit-core install <source>` again (reinstall over the
   name); every install stages, validates, then moves into place — a
   failed install never leaves a half package.
 - `requires: ["a"]` — name-only dependencies (the task-6 amendment
@@ -265,7 +265,7 @@ settled 2026-09, shipped as `crates/tabit-ext-install`)
   files). A declared-but-empty entry is still a broken manifest. A
   *collection* is `requires` + no entry (optionally carrying skills
   or a fragment — a curated bundle is a legitimate package).
-- `tabit extensions list` reads disk (marking disabled from
+- `tabit-core extensions list` reads disk (marking disabled from
   settings and static from the manifest); `uninstall` removes the
   directory — **v1 refuses while direct dependents remain, naming
   them** (one linear pass over the manifests; uninstall those
@@ -470,15 +470,21 @@ executed 2026-09, checklist task 3)
 The core shipped a basic permission gate only to test the
 interaction path — an ask-set of exactly `bash`, "Always allow" as
 session memory. With the hook lane landed, the gate **moved out of
-the core into `gate-ext`** (`crates/tabit-ext-sdk/src/bin/gate.rs`):
-the exact policy over the same seam, `permission.rs` deleted, no
-core code knows a permission exists. The hub, the wire shapes, and
-the capability are the permanent infrastructure the package
-inherits. The package's "Always allow" memory keys on the hook
-payload's session identity (one gate process serves every session —
-without the key, one session's grant would leak into another); the
-session-vs-user durability split stays deferred (v1 is session-only,
-as the core gate was).
+the core into `gate-ext`**: the exact policy over the same seam,
+`permission.rs` deleted, no core code knows a permission exists. The
+hub, the wire shapes, and the capability are the permanent
+infrastructure the package inherited. The package's "Always allow"
+memory keyed on the hook payload's session identity (one gate
+process serves every session — without the key, one session's grant
+would leak into another); the session-vs-user durability split
+stayed deferred (v1 is session-only, as the core gate was).
+(Superseded 2026-09: the gate returned as a **built-in, in-process
+hook** — the `tabit-gate` crate carrying pi-sanity's heuristic
+policy, assembled by the `tabit-core` binary — and `gate-ext` was
+deleted: a default safety feature must not fail open with a dead
+extension process, and example extensions will ride the extension
+SDK when it is developed. The move-out ruling's machinery — the
+hook lane, the ask lift, the session-keyed memory — all stand.)
 
 ## Tool-call policy mounts through the hook surface (2026-08; seam
 replaced by the hook-surface round the same month)

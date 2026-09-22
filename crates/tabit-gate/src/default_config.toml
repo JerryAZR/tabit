@@ -1,0 +1,198 @@
+# Built-in default configuration for pi-sanity
+# This file is shipped with the extension and serves as the base configuration.
+# User configs (global and project-level) override these defaults.
+
+# Ask timeout in seconds (default: 30)
+ask_timeout = 30
+
+# ============================================================================
+# Path Permissions
+# ============================================================================
+
+[permissions.read]
+default = "allow"
+
+# Known locations that commonly contain secrets or credentials.
+# These ask for confirmation rather than deny, since the user may
+# legitimately want to view them (e.g., checking ssh config).
+[[permissions.read.overrides]]
+path = [
+  "{{HOME}}/.ssh/*",
+  "{{HOME}}/.aws/**",
+  "{{HOME}}/.config/gcloud/**",
+  "{{HOME}}/.azure/**",
+  "{{HOME}}/.netrc",
+  "{{HOME}}/.pgpass",
+  "{{HOME}}/.my.cnf",
+  "{{HOME}}/.npmrc",
+  "{{HOME}}/.pypirc",
+  "{{HOME}}/.git-credentials",
+  "{{HOME}}/.docker/config.json",
+  "{{HOME}}/.kube/config",
+]
+action = "ask"
+reason = "May contain credentials or secrets"
+
+# Public SSH keys are safe to read (exception to ~/.ssh/* above)
+[[permissions.read.overrides]]
+path = ["{{HOME}}/.ssh/*.pub"]
+action = "allow"
+
+# Write permissions: DENY-FIRST model
+# - Default: deny (catches all system directories automatically)
+# - Home: ask (bigger scope)
+# - CWD/TMPDIR/POSIX-tmp: allow (smaller scope, listed AFTER home so it wins for paths inside CWD).
+#   /tmp is allowed because pi's bash runs Git Bash, which maps /tmp to %TEMP%
+#   on Windows (and it is a real temp dir on Linux/macOS, incl. WSL).
+# - Git: ask (most specific, listed LAST so it wins over CWD for .git directories)
+[permissions.write]
+default = "deny"
+reason = "Writing outside allowed locations requires explicit permission"
+
+[[permissions.write.overrides]]
+path = ["/dev/null", "/dev/stdout", "/dev/stderr"]
+action = "allow"
+reason = "Special device files are safe to write to"
+
+[[permissions.write.overrides]]
+path = ["{{HOME}}/**"]
+action = "ask"
+reason = "Writing to home directory requires confirmation"
+
+[[permissions.write.overrides]]
+path = ["{{CWD}}/**", "{{TMPDIR}}/**", "/tmp/**"]
+action = "allow"
+
+[[permissions.write.overrides]]
+path = ["**/.git/**"]
+action = "ask"
+reason = "Modifying git internals can be dangerous"
+
+[[permissions.write.overrides]]
+path = [".pi/sanity.toml", ".pi/config.toml"]
+action = "ask"
+reason = "Modifying safety configuration requires confirmation"
+
+# ============================================================================
+# Command Rules
+# ============================================================================
+# Rules are checked in array order. LAST match wins.
+# General rules first, specific overrides after.
+
+[commands]
+default = "allow"
+reason = "Unknown commands default to allow (low-friction)"
+
+# Common read commands
+[[commands.rules]]
+names = ["cat", "head", "tail", "less", "more", "grep", "awk", "sed", "cut", "sort", "uniq", "wc"]
+positionals = { default_perm = ["read"] }
+
+# sed in-place editing: check file paths against write permissions.
+# Matches "sed -i" and "sed -i ''" (macOS empty backup suffix).
+# Positional 0 is the sed script (skipped from path checking).
+# Positional 1+ are file paths, checked as write.
+# This avoids checking the script as a path while correctly checking files.
+# Edge case: sed -i file.txt (no script) reads stdin, harmless to skip.
+[[commands.rules]]
+names = ["sed -i"]
+positionals = { default_perm = ["write"], overrides = { "0" = [] } }
+reason = "In-place editing modifies files"
+
+# cp: read sources, write destination
+[[commands.rules]]
+names = ["cp"]
+positionals = { default_perm = ["read"], overrides = { "-1" = ["write"] } }
+options = { "-t" = ["write"], "--target-directory" = ["write"] }
+
+# mv: read + write on sources, write destination
+[[commands.rules]]
+names = ["mv"]
+positionals = { default_perm = ["read", "write"], overrides = { "-1" = ["write"] } }
+
+# rm: write (delete) files
+[[commands.rules]]
+names = ["rm"]
+positionals = { default_perm = ["write"] }
+
+# dd: blocked by default - rarely needed and destructive
+[[commands.rules]]
+names = ["dd"]
+action = "deny"
+reason = "dd is a low-level disk utility not typically needed in development"
+
+# npm/pnpm: deny global installs
+[[commands.rules]]
+names = ["npm", "pnpm"]
+flags = [
+  { flag = "-g", action = "deny", reason = "Use project-local installs instead of global" },
+  { flag = "--global", action = "deny", reason = "Use project-local installs instead of global" }
+]
+
+# yarn: deny global installs
+[[commands.rules]]
+names = ["yarn global"]
+action = "deny"
+reason = "Use project-local installs instead of global"
+
+# pip/pip3: require virtual environment
+[[commands.rules]]
+names = ["pip", "pip3"]
+pre_checks = [
+  { env = "VIRTUAL_ENV", match = "", action = "deny", reason = "pip must be run inside a virtual environment" }
+]
+flags = [
+  { flag = "--user", action = "deny", reason = "--user installs outside the virtual environment" }
+]
+
+# git push --force / --force-with-lease: ask before rewriting history
+[[commands.rules]]
+names = ["git push"]
+flags = [
+  { flag = "--force", action = "ask", reason = "Force push rewrites history" },
+  { flag = "-f", action = "ask", reason = "Force push rewrites history" },
+  { flag = "--force-with-lease", action = "ask", reason = "Force push rewrites history" }
+]
+
+# git clean --force: ask before removing untracked files
+[[commands.rules]]
+names = ["git clean"]
+flags = [
+  { flag = "-f", action = "ask", reason = "Removes untracked files" },
+  { flag = "--force", action = "ask", reason = "Removes untracked files" }
+]
+
+# User-level package managers: deny by default
+[[commands.rules]]
+names = ["winget", "scoop", "choco", "flatpak"]
+action = "deny"
+reason = "System packages should not be manipulated during project development"
+
+
+# ============================================================================
+# Tool Rules
+# ============================================================================
+# Map Pi tool names to parameter checks. Rules are checked in array order;
+# later rules overwrite earlier ones for the same tool name (last-match-wins).
+#
+# `check` selects the permission domain to use:
+#   "read"  -> checked against [permissions.read]
+#   "write" -> checked against [permissions.write]
+#   "bash"  -> checked against [commands]
+#
+# Parameter values may be strings or arrays of strings. Missing/empty params
+# are skipped so the framework handles required-argument validation.
+
+[tools]
+
+[[tools.rules]]
+names = ["read"]
+checks = [{ param = "path", check = "read" }]
+
+[[tools.rules]]
+names = ["write", "edit"]
+checks = [{ param = "path", check = "write" }]
+
+[[tools.rules]]
+names = ["bash"]
+checks = [{ param = "command", check = "bash" }]
