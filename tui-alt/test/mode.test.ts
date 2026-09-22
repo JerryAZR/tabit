@@ -350,10 +350,10 @@ describe("InteractiveMode", () => {
 		expect(view.cards).toHaveLength(1);
 		expect(view.cards[0]).toMatchObject({ id: "ask1", options: ["Allow", "Deny"], freeText: true });
 
-		mode.answerCard("ask1", 0);
-		expect(backend.sent).toEqual([{ kind: "interaction_response", session: SESSION, id: "ask1", payload: { selected: ["Allow"], text: null } }]);
+		mode.answerCard("ask1", ["Allow"], "needs an excluded path");
+		expect(backend.sent).toEqual([{ kind: "interaction_response", session: SESSION, id: "ask1", payload: { selected: ["Allow"], text: "needs an excluded path" } }]);
 		expect(view.closed).toEqual([{ id: "ask1", note: undefined }]);
-		mode.answerCard("ask1", 0); // stale answer: no second send
+		mode.answerCard("ask1", ["Allow"], null); // stale answer: no second send
 		expect(backend.sent).toHaveLength(1);
 
 		feed({ type: "interaction_request", id: "ask2", ui_type: "native:select_one", payload: { title: "t", body: "b", options: [{ label: "A" }] } });

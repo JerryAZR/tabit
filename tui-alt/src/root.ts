@@ -34,7 +34,7 @@ import { StatusBar } from "./components/status-bar";
 import { ToolBlock } from "./components/tool-block";
 import { UserBlock } from "./components/user-block";
 import { TranscriptRegistry } from "./components/transcript-registry";
-import { CardView } from "./card-view";
+import { cardViewFor } from "./card-view";
 import { InputController } from "./input-controller";
 import { AtPathCompletionProvider } from "./path-completion";
 import { APP_KEYBINDING_IDS, applyKeybindings, loadTuiToml } from "./keybindings";
@@ -115,6 +115,7 @@ export class AltRoot implements ModeView {
 			tui: this.tui,
 			editor: this.editor,
 			isRunning: () => mode.running,
+			isCardOpen: () => mode.hasOpenCard,
 			interrupt: () => mode.interrupt(),
 			toggleAllCollapsibles: () => {
 				// Thinking lines and tool cards together: if any is collapsed,
@@ -253,7 +254,7 @@ export class AltRoot implements ModeView {
 
 	showCard(card: InteractionCard): void {
 		this.#cardSlot.clear();
-		this.#cardSlot.addChild(new CardView(card, index => this.#mode?.answerCard(card.id, index)));
+		this.#cardSlot.addChild(cardViewFor(card, (selected, text) => this.#mode?.answerCard(card.id, selected, text)));
 		this.tui.setFocus(this.#cardSlot.children[0]!);
 		this.#touch();
 	}

@@ -13,12 +13,16 @@
  *   4. everything else falls through to the focused component
  */
 
-import { getKeybindings, type Editor, type TuiAltScreen, type TuiInputListenerResult } from "@earendil-works/pi-tui";
+import { getKeybindings, matchesKey, type Editor, type TuiAltScreen, type TuiInputListenerResult } from "@earendil-works/pi-tui";
 
 export interface InputControllerDeps {
 	tui: TuiAltScreen;
 	editor: Editor;
 	isRunning: () => boolean;
+	/** Whether an interaction card is open — the card owns the keyboard
+	 *  then; this listener stands down (bar Ctrl+C, the global abort
+	 *  affordance) so keys reach the focused card. */
+	isCardOpen: () => boolean;
 	interrupt: () => void;
 	/** Ctrl+O: expand/collapse every collapsible block (thinking + tool cards). */
 	toggleAllCollapsibles: () => void;
@@ -43,7 +47,17 @@ export class InputController {
 	}
 
 	#handle(data: string): TuiInputListenerResult {
-		const { editor, isRunning, interrupt, toggleAllCollapsibles, onQuit } = this.#deps;
+		const { editor, isRunning, isCardOpen, interrupt, toggleAllCollapsibles, onQuit } = this.#deps;
+		if (isCardOpen()) {
+			// The card is focused and consumes everything it knows; only
+			// the abort affordance preempts (a literal: the interrupt
+			// action's escape leg belongs to the card while it is open).
+			if (matchesKey(data, "ctrl+c") && isRunning()) {
+				interrupt();
+				return { consume: true };
+			}
+			return undefined;
+		}
 		const kb = getKeybindings();
 		if (kb.matches(data, "tui.app.interrupt") && isRunning()) {
 			interrupt();

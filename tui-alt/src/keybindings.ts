@@ -28,6 +28,7 @@ declare module "@earendil-works/pi-tui" {
 		"tui.app.interrupt": true;
 		"tui.app.toggleCollapsibles": true;
 		"tui.app.quit": true;
+		"tui.app.clearNote": true;
 	}
 }
 
@@ -45,6 +46,10 @@ export const APP_KEYBINDINGS: KeybindingDefinitions = {
 		defaultKeys: ["ctrl+d", "ctrl+c"],
 		description: "Quit (only when the editor is empty)",
 	},
+	"tui.app.clearNote": {
+		defaultKeys: ["ctrl+u"],
+		description: "Clear the note on an interaction card",
+	},
 };
 
 /** The engine's TUI defaults, deep-copied into the mutable definitions shape. */
@@ -61,9 +66,14 @@ function allDefinitions(): KeybindingDefinitions {
 	return { ...engine, ...APP_KEYBINDINGS };
 }
 
-type AppKeybindingId = "tui.app.interrupt" | "tui.app.toggleCollapsibles" | "tui.app.quit";
+type AppKeybindingId = "tui.app.interrupt" | "tui.app.toggleCollapsibles" | "tui.app.quit" | "tui.app.clearNote";
 
-export const APP_KEYBINDING_IDS: AppKeybindingId[] = ["tui.app.interrupt", "tui.app.toggleCollapsibles", "tui.app.quit"];
+export const APP_KEYBINDING_IDS: AppKeybindingId[] = [
+	"tui.app.interrupt",
+	"tui.app.toggleCollapsibles",
+	"tui.app.quit",
+	"tui.app.clearNote",
+];
 
 /** Install the merged registry globally; returns it for display facts.
  *  The user bindings arrive as authored (raw strings from the TOML) —

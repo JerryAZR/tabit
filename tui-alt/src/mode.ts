@@ -256,16 +256,21 @@ export class InteractiveMode {
 		if (this.#session && this.#running) this.#backend.abort(this.#session);
 	}
 
-	answerCard(id: string, optionIndex: number): void {
+	/** Answer a card: `selected` echoes the chosen labels (exactly one
+	 *  for select_one, 0..n for select_any), `text` carries the note when
+	 *  the card invited one. */
+	answerCard(id: string, selected: string[], text: string | null): void {
 		const card = this.#cards.get(id);
 		if (!card) return;
-		const label = card.options[optionIndex];
-		// Out-of-range or option-less cards get no fabricated answer — the
-		// render side surfaces them as cannot-answer notices (FRONTEND.md §8).
-		if (label === undefined) return;
 		this.#cards.delete(id);
-		this.#backend.interactionResponse(this.#session!, id, { selected: [label], text: null });
+		this.#backend.interactionResponse(this.#session!, id, { selected, text });
 		this.#view.closeCard(id, undefined);
+	}
+
+	/** Whether an interaction card is open — the input listener stands
+	 *  down (bar Ctrl+C) while it is, so the card owns the keyboard. */
+	get hasOpenCard(): boolean {
+		return this.#cards.size > 0;
 	}
 
 	handleFrame(parsed: ParsedServerFrame): void {
