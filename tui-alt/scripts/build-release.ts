@@ -39,7 +39,7 @@ const bunTarget = `bun-${process.platform}-${process.arch}`;
 rmSync(dist, { recursive: true, force: true });
 mkdirSync(join(dist, "bin"), { recursive: true });
 
-run(["cargo", "build", "--release", "-p", "tabit"], { cwd: repoRoot });
+run(["cargo", "build", "--release", "-p", "tabit-core"], { cwd: repoRoot });
 run(
 	[
 		"bun",
@@ -51,7 +51,7 @@ run(
 	],
 	{ cwd: pkgRoot },
 );
-cpSync(join(repoRoot, "target", "release", `tabit${exeSuffix}`), join(dist, `tabit${exeSuffix}`));
+cpSync(join(repoRoot, "target", "release", `tabit-core${exeSuffix}`), join(dist, `tabit-core${exeSuffix}`));
 
 // The platform package manifest: os/cpu-gated like the real optionalDependency.
 writeFileSync(

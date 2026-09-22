@@ -26,7 +26,7 @@
  * `completion_call`'s.
  */
 
-export const PROTOCOL_VERSION = 15;
+export const PROTOCOL_VERSION = 16;
 
 // ---------------------------------------------------------------------------
 // Commands (frontend → backend). Fire-and-forget; outcomes arrive as
@@ -40,7 +40,7 @@ export type SessionCommand =
 	| { type: "new_session" }
 	| { type: "open_session"; id: string }
 	| { type: "checkout"; session: string; entry_id: string }
-	| { type: "compact"; session: string; directives?: unknown }
+	| { type: "compact"; session: string; directives?: string }
 	| {
 			type: "model";
 			session: string;
@@ -95,6 +95,9 @@ export interface AvailableSession {
 	id: string;
 	created_at: string;
 	entry_count: number;
+	/** The session log file's path and working directory (v16). */
+	path: string;
+	cwd: string;
 }
 
 /** One discovered skill in the `skills_available` announcement (v8). */
@@ -226,6 +229,9 @@ export type SessionEvent =
 			type: "session_opened";
 			id: string;
 			path: string;
+			/** The session's working directory (v16): the boot's is the
+			 *  backend's cwd, a child's is its spawn cwd. */
+			cwd: string;
 			model: ModelSelection;
 			resumed: boolean;
 			parent?: string;

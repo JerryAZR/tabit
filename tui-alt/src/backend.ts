@@ -123,8 +123,8 @@ export class Backend {
 	}
 
 	/** Manual compaction — parks behind a running run, executes at its end. */
-	compact(session: string): void {
-		this.send({ type: "compact", session });
+	compact(session: string, directives?: string): void {
+		this.send({ type: "compact", session, ...(directives !== undefined ? { directives } : {}) });
 	}
 
 	interactionResponse(session: string, id: string, payload: unknown): void {

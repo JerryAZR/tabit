@@ -15,15 +15,15 @@ const SESSION = "0199aaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
 const CHILD = "0199bbbbbbbbbbbbbbbbbbbbbbbbbbbbbb";
 
 class FakeBackend implements BackendLink {
-	readonly sent: Array<{ kind: string; session?: string; id?: string; payload?: unknown; text?: string }> = [];
+	readonly sent: Array<{ kind: string; session?: string; id?: string; payload?: unknown; text?: string; directives?: string }> = [];
 	message(session: string, text: string): void {
 		this.sent.push({ kind: "message", session, text });
 	}
 	abort(session: string): void {
 		this.sent.push({ kind: "abort", session });
 	}
-	compact(session: string): void {
-		this.sent.push({ kind: "compact", session });
+	compact(session: string, directives?: string): void {
+		this.sent.push({ kind: "compact", session, directives });
 	}
 	interactionResponse(session: string, id: string, payload: unknown): void {
 		this.sent.push({ kind: "interaction_response", session, id, payload });
@@ -129,14 +129,14 @@ function harness() {
 }
 
 function ack(control: (frame: Extract<ParsedServerFrame, { kind: "control" }>["frame"]) => void, session = SESSION): void {
-	control({ type: "initialize_ack", protocol_version: 15, session_id: session });
+	control({ type: "initialize_ack", protocol_version: 16, session_id: session });
 }
 
 describe("InteractiveMode", () => {
 	test("ack mints the routing key; submits address the active session", () => {
 		const { backend, view, mode, control } = harness();
 		expect(view.status).toBe("connecting…");
-		control({ type: "initialize_ack", protocol_version: 15, session_id: SESSION });
+		control({ type: "initialize_ack", protocol_version: 16, session_id: SESSION });
 		mode.submit("hello");
 		expect(backend.sent).toEqual([{ kind: "message", session: SESSION, text: "hello" }]);
 		// Pre-ack submits have no session to address — dropped, not sent.
@@ -317,8 +317,9 @@ describe("InteractiveMode", () => {
 		expect(view.notes.at(-1)?.text).toContain("not invocable");
 
 		mode.submit("/no-such-command");
-		mode.submit("/compact extra"); // arguments are not the bare command
-		expect(view.notes.filter(n => n.kind === "warn")).toHaveLength(3);
+		mode.submit("/compact focus on the auth module"); // v16: guidance rides as directives
+		expect(backend.sent[1]).toEqual({ kind: "compact", session: SESSION, directives: "focus on the auth module" });
+		expect(view.notes.filter(n => n.kind === "warn")).toHaveLength(2);
 	});
 
 	test("the command table is the one home: the dropdown list and interpreter cannot diverge", () => {
@@ -417,9 +418,9 @@ describe("InteractiveMode", () => {
 		mode.onFatal = r => {
 			reason = r;
 		};
-		control({ type: "initialize_ack", protocol_version: 14, session_id: SESSION });
-		expect(reason).toContain("v14");
+		control({ type: "initialize_ack", protocol_version: 15, session_id: SESSION });
 		expect(reason).toContain("v15");
+		expect(reason).toContain("v16");
 		expect(mode.activeSession).toBeUndefined();
 	});
 

@@ -226,6 +226,7 @@ async function subagentRun(session: string): Promise<void> {
 		type: "session_opened",
 		id: CHILD,
 		path: "",
+		cwd: process.cwd(),
 		model: { provider: "mock", model: "child-model", thinking_level: null },
 		resumed: false,
 		parent: session,
@@ -380,12 +381,13 @@ stdin.on("line", line => {
 			type: "session_opened",
 			id: BOOT,
 			path: "",
+			cwd: process.cwd(),
 			model: { provider: "mock", model: "mock-model", thinking_level: null },
 			resumed: false,
 		});
 		emitNow({
 			type: "sessions_available",
-			sessions: [{ id: BOOT, created_at: new Date().toISOString(), entry_count: 0 }],
+			sessions: [{ id: BOOT, created_at: new Date().toISOString(), entry_count: 0, path: "", cwd: process.cwd() }],
 		});
 		// v8/v9 startup catalogs, only-when-found (the mock models a
 		// discovery that found something, so the handlers get exercised).

@@ -52,7 +52,7 @@ export function resolveBackendCommand(
 	}
 	const envBin = process.env.TABIT_BIN;
 	if (envBin !== undefined && envBin !== "") return { bin: envBin, args: base };
-	const exe = process.platform === "win32" ? "tabit.exe" : "tabit";
+	const exe = process.platform === "win32" ? "tabit-core.exe" : "tabit-core";
 	const candidates = [
 		join(execDir, exe), // the packaged sibling: the core rides next to the TUI exe
 		sourceFile(`../../target-test/debug/${exe}`), // dev: the gate's build
@@ -61,7 +61,7 @@ export function resolveBackendCommand(
 	for (const candidate of candidates) {
 		if (candidate !== undefined && exists(candidate)) return { bin: candidate, args: base };
 	}
-	return { bin: "tabit", args: base };
+	return { bin: "tabit-core", args: base };
 }
 
 /**

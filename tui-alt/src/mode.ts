@@ -43,9 +43,12 @@ export interface InteractionCard {
 export interface FooterFacts {
 	session: string | undefined;
 	/** The session log file's path (from `session_opened`) — the future
-	 *  session UI's open target; undefined for ephemeral sessions. Never
-	 *  a working directory. */
+	 *  session UI's open target; undefined for ephemeral sessions. */
 	path: string | undefined;
+	/** The session's working directory (v16) — the completion root. A
+	 *  child's spawn cwd differs from the frontend's, so this comes from
+	 *  the wire, never from process.cwd(). */
+	cwd: string | undefined;
 	model: string | undefined;
 	/** Config's display name for the model (v11) — absent means unstated. */
 	modelName: string | undefined;
@@ -122,7 +125,10 @@ export interface ModeView {
 export interface BackendLink {
 	message(session: string, text: string): void;
 	abort(session: string): void;
-	compact(session: string): void;
+	/** Manual compaction; `directives` is the user's free-text guidance
+	 *  for this invocation (v16 — appended to the instruction, never
+	 *  persisted). */
+	compact(session: string, directives?: string): void;
 	interactionResponse(session: string, id: string, payload: unknown): void;
 }
 
@@ -146,6 +152,7 @@ export class InteractiveMode {
 	#modelName: string | undefined;
 	#contextWindow: number | undefined;
 	#path: string | undefined;
+	#cwd: string | undefined;
 	#resumed = false;
 	#inputTokens = 0;
 	#outputTokens = 0;
@@ -190,16 +197,21 @@ export class InteractiveMode {
 		return this.#replaying;
 	}
 
-	/** Editor submit: slash space first (`/compact` is a wire command;
-	 *  `/help` lists keys and commands; `exit`/`quit` end the TUI; skills
-	 *  are display-only — no wire invocation exists, so selecting one
-	 *  warns instead of sending), else a plain message. */
+	/** Editor submit: slash space first (`/compact [guidance]` is a wire
+	 *  command — the guidance rides the frame as this invocation's
+	 *  directives; `/help` lists keys and commands; `exit`/`quit` end the
+	 *  TUI; skills are display-only — no wire invocation exists, so
+	 *  selecting one warns instead of sending), else a plain message. */
 	submit(text: string): void {
 		if (!this.#session || text === "") return;
 		if (text.startsWith("/")) {
-			const entry = this.#slashEntries().find(candidate => candidate.name === text.slice(1).trim());
-			if (entry?.run !== undefined) entry.run();
-			else this.#view.addNote(`/${entry?.name ?? text.slice(1).trim()} is not invocable yet — listed for discovery only`, "warn");
+			const body = text.slice(1).trim();
+			const space = body.indexOf(" ");
+			const name = space === -1 ? body : body.slice(0, space);
+			const args = space === -1 ? "" : body.slice(space + 1).trim();
+			const entry = this.#slashEntries().find(candidate => candidate.name === name);
+			if (entry?.run !== undefined) entry.run(args);
+			else this.#view.addNote(`/${name} is not invocable yet — listed for discovery only`, "warn");
 			return;
 		}
 		this.#backend.message(this.#session, text);
@@ -215,9 +227,16 @@ export class InteractiveMode {
 		return this.#slashEntries().map(({ name, description, run }) => ({ name, description, displayOnly: run === undefined }));
 	}
 
-	#slashEntries(): Array<{ name: string; description: string; run?: () => void }> {
+	#slashEntries(): Array<{ name: string; description: string; run?: (args: string) => void }> {
 		return [
-			{ name: "compact", description: "summarize the context now", run: () => this.#backend.compact(this.#session!) },
+			{
+				name: "compact",
+				description: "summarize the context now",
+				run: args => {
+					const directives = args === "" ? undefined : args;
+					this.#backend.compact(this.#session!, directives);
+				},
+			},
 			{ name: "help", description: "list keys and commands", run: () => this.#showHelp() },
 			{ name: "exit", description: "quit the TUI (shuts the backend down)", run: () => this.onQuit?.() },
 			{ name: "quit", description: "quit the TUI (shuts the backend down)", run: () => this.onQuit?.() },
@@ -301,6 +320,7 @@ export class InteractiveMode {
 		this.#view.setFooter({
 			session: this.#session,
 			path: this.#path,
+			cwd: this.#cwd,
 			model: this.#model,
 			modelName: this.#modelName,
 			contextWindow: this.#contextWindow,
@@ -497,8 +517,9 @@ export class InteractiveMode {
 			}
 			this.#session = event.id;
 			this.#model = event.model.model;
-			// Empty path = ephemeral session (nothing on disk to complete against).
+			// Empty path = ephemeral session (nothing on disk to open).
 			this.#path = event.path === "" ? undefined : event.path;
+			this.#cwd = event.cwd === "" ? undefined : event.cwd;
 			this.#resumed = event.resumed;
 			// Per-session facts reset here: the model_changed ahead of the
 			// following replay restates the resolved record, and the pass

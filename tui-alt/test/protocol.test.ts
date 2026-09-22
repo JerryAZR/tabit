@@ -18,10 +18,10 @@ describe("protocol: parseServerFrame", () => {
 	});
 
 	test("control frames parse with their fields", () => {
-		const parsed = parseServerFrame('{"type":"initialize_ack","protocol_version":15,"session_id":"s1"}');
+		const parsed = parseServerFrame('{"type":"initialize_ack","protocol_version":16,"session_id":"s1"}');
 		expect(parsed).toEqual({
 			kind: "control",
-			frame: { type: "initialize_ack", protocol_version: 15, session_id: "s1" },
+			frame: { type: "initialize_ack", protocol_version: 16, session_id: "s1" },
 		});
 	});
 
@@ -63,7 +63,7 @@ describe("protocol: parseServerFrame", () => {
 describe("protocol: toWireLine", () => {
 	test("initialize serializes with replay", () => {
 		const line = toWireLine({ type: "initialize", protocol_version: PROTOCOL_VERSION, replay: true });
-		expect(JSON.parse(line)).toEqual({ type: "initialize", protocol_version: 15, replay: true });
+		expect(JSON.parse(line)).toEqual({ type: "initialize", protocol_version: 16, replay: true });
 	});
 
 	test("session commands carry their session field", () => {
@@ -74,6 +74,6 @@ describe("protocol: toWireLine", () => {
 	test("the declared version matches the protocol this build was written against", () => {
 		// The handshake rejects mismatches; a silent bump here would strand
 		// every copy of this frontend against a backend it can't talk to.
-		expect(PROTOCOL_VERSION).toBe(15);
+		expect(PROTOCOL_VERSION).toBe(16);
 	});
 });

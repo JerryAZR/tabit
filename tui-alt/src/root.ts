@@ -181,9 +181,14 @@ export class AltRoot implements ModeView {
 			name: entry.name,
 			description: `${entry.displayOnly ? TYPE_COLUMN.skill : TYPE_COLUMN.command} · ${entry.description}`.trimEnd(),
 		}));
-		const combined = new CombinedAutocompleteProvider(entries, process.cwd());
-		this.editor.setAutocompleteProvider(new AtPathCompletionProvider(combined, process.cwd()));
+		const combined = new CombinedAutocompleteProvider(entries, this.#completionBase);
+		this.editor.setAutocompleteProvider(new AtPathCompletionProvider(combined, this.#completionBase));
 	}
+
+	/** The completion root: the active session's working directory from
+	 *  the wire (v16) — a child's spawn cwd differs from the frontend's,
+	 *  so process.cwd() is only the pre-boot fallback. */
+	#completionBase = process.cwd();
 
 	addNote(text: string, kind: "info" | "warn" | "error"): void {
 		this.#chat.addChild(new NoteBlock(text, kind));
@@ -237,6 +242,13 @@ export class AltRoot implements ModeView {
 
 	setFooter(facts: FooterFacts): void {
 		this.#footer.set(facts);
+		// The session's own cwd arrived: upgrade the completion root (and
+		// again whenever a different session becomes active — M2's child
+		// focus will rely on this).
+		if (facts.cwd !== undefined && facts.cwd !== this.#completionBase) {
+			this.#completionBase = facts.cwd;
+			this.#attachProvider();
+		}
 	}
 
 	showCard(card: InteractionCard): void {

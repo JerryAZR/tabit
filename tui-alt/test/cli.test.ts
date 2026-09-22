@@ -57,16 +57,16 @@ describe("the backend resolution ladder", () => {
 	test("the packaged sibling next to the executable is the first file rung", () => {
 		withEnv(undefined, () => {
 			const resolved = resolveBackendCommand(["--bin-x"], () => false, "C:/packaged/dir");
-			expect(resolved.bin).toBe("tabit"); // nothing exists anywhere
+			expect(resolved.bin).toBe("tabit-core"); // nothing exists anywhere
 			const resolved2 = resolveBackendCommand([], path => path.includes("packaged"), "C:/packaged/dir");
 			expect(resolved2.bin).toContain("packaged"); // execDir rung wins over dev rungs
 		});
 	});
 
-	test("with nothing local, the rung is `tabit` on PATH", () => {
+	test("with nothing local, the rung is `tabit-core` on PATH", () => {
 		withEnv(undefined, () => {
 			const resolved = resolveBackendCommand([], () => false);
-			expect(resolved.bin).toBe("tabit");
+			expect(resolved.bin).toBe("tabit-core");
 			expect(resolved.args).toEqual(["--json"]); // no args = a NEW session
 		});
 	});
