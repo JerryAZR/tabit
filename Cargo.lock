@@ -5083,6 +5083,7 @@ name = "tabit-gate"
 version = "0.41.0"
 dependencies = [
  "brush-parser",
+ "glob",
  "home",
  "regex",
  "serde",
