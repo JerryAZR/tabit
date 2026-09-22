@@ -369,10 +369,9 @@ pub enum SessionEvent {
     /// frontend (see `templates`), extension types (`ext:<id>:*`)
     /// render where the extension's widgets live — and `payload` is
     /// opaque cargo the asker shaped however it wants. Several may be
-    /// open at once (concurrent chains, any answer order); a run
-    /// terminal closes every unanswered request — no close event,
-    /// none needed. Never persisted, never replayed; the durable
-    /// record is the tool result.
+    /// open at once (concurrent chains, any answer order). Never
+    /// persisted, never replayed; the durable record is the tool
+    /// result.
     InteractionRequest {
         /// Backend-minted request id (UUIDv7, like every protocol id).
         id: String,
@@ -380,6 +379,19 @@ pub enum SessionEvent {
         ui_type: String,
         /// The ask, opaque to the core.
         payload: serde_json::Value,
+    },
+    /// An interaction request settled — answered, retracted, or dead
+    /// (v17). The first answer lands and the rest are dropped by the
+    /// hub's id routing; this event is how every *other* holder of the
+    /// card learns it is no longer needed (with one frontend, run
+    /// terminals sufficed as the close signal; with more channels
+    /// answering, a card can die long before any terminal). Id-only by
+    /// ruling: the answer itself is indirectly visible wherever its
+    /// asker surfaces it (the tool result, typically). Fire-and-forget
+    /// from every settle site; stamped like the request it closes.
+    InteractionSettled {
+        /// The settled request's id.
+        id: String,
     },
     /// A compaction invocation began (v15): the envelope for every
     /// following compaction event until `compaction_end` or

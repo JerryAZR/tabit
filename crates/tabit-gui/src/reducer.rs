@@ -732,6 +732,11 @@ impl GuiState {
             } => {
                 self.open_card(&stream, id, ui_type, payload);
             }
+            // v17: the settle close — another channel answered, or the
+            // question died. Id-addressed, session-agnostic by design.
+            SessionEvent::InteractionSettled { id } => {
+                self.interactions.retain(|card| card.id() != id.as_str());
+            }
             SessionEvent::NativeItem { item, .. } => {
                 self.transcript.push(Group::Native {
                     item: item.to_string(),
@@ -776,6 +781,10 @@ impl GuiState {
                     row.attention = true;
                 }
                 self.open_card(&stream, id, ui_type, payload);
+            }
+            // v17's settle close reaches background cards the same way.
+            SessionEvent::InteractionSettled { id } => {
+                self.interactions.retain(|card| card.id() != id.as_str());
             }
             _ => {}
         }

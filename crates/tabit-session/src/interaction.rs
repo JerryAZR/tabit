@@ -12,9 +12,12 @@
 //! awaits; [`InteractionHub::respond`] routes an arriving answer by id
 //! to the one awaiting asker — a sync leaf call needing no worker
 //! attention. Total semantics: an unknown id or a dead asker is a
-//! logged no-op. Run terminals clear the pending map (questions die
-//! with their chains — drop is the cancellation), and the frontend
-//! closes cards on terminals, so no close event exists.
+//! logged no-op. Every settle site — the first answer (the rest race
+//! onto a gone id and drop), the run-terminal retraction, the
+//! dead-channel dismissal at registration — emits
+//! `interaction_settled` fire-and-forget, so every channel holding
+//! the card can close it; run terminals clear the pending map
+//! (questions die with their chains — drop is the cancellation).
 
 use std::collections::HashMap;
 use std::sync::Arc;
@@ -71,11 +74,21 @@ impl InteractionHub {
 
     /// Deliver an answer. Returns whether it reached a live asker (a
     /// miss is the total-semantics no-op — the question went away with
-    /// its run).
+    /// its run). The first answer settles the id: the entry is removed
+    /// atomically with the lookup, so a racing second answer finds
+    /// nothing and drops, and the settlement is announced to every
+    /// channel still holding the card.
     pub fn respond(&self, id: &str, payload: serde_json::Value) -> bool {
         let sender = lock(&self.inner.pending).remove(id);
         match sender {
-            Some(sender) => sender.send(payload).is_ok(),
+            Some(sender) => {
+                let delivered = sender.send(payload).is_ok();
+                let _ = self
+                    .inner
+                    .notices
+                    .emit(SessionEvent::InteractionSettled { id: id.to_string() });
+                delivered
+            }
             None => {
                 tracing::debug!(
                     interaction_id = id,
@@ -87,9 +100,20 @@ impl InteractionHub {
     }
 
     /// Retract every open question. Called at run terminals: the askers
-    /// died with the run, and the senders must not linger.
+    /// died with the run, and the senders must not linger. Each
+    /// retraction settles its id — a channel that missed whatever
+    /// ended the run still learns its card is dead.
     pub fn clear_pending(&self) {
-        lock(&self.inner.pending).clear();
+        let retracted: Vec<String> = lock(&self.inner.pending)
+            .drain()
+            .map(|(id, _)| id)
+            .collect();
+        for id in retracted {
+            let _ = self
+                .inner
+                .notices
+                .emit(SessionEvent::InteractionSettled { id });
+        }
     }
 
     /// Register the question, surface it, await the answer. Drop is
@@ -109,8 +133,14 @@ impl InteractionHub {
         });
         if !sent {
             // No pump in flight, or the frontend is already gone: no one
-            // will ever answer.
+            // will ever answer. The question settles at registration —
+            // announced for whoever still consumes the channel, though
+            // a dead channel makes that nobody (fail-soft either way).
             lock(&self.inner.pending).remove(&id);
+            let _ = self
+                .inner
+                .notices
+                .emit(SessionEvent::InteractionSettled { id: id.clone() });
             return InteractionOutcome::Dismissed;
         }
         match receiver.await {
@@ -189,6 +219,17 @@ mod tests {
             asker.await.expect("asker finished"),
             InteractionOutcome::Answered(serde_json::json!({"text": "main.rs"}))
         );
+        // Settling is announced: the next frame on the channel closes
+        // the card for every holder.
+        let settled = rx.recv().await.expect("settlement emitted");
+        assert_eq!(
+            settled.event,
+            SessionEvent::InteractionSettled { id: id.clone() }
+        );
+        // First answer wins; a racing second answer finds a gone id,
+        // drops, and re-announces nothing.
+        assert!(!hub.respond(&id, serde_json::json!({"text": "lib.rs"})));
+        assert!(rx.try_recv().is_err(), "no second settlement");
     }
 
     #[tokio::test]
@@ -235,6 +276,13 @@ mod tests {
         assert_eq!(
             asker.await.expect("asker finished"),
             InteractionOutcome::Dismissed
+        );
+        // The retraction settled the id — announced, like every settle
+        // site.
+        let settled = rx.recv().await.expect("retraction settlement emitted");
+        assert_eq!(
+            settled.event,
+            SessionEvent::InteractionSettled { id: id.clone() }
         );
     }
 }

@@ -11,7 +11,7 @@ render a specific tool's `details` cargo, the interaction template
 payloads — lives in **TOOLS.md**, its companion since the shapes grew
 past one doc (2026-09 ruling).
 
-Wire shapes below are the **v16 contract**. v3 was the multi-session
+Wire shapes below are the **v17 contract**. v3 was the multi-session
 host — session-addressed commands, `new_session`/`open_session` on the
 channel, the `"main"` stream alias retired (the stream stamp is the
 session id). v4 made backend-level frames **unstamped** (§6) and
@@ -36,7 +36,8 @@ into the invocation envelope — `compaction_begin` → `compaction_step` × N �
 attempts; v16 made the session's world visible — `session_opened` and the
 catalog rows carry `cwd` (rows also `path`), and `compact.directives` became
 real free text (appended to the summarization instruction for that
-invocation). Each version landed as one
+invocation); v17 added `interaction_settled { id }` — the settle close
+for interaction cards (§8). Each version landed as one
 protocol-version bump with no compatibility period; always check the
 ack's `protocol_version`. (`tabit-core --list` prints a human table —
 there is no JSON listing edge.)
@@ -293,6 +294,7 @@ those connection-level).
 | `reasoning_delta` | `turn_id`, `id`, `reasoning` | model reasoning; `id` correlates blocks within the turn (several may interleave; same-id deltas append). Full-text once per block id in replay. |
 | `tool_call` | `turn_id`, `name`, `call_id`, `internal_call_id`, `arguments` | the model issued a complete tool call, before execution. `arguments` is the raw JSON string, or `null` when unparseable. |
 | `interaction_request` | `id`, `ui_type`, `payload` | a tool gate (permission) or a tool body asks the user; `ui_type` names the widget and `payload` is its cargo (§8 templates own the shapes). Several may be open at once. Answer with `interaction_response`; a run terminal closes the unanswered (§8). |
+| `interaction_settled` | `id` | a pending request settled — answered, retracted, or dead (v17). Id-only, fire-and-forget; close the card. Terminals remain the belt-and-suspenders close (§8). |
 | `compaction_begin` | — | **(v15)** a compaction invocation began — the envelope for every compaction event until `compaction_end` or `compaction_failed`. No id: the stream stamp scopes it (invocations are serial per session), and events inside are contiguous and ordered. May arrive mid-run (between turns) or at idle. A door that finds nothing worth folding stays silent — no envelope. |
 | `compaction_delta` | `text` | a summary text delta inside the open pass (positional: deltas between steps belong to the pass that next commits; after a `compaction_retried`, the pending deltas were the discarded attempt's and drop). |
 | `compaction_step` | `id`, `usage`, `cost?` | **(v15)** one pass committed: the summary is durable as a compaction entry. `id` is the pass's entry id (born early, like turn ids) — a checkout anchor and the replay marker's correlation. `usage` is the summarization request's fresh report and `cost` its recorded dollars: spend that meters exactly like a `completion_call`'s — a frontend's totals are one fold over both event kinds. Multi-pass invocations emit one step per pass. |
@@ -557,15 +559,19 @@ order.
 - A `free_text` answer is delivered to the model when present (a
   denial reason shapes the retry), not just logged.
 
-**Closing rule:** a run terminal (`run_finished` / `run_aborted` /
-`run_failed`) closes every pending request — drop the cards, no
-response needed. There is no close event and none is needed: an
-unanswered request's death always coincides with a run terminal (a
-question lives inside its tool's execution, and the run always ends
-in exactly one terminal). A response racing a terminal (stale id,
-dead asker) is a logged no-op on the backend — send it, never block
-on the race. Requests never replay; the durable record of an
-interaction is the tool result — the answer or denial the model saw.
+**Closing rule:** a request settles exactly once — the first
+`interaction_response` to arrive lands and every racing duplicate is a
+logged no-op on the backend (send it, never block on the race); the
+run terminals (`run_finished` / `run_aborted` / `run_failed`) close
+every still-pending request. Every settle site also emits
+`interaction_settled { id }` (v17) — fire-and-forget, id-only (the
+answer itself is indirectly visible wherever its asker surfaces it,
+the tool result typically). With one frontend the terminals sufficed
+as the close signal; with more channels able to answer (co-frontends),
+a card can die long before any terminal, and this event is how the
+other holders learn to drop it. Requests never settle twice and never
+replay; the durable record of an interaction is the tool result — the
+answer or denial the model saw.
 
 ## 9. Invariants you may rely on
 

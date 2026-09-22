@@ -593,10 +593,13 @@ receiver: log and drop — total semantics, like abort-while-idle).
 Two sites share the one primitive: the gate (a permission hook
 constructed with the hub handle — deny maps to `Skip`) and the body
 (`ToolContext` capability). Questions die with their chains — drop
-is the cancellation — and run terminals clear the pending map; the
-frontend closes cards on run terminals (no close event exists or is
-needed: every unanswered question's death coincides with a run
-terminal, structurally). Interaction requests never persist or
+is the cancellation — and run terminals clear the pending map. Every
+settle site (the first answer — racing duplicates find a gone id —
+the terminal retraction, the dead-channel dismissal at registration)
+emits `interaction_settled { id }` fire-and-forget: one frontend
+could close cards on terminals alone, but more channels than one can
+answer means a card can die long before any terminal, and the other
+holders must learn it. Interaction requests never persist or
 replay; the durable record is the tool result (the answer or denial
 the model saw).
 

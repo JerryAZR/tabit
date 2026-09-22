@@ -467,8 +467,10 @@ fn print_event(event: &SessionEvent) {
             let _ = writeln!(out, "[{} queued message(s) discarded]", messages.len());
         }
         // Cards render on stderr in the event loop; stdout stays the
-        // answer channel.
-        SessionEvent::InteractionRequest { .. } => {}
+        // answer channel. The settle close follows the card: print
+        // mode's card loop ends with the answer, so there is nothing
+        // left to close here.
+        SessionEvent::InteractionRequest { .. } | SessionEvent::InteractionSettled { .. } => {}
         SessionEvent::RunAborted { .. } => {
             let _ = writeln!(
                 out,

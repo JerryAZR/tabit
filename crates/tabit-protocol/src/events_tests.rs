@@ -117,6 +117,9 @@ fn events_round_trip_through_json() {
             ui_type: "native:confirm".to_string(),
             payload: serde_json::json!({"title": "Run command?"}),
         },
+        SessionEvent::InteractionSettled {
+            id: "0199".to_string(),
+        },
         SessionEvent::error_model("default_model `gone` is not usable"),
         SessionEvent::ReplayStarted { total: 7 },
         SessionEvent::ReplayDone,
@@ -209,6 +212,13 @@ fn events_round_trip_through_json() {
         serde_json::to_string(&SessionEvent::error_persist_degraded(3, "pending"))
             .expect("serialize"),
         r#"{"type":"error","kind":"persist_degraded","message":"pending","pending":3}"#
+    );
+    assert_eq!(
+        serde_json::to_string(&SessionEvent::InteractionSettled {
+            id: "0199".to_string(),
+        })
+        .expect("serialize"),
+        r#"{"type":"interaction_settled","id":"0199"}"#
     );
     assert_eq!(
         serde_json::to_string(&SessionEvent::SessionsAvailable {

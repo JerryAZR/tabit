@@ -18,7 +18,25 @@ software/hardware contract, not just the encodings):
 Every `PROTOCOL_VERSION` bump — and every additive change a frontend
 could observe — gets an entry here in the same commit.
 
-## v16 (current)
+## v17 (current)
+
+### wire: `interaction_settled { id }` — settle close for interaction cards (2026-09)
+
+Every settle site of an interaction request now emits a
+fire-and-forget, id-only event: the first `interaction_response`
+landing (racing duplicates still drop silently), the run-terminal
+retraction, and the dead-channel dismissal at registration. With one
+frontend, closing cards on run terminals sufficed; more channels than
+one able to answer means a card can die long before any terminal, and
+this event tells the other holders to drop it. The answer itself is
+deliberately not carried — it is indirectly visible wherever its
+asker surfaces it (the tool result, typically). Protocol version 17.
+*Migration:* frontends may keep terminal-based closing as-is (the
+event is additive), but precise card closing should watch
+`interaction_settled` — and any multi-channel setup (co-frontends)
+requires it.
+
+## v16
 
 ### wire: the session's world — cwd everywhere, real compact directives (2026-09)
 
