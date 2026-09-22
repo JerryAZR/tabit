@@ -423,7 +423,7 @@ macro_rules! impl_http_client_ext {
 
                     let mapped_stream: Pin<Box<dyn WasmCompatSendStream<InnerItem = Result<Bytes>>>> = if tracing_enabled {
                         use std::io::Write as _;
-                        let mut trace = std::fs::File::create("stream-trace.log").ok().map(std::sync::Mutex::new);
+                        let trace = std::fs::File::create("stream-trace.log").ok().map(std::sync::Mutex::new);
                         Box::pin(futures::stream::unfold(
                             (raw, trace, started),
                             |(mut raw, trace, started)| async move {
