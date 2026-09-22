@@ -42,8 +42,10 @@ impl Session {
 
     /// The manual door (the `compact` command, parked and served at
     /// the beat): forced; the short-history skip is its only guard.
-    pub async fn compact_manual(&mut self) {
-        self.run_box(Door::Manual, true).await;
+    /// `directives` is the invocation's free-text summarizer guidance
+    /// (v16).
+    pub async fn compact_manual(&mut self, directives: Option<String>) {
+        self.run_box(Door::Manual { directives }, true).await;
     }
 
     /// The overflow intercept (the run epilogue): forced, with the

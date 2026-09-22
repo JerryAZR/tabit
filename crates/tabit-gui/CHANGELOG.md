@@ -18,7 +18,23 @@ software/hardware contract, not just the encodings):
 Every `PROTOCOL_VERSION` bump — and every additive change a frontend
 could observe — gets an entry here in the same commit.
 
-## v15 (current)
+## v16 (current)
+
+### wire: the session's world — cwd everywhere, real compact directives (2026-09)
+
+Three frontend-reported gaps. `session_opened` carries `cwd` (the
+session's working directory — the boot's is the backend's cwd, a
+subagent child's is its spawn cwd), and `sessions_available` rows
+carry `path` (the session file) and `cwd` (derived from the store
+root) — a frontend never lists the session directory to learn either.
+`compact { directives }` graduated from a reserved, ignored field to
+free text appended to the summarization instruction for that
+invocation only (never persisted, never replayed); the parked slot
+keeps last-wins semantics. Protocol version 16; the catalog remains
+one-shot at startup.
+
+## v15
+
 
 ### behavior: the built-in permission gate ships (2026-09)
 

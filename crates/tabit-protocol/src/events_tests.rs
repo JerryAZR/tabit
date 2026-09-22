@@ -131,11 +131,15 @@ fn events_round_trip_through_json() {
                     id: "0197".to_string(),
                     created_at: "2026-08-22T10:00:00Z".to_string(),
                     entry_count: 14,
+                    path: "C:/work/proj/.tabit/sessions/s.jsonl".to_string(),
+                    cwd: "C:/work/proj".to_string(),
                 },
                 AvailableSession {
                     id: "0196".to_string(),
                     created_at: "2026-08-21T09:00:00Z".to_string(),
                     entry_count: 0,
+                    path: "C:/work/proj/.tabit/sessions/s.jsonl".to_string(),
+                    cwd: "C:/work/proj".to_string(),
                 },
             ],
         },
@@ -212,10 +216,12 @@ fn events_round_trip_through_json() {
                 id: "0197".to_string(),
                 created_at: "2026-08-22T10:00:00Z".to_string(),
                 entry_count: 14,
+                path: "C:/work/proj/.tabit/sessions/s.jsonl".to_string(),
+                cwd: "C:/work/proj".to_string(),
             }]
         })
         .expect("serialize"),
-        r#"{"type":"sessions_available","sessions":[{"id":"0197","created_at":"2026-08-22T10:00:00Z","entry_count":14}]}"#
+        r#"{"type":"sessions_available","sessions":[{"id":"0197","created_at":"2026-08-22T10:00:00Z","entry_count":14,"path":"C:/work/proj/.tabit/sessions/s.jsonl","cwd":"C:/work/proj"}]}"#
     );
     // The skills announcement: unstamped backend-level facts, same
     // shape family as the session catalog.
@@ -262,25 +268,27 @@ fn events_round_trip_through_json() {
         serde_json::to_string(&SessionEvent::SessionOpened {
             id: "0199".to_string(),
             path: String::new(),
+            cwd: "C:/work/proj".to_string(),
             model: ModelSelection::new("p", "m"),
             resumed: false,
             parent: Some("0192uuidv7parent".to_string()),
             parent_call: Some("i1".to_string()),
         })
         .expect("serialize"),
-        r#"{"type":"session_opened","id":"0199","path":"","model":{"provider":"p","model":"m","thinking_level":null},"resumed":false,"parent":"0192uuidv7parent","parent_call":"i1"}"#
+        r#"{"type":"session_opened","id":"0199","path":"","cwd":"C:/work/proj","model":{"provider":"p","model":"m","thinking_level":null},"resumed":false,"parent":"0192uuidv7parent","parent_call":"i1"}"#
     );
     assert_eq!(
         serde_json::to_string(&SessionEvent::SessionOpened {
             id: "0199".to_string(),
             path: "C:/w/s.jsonl".to_string(),
+            cwd: "C:/work/proj".to_string(),
             model: ModelSelection::new("p", "m"),
             resumed: true,
             parent: None,
             parent_call: None,
         })
         .expect("serialize"),
-        r#"{"type":"session_opened","id":"0199","path":"C:/w/s.jsonl","model":{"provider":"p","model":"m","thinking_level":null},"resumed":true}"#
+        r#"{"type":"session_opened","id":"0199","path":"C:/w/s.jsonl","cwd":"C:/work/proj","model":{"provider":"p","model":"m","thinking_level":null},"resumed":true}"#
     );
     // The wire spelling of the brackets and the truncation warning.
     assert_eq!(

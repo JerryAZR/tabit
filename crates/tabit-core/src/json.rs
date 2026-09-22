@@ -1124,6 +1124,28 @@ id = "m"
                 )
             })
             .expect("sessions_available listing the boot session");
+        // v16: the announce and the catalog rows both carry the
+        // session's cwd (and the rows its file path) — a frontend
+        // never lists the directory to learn either.
+        let opened = frames.iter().find_map(|frame| match frame {
+            ServerFrame::Event(EventFrame {
+                event: tabit_session::SessionEvent::SessionOpened { cwd, path, .. },
+                ..
+            }) => Some((cwd.clone(), path.clone())),
+            _ => None,
+        });
+        let (opened_cwd, _opened_path) = opened.expect("session_opened on the wire");
+        assert!(!opened_cwd.is_empty(), "the boot announces its cwd");
+        if let ServerFrame::Event(EventFrame {
+            event: tabit_session::SessionEvent::SessionsAvailable { sessions },
+            ..
+        }) = &frames[catalog_at]
+        {
+            for row in sessions {
+                assert!(!row.cwd.is_empty(), "catalog rows carry cwd");
+                assert!(!row.path.is_empty(), "catalog rows carry the file path");
+            }
+        }
         assert_eq!(
             catalog_at, 2,
             "session_opened, then the catalog, then the pass"

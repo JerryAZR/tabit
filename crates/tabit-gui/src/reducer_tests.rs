@@ -40,6 +40,7 @@ fn opened(resumed: bool) -> InMsg {
     event(SessionEvent::SessionOpened {
         id: BOOT.to_string(),
         path: "sessions/s1.jsonl".to_string(),
+        cwd: "C:/work/proj".to_string(),
         model: tabit_protocol::ModelSelection::new("local", "m"),
         resumed,
         parent: None,
@@ -684,11 +685,15 @@ fn the_startup_catalog_populates_the_switcher() {
                 id: "s2".to_string(),
                 created_at: "2026-08-22T10:00:00Z".to_string(),
                 entry_count: 7,
+                path: "s.jsonl".to_string(),
+                cwd: "C:/work/proj".to_string(),
             },
             tabit_protocol::AvailableSession {
                 id: BOOT.to_string(),
                 created_at: "2026-08-22T11:00:00Z".to_string(),
                 entry_count: 3,
+                path: "s.jsonl".to_string(),
+                cwd: "C:/work/proj".to_string(),
             },
         ],
     }));
@@ -712,6 +717,8 @@ fn background_events_update_liveness_but_never_the_transcript() {
             id: "s2".to_string(),
             created_at: "2026-08-22T10:00:00Z".to_string(),
             entry_count: 7,
+            path: "s.jsonl".to_string(),
+            cwd: "C:/work/proj".to_string(),
         }],
     }));
 
@@ -818,6 +825,8 @@ fn switching_is_optimistic_and_the_replay_pass_rebuilds() {
             id: "s2".to_string(),
             created_at: "2026-08-22T10:00:00Z".to_string(),
             entry_count: 7,
+            path: "s.jsonl".to_string(),
+            cwd: "C:/work/proj".to_string(),
         }],
     }));
 
@@ -874,6 +883,7 @@ fn a_new_session_announcement_switches_to_the_empty_new_session() {
         SessionEvent::SessionOpened {
             id: "s9".to_string(),
             path: "sessions/20260822_s9.jsonl".to_string(),
+            cwd: "C:/work/proj".to_string(),
             model: tabit_protocol::ModelSelection::new("local", "m9"),
             resumed: false,
             parent: None,
@@ -938,6 +948,8 @@ fn a_new_session_lands_even_while_the_current_one_runs() {
             id: BOOT.to_string(),
             created_at: "2026-08-22T11:00:00Z".to_string(),
             entry_count: 3,
+            path: "s.jsonl".to_string(),
+            cwd: "C:/work/proj".to_string(),
         }],
     }));
     state.reduce(user("work in progress"));
@@ -948,6 +960,7 @@ fn a_new_session_lands_even_while_the_current_one_runs() {
         SessionEvent::SessionOpened {
             id: "s9".to_string(),
             path: "sessions/20260822_s9.jsonl".to_string(),
+            cwd: "C:/work/proj".to_string(),
             model: tabit_protocol::ModelSelection::new("local", "m9"),
             resumed: false,
             parent: None,
@@ -1011,6 +1024,8 @@ fn an_active_sessions_run_state_is_mirrored_onto_its_row() {
             id: BOOT.to_string(),
             created_at: "2026-08-22T11:00:00Z".to_string(),
             entry_count: 0,
+            path: "s.jsonl".to_string(),
+            cwd: "C:/work/proj".to_string(),
         }],
     }));
     state.reduce(user("go"));
@@ -1039,6 +1054,8 @@ fn a_replay_pass_never_marks_the_session_running() {
             id: "s2".to_string(),
             created_at: "2026-08-22T10:00:00Z".to_string(),
             entry_count: 9,
+            path: "s.jsonl".to_string(),
+            cwd: "C:/work/proj".to_string(),
         }],
     }));
     state.open_session("s2");
@@ -1113,6 +1130,8 @@ fn a_background_pass_after_a_fast_switch_does_not_poison_the_row() {
             id: "s2".to_string(),
             created_at: "2026-08-22T10:00:00Z".to_string(),
             entry_count: 9,
+            path: "s.jsonl".to_string(),
+            cwd: "C:/work/proj".to_string(),
         }],
     }));
     state.open_session("s2");
@@ -1151,6 +1170,8 @@ fn cards_survive_a_view_switch_and_route_by_their_own_session() {
             id: "s2".to_string(),
             created_at: "2026-08-22T10:00:00Z".to_string(),
             entry_count: 4,
+            path: "s.jsonl".to_string(),
+            cwd: "C:/work/proj".to_string(),
         }],
     }));
     state.reduce(event(SessionEvent::InteractionRequest {
@@ -1193,6 +1214,8 @@ fn a_background_question_raises_attention_and_dies_with_its_run() {
             id: "s2".to_string(),
             created_at: "2026-08-22T10:00:00Z".to_string(),
             entry_count: 4,
+            path: "s.jsonl".to_string(),
+            cwd: "C:/work/proj".to_string(),
         }],
     }));
     state.reduce(from(
@@ -1388,6 +1411,8 @@ fn a_catalog_reannouncement_preserves_liveness_and_attention() {
                 id: "s2".to_string(),
                 created_at: "2026-08-22T10:00:00Z".to_string(),
                 entry_count: 3,
+                path: "s.jsonl".to_string(),
+                cwd: "C:/work/proj".to_string(),
             }],
         })
     };

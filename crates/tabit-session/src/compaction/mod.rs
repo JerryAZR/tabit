@@ -87,7 +87,7 @@ impl Compaction {
 
 /// Which door is asking. The door selects the trigger formula; the
 /// box owns the evaluation (callers carry no policy).
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) enum Door {
     /// Mid-run, the point the run is about to send a request —
     /// condition B only (safety; fires mid-task only when genuinely
@@ -97,8 +97,10 @@ pub(crate) enum Door {
     /// mailbox-empty requirement).
     Idle,
     /// The `compact` command — forced; the short-history skip is its
-    /// only guard.
-    Manual,
+    /// only guard. Carries the invocation's free-text directives
+    /// (v16), appended to the summarization instruction for this run
+    /// only — never persisted, never replayed.
+    Manual { directives: Option<String> },
     /// The run epilogue's intercept — forced, and it arrives with the
     /// window the error itself reported (noted on the state before
     /// the door runs).
@@ -245,6 +247,13 @@ pub(crate) async fn run(
         );
         return Outcome::Skipped;
     };
+    // The manual door's directives ride every pass of this
+    // invocation (a multi-pass invocation is one summarization
+    // intent) — extracted before `fires` consumes the door.
+    let manual_directives = match &door {
+        Door::Manual { directives } => directives.clone(),
+        _ => None,
+    };
     if !fires(door, tokens_now, window, mailbox_empty) {
         return Outcome::Skipped;
     }
@@ -288,7 +297,17 @@ pub(crate) async fn run(
         if pass == 1 {
             emit(SessionEvent::CompactionBegin);
         }
-        match one_pass(&history, boundary, state, agent, token, emit).await {
+        match one_pass(
+            &history,
+            boundary,
+            &manual_directives,
+            state,
+            agent,
+            token,
+            emit,
+        )
+        .await
+        {
             PassOutcome::Committed {
                 summary,
                 usage,
@@ -429,7 +448,7 @@ fn fires(door: Door, context_tokens: u64, window: u64, mailbox_empty: bool) -> b
             over_urgent
                 || (mailbox_empty && context_tokens as f64 > dials::IDLE_FRACTION * window as f64)
         }
-        Door::Manual | Door::Overflow => true,
+        Door::Manual { .. } | Door::Overflow => true,
     }
 }
 
@@ -516,15 +535,29 @@ enum PassOutcome {
 async fn one_pass(
     history: &[SessionEntry],
     initial_boundary: usize,
+    directives: &Option<String>,
     state: &Compaction,
     agent: &Agent,
     token: &CancellationToken,
     emit: &mut (dyn FnMut(SessionEvent) + Send),
 ) -> PassOutcome {
     let mut boundary = initial_boundary;
+    // The standing instruction from the dials, plus this invocation's
+    // user directives when the manual door carried any (v16) — the
+    // join is invocation data, so it lives here, not in the dials.
+    let instruction = match directives.as_deref() {
+        Some(text) => format!(
+            "{}
+
+Directives from the user for this compaction:
+{text}",
+            dials::SUMMARIZATION_INSTRUCTION
+        ),
+        None => dials::SUMMARIZATION_INSTRUCTION.to_string(),
+    };
     loop {
         let mut view = tabit_log::fold_branch(&history[..boundary]);
-        view.push(Message::user(dials::SUMMARIZATION_INSTRUCTION));
+        view.push(Message::user(instruction.clone()));
         // The live view: summary text streams as positional deltas
         // (v15 — no bracket id). Tool call items pass through here too
         // — the verdict on them is the assembled classification below

@@ -52,6 +52,7 @@ use crate::session::{AbortHandle, MailboxHandle, Session};
 use crate::stats::SessionStats;
 use crate::store::SessionStore;
 use std::collections::HashMap;
+use std::path::Path;
 use std::sync::{Arc, Mutex};
 use tabit_protocol::{
     AvailableSession, EventFrame, ModelSelection, SessionCommand, SessionEvent, StreamId,
@@ -68,6 +69,8 @@ pub struct SessionInfo {
     pub session_id: String,
     /// The session file path.
     pub session_path: String,
+    /// The session's working directory.
+    pub session_cwd: String,
     /// The active model selection.
     pub model: ModelSelection,
     /// Whether the session continues an existing chain (or started
@@ -172,10 +175,13 @@ struct Worker {
     /// any number of requests; the beat serves it before batching).
     replay_due: Arc<std::sync::atomic::AtomicBool>,
     /// A parked `compact` command (the manual door): served at the
-    /// beat ahead of any queued batch. A flag, not a queue — the
-    /// command carries no directives a second request could differ
-    /// in; abort clears it (drop-all-pending-intent).
-    compact_due: Arc<std::sync::atomic::AtomicBool>,
+    /// beat ahead of any queued batch. A slot, not a queue — a newer
+    /// command replaces an older; abort clears it
+    /// (drop-all-pending-intent). The nested option: outer = whether
+    /// a compact is parked at all, inner = the invocation's
+    /// directives (`compact` without directives is a parked compact,
+    /// not no compact).
+    compact_slot: Arc<Mutex<Option<Option<String>>>>,
 }
 
 impl Worker {
@@ -198,8 +204,7 @@ impl Worker {
     /// session.
     fn abort(&self) {
         lock(&self.checkout_slot).take();
-        self.compact_due
-            .store(false, std::sync::atomic::Ordering::Release);
+        lock(&self.compact_slot).take();
         self.abort_handle.abort();
     }
 
@@ -275,9 +280,11 @@ impl Worker {
             // runs at the beat (idle position, ahead of queued
             // batches). Compaction never aborts a run — it does not
             // move the chain, so a run in flight finishes first.
-            SessionCommand::Compact { .. } => {
-                self.compact_due
-                    .store(true, std::sync::atomic::Ordering::Release);
+            SessionCommand::Compact { directives, .. } => {
+                // Park the manual compact with its directives (the
+                // parking key: a second compact replaces the first —
+                // last wins, exactly one invocation serves).
+                *lock(&self.compact_slot) = Some(directives);
                 self.mailbox.work_signal().notify_one();
             }
             // Lifecycle is not session-scoped — the router forwards
@@ -349,6 +356,7 @@ impl SessionHost {
         let info = SessionInfo {
             session_id: boot.id().to_string(),
             session_path: boot.wire_path(),
+            session_cwd: boot.cwd().display().to_string(),
             model: boot.selection(),
             resumed: boot.resumed(),
         };
@@ -379,6 +387,7 @@ impl SessionHost {
             event: SessionEvent::SessionOpened {
                 id: info.session_id.clone(),
                 path: info.session_path.clone(),
+                cwd: info.session_cwd.clone(),
                 model: info.model.clone(),
                 resumed: info.resumed,
                 parent: wiring.boot_parent.clone(),
@@ -394,7 +403,17 @@ impl SessionHost {
         match wiring.store.list() {
             Ok(summaries) => {
                 // Backend-level: no session produced this (the optional-
-                // stream ruling).
+                // stream ruling). Every catalog row is file-backed (a
+                // session with no file is not in the store), so the
+                // project cwd derives from the store root once:
+                // `<cwd>/.tabit/sessions` -> the `<cwd>` above it.
+                let project_cwd = wiring
+                    .store
+                    .dir()
+                    .parent()
+                    .and_then(Path::parent)
+                    .map(|dir| dir.display().to_string())
+                    .unwrap_or_default();
                 let _ = event_tx.send(EventFrame {
                     stream: None,
                     event: SessionEvent::SessionsAvailable {
@@ -404,6 +423,8 @@ impl SessionHost {
                                 id: summary.id,
                                 created_at: summary.created_at,
                                 entry_count: summary.entry_count as u64,
+                                path: summary.path.display().to_string(),
+                                cwd: project_cwd.clone(),
                             })
                             .collect(),
                     },
@@ -764,6 +785,7 @@ impl HostLoop {
             event: SessionEvent::SessionOpened {
                 id: id.clone(),
                 path: session.wire_path(),
+                cwd: session.cwd().display().to_string(),
                 model: session.selection(),
                 resumed: session.resumed(),
                 parent: None,
@@ -805,6 +827,7 @@ impl HostLoop {
             event: SessionEvent::SessionOpened {
                 id: id.to_string(),
                 path: session.wire_path(),
+                cwd: session.cwd().display().to_string(),
                 model: session.selection(),
                 resumed: session.resumed(),
                 parent: None,
@@ -853,14 +876,14 @@ fn spawn_worker(
     let interaction = InteractionHub::new(event_tx.clone(), stream.clone());
     let checkout_slot = Arc::new(Mutex::new(None::<String>));
     let replay_due = Arc::new(std::sync::atomic::AtomicBool::new(false));
-    let compact_due = Arc::new(std::sync::atomic::AtomicBool::new(false));
+    let compact_slot = Arc::new(Mutex::new(None::<Option<String>>));
     let worker_notices = NoticeSink::new(&event_tx, stream.clone());
     let entry_probe = session.entry_id_probe();
     let model_probe = session.model_probe();
     let model_register = session.model_register();
     let worker_slot = checkout_slot.clone();
     let worker_replay_due = replay_due.clone();
-    let worker_compact_due = compact_due.clone();
+    let worker_compact_slot = compact_slot.clone();
     let worker_mailbox = mailbox.clone();
     let task_interaction = interaction.clone();
     let stats_id = id.clone();
@@ -891,7 +914,7 @@ fn spawn_worker(
                 &stream,
                 &replay_due,
                 &checkout_slot,
-                &worker_compact_due,
+                &worker_compact_slot,
             )
             .await;
             if worker_mailbox.has_queued() || worker_mailbox.has_continue() {
@@ -938,7 +961,7 @@ fn spawn_worker(
                         &stream,
                         &replay_due,
                         &checkout_slot,
-                        &worker_compact_due,
+                        &worker_compact_slot,
                     )
                     .await;
                     // The clean-exit flush attempt (flag 8): one more
@@ -976,7 +999,7 @@ fn spawn_worker(
             model_register,
             model_probe,
             replay_due: worker_replay_due,
-            compact_due,
+            compact_slot,
         },
         join,
     )
@@ -995,7 +1018,7 @@ async fn serve_parked(
     stream: &StreamId,
     replay_due: &std::sync::atomic::AtomicBool,
     checkout_slot: &Mutex<Option<String>>,
-    compact_due: &std::sync::atomic::AtomicBool,
+    compact_slot: &Mutex<Option<Option<String>>>,
 ) {
     if replay_due.swap(false, std::sync::atomic::Ordering::Acquire) {
         emit_replay(session, event_tx, stream);
@@ -1003,8 +1026,11 @@ async fn serve_parked(
     if let Some(entry_id) = lock(checkout_slot).take() {
         execute_checkout(session, event_tx, stream, entry_id);
     }
-    if compact_due.swap(false, std::sync::atomic::Ordering::Acquire) {
-        session.compact_manual().await;
+    // The guard drops before the await (the lock contract — no
+    // guard across an await).
+    let parked_compact = lock(compact_slot).take();
+    if let Some(directives) = parked_compact {
+        session.compact_manual(directives).await;
     }
 }
 

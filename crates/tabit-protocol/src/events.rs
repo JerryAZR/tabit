@@ -306,6 +306,11 @@ pub enum SessionEvent {
         /// message for a fresh session). **Empty for an ephemeral
         /// session** — in memory only, nothing to open or replay.
         path: String,
+        /// The session's working directory (v16) — where its tools
+        /// run and where `.tabit/sessions` rooted. The boot
+        /// session's is the backend's cwd; a subagent child's is its
+        /// own spawn cwd.
+        cwd: String,
         /// The session's active selection.
         model: ModelSelection,
         /// Whether the session continues an existing chain.
@@ -444,6 +449,13 @@ pub struct AvailableSession {
     pub created_at: String,
     /// Entries in the session file (all branches and markers).
     pub entry_count: u64,
+    /// The session file's path on the host (v16) — `open_session` by
+    /// id is the wire way in; this is display and debugging.
+    pub path: String,
+    /// The project directory the session ran in (v16) — derived from
+    /// the store's root (every catalog entry is file-backed, so the
+    /// derivation is total).
+    pub cwd: String,
 }
 
 /// One discovered skill in the startup `skills_available`
