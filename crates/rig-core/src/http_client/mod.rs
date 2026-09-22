@@ -431,7 +431,7 @@ macro_rules! impl_http_client_ext {
                                     Some(item) => {
                                         let size = item.as_ref().map(|c| c.len()).unwrap_or(0);
                                         if let Some(trace) = &trace {
-                                            if let Ok(t) = trace.lock() {
+                                            if let Ok(mut t) = trace.lock() {
                                                 let _ = writeln!(t, "{} {}", started.elapsed().as_millis(), size);
                                             }
                                         }
