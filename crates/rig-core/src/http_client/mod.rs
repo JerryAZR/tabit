@@ -412,13 +412,39 @@ macro_rules! impl_http_client_ext {
 
                     use futures::StreamExt;
 
-                    let mapped_stream: Pin<
-                        Box<dyn WasmCompatSendStream<InnerItem = Result<Bytes>>>,
-                    > = Box::pin(
-                        response
-                            .bytes_stream()
-                            .map(|chunk| chunk.map_err(|e| Error::Instance(Box::new(e)))),
-                    );
+                    // TABIT_STREAM_TRACE: when set to any value, append one
+                    // line per body chunk (elapsed-ms, byte-size) to
+                    // ./stream-trace.log — transport pacing vs downstream
+                    // consumption pacing, separable.
+                    let tracing_enabled = std::env::var("TABIT_STREAM_TRACE").is_ok();
+                    let started = std::time::Instant::now();
+
+                    let raw = response.bytes_stream().map(|chunk| chunk.map_err(|e| Error::Instance(Box::new(e))));
+
+                    let mapped_stream: Pin<Box<dyn WasmCompatSendStream<InnerItem = Result<Bytes>>>> = if tracing_enabled {
+                        use std::io::Write as _;
+                        let mut trace = std::fs::File::create("stream-trace.log").ok().map(std::sync::Mutex::new);
+                        Box::pin(futures::stream::unfold(
+                            (raw, trace, started),
+                            |(mut raw, trace, started)| async move {
+                                match raw.next().await {
+                                    Some(item) => {
+                                        let size = item.as_ref().map(|c| c.len()).unwrap_or(0);
+                                        if let Some(trace) = &trace {
+                                            if let Ok(t) = trace.lock() {
+                                                let _ = writeln!(t, "{} {}", started.elapsed().as_millis(), size);
+                                            }
+                                        }
+                                        Some((item, (raw, trace, started)))
+                                    }
+                                    None => None,
+                                }
+                            },
+                        )
+                        .boxed())
+                    } else {
+                        Box::pin(raw)
+                    };
 
                     res.body(mapped_stream).map_err(Error::Protocol)
                 }
