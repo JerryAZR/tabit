@@ -119,9 +119,13 @@ class ChoiceCardView implements Component {
 	render(width: number): string[] {
 		const lines: string[] = [`┌─  ${this.card.title}`];
 		for (const bodyLine of this.card.body.split("\n")) lines.push(`│  ${bodyLine}`);
+		// pi's SelectList row language: the cursor prefix is the selection
+		// indicator — no toggle boxes on single-select (space is inert
+		// there; the toggled set exists only for select_any).
+		const multi = this.card.uiType === "native:select_any";
 		this.card.options.forEach((option, index) => {
 			const cursor = index === this.#cursor ? "❯ " : "  ";
-			const mark = this.#toggled.has(index) ? "[×] " : "[ ] ";
+			const mark = multi ? (this.#toggled.has(index) ? "[×] " : "[ ] ") : "";
 			lines.push(`│  ${cursor}${mark}${index + 1}. ${option}`);
 		});
 		if (this.#noteMode || this.#note !== "") {
