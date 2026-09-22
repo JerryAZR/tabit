@@ -96,7 +96,19 @@ async fn forward_events(
             return;
         }
     }
+    let started = std::time::Instant::now();
     while let Some(frame) = stream.recv().await {
+        if std::env::var("TABIT_FORWARD_TRACE").is_ok() {
+            if let Ok(mut t) = std::fs::OpenOptions::new()
+                .create(true)
+                .append(true)
+                .open("forward-trace.log")
+            {
+                use std::io::Write as _;
+                let kind = format!("{:?}", std::mem::discriminant(&frame.event));
+                let _ = writeln!(t, "{} {}", started.elapsed().as_millis(), kind);
+            }
+        }
         let _ = out.send(ServerFrame::Event(frame));
     }
 }
