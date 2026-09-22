@@ -65,6 +65,14 @@
 //! bash_walker::walk(script: &str) -> bash_walker::WalkResult;
 //! ```
 //!
+//! Normalization has ONE site per side (owner-ruled 2026-09):
+//! patterns are preprocessed exactly once, at load — the loader does
+//! it, and [`path_utils::preprocess_config_pattern`] is public so a
+//! hand-built config can apply the same transformation; runtime
+//! paths are preprocessed exactly once, inside the checkers
+//! ([`path_utils::preprocess_runtime_path`], also public — the TS
+//! unit surface). Checking never preprocesses patterns.
+//!
 //! Porting discipline (the owner's ruling): **policy and logic
 //! unchanged** — port what is there, including pi-sanity's
 //! LIMITATIONS.md blind spots (obfuscation, `eval`, `xargs` … are

@@ -1,11 +1,13 @@
-//! Path preprocessing semantics, observed through the checkers
-//! (ported from pi-sanity `tests/unit/permissions/path-utils.test.ts`).
+//! Path preprocessing semantics, end to end through the real loader
+//! and checkers (ported from pi-sanity
+//! `tests/unit/permissions/path-utils.test.ts`).
 //!
-//! The source suite calls `preprocessConfigPattern`,
-//! `preprocessRuntimePath`, and `canonicalizeDrive` as pure string
-//! functions; those are not part of the frozen API, so every case here
-//! drives the same preprocessing through `check_read` with a config
-//! whose pattern (or probe path) exercises the transformation.
+//! Layering (one preprocessing site per side, owner-ruled 2026-09):
+//! patterns are preprocessed exactly once, at LOAD — configs here are
+//! built through the real loader (`load_from_string`), never raw
+//! structs — and runtime paths are preprocessed once, at check. The
+//! raw struct-built seam stays for the path_permission suite (the TS
+//! unit shape: patterns matched as written).
 //! Not ported: the exact-string `canonicalizeDrive` unit cases
 //! (idempotency, UNC passthrough) — they assert the string function's
 //! output directly; their behavioral consequences are pinned by
@@ -38,25 +40,33 @@ fn only_matches(patterns: &[&str]) -> tabit_gate::config::SanityConfig {
     )
 }
 
-/// The repo root as the default context detects it (`git rev-parse
-/// --show-toplevel`), or None when git is unavailable / not a repo.
-fn repo_root() -> Option<String> {
-    let output = std::process::Command::new("git")
-        .args(["rev-parse", "--show-toplevel"])
-        .output()
-        .ok()?;
-    if !output.status.success() {
-        return None;
-    }
-    let root = String::from_utf8_lossy(&output.stdout).trim().to_string();
-    if root.is_empty() { None } else { Some(root) }
+/// A read-only config built through the REAL loader: the pattern is
+/// preprocessed at load (the production single site). The
+/// preprocessing tests use this so they exercise exactly what a
+/// config file gets.
+fn loaded_only_matches(patterns: &[&str]) -> tabit_gate::config::SanityConfig {
+    let list = patterns
+        .iter()
+        .map(|p| format!("'{p}'"))
+        .collect::<Vec<_>>()
+        .join(", ");
+    let source = format!(
+        "[permissions.read]
+default = \"deny\"
+
+[[permissions.read.overrides]]
+path = [{list}]
+action = \"allow\"
+"
+    );
+    tabit_gate::config::load_from_string(&source, None).expect("the test config loads")
 }
 
 // --- {{VAR}} expansion in config patterns ------------------------------------
 
 #[test]
 fn home_placeholder_expands_to_the_home_directory() {
-    let config = only_matches(&["{{HOME}}/.ssh/**"]);
+    let config = loaded_only_matches(&["{{HOME}}/.ssh/**"]);
     let inside = check_read(format!("{}/.ssh/id_rsa", home()), &config);
     let outside = check_read("/etc/hosts", &config);
     assert_action(
@@ -69,7 +79,7 @@ fn home_placeholder_expands_to_the_home_directory() {
 
 #[test]
 fn cwd_placeholder_expands_to_the_working_directory() {
-    let config = only_matches(&["{{CWD}}/file.txt"]);
+    let config = loaded_only_matches(&["{{CWD}}/file.txt"]);
     let inside = check_read(format!("{}/file.txt", cwd()), &config);
     let outside = check_read(format!("{}/other.txt", cwd()), &config);
     assert_action(
@@ -82,7 +92,7 @@ fn cwd_placeholder_expands_to_the_working_directory() {
 
 #[test]
 fn tmpdir_placeholder_expands_to_the_temp_directory() {
-    let config = only_matches(&["{{TMPDIR}}/temp/**"]);
+    let config = loaded_only_matches(&["{{TMPDIR}}/temp/**"]);
     let inside = check_read(format!("{}/temp/file", tmpdir()), &config);
     let outside = check_read(format!("{}/elsewhere", tmpdir()), &config);
     assert_action(
@@ -98,28 +108,29 @@ fn tmpdir_placeholder_expands_to_the_temp_directory() {
 }
 
 #[test]
-fn repo_placeholder_expands_to_the_repo_root_or_cwd() {
-    // The default context auto-detects the repo root via git and falls
-    // back to cwd; compute the same anchor the way the context does.
-    let config = only_matches(&["{{REPO}}/file.txt"]);
-    match repo_root() {
-        Some(repo) => {
-            let inside = check_read(format!("{repo}/file.txt"), &config);
-            assert_action(
-                &inside,
-                Action::Allow,
-                "{{REPO}} expands to the detected repo root",
-            );
-        }
-        None => {
-            let inside = check_read(format!("{}/file.txt", cwd()), &config);
-            assert_action(
-                &inside,
-                Action::Allow,
-                "{{REPO}} falls back to cwd outside a repo",
-            );
-        }
-    }
+fn repo_placeholder_expands_to_the_context_repo_or_cwd() {
+    // The TS shape: an explicit context decides the anchor. The
+    // loader's own context carries no repo (`createConfigContext` —
+    // repo is unknown at load), so `{{REPO}}` in a config file means
+    // the cwd; a caller-supplied repo anchors to it.
+    use tabit_gate::path_utils::preprocess_config_pattern;
+    let base = tabit_gate::path_permission::default_context();
+    let with_repo = tabit_gate::path_utils::PathContext {
+        repo: Some("/repos/work".to_string()),
+        ..base.clone()
+    };
+    assert_eq!(
+        preprocess_config_pattern("{{REPO}}/file.txt", &with_repo),
+        "/repos/work/file.txt",
+        "{{REPO}} expands to the context's repo"
+    );
+    let no_repo = tabit_gate::path_utils::PathContext { repo: None, ..base };
+    let cwd_anchor = preprocess_config_pattern(&cwd(), &no_repo);
+    assert_eq!(
+        preprocess_config_pattern("{{REPO}}/file.txt", &no_repo),
+        format!("{cwd_anchor}/file.txt"),
+        "{{REPO}} falls back to cwd without a repo"
+    );
 }
 
 // --- $ENV_VAR expansion in config patterns --------------------------------------
@@ -130,7 +141,7 @@ fn env_var_placeholder_expands_when_set() {
     // SAFETY: test-private variable, no other test reads it.
     unsafe { std::env::set_var(VAR, "/test/value") };
     let pattern = format!("${VAR}/file");
-    let config = only_matches(&[pattern.as_str()]);
+    let config = loaded_only_matches(&[pattern.as_str()]);
     let result = check_read("/test/value/file", &config);
     // SAFETY: see above.
     unsafe { std::env::remove_var(VAR) };
@@ -157,7 +168,7 @@ fn trailing_slash_in_a_pattern_is_normalized_away() {
     // ".../Temp/" normalizes to the tmpdir itself, so the tmpdir
     // exactly matches; an unnormalized pattern would not.
     let pattern = format!("{}/", tmpdir());
-    let config = only_matches(&[pattern.as_str()]);
+    let config = loaded_only_matches(&[pattern.as_str()]);
     let path = tmpdir();
     let result = check_read(&path, &config);
     assert_action(
@@ -192,7 +203,7 @@ fn simple_patterns_pass_through_unchanged() {
 
 #[test]
 fn expanded_cwd_glob_matches_within_cwd_only() {
-    let config = only_matches(&["{{CWD}}/**"]);
+    let config = loaded_only_matches(&["{{CWD}}/**"]);
     let inside = check_read(format!("{}/file.txt", cwd()), &config);
     let outside = check_read("/other/file.txt", &config);
     assert_action(
@@ -209,12 +220,20 @@ fn expanded_cwd_glob_matches_within_cwd_only() {
 
 #[test]
 fn expanded_repo_glob_matches_git_directories_at_any_depth() {
-    let Some(repo) = repo_root() else {
-        return; // outside a repo the {{REPO}} anchor is cwd; covered above
+    // Expand with an explicit repo (the loader's own context carries
+    // none), then the expanded pattern matches end to end through the
+    // loader-built config.
+    use tabit_gate::path_utils::preprocess_config_pattern;
+    let base = tabit_gate::path_permission::default_context();
+    let with_repo = tabit_gate::path_utils::PathContext {
+        repo: Some("/repos/work".to_string()),
+        ..base
     };
-    let config = only_matches(&["{{REPO}}/**/.git/**"]);
-    let top = check_read(format!("{repo}/.git/config"), &config);
-    let nested = check_read(format!("{repo}/submodule/.git/HEAD"), &config);
+    let expanded = preprocess_config_pattern("{{REPO}}/**/.git/**", &with_repo);
+    assert_eq!(expanded, "/repos/work/**/.git/**");
+    let config = loaded_only_matches(&[expanded.as_str()]);
+    let top = check_read("/repos/work/.git/config", &config);
+    let nested = check_read("/repos/work/submodule/.git/HEAD", &config);
     let foreign = check_read("/other/.git/config", &config);
     assert_action(&top, Action::Allow, "the repo's own .git matches");
     assert_action(&nested, Action::Allow, "nested .git directories match");

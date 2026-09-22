@@ -308,7 +308,13 @@ pub(crate) fn preprocess_path(
 /// Preprocess a config pattern for glob matching (TS
 /// `preprocessConfigPattern`). Patterns starting with `/**` match
 /// anywhere (absolute glob) and skip relative resolution.
-pub(crate) fn preprocess_config_pattern(pattern: &str, context: &PathContext) -> String {
+///
+/// Public because the invariant needs it: patterns in a
+/// [`crate::config::SanityConfig`] are ALWAYS already preprocessed —
+/// the loader does it (one site), and any hand-built config must apply
+/// this same transformation before storing patterns. Checking never
+/// preprocesses.
+pub fn preprocess_config_pattern(pattern: &str, context: &PathContext) -> String {
     let mut options = CONFIG_DEFAULTS;
     if pattern.starts_with("/**") {
         options.resolve_relative = false;
@@ -319,7 +325,10 @@ pub(crate) fn preprocess_config_pattern(pattern: &str, context: &PathContext) ->
 /// Preprocess a runtime file path for checking (TS
 /// `preprocessRuntimePath`): expands tilde and env vars, resolves to
 /// absolute, normalizes to forward slashes.
-pub(crate) fn preprocess_runtime_path(file_path: &str, context: &PathContext) -> String {
+///
+/// Public for the same reason as [`preprocess_config_pattern`]: the
+/// TS unit tests called it directly, and the ported corpus does too.
+pub fn preprocess_runtime_path(file_path: &str, context: &PathContext) -> String {
     preprocess_path(file_path, context, RUNTIME_DEFAULTS)
 }
 

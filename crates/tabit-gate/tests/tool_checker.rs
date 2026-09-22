@@ -25,7 +25,7 @@
 
 mod common;
 
-use common::{action_rule_reason, assert_action, empty_config, input, param_check, tool_rules};
+use common::{assert_action, empty_config, input, loaded_rule, param_check, tool_rules};
 use tabit_gate::config::{CheckKind, SanityConfig};
 use tabit_gate::tool_checker::{build_tool_details, check_tool_call};
 use tabit_gate::types::Action;
@@ -59,7 +59,8 @@ fn allows_read_of_allowed_files() {
 #[test]
 fn asks_for_read_of_sensitive_files() {
     let mut config = make_config(vec![("read", vec![param_check("path", CheckKind::Read)])]);
-    config.permissions.read.overrides.push(action_rule_reason(
+    config.permissions.read.overrides.push(loaded_rule(
+        "read",
         &["{{HOME}}/.ssh/*"],
         Action::Ask,
         "May contain credentials or secrets",
@@ -158,12 +159,14 @@ fn aggregates_reasons_from_multiple_checks() {
             param_check("dst", CheckKind::Write),
         ],
     )]);
-    config.permissions.read.overrides.push(action_rule_reason(
+    config.permissions.read.overrides.push(loaded_rule(
+        "read",
         &["{{HOME}}/.ssh/*"],
         Action::Ask,
         "May contain credentials or secrets",
     ));
-    config.permissions.write.overrides.push(action_rule_reason(
+    config.permissions.write.overrides.push(loaded_rule(
+        "write",
         &["{{HOME}}/**"],
         Action::Ask,
         "Writing to home directory requires confirmation",
@@ -195,7 +198,8 @@ fn aggregates_mixed_actions_with_deny_winning_and_keeps_reasons() {
             param_check("dst", CheckKind::Write),
         ],
     )]);
-    config.permissions.read.overrides.push(action_rule_reason(
+    config.permissions.read.overrides.push(loaded_rule(
+        "read",
         &["{{HOME}}/.ssh/*"],
         Action::Ask,
         "May contain credentials or secrets",

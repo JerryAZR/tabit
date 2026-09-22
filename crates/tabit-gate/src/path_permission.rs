@@ -5,7 +5,7 @@
 mod glob_matcher;
 
 use crate::config::{PermissionSection, SanityConfig};
-use crate::path_utils::{Platform, preprocess_config_pattern, preprocess_runtime_path};
+use crate::path_utils::{Platform, preprocess_runtime_path};
 use crate::types::Action;
 
 // TS path-permission.ts re-exports the context type.
@@ -88,11 +88,10 @@ pub(crate) fn matches_glob(normalized_path: &str, pattern: &str, platform: Platf
 
 /// Check a path against a permission section (read/write); returns
 /// the last matching override's action, or the section default (TS
-/// `checkPathPermission`). Override patterns are preprocessed against
-/// the runtime context here — already-preprocessed patterns (as the
-/// loader emits them) preprocess idempotently to themselves, and
-/// hand-built configs get the same `{{VAR}}`/tilde/env expansion the
-/// loader applies.
+/// `checkPathPermission`). The stored patterns must already be
+/// preprocessed (the loader's one site — see
+/// [`crate::path_utils::preprocess_config_pattern`]); the runtime
+/// path is normalized here, the single path-side site.
 pub fn check_path_permission(
     file_path: &str,
     permission: &PermissionSection,
@@ -108,27 +107,18 @@ pub fn check_path_permission(
     let normalized_file_path = preprocess_runtime_path(file_path, context);
 
     // Check each override in order (last match wins — no break).
+    // Patterns are matched AS STORED: they are preprocessed exactly
+    // once, at load (the loader's job) — checking never preprocesses.
+    // The runtime path above is the only side normalized here, so the
+    // two preprocessing sites (load for patterns, check for paths)
+    // never meet.
     for override_rule in &permission.overrides {
         for pattern in &override_rule.path {
-            // Relative globs (`**/...`) are matched as written,
-            // anywhere — preprocessing them would anchor them to the
-            // cwd, changing their meaning. Everything else (absolute
-            // patterns included) goes through the idempotent
-            // preprocessing: loader-emitted patterns preprocess to
-            // themselves, and hand-built raw patterns get the same
-            // {{VAR}}/tilde/env expansion and normalization the loader
-            // applies (a trailing slash on an absolute pattern, for
-            // instance, strips exactly as it would at load).
-            let pattern = if pattern.starts_with('*') {
-                pattern.clone()
-            } else {
-                preprocess_config_pattern(pattern, context)
-            };
-            if matches_glob(&normalized_file_path, &pattern, context.platform) {
+            if matches_glob(&normalized_file_path, pattern, context.platform) {
                 result = PathCheckResult {
                     action: override_rule.action,
                     reason: override_rule.reason.clone(),
-                    matched_pattern: Some(pattern),
+                    matched_pattern: Some(pattern.clone()),
                 };
             }
         }

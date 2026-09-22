@@ -121,7 +121,45 @@ pub fn allow_rule(patterns: &[&str]) -> OverrideRule {
     action_rule(patterns, Action::Allow)
 }
 
-/// An override with no reason.
+/// One override built through the REAL loader — the pattern is
+/// preprocessed at load (placeholder expansion, normalization), the
+/// production single site. pi-sanity's own makeConfig did the same
+/// for its {{VAR}} fixtures; struct pushes stay raw for plain
+/// patterns (the TS path-permission seam).
+pub fn loaded_rule(section: &str, patterns: &[&str], action: Action, reason: &str) -> OverrideRule {
+    let list = patterns
+        .iter()
+        .map(|p| format!("'{p}'"))
+        .collect::<Vec<_>>()
+        .join(", ");
+    let action = match action {
+        Action::Allow => "allow",
+        Action::Ask => "ask",
+        Action::Deny => "deny",
+    };
+    let source = format!(
+        "[permissions.{section}]
+default = \"allow\"
+
+[[permissions.{section}.overrides]]
+path = [{list}]
+action = '{action}'
+reason = '{reason}'
+"
+    );
+    let mut config =
+        tabit_gate::config::load_from_string(&source, None).expect("the rule config loads");
+    let overrides = match section {
+        "read" => std::mem::take(&mut config.permissions.read.overrides),
+        _ => std::mem::take(&mut config.permissions.write.overrides),
+    };
+    overrides.into_iter().next().expect("exactly one override")
+}
+
+/// An override with no reason. Patterns are stored AS WRITTEN — the
+/// TS path-permission tests built raw sections and matched raw; the
+/// loader's preprocessing is the production writer's job, exercised
+/// by its own tests against the public preprocess functions.
 pub fn action_rule(patterns: &[&str], action: Action) -> OverrideRule {
     OverrideRule {
         path: patterns.iter().map(|p| (*p).to_string()).collect(),
