@@ -20,7 +20,7 @@ use std::collections::HashMap;
 use std::sync::Arc;
 
 use tabit_log::lock::lock;
-use tabit_protocol::{SessionCommand, SessionEvent};
+use tabit_protocol::{EventFrame, SessionCommand, SessionEvent};
 
 /// Where the shared grammar goes once the pipe has parsed it — the
 /// host-process glue, injected at launch. Commands are actions to
@@ -36,23 +36,35 @@ pub type CommandRoute = Arc<dyn Fn(SessionCommand) + Send + Sync>;
 /// stamped with its origin.
 pub type EventRoute = Arc<dyn Fn(&str, SessionEvent) + Send + Sync>;
 
+/// Where one extension-forwarded frame goes — verbatim, its stream
+/// stamp preserved (an owned child's traffic crossing its owner's
+/// pipe: forward-don't-re-stamp, the same rule the core bridge's tap
+/// applies, origin added so subscribers can see the conduit).
+pub type FrameRoute = Arc<dyn Fn(&str, EventFrame) + Send + Sync>;
+
 #[derive(Clone)]
 pub struct GrammarRoutes {
     command: CommandRoute,
     event: EventRoute,
+    forward: FrameRoute,
 }
 
 impl GrammarRoutes {
-    /// Wire the two directions. One constructor, no defaults to drift
-    /// on: every launcher states both routes.
-    pub fn new(command: CommandRoute, event: EventRoute) -> Self {
-        Self { command, event }
+    /// Wire the three directions. One constructor, no defaults to
+    /// drift on: every launcher states its routes.
+    pub fn new(command: CommandRoute, event: EventRoute, forward: FrameRoute) -> Self {
+        Self {
+            command,
+            event,
+            forward,
+        }
     }
 
     /// The drop-everything route for consumers with no grammar to
-    /// serve (tests, print mode): commands vanish, events go nowhere.
+    /// serve (tests, print mode): commands vanish, events go nowhere,
+    /// nothing forwards.
     pub fn noop() -> Self {
-        Self::new(Arc::new(|_| {}), Arc::new(|_, _| {}))
+        Self::new(Arc::new(|_| {}), Arc::new(|_, _| {}), Arc::new(|_, _| {}))
     }
 
     /// Route one parsed command into the host process.
@@ -64,6 +76,12 @@ impl GrammarRoutes {
     /// outbound fan-out, stamped with its origin.
     pub fn event(&self, origin: &str, event: SessionEvent) {
         (self.event)(origin, event);
+    }
+
+    /// Route one extension-forwarded frame verbatim — the stream
+    /// stamp survives, the origin names the conduit.
+    pub fn forward(&self, origin: &str, frame: EventFrame) {
+        (self.forward)(origin, frame);
     }
 }
 
@@ -172,6 +190,7 @@ mod tests {
                     serde_json::to_string(&event).unwrap()
                 ));
             }),
+            Arc::new(|_, _| {}),
         );
         (seen, routes)
     }

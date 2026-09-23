@@ -886,6 +886,7 @@ impl Recorded {
                         serde_json::to_string(&event).unwrap()
                     ));
                 }),
+                std::sync::Arc::new(|_, _| {}),
             ),
             core_path: "tabit-core".to_string(),
             cwd: ".".to_string(),

@@ -104,6 +104,22 @@ impl BackendSink {
         }
     }
 
+    /// Forward a frame verbatim — the stream stamp survives, the
+    /// origin names the conduit (an owned child's traffic crossing
+    /// its owner's pipe; forward-don't-re-stamp, the bridge tap's
+    /// rule). Returns whether the channel was live.
+    pub fn forward(&self, origin: &str, frame: EventFrame) -> bool {
+        let Some(events) = self.events.upgrade() else {
+            return false;
+        };
+        let stamped = EventFrame {
+            stream: frame.stream,
+            origin: Some(origin.to_string()),
+            event: frame.event,
+        };
+        events.send(stamped).is_ok()
+    }
+
     /// Emit an extension's event, origin-stamped and backend-level
     /// (no stream). Returns whether the channel was live.
     pub fn emit(&self, origin: &str, event: SessionEvent) -> bool {

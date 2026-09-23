@@ -36,12 +36,22 @@ path = "src/bin/clash_b.rs"
 name = "autotitle-ext"
 path = "src/bin/autotitle.rs"
 
+# The owned-children demo (the SDK round's C3 example).
+[[bin]]
+name = "child-ext"
+path = "src/bin/child_ext.rs"
+
 [[bin]]
 name = "lmstudio-ext"
 path = "src/bin/lmstudio.rs"
 
 [dependencies]
 serde = { workspace = true }
+# Owned children: the shared client and its async runtime (the settle
+# folds and spawns ride one static runtime inside the SDK).
+tabit-wire = { path = "../tabit-wire", version = "0.41.0" }
+tokio = { workspace = true, features = ["rt-multi-thread", "macros", "time"] }
+tokio-util = { version = "0.7", default-features = false }
 # The wire types, shared with the host (the 2026-09 sharing ruling:
 # one wire, one set of shapes — the docs stay the contract for other
 # languages, the conformance tests keep crate and docs honest).

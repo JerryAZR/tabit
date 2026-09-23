@@ -845,11 +845,15 @@ async fn supervise(
                     }
                     // Not a lane frame: the shared grammar rides the
                     // same lines (flat, byte-identical with the
-                    // frontend edge). Commands are actions; events are
-                    // emissions — an interaction request additionally
-                    // registers its ask so the routed answer finds this
-                    // lane. A line parseable as none of the three is
-                    // the contract break it always was.
+                    // frontend edge). Commands are actions. Frames
+                    // follow one law: stamped frames FORWARD verbatim
+                    // (an owned child's traffic, stream preserved),
+                    // unstamped frames are emissions (backend-level,
+                    // origin-stamped) — and an interaction request
+                    // registers its ask either way, so the routed
+                    // answer finds this lane. A line parseable as
+                    // none of these is the contract break it always
+                    // was.
                     Err(_) => {
                         if let Ok(command) =
                             serde_json::from_str::<tabit_protocol::SessionCommand>(&line)
@@ -857,15 +861,17 @@ async fn supervise(
                             routes.command(command);
                             continue;
                         }
-                        if let Ok(event) =
-                            serde_json::from_str::<tabit_protocol::SessionEvent>(&line)
+                        if let Ok(frame) = serde_json::from_str::<tabit_protocol::EventFrame>(&line)
                         {
                             if let tabit_protocol::SessionEvent::InteractionRequest { id, .. } =
-                                &event
+                                &frame.event
                             {
                                 asks.register(&lane.name, id.clone(), lane.commands.clone());
                             }
-                            routes.event(&lane.name, event);
+                            match frame.stream {
+                                Some(_) => routes.forward(&lane.name, frame),
+                                None => routes.event(&lane.name, frame.event),
+                            }
                             continue;
                         }
                         refuse(

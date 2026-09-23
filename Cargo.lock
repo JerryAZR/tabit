@@ -5075,6 +5075,7 @@ dependencies = [
  "serde_json",
  "tabit-ext",
  "tabit-protocol",
+ "tabit-wire",
  "tiny_http",
  "tokio",
  "tokio-util",

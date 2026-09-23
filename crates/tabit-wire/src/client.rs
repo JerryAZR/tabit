@@ -493,6 +493,18 @@ impl ChildHandle {
     /// live here; mapping the settlement to the driver's own
     /// vocabulary is the caller's policy.
     pub async fn settle(&mut self, token: Option<CancellationToken>) -> Settlement {
+        self.settle_with_tap(token, |_| {}).await
+    }
+
+    /// [`Self::settle`] with a per-frame tap — every frame of this
+    /// child's run reaches the tap (before the fold's own handling)
+    /// so a driver's event subscribers and THE one fold share the
+    /// stream instead of racing two readers over it.
+    pub async fn settle_with_tap(
+        &mut self,
+        token: Option<CancellationToken>,
+        tap: impl Fn(&EventFrame),
+    ) -> Settlement {
         let mut events: Vec<SessionEvent> = Vec::new();
         let started_at_ms = unix_ms();
         loop {
@@ -532,6 +544,7 @@ impl ChildHandle {
                         });
                         return Settlement::Crashed { events };
                     };
+                    tap(&frame);
                     if frame.stream.as_ref() != Some(&self.stream) {
                         continue; // A grandchild's frame — already forwarded.
                     }

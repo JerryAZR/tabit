@@ -52,6 +52,10 @@ use tabit_protocol::{EventFrame, SessionCommand, SessionEvent};
 /// exactly (the pipe is a frozen contract, not a negotiated one).
 const PROTOCOL_VERSION: u32 = 3;
 
+pub mod children;
+
+pub use children::{Child, ChildOptions};
+
 /// One extension's whole declaration, built by registering tools,
 /// consultations, and watches; `serve` derives the handshake from
 /// it. Nothing is declared twice — the registration IS the ack.
@@ -278,6 +282,34 @@ pub struct Ctx {
 }
 
 impl Ctx {
+    /// A watch-shaped context: no correlation (nothing owed, nothing
+    /// cancelled). The dispatcher builds these for observation and
+    /// child-event handlers.
+    pub(crate) fn watch_context(shared: Arc<Shared>) -> Self {
+        Self {
+            correlation: None,
+            shared,
+        }
+    }
+
+    pub(crate) fn shared_clone(&self) -> Arc<Shared> {
+        self.shared.clone()
+    }
+
+    /// The host's own executable path (the initialize's
+    /// `core_path`) — the thing owned children spawn.
+    pub(crate) fn core_path(&self) -> Result<String, String> {
+        self.shared
+            .core_path
+            .lock()
+            .unwrap_or_else(|poison| poison.into_inner())
+            .clone()
+            .filter(|path| !path.is_empty())
+            .ok_or_else(|| "the host named no core_path at the handshake".to_string())
+    }
+}
+
+impl Ctx {
     /// Whether the host cancelled this invocation's run (the run
     /// aborted under it). THE contract for long-running bodies: poll
     /// between units of work — kill the process, close the stream,
@@ -434,6 +466,9 @@ struct Shared {
     /// long-running handlers poll [`Ctx::cancelled`] and stop: kill
     /// the sandbox, drop the wedge, stop billing.
     cancelled: Mutex<std::collections::HashSet<String>>,
+    /// The host's own executable (the initialize's `core_path`) —
+    /// owned children spawn it.
+    core_path: Mutex<Option<String>>,
 }
 
 /// The dispatcher: answer the initialize, ack (the registration
@@ -452,6 +487,7 @@ pub fn serve(extension: Extension) -> ! {
         asks: Mutex::new(HashMap::new()),
         grammar_asks: Mutex::new(HashMap::new()),
         cancelled: Mutex::new(std::collections::HashSet::new()),
+        core_path: Mutex::new(None),
     });
 
     // The handshake: the initialize must be the first line, and its
@@ -470,6 +506,7 @@ pub fn serve(extension: Extension) -> ! {
             initialize["protocol_version"]
         ));
     }
+    *tabit_ext_sdk_lock(&shared.core_path) = initialize["core_path"].as_str().map(str::to_string);
     let ack = ExtFrame::Ack {
         protocol_version: PROTOCOL_VERSION,
         tools: tools
@@ -681,7 +718,18 @@ fn run_consult(
 
 /// A watch body's panic is reported, never fatal — observation must
 /// not take the process down.
-fn catch_unwind_silently(body: impl FnOnce()) {
+/// Register a relayed child ask: the routed answer resolves through
+/// the same pending map the extension's own asks use; the receiver
+/// carries it home to the child.
+pub(crate) fn register_relay(
+    shared: &Arc<Shared>,
+    id: &str,
+    sender: std::sync::mpsc::Sender<Value>,
+) {
+    tabit_ext_sdk_lock(&shared.grammar_asks).insert(id.to_string(), sender);
+}
+
+pub(crate) fn catch_unwind_silently(body: impl FnOnce()) {
     if let Err(panic) = std::panic::catch_unwind(AssertUnwindSafe(body)) {
         let _ = writeln!(
             std::io::stderr(),
@@ -776,6 +824,7 @@ mod tests {
             asks: Mutex::new(HashMap::new()),
             grammar_asks: Mutex::new(HashMap::new()),
             cancelled: Mutex::new(std::collections::HashSet::new()),
+            core_path: Mutex::new(None),
         })
     }
 

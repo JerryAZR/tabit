@@ -1040,6 +1040,8 @@ fn run() -> Result<i32, String> {
                 tokio::sync::mpsc::unbounded_channel::<SessionCommand>();
             let (grammar_evt_tx, mut grammar_evt_rx) =
                 tokio::sync::mpsc::unbounded_channel::<(String, SessionEvent)>();
+            let (grammar_fwd_tx, mut grammar_fwd_rx) =
+                tokio::sync::mpsc::unbounded_channel::<(String, EventFrame)>();
             let launch_context = tabit_ext::LaunchContext {
                 routes: tabit_ext::GrammarRoutes::new(
                     std::sync::Arc::new(move |command| {
@@ -1047,6 +1049,13 @@ fn run() -> Result<i32, String> {
                     }),
                     std::sync::Arc::new(move |origin, event| {
                         let _ = grammar_evt_tx.send((origin.to_string(), event));
+                    }),
+                    // Verbatim frame forwarding rides the same bridge
+                    // discipline: a stamped frame from an extension
+                    // crosses stream-preserved (an owned child's
+                    // traffic through its owner's pipe).
+                    std::sync::Arc::new(move |origin: &str, frame: tabit_protocol::EventFrame| {
+                        let _ = grammar_fwd_tx.send((origin.to_string(), frame));
                     }),
                 ),
                 // The host IS the binary: owned-session spawners get
@@ -1108,9 +1117,17 @@ fn run() -> Result<i32, String> {
                 // The emission bridge: extension-emitted events fan out
                 // origin-stamped on the host's channel.
                 let sink = backend_sink;
+                let forward_sink = handle.backend_sink();
                 tokio::spawn(async move {
                     while let Some((origin, event)) = grammar_evt_rx.recv().await {
                         sink.emit(&origin, event);
+                    }
+                });
+                // The forwarding bridge: stamped frames cross verbatim
+                // (stream preserved, origin naming the conduit).
+                tokio::spawn(async move {
+                    while let Some((origin, frame)) = grammar_fwd_rx.recv().await {
+                        forward_sink.forward(&origin, frame);
                     }
                 });
                 // The command bridge drains through the same dispatch.
