@@ -851,15 +851,26 @@ async fn the_shared_grammar_flows_both_directions_over_the_pipe() {
     await_status(&mut events, "grammar-ext", |s| matches!(s, Status::Alive)).await;
 
     // The double's opening emissions crossed: one command, one ask.
-    let commands = recorded.commands();
-    assert_eq!(commands.len(), 1, "one command routed: {commands:?}");
-    assert!(commands[0].contains("steered by the extension"));
-    let events_so_far = recorded.events();
-    let ask = events_so_far
-        .iter()
-        .find(|e| e.contains("interaction_request") && e.contains("g-1"))
-        .expect("the ask emission routed, origin-stamped");
-    assert!(ask.starts_with("grammar-ext|"), "origin-stamped: {ask}");
+    // Both race the Alive transition (the ack lands before the
+    // double's next writes are processed), so poll for them — never
+    // assert on an instantaneous snapshot.
+    let saw_command = wait_for(|| {
+        recorded
+            .commands()
+            .iter()
+            .any(|c| c.contains("steered by the extension"))
+    })
+    .await;
+    assert!(saw_command, "the command routed: {:?}", recorded.commands());
+    assert_eq!(recorded.commands().len(), 1, "exactly one command routed");
+    let saw_ask = wait_for(|| {
+        recorded
+            .events()
+            .iter()
+            .any(|e| e.starts_with("grammar-ext|") && e.contains("interaction_request") && e.contains("g-1"))
+    })
+    .await;
+    assert!(saw_ask, "the ask emission routed, origin-stamped: {:?}", recorded.events());
 
     // Broadcast honors the watch list: a watched kind mirrors (the
     // double echoes it back out), an unwatched kind does not.
