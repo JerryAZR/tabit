@@ -29,11 +29,16 @@ ownership, lifecycle — the spawner decides); **dataflow is a net**
 over those edges: a node's events fan to all its subscribers, never
 "the one and only frontend"; commands arrive from any link; asks
 are answered by id from any channel — first arrival wins, late
-answers are tolerated no-ops. The shared mechanisms live where both
-sides link them: `tabit-wire` (`asks.rs` — the one pending-answer
-registry every node instantiates; `client.rs` — the one child
-driver) and `tabit-ext-sdk` (`FrameRouter` — the one frame
-dispatch). Neither core nor extensions re-invent them.
+answers are tolerated no-ops. **Mechanisms shared between core and
+the SDK live in `tabit-wire` — the one crate below both, and the
+only home for them** (`asks.rs` — the one pending-answer registry
+every node instantiates; `client.rs` — the one child driver;
+`process.rs` — the child substrate). Core never depends on
+`tabit-ext-sdk`: the SDK is the guest authoring library, and
+anything the host needs from it is node-mechanics that belongs in
+the wire. What the SDK owns alone is its own in-guest dispatch
+(`FrameRouter` — one frame in, interested local handlers out; the
+host's watch fan-out is a different concern, an outbound filter).
 
 Current workspace layout:
 
