@@ -32,13 +32,22 @@ are answered by id from any channel — first arrival wins, late
 answers are tolerated no-ops. **Mechanisms shared between core and
 the SDK live in `tabit-wire` — the one crate below both, and the
 only home for them** (`asks.rs` — the one pending-answer registry
-every node instantiates; `client.rs` — the one child driver;
-`process.rs` — the child substrate). Core never depends on
-`tabit-ext-sdk`: the SDK is the guest authoring library, and
+every node instantiates; `client.rs` — the one child-management
+mechanism; `process.rs` — the child substrate). Core never depends
+on `tabit-ext-sdk`: the SDK is the guest authoring library, and
 anything the host needs from it is node-mechanics that belongs in
-the wire. What the SDK owns alone is its own in-guest dispatch
-(`FrameRouter` — one frame in, interested local handlers out; the
-host's watch fan-out is a different concern, an outbound filter).
+the wire.
+
+**Child management is one mechanism with two policies.** A node's
+child frames arrive through the shared client's pump and fan to
+local consumers and upstream relay, with the settle fold watching
+the same stream — all of it `tabit-wire`'s `ChildHandle` (pump,
+tap, fold). Core's bridge is the fixed policy (learn + relay
+always on; the fold consumes the terminal, most frames ignored);
+the SDK's wrapper is the general policy (registered handlers via
+its in-guest `FrameRouter`; relay opt-in — the SDK's "frontend" is
+its parent node). What differs between the two drivers is policy,
+never mechanism.
 
 Current workspace layout:
 

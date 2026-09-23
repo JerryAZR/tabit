@@ -16,6 +16,14 @@
 //!   budget, preamble, extension root, ephemeral-vs-resume). The
 //!   flags are the wire-level contract of tabit-core's child role —
 //!   one builder so no driver drifts from the CLI it drives.
+//! **One mechanism, policies above it.** A node's child frames fan
+//! to local consumers and upstream relay through the pump's tap,
+//! with the settle fold watching the same stream — the child-
+//! management pattern every driver shares. The drivers differ only
+//! in the policy they wire into the tap: core's bridge (learn +
+//! relay always on, the fold takes the terminal) and the SDK's
+//! wrapper (registered handlers, relay opt-in).
+//!
 //! - **The runtime** ([`ChildSpec::spawn`]): wrap-and-spawn with the
 //!   process cwd (the OS enforces the scope), the command writer
 //!   whose close is the stdin drop, the stderr ring, the bounded
