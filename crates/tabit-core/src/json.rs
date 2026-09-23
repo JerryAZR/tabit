@@ -18,6 +18,7 @@ use tokio::sync::mpsc;
 /// Serve the backend over `reader`/`writer` until the client closes its
 /// input. Returns the process exit code: 0 normally, 1 on a handshake
 /// version mismatch (the connection is rejected and closed).
+#[cfg(test)] // the plain-glue entry: production edges carry their own glue
 pub async fn serve<R, W>(host: SessionHost, reader: R, writer: W) -> i32
 where
     R: BufRead + Send + 'static,
