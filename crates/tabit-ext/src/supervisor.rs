@@ -29,7 +29,7 @@
 //! a reader task parses stdout (handshake first, tool results and
 //! ask lifts after), and the pipe's mechanics — the command writer,
 //! the grace reaper, the immediate kill, the crash tail — live in
-//! [`crate::process`], shared with the bridge. Local to here: the
+//! [`tabit_wire::process`], shared with every spawning site. Local to here: the
 //! typed-frame reader and the lane machinery; a pre-ack failure
 //! kills the tree immediately (nothing was proven), a post-ack death
 //! gets the grace-bounded reclaim.
@@ -42,14 +42,14 @@ use std::time::Duration;
 
 use crate::grammar::{BackendAsks, GrammarRoutes};
 use crate::manifest::{self, Discovered, Manifest};
-use crate::process::{self, wrap_command};
 use crate::protocol::{
     Ack, EXTENSION_PROTOCOL_VERSION, ExtFrame, HOOK_POINTS, HookDecision, HookDecl, HostFrame,
     ServiceVerb, ToolDecl, ToolWireResult,
 };
-use process_wrap::tokio::ChildWrapper;
 use rig_agent::tool::interaction::InteractionOutcome;
 use rig_agent::tool::services::{HostServices, ModelPromptOk, ModelPromptRequest, ServiceUsage};
+use tabit_wire::process::ChildWrapper;
+use tabit_wire::process::{self, wrap_command};
 use tokio::io::{AsyncBufReadExt, BufReader};
 use tokio_util::sync::CancellationToken;
 
@@ -57,10 +57,10 @@ use tokio_util::sync::CancellationToken;
 /// spawned pipe (extensions here, subagent children in the bridge):
 /// slow runtimes (a Python import, a cold Node) need the room;
 /// healthy children answer in milliseconds. Lives in
-/// [`crate::process`] with the rest of the shared pipe plumbing;
+/// [`tabit_wire::process`] with the rest of the shared pipe plumbing;
 /// re-exported here for the existing call sites.
-pub use crate::process::HANDSHAKE_TIMEOUT;
-use crate::process::{REAP_GRACE, crash_tail, reap_with_grace, spawn_command_writer};
+pub use tabit_wire::process::HANDSHAKE_TIMEOUT;
+use tabit_wire::process::{REAP_GRACE, crash_tail, reap_with_grace, spawn_command_writer};
 
 /// One extension's standing, as the host sees it.
 #[derive(Debug, Clone)]
@@ -1179,7 +1179,7 @@ async fn fail_before_ack(
     resolve_dead(state, lane, events, name, reason);
 }
 
-// The post-ack close lives in [`crate::process::reap_with_grace`]
+// The post-ack close lives in [`tabit_wire::process::reap_with_grace`]
 // (the shared pipe contract).
 fn resolve_dead(
     state: &Arc<ChildState>,

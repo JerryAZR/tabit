@@ -34,7 +34,6 @@ mod extensions;
 // (the same allowance the extension SDK's bins carry).
 #[allow(clippy::indexing_slicing)]
 mod gate;
-mod json;
 
 use std::io::Write as _;
 use std::path::PathBuf;
@@ -1126,7 +1125,7 @@ fn run() -> Result<i32, String> {
                         let supervisor = mounted.supervisor().clone();
                         move |frame| supervisor.broadcast(frame)
                     });
-                json::serve_with_glue(
+                tabit_session::edge::serve_with_glue(
                     handle,
                     std::io::BufReader::new(std::io::stdin()),
                     std::io::stdout(),

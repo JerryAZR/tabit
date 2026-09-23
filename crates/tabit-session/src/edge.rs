@@ -1,19 +1,24 @@
-//! JSON mode: the stdio edge of the session protocol. LF-JSONL in both
-//! directions — the client's lines are [`ClientFrame`]s (an `initialize`
-//! handshake, then commands), the server's lines are stamped
-//! [`EventFrame`]s plus handshake/transport-error control frames. Only
-//! protocol bytes reach stdout; human banners stay on stderr.
+//! The serve side of the frozen wire: the stdio edge of the session
+//! protocol (JSON mode). LF-JSONL in both directions — the client's
+//! lines are [`ClientFrame`]s (an `initialize` handshake, then
+//! commands), the server's lines are stamped [`EventFrame`]s plus
+//! handshake/transport-error control frames. Only protocol bytes reach
+//! stdout; human banners stay on stderr.
 //!
-//! The whole bridge is generic over `BufRead`/`Write` so tests drive it
-//! with in-memory buffers instead of process pipes.
+//! This is the wire's server half living with the host it drives (the
+//! extraction ruling 2026-09: the client half and the child substrate
+//! are `tabit-wire`; one server exists, so it lives here, out of the
+//! binary). The whole bridge is generic over `BufRead`/`Write` so
+//! tests drive it with in-memory buffers instead of process pipes.
 
 use std::io::{BufRead, Write};
 use tabit_protocol::EventFrame;
 use tabit_protocol::{
     ClientFrame, PROTOCOL_VERSION, ServerControlFrame, ServerFrame, SessionCommand,
 };
-use tabit_session::{SessionCommandLink, SessionHost, SessionInfo};
 use tokio::sync::mpsc;
+
+use crate::endpoint::{SessionCommandLink, SessionHost, SessionInfo};
 
 /// Serve the backend over `reader`/`writer` until the client closes its
 /// input. Returns the process exit code: 0 normally, 1 on a handshake
@@ -245,6 +250,10 @@ async fn write_loop<W: Write>(mut rx: mpsc::UnboundedReceiver<ServerFrame>, mut 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::{
+        EventFrame, ModelSelection, Session, SessionBuilder, SessionHost, SessionHostWiring,
+        SessionSource, SessionStore,
+    };
     use rig_agent::agent::ModelHandle;
     use rig_agent::test_utils::{MockCompletionModel, MockStreamEvent};
     use rig_core::completion::Usage;
@@ -252,10 +261,6 @@ mod tests {
     use std::path::Path;
     use std::sync::Arc;
     use tabit_config::{AuthConfig, TabitConfig};
-    use tabit_session::{
-        EventFrame, ModelSelection, Session, SessionBuilder, SessionHost, SessionHostWiring,
-        SessionSource, SessionStore,
-    };
 
     fn script(text: &str) -> Vec<MockStreamEvent> {
         vec![
@@ -364,7 +369,7 @@ id = "m"
     /// pass their own builder.
     fn test_wiring(dir: &Path, create: SessionSource) -> SessionHostWiring {
         SessionHostWiring {
-            children: tabit_session::ChildRouter::shared(),
+            children: crate::ChildRouter::shared(),
             boot_parent: None,
             boot_parent_call: None,
             skills: Vec::new(),
@@ -511,10 +516,7 @@ id = "m"
 
     /// An `initialize` wire line carrying the live protocol version.
     fn init_line() -> String {
-        format!(
-            r#"{{"protocol_version":{}}}"#,
-            tabit_session::PROTOCOL_VERSION
-        )
+        format!(r#"{{"protocol_version":{}}}"#, crate::PROTOCOL_VERSION)
     }
 
     /// A `message` wire line for `session`.
@@ -577,12 +579,12 @@ id = "m"
             .filter_map(|frame| match frame {
                 ServerFrame::Event(EventFrame {
                     origin: None,
-                    event: tabit_session::SessionEvent::UserMessage { text, .. },
+                    event: crate::SessionEvent::UserMessage { text, .. },
                     ..
                 }) if kind == "user" => Some(text.as_str()),
                 ServerFrame::Event(EventFrame {
                     origin: None,
-                    event: tabit_session::SessionEvent::TextDelta { text, .. },
+                    event: crate::SessionEvent::TextDelta { text, .. },
                     ..
                 }) if kind == "delta" => Some(text.as_str()),
                 _ => None,
@@ -665,7 +667,7 @@ id = "m"
                 protocol_version,
                 session_id,
             }) => {
-                assert_eq!(*protocol_version, tabit_session::PROTOCOL_VERSION);
+                assert_eq!(*protocol_version, crate::PROTOCOL_VERSION);
                 assert!(!session_id.is_empty());
             }
             other => panic!("expected initialize_ack, got {other:?}"),
@@ -679,7 +681,7 @@ id = "m"
         let opened = frames.iter().find_map(|frame| match frame {
             ServerFrame::Event(EventFrame {
                 origin: None,
-                event: tabit_session::SessionEvent::SessionOpened { id, model, .. },
+                event: crate::SessionEvent::SessionOpened { id, model, .. },
                 ..
             }) => Some((id.clone(), model.clone())),
             _ => None,
@@ -694,7 +696,7 @@ id = "m"
             frames.last(),
             Some(ServerFrame::Event(EventFrame {
                 origin: None,
-                event: tabit_session::SessionEvent::RunFinished { output, .. },
+                event: crate::SessionEvent::RunFinished { output, .. },
                 ..
             })) if output == "hello"
         ));
@@ -753,7 +755,7 @@ id = "m"
                     frame,
                     ServerFrame::Event(EventFrame {
                         origin: None,
-                        event: tabit_session::SessionEvent::Error { kind, .. },
+                        event: crate::SessionEvent::Error { kind, .. },
                         ..
                     }) if kind == "model"
                 )
@@ -770,7 +772,7 @@ id = "m"
                     frame,
                     ServerFrame::Event(EventFrame {
                         origin: None,
-                        event: tabit_session::SessionEvent::UserMessage { .. },
+                        event: crate::SessionEvent::UserMessage { .. },
                         ..
                     })
                 )
@@ -964,7 +966,7 @@ id = "m"
                 frame,
                 ServerFrame::Event(EventFrame {
                     origin: None,
-                    event: tabit_session::SessionEvent::SessionOpened { .. },
+                    event: crate::SessionEvent::SessionOpened { .. },
                     ..
                 })
             )),
@@ -1067,8 +1069,8 @@ id = "m"
             .join("tabit-json-tests")
             .join(format!("replay-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&dir);
-        let store = tabit_session::SessionStore::new(&dir);
-        let history_session = |answer: &'static str, store: tabit_session::SessionStore| {
+        let store = crate::SessionStore::new(&dir);
+        let history_session = |answer: &'static str, store: crate::SessionStore| {
             let config = Arc::new(
                 TabitConfig::from_toml_str(
                     r#"
@@ -1126,7 +1128,7 @@ id = "m"
         tx_in
             .send(format!(
                 r#"{{"protocol_version":{},"replay":true}}"#,
-                tabit_session::PROTOCOL_VERSION
+                crate::PROTOCOL_VERSION
             ))
             .unwrap();
         let session_id = ack_session_id(&out).await;
@@ -1162,7 +1164,7 @@ id = "m"
                     frame,
                     ServerFrame::Event(EventFrame {
                         origin: None,
-                        event: tabit_session::SessionEvent::SessionsAvailable { sessions },
+                        event: crate::SessionEvent::SessionsAvailable { sessions },
                         ..
                     }) if sessions.iter().any(|s| s.id == session_id)
                 )
@@ -1174,7 +1176,7 @@ id = "m"
         let opened = frames.iter().find_map(|frame| match frame {
             ServerFrame::Event(EventFrame {
                 origin: None,
-                event: tabit_session::SessionEvent::SessionOpened { cwd, path, .. },
+                event: crate::SessionEvent::SessionOpened { cwd, path, .. },
                 ..
             }) => Some((cwd.clone(), path.clone())),
             _ => None,
@@ -1183,7 +1185,7 @@ id = "m"
         assert!(!opened_cwd.is_empty(), "the boot announces its cwd");
         if let ServerFrame::Event(EventFrame {
             origin: None,
-            event: tabit_session::SessionEvent::SessionsAvailable { sessions },
+            event: crate::SessionEvent::SessionsAvailable { sessions },
             ..
         }) = &frames[catalog_at]
         {
@@ -1200,19 +1202,17 @@ id = "m"
             .iter()
             .filter_map(|frame| match frame {
                 ServerFrame::Event(event) => match &event.event {
-                    tabit_session::SessionEvent::ReplayStarted { .. } => Some("replay_started"),
-                    tabit_session::SessionEvent::ReplayDone => Some("replay_done"),
-                    tabit_session::SessionEvent::ModelChanged { .. } => Some("model_changed"),
-                    tabit_session::SessionEvent::UserMessage { .. } => Some("user_message"),
-                    tabit_session::SessionEvent::TurnStarted { .. } => Some("turn_started"),
-                    tabit_session::SessionEvent::TextDelta { .. } => Some("text_delta"),
-                    tabit_session::SessionEvent::CompletionCall { .. } => Some("completion_call"),
-                    tabit_session::SessionEvent::TurnCommitted { .. } => Some("turn_committed"),
-                    tabit_session::SessionEvent::RunFinished { .. } => Some("run_finished"),
-                    tabit_session::SessionEvent::SessionsAvailable { .. } => {
-                        Some("sessions_available")
-                    }
-                    tabit_session::SessionEvent::SessionOpened { .. } => Some("session_opened"),
+                    crate::SessionEvent::ReplayStarted { .. } => Some("replay_started"),
+                    crate::SessionEvent::ReplayDone => Some("replay_done"),
+                    crate::SessionEvent::ModelChanged { .. } => Some("model_changed"),
+                    crate::SessionEvent::UserMessage { .. } => Some("user_message"),
+                    crate::SessionEvent::TurnStarted { .. } => Some("turn_started"),
+                    crate::SessionEvent::TextDelta { .. } => Some("text_delta"),
+                    crate::SessionEvent::CompletionCall { .. } => Some("completion_call"),
+                    crate::SessionEvent::TurnCommitted { .. } => Some("turn_committed"),
+                    crate::SessionEvent::RunFinished { .. } => Some("run_finished"),
+                    crate::SessionEvent::SessionsAvailable { .. } => Some("sessions_available"),
+                    crate::SessionEvent::SessionOpened { .. } => Some("session_opened"),
                     _ => Some("other"),
                 },
                 _ => None,
@@ -1249,7 +1249,7 @@ id = "m"
             frames.iter().any(|frame| matches!(frame,
                 ServerFrame::Event(EventFrame {
                     origin: None,
-                    event: tabit_session::SessionEvent::TextDelta { text, .. },
+                    event: crate::SessionEvent::TextDelta { text, .. },
                     ..
                 }) if text == "first answer"
             )),
@@ -1267,7 +1267,7 @@ id = "m"
                 frame,
                 ServerFrame::Event(EventFrame {
                     origin: None,
-                    event: tabit_session::SessionEvent::ReplayStarted { .. },
+                    event: crate::SessionEvent::ReplayStarted { .. },
                     ..
                 })
             )),
@@ -1293,7 +1293,7 @@ id = "m"
             ))
         });
         let open_store = SessionStore::new(&dir);
-        let open: tabit_session::OpenSessionSource = Arc::new(move |id: &str| {
+        let open: crate::OpenSessionSource = Arc::new(move |id: &str| {
             let summary = open_store
                 .list()
                 .map_err(|e| e.to_string())?
@@ -1340,7 +1340,7 @@ id = "m"
             session,
             Vec::new(),
             SessionHostWiring {
-                children: tabit_session::ChildRouter::shared(),
+                children: crate::ChildRouter::shared(),
                 boot_parent: None,
                 boot_parent_call: None,
                 skills: Vec::new(),
@@ -1383,7 +1383,7 @@ id = "m"
                     Ok(ServerFrame::Event(EventFrame {
                         origin: None,
                         stream: Some(stream),
-                        event: tabit_session::SessionEvent::SessionOpened { id, .. },
+                        event: crate::SessionEvent::SessionOpened { id, .. },
                         ..
                     })) if id != boot => Some((id, stream, line)),
                     _ => None,
@@ -1551,7 +1551,7 @@ id = "m"
             .find_map(|line| match serde_json::from_str::<ServerFrame>(&line) {
                 Ok(ServerFrame::Event(EventFrame {
                     origin: None,
-                    event: tabit_session::SessionEvent::UserMessage { text, entry_id },
+                    event: crate::SessionEvent::UserMessage { text, entry_id },
                     ..
                 })) if text == "hi" => Some(entry_id),
                 _ => None,

@@ -21,17 +21,6 @@ futures = { workspace = true }
 # payload), so the ask shapes stay one concern across core and
 # extensions.
 rig-agent = { path = "../rig-agent", version = "0.41.0", default-features = false }
-# Tree-kill wrapping for every child the host spawns (extensions, and
-# the subagent bridge's children — the helper is shared from here): a
-# Job Object on Windows / a process group elsewhere, so killing a
-# child reclaims its descendants too.
-process-wrap = { version = "10", default-features = false, features = [
-    "tokio1",
-    "creation-flags",
-    "job-object",
-    "kill-on-drop",
-    "process-group",
-] }
 serde = { workspace = true, features = ["derive"] }
 serde_json = { workspace = true }
 # The shared grammar on the pipe: commands in, emissions out, watched
@@ -39,6 +28,9 @@ serde_json = { workspace = true }
 # vocabulary verbatim, flat beside the lane frames).
 tabit-log = { path = "../tabit-log", version = "0.41.0" }
 tabit-protocol = { path = "../tabit-protocol", version = "0.41.0" }
+# The child-process substrate (moved to tabit-wire; the supervisor's
+# spawn/reap plumbing rides it).
+tabit-wire = { path = "../tabit-wire", version = "0.41.0" }
 thiserror = { workspace = true }
 tokio = { workspace = true, features = [
     "io-util",
@@ -49,16 +41,6 @@ tokio = { workspace = true, features = [
     "time",
 ] }
 tokio-util = { version = "0.7", default-features = false }
-
-# The CreationFlags shim's type — version-matched to process-wrap's own
-# windows dependency so they are the same type. Target-gated: a
-# Windows-only crate tree must never build on other targets (an
-# unconditional dep made Linux build windows-future, whose 0.3.2
-# release breaks against the pinned windows-core there).
-[target.'cfg(windows)'.dependencies]
-windows = { version = "0.62.2", default-features = false, features = [
-    "Win32_System_Threading",
-] }
 
 [dev-dependencies]
 futures = { workspace = true }

@@ -1,6 +1,7 @@
 //! Child-process plumbing shared by every tree the backend spawns:
-//! the extension supervisor here, the subagent bridge in
-//! tabit-session (`subprocess.rs` imports the helpers). One home —
+//! the extension supervisor (tabit-ext), the subagent bridge
+//! (tabit-session), and the extension SDK's owned children. One
+//! home —
 //! killing a child must reclaim its descendants (a bash under a
 //! subagent, a server under an extension), the crash report always
 //! wants the stderr tail, and the pipe protocol (a command writer
@@ -21,8 +22,8 @@ use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
 use tokio_util::sync::CancellationToken;
 
 /// The wrapped child's type (what `wrap_command(...).spawn()`
-/// yields) — re-exported so the bridge (a downstream crate without a
-/// direct process-wrap dependency) can name it.
+/// yields) — re-exported so downstream crates without a direct
+/// process-wrap dependency can name it.
 pub use process_wrap::tokio::ChildWrapper;
 
 /// The stderr ring's depth — the crash report's tail.

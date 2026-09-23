@@ -43,16 +43,31 @@ Current workspace layout:
   context manager (the resident tree + the model-facing history
   view), the delta-token regime compaction reads — engine-free,
   consumed by rig-agent and tabit-session
+- `crates/tabit-wire` — the frozen wire's client role and the
+  child-process substrate (the 2026-09 extraction: share what is the
+  same): `client.rs` spawns a tabit-core child in `--json` role (the
+  child-role CLI knobs as one builder) and speaks the frontend
+  protocol to it — the bounded handshake, the frame pump
+  (forward-don't-re-stamp, with the router's learn/forward tap), the
+  command writer, the reaper; `process.rs` (moved from tabit-ext) is
+  the substrate every spawning site shares (tree-kill wrapping, the
+  stderr ring, the grace reaper). Consumers: the subagent bridge,
+  the extension host, and the extension SDK's owned-session wrapper;
+  the wire's serve side lives with the host (`tabit-session`'s edge
+  module) — one server, no sharing need
 - `crates/tabit-session` — persistent sessions over the outer loop (native
   only: filesystem-backed; the rig crates keep wasm support), the
   compaction box (`src/compaction/`: the pass machinery, the doors, the
   dials file — every threshold and prompt text as data), the
   skills module (`src/skills.rs`: four-source discovery, the prompt
   catalog, the confined `skill` tool), plus the
+  serve side of the frozen wire (`src/edge.rs`: the json stdio edge —
+  handshake serving, the command loop, the event forwarder with the
+  grammar glue), the
   subagent framework (`subagent.rs`: `SpawnContext` — spawn/drive a
   subprocess child, the one substrate; `subprocess.rs`: the bridge —
-  self-spawn in `--json` child role with the OS-enforced cwd and the
-  ruled abort shape; `routing.rs`: the ChildRouter — route-all line
+  the session adapter over `tabit-wire`'s client (router taps, the
+  drive fold, the ruled abort shape); `routing.rs`: the ChildRouter — route-all line
   forwarding, learned tables, abort's subtree broadcast; the
   `subagent` tool is the opinionated example shape extensions
   override — ROADMAP item 5)
@@ -80,10 +95,9 @@ Current workspace layout:
   interaction lift), the supervisor (launch over the
   disable-filtered scan, handshake, supervise,
   mark-dead-and-report — no mid-run respawn; the tool-call dispatch
-  surface for proxy tools); the shared
-  child-process substrate (tree-kill wrapping, the stderr ring, the
-  command writer, the grace reaper — `src/process.rs`) lives here and
-  serves the subagent bridge too; the hook lane forwards
+  surface for proxy tools); the child-process substrate it spawns on
+  lives in `tabit-wire` (moved 2026-09 — every spawning site shares
+  it); the hook lane forwards
   engine hook events over the same pipe (policy fails open on a dead
   extension)
 - `crates/tabit-ext-sdk` — the extension SDK, the guest side of the

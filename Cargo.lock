@@ -5040,16 +5040,15 @@ name = "tabit-ext"
 version = "0.41.0"
 dependencies = [
  "futures",
- "process-wrap",
  "rig-agent",
  "serde",
  "serde_json",
  "tabit-log",
  "tabit-protocol",
+ "tabit-wire",
  "thiserror 2.0.20",
  "tokio",
  "tokio-util",
- "windows",
 ]
 
 [[package]]
@@ -5139,9 +5138,9 @@ dependencies = [
  "serde_json",
  "serde_yaml",
  "tabit-config",
- "tabit-ext",
  "tabit-log",
  "tabit-protocol",
+ "tabit-wire",
  "thiserror 2.0.20",
  "tokio",
  "tokio-util",
@@ -5168,6 +5167,19 @@ dependencies = [
  "tokio-util",
  "windows",
  "windows-registry",
+]
+
+[[package]]
+name = "tabit-wire"
+version = "0.41.0"
+dependencies = [
+ "process-wrap",
+ "serde_json",
+ "tabit-log",
+ "tabit-protocol",
+ "tokio",
+ "tokio-util",
+ "windows",
 ]
 
 [[package]]

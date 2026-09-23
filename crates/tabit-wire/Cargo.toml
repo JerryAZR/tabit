@@ -1,0 +1,46 @@
+[package]
+name = "tabit-wire"
+version.workspace = true
+edition.workspace = true
+license = "MIT"
+description = "The frozen wire's client role and the child-process substrate: spawn a tabit-core child, speak the frontend protocol to it."
+
+[lints]
+workspace = true
+
+[lib]
+name = "tabit_wire"
+path = "src/lib.rs"
+doctest = true
+
+[dependencies]
+process-wrap = { version = "10", default-features = false, features = [
+    "tokio1",
+    "creation-flags",
+    "job-object",
+    "kill-on-drop",
+    "process-group",
+] }
+serde_json = { workspace = true }
+tabit-log = { path = "../tabit-log", version = "0.41.0" }
+tabit-protocol = { path = "../tabit-protocol", version = "0.41.0" }
+tokio = { workspace = true, features = [
+    "io-util",
+    "macros",
+    "process",
+    "rt",
+    "sync",
+    "time",
+] }
+tokio-util = { version = "0.7", default-features = false }
+
+# The CreationFlags shim's type — version-matched to process-wrap's own
+# windows dependency so they are the same type. Target-gated (carried
+# from tabit-ext, where this substrate lived first).
+[target.'cfg(windows)'.dependencies]
+windows = { version = "0.62.2", default-features = false, features = [
+    "Win32_System_Threading",
+] }
+
+[dev-dependencies]
+tokio = { workspace = true, features = ["rt-multi-thread", "macros", "time"] }

@@ -1,70 +1,46 @@
 //! The subprocess bridge: the second execution substrate's parent
-//! half (ROADMAP item 5 — a first-class substrate, not a fallback).
+//! half (ROADMAP item 5 — a first-class substrate, not a fallback),
+//! now the session-side adapter over the shared frontend-role client
+//! ([`tabit_wire::client`] — the extraction the SDK round builds on).
 //!
 //! A subprocess child is the tabit binary itself in `--json` child
-//! role (`--parent`, `--tools`, `--ephemeral`/`--session`), spawned
-//! with the child's cwd as the **process** cwd — the OS enforces the
-//! scope every tool, extension, and path resolves against, instead of
-//! a convention each tool author must follow. The bridge acts as the
-//! child's frontend over the frozen stdio edge:
+//! role, spawned with the child's cwd as the **process** cwd. The
+//! shared client owns the wire (handshake, pump, reaper); this
+//! adapter owns the session machinery hung on its seams:
 //!
-//! - **forward, don't re-stamp**: the child's stamped frames already
-//!   carry the child's session id as their stream stamp; they cross
-//!   to the real frontend as-is. The child's backend-level frames
-//!   (the handshake, its catalog, its unstamped errors) are consumed
-//!   here — they would collide with the parent's connection-level
-//!   fold.
-//! - **learning** (the Ethernet-switch model): every forwarded frame
-//!   teaches the router which child subtree owns its stamp, so a
-//!   command addressed to a grandchild walks hop by hop — see
-//!   [`crate::routing`].
+//! - **forward, don't re-stamp**: the pump's tap forwards every
+//!   stamped frame to the real frontend as-is (the child's stamps are
+//!   already its session ids) and **learns** — the Ethernet-switch
+//!   model — which child subtree owns the id, so a command addressed
+//!   to a grandchild walks hop by hop (see [`crate::routing`]). The
+//!   child's backend-level frames (the handshake, its catalog, its
+//!   unstamped errors) are consumed in the client — they would
+//!   collide with the parent's connection-level fold.
+//! - **registration**: spawn registers the router's delivery lane;
+//!   the exit tap unregisters (the reaper's cleanup).
+//! - **the drive fold**: one task to a terminal under the abort
+//!   leash, mapped to the session's [`RunSummary`].
 //! - **abort is a courtesy with a deadline** (owner ruling 2026-09):
 //!   on the leash's cancel the bridge forwards `abort`, closes stdin
 //!   (the death contract — the child aborts, flushes, and exits on
 //!   its own), and returns `Aborted` immediately; a reaper bounds the
-//!   child's exit with the tree kill (the Job Object / process group
-//!   takes the child's bash descendants with it). The graceful path
-//!   buys the write-behind flush for persisted children; it never
-//!   buys the parent's latency.
+//!   child's exit with the tree kill. The graceful path buys the
+//!   write-behind flush for persisted children; it never buys the
+//!   parent's latency.
 
 use crate::subagent::SpawnContext;
 use rig_agent::completion::Message;
-use std::collections::VecDeque;
-use std::path::PathBuf;
-use std::sync::{Arc, Mutex};
-use tabit_ext::process::{
-    HANDSHAKE_TIMEOUT, crash_tail, reap_with_grace, spawn_command_writer, spawn_stderr_ring,
-    wrap_command,
-};
-use tabit_protocol::{
-    ClientFrame, EventFrame, ModelSelection, PROTOCOL_VERSION, ServerFrame, SessionCommand,
-    SessionEvent, StreamId,
-};
-use tokio::io::{AsyncBufReadExt, BufReader};
+use std::sync::Arc;
+use tabit_protocol::{ModelSelection, SessionCommand, SessionEvent};
+use tabit_wire::client::ChildSpec;
 use tokio_util::sync::CancellationToken;
 
 /// Shapes one subprocess child before the spawn: the child-role flags
-/// as builder knobs. Everything omitted inherits the default
-/// (ephemeral, the parent's cwd).
+/// as builder knobs over the shared [`ChildSpec`]. Everything omitted
+/// inherits the default (ephemeral, the parent's cwd).
 pub struct SubprocessBuilder {
-    exe: PathBuf,
-    parent_id: String,
-    parent_call: Option<String>,
-    cwd: PathBuf,
-    model: Option<ModelSelection>,
-    tools: Option<Vec<String>>,
-    without: Option<Vec<String>>,
-    ephemeral: bool,
-    session: Option<PathBuf>,
-    extensions: Option<PathBuf>,
-    max_turns: Option<usize>,
-    /// The child's preamble — replaces the default base text
-    /// (identity + standing body) while the environment block,
-    /// AGENTS.md files, and skills catalog append as usual. The
-    /// child's preamble belongs to its spawner (ruled 2026-09).
-    preamble: Option<String>,
+    spec: ChildSpec,
     router: Arc<crate::routing::ChildRouter>,
-    notice: Option<crate::notice::NoticeSink>,
 }
 
 impl SubprocessBuilder {
@@ -72,35 +48,37 @@ impl SubprocessBuilder {
     /// the shared router, and the weak frontend handle all come from
     /// the assembly's parts.
     pub fn new(ctx: &SpawnContext) -> Self {
+        let parts = ctx.parts();
+        // The pump-order tap: forward stamped frames to the real
+        // frontend and teach the router the stamp's subtree.
+        let tap_router = parts.router.clone();
+        let notice = ctx.notice();
+        let spec = ChildSpec::new(parts.exe.clone(), ctx.parent_cwd().to_path_buf())
+            .parent(ctx.parent_id().to_string())
+            .extensions(parts.extensions.clone())
+            .on_stamped_frame(Arc::new(move |child, frame| {
+                if let (Some(notice), Some(stream)) = (&notice, &frame.stream) {
+                    tap_router.learn(stream.as_str(), child);
+                    notice.forward(frame.clone());
+                }
+            }));
         Self {
-            exe: ctx.parts().exe.clone(),
-            parent_id: ctx.parent_id().to_string(),
-            parent_call: None,
-            cwd: ctx.parent_cwd().to_path_buf(),
-            model: None,
-            tools: None,
-            without: None,
-            ephemeral: true,
-            session: None,
-            extensions: Some(ctx.parts().extensions.clone()),
-            max_turns: None,
-            preamble: None,
-            router: ctx.parts().router.clone(),
-            notice: ctx.notice(),
+            spec,
+            router: parts.router.clone(),
         }
     }
 
     /// The child's working directory — the process cwd; every tool
     /// and path inside resolves against it by OS fact.
-    pub fn cwd(mut self, cwd: PathBuf) -> Self {
-        self.cwd = cwd;
+    pub fn cwd(mut self, cwd: std::path::PathBuf) -> Self {
+        self.spec = self.spec.cwd(cwd);
         self
     }
 
     /// The child's model selection (`provider/model` crosses as the
     /// `--model` ref; the thinking level is the child config's).
     pub fn model(mut self, selection: ModelSelection) -> Self {
-        self.model = Some(selection);
+        self.spec = self.spec.model(selection);
         self
     }
 
@@ -109,7 +87,7 @@ impl SubprocessBuilder {
     /// by omission); an unknown name fails the child loudly at
     /// startup.
     pub fn tools(mut self, names: Vec<String>) -> Self {
-        self.tools = Some(names);
+        self.spec = self.spec.tools(names);
         self
     }
 
@@ -117,10 +95,9 @@ impl SubprocessBuilder {
     /// [`SubprocessBuilder::tools`], crossing as `--without`. Applied
     /// child-side over the full toolset (core and extension proxies
     /// alike): a spawner offering a read-write agent denies its own
-    /// delegate tool, so the child cannot recurse through it. An
-    /// unknown name fails the child loudly at startup.
+    /// delegate tool, so the child cannot recurse through it.
     pub fn without(mut self, names: Vec<String>) -> Self {
-        self.without = Some(names);
+        self.spec = self.spec.without(names);
         self
     }
 
@@ -128,13 +105,19 @@ impl SubprocessBuilder {
     /// cwd, resumable through `open_session` like any other. The
     /// default (and this flag's opposite) is ephemeral.
     pub fn ephemeral(mut self, ephemeral: bool) -> Self {
-        self.ephemeral = ephemeral;
+        self.spec = self.spec.ephemeral(ephemeral);
+        self
+    }
+
+    /// Resume the stored session at `path` instead of starting fresh.
+    pub fn session(mut self, path: std::path::PathBuf) -> Self {
+        self.spec = self.spec.session(path);
         self
     }
 
     /// The per-child model-call budget.
     pub fn max_turns(mut self, max_turns: usize) -> Self {
-        self.max_turns = Some(max_turns);
+        self.spec = self.spec.max_turns(max_turns);
         self
     }
 
@@ -145,7 +128,7 @@ impl SubprocessBuilder {
     /// truthful context. Absent, the child builds its own default
     /// preamble in its cwd.
     pub fn preamble(mut self, text: String) -> Self {
-        self.preamble = Some(text);
+        self.spec = self.spec.preamble(text);
         self
     }
 
@@ -155,7 +138,7 @@ impl SubprocessBuilder {
     /// under concurrent subagent calls). Absent for spawners outside
     /// a model turn.
     pub fn parent_call(mut self, id: String) -> Self {
-        self.parent_call = Some(id);
+        self.spec = self.spec.parent_call(id);
         self
     }
 
@@ -163,240 +146,39 @@ impl SubprocessBuilder {
     /// display strings — the caller (a tool body) turns them into its
     /// failure report.
     pub async fn spawn(self) -> Result<SubprocessChild, String> {
-        let Self {
-            exe,
-            parent_id,
-            parent_call,
-            cwd,
-            model,
-            tools,
-            without,
-            ephemeral,
-            session,
-            extensions,
-            max_turns,
-            preamble,
-            router,
-            notice,
-        } = self;
-
-        let mut args: Vec<String> = vec![
-            "--json".to_string(),
-            "--parent".to_string(),
-            parent_id.clone(),
-        ];
-        if let Some(id) = &parent_call {
-            args.push("--parent-call".to_string());
-            args.push(id.clone());
-        }
-        if let Some(selection) = &model {
-            args.push("--model".to_string());
-            args.push(format!("{}/{}", selection.provider, selection.model));
-        }
-        if let Some(max_turns) = max_turns {
-            args.push("--max-turns".to_string());
-            args.push(max_turns.to_string());
-        }
-        if let Some(tools) = &tools {
-            args.push("--tools".to_string());
-            args.push(tools.join(","));
-        }
-        if let Some(without) = &without {
-            args.push("--without".to_string());
-            args.push(without.join(","));
-        }
-        if let Some(text) = &preamble {
-            args.push("--preamble".to_string());
-            args.push(text.clone());
-        }
-        if let Some(path) = &extensions {
-            args.push("--extensions".to_string());
-            args.push(path.display().to_string());
-        }
-        if let Some(path) = &session {
-            args.push("--session".to_string());
-            args.push(path.display().to_string());
-        } else if ephemeral {
-            args.push("--ephemeral".to_string());
-        }
-
-        let mut process = wrap_command(&exe, &args, &cwd).spawn().map_err(|error| {
-            format!(
-                "cannot spawn the subagent process `{}`: {error}",
-                exe.display()
-            )
-        })?;
-        let stdin = process
-            .stdin()
-            .take()
-            .ok_or("the subagent process opened no stdin")?;
-        let stdout = process
-            .stdout()
-            .take()
-            .ok_or("the subagent process opened no stdout")?;
-        let stderr = process
-            .stderr()
-            .take()
-            .ok_or("the subagent process opened no stderr")?;
-
-        // The closing token: the child's shutdown signal, shared by the
-        // stdin writer (the pipe drop) and the reaper (the grace
-        // timer). Cancelling it IS the close.
-        let closing = CancellationToken::new();
-
-        // The command writer: lines in, stdin out — the shared pipe
-        // contract (`tabit_ext::process`): the closing token IS the
-        // stdin close (the drive holds a sender clone, so dropping
-        // senders cannot be the mechanism); on close, everything
-        // already queued (the abort line crossed first) is written,
-        // then the pipe drops — EOF, the child's death contract.
-        let (command_tx, command_rx) = tokio::sync::mpsc::unbounded_channel::<String>();
-        spawn_command_writer(stdin, command_rx, closing.clone());
-
-        // The stderr ring — the crash report's tail.
-        let ring = spawn_stderr_ring(stderr);
-
-        // The frame pump: handshake frames consumed here, stamped
-        // frames forwarded as-is and learned, everything mirrored to
-        // the drive channel.
-        let (frame_tx, frame_rx) = tokio::sync::mpsc::unbounded_channel::<EventFrame>();
-        let (handshake_tx, handshake_rx) = tokio::sync::oneshot::channel::<Handshake>();
-        let pump_router = router.clone();
-        let pump_notice = notice;
-        tokio::spawn(async move {
-            let mut lines = BufReader::new(stdout).lines();
-            let mut child_id: Option<String> = None;
-            let mut handshake_tx = Some(handshake_tx);
-            while let Ok(Some(line)) = lines.next_line().await {
-                let Ok(frame) = serde_json::from_str::<ServerFrame>(&line) else {
-                    continue;
-                };
-                match frame {
-                    ServerFrame::Control(control) => {
-                        if let Some(tx) = handshake_tx.take() {
-                            let outcome = match &control {
-                                tabit_protocol::ServerControlFrame::InitializeAck {
-                                    session_id,
-                                    ..
-                                } => {
-                                    child_id = Some(session_id.clone());
-                                    Handshake::Acked(session_id.clone())
-                                }
-                                tabit_protocol::ServerControlFrame::InitializeRejected {
-                                    reason,
-                                } => Handshake::Rejected(reason.clone()),
-                                tabit_protocol::ServerControlFrame::ProtocolError { message } => {
-                                    Handshake::Rejected(message.clone())
-                                }
-                            };
-                            let _ = tx.send(outcome);
-                        }
-                        // Post-handshake control frames from a child
-                        // (its protocol errors) are its own diagnostics
-                        // — logged, never forwarded.
-                    }
-                    ServerFrame::Event(frame) => {
-                        // Forward as-is (the child's stamps are already
-                        // its session ids) and learn: a frame's stamp
-                        // teaches which subtree owns the id.
-                        if let (Some(notice), Some(id)) = (&pump_notice, &child_id)
-                            && let Some(stream) = &frame.stream
-                        {
-                            pump_router.learn(stream.as_str(), id);
-                            notice.forward(frame.clone());
-                        }
-                        let _ = frame_tx.send(frame);
-                    }
-                }
-            }
-        });
-
-        // Send the handshake and await the child's answer, bounded.
-        let _ = command_tx.send(tabit_protocol::to_wire_line(&ClientFrame::Initialize {
-            protocol_version: PROTOCOL_VERSION,
-            replay: false,
+        let router = self.router.clone();
+        let spec = self.spec.on_exit(Arc::new(move |child| {
+            router.unregister(child);
         }));
-        let handshake = tokio::select! {
-            outcome = handshake_rx => {
-                outcome.map_err(|_| "the subagent process closed before the handshake".to_string())?
-            }
-            _ = tokio::time::sleep(HANDSHAKE_TIMEOUT) => {
-                tabit_ext::process::kill_now(&mut process, &closing).await;
-                return Err("the subagent process did not answer the handshake".to_string());
-            }
+        let handle = spec.spawn().await?;
+        let child = SubprocessChild {
+            handle,
+            router: self.router,
         };
-        let child_id = match handshake {
-            Handshake::Acked(id) => id,
-            Handshake::Rejected(reason) => {
-                tabit_ext::process::kill_now(&mut process, &closing).await;
-                return Err(format!(
-                    "the subagent process rejected the handshake: {reason}"
-                ));
-            }
-        };
-
-        // Registration: routing's Process entry, and the reaper that
-        // bounds the child's lifetime (Drop of this struct closes it).
-        let closing_for_reaper = closing.clone();
-        let reaper_router = router.clone();
-        let reaper_id = child_id.clone();
-        let exit = Arc::new(Mutex::new(None::<String>));
-        let exit_for_reaper = exit.clone();
-        let join = tokio::spawn(async move {
-            let status = tokio::select! {
-                status = process.wait() => Some(status),
-                _ = closing_for_reaper.cancelled() => None,
-            };
-            // A natural exit reaps itself; the close path gets the
-            // shared grace-then-tree-kill (`reap_with_grace`).
-            let status: Option<std::process::ExitStatus> = match status {
-                Some(result) => result.ok(),
-                None => reap_with_grace(&mut process).await,
-            };
-            if let Some(status) = status {
-                *crate::lock::lock(&exit_for_reaper) =
-                    Some(format!("exit code {}", status.code().unwrap_or(-1)));
-            }
-            reaper_router.unregister(&reaper_id);
-        });
-        router.register(&child_id, command_tx.clone());
-
-        Ok(SubprocessChild {
-            id: child_id.clone(),
-            stream: StreamId::new(child_id),
-            commands: command_tx,
-            frames: frame_rx,
-            closing,
-            reaper: join,
-            exit,
-            stderr_ring: ring,
-        })
+        child.register();
+        Ok(child)
     }
 }
 
-/// What the child answered at the handshake.
-enum Handshake {
-    Acked(String),
-    Rejected(String),
-}
-
-/// One live subprocess child: the drive surface. Dropping it closes
-/// the child (stdin EOF, bounded by the reaper's tree kill).
+/// One live subprocess child: the drive surface over the shared
+/// handle. Dropping it closes the child (stdin EOF, bounded by the
+/// reaper's tree kill).
 pub struct SubprocessChild {
-    id: String,
-    stream: StreamId,
-    commands: tokio::sync::mpsc::UnboundedSender<String>,
-    frames: tokio::sync::mpsc::UnboundedReceiver<EventFrame>,
-    closing: CancellationToken,
-    reaper: tokio::task::JoinHandle<()>,
-    exit: Arc<Mutex<Option<String>>>,
-    stderr_ring: Arc<Mutex<VecDeque<String>>>,
+    handle: tabit_wire::client::ChildHandle,
+    router: Arc<crate::routing::ChildRouter>,
 }
 
 impl SubprocessChild {
+    /// Register the router's delivery lane (the spawn's second half —
+    /// the exit tap above is the first).
+    fn register(&self) {
+        self.router
+            .register(self.handle.id(), self.handle.commands());
+    }
+
     /// The child session's id — its stream stamp and routing address.
     pub fn id(&self) -> &str {
-        &self.id
+        self.handle.id()
     }
 
     /// Send the task and drive to the child's terminal under the
@@ -409,13 +191,13 @@ impl SubprocessChild {
         token: Option<CancellationToken>,
     ) -> crate::session::RunSummary {
         let text = message_text(&task);
-        let _ = self
-            .commands
-            .send(tabit_protocol::to_wire_line(&SessionCommand::Message {
-                session: self.id.clone(),
+        self.handle
+            .send_line(tabit_protocol::to_wire_line(&SessionCommand::Message {
+                session: self.handle.id().to_string(),
                 text,
             }));
 
+        let stream = self.handle.stream().clone();
         let mut events: Vec<SessionEvent> = Vec::new();
         // The synthetic terminal's bracket: the child's run began when
         // this drive did.
@@ -434,24 +216,24 @@ impl SubprocessChild {
                     // flushes, exits — or the reaper kills the tree at
                     // the grace), and report Aborted now. The parent's
                     // tool body never waits on the child's cooperation.
-                    let _ = self.commands.send(tabit_protocol::to_wire_line(
-                        &SessionCommand::Abort { session: self.id.clone() },
+                    self.handle.send_line(tabit_protocol::to_wire_line(
+                        &SessionCommand::Abort { session: self.handle.id().to_string() },
                     ));
-                    self.close();
+                    self.handle.close();
                     return crate::session::RunSummary {
                         outcome: crate::session::RunOutcome::Aborted,
                         output: String::new(),
                         events,
                     };
                 }
-                frame = self.frames.recv() => {
+                frame = self.handle.frames().recv() => {
                     let Some(frame) = frame else {
                         // The stream ended without a terminal: the child
                         // process died. A synthetic RunFailed carries the
                         // exit status and the stderr tail — the same
                         // mapping the tool's Failed arm already keeps.
                         events.push(SessionEvent::RunFailed {
-                            message: self.crash_report(),
+                            message: self.handle.crash_report(),
                             kind: tabit_protocol::RunFailedKind::ENGINE.to_string(),
                             started_at_ms,
                             completed_at_ms: crate::ids::now_unix_ms(),
@@ -462,7 +244,7 @@ impl SubprocessChild {
                             events,
                         };
                     };
-                    if frame.stream.as_ref() != Some(&self.stream) {
+                    if frame.stream.as_ref() != Some(&stream) {
                         continue; // A grandchild's frame — already forwarded.
                     }
                     let event = frame.event;
@@ -480,7 +262,7 @@ impl SubprocessChild {
                     };
                     events.push(event);
                     if let Some((outcome, output)) = terminal {
-                        self.close();
+                        self.handle.close();
                         return crate::session::RunSummary {
                             outcome,
                             output,
@@ -492,41 +274,10 @@ impl SubprocessChild {
         }
     }
 
-    /// Begin the child's shutdown (idempotent): stdin closes, the
-    /// reaper's grace timer arms.
-    fn close(&self) {
-        self.closing.cancel();
-    }
-
-    /// The crash report: the exit status and the stderr tail.
-    fn crash_report(&self) -> String {
-        let exit = crate::lock::lock(&self.exit)
-            .clone()
-            .unwrap_or_else(|| "no exit recorded".to_string());
-        let tail = crash_tail(&self.stderr_ring);
-        if tail.is_empty() {
-            format!("the subagent process died unexpectedly ({exit})")
-        } else {
-            format!(
-                "the subagent process died unexpectedly ({exit}); stderr tail:\n{}",
-                tail
-            )
-        }
-    }
-
     /// Wait for the reaper to finish (tests and callers that want the
     /// process fully reclaimed).
     pub async fn wait_exit(&mut self) {
-        let _ = (&mut self.reaper).await;
-    }
-}
-
-impl Drop for SubprocessChild {
-    fn drop(&mut self) {
-        // The commands sender drops with the struct; the closing token
-        // arms the reaper either way. Nothing async here — the reaper
-        // owns the wait.
-        self.close();
+        self.handle.wait_exit().await;
     }
 }
 
