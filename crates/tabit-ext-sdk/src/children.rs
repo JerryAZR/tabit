@@ -99,9 +99,9 @@ type FrameHandler = Arc<dyn Fn(&Ctx, &EventFrame) + Send + Sync>;
 /// The per-child frame registry: kind-keyed specifics, one generic
 /// slot, and the single-owner ask slot.
 struct Registry {
-    /// The observation surface: the shared FrameRouter (one mechanism
+    /// The observation surface: the shared Router (one mechanism
     /// with the watch surface — the 2026-09 unification).
-    router: crate::FrameRouter,
+    router: tabit_wire::router::Router,
     /// The ask-answerers: the shipped forward-and-relay default
     /// yields to the first author registration (a custom beside the
     /// default would double-surface the card); author registrations
@@ -120,6 +120,7 @@ struct Registry {
 #[derive(Clone)]
 pub struct Child {
     id: Arc<String>,
+    shared: Arc<crate::Shared>,
     commands: std::sync::mpsc::Sender<ChildCmd>,
     registry: Arc<Registry>,
 }
@@ -158,9 +159,13 @@ impl Child {
             spec = spec.max_turns(max_turns);
         }
 
+        let ask_shared = ctx.shared_clone();
         let registry = Arc::new(Registry {
-            router: crate::FrameRouter::default(),
-            ask_answerers: Mutex::new(vec![Arc::new(forward_frame)]),
+            router: tabit_wire::router::Router::default(),
+            ask_answerers: Mutex::new(vec![Arc::new(move |ctx: &Ctx, frame: &EventFrame| {
+                let _ = emit(&ask_shared, frame);
+                let _ = ctx;
+            })]),
             ask_default: Mutex::new(true),
             commands: Mutex::new(None),
         });
@@ -169,8 +174,12 @@ impl Child {
         // an unanswered ask hangs a child, so asks surface by default)
         // is installed above and yields to the first author
         // registration.
+        let shared = ctx.shared_clone();
+        let forward_shared = shared.clone();
         if options.forwarding {
-            registry.router.set_generic(forward_frame);
+            registry.router.register_all("forward", move |frame| {
+                let _ = emit(&forward_shared, frame);
+            });
         }
 
         // The driver task owns the handle on the SDK's runtime: one
@@ -233,6 +242,7 @@ impl Child {
         *crate::sdk_lock(&registry.commands) = Some(cmd_tx.clone());
         Ok(Child {
             id: Arc::new(id),
+            shared,
             commands: cmd_tx,
             registry,
         })
@@ -250,7 +260,8 @@ impl Child {
     where
         F: Fn(&Ctx, &SessionEvent) + Send + Sync + 'static,
     {
-        self.registry.on(kind, body)
+        let owner = (*self.id).clone();
+        self.registry.on(kind, &owner, &self.shared, body)
     }
 
     /// Register an ask-answerer for the child. The first
@@ -304,18 +315,33 @@ impl Child {
 impl Registry {
     /// The observation registration (many per kind; the ask kind is
     /// refused here — it owes an answer).
-    fn on<F>(&self, kind: &str, body: F) -> Result<(), String>
+    fn on<F>(
+        &self,
+        kind: &str,
+        owner: &str,
+        shared: &Arc<crate::Shared>,
+        body: F,
+    ) -> Result<(), String>
     where
         F: Fn(&Ctx, &SessionEvent) + Send + Sync + 'static,
     {
         if kind == tags::INTERACTION_REQUEST {
             return Err(
-                "interaction_request owes an answer — register with `on_ask` (its single owner slot)"
+                "interaction_request owes an answer — register with `on_ask` (its answerer list)"
                     .to_string(),
             );
         }
-        self.router
-            .register(kind, move |ctx, frame| body(ctx, &frame.event));
+        let shared = shared.clone();
+        let body = std::sync::Arc::new(body);
+        let owner = owner.to_string();
+        self.router.register(kind, &owner, move |frame| {
+            let event = frame.event.clone();
+            let (shared, body) = (shared.clone(), body.clone());
+            std::thread::spawn(move || {
+                let ctx = Ctx::watch_context(shared);
+                crate::catch_unwind_silently(move || body(&ctx, &event));
+            });
+        });
         Ok(())
     }
 
@@ -382,7 +408,7 @@ fn dispatch_frame(ctx: &Ctx, registry_arc: &Arc<Registry>, frame: EventFrame) {
         }
         return;
     }
-    registry.router.dispatch(&shared, &frame);
+    registry.router.dispatch(&frame);
 }
 
 fn spawn_handler(shared: std::sync::Arc<Shared>, body: impl FnOnce(Ctx) + Send + 'static) {
@@ -390,15 +416,6 @@ fn spawn_handler(shared: std::sync::Arc<Shared>, body: impl FnOnce(Ctx) + Send +
         let ctx = Ctx::watch_context(shared);
         crate::catch_unwind_silently(move || body(ctx));
     });
-}
-
-/// The shipped forward callback (the generic slot and the ask
-/// default): the frame crosses verbatim (stream preserved; the host
-/// re-stamps the origin, naming this extension as the conduit). The
-/// ask install site differs only in what the dispatcher registers
-/// alongside it — the id relay that carries routed answers home.
-fn forward_frame(ctx: &Ctx, frame: &EventFrame) {
-    let _ = emit(&ctx.shared_clone(), frame);
 }
 
 /// The SDK's one runtime for owned children (multi-thread; the
@@ -421,21 +438,26 @@ mod tests {
 
     fn registry() -> Registry {
         Registry {
-            router: crate::FrameRouter::default(),
+            router: tabit_wire::router::Router::default(),
             ask_answerers: Mutex::new(Vec::new()),
             ask_default: Mutex::new(true),
             commands: Mutex::new(None),
         }
     }
 
+    fn shared() -> std::sync::Arc<crate::Shared> {
+        crate::tests::shared()
+    }
+
     #[test]
     fn observation_kinds_compose_many_subscribers() {
         let registry = registry();
+        let shared = shared();
         registry
-            .on(tags::RUN_FINISHED, |_ctx, _event| {})
+            .on(tags::RUN_FINISHED, "test", &shared, |_ctx, _event| {})
             .expect("the first registers");
         registry
-            .on(tags::RUN_FINISHED, |_ctx, _event| {})
+            .on(tags::RUN_FINISHED, "test", &shared, |_ctx, _event| {})
             .expect("and so does the second — observation composes");
         // Two registrations of one kind compose — the router's law;
         // both succeeded, which is it.
@@ -446,7 +468,12 @@ mod tests {
         let registry = registry();
         assert!(
             registry
-                .on(tags::INTERACTION_REQUEST, |_ctx, _event| {})
+                .on(
+                    tags::INTERACTION_REQUEST,
+                    "test",
+                    &shared(),
+                    |_ctx, _event| {}
+                )
                 .is_err()
         );
     }

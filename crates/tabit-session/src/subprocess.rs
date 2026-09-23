@@ -12,7 +12,7 @@
 //!   stamped frame to the real frontend as-is (the child's stamps are
 //!   already its session ids) and **learns** — the Ethernet-switch
 //!   model — which child subtree owns the id, so a command addressed
-//!   to a grandchild walks hop by hop (see [`crate::routing`]). The
+//!   to a grandchild walks hop by hop (see [`tabit_wire::routing`]). The
 //!   child's backend-level frames (the handshake, its catalog, its
 //!   unstamped errors) are consumed in the client — they would
 //!   collide with the parent's connection-level fold.
@@ -41,7 +41,7 @@ use tokio_util::sync::CancellationToken;
 /// inherits the default (ephemeral, the parent's cwd).
 pub struct SubprocessBuilder {
     spec: ChildSpec,
-    router: Arc<crate::routing::ChildRouter>,
+    router: Arc<tabit_wire::routing::ChildRouter>,
 }
 
 impl SubprocessBuilder {
@@ -50,17 +50,33 @@ impl SubprocessBuilder {
     /// the assembly's parts.
     pub fn new(ctx: &SpawnContext) -> Self {
         let parts = ctx.parts();
-        // The pump-order tap: forward stamped frames to the real
-        // frontend and teach the router the stamp's subtree.
+        // The pump-order policy rides the shared Router (one
+        // mechanism with every node): the upstream relay is a
+        // wildcard subscriber (forward-don't-re-stamp, to the real
+        // frontend); the learning table is taught by the tap wrapper,
+        // which is where the speaking child's id lives (the
+        // descendant is the frame's stamp, the child is the tap's
+        // per-frame parameter — a Router callback sees only the
+        // frame).
+        let router = std::sync::Arc::new(tabit_wire::router::Router::default());
         let tap_router = parts.router.clone();
-        let notice = ctx.notice();
+        if let Some(notice) = ctx.notice() {
+            router.register_all("relay", move |frame: &tabit_protocol::EventFrame| {
+                if frame.stream.is_some() {
+                    notice.forward(frame.clone());
+                }
+            });
+        }
         let spec = ChildSpec::new(parts.exe.clone(), ctx.parent_cwd().to_path_buf())
             .parent(ctx.parent_id().to_string())
             .extensions(parts.extensions.clone())
-            .on_stamped_frame(Arc::new(move |child, frame| {
-                if let (Some(notice), Some(stream)) = (&notice, &frame.stream) {
-                    tap_router.learn(stream.as_str(), child);
-                    notice.forward(frame.clone());
+            .on_stamped_frame(Arc::new({
+                let router = router.clone();
+                move |child: &str, frame: &tabit_protocol::EventFrame| {
+                    if let Some(stream) = &frame.stream {
+                        tap_router.learn(stream.as_str(), child);
+                    }
+                    router.dispatch(frame);
                 }
             }));
         Self {
@@ -166,7 +182,7 @@ impl SubprocessBuilder {
 /// reaper's tree kill).
 pub struct SubprocessChild {
     handle: tabit_wire::client::ChildHandle,
-    router: Arc<crate::routing::ChildRouter>,
+    router: Arc<tabit_wire::routing::ChildRouter>,
 }
 
 impl SubprocessChild {

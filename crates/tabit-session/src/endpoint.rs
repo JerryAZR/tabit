@@ -92,7 +92,7 @@ pub type OpenSessionSource =
 
 /// Everything the host needs beyond the boot session: the store (the
 /// startup catalog), the two session builders, the child router
-/// (routing's second table — see [`crate::routing`]), and the boot
+/// (routing's second table — see [`tabit_wire::routing`]), and the boot
 /// announcement's `parent` (a `--parent` child process names its
 /// spawner; `None` for every user-facing host).
 pub struct SessionHostWiring {
@@ -105,7 +105,7 @@ pub struct SessionHostWiring {
     /// The child registry: session addresses the workers don't own
     /// resolve here (route-all — the router delivers, the target
     /// consumes).
-    pub children: Arc<crate::routing::ChildRouter>,
+    pub children: Arc<tabit_wire::routing::ChildRouter>,
     /// The `parent` field on the boot session's announcement — the
     /// child-role flag speaking at the source of truth.
     pub boot_parent: Option<String>,

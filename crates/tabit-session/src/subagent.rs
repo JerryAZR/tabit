@@ -12,7 +12,7 @@
 //! scope every tool, extension, and path inside resolves against.
 //! Everything a session command does works on a child structurally:
 //! the child is a full session host, routing
-//! ([`crate::routing`]) forwards wire lines to it, and there is no
+//! ([`tabit_wire::routing`]) forwards wire lines to it, and there is no
 //! child-specific consumption code anywhere by design.
 //!
 //! The framework's surface is exactly the parent-half machinery a
@@ -38,7 +38,7 @@ pub struct SubagentParts {
     /// The child registry the host routes through — spawns register
     /// here, routing's second table reads here (one table per
     /// process; the assembly shares it with the host wiring).
-    pub router: Arc<crate::routing::ChildRouter>,
+    pub router: Arc<tabit_wire::routing::ChildRouter>,
     /// The tabit executable subprocess children spawn (`--json` child
     /// role). The assembly resolves it to the current executable, no
     /// exceptions (the pi self-spawn pattern) — children are this very

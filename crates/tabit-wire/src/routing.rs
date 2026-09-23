@@ -32,9 +32,9 @@
 //! 2026-09, after the codex/opencode survey: both kill foreground
 //! only; nobody walks a registry).
 
-use crate::lock::lock;
 use std::collections::HashMap;
 use std::sync::{Arc, Mutex};
+use tabit_log::lock::lock;
 use tabit_protocol::SessionCommand;
 
 #[cfg(test)]
@@ -78,11 +78,7 @@ impl ChildRouter {
 
     /// Register a child at spawn. Routing begins here: the child's
     /// own id resolves to itself.
-    pub(crate) fn register(
-        &self,
-        child_id: &str,
-        commands: tokio::sync::mpsc::UnboundedSender<String>,
-    ) {
+    pub fn register(&self, child_id: &str, commands: tokio::sync::mpsc::UnboundedSender<String>) {
         let mut state = lock(&self.state);
         state
             .children
@@ -94,7 +90,7 @@ impl ChildRouter {
 
     /// Learn a routable id: `descendant` emitted through `child`'s
     /// subtree (the bridge's snoop at its forwarding site). Idempotent.
-    pub(crate) fn learn(&self, descendant: &str, child: &str) {
+    pub fn learn(&self, descendant: &str, child: &str) {
         lock(&self.state)
             .routes
             .insert(descendant.to_string(), child.to_string());
@@ -102,7 +98,7 @@ impl ChildRouter {
 
     /// Unregister a child and everything learned through it (the
     /// process exit's cleanup).
-    pub(crate) fn unregister(&self, child_id: &str) {
+    pub fn unregister(&self, child_id: &str) {
         let mut state = lock(&self.state);
         state.children.remove(child_id);
         state.routes.retain(|_, owner| owner != child_id);
@@ -112,7 +108,7 @@ impl ChildRouter {
     /// whether a child took it — `false` means no such session
     /// anywhere, and the host's unknown-session error follows.
     /// Forwarding is all the router does; the child's host consumes.
-    pub(crate) fn deliver(&self, session: &str, command: SessionCommand) -> bool {
+    pub fn deliver(&self, session: &str, command: SessionCommand) -> bool {
         let owner = lock(&self.state).routes.get(session).cloned();
         let Some(owner) = owner else {
             return false;

@@ -77,7 +77,6 @@ mod parser;
 mod prompt;
 mod registry;
 pub(crate) mod replay;
-mod routing;
 pub mod services;
 mod session;
 pub mod skills;
@@ -111,7 +110,6 @@ pub use notice::NoticeSink;
 pub use parser::Parsed;
 pub use prompt::{build_system_prompt, build_system_prompt_with_base};
 pub use registry::ModelRegistry;
-pub use routing::ChildRouter;
 pub use session::{
     AbortHandle, DEFAULT_MAX_TURNS, MailboxHandle, RewindSummary, RunOutcome, RunSummary, Session,
     SessionBuilder, TOOL_CONCURRENCY,
@@ -122,6 +120,7 @@ pub use tabit_protocol::{
     ClientFrame, EventFrame, ModelSelection, PROTOCOL_VERSION, ServerControlFrame, ServerFrame,
     SessionCommand, SessionEvent, StreamId,
 };
+pub use tabit_wire::routing::ChildRouter;
 pub use tree::{SessionTree, TreeFault};
 pub use writer::{SessionWriter, SharedBuffer, WriteBuffer};
 

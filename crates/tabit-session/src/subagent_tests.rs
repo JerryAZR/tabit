@@ -150,7 +150,7 @@ async fn a_missing_executable_fails_the_spawn_with_the_exe_named() {
     // The bridge's spawn error carries the executable path — the
     // operator's first question is which binary failed to start.
     let parts = std::sync::Arc::new(super::SubagentParts {
-        router: std::sync::Arc::new(crate::routing::ChildRouter::default()),
+        router: std::sync::Arc::new(tabit_wire::routing::ChildRouter::default()),
         exe: std::path::PathBuf::from("Z:/does-not-exist/tabit-child.exe"),
         tools: Vec::new(),
         max_turns: 4,

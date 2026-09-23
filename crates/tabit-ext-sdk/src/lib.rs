@@ -470,91 +470,6 @@ struct Shared {
     core_path: Mutex<Option<String>>,
 }
 
-/// One frame handler: the frame, not the bare event — forwarding and
-/// answering both need the stream stamp.
-pub(crate) type FrameHandler = std::sync::Arc<dyn Fn(&Ctx, &EventFrame) + Send + Sync>;
-
-/// THE frame router: a frame arrives, the interested handlers run —
-/// one map probe per kind, a generic slot for kinds without
-/// specifics, every handler on its own thread, panics reported
-/// never fatal. Both SDK surfaces instantiate it (the host-facing
-/// watch dispatch and each owned child's registry): same concern,
-/// one mechanism — the 2026-09 unification.
-pub(crate) struct FrameRouter {
-    handlers: Mutex<std::collections::HashMap<String, Vec<FrameHandler>>>,
-    generic: Mutex<Option<FrameHandler>>,
-}
-
-impl Default for FrameRouter {
-    fn default() -> Self {
-        Self {
-            handlers: Mutex::new(std::collections::HashMap::new()),
-            generic: Mutex::new(None),
-        }
-    }
-}
-
-impl FrameRouter {
-    /// Register one observer of one kind. Observation composes: many
-    /// subscribers per kind, plus the generic slot when installed.
-    pub(crate) fn register<F>(&self, kind: &str, body: F)
-    where
-        F: Fn(&Ctx, &EventFrame) + Send + Sync + 'static,
-    {
-        self.handlers
-            .lock()
-            .unwrap_or_else(|poison| poison.into_inner())
-            .entry(kind.to_string())
-            .or_default()
-            .push(std::sync::Arc::new(body));
-    }
-
-    /// Install the generic slot (kinds without specifics fall to it).
-    pub(crate) fn set_generic<F>(&self, body: F)
-    where
-        F: Fn(&Ctx, &EventFrame) + Send + Sync + 'static,
-    {
-        *self
-            .generic
-            .lock()
-            .unwrap_or_else(|poison| poison.into_inner()) = Some(std::sync::Arc::new(body));
-    }
-
-    /// One frame through: the kind's specifics, else the generic —
-    /// every match on its own thread, the loop never waits.
-    pub(crate) fn dispatch(&self, shared: &Arc<Shared>, frame: &EventFrame) {
-        let kind = frame.event.tag();
-        let specifics = self
-            .handlers
-            .lock()
-            .unwrap_or_else(|poison| poison.into_inner())
-            .get(kind)
-            .cloned()
-            .unwrap_or_default();
-        if !specifics.is_empty() {
-            for handler in specifics {
-                spawn_frame_handler(shared.clone(), frame.clone(), handler);
-            }
-            return;
-        }
-        let generic = self
-            .generic
-            .lock()
-            .unwrap_or_else(|poison| poison.into_inner())
-            .clone();
-        if let Some(generic) = generic {
-            spawn_frame_handler(shared.clone(), frame.clone(), generic);
-        }
-    }
-}
-
-fn spawn_frame_handler(shared: Arc<Shared>, frame: EventFrame, handler: FrameHandler) {
-    std::thread::spawn(move || {
-        let ctx = Ctx::watch_context(shared);
-        catch_unwind_silently(move || handler(&ctx, &frame));
-    });
-}
-
 /// The dispatcher: answer the initialize, ack (the registration
 /// derived), then serve the pipe until EOF. Never returns on success
 /// (the pipe's end is the end); a malformed handshake or an
@@ -611,13 +526,24 @@ pub fn serve(extension: Extension) -> ! {
     };
     emit(&shared, &ack);
 
-    // The watch surface: one router over the registration (the
-    // handlers wrap the typed-event bodies the author wrote).
-    let router = Arc::new(FrameRouter::default());
+    // The watch surface: the shared router (one mechanism with every
+    // other node); each handler's callback owns its dispatch — a
+    // thread with a fresh watch context, panics reported never
+    // fatal.
+    let router = Arc::new(tabit_wire::router::Router::default());
     for watch in watches.iter() {
         let kind = watch.kind.clone();
         let body = watch.arc_body().clone();
-        router.register(&kind, move |ctx, frame| body(ctx, frame.event.clone()));
+        let watch_shared = shared.clone();
+        router.register(&kind, "watch", move |frame| {
+            let shared = watch_shared.clone();
+            let body = body.clone();
+            let event = frame.event.clone();
+            std::thread::spawn(move || {
+                let ctx = Ctx::watch_context(shared);
+                catch_unwind_silently(move || body(&ctx, event));
+            });
+        });
     }
 
     // The dispatch loop: every invocation (a tool call, a
@@ -636,7 +562,7 @@ fn dispatch_line(
     line: &str,
     tools: &Arc<Vec<ToolDef>>,
     consults: &Arc<Vec<ConsultDef>>,
-    router: &Arc<FrameRouter>,
+    router: &Arc<tabit_wire::router::Router>,
 ) {
     if let Ok(host) = serde_json::from_str::<HostFrame>(line) {
         match host {
@@ -677,9 +603,9 @@ fn dispatch_line(
         return;
     }
     if let Ok(frame) = serde_json::from_str::<EventFrame>(line) {
-        // A watched event, typed — through the router like every
-        // other frame the SDK dispatches.
-        router.dispatch(shared, &frame);
+        // A watched event, typed — through the shared router like
+        // every other frame this node dispatches.
+        router.dispatch(&frame);
         return;
     }
     if let Ok(SessionCommand::InteractionResponse { id, payload, .. }) =
@@ -898,7 +824,7 @@ pub(crate) fn sdk_lock<T: ?Sized>(mutex: &Mutex<T>) -> std::sync::MutexGuard<'_,
 mod tests {
     use super::*;
 
-    fn shared() -> Arc<Shared> {
+    pub(crate) fn shared() -> Arc<Shared> {
         Arc::new(Shared {
             stdout: std::sync::Mutex::new(()),
             asks: tabit_wire::asks::PendingAsks::default(),

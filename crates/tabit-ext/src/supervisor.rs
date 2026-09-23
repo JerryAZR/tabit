@@ -162,9 +162,6 @@ struct Lane {
     commands: tokio::sync::mpsc::UnboundedSender<String>,
     pending: tabit_wire::asks::PendingAsks<PendingCall>,
     next_call_id: AtomicU64,
-    /// The watched event kinds (the ack's subscription list) — written
-    /// once at the handshake, read by every broadcast.
-    watch: Mutex<std::collections::HashSet<String>>,
     /// Set at the pipe's end (EOF or garbage), before the pending
     /// drain — a call registering after death fails fast instead of
     /// awaiting a result that can never come.
@@ -178,19 +175,8 @@ impl Lane {
             commands,
             pending: tabit_wire::asks::PendingAsks::default(),
             next_call_id: AtomicU64::new(1),
-            watch: Mutex::new(std::collections::HashSet::new()),
             dead: AtomicBool::new(false),
         })
-    }
-
-    /// Record the ack's subscription list — the one write.
-    fn set_watch(&self, kinds: impl IntoIterator<Item = String>) {
-        tabit_log::lock::lock(&self.watch).extend(kinds);
-    }
-
-    /// Whether this lane wants frames of one event kind.
-    fn watches(&self, kind: &str) -> bool {
-        tabit_log::lock::lock(&self.watch).contains(kind)
     }
 
     /// The pipe's last act: answer every pending item — executions
@@ -414,6 +400,11 @@ impl ExtensionHandle {
 pub struct Supervisor {
     closing: CancellationToken,
     children: Vec<Supervised>,
+    /// The host node's event router (one mechanism with every node):
+    /// each alive lane subscribes its watched kinds at the ack (the
+    /// callback writes the wire line down its stdin); death retracts
+    /// the lane's every registration.
+    router: Arc<tabit_wire::router::Router>,
     /// The extension-asked questions' registry — the glue's id-first
     /// dispatch consults it before routing a response to the session
     /// host.
@@ -475,6 +466,8 @@ pub fn launch(
     let closing = CancellationToken::new();
     let (events_tx, events_rx) = tokio::sync::mpsc::unbounded_channel();
     let asks = Arc::new(BackendAsks::new(host.routes.clone()));
+    let launch_router_holder = Arc::new(tabit_wire::router::Router::default());
+    let supervise_router = launch_router_holder.clone();
     let mut children = Vec::new();
     for found in found {
         match found {
@@ -501,6 +494,7 @@ pub fn launch(
                     host.cwd.clone(),
                     host.routes.clone(),
                     asks.clone(),
+                    supervise_router.clone(),
                 ));
                 children.push(Supervised {
                     name,
@@ -544,6 +538,7 @@ pub fn launch(
             closing,
             children,
             asks,
+            router: launch_router_holder,
         },
         events_rx,
     )
@@ -558,6 +553,7 @@ impl Supervisor {
             closing: CancellationToken::new(),
             children: Vec::new(),
             asks: Arc::new(BackendAsks::new(GrammarRoutes::noop())),
+            router: Arc::new(tabit_wire::router::Router::default()),
         }
     }
 
@@ -574,18 +570,7 @@ impl Supervisor {
     /// contains the event's kind. Fire-and-forget — a dead or slow
     /// lane's writer drops the line, never blocks the pump.
     pub fn broadcast(&self, frame: &tabit_protocol::EventFrame) {
-        let Ok(value) = serde_json::to_value(frame) else {
-            return;
-        };
-        let Some(kind) = value.get("type").and_then(serde_json::Value::as_str) else {
-            return;
-        };
-        let line = tabit_protocol::to_wire_line(frame);
-        for child in &self.children {
-            if !child.lane.dead.load(Ordering::SeqCst) && child.lane.watches(kind) {
-                let _ = child.lane.commands.send(line.clone());
-            }
-        }
+        self.router.dispatch(frame);
     }
 
     /// The standing of every extension, resolved so far and current.
@@ -667,6 +652,7 @@ async fn supervise(
     cwd: String,
     routes: GrammarRoutes,
     asks: Arc<BackendAsks>,
+    router: Arc<tabit_wire::router::Router>,
 ) {
     // A child of the supervisor's token: this extension's failure
     // closes only its own pipe (fail_before_ack cancels this one),
@@ -686,6 +672,7 @@ async fn supervise(
                 &events,
                 &manifest.name,
                 format!("cannot spawn `{}`: {error}", program.display()),
+                &router,
             );
             return;
         }
@@ -701,6 +688,7 @@ async fn supervise(
                 &events,
                 &manifest.name,
                 "opened no stdin".to_string(),
+                &router,
             )
             .await;
             return;
@@ -717,6 +705,7 @@ async fn supervise(
                 &events,
                 &manifest.name,
                 "opened no stdout".to_string(),
+                &router,
             )
             .await;
             return;
@@ -733,6 +722,7 @@ async fn supervise(
                 &events,
                 &manifest.name,
                 "opened no stderr".to_string(),
+                &router,
             )
             .await;
             return;
@@ -762,6 +752,7 @@ async fn supervise(
         let lane = lane.clone();
         let routes = routes.clone();
         let asks = asks.clone();
+        let reader_router = router.clone();
         tokio::spawn(async move {
             let mut lines = BufReader::new(stdout).lines();
             let mut handshake_tx = Some(handshake_tx);
@@ -892,6 +883,7 @@ async fn supervise(
             let reason = "the extension process died mid-call".to_string();
             lane.die(&reason);
             asks.clear_extension(&lane.name);
+            reader_router.retract_owner(&lane.name);
             if let Some(tx) = handshake_tx.take() {
                 let _ = tx.send(Handshake::Failed("closed before the handshake".to_string()));
             } else if let Some(tx) = death_tx.take() {
@@ -930,6 +922,7 @@ async fn supervise(
                 &events,
                 &manifest.name,
                 reason,
+                &router,
             )
             .await;
             return;
@@ -945,6 +938,7 @@ async fn supervise(
             &events,
             &manifest.name,
             reason,
+            &router,
         )
         .await;
         return;
@@ -956,7 +950,15 @@ async fn supervise(
         watch,
         ..
     } = ack;
-    lane.set_watch(watch);
+    // The ack's watch list subscribes the lane's writer on the host
+    // router — a subscriber is a callback; this one pushes the wire
+    // line down the lane's stdin.
+    for kind in &watch {
+        let commands = lane.commands.clone();
+        router.register(kind, &manifest.name, move |frame| {
+            let _ = commands.send(tabit_protocol::to_wire_line(frame));
+        });
+    }
     let status = state.transition(Status::Alive, tools, hooks);
     let _ = events.send(ExtensionEvent {
         name: manifest.name.clone(),
@@ -1000,7 +1002,7 @@ async fn supervise(
     // The reader never saw this death (stdout stayed open), so its
     // ask-settling did not run: settle here.
     asks.clear_extension(&manifest.name);
-    resolve_dead(&state, &lane, &events, &manifest.name, reason);
+    resolve_dead(&state, &lane, &events, &manifest.name, reason, &router);
 }
 
 /// The envelope dispatcher: route one extension service request to
@@ -1155,6 +1157,7 @@ fn validate(ack: &Ack) -> Result<(), String> {
 /// A pre-ack failure: nothing was proven, so the tree dies now (no
 /// grace — the pipe contract was never honored) and the dead report
 /// resolves.
+#[allow(clippy::too_many_arguments)] // the launch context is irreducible; the alternative is a struct of seven
 async fn fail_before_ack(
     process: &mut Box<dyn ChildWrapper>,
     closing: &CancellationToken,
@@ -1163,9 +1166,10 @@ async fn fail_before_ack(
     events: &tokio::sync::mpsc::UnboundedSender<ExtensionEvent>,
     name: &str,
     reason: String,
+    router: &Arc<tabit_wire::router::Router>,
 ) {
     process::kill_now(process, closing).await;
-    resolve_dead(state, lane, events, name, reason);
+    resolve_dead(state, lane, events, name, reason, router);
 }
 
 // The post-ack close lives in [`tabit_wire::process::reap_with_grace`]
@@ -1176,8 +1180,10 @@ fn resolve_dead(
     events: &tokio::sync::mpsc::UnboundedSender<ExtensionEvent>,
     name: &str,
     reason: String,
+    router: &Arc<tabit_wire::router::Router>,
 ) {
     lane.die("the extension is not running");
+    router.retract_owner(&lane.name);
     // (Ask settling lives at the death sites that can see the asks
     // registry: the reader end and the exit branch.) The pre-ack and
     // spawn-failure paths funnel here and cannot carry open asks. — announced, so no channel holds a card that can never be
