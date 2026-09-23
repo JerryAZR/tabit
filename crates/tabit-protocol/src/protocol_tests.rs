@@ -497,3 +497,61 @@ fn the_compaction_bracket_and_command_round_trip() {
         }
     );
 }
+
+/// Every command's `tag()` is its serde `type` — the routing layer's
+/// by-type tables key on the same string the wire carries, so the
+/// agreement is pinned, not assumed (the event twin lives in
+/// events_tests).
+#[test]
+fn every_command_tag_agrees_with_the_wire() {
+    use serde_json::Value;
+
+    fn tag_of(command: crate::SessionCommand) -> &'static str {
+        let line = crate::to_wire_line(&command);
+        let value: Value = serde_json::from_str(&line).expect("a command serializes");
+        let wire_tag = value["type"].as_str().expect("the type tag").to_string();
+        assert_eq!(wire_tag, command.tag(), "the wire tag and tag() disagree");
+        command.tag()
+    }
+
+    let every = [
+        tag_of(crate::SessionCommand::Message {
+            session: "s".to_string(),
+            text: String::new(),
+        }),
+        tag_of(crate::SessionCommand::Abort {
+            session: "s".to_string(),
+        }),
+        tag_of(crate::SessionCommand::Continue {
+            session: "s".to_string(),
+        }),
+        tag_of(crate::SessionCommand::InteractionResponse {
+            session: None,
+            id: "a-1".to_string(),
+            payload: serde_json::json!({}),
+        }),
+        tag_of(crate::SessionCommand::NewSession),
+        tag_of(crate::SessionCommand::OpenSession {
+            id: "s".to_string(),
+        }),
+        tag_of(crate::SessionCommand::Checkout {
+            session: "s".to_string(),
+            entry_id: "e-1".to_string(),
+        }),
+        tag_of(crate::SessionCommand::Model {
+            session: "s".to_string(),
+            provider: "p".to_string(),
+            model: "m".to_string(),
+            thinking_level: None,
+        }),
+        tag_of(crate::SessionCommand::Compact {
+            session: "s".to_string(),
+            directives: None,
+        }),
+    ];
+    // Nine commands, nine distinct tags.
+    let mut seen = every.to_vec();
+    seen.sort_unstable();
+    seen.dedup();
+    assert_eq!(seen.len(), every.len(), "every command tag is distinct");
+}

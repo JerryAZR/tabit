@@ -130,27 +130,36 @@ impl PendingAsks {
     }
 
     /// Retract every question one owner asked — its death site. Each
-    /// settles orphaned, its reason the death's.
-    pub fn retract_owner(&self, owner: &str, reason: &str) {
+    /// settles orphaned, its reason the death's; the swept ids return
+    /// so the caller can announce the settlements its surface demands.
+    pub fn retract_owner(&self, owner: &str, reason: &str) -> Vec<String> {
         let matching: Vec<String> = lock(&self.pending)
             .iter()
             .filter(|(_, ask)| ask.owner == owner)
             .map(|(id, _)| id.clone())
             .collect();
+        let mut swept = Vec::new();
         for id in matching {
             if let Some(ask) = lock(&self.pending).remove(&id) {
                 (ask.deliver)(Outcome::Orphaned(reason.to_string()));
+                swept.push(id);
             }
         }
+        swept
     }
 
     /// Retract everything (a terminal's sweep — the askers died with
-    /// their run). Each settles orphaned, its reason the terminal's.
-    pub fn retract_all(&self, reason: &str) {
-        let swept: Vec<PendingAsk> = lock(&self.pending).drain().map(|(_, ask)| ask).collect();
-        for ask in swept {
-            (ask.deliver)(Outcome::Orphaned(reason.to_string()));
-        }
+    /// their run). Each settles orphaned, its reason the terminal's;
+    /// the swept ids return for settlement announcements.
+    pub fn retract_all(&self, reason: &str) -> Vec<String> {
+        let swept: Vec<(String, PendingAsk)> = lock(&self.pending).drain().collect();
+        swept
+            .into_iter()
+            .map(|(id, ask)| {
+                (ask.deliver)(Outcome::Orphaned(reason.to_string()));
+                id
+            })
+            .collect()
     }
 }
 

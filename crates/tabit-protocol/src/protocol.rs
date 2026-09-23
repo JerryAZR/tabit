@@ -231,6 +231,27 @@ pub enum ClientFrame {
     Command(SessionCommand),
 }
 
+impl SessionCommand {
+    /// The wire tag of one command kind — the `type` field's value
+    /// (the command twin of [`SessionEvent::tag`]; the routing layer's
+    /// by-type tables key on it). Exhaustive by construction: a new
+    /// variant breaks this compile until it is tagged.
+    #[must_use]
+    pub const fn tag(&self) -> &'static str {
+        match self {
+            SessionCommand::Message { .. } => "message",
+            SessionCommand::Abort { .. } => "abort",
+            SessionCommand::Continue { .. } => "continue",
+            SessionCommand::InteractionResponse { .. } => "interaction_response",
+            SessionCommand::NewSession => "new_session",
+            SessionCommand::OpenSession { .. } => "open_session",
+            SessionCommand::Checkout { .. } => "checkout",
+            SessionCommand::Model { .. } => "model",
+            SessionCommand::Compact { .. } => "compact",
+        }
+    }
+}
+
 fn is_false(value: &bool) -> bool {
     !*value
 }

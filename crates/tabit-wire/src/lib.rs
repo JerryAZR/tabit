@@ -14,9 +14,15 @@
 //! spawned tabit-core children (the extraction the extension-SDK
 //! round builds on — ruled 2026-09: share what is the same):
 //!
-//! - [`router`]: THE event router — register by kind or wildcard,
-//!   dispatch, retract by owner; each callback owns its own dispatch
-//!   (a thread, a pipe, a channel — the router never queues).
+//! - [`node`]: the node runtime — the ruled architecture assembled:
+//!   one routing layer (the [`node::Channel`] primitive, the
+//!   learning table, the ask table, the command-by-type handlers)
+//!   with functional layers mounted on top; the net tests
+//!   (`node_tests`, `tests/net.rs`) are its acceptance suite.
+//!   dispatch, retract by owner, over any routed vocabulary (events
+//!   by tag, commands by tag — one mechanism, no sibling tables);
+//!   each callback owns its own dispatch (a thread, a pipe, a
+//!   channel — the router never queues).
 //! - [`asks`]: THE pending-question registry — one entry per open
 //!   round-trip (an owner key plus a delivery closure over
 //!   answered-or-orphaned); answers are races, the first arrival
@@ -40,6 +46,7 @@
 
 pub mod asks;
 pub mod client;
+pub mod node;
 pub mod process;
 pub mod router;
 pub mod routing;

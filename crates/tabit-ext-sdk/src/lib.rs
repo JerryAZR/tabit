@@ -526,7 +526,7 @@ pub fn serve(extension: Extension) -> ! {
         let kind = watch.kind.clone();
         let body = watch.arc_body().clone();
         let watch_shared = shared.clone();
-        router.register(&kind, "watch", move |frame| {
+        router.register(&kind, "watch", move |frame: &tabit_protocol::EventFrame| {
             let shared = watch_shared.clone();
             let body = body.clone();
             let event = frame.event.clone();
