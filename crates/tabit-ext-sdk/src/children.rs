@@ -13,14 +13,17 @@
 //!   slot**. Observation kinds compose: specifics and the generic
 //!   both run (forwarding keeps forwarding the kinds you also
 //!   watch).
-//! - **Answer-owing kinds take exactly one owner.** Today that is
-//!   `interaction_request` alone: the default owner is the shipped
-//!   forward-and-relay callback (the child's card crosses verbatim —
-//!   stream preserved, the origin naming the conduit once the host
-//!   re-stamps it — and the answer routes home by id through the
-//!   same registry the extension's own asks answer through); an
-//!   author handler replaces the default at registration; a second
-//!   author registration refuses loudly.
+//! - **Asks follow the co-frontend law.** The shipped
+//!   forward-and-relay default surfaces the child's card verbatim
+//!   (stream preserved, the origin naming the conduit once the host
+//!   re-stamps it) and the answer routes home by id through the same
+//!   registry the extension's own asks answer through; the first
+//!   author registration replaces the default (a custom beside it
+//!   would double-surface the card), and author registrations then
+//!   stack — any answerer may answer, the child's hub takes the
+//!   first arrival, a late answer is a tolerated no-op. There is no
+//!   single-owner rule anywhere: answers are races, arbitrated where
+//!   the question lives.
 //! - **No lift**: an id-swap re-ask has no reason to exist — the
 //!   child's id-space never mints onto the host stream, and the one
 //!   card a user sees is the child's own.
@@ -99,9 +102,16 @@ type FrameHandler = Arc<dyn Fn(&Ctx, &EventFrame) + Send + Sync>;
 struct Registry {
     observation: Mutex<HashMap<String, Vec<FrameHandler>>>,
     generic: Mutex<Option<FrameHandler>>,
-    ask_owner: Mutex<Option<FrameHandler>>,
-    /// The driver's command lane — the relay's answers ride it home
-    /// to the child.
+    /// The ask-answerers: the shipped forward-and-relay default
+    /// yields to the first author registration (a custom beside the
+    /// default would double-surface the card); author registrations
+    /// then stack — any may answer, the child's hub takes the first,
+    /// late answers are tolerated no-ops (the co-frontend law).
+    ask_answerers: Mutex<Vec<FrameHandler>>,
+    /// Whether the shipped default still stands (replaced by the
+    /// first author registration).
+    ask_default: Mutex<bool>,
+    /// The driver's command lane — answers ride it home to the child.
     commands: Mutex<Option<std::sync::mpsc::Sender<ChildCmd>>>,
 }
 
@@ -151,18 +161,18 @@ impl Child {
         let registry = Arc::new(Registry {
             observation: Mutex::new(HashMap::new()),
             generic: Mutex::new(None),
-            ask_owner: Mutex::new(None),
+            ask_answerers: Mutex::new(vec![Arc::new(forward_and_relay)]),
+            ask_default: Mutex::new(true),
             commands: Mutex::new(None),
         });
-        // The defaults ride the registry like any handler: forward in
-        // the generic slot when the boolean says so, forward-and-relay
-        // in the ask slot always (an unanswered ask hangs a child —
-        // asks surface by default; the author replaces the slot to
-        // customize).
+        // The generic slot's default: forward-everything when the
+        // boolean says so. The ask slot's default (forward-and-relay —
+        // an unanswered ask hangs a child, so asks surface by default)
+        // is installed above and yields to the first author
+        // registration.
         if options.forwarding {
             *lock(&registry.generic) = Some(Arc::new(forward_frame));
         }
-        *lock(&registry.ask_owner) = Some(Arc::new(forward_frame));
 
         // The driver task owns the handle on the SDK's runtime: one
         // loop — commands in, the shared settle fold under the tap
@@ -244,15 +254,33 @@ impl Child {
         self.registry.on(kind, body)
     }
 
-    /// Own the child's asks — the single-owner slot (an answer is
-    /// owed; two answerers would double the card). Replaces the
-    /// shipped forward-and-relay default; a second registration
-    /// refuses loudly.
+    /// Register an ask-answerer for the child. The first
+    /// registration replaces the shipped forward-and-relay default
+    /// (a custom beside it would double-surface the card);
+    /// registrations then stack — any answerer may answer, the
+    /// child's hub takes the first arrival, and a late answer is a
+    /// tolerated no-op (the co-frontend law, applied one hop down).
+    /// Answer with [`Child::answer`]; a handler that surfaces the
+    /// question to users itself (its own card) relays the answer it
+    /// receives.
     pub fn on_ask<F>(&self, body: F) -> Result<(), String>
     where
         F: Fn(&Ctx, &EventFrame) + Send + Sync + 'static,
     {
         self.registry.on_ask(body)
+    }
+
+    /// Answer one of the child's questions by id. Races are the
+    /// co-frontend law: the child takes the first answer to land;
+    /// one that arrives after another (or after the question died)
+    /// is a tolerated no-op.
+    pub fn answer(&self, id: &str, payload: serde_json::Value) {
+        if let Some(commands) = lock(&self.registry.commands).clone() {
+            let _ = commands.send(ChildCmd::Answer {
+                id: id.to_string(),
+                payload,
+            });
+        }
     }
 
     /// Run one task to the child's terminal (blocking — the shared
@@ -296,21 +324,19 @@ impl Registry {
         Ok(())
     }
 
-    /// The ask slot's single-owner law: the default
-    /// (forward-and-relay) yields to the first author handler; a
-    /// second registration refuses loudly.
+    /// The ask law: the default yields to the first author
+    /// registration, then registrations stack (any may answer, the
+    /// child arbitrates, late answers are no-ops).
     fn on_ask<F>(&self, body: F) -> Result<(), String>
     where
         F: Fn(&Ctx, &EventFrame) + Send + Sync + 'static,
     {
-        let mut owner = lock(&self.ask_owner);
-        if owner.is_some() {
-            return Err(
-                "the ask slot has exactly one owner (forward-and-relay is installed by default)"
-                    .to_string(),
-            );
+        let mut answerers = lock(&self.ask_answerers);
+        if *lock(&self.ask_default) {
+            answerers.clear();
+            *lock(&self.ask_default) = false;
         }
-        *owner = Some(Arc::new(body));
+        answerers.push(Arc::new(body));
         Ok(())
     }
 }
@@ -323,22 +349,27 @@ fn dispatch_frame(ctx: &Ctx, registry_arc: &Arc<Registry>, frame: EventFrame) {
     let shared = ctx.shared_clone();
     let kind = frame.event.tag();
     if kind == tags::INTERACTION_REQUEST {
-        // The ask arm: register the relay (the routed answer finds
-        // this child's driver through the extension's own pending
-        // map — the same registry `Ctx::ask` answers through), then
-        // the owner runs.
+        // The ask arm: the relay registration (the routed answer
+        // finds this child's driver through the extension's own
+        // pending map — the same registry `Ctx::ask` answers
+        // through) stands for the shipped default; every answerer
+        // runs, any may answer, the child's hub takes the first
+        // arrival, late answers are tolerated no-ops.
         let id = match &frame.event {
             SessionEvent::InteractionRequest { id, .. } => id.clone(),
             _ => return,
         };
         let (tx, rx) = std::sync::mpsc::channel::<serde_json::Value>();
         crate::register_relay(&shared, &id, tx);
-        let owner = lock(&registry.ask_owner).clone();
-        if let Some(owner) = owner {
+        let answerers = lock(&registry.ask_answerers).clone();
+        let default_stands = *lock(&registry.ask_default);
+        for answerer in answerers {
             let frame = frame.clone();
+            spawn_handler(shared.clone(), move |ctx| answerer(&ctx, &frame));
+        }
+        if default_stands {
             let registry_ref = registry_arc.clone();
-            spawn_handler(shared.clone(), move |ctx| {
-                owner(&ctx, &frame);
+            spawn_handler(shared, move |_ctx| {
                 // Drain the relay until an answer lands, then carry it
                 // home to the child. A kill ends the loop with the
                 // pipe; a dismissed card starves until then (the
@@ -379,10 +410,18 @@ fn spawn_handler(shared: std::sync::Arc<Shared>, body: impl FnOnce(Ctx) + Send +
     });
 }
 
-/// The shipped forward callback: the frame crosses verbatim (the
-/// stamped line — stream preserved; the host re-stamps the origin,
-/// naming this extension as the conduit).
+/// The shipped forward callback (the generic slot): the frame
+/// crosses verbatim (stream preserved; the host re-stamps the
+/// origin, naming this extension as the conduit).
 fn forward_frame(ctx: &Ctx, frame: &EventFrame) {
+    let _ = emit(&ctx.shared_clone(), frame);
+}
+
+/// The ask slot's shipped default: forward the child's card verbatim
+/// — the dispatcher registers the id relay alongside it (a routed
+/// answer from any channel carries home by id), which is the whole
+/// difference from the generic forward callback.
+fn forward_and_relay(ctx: &Ctx, frame: &EventFrame) {
     let _ = emit(&ctx.shared_clone(), frame);
 }
 
@@ -412,7 +451,8 @@ mod tests {
         Registry {
             observation: Mutex::new(HashMap::new()),
             generic: Mutex::new(None),
-            ask_owner: Mutex::new(Some(Arc::new(|_ctx: &Ctx, _frame: &EventFrame| {}))),
+            ask_answerers: Mutex::new(Vec::new()),
+            ask_default: Mutex::new(true),
             commands: Mutex::new(None),
         }
     }
@@ -445,26 +485,22 @@ mod tests {
     }
 
     #[test]
-    fn the_ask_slot_takes_exactly_one_owner() {
+    fn the_ask_law_defaults_yield_then_authors_stack() {
         let registry = registry();
-        // The default (forward-and-relay) is installed; a first
-        // author registration replaces it, a second refuses.
-        // Replacing the default rides Child::create's registry
-        // construction — the author-facing replacement path — so
-        // here we prove the refusal once an owner stands.
-        assert!(
-            registry
-                .on_ask(|_ctx: &Ctx, _frame: &EventFrame| {})
-                .is_err(),
-            "an owner stands (the default); the slot is single-owner"
-        );
-        let bare = Registry {
-            observation: Mutex::new(HashMap::new()),
-            generic: Mutex::new(None),
-            ask_owner: Mutex::new(None),
-            commands: Mutex::new(None),
-        };
-        assert!(bare.on_ask(|_ctx: &Ctx, _frame: &EventFrame| {}).is_ok());
-        assert!(bare.on_ask(|_ctx: &Ctx, _frame: &EventFrame| {}).is_err());
+        // The default stands; the first author registration replaces
+        // it (a custom beside the default would double-surface the
+        // card)...
+        registry
+            .on_ask(|_ctx: &Ctx, _frame: &EventFrame| {})
+            .expect("the first replaces the default");
+        assert!(!*lock(&registry.ask_default), "the default yielded");
+        assert_eq!(lock(&registry.ask_answerers).len(), 1);
+        // ...and further registrations stack — any may answer, the
+        // child arbitrates, late answers are no-ops (the co-frontend
+        // law one hop down).
+        registry
+            .on_ask(|_ctx: &Ctx, _frame: &EventFrame| {})
+            .expect("the second stacks");
+        assert_eq!(lock(&registry.ask_answerers).len(), 2);
     }
 }
