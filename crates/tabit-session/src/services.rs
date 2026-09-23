@@ -24,10 +24,8 @@ use futures::StreamExt as _;
 use futures::future::BoxFuture;
 use rig_agent::agent::{Agent, MultiTurnStreamItem};
 use rig_agent::streaming::StreamingPrompt as _;
-use rig_agent::tool::interaction::{InteractionOutcome, UserInteraction};
 use rig_agent::tool::services::{HostServices, ModelPromptOk, ModelPromptRequest, ServiceUsage};
 use rig_core::completion::Usage;
-use serde_json::Value;
 use tabit_config::TabitConfig;
 use tabit_protocol::ModelSelection;
 
@@ -41,12 +39,11 @@ use crate::stats::UsageLedger;
 /// lower; nobody asks higher.
 const MODEL_PROMPT_MAX_TOKENS: u64 = 4096;
 
-/// The per-run capability. `interaction` is optional: a
-/// non-interactive session still serves `model_prompt` (it needs no
-/// user) while its asks answer dismissed — fail closed, the askers'
-/// contract.
+/// The per-run capability: the host-service surface extension
+/// envelopes dispatch to. (The interaction hub once rode here for
+/// the ask verb; asks are grammar emissions now, and the hub reaches
+/// extensions no other way.)
 pub struct ExtensionServices {
-    interaction: Option<Arc<dyn UserInteraction>>,
     model_factory: ModelFactory,
     config: Arc<TabitConfig>,
     selection: ModelSelection,
@@ -60,14 +57,12 @@ pub struct ExtensionServices {
 
 impl ExtensionServices {
     pub fn new(
-        interaction: Option<Arc<dyn UserInteraction>>,
         model_factory: ModelFactory,
         config: Arc<TabitConfig>,
         selection: ModelSelection,
         ledger: Arc<Mutex<UsageLedger>>,
     ) -> Self {
         Self {
-            interaction,
             model_factory,
             config,
             selection,
@@ -77,13 +72,6 @@ impl ExtensionServices {
 }
 
 impl HostServices for ExtensionServices {
-    fn ask(&self, ui_type: &str, payload: Value) -> BoxFuture<'static, InteractionOutcome> {
-        match self.interaction.clone() {
-            Some(interaction) => interaction.request(ui_type, payload),
-            None => Box::pin(async move { InteractionOutcome::Dismissed }),
-        }
-    }
-
     fn model_prompt(
         &self,
         caller: &str,

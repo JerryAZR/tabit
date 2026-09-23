@@ -21,7 +21,6 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use futures::future::BoxFuture;
-use rig_agent::tool::interaction::InteractionOutcome;
 use rig_agent::tool::services::HostServices;
 use tabit_ext::supervisor::{self, HANDSHAKE_TIMEOUT, Status};
 
@@ -29,6 +28,58 @@ const BOUND: Duration = Duration::from_secs(15);
 
 /// A never-fired run token for call sites that test the steady
 /// state (cancellation has its own tests).
+/// The recorded grammar: what crossed, in arrival order.
+#[derive(Default, Clone)]
+struct Recorded {
+    events: std::sync::Arc<std::sync::Mutex<Vec<String>>>,
+}
+
+impl Recorded {
+    fn host(&self) -> tabit_ext::LaunchContext {
+        let events = self.events.clone();
+        tabit_ext::LaunchContext {
+            routes: tabit_ext::GrammarRoutes::new(
+                std::sync::Arc::new(|_| {}),
+                std::sync::Arc::new(move |origin, event| {
+                    events.lock().unwrap().push(format!(
+                        "{origin}|{}",
+                        serde_json::to_string(&event).unwrap()
+                    ));
+                }),
+            ),
+            core_path: "tabit-core".to_string(),
+            cwd: ".".to_string(),
+        }
+    }
+
+    fn events(&self) -> Vec<String> {
+        self.events.lock().unwrap().clone()
+    }
+
+    /// The newest interaction-request id from one extension.
+    fn newest_ask(&self, extension: &str) -> Option<String> {
+        let needle = "\"id\":\"".to_string();
+        self.events()
+            .iter()
+            .rev()
+            .find(|e| e.starts_with(extension) && e.contains("interaction_request"))
+            .and_then(|e| e.split(&needle).nth(1))
+            .and_then(|rest| rest.split('"').next().map(str::to_string))
+    }
+}
+
+/// Poll until true, bounded.
+async fn wait_for(check: impl Fn() -> bool) -> bool {
+    let deadline = std::time::Instant::now() + BOUND;
+    while std::time::Instant::now() < deadline {
+        if check() {
+            return true;
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+    }
+    false
+}
+
 /// The launch context the contract tests serve: grammar dropped, and
 /// the host facts a real boot would carry.
 fn host_ctx() -> tabit_ext::LaunchContext {
@@ -99,7 +150,6 @@ async fn await_alive(
 }
 
 struct FakeServices {
-    answer: Option<serde_json::Value>,
     /// model_prompt callers, recorded (no asserts in futures).
     prompted: Arc<std::sync::Mutex<Vec<String>>>,
 }
@@ -108,21 +158,6 @@ struct FakeServices {
 // routing task and wedges the asking extension. Record; the tests
 // assert on the recording.
 impl HostServices for FakeServices {
-    fn ask(
-        &self,
-        ui_type: &str,
-        payload: serde_json::Value,
-    ) -> BoxFuture<'static, InteractionOutcome> {
-        eprintln!("fake services: ask {ui_type} {payload}");
-        let answer = self.answer.clone();
-        Box::pin(async move {
-            match answer {
-                Some(payload) => InteractionOutcome::Answered(payload),
-                None => InteractionOutcome::Dismissed,
-            }
-        })
-    }
-
     fn model_prompt(
         &self,
         caller: &str,
@@ -169,55 +204,75 @@ async fn the_echo_example_declares_and_serves() {
 }
 
 #[tokio::test]
-async fn the_ask_example_lifts_the_answer() {
+async fn the_ask_example_routes_its_answer() {
     let root = test_dir("ask-answered");
     install(&root, "echo", env!("CARGO_BIN_EXE_echo-ext"));
-    let (host, mut events) = supervisor::launch_root(&root, HANDSHAKE_TIMEOUT, host_ctx());
+    let recorded = Recorded::default();
+    let (host, mut events) = supervisor::launch_root(&root, HANDSHAKE_TIMEOUT, recorded.host());
     await_alive(&mut events, "echo").await;
     let handle = host.extension("echo").expect("installed");
 
-    let services: Arc<dyn HostServices> = Arc::new(FakeServices {
-        answer: Some(serde_json::json!({"text": "yes"})),
-        prompted: Arc::new(std::sync::Mutex::new(Vec::new())),
+    // The grammar flow: the SDK's ask emits an interaction request;
+    // the answer crosses back by id through the backend registry.
+    let call = tokio::spawn(async move {
+        handle
+            .call(
+                "ask",
+                serde_json::json!({"question": "is this thing on?"}),
+                None,
+                run_token(),
+            )
+            .await
+            .expect("the call resolves")
     });
-    let result = handle
-        .call(
-            "ask",
-            serde_json::json!({"question": "is this thing on?"}),
-            Some(services),
-            run_token(),
-        )
-        .await
-        .expect("the call resolves");
+    assert!(
+        wait_for(|| recorded.newest_ask("echo").is_some()).await,
+        "the ask surfaced: {:?}",
+        recorded.events()
+    );
+    let id = recorded.newest_ask("echo").expect("the id");
+    assert!(host.asks().respond(&id, serde_json::json!({"text": "yes"})));
+    let result = call.await.expect("joined");
     assert_eq!(result.error, None);
     assert_eq!(result.report, "the user answered: yes");
     host.shutdown().await;
 }
 
 #[tokio::test]
-async fn the_ask_example_fails_closed_on_dismissal() {
-    let root = test_dir("ask-dismissed");
+async fn the_ask_example_abandoned_by_cancellation_fails_the_call() {
+    let root = test_dir("ask-cancelled");
     install(&root, "echo", env!("CARGO_BIN_EXE_echo-ext"));
-    let (host, mut events) = supervisor::launch_root(&root, HANDSHAKE_TIMEOUT, host_ctx());
+    let recorded = Recorded::default();
+    let (host, mut events) = supervisor::launch_root(&root, HANDSHAKE_TIMEOUT, recorded.host());
     await_alive(&mut events, "echo").await;
     let handle = host.extension("echo").expect("installed");
 
-    let services: Arc<dyn HostServices> = Arc::new(FakeServices {
-        answer: None,
-        prompted: Arc::new(std::sync::Mutex::new(Vec::new())),
+    // The grammar ask has no in-band dismissal; abandonment is the
+    // run's cancellation, and the call fails cancelled at the leash.
+    let token = tokio_util::sync::CancellationToken::new();
+    let call_token = token.clone();
+    let call = tokio::spawn(async move {
+        handle
+            .call(
+                "ask",
+                serde_json::json!({"question": "is this thing on?"}),
+                None,
+                call_token,
+            )
+            .await
     });
-    let result = handle
-        .call(
-            "ask",
-            serde_json::json!({"question": "is this thing on?"}),
-            Some(services),
-            run_token(),
-        )
-        .await
-        .expect("the call resolves");
-    assert_eq!(
-        result.report,
-        "the user dismissed the question without answering"
+    assert!(
+        wait_for(|| recorded.newest_ask("echo").is_some()).await,
+        "the ask surfaced: {:?}",
+        recorded.events()
+    );
+    token.cancel();
+    let outcome = call.await.expect("joined");
+    assert!(
+        outcome
+            .as_ref()
+            .is_err_and(|error| error.contains("cancelled")),
+        "the call fails cancelled: {outcome:?}"
     );
     host.shutdown().await;
 }
@@ -268,7 +323,6 @@ async fn the_autotitle_example_prompts_the_model_over_the_envelope() {
 
     let prompted = Arc::new(std::sync::Mutex::new(Vec::new()));
     let services: Arc<dyn HostServices> = Arc::new(FakeServices {
-        answer: None,
         prompted: prompted.clone(),
     });
     let result = serde_json::json!({"result": "42 lines changed"});

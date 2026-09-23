@@ -31,8 +31,10 @@
 //! serve it on the pipe:
 //! - `tools-echo`   — tool `echo`: answers with the args as the report
 //! - `tools-fail`   — tool `boom`: answers with an error
-//! - `tools-ask`    — tool `ask`: lifts one interaction (envelope
-//!   verb zero), answers with the outcome (or "dismissed")
+//! - `tools-ask`    — tool `ask`: lifts one interaction (a grammar
+//!   `interaction_request` emission, answered by the routed
+//!   `interaction_response`; a cancel for the owning call reads as
+//!   abandoned), answers with the outcome (or "dismissed")
 //! - `tools-model`  — tool `summarize`: calls `model_prompt` (envelope
 //!   verb one, hand-rolled — the any-language proof), answers with
 //!   the completion text (or the verb's error)
@@ -100,7 +102,7 @@ fn main() {
         }
         _ => {
             emit(json!({
-                "type": "ack", "protocol_version": 2,
+                "type": "ack", "protocol_version": 3,
                 "tools": [], "hooks": [], "watch": [],
             }));
             if behavior == "die-post-ack" {
@@ -127,7 +129,7 @@ fn main() {
 /// mirror everything the host sends back as reportable events.
 fn serve_grammar() {
     emit(json!({
-        "type": "ack", "protocol_version": 2,
+        "type": "ack", "protocol_version": 3,
         "tools": [], "hooks": [],
         "watch": ["session_opened", "interaction_settled"],
     }));
@@ -165,7 +167,7 @@ fn serve_grammar() {
 /// pipe is one lane, and this double keeps it honest.
 fn serve_tools(tools: Value) {
     emit(json!({
-        "type": "ack", "protocol_version": 2,
+        "type": "ack", "protocol_version": 3,
         "tools": tools, "hooks": [], "watch": [],
     }));
     let behavior = std::env::args().nth(1).unwrap_or_default();
@@ -186,11 +188,12 @@ fn serve_tools(tools: Value) {
                 "error": "the boom tool refuses", "report": "", "details": null,
             })),
             "tools-ask" => {
+                // Grammar ask: emit the interaction request, await the
+                // routed response by id (or the owning call's cancel —
+                // the abandonment shape).
                 emit(json!({
-                    "type": "service_request",
-                    "request_id": format!("{call_id}-ask"),
-                    "call_id": call_id,
-                    "verb": "ask",
+                    "type": "interaction_request",
+                    "id": format!("{call_id}-ask"),
                     "ui_type": "native:select_any",
                     "payload": {
                         "title": "The extension asks",
@@ -199,21 +202,22 @@ fn serve_tools(tools: Value) {
                         "free_text": true,
                     },
                 }));
-                // The answer (or dismissal) is the next line owed to us.
-                let answer = loop {
+                let outcome = loop {
                     let line = read_line();
-                    match serde_json::from_str::<Value>(&line) {
-                        Ok(frame) if frame["type"] == "service_response" => break frame,
-                        _ => continue,
+                    let Ok(frame) = serde_json::from_str::<Value>(&line) else {
+                        continue;
+                    };
+                    if frame["type"] == "interaction_response"
+                        && frame["id"] == format!("{call_id}-ask")
+                    {
+                        break format!(
+                            "answered: {}",
+                            frame["payload"]["text"].as_str().unwrap_or("<no text>")
+                        );
                     }
-                };
-                let outcome = if answer["result"].is_null() {
-                    "dismissed".to_string()
-                } else {
-                    format!(
-                        "answered: {}",
-                        answer["result"]["text"].as_str().unwrap_or("<no text>")
-                    )
+                    if frame["type"] == "cancel" && frame["call_id"] == call_id {
+                        break "dismissed".to_string();
+                    }
                 };
                 emit(json!({
                     "type": "tool_result", "call_id": call_id,
@@ -296,7 +300,7 @@ fn serve_tools(tools: Value) {
 /// sequentially. The behavior picks the decision path.
 fn serve_hooks(behavior: &str) {
     emit(json!({
-        "type": "ack", "protocol_version": 2,
+        "type": "ack", "protocol_version": 3,
         "tools": [], "hooks": [{"event": "tool_call"}], "watch": [],
     }));
     loop {
@@ -320,11 +324,12 @@ fn serve_hooks(behavior: &str) {
                 }
             }
             "hooks-ask" => {
+                // Grammar ask: the hook's mid-call question rides the
+                // interaction request emission, the routed response
+                // decides run/skip.
                 emit(json!({
-                    "type": "service_request",
-                    "request_id": format!("{hook_id}-ask"),
-                    "call_id": hook_id.clone(),
-                    "verb": "ask",
+                    "type": "interaction_request",
+                    "id": format!("{hook_id}-ask"),
                     "ui_type": "native:select_one",
                     "payload": {
                         "title": "The hook asks",
@@ -338,25 +343,21 @@ fn serve_hooks(behavior: &str) {
                 }));
                 let answer = loop {
                     let line = read_line();
-                    match serde_json::from_str::<Value>(&line) {
-                        Ok(frame) if frame["type"] == "service_response" => break frame,
-                        _ => continue,
+                    let Ok(frame) = serde_json::from_str::<Value>(&line) else {
+                        continue;
+                    };
+                    if frame["type"] == "interaction_response"
+                        && frame["id"] == format!("{hook_id}-ask")
+                    {
+                        break frame;
                     }
                 };
-                match &answer["result"] {
-                    Value::Null => emit(json!({
-                        "type": "hook_result", "hook_id": hook_id,
-                        "decision": "skip", "message": "dismissed — the call did not run",
-                    })),
-                    other => {
-                        let allowed = other["selected"][0].as_str() == Some("Allow");
-                        emit(json!({
-                            "type": "hook_result", "hook_id": hook_id,
-                            "decision": if allowed { "run" } else { "skip" },
-                            "message": if allowed { Value::Null } else { json!("denied by the answer") },
-                        }));
-                    }
-                }
+                let allowed = answer["payload"]["selected"][0].as_str() == Some("Allow");
+                emit(json!({
+                    "type": "hook_result", "hook_id": hook_id,
+                    "decision": if allowed { "run" } else { "skip" },
+                    "message": if allowed { Value::Null } else { json!("denied by the answer") },
+                }));
             }
             _ => emit(json!({
                 "type": "hook_result", "hook_id": hook_id,

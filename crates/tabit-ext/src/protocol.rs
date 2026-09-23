@@ -24,14 +24,18 @@
 //! the pipe flat as bare lines — commands and emissions out, watched
 //! events and routed answers in — and `initialize` grows the host
 //! facts an owned-session spawner needs (`core_path`, `cwd`), with
-//! `ack` declaring the watched event kinds.
+//! `ack` declaring the watched event kinds. v3 deletes the service
+//! envelope's interaction ask (verb zero): the routing
+//! generalization's direct grammar emission superseded it, and a
+//! wrapper nobody needs is deleted, not windowed — `model_prompt`
+//! is the envelope's one verb.
 
 use serde::{Deserialize, Serialize};
 
 /// The extension protocol this host speaks. An extension acking a
 /// different version is refused at the handshake — the pipe is a
 /// frozen contract, not a negotiated one.
-pub const EXTENSION_PROTOCOL_VERSION: u32 = 2;
+pub const EXTENSION_PROTOCOL_VERSION: u32 = 3;
 
 /// One tool the extension serves, declared at the handshake. The
 /// schema is the model-facing JSON Schema; the host turns it into a
@@ -173,21 +177,14 @@ pub struct HookResult {
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 #[serde(tag = "verb", rename_all = "snake_case")]
 pub enum ServiceVerb {
-    /// Verb zero — the interaction ask (the capability lift, folded
-    /// into the envelope 2026-09): `ui_type` + `payload` mirror the
-    /// engine's `UserInteraction` verbatim, so extensions use the
-    /// same `native:*` templates core tools do. The response's
-    /// `result` is the answer; its absence is the dismissal.
-    Ask {
-        ui_type: String,
-        payload: serde_json::Value,
-    },
-    /// Verb one — one model completion (checklist task 5):
-    /// complete-only (no streaming over the pipe), `max_tokens`
-    /// capped by the host. `model` is an optional provider/model or
-    /// bare-id reference; absent means the session's current model.
-    /// Usage bills to the session, tagged with the calling extension.
-    /// The response's `result` is `{ text, usage }`.
+    /// One model completion (checklist task 5): complete-only (no
+    /// streaming over the pipe), `max_tokens` capped by the host.
+    /// `model` is an optional provider/model or bare-id reference;
+    /// absent means the session's current model. Usage bills to the
+    /// session, tagged with the calling extension. The response's
+    /// `result` is `{ text, usage }`. (The envelope's other
+    /// historical verb — the interaction ask — was deleted in v3:
+    /// grammar emission superseded it.)
     ModelPrompt {
         prompt: String,
         #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -256,7 +253,7 @@ mod tests {
         .unwrap();
         assert_eq!(
             line,
-            r#"{"type":"initialize","protocol_version":2,"core_path":"C:/bin/tabit-core.exe","cwd":"C:/work/proj"}"#
+            r#"{"type":"initialize","protocol_version":3,"core_path":"C:/bin/tabit-core.exe","cwd":"C:/work/proj"}"#
         );
         let back: HostFrame = serde_json::from_str(&line).unwrap();
         match back {
@@ -281,7 +278,7 @@ mod tests {
     #[test]
     fn ack_round_trips_with_declarations() {
         let frame = ExtFrame::Ack {
-            protocol_version: 2,
+            protocol_version: 3,
             tools: vec![ToolDecl {
                 name: "echo".to_string(),
                 description: "says it back".to_string(),
@@ -298,7 +295,7 @@ mod tests {
         let line = serde_json::to_string(&frame).unwrap();
         assert_eq!(
             line,
-            r#"{"type":"ack","protocol_version":2,"tools":[{"name":"echo","description":"says it back","schema":{"type":"object"}}],"hooks":[{"event":"tool_call"}],"watch":["session_opened","interaction_settled"]}"#
+            r#"{"type":"ack","protocol_version":3,"tools":[{"name":"echo","description":"says it back","schema":{"type":"object"}}],"hooks":[{"event":"tool_call"}],"watch":["session_opened","interaction_settled"]}"#
         );
         let back: ExtFrame = serde_json::from_str(&line).unwrap();
         match back {
@@ -405,37 +402,12 @@ mod tests {
 
     #[test]
     fn the_service_envelope_round_trips() {
-        // Verb zero, folded: the ask rides the envelope.
-        let ask = ExtFrame::ServiceRequest {
-            request_id: "hello-1-ask-1".to_string(),
-            call_id: "hello-1".to_string(),
-            verb: ServiceVerb::Ask {
-                ui_type: "native:select_any".to_string(),
-                payload: serde_json::json!({"title": "T", "body": "B"}),
-            },
-        };
-        let line = serde_json::to_string(&ask).unwrap();
-        assert_eq!(
-            line,
-            r#"{"type":"service_request","request_id":"hello-1-ask-1","call_id":"hello-1","verb":"ask","ui_type":"native:select_any","payload":{"title":"T","body":"B"}}"#
-        );
-        match serde_json::from_str::<ExtFrame>(&line).unwrap() {
-            ExtFrame::ServiceRequest {
-                request_id, verb, ..
-            } => {
-                assert_eq!(request_id, "hello-1-ask-1");
-                assert_eq!(
-                    verb,
-                    ServiceVerb::Ask {
-                        ui_type: "native:select_any".to_string(),
-                        payload: serde_json::json!({"title": "T", "body": "B"}),
-                    }
-                );
-            }
-            _ => panic!("wrong frame"),
-        }
+        // v3: the ask verb is gone — an ask frame no longer parses
+        // (the grammar's interaction_request carries asks now).
+        let ask_line = r#"{"type":"service_request","request_id":"r","call_id":"c","verb":"ask","ui_type":"native:select_any","payload":{}}"#;
+        assert!(serde_json::from_str::<ExtFrame>(ask_line).is_err());
 
-        // Verb one: the model completion request, optional fields
+        // The one verb: the model completion request, optional fields
         // absent by default and round-tripping.
         let prompt = ExtFrame::ServiceRequest {
             request_id: "hello-2-svc-1".to_string(),

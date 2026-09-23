@@ -57,7 +57,6 @@ fn prompt(text: &str) -> ModelPromptRequest {
 async fn a_model_prompt_completes_bare_and_bills_the_extension() {
     let ledger = Arc::new(std::sync::Mutex::new(UsageLedger::new()));
     let services = ExtensionServices::new(
-        None, // no interaction: asks dismiss, prompts still serve
         factory(),
         config(),
         ModelSelection::new("mock", "m"),
@@ -86,21 +85,14 @@ async fn a_model_prompt_completes_bare_and_bills_the_extension() {
 #[tokio::test]
 async fn a_model_prompt_without_interaction_still_serves_and_asks_dismiss() {
     let services = ExtensionServices::new(
-        None,
         factory(),
         config(),
         ModelSelection::new("mock", "m"),
         Arc::new(std::sync::Mutex::new(UsageLedger::new())),
     );
-    // The ask half of the same capability: fail closed without a hub.
-    let outcome = services
-        .ask("native:select_one", serde_json::json!({}))
-        .await;
-    assert_eq!(
-        outcome,
-        rig_agent::tool::interaction::InteractionOutcome::Dismissed
-    );
-    // And the prompt half is unaffected.
+    // (The ask half of this capability is gone with the envelope
+    // verb — asks ride the grammar now.) The prompt half serves
+    // without an interaction hub.
     services
         .model_prompt("x", prompt("anything"))
         .await
@@ -111,7 +103,6 @@ async fn a_model_prompt_without_interaction_still_serves_and_asks_dismiss() {
 async fn a_bad_model_reference_errors_without_billing() {
     let ledger = Arc::new(std::sync::Mutex::new(UsageLedger::new()));
     let services = ExtensionServices::new(
-        None,
         factory(),
         config(),
         ModelSelection::new("mock", "m"),

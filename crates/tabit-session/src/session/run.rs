@@ -292,11 +292,11 @@ impl Session {
             tool_context.insert(hub.capability());
         }
         // The host-service capability extension envelopes dispatch to
-        // (task 5): verb zero is the ask, verb one `model_prompt` —
-        // billed through this session's ledger under the caller's
-        // name. Snapshotted at open like every per-run capability.
+        // (task 5): `model_prompt` — the envelope's one verb (the ask
+        // verb is gone; asks ride the grammar), billed through this
+        // session's ledger under the caller's name. Snapshotted at
+        // open like every per-run capability.
         tool_context.insert(std::sync::Arc::new(crate::services::ExtensionServices::new(
-            self.interaction.as_ref().map(|hub| hub.capability()),
             self.model_factory.clone(),
             self.config.clone(),
             self.selection(),

@@ -54,7 +54,7 @@ use serde_json::{Value, json};
 
 /// The extension protocol this SDK speaks — must match the host's
 /// exactly (the pipe is a frozen contract, not a negotiated one).
-const PROTOCOL_VERSION: u64 = 2;
+const PROTOCOL_VERSION: u64 = 3;
 
 /// One extension's whole declaration.
 pub struct Extension {
@@ -221,20 +221,51 @@ struct ServiceReply {
 }
 
 impl Ask {
-    /// Ask the user (envelope verb zero): `ui_type` + opaque payload,
-    /// mirroring the engine's interaction capability verbatim (core
-    /// tools' `native:*` templates qualify). Blocks the body's thread
-    /// until answered; a dismissal (nobody will ever answer) resolves
-    /// `None` — fail closed.
+    /// Ask the user: emit an `interaction_request` into the shared
+    /// grammar (the routing generalization — the old envelope verb is
+    /// deleted) and await the routed `interaction_response` by id.
+    /// `ui_type` + opaque payload mirror the templates core tools
+    /// use (`native:*` qualifies). Blocks the body's thread until
+    /// answered; the cancellation of this call's run resolves `None`
+    /// (the card may still be answered behind us — a late response
+    /// finds no waiter and drops), and the pipe's death resolves
+    /// `None` too — fail closed.
     pub fn ask(&self, ui_type: &str, payload: Value) -> Option<Value> {
         let id = self.next_request_id("ask");
-        let reply = self
-            .request(
-                &id,
-                json!({"verb": "ask", "ui_type": ui_type, "payload": payload}),
-            )
-            .ok()?;
-        reply.result
+        let (tx, rx) = std::sync::mpsc::channel::<Value>();
+        tabit_ext_sdk_lock(&self.shared.grammar_asks).insert(id.clone(), tx);
+        let sent = emit(
+            &self.shared,
+            json!({
+                "type": "interaction_request",
+                "id": id,
+                "ui_type": ui_type,
+                "payload": payload,
+            }),
+        );
+        if !sent {
+            tabit_ext_sdk_lock(&self.shared.grammar_asks).remove(&id);
+            return None;
+        }
+        // The wait honors cancellation: the run aborting under this
+        // call abandons the ask (the host-side card settles whenever
+        // the user answers it; the routed response then finds no
+        // waiter).
+        loop {
+            match rx.recv_timeout(std::time::Duration::from_millis(100)) {
+                Ok(answer) => {
+                    tabit_ext_sdk_lock(&self.shared.grammar_asks).remove(&id);
+                    return Some(answer);
+                }
+                Err(std::sync::mpsc::RecvTimeoutError::Timeout) => {
+                    if self.is_cancelled() {
+                        tabit_ext_sdk_lock(&self.shared.grammar_asks).remove(&id);
+                        return None;
+                    }
+                }
+                Err(std::sync::mpsc::RecvTimeoutError::Disconnected) => return None,
+            }
+        }
     }
 
     /// One model completion (envelope verb one): complete-only,
@@ -338,6 +369,9 @@ static SHARED_COUNTER: AtomicU64 = AtomicU64::new(1);
 struct Shared {
     stdout: std::sync::Mutex<()>,
     asks: Mutex<HashMap<String, std::sync::mpsc::Sender<ServiceReply>>>,
+    /// Grammar asks in flight: interaction-request ids the extension
+    /// minted, awaiting their routed interaction responses.
+    grammar_asks: Mutex<HashMap<String, std::sync::mpsc::Sender<Value>>>,
     /// Call ids the host cancelled (the run aborted under them) —
     /// long-running bodies poll [`Ask::is_cancelled`] and stop: kill
     /// the sandbox, drop the wedge, stop billing.
@@ -355,6 +389,7 @@ pub fn serve(extension: Extension) -> ! {
     let shared = Arc::new(Shared {
         stdout: std::sync::Mutex::new(()),
         asks: Mutex::new(HashMap::new()),
+        grammar_asks: Mutex::new(HashMap::new()),
         cancelled: Mutex::new(std::collections::HashSet::new()),
     });
 
@@ -434,6 +469,16 @@ pub fn serve(extension: Extension) -> ! {
                 let id = frame["call_id"].as_str().unwrap_or_default().to_string();
                 if !id.is_empty() {
                     tabit_ext_sdk_lock(&shared.cancelled).insert(id);
+                }
+            }
+            Some("interaction_response") => {
+                // A routed answer to one of our grammar asks: resolve
+                // by id; a late response for a gone waiter drops.
+                let id = frame["id"].as_str().unwrap_or_default().to_string();
+                if !id.is_empty()
+                    && let Some(sender) = tabit_ext_sdk_lock(&shared.grammar_asks).remove(&id)
+                {
+                    let _ = sender.send(frame["payload"].clone());
                 }
             }
             Some("service_response") => {
@@ -609,6 +654,7 @@ mod tests {
         Arc::new(Shared {
             stdout: std::sync::Mutex::new(()),
             asks: Mutex::new(HashMap::new()),
+            grammar_asks: Mutex::new(HashMap::new()),
             cancelled: Mutex::new(std::collections::HashSet::new()),
         })
     }

@@ -186,11 +186,13 @@ and `cwd`; `ack` carries the watch list. Versioning unchanged: each
 edge enforces at its own handshake — a mismatched extension dies at
 the ack before any line it could emit reaches the core.
 
-The service envelope's ask (verb zero) is **superseded** by direct
-event emission: an extension that can emit an `interaction_request`
-needs no wrapper. The verb is deleted with the SDK rebuild that
-builds on this shape (it rides v2's window; nothing new should use
-it).
+The service envelope's ask (verb zero) is **deleted** (extension
+protocol v3): an extension that can emit an `interaction_request`
+needs no wrapper, and a wrapper nobody needs goes, not windows.
+`model_prompt` is the envelope's one verb. The SDK's ask helper is
+the emission-and-await flow over the grammar; abandonment is the
+run's cancellation (the guest reads its cancel frame as the ask
+resolving dismissed, and the call fails cancelled at the leash).
 
 ## Model-facing names are flat; identity is the pair (2026-09)
 

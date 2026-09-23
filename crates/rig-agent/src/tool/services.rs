@@ -1,6 +1,8 @@
 //! The host-service capability: what extension-envelope verbs
 //! dispatch to (tabit's checklist task 5, but the capability is
-//! substrate-generic): verb zero is the interaction ask (the hub's
+//! substrate-generic). (The interaction ask rode this envelope as
+//! verb zero until the routing generalization replaced it with
+//! direct grammar emission — deleted with extension protocol v3.)
 //! existing lift), verb one is `model_prompt` — a bare, capped model
 //! completion whose usage bills to the session under the calling
 //! extension's name.
@@ -17,19 +19,11 @@
 //! verb bills and attributes through it.
 
 use futures::future::BoxFuture;
-use serde_json::Value;
-
-use super::interaction::InteractionOutcome;
 
 /// The envelope's dispatch surface. One capability per run; verbs
 /// are fixed and typed (the task-5 ruling) — a new verb is a new
 /// trait method riding the protocol version bump.
 pub trait HostServices: Send + Sync {
-    /// Verb zero — the interaction ask, the hub's existing lift: the
-    /// future resolves answered or dismissed; no capability context
-    /// is itself a dismissal (fail closed, the askers' contract).
-    fn ask(&self, ui_type: &str, payload: Value) -> BoxFuture<'static, InteractionOutcome>;
-
     /// Verb one — one model completion, complete-only, capped by the
     /// implementation. `caller` is the requesting extension's name
     /// (the supervisor knows its lane): usage bills to the session

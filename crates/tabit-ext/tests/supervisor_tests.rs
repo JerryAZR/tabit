@@ -20,7 +20,6 @@ use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 use futures::future::BoxFuture;
-use rig_agent::tool::interaction::InteractionOutcome;
 use rig_agent::tool::services::{HostServices, ModelPromptOk, ModelPromptRequest, ServiceUsage};
 use tabit_ext::supervisor::{self, ExtensionEvent, HANDSHAKE_TIMEOUT, Status};
 
@@ -355,30 +354,11 @@ async fn shutdown_reclaims_the_extension_tree() {
 /// A scripted host-service capability: records what crossed, answers
 /// asks (or dismisses) and model prompts on cue.
 struct FakeServices {
-    answer: Option<serde_json::Value>,
     prompt: Option<Result<String, String>>,
-    seen_ask: Arc<Mutex<Vec<(String, serde_json::Value)>>>,
     seen_prompt: Arc<Mutex<Vec<(String, String)>>>,
 }
 
 impl HostServices for FakeServices {
-    fn ask(
-        &self,
-        ui_type: &str,
-        payload: serde_json::Value,
-    ) -> BoxFuture<'static, InteractionOutcome> {
-        let ui_type = ui_type.to_string();
-        let answer = self.answer.clone();
-        let seen = self.seen_ask.clone();
-        Box::pin(async move {
-            seen.lock().expect("seen lock").push((ui_type, payload));
-            match answer {
-                Some(payload) => InteractionOutcome::Answered(payload),
-                None => InteractionOutcome::Dismissed,
-            }
-        })
-    }
-
     fn model_prompt(
         &self,
         caller: &str,
@@ -444,57 +424,111 @@ async fn a_failing_tool_carries_its_error() {
 }
 
 #[tokio::test]
-async fn an_ask_lifts_through_the_interaction_capability() {
+async fn an_ask_routes_through_the_backend_registry() {
     let root = test_dir("ask");
     install(&root, "asker", "tools-ask");
-    let (supervisor, mut events) = supervisor::launch_root(&root, HANDSHAKE_TIMEOUT, test_host());
+    let recorded = Recorded::default();
+    let (supervisor, mut events) =
+        supervisor::launch_root(&root, HANDSHAKE_TIMEOUT, recorded.host());
     await_status(&mut events, "asker", |s| matches!(s, Status::Alive)).await;
     let handle = supervisor.extension("asker").expect("installed");
-    let seen = Arc::new(Mutex::new(Vec::new()));
-    let services = FakeServices {
-        answer: Some(serde_json::json!({"text": "yes"})),
-        prompt: None,
-        seen_ask: seen.clone(),
-        seen_prompt: Arc::new(Mutex::new(Vec::new())),
-    };
-    let result = handle
-        .call(
-            "ask",
-            serde_json::json!({"text": "should we?"}),
-            Some(Arc::new(services)),
-            run_token(),
-        )
-        .await
-        .expect("the call resolves");
+
+    // The call parks on its ask; the answer arrives by id through the
+    // backend registry (the grammar flow — the envelope verb is gone).
+    let call = tokio::spawn(async move {
+        handle
+            .call(
+                "ask",
+                serde_json::json!({"text": "should we?"}),
+                None,
+                run_token(),
+            )
+            .await
+            .expect("the call resolves")
+    });
+    let asked = wait_for(|| {
+        recorded
+            .events()
+            .iter()
+            .any(|e| e.starts_with("asker|") && e.contains("interaction_request"))
+    })
+    .await;
+    assert!(asked, "the ask emission routed: {:?}", recorded.events());
+    let id = recorded
+        .events()
+        .iter()
+        .find(|e| e.contains("interaction_request"))
+        .and_then(|e| e.split("\"id\":\"").nth(1))
+        .and_then(|rest| rest.split('"').next().map(str::to_string))
+        .expect("the ask id");
+    assert!(
+        supervisor
+            .asks()
+            .respond(&id, serde_json::json!({"text": "yes"}))
+    );
+    let result = call.await.expect("joined");
     assert_eq!(result.error, None);
     assert_eq!(result.report, "answered: yes");
-    {
-        let seen = seen.lock().expect("seen lock");
-        let (ui_type, payload) = &seen[0];
-        assert_eq!(ui_type, "native:select_any");
-        assert_eq!(payload["body"], "the ask tool was called with should we?");
-    }
+    // Settlement is announced for every channel holding the card.
+    assert!(
+        wait_for(|| {
+            recorded
+                .events()
+                .iter()
+                .any(|e| e.contains("interaction_settled") && e.contains(&id))
+        })
+        .await
+    );
     supervisor.shutdown().await;
 }
 
 #[tokio::test]
-async fn an_ask_without_a_capability_fails_closed() {
+async fn an_ask_abandoned_by_cancellation_reports_dismissed() {
     let root = test_dir("no-ask");
     install(&root, "asker", "tools-ask");
-    let (supervisor, mut events) = supervisor::launch_root(&root, HANDSHAKE_TIMEOUT, test_host());
+    let recorded = Recorded::default();
+    let (supervisor, mut events) =
+        supervisor::launch_root(&root, HANDSHAKE_TIMEOUT, recorded.host());
     await_status(&mut events, "asker", |s| matches!(s, Status::Alive)).await;
     let handle = supervisor.extension("asker").expect("installed");
-    let result = handle
-        .call(
-            "ask",
-            serde_json::json!({"text": "anyone?"}),
-            None,
-            run_token(),
-        )
-        .await
-        .expect("the call resolves");
-    assert_eq!(result.error, None);
-    assert_eq!(result.report, "dismissed");
+
+    // The grammar ask has no in-band dismissal: abandonment is the
+    // run's cancellation (the guest reads the cancel frame as its
+    // ask resolving dismissed).
+    let token = tokio_util::sync::CancellationToken::new();
+    let call_token = token.clone();
+    let call = tokio::spawn(async move {
+        handle
+            .call(
+                "ask",
+                serde_json::json!({"text": "anyone?"}),
+                None,
+                call_token,
+            )
+            .await
+    });
+    assert!(
+        wait_for(|| {
+            recorded
+                .events()
+                .iter()
+                .any(|e| e.starts_with("asker|") && e.contains("interaction_request"))
+        })
+        .await,
+        "the ask surfaced first: {:?}",
+        recorded.events()
+    );
+    token.cancel();
+    // Token-and-detach: the call fails cancelled (the model-visible
+    // failure); the guest's own dismissal handling is its cleanup,
+    // racing a pending entry that is already gone.
+    let outcome = call.await.expect("joined");
+    assert!(
+        outcome
+            .as_ref()
+            .is_err_and(|error| error.contains("cancelled")),
+        "the call fails cancelled: {outcome:?}"
+    );
     supervisor.shutdown().await;
 }
 
@@ -507,9 +541,7 @@ async fn a_model_prompt_dispatches_through_the_envelope() {
     let handle = supervisor.extension("modeler").expect("installed");
     let seen_prompt = Arc::new(Mutex::new(Vec::new()));
     let services = FakeServices {
-        answer: None,
         prompt: Some(Ok("five words exactly right".to_string())),
-        seen_ask: Arc::new(Mutex::new(Vec::new())),
         seen_prompt: seen_prompt.clone(),
     };
     let result = handle
@@ -669,50 +701,83 @@ async fn a_hook_skip_carries_its_message() {
 }
 
 #[tokio::test]
-async fn a_hook_ask_lifts_to_the_capability() {
+async fn a_hook_ask_decides_through_the_backend_registry() {
     let root = test_dir("hook-ask");
     install(&root, "asker", "hooks-ask");
-    let (supervisor, mut events) = supervisor::launch_root(&root, HANDSHAKE_TIMEOUT, test_host());
+    let recorded = Recorded::default();
+    let (supervisor, mut events) =
+        supervisor::launch_root(&root, HANDSHAKE_TIMEOUT, recorded.host());
     await_status(&mut events, "asker", |s| matches!(s, Status::Alive)).await;
     let handle = supervisor.extension("asker").expect("installed");
-    let seen = Arc::new(Mutex::new(Vec::new()));
-    let services = FakeServices {
-        answer: Some(serde_json::json!({"selected": ["Allow"]})),
-        prompt: None,
-        seen_ask: seen.clone(),
-        seen_prompt: Arc::new(Mutex::new(Vec::new())),
-    };
-    let decision = handle
-        .hook(
-            "tool_call",
-            serde_json::json!({"tool": "bash"}),
-            Some(Arc::new(services)),
-            run_token(),
-        )
-        .await
-        .expect("the hook resolves");
+
+    // Allowed: the answer routes by id, the hook runs the call.
+    let hook = tokio::spawn(async move {
+        handle
+            .hook(
+                "tool_call",
+                serde_json::json!({"tool": "bash"}),
+                None,
+                run_token(),
+            )
+            .await
+            .expect("the hook resolves")
+    });
+    assert!(
+        wait_for(|| {
+            recorded
+                .events()
+                .iter()
+                .any(|e| e.starts_with("asker|") && e.contains("interaction_request"))
+        })
+        .await,
+        "the hook's ask surfaced: {:?}",
+        recorded.events()
+    );
+    let id = recorded
+        .events()
+        .iter()
+        .find(|e| e.contains("interaction_request"))
+        .and_then(|e| e.split("\"id\":\"").nth(1))
+        .and_then(|rest| rest.split('"').next().map(str::to_string))
+        .expect("the ask id");
+    assert!(
+        supervisor
+            .asks()
+            .respond(&id, serde_json::json!({"selected": ["Allow"]}))
+    );
+    let decision = hook.await.expect("joined");
     assert_eq!(decision, tabit_ext::protocol::HookDecision::Run);
-    {
-        let seen = seen.lock().expect("seen lock");
-        assert_eq!(seen.len(), 1, "the hook asked exactly once");
-        assert_eq!(seen[0].0, "native:select_one");
-    }
-    // And the dismissed path denies.
-    let services = FakeServices {
-        answer: None,
-        prompt: None,
-        seen_ask: Arc::new(Mutex::new(Vec::new())),
-        seen_prompt: Arc::new(Mutex::new(Vec::new())),
-    };
-    let decision = handle
-        .hook(
-            "tool_call",
-            serde_json::json!({"tool": "bash"}),
-            Some(Arc::new(services)),
-            run_token(),
-        )
-        .await
-        .expect("the hook resolves");
+
+    // Denied: the same flow, a Block answer skips with the reason.
+    let handle = supervisor.extension("asker").expect("installed");
+    let hook = tokio::spawn(async move {
+        handle
+            .hook(
+                "tool_call",
+                serde_json::json!({"tool": "bash"}),
+                None,
+                run_token(),
+            )
+            .await
+            .expect("the hook resolves")
+    });
+    let baseline = recorded.events().len();
+    assert!(
+        wait_for(|| recorded.events().len() > baseline).await,
+        "the second ask surfaced"
+    );
+    let id = recorded.events()[baseline..]
+        .iter()
+        .find(|e| e.contains("interaction_request"))
+        .and_then(|e| e.split("\"id\":\"").nth(1))
+        .and_then(|rest| rest.split('"').next().map(str::to_string))
+        .expect("the second ask id");
+    assert!(
+        supervisor
+            .asks()
+            .respond(&id, serde_json::json!({"selected": ["Deny"]}))
+    );
+    let decision = hook.await.expect("joined");
     assert!(matches!(
         decision,
         tabit_ext::protocol::HookDecision::Skip { .. }

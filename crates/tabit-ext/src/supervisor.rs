@@ -46,7 +46,6 @@ use crate::protocol::{
     Ack, EXTENSION_PROTOCOL_VERSION, ExtFrame, HOOK_POINTS, HookDecision, HookDecl, HostFrame,
     ServiceVerb, ToolDecl, ToolWireResult,
 };
-use rig_agent::tool::interaction::InteractionOutcome;
 use rig_agent::tool::services::{HostServices, ModelPromptOk, ModelPromptRequest, ServiceUsage};
 use tabit_wire::process::ChildWrapper;
 use tabit_wire::process::{self, wrap_command};
@@ -1002,35 +1001,19 @@ async fn supervise(
 /// The envelope dispatcher: route one extension service request to
 /// the session whose call or hook is in flight (the pending entry's
 /// capability) and carry the answer back down the pipe. The verbs
-/// are fixed (the task-5 ruling); `ask` is verb zero — the hub's
-/// existing lift — and `model_prompt` is verb one, billed through
-/// the same capability. No capability on the pending entry (a
-/// non-interactive session, or the call already gone) answers the
-/// ask dismissed and every other verb with an error — fail closed,
-/// exactly as core tools behave.
+/// are fixed (the task-5 ruling); `model_prompt` is the one verb,
+/// billed through the call's capability. No capability on the
+/// pending entry (a non-interactive session, or the call already
+/// gone) errors — fail closed, exactly as core tools behave. (The
+/// interaction ask rode this envelope as verb zero until the
+/// routing generalization replaced it with direct grammar
+/// emission — deleted with extension protocol v3.)
 fn dispatch_service(lane: Arc<Lane>, request_id: String, call_id: String, verb: ServiceVerb) {
     tokio::spawn(async move {
         let services = tabit_log::lock::lock(&lane.pending)
             .get(&call_id)
             .and_then(|pending| pending.services.clone());
         let response = match verb {
-            ServiceVerb::Ask { ui_type, payload } => {
-                // Verb zero: the lift never contains a core panic
-                // (ruled 2026-09 — the future is core's code, and the
-                // crash hook owns core panics).
-                let outcome = match services {
-                    Some(services) => services.ask(&ui_type, payload).await,
-                    None => InteractionOutcome::Dismissed,
-                };
-                HostFrame::ServiceResponse {
-                    request_id,
-                    result: match outcome {
-                        InteractionOutcome::Answered(answer) => Some(answer),
-                        InteractionOutcome::Dismissed => None,
-                    },
-                    error: None,
-                }
-            }
             ServiceVerb::ModelPrompt {
                 prompt,
                 model,
