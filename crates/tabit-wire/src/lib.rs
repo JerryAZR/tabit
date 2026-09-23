@@ -32,5 +32,6 @@
 //! (`tabit-session`'s edge module) — one server, no sharing need;
 //! this crate is the many-clients half.
 
+pub mod asks;
 pub mod client;
 pub mod process;

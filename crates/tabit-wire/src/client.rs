@@ -1,10 +1,13 @@
 //! The frontend-role client: spawn a tabit-core process in `--json`
 //! child role and speak the frozen wire to it. This is the runtime
 //! every child-driver shares — the subagent bridge (tabit-session)
-//! today, the extension SDK's owned-session wrapper next — extracted
-//! so the wire's client end exists once (the sharing ruling 2026-09;
-//! before this, the bridge hand-rolled it and the GUI carried a
-//! second, simpler copy).
+//! and the extension SDK's owned-session wrapper (the sharing ruling
+//! 2026-09; before this, the bridge hand-rolled its own). The GUI
+//! still carries a deliberate sync twin of this runtime (it runs no
+//! tokio; the twin lacks the bounded handshake and the grace reaper)
+//! — a known, paused-frontend exception, not the rule: when the GUI
+//! revives, it either adopts a sync core extracted here or the twin
+//! goes.
 //!
 //! What lives here, precisely:
 //!

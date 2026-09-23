@@ -77,6 +77,44 @@ impl NoticeSink {
     }
 }
 
+/// The endpoint's own way onto the channel: the strong-sender
+/// sibling of the weak sinks. Exactly one place in a node holds the
+/// strong end (the endpoint — its drop at wind-down IS the
+/// stream-end contract), and this type makes that the stamped-triple
+/// discipline's one strong site instead of twenty hand-written
+/// literals.
+pub struct HostSink {
+    events: mpsc::UnboundedSender<EventFrame>,
+}
+
+impl Clone for HostSink {
+    fn clone(&self) -> Self {
+        Self {
+            events: self.events.clone(),
+        }
+    }
+}
+
+impl HostSink {
+    /// The one construction site (beside the channel itself).
+    pub(crate) fn new(events: &mpsc::UnboundedSender<EventFrame>) -> Self {
+        Self {
+            events: events.clone(),
+        }
+    }
+
+    /// Put one event on the channel, stamped with its stream
+    /// (`None` = backend-level). The send is fire-and-forget like
+    /// every sink: a dead channel means the frontend is gone.
+    pub fn emit(&self, stream: Option<StreamId>, event: SessionEvent) {
+        let _ = self.events.send(EventFrame {
+            stream,
+            origin: None,
+            event,
+        });
+    }
+}
+
 /// The attach-once cell for a sink that does not exist until the
 /// resident worker spawns (mailbox and persist notices). `set` runs
 /// exactly once, at spawn; a second attempt is ignored, and `None`

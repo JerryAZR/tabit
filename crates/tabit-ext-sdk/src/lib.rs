@@ -35,7 +35,6 @@
 #![cfg_attr(test, allow(clippy::expect_used, clippy::panic, clippy::unwrap_used))]
 #![allow(clippy::indexing_slicing, clippy::type_complexity)]
 
-use std::collections::HashMap;
 use std::io::{BufRead, Write};
 use std::panic::AssertUnwindSafe;
 use std::sync::atomic::{AtomicU64, Ordering};
@@ -349,7 +348,7 @@ impl Ctx {
     pub fn ask(&self, ui_type: &str, payload: Value) -> Option<Value> {
         let id = next_request_id(self.correlation.as_deref().unwrap_or("watch"), "ask");
         let (tx, rx) = std::sync::mpsc::channel::<Value>();
-        sdk_lock(&self.shared.grammar_asks).insert(id.clone(), tx);
+        self.shared.grammar_asks.insert(id.clone(), tx);
         let sent = emit(
             &self.shared,
             &SessionEvent::InteractionRequest {
@@ -359,7 +358,7 @@ impl Ctx {
             },
         );
         if !sent {
-            sdk_lock(&self.shared.grammar_asks).remove(&id);
+            drop(self.shared.grammar_asks.take(&id));
             return None;
         }
         // The wait honors cancellation: the run aborting under this
@@ -369,12 +368,12 @@ impl Ctx {
         loop {
             match rx.recv_timeout(std::time::Duration::from_millis(100)) {
                 Ok(answer) => {
-                    sdk_lock(&self.shared.grammar_asks).remove(&id);
+                    drop(self.shared.grammar_asks.take(&id));
                     return Some(answer);
                 }
                 Err(std::sync::mpsc::RecvTimeoutError::Timeout) => {
                     if self.cancelled() {
-                        sdk_lock(&self.shared.grammar_asks).remove(&id);
+                        drop(self.shared.grammar_asks.take(&id));
                         return None;
                     }
                 }
@@ -458,10 +457,10 @@ fn next_request_id(family_root: &str, family: &str) -> String {
 struct Shared {
     stdout: std::sync::Mutex<()>,
     /// Envelope requests in flight, by request id.
-    asks: Mutex<HashMap<String, std::sync::mpsc::Sender<ServiceReply>>>,
+    asks: tabit_wire::asks::PendingAsks<std::sync::mpsc::Sender<ServiceReply>>,
     /// Grammar asks in flight: interaction-request ids the extension
     /// minted, awaiting their routed interaction responses.
-    grammar_asks: Mutex<HashMap<String, std::sync::mpsc::Sender<Value>>>,
+    grammar_asks: tabit_wire::asks::PendingAsks<std::sync::mpsc::Sender<Value>>,
     /// Correlation ids (calls, consultations) the host cancelled —
     /// long-running handlers poll [`Ctx::cancelled`] and stop: kill
     /// the sandbox, drop the wedge, stop billing.
@@ -469,6 +468,91 @@ struct Shared {
     /// The host's own executable (the initialize's `core_path`) —
     /// owned children spawn it.
     core_path: Mutex<Option<String>>,
+}
+
+/// One frame handler: the frame, not the bare event — forwarding and
+/// answering both need the stream stamp.
+pub(crate) type FrameHandler = std::sync::Arc<dyn Fn(&Ctx, &EventFrame) + Send + Sync>;
+
+/// THE frame router: a frame arrives, the interested handlers run —
+/// one map probe per kind, a generic slot for kinds without
+/// specifics, every handler on its own thread, panics reported
+/// never fatal. Both SDK surfaces instantiate it (the host-facing
+/// watch dispatch and each owned child's registry): same concern,
+/// one mechanism — the 2026-09 unification.
+pub(crate) struct FrameRouter {
+    handlers: Mutex<std::collections::HashMap<String, Vec<FrameHandler>>>,
+    generic: Mutex<Option<FrameHandler>>,
+}
+
+impl Default for FrameRouter {
+    fn default() -> Self {
+        Self {
+            handlers: Mutex::new(std::collections::HashMap::new()),
+            generic: Mutex::new(None),
+        }
+    }
+}
+
+impl FrameRouter {
+    /// Register one observer of one kind. Observation composes: many
+    /// subscribers per kind, plus the generic slot when installed.
+    pub(crate) fn register<F>(&self, kind: &str, body: F)
+    where
+        F: Fn(&Ctx, &EventFrame) + Send + Sync + 'static,
+    {
+        self.handlers
+            .lock()
+            .unwrap_or_else(|poison| poison.into_inner())
+            .entry(kind.to_string())
+            .or_default()
+            .push(std::sync::Arc::new(body));
+    }
+
+    /// Install the generic slot (kinds without specifics fall to it).
+    pub(crate) fn set_generic<F>(&self, body: F)
+    where
+        F: Fn(&Ctx, &EventFrame) + Send + Sync + 'static,
+    {
+        *self
+            .generic
+            .lock()
+            .unwrap_or_else(|poison| poison.into_inner()) = Some(std::sync::Arc::new(body));
+    }
+
+    /// One frame through: the kind's specifics, else the generic —
+    /// every match on its own thread, the loop never waits.
+    pub(crate) fn dispatch(&self, shared: &Arc<Shared>, frame: &EventFrame) {
+        let kind = frame.event.tag();
+        let specifics = self
+            .handlers
+            .lock()
+            .unwrap_or_else(|poison| poison.into_inner())
+            .get(kind)
+            .cloned()
+            .unwrap_or_default();
+        if !specifics.is_empty() {
+            for handler in specifics {
+                spawn_frame_handler(shared.clone(), frame.clone(), handler);
+            }
+            return;
+        }
+        let generic = self
+            .generic
+            .lock()
+            .unwrap_or_else(|poison| poison.into_inner())
+            .clone();
+        if let Some(generic) = generic {
+            spawn_frame_handler(shared.clone(), frame.clone(), generic);
+        }
+    }
+}
+
+fn spawn_frame_handler(shared: Arc<Shared>, frame: EventFrame, handler: FrameHandler) {
+    std::thread::spawn(move || {
+        let ctx = Ctx::watch_context(shared);
+        catch_unwind_silently(move || handler(&ctx, &frame));
+    });
 }
 
 /// The dispatcher: answer the initialize, ack (the registration
@@ -484,8 +568,8 @@ pub fn serve(extension: Extension) -> ! {
     let (tools, consults, watches) = (Arc::new(tools), Arc::new(consults), Arc::new(watches));
     let shared = Arc::new(Shared {
         stdout: std::sync::Mutex::new(()),
-        asks: Mutex::new(HashMap::new()),
-        grammar_asks: Mutex::new(HashMap::new()),
+        asks: tabit_wire::asks::PendingAsks::default(),
+        grammar_asks: tabit_wire::asks::PendingAsks::default(),
         cancelled: Mutex::new(std::collections::HashSet::new()),
         core_path: Mutex::new(None),
     });
@@ -527,12 +611,21 @@ pub fn serve(extension: Extension) -> ! {
     };
     emit(&shared, &ack);
 
+    // The watch surface: one router over the registration (the
+    // handlers wrap the typed-event bodies the author wrote).
+    let router = Arc::new(FrameRouter::default());
+    for watch in watches.iter() {
+        let kind = watch.kind.clone();
+        let body = watch.arc_body().clone();
+        router.register(&kind, move |ctx, frame| body(ctx, frame.event.clone()));
+    }
+
     // The dispatch loop: every invocation (a tool call, a
     // consultation, a watched event) runs on its own worker thread —
     // handlers may block, concurrently, and the loop keeps reading.
     loop {
         let line = read_line();
-        dispatch_line(&shared, &line, &tools, &consults, &watches);
+        dispatch_line(&shared, &line, &tools, &consults, &router);
     }
 }
 
@@ -543,7 +636,7 @@ fn dispatch_line(
     line: &str,
     tools: &Arc<Vec<ToolDef>>,
     consults: &Arc<Vec<ConsultDef>>,
-    watches: &Arc<Vec<WatchDef>>,
+    router: &Arc<FrameRouter>,
 ) {
     if let Ok(host) = serde_json::from_str::<HostFrame>(line) {
         match host {
@@ -575,7 +668,7 @@ fn dispatch_line(
                 error,
             } => {
                 let reply = ServiceReply { result, error };
-                if let Some(sender) = sdk_lock(&shared.asks).remove(&request_id) {
+                if let Some(sender) = shared.asks.take(&request_id) {
                     let _ = sender.send(reply);
                 }
             }
@@ -584,22 +677,9 @@ fn dispatch_line(
         return;
     }
     if let Ok(frame) = serde_json::from_str::<EventFrame>(line) {
-        // A watched event, typed. Every matching watch fires, each on
-        // its own thread.
-        let kind = frame.event.tag();
-        for watch in watches.iter() {
-            if watch.kind == kind {
-                let (shared, body) = (shared.clone(), watch.arc_body().clone());
-                let event = frame.event.clone();
-                std::thread::spawn(move || {
-                    let ctx = Ctx {
-                        correlation: None,
-                        shared,
-                    };
-                    catch_unwind_silently(move || body(&ctx, event));
-                });
-            }
-        }
+        // A watched event, typed — through the router like every
+        // other frame the SDK dispatches.
+        router.dispatch(shared, &frame);
         return;
     }
     if let Ok(SessionCommand::InteractionResponse { id, payload, .. }) =
@@ -607,7 +687,7 @@ fn dispatch_line(
     {
         // A routed answer to one of our grammar asks: resolve by id;
         // a late response for a gone waiter drops.
-        if let Some(sender) = sdk_lock(&shared.grammar_asks).remove(&id) {
+        if let Some(sender) = shared.grammar_asks.take(&id) {
             let _ = sender.send(payload);
         }
         return;
@@ -726,7 +806,7 @@ pub(crate) fn register_relay(
     id: &str,
     sender: std::sync::mpsc::Sender<Value>,
 ) {
-    sdk_lock(&shared.grammar_asks).insert(id.to_string(), sender);
+    shared.grammar_asks.insert(id.to_string(), sender);
 }
 
 pub(crate) fn catch_unwind_silently(body: impl FnOnce()) {
@@ -776,20 +856,20 @@ fn request(
     verb: ServiceVerb,
 ) -> Result<ServiceReply, String> {
     let (tx, rx) = std::sync::mpsc::channel::<ServiceReply>();
-    sdk_lock(&shared.asks).insert(id.to_string(), tx);
+    shared.asks.insert(id.to_string(), tx);
     let frame = ExtFrame::ServiceRequest {
         request_id: id.to_string(),
         call_id: call_id.to_string(),
         verb,
     };
     if !emit(shared, &frame) {
-        sdk_lock(&shared.asks).remove(id);
+        drop(shared.asks.take(id));
         return Err("the host closed the pipe".to_string());
     }
     let reply = rx
         .recv()
         .map_err(|_| "the host closed the pipe".to_string());
-    sdk_lock(&shared.asks).remove(id);
+    drop(shared.asks.take(id));
     reply
 }
 
@@ -821,8 +901,8 @@ mod tests {
     fn shared() -> Arc<Shared> {
         Arc::new(Shared {
             stdout: std::sync::Mutex::new(()),
-            asks: Mutex::new(HashMap::new()),
-            grammar_asks: Mutex::new(HashMap::new()),
+            asks: tabit_wire::asks::PendingAsks::default(),
+            grammar_asks: tabit_wire::asks::PendingAsks::default(),
             cancelled: Mutex::new(std::collections::HashSet::new()),
             core_path: Mutex::new(None),
         })

@@ -367,6 +367,7 @@ impl SessionHost {
         let boot_id = info.session_id.clone();
         let boot_stream = StreamId::new(boot_id.clone());
         let (event_tx, event_rx) = mpsc::unbounded_channel::<EventFrame>();
+        let sink = crate::notice::HostSink::new(&event_tx);
         let backend_sink = crate::notice::BackendSink::new(&event_tx);
         let (command_tx, mut command_rx) = mpsc::unbounded_channel::<HostCommand>();
         let shutdown = CancellationToken::new();
@@ -387,10 +388,9 @@ impl SessionHost {
         // degradations, then the catalog. A listing failure is the
         // carrier in place of the announcement — no catalog follows
         // (ruled: external errors ride the channel; PROTOCOL.md v3).
-        let _ = event_tx.send(EventFrame {
-            origin: None,
-            stream: Some(boot_stream.clone()),
-            event: SessionEvent::SessionOpened {
+        sink.emit(
+            Some(boot_stream.clone()),
+            SessionEvent::SessionOpened {
                 id: info.session_id.clone(),
                 path: info.session_path.clone(),
                 cwd: info.session_cwd.clone(),
@@ -399,13 +399,9 @@ impl SessionHost {
                 parent: wiring.boot_parent.clone(),
                 parent_call: wiring.boot_parent_call.clone(),
             },
-        });
+        );
         for note in startup_notes {
-            let _ = event_tx.send(EventFrame {
-                origin: None,
-                stream: Some(boot_stream.clone()),
-                event: SessionEvent::error_model(note),
-            });
+            sink.emit(Some(boot_stream.clone()), SessionEvent::error_model(note));
         }
         match wiring.store.list() {
             Ok(summaries) => {
@@ -421,10 +417,9 @@ impl SessionHost {
                     .and_then(Path::parent)
                     .map(|dir| dir.display().to_string())
                     .unwrap_or_default();
-                let _ = event_tx.send(EventFrame {
-                    origin: None,
-                    stream: None,
-                    event: SessionEvent::SessionsAvailable {
+                sink.emit(
+                    None,
+                    SessionEvent::SessionsAvailable {
                         sessions: summaries
                             .into_iter()
                             .map(|summary| AvailableSession {
@@ -436,14 +431,13 @@ impl SessionHost {
                             })
                             .collect(),
                     },
-                });
+                );
             }
             Err(error) => {
-                let _ = event_tx.send(EventFrame {
-                    origin: None,
-                    stream: None,
-                    event: SessionEvent::error_session(format!("could not list sessions: {error}")),
-                });
+                sink.emit(
+                    None,
+                    SessionEvent::error_session(format!("could not list sessions: {error}")),
+                );
             }
         }
         // The skills catalog rides right after the session catalog —
@@ -451,32 +445,31 @@ impl SessionHost {
         // one skill set). Only when discovery found something: an
         // empty announcement is noise with no state to clear.
         if !wiring.skills.is_empty() {
-            let _ = event_tx.send(EventFrame {
-                origin: None,
-                stream: None,
-                event: SessionEvent::SkillsAvailable {
+            sink.emit(
+                None,
+                SessionEvent::SkillsAvailable {
                     skills: wiring.skills.clone(),
                 },
-            });
+            );
         }
         // The extension catalog rides right after the skills catalog —
         // same backend-level reasons (one process, one extension
         // host), and the conflict reports are load-time facts: they
         // belong to the boot that produced them.
         if !wiring.extensions.extensions.is_empty() {
-            let _ = event_tx.send(EventFrame {
-                origin: None,
-                stream: None,
-                event: SessionEvent::ExtensionsAvailable {
+            sink.emit(
+                None,
+                SessionEvent::ExtensionsAvailable {
                     extensions: wiring.extensions.extensions.clone(),
                     conflicts: wiring.extensions.conflicts.clone(),
                 },
-            });
+            );
         }
 
         let (boot_worker, boot_join) = spawn_worker(
             boot,
             event_tx.clone(),
+            sink.clone(),
             worker_shutdown.clone(),
             closing_stats.clone(),
         );
@@ -519,6 +512,7 @@ impl SessionHost {
             workers: workers.clone(),
             wiring,
             event_tx,
+            sink: sink.clone(),
             stats: closing_stats.clone(),
             worker_shutdown,
             joins: vec![boot_join],
@@ -744,6 +738,7 @@ struct HostLoop {
     workers: Arc<Mutex<HashMap<String, Worker>>>,
     wiring: SessionHostWiring,
     event_tx: mpsc::UnboundedSender<EventFrame>,
+    sink: crate::notice::HostSink,
     stats: Arc<Mutex<HashMap<String, SessionStats>>>,
     worker_shutdown: CancellationToken,
     joins: Vec<JoinHandle<()>>,
@@ -776,14 +771,13 @@ impl HostLoop {
                 } else if self.wiring.children.deliver(&address, command) {
                     // The child's consumption is its own report.
                 } else {
-                    let _ = self.event_tx.send(EventFrame {
-                        origin: None,
-                        stream: None,
-                        event: SessionEvent::error_session(format!(
+                    self.sink.emit(
+                        None,
+                        SessionEvent::error_session(format!(
                             "unknown session `{address}` — not open in this backend \
                              (open_session loads it; sessions_available lists the stored ones)"
                         )),
-                    });
+                    );
                 }
             }
         }
@@ -796,13 +790,12 @@ impl HostLoop {
         let (session, notes) = match (self.wiring.create)() {
             Ok(built) => built,
             Err(message) => {
-                let _ = self.event_tx.send(EventFrame {
-                    origin: None,
-                    stream: None,
-                    event: SessionEvent::error_session(format!(
+                self.sink.emit(
+                    None,
+                    SessionEvent::error_session(format!(
                         "could not build a new session: {message}"
                     )),
-                });
+                );
                 return;
             }
         };
@@ -814,10 +807,9 @@ impl HostLoop {
         // else on the wire will say so (the session is empty; no
         // `model_changed` replays). Selection notes follow on the
         // same stream, the same order `open_session` uses.
-        let _ = self.event_tx.send(EventFrame {
-            origin: None,
-            stream: Some(stream.clone()),
-            event: SessionEvent::SessionOpened {
+        self.sink.emit(
+            Some(stream.clone()),
+            SessionEvent::SessionOpened {
                 id: id.clone(),
                 path: session.wire_path(),
                 cwd: session.cwd().display().to_string(),
@@ -826,13 +818,10 @@ impl HostLoop {
                 parent: None,
                 parent_call: None,
             },
-        });
+        );
         for note in notes {
-            let _ = self.event_tx.send(EventFrame {
-                origin: None,
-                stream: Some(stream.clone()),
-                event: SessionEvent::error_model(note),
-            });
+            self.sink
+                .emit(Some(stream.clone()), SessionEvent::error_model(note));
         }
         self.add_worker(id, session);
     }
@@ -848,21 +837,19 @@ impl HostLoop {
         let (session, notes) = match (self.wiring.open)(id) {
             Ok(loaded) => loaded,
             Err(message) => {
-                let _ = self.event_tx.send(EventFrame {
-                    origin: None,
-                    stream: None,
-                    event: SessionEvent::error_session(format!(
+                self.sink.emit(
+                    None,
+                    SessionEvent::error_session(format!(
                         "could not open session `{id}`: {message}"
                     )),
-                });
+                );
                 return;
             }
         };
         let stream = StreamId::new(id.to_string());
-        let _ = self.event_tx.send(EventFrame {
-            origin: None,
-            stream: Some(stream.clone()),
-            event: SessionEvent::SessionOpened {
+        self.sink.emit(
+            Some(stream.clone()),
+            SessionEvent::SessionOpened {
                 id: id.to_string(),
                 path: session.wire_path(),
                 cwd: session.cwd().display().to_string(),
@@ -871,13 +858,10 @@ impl HostLoop {
                 parent: None,
                 parent_call: None,
             },
-        });
+        );
         for note in notes {
-            let _ = self.event_tx.send(EventFrame {
-                origin: None,
-                stream: Some(stream.clone()),
-                event: SessionEvent::error_model(note),
-            });
+            self.sink
+                .emit(Some(stream.clone()), SessionEvent::error_model(note));
         }
         let worker = self.add_worker(id.to_string(), session);
         worker.deliver_replay();
@@ -889,6 +873,7 @@ impl HostLoop {
         let (worker, join) = spawn_worker(
             session,
             self.event_tx.clone(),
+            self.sink.clone(),
             self.worker_shutdown.clone(),
             self.stats.clone(),
         );
@@ -905,6 +890,7 @@ impl HostLoop {
 fn spawn_worker(
     mut session: Session,
     event_tx: mpsc::UnboundedSender<EventFrame>,
+    sink: crate::notice::HostSink,
     shutdown: CancellationToken,
     stats: Arc<Mutex<HashMap<String, SessionStats>>>,
 ) -> (Worker, JoinHandle<()>) {
@@ -949,7 +935,7 @@ fn spawn_worker(
             // passes announce it live.)
             serve_parked(
                 &mut session,
-                &event_tx,
+                &sink,
                 &stream,
                 &replay_due,
                 &checkout_slot,
@@ -966,11 +952,7 @@ fn spawn_worker(
                         // The receiver is gone only when the
                         // frontend is; there is no one left to
                         // tell.
-                        let _ = event_tx.send(EventFrame {
-                            stream: Some(stream.clone()),
-                            origin: None,
-                            event,
-                        });
+                        sink.emit(Some(stream.clone()), event);
                     })
                     .await;
                 continue;
@@ -997,7 +979,7 @@ fn spawn_worker(
                     // durable — receive wrote them.)
                     serve_parked(
                         &mut session,
-                        &event_tx,
+                        &sink,
                         &stream,
                         &replay_due,
                         &checkout_slot,
@@ -1054,17 +1036,17 @@ fn spawn_worker(
 /// list exactly once.
 async fn serve_parked(
     session: &mut Session,
-    event_tx: &mpsc::UnboundedSender<EventFrame>,
+    sink: &crate::notice::HostSink,
     stream: &StreamId,
     replay_due: &std::sync::atomic::AtomicBool,
     checkout_slot: &Mutex<Option<String>>,
     compact_slot: &Mutex<Option<Option<String>>>,
 ) {
     if replay_due.swap(false, std::sync::atomic::Ordering::Acquire) {
-        emit_replay(session, event_tx, stream);
+        emit_replay(session, sink, stream);
     }
     if let Some(entry_id) = lock(checkout_slot).take() {
-        execute_checkout(session, event_tx, stream, entry_id);
+        execute_checkout(session, sink, stream, entry_id);
     }
     // The guard drops before the await (the lock contract — no
     // guard across an await).
@@ -1082,29 +1064,27 @@ async fn serve_parked(
 /// ones: persist trouble, the chain's model gone from config).
 fn execute_checkout(
     session: &mut Session,
-    event_tx: &mpsc::UnboundedSender<EventFrame>,
+    sink: &crate::notice::HostSink,
     stream: &StreamId,
     entry_id: String,
 ) {
     let res = session.rewind_to_entry(&entry_id);
     if let Err(error) = res {
-        let _ = event_tx.send(EventFrame {
-            origin: None,
-            stream: Some(stream.clone()),
-            event: SessionEvent::error_checkout(error.to_string()),
-        });
+        sink.emit(
+            Some(stream.clone()),
+            SessionEvent::error_checkout(error.to_string()),
+        );
         return;
     }
-    let _ = event_tx.send(EventFrame {
-        origin: None,
-        stream: Some(stream.clone()),
-        event: SessionEvent::CheckedOut {
+    sink.emit(
+        Some(stream.clone()),
+        SessionEvent::CheckedOut {
             entry_id,
             // Full re-render (the suffix mode's reserved seam).
             base_id: None,
         },
-    });
-    emit_replay(session, event_tx, stream);
+    );
+    emit_replay(session, sink, stream);
 }
 
 /// The replay pass (PROTOCOL.md v2): the resident chain projected
@@ -1117,32 +1097,19 @@ fn execute_checkout(
 /// by construction — a pass never moves the register, so the value
 /// repeats; replayed history itself never carries `model_changed` (the
 /// register ruling: state is announced live, not reconstructed).
-fn emit_replay(session: &Session, event_tx: &mpsc::UnboundedSender<EventFrame>, stream: &StreamId) {
+fn emit_replay(session: &Session, sink: &crate::notice::HostSink, stream: &StreamId) {
     let selection = session.selection();
-    let _ = event_tx.send(EventFrame {
-        origin: None,
-        stream: Some(stream.clone()),
-        event: SessionEvent::model_changed(&selection, session.model_facts(&selection)),
-    });
+    sink.emit(
+        Some(stream.clone()),
+        SessionEvent::model_changed(&selection, session.model_facts(&selection)),
+    );
     let events = session.replay_events();
     let total = events.len() as u64;
-    let _ = event_tx.send(EventFrame {
-        origin: None,
-        stream: Some(stream.clone()),
-        event: SessionEvent::ReplayStarted { total },
-    });
+    sink.emit(Some(stream.clone()), SessionEvent::ReplayStarted { total });
     for event in events {
-        let _ = event_tx.send(EventFrame {
-            stream: Some(stream.clone()),
-            origin: None,
-            event,
-        });
+        sink.emit(Some(stream.clone()), event);
     }
-    let _ = event_tx.send(EventFrame {
-        origin: None,
-        stream: Some(stream.clone()),
-        event: SessionEvent::ReplayDone,
-    });
+    sink.emit(Some(stream.clone()), SessionEvent::ReplayDone);
 }
 
 #[cfg(test)]

@@ -34,7 +34,6 @@
 //! kills the tree immediately (nothing was proven), a post-ack death
 //! gets the grace-bounded reclaim.
 
-use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
@@ -161,7 +160,7 @@ impl ChildState {
 struct Lane {
     name: String,
     commands: tokio::sync::mpsc::UnboundedSender<String>,
-    pending: Mutex<HashMap<String, PendingCall>>,
+    pending: tabit_wire::asks::PendingAsks<PendingCall>,
     next_call_id: AtomicU64,
     /// The watched event kinds (the ack's subscription list) — written
     /// once at the handshake, read by every broadcast.
@@ -177,7 +176,7 @@ impl Lane {
         Arc::new(Self {
             name,
             commands,
-            pending: Mutex::new(HashMap::new()),
+            pending: tabit_wire::asks::PendingAsks::default(),
             next_call_id: AtomicU64::new(1),
             watch: Mutex::new(std::collections::HashSet::new()),
             dead: AtomicBool::new(false),
@@ -199,7 +198,7 @@ impl Lane {
     /// stay dead-flagged for late arrivals.
     fn die(&self, reason: &str) {
         self.dead.store(true, Ordering::SeqCst);
-        for (call_id, pending) in tabit_log::lock::lock(&self.pending).drain() {
+        for (call_id, pending) in self.pending.retract_all() {
             match pending.waiter {
                 Waiter::ToolCall(result) => {
                     let _ = result.send(ToolWireResult {
@@ -276,7 +275,7 @@ impl ExtensionHandle {
             self.lane.next_call_id.fetch_add(1, Ordering::Relaxed)
         );
         let (tx, rx) = tokio::sync::oneshot::channel();
-        tabit_log::lock::lock(&self.lane.pending).insert(
+        self.lane.pending.insert(
             call_id.clone(),
             PendingCall {
                 waiter: Waiter::ToolCall(tx),
@@ -288,7 +287,7 @@ impl ExtensionHandle {
         // insert and check is caught either by the flag or by the
         // drain itself.
         if self.lane.dead.load(Ordering::SeqCst) {
-            tabit_log::lock::lock(&self.lane.pending).remove(&call_id);
+            drop(self.lane.pending.take(&call_id));
             return Err(format!("extension `{}` is not running", self.lane.name));
         }
         let frame = serde_json::to_string(&HostFrame::ToolCall {
@@ -298,12 +297,12 @@ impl ExtensionHandle {
         })
         .map_err(|error| format!("cannot encode the tool call: {error}"))?;
         if self.lane.commands.send(frame).is_err() {
-            tabit_log::lock::lock(&self.lane.pending).remove(&call_id);
+            drop(self.lane.pending.take(&call_id));
             return Err(format!("extension `{}` is not running", self.lane.name));
         }
         let outcome = tokio::select! {
             result = rx => result.map_err(|_| {
-                tabit_log::lock::lock(&self.lane.pending).remove(&call_id);
+                drop(self.lane.pending.take(&call_id));
                 format!("extension `{}` closed mid-call", self.lane.name)
             }),
             _ = cancel.cancelled() => {
@@ -314,7 +313,7 @@ impl ExtensionHandle {
         match outcome {
             Ok(result) => Ok(result),
             Err(error) => {
-                tabit_log::lock::lock(&self.lane.pending).remove(&call_id);
+                drop(self.lane.pending.take(&call_id));
                 Err(error)
             }
         }
@@ -325,7 +324,7 @@ impl ExtensionHandle {
     /// unknown id, tolerated) and tell the guest to stop. Shared by
     /// the call and hook lanes — the id is whichever correlation.
     fn cancel(&self, call_id: &str) {
-        tabit_log::lock::lock(&self.lane.pending).remove(call_id);
+        drop(self.lane.pending.take(call_id));
         let frame = HostFrame::Cancel {
             call_id: call_id.to_string(),
         };
@@ -359,7 +358,7 @@ impl ExtensionHandle {
             self.lane.next_call_id.fetch_add(1, Ordering::Relaxed)
         );
         let (tx, rx) = tokio::sync::oneshot::channel();
-        tabit_log::lock::lock(&self.lane.pending).insert(
+        self.lane.pending.insert(
             hook_id.clone(),
             PendingCall {
                 waiter: Waiter::Hook {
@@ -370,7 +369,7 @@ impl ExtensionHandle {
             },
         );
         if self.lane.dead.load(Ordering::SeqCst) {
-            tabit_log::lock::lock(&self.lane.pending).remove(&hook_id);
+            drop(self.lane.pending.take(&hook_id));
             return Err(format!("extension `{}` is not running", self.lane.name));
         }
         let frame = serde_json::to_string(&HostFrame::Hook {
@@ -380,7 +379,7 @@ impl ExtensionHandle {
         })
         .map_err(|error| format!("cannot encode the hook event: {error}"))?;
         if self.lane.commands.send(frame).is_err() {
-            tabit_log::lock::lock(&self.lane.pending).remove(&hook_id);
+            drop(self.lane.pending.take(&hook_id));
             return Err(format!("extension `{}` is not running", self.lane.name));
         }
         // Cancellation resolves the policy FAIL OPEN (the ruling's
@@ -398,7 +397,7 @@ impl ExtensionHandle {
         match outcome {
             Ok(decision) => Ok(decision),
             Err(_) => {
-                tabit_log::lock::lock(&self.lane.pending).remove(&hook_id);
+                drop(self.lane.pending.take(&hook_id));
                 // The lane died and its drain answers every pending
                 // item with the fallback; reaching here means our
                 // entry was gone first — answer the same.
@@ -786,7 +785,7 @@ async fn supervise(
                         // A re-ack after a good one: tolerated, ignored.
                     }
                     Ok(ExtFrame::ToolResult(result)) => {
-                        let entry = tabit_log::lock::lock(&lane.pending).remove(&result.call_id);
+                        let entry = lane.pending.take(&result.call_id);
                         match entry {
                             Some(PendingCall {
                                 waiter: Waiter::ToolCall(result_tx),
@@ -811,7 +810,7 @@ async fn supervise(
                         }
                     }
                     Ok(ExtFrame::HookResult(result)) => {
-                        let entry = tabit_log::lock::lock(&lane.pending).remove(&result.hook_id);
+                        let entry = lane.pending.take(&result.hook_id);
                         match entry {
                             Some(PendingCall {
                                 waiter:
@@ -1016,9 +1015,10 @@ async fn supervise(
 /// emission — deleted with extension protocol v3.)
 fn dispatch_service(lane: Arc<Lane>, request_id: String, call_id: String, verb: ServiceVerb) {
     tokio::spawn(async move {
-        let services = tabit_log::lock::lock(&lane.pending)
-            .get(&call_id)
-            .and_then(|pending| pending.services.clone());
+        let services = lane
+            .pending
+            .peek(&call_id, |pending| pending.services.clone())
+            .flatten();
         let response = match verb {
             ServiceVerb::ModelPrompt {
                 prompt,

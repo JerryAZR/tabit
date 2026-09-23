@@ -18,6 +18,23 @@ don't add machinery because pi has it. The reasons to exist: the native Rust
 stack, the egui GUI as a first-class frontend, planned in-process subagents,
 and a design we fully own.
 
+## The node model (2026-09 ruling)
+
+Every tabit process is a **node** with one bidirectional interface:
+it serves the process that spawned it over a frozen pipe, and may
+spawn nodes that serve it. A subagent is a node, a frontend is a
+node, an extension is a node — the vocabulary is shared, the
+mechanisms are shared. Process management is a tree (spawn,
+ownership, lifecycle — the spawner decides); **dataflow is a net**
+over those edges: a node's events fan to all its subscribers, never
+"the one and only frontend"; commands arrive from any link; asks
+are answered by id from any channel — first arrival wins, late
+answers are tolerated no-ops. The shared mechanisms live where both
+sides link them: `tabit-wire` (`asks.rs` — the one pending-answer
+registry every node instantiates; `client.rs` — the one child
+driver) and `tabit-ext-sdk` (`FrameRouter` — the one frame
+dispatch). Neither core nor extensions re-invent them.
+
 Current workspace layout:
 
 - `crates/rig-core` — provider API clients, streaming, tools (providers kept:

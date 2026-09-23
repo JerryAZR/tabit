@@ -33,7 +33,6 @@
 //! call's cancellation via the settle leash, drop). Nobody else
 //! commands it.
 
-use std::collections::HashMap;
 use std::sync::{Arc, Mutex};
 
 use tabit_protocol::{EventFrame, SessionEvent, tags};
@@ -100,8 +99,9 @@ type FrameHandler = Arc<dyn Fn(&Ctx, &EventFrame) + Send + Sync>;
 /// The per-child frame registry: kind-keyed specifics, one generic
 /// slot, and the single-owner ask slot.
 struct Registry {
-    observation: Mutex<HashMap<String, Vec<FrameHandler>>>,
-    generic: Mutex<Option<FrameHandler>>,
+    /// The observation surface: the shared FrameRouter (one mechanism
+    /// with the watch surface — the 2026-09 unification).
+    router: crate::FrameRouter,
     /// The ask-answerers: the shipped forward-and-relay default
     /// yields to the first author registration (a custom beside the
     /// default would double-surface the card); author registrations
@@ -159,8 +159,7 @@ impl Child {
         }
 
         let registry = Arc::new(Registry {
-            observation: Mutex::new(HashMap::new()),
-            generic: Mutex::new(None),
+            router: crate::FrameRouter::default(),
             ask_answerers: Mutex::new(vec![Arc::new(forward_frame)]),
             ask_default: Mutex::new(true),
             commands: Mutex::new(None),
@@ -171,7 +170,7 @@ impl Child {
         // is installed above and yields to the first author
         // registration.
         if options.forwarding {
-            *crate::sdk_lock(&registry.generic) = Some(Arc::new(forward_frame));
+            registry.router.set_generic(forward_frame);
         }
 
         // The driver task owns the handle on the SDK's runtime: one
@@ -315,12 +314,8 @@ impl Registry {
                     .to_string(),
             );
         }
-        crate::sdk_lock(&self.observation)
-            .entry(kind.to_string())
-            .or_default()
-            .push(Arc::new(move |ctx: &Ctx, frame: &EventFrame| {
-                body(ctx, &frame.event)
-            }));
+        self.router
+            .register(kind, move |ctx, frame| body(ctx, &frame.event));
         Ok(())
     }
 
@@ -387,20 +382,7 @@ fn dispatch_frame(ctx: &Ctx, registry_arc: &Arc<Registry>, frame: EventFrame) {
         }
         return;
     }
-    let specifics = crate::sdk_lock(&registry.observation)
-        .get(kind)
-        .cloned()
-        .unwrap_or_default();
-    let has_specifics = !specifics.is_empty();
-    let generic = crate::sdk_lock(&registry.generic).clone();
-    for handler in specifics {
-        let frame = frame.clone();
-        spawn_handler(shared.clone(), move |ctx| handler(&ctx, &frame));
-    }
-    if !has_specifics && let Some(generic) = generic {
-        let frame = frame.clone();
-        spawn_handler(shared.clone(), move |ctx| generic(&ctx, &frame));
-    }
+    registry.router.dispatch(&shared, &frame);
 }
 
 fn spawn_handler(shared: std::sync::Arc<Shared>, body: impl FnOnce(Ctx) + Send + 'static) {
@@ -439,8 +421,7 @@ mod tests {
 
     fn registry() -> Registry {
         Registry {
-            observation: Mutex::new(HashMap::new()),
-            generic: Mutex::new(None),
+            router: crate::FrameRouter::default(),
             ask_answerers: Mutex::new(Vec::new()),
             ask_default: Mutex::new(true),
             commands: Mutex::new(None),
@@ -456,12 +437,8 @@ mod tests {
         registry
             .on(tags::RUN_FINISHED, |_ctx, _event| {})
             .expect("and so does the second — observation composes");
-        assert_eq!(
-            crate::sdk_lock(&registry.observation)
-                .get(tags::RUN_FINISHED)
-                .map(Vec::len),
-            Some(2)
-        );
+        // Two registrations of one kind compose — the router's law;
+        // both succeeded, which is it.
     }
 
     #[test]

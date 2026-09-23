@@ -19,7 +19,6 @@
 //! the card can close it; run terminals clear the pending map
 //! (questions die with their chains — drop is the cancellation).
 
-use std::collections::HashMap;
 use std::sync::Arc;
 
 use futures::future::BoxFuture;
@@ -29,7 +28,6 @@ use rig_agent::tool::interaction::{InteractionOutcome, UserInteraction};
 use tabit_protocol::{EventFrame, SessionEvent, StreamId};
 
 use crate::ids::new_entry_id;
-use crate::lock::lock;
 use crate::notice::NoticeSink;
 
 /// The hub's shared state.
@@ -44,8 +42,10 @@ struct Inner {
     /// originate on tool-chain tasks, not the worker, and reach the
     /// channel directly; ordering with run events is channel send order.
     notices: NoticeSink,
-    /// Open questions by id: where the answer payload goes.
-    pending: std::sync::Mutex<HashMap<String, oneshot::Sender<serde_json::Value>>>,
+    /// Open questions by id: where the answer payload goes — the
+    /// shared registry ([`tabit_wire::asks`]), one law for every
+    /// node.
+    pending: tabit_wire::asks::PendingAsks<oneshot::Sender<serde_json::Value>>,
 }
 
 /// The session's interaction router. Cheap to clone (one `Arc`).
@@ -61,7 +61,7 @@ impl InteractionHub {
         Self {
             inner: Arc::new(Inner {
                 notices: NoticeSink::new(&events, stream),
-                pending: std::sync::Mutex::new(HashMap::new()),
+                pending: tabit_wire::asks::PendingAsks::default(),
             }),
         }
     }
@@ -79,7 +79,7 @@ impl InteractionHub {
     /// nothing and drops, and the settlement is announced to every
     /// channel still holding the card.
     pub fn respond(&self, id: &str, payload: serde_json::Value) -> bool {
-        let sender = lock(&self.inner.pending).remove(id);
+        let sender = self.inner.pending.take(id);
         match sender {
             Some(sender) => {
                 let delivered = sender.send(payload).is_ok();
@@ -104,8 +104,11 @@ impl InteractionHub {
     /// retraction settles its id — a channel that missed whatever
     /// ended the run still learns its card is dead.
     pub fn clear_pending(&self) {
-        let retracted: Vec<String> = lock(&self.inner.pending)
-            .drain()
+        let retracted: Vec<String> = self
+            .inner
+            .pending
+            .retract_all()
+            .into_iter()
             .map(|(id, _)| id)
             .collect();
         for id in retracted {
@@ -125,7 +128,7 @@ impl InteractionHub {
     async fn ask_once(&self, ui_type: &str, payload: serde_json::Value) -> InteractionOutcome {
         let (sender, receiver) = oneshot::channel();
         let id = new_entry_id();
-        lock(&self.inner.pending).insert(id.clone(), sender);
+        self.inner.pending.insert(id.clone(), sender);
         let sent = self.inner.notices.emit(SessionEvent::InteractionRequest {
             id: id.clone(),
             ui_type: ui_type.to_string(),
@@ -136,7 +139,7 @@ impl InteractionHub {
             // will ever answer. The question settles at registration —
             // announced for whoever still consumes the channel, though
             // a dead channel makes that nobody (fail-soft either way).
-            lock(&self.inner.pending).remove(&id);
+            drop(self.inner.pending.take(&id));
             let _ = self
                 .inner
                 .notices
