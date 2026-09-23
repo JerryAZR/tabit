@@ -24,7 +24,11 @@ use futures::future::BoxFuture;
 use rig_agent::tool::services::HostServices;
 use tabit_ext::supervisor::{self, HANDSHAKE_TIMEOUT, Status};
 
-const BOUND: Duration = Duration::from_secs(15);
+// Generous: the bound exists to catch hangs, not to race a loaded
+// runner's process spawns — it sits above the protocol's own 30s
+// handshake window on purpose (the load-timing family's second
+// occurrence bought this comment).
+const BOUND: Duration = Duration::from_secs(45);
 
 /// A never-fired run token for call sites that test the steady
 /// state (cancellation has its own tests).
