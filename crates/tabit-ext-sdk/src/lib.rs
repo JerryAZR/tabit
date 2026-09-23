@@ -346,9 +346,19 @@ impl Ctx {
     /// response finds no waiter and drops), and the pipe's death
     /// resolves `None` too — fail closed.
     pub fn ask(&self, ui_type: &str, payload: Value) -> Option<Value> {
-        let id = next_request_id(self.correlation.as_deref().unwrap_or("watch"), "ask");
+        let owner = self
+            .correlation
+            .clone()
+            .unwrap_or_else(|| "watch".to_string());
+        let id = next_request_id(&owner, "ask");
         let (tx, rx) = std::sync::mpsc::channel::<Value>();
-        self.shared.grammar_asks.insert(id.clone(), tx);
+        self.shared
+            .grammar_asks
+            .insert(id.clone(), &owner, "interaction", move |outcome| {
+                if let tabit_wire::asks::Outcome::Answered(answer) = outcome {
+                    let _ = tx.send(tabit_wire::asks::unanswer::<Value>(answer));
+                }
+            });
         let sent = emit(
             &self.shared,
             &SessionEvent::InteractionRequest {
@@ -358,7 +368,7 @@ impl Ctx {
             },
         );
         if !sent {
-            drop(self.shared.grammar_asks.take(&id));
+            drop(self.shared.grammar_asks.claim(&id));
             return None;
         }
         // The wait honors cancellation: the run aborting under this
@@ -368,12 +378,12 @@ impl Ctx {
         loop {
             match rx.recv_timeout(std::time::Duration::from_millis(100)) {
                 Ok(answer) => {
-                    drop(self.shared.grammar_asks.take(&id));
+                    drop(self.shared.grammar_asks.claim(&id));
                     return Some(answer);
                 }
                 Err(std::sync::mpsc::RecvTimeoutError::Timeout) => {
                     if self.cancelled() {
-                        drop(self.shared.grammar_asks.take(&id));
+                        drop(self.shared.grammar_asks.claim(&id));
                         return None;
                     }
                 }
@@ -456,11 +466,13 @@ fn next_request_id(family_root: &str, family: &str) -> String {
 /// Everything the loop and the worker threads share.
 struct Shared {
     stdout: std::sync::Mutex<()>,
-    /// Envelope requests in flight, by request id.
-    asks: tabit_wire::asks::PendingAsks<std::sync::mpsc::Sender<ServiceReply>>,
+    /// Envelope requests in flight, by request id — the delivery
+    /// closure wakes the blocked body's thread with the reply.
+    asks: tabit_wire::asks::PendingAsks,
     /// Grammar asks in flight: interaction-request ids the extension
-    /// minted, awaiting their routed interaction responses.
-    grammar_asks: tabit_wire::asks::PendingAsks<std::sync::mpsc::Sender<Value>>,
+    /// minted, awaiting their routed interaction responses (or, for a
+    /// relayed child's ask, carrying the answer home to the child).
+    grammar_asks: tabit_wire::asks::PendingAsks,
     /// Correlation ids (calls, consultations) the host cancelled —
     /// long-running handlers poll [`Ctx::cancelled`] and stop: kill
     /// the sandbox, drop the wedge, stop billing.
@@ -594,9 +606,8 @@ fn dispatch_line(
                 error,
             } => {
                 let reply = ServiceReply { result, error };
-                if let Some(sender) = shared.asks.take(&request_id) {
-                    let _ = sender.send(reply);
-                }
+                // A miss is a late or unknown id — tolerated.
+                let _ = shared.asks.respond(&request_id, Box::new(reply));
             }
             HostFrame::Initialize { .. } => {} // a re-send: tolerated, ignored
         }
@@ -613,9 +624,7 @@ fn dispatch_line(
     {
         // A routed answer to one of our grammar asks: resolve by id;
         // a late response for a gone waiter drops.
-        if let Some(sender) = shared.grammar_asks.take(&id) {
-            let _ = sender.send(payload);
-        }
+        let _ = shared.grammar_asks.respond(&id, Box::new(payload));
         return;
     }
     // The double tolerates garbage; the SDK exits loud — a malformed
@@ -725,14 +734,21 @@ fn run_consult(
 /// A watch body's panic is reported, never fatal — observation must
 /// not take the process down.
 /// Register a relayed child ask: the routed answer resolves through
-/// the same pending map the extension's own asks use; the receiver
+/// the same registry the extension's own asks use; the receiver
 /// carries it home to the child.
 pub(crate) fn register_relay(
     shared: &Arc<Shared>,
+    owner: &str,
     id: &str,
     sender: std::sync::mpsc::Sender<Value>,
 ) {
-    shared.grammar_asks.insert(id.to_string(), sender);
+    shared
+        .grammar_asks
+        .insert(id.to_string(), owner, "interaction", move |outcome| {
+            if let tabit_wire::asks::Outcome::Answered(answer) = outcome {
+                let _ = sender.send(tabit_wire::asks::unanswer::<Value>(answer));
+            }
+        });
 }
 
 pub(crate) fn catch_unwind_silently(body: impl FnOnce()) {
@@ -782,20 +798,26 @@ fn request(
     verb: ServiceVerb,
 ) -> Result<ServiceReply, String> {
     let (tx, rx) = std::sync::mpsc::channel::<ServiceReply>();
-    shared.asks.insert(id.to_string(), tx);
+    shared
+        .asks
+        .insert(id.to_string(), call_id, "service", move |outcome| {
+            if let tabit_wire::asks::Outcome::Answered(answer) = outcome {
+                let _ = tx.send(tabit_wire::asks::unanswer::<ServiceReply>(answer));
+            }
+        });
     let frame = ExtFrame::ServiceRequest {
         request_id: id.to_string(),
         call_id: call_id.to_string(),
         verb,
     };
     if !emit(shared, &frame) {
-        drop(shared.asks.take(id));
+        drop(shared.asks.claim(id));
         return Err("the host closed the pipe".to_string());
     }
     let reply = rx
         .recv()
         .map_err(|_| "the host closed the pipe".to_string());
-    drop(shared.asks.take(id));
+    drop(shared.asks.claim(id));
     reply
 }
 

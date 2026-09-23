@@ -196,12 +196,10 @@ impl Worker {
     /// already done — abort has nothing to say about them.
     /// The cancel itself (the run's abort plus its immediate
     /// `messages_discarded` notice) lives in the handle.
-    /// Abort consumption also **broadcasts to this session's
-    /// registered children** (the tree rule): stop all work in the
-    /// subtree, never destroy the instances. In-run children are
-    /// already leash-cancelled by the token; this walk reaches them
-    /// again (idempotently) and anything else registered under this
-    /// session.
+    /// Abort carries no routing machinery (the routing ruling): the
+    /// run token is every tool body's leash, so the abort cascades
+    /// through the active tool calls — a subagent tool kills its own
+    /// child — and children with no active call survive naturally.
     fn abort(&self) {
         lock(&self.checkout_slot).take();
         lock(&self.compact_slot).take();

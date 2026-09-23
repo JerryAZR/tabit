@@ -41,9 +41,8 @@ use tabit_protocol::SessionCommand;
 #[path = "routing_tests.rs"]
 mod tests;
 
-/// One registered child: its parent (abort's tree walk) and its
-/// command pipe — line-form commands into the subprocess child's
-/// stdin writer. Every command crosses unfiltered; the child's own
+/// One registered child: its command pipe — line-form commands
+/// into the subprocess child's stdin writer. Every command crosses unfiltered; the child's own
 /// host consumes it (and cascades aborts to its own children), which
 /// is the structural guarantee that every session command works on a
 /// child with zero child-specific code: a child IS a session host.
@@ -61,9 +60,9 @@ struct RouterState {
     routes: HashMap<String, String>,
 }
 
-/// The process-wide child registry — one per host; the binary shares
-/// it with [`crate::subagent::SubagentParts`] so spawns register and
-/// routing sees the same table.
+/// The process-wide child registry — one per host; the binary
+/// shares it with the session host's spawn sites so spawns register
+/// and routing sees the same table.
 #[derive(Default)]
 pub struct ChildRouter {
     state: Mutex<RouterState>,

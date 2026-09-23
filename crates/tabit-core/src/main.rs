@@ -1108,7 +1108,7 @@ fn run() -> Result<i32, String> {
                 let dispatch: std::sync::Arc<dyn Fn(SessionCommand) + Send + Sync> =
                     std::sync::Arc::new(move |command| {
                         if let SessionCommand::InteractionResponse { id, payload, .. } = &command
-                            && asks.respond(id, payload.clone())
+                            && asks.respond(id, Box::new(payload.clone()))
                         {
                             return;
                         }

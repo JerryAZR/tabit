@@ -45,7 +45,7 @@ the same stream — all of it `tabit-wire`'s `ChildHandle` (pump,
 tap, fold). Core's bridge is the fixed policy (learn + relay
 always on; the fold consumes the terminal, most frames ignored);
 the SDK's wrapper is the general policy (registered handlers via
-its in-guest `FrameRouter`; relay opt-in — the SDK's "frontend" is
+the shared router; relay opt-in — the SDK's "frontend" is
 its parent node). What differs between the two drivers is policy,
 never mechanism.
 
@@ -74,17 +74,24 @@ Current workspace layout:
   context manager (the resident tree + the model-facing history
   view), the delta-token regime compaction reads — engine-free,
   consumed by rig-agent and tabit-session
-- `crates/tabit-wire` — the frozen wire's client role and the
-  child-process substrate (the 2026-09 extraction: share what is the
-  same): `client.rs` spawns a tabit-core child in `--json` role (the
-  child-role CLI knobs as one builder) and speaks the frontend
-  protocol to it — the bounded handshake, the frame pump
-  (forward-don't-re-stamp, with the router's learn/forward tap), the
-  command writer, the reaper; `process.rs` (moved from tabit-ext) is
-  the substrate every spawning site shares (tree-kill wrapping, the
-  stderr ring, the grace reaper). Consumers: the subagent bridge,
-  the extension host, and the extension SDK's owned-session wrapper;
-  the wire's serve side lives with the host (`tabit-session`'s edge
+- `crates/tabit-wire` — the frozen wire's client role, the shared
+  node mechanisms, and the child-process substrate (the 2026-09
+  extraction: share what is the same): `router.rs` is THE event
+  router (register by kind or wildcard, dispatch, retract by owner —
+  each callback owns its own dispatch); `asks.rs` is THE
+  pending-question registry (one entry per open round-trip: an owner
+  key plus a delivery closure over answered-or-orphaned — answers
+  are races, the first wins); `routing.rs` is the ChildRouter
+  (route-all line forwarding with learned grandchild tables — the
+  Ethernet-switch model); `client.rs` spawns a tabit-core child in
+  `--json` role (the child-role CLI knobs as one builder) and speaks
+  the frontend protocol to it — the bounded handshake, the frame
+  pump (forward-don't-re-stamp, with the router's learn/forward
+  tap), the command writer, the reaper; `process.rs` (moved from
+  tabit-ext) is the substrate every spawning site shares (tree-kill
+  wrapping, the stderr ring, the grace reaper). Consumers: the
+  subagent bridge, the extension host, and the extension SDK; the
+  wire's serve side lives with the host (`tabit-session`'s edge
   module) — one server, no sharing need
 - `crates/tabit-session` — persistent sessions over the outer loop (native
   only: filesystem-backed; the rig crates keep wasm support), the
@@ -98,10 +105,8 @@ Current workspace layout:
   subagent framework (`subagent.rs`: `SpawnContext` — spawn/drive a
   subprocess child, the one substrate; `subprocess.rs`: the bridge —
   the session adapter over `tabit-wire`'s client (router taps, the
-  drive fold, the ruled abort shape); `routing.rs`: the ChildRouter — route-all line
-  forwarding, learned tables, abort's subtree broadcast; the
-  `subagent` tool is the opinionated example shape extensions
-  override — ROADMAP item 5)
+  drive fold, the ruled abort shape); the `subagent` tool is the
+  opinionated example shape extensions override — ROADMAP item 5)
 - `crates/tabit-tools` — coding tools (`read`, `write`, `edit`, `bash`
   — chosen at registration: verified Git Bash, else PowerShell on
   Windows) as
@@ -122,8 +127,8 @@ Current workspace layout:
   registry, no lockfile)
 - `crates/tabit-ext` — the extension host (ROADMAP item 9): manifest
   discovery (`tabit.json` under the extensions root), the frozen
-  JSONL extension pipe (initialize/ack, the tool lane, the
-  interaction lift), the supervisor (launch over the
+  JSONL extension pipe (initialize/ack, the tool lane, the flat
+  grammar), the supervisor (launch over the
   disable-filtered scan, handshake, supervise,
   mark-dead-and-report — no mid-run respawn; the tool-call dispatch
   surface for proxy tools); the child-process substrate it spawns on

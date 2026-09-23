@@ -381,7 +381,7 @@ fn dispatch_frame(ctx: &Ctx, registry_arc: &Arc<Registry>, frame: EventFrame) {
             _ => return,
         };
         let (tx, rx) = std::sync::mpsc::channel::<serde_json::Value>();
-        crate::register_relay(&shared, &id, tx);
+        crate::register_relay(&shared, "relay", &id, tx);
         let answerers = crate::sdk_lock(&registry.ask_answerers).clone();
         let default_stands = *crate::sdk_lock(&registry.ask_default);
         for answerer in answerers {

@@ -5,8 +5,8 @@
 //! frontend edge, and receives the events it watches the same way.
 //! Routing is participant-blind — channels, subscriptions, and action
 //! requests — and this module is the pipe's half of that law: where
-//! inbound grammar goes, and the ask registry that routes answers back
-//! to extension askers.
+//! inbound grammar goes, and the ask registration that routes answers
+//! back to extension askers ([`register_ask`]).
 //!
 //! Frame dispatch on the inbound side is a parse cascade
 //! ([`crate::supervisor`]): the extension lanes first (`ack`,
@@ -16,10 +16,8 @@
 //! namespaces stay disjoint by construction and are held so by the
 //! round-trip tests on both sides.
 
-use std::collections::HashMap;
 use std::sync::Arc;
 
-use tabit_log::lock::lock;
 use tabit_protocol::{EventFrame, SessionCommand, SessionEvent};
 
 /// Where the shared grammar goes once the pipe has parsed it — the
@@ -85,101 +83,56 @@ impl GrammarRoutes {
     }
 }
 
-/// The registry of open questions **extensions** asked through the
-/// shared grammar: an extension emits an `interaction_request` event,
-/// the host re-emits it (origin-stamped) to the watching channels, and
+/// The correlation-kind tag grammar asks register under.
+const KIND_ASK: &str = "interaction";
+
+/// Register one extension-minted question on the node's shared ask
+/// registry: an extension emits an `interaction_request` event, the
+/// host re-emits it (origin-stamped) to the watching channels, and
 /// the answer — a sessionless `interaction_response`, routed by id —
-/// lands here and is written back down the asking extension's pipe.
-/// Ask ids are unique per minter, prefixed by the minting lane or
-/// call identity, so namespaces cannot collide (core mints UUIDv7;
-/// the SDK mints lane-prefixed counters — one vocabulary, dialects
-/// by construction); settlement is announced as `interaction_settled`
-/// through the same routes, so every channel holding the card closes
-/// it. A dead asking extension loses its entries at the death site
-/// (settled, announced) — no answer can strand.
-pub struct BackendAsks {
+/// is written back down the asking extension's pipe. Every settle
+/// site (the answer, the extension's death) announces
+/// `interaction_settled` through the routes, so every channel holding
+/// the card closes it. Ask ids are unique per minter, prefixed by the
+/// minting lane or call identity, so namespaces cannot collide (core
+/// mints UUIDv7; the SDK mints lane-prefixed counters — one
+/// vocabulary, dialects by construction); a dead asking extension
+/// loses its entries at the death site (settled, announced) — no
+/// answer can strand.
+pub fn register_ask(
+    asks: &tabit_wire::asks::PendingAsks,
     routes: GrammarRoutes,
-    pending: std::sync::Mutex<HashMap<String, BackendAsk>>,
-}
-
-/// One registered question: who asked, and the lane that carries the
-/// answer home.
-struct BackendAsk {
-    extension: String,
+    extension: &str,
+    id: String,
     commands: tokio::sync::mpsc::UnboundedSender<String>,
-}
-
-impl BackendAsks {
-    /// Build the registry over the routes its settlements ride.
-    pub fn new(routes: GrammarRoutes) -> Self {
-        Self {
-            routes,
-            pending: std::sync::Mutex::new(HashMap::new()),
+) {
+    let origin = extension.to_string();
+    let settled_id = id.clone();
+    asks.insert(id, extension, KIND_ASK, move |outcome| {
+        if let tabit_wire::asks::Outcome::Answered(boxed) = outcome {
+            let payload = tabit_wire::asks::unanswer::<serde_json::Value>(boxed);
+            let line = tabit_protocol::to_wire_line(&SessionCommand::InteractionResponse {
+                session: None,
+                id: settled_id.clone(),
+                payload,
+            });
+            let _ = commands.send(line);
         }
-    }
-
-    /// Adopt an extension-emitted question. A colliding id (the
-    /// extension reused a live id — its bug, not a routing event)
-    /// replaces the earlier entry, which settles silently orphaned:
-    /// the frontend's answer still routes here, once.
-    pub fn register(
-        &self,
-        extension: &str,
-        id: String,
-        commands: tokio::sync::mpsc::UnboundedSender<String>,
-    ) {
-        lock(&self.pending).insert(
-            id,
-            BackendAsk {
-                extension: extension.to_string(),
-                commands,
+        routes.event(
+            &origin,
+            SessionEvent::InteractionSettled {
+                id: settled_id.clone(),
             },
         );
-    }
-
-    /// Route one answer to its asking extension. Returns whether the
-    /// id was ours to answer — the glue's id-first dispatch: `false`
-    /// means the command belongs to the session host. A known id whose
-    /// lane is dead still counts as ours (the entry is consumed, the
-    /// settlement announced); the write into a dead lane is a no-op.
-    pub fn respond(&self, id: &str, payload: serde_json::Value) -> bool {
-        let Some(ask) = lock(&self.pending).remove(id) else {
-            return false;
-        };
-        let line = tabit_protocol::to_wire_line(&SessionCommand::InteractionResponse {
-            session: None,
-            id: id.to_string(),
-            payload,
-        });
-        let _ = ask.commands.send(line);
-        self.routes.event(
-            &ask.extension,
-            SessionEvent::InteractionSettled { id: id.to_string() },
-        );
-        true
-    }
-
-    /// Settle every question one extension asked — its death site. No
-    /// answer can ever come for these; the channels holding the cards
-    /// learn it through the settlement events.
-    pub fn clear_extension(&self, extension: &str) {
-        let orphaned: Vec<String> = lock(&self.pending)
-            .iter()
-            .filter(|(_, ask)| ask.extension == extension)
-            .map(|(id, _)| id.clone())
-            .collect();
-        for id in orphaned {
-            lock(&self.pending).remove(&id);
-            self.routes
-                .event(extension, SessionEvent::InteractionSettled { id });
-        }
-    }
+    });
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
     use std::sync::Mutex as StdMutex;
+
+    use tabit_wire::asks::Outcome;
 
     fn recording() -> (Arc<StdMutex<Vec<String>>>, GrammarRoutes) {
         let seen: Arc<StdMutex<Vec<String>>> = Arc::new(StdMutex::new(Vec::new()));
@@ -200,11 +153,14 @@ mod tests {
     #[test]
     fn an_answer_routes_back_and_settles() {
         let (seen, routes) = recording();
-        let asks = BackendAsks::new(routes);
+        let asks = tabit_wire::asks::PendingAsks::default();
         let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel::<String>();
-        asks.register("echo-ext", "req-1".to_string(), tx);
+        register_ask(&asks, routes.clone(), "echo-ext", "req-1".to_string(), tx);
 
-        assert!(asks.respond("req-1", serde_json::json!({"selected": ["Allow"]})));
+        assert!(asks.respond(
+            "req-1",
+            Box::new(serde_json::json!({"selected": ["Allow"]}))
+        ));
         let line = rx.blocking_recv().expect("the answer crossed the lane");
         assert_eq!(
             line,
@@ -216,30 +172,51 @@ mod tests {
             r#"echo-ext:{"type":"interaction_settled","id":"req-1"}"#
         );
         // First answer wins; a second finds nothing and is not ours.
-        assert!(!asks.respond("req-1", serde_json::json!({})));
+        assert!(!asks.respond("req-1", Box::new(serde_json::json!({}))));
     }
 
     #[test]
     fn an_unknown_id_is_not_ours_to_answer() {
-        let (_seen, routes) = recording();
-        let asks = BackendAsks::new(routes);
-        assert!(!asks.respond("no-such-id", serde_json::json!({})));
+        let (_seen, _routes) = recording();
+        let asks = tabit_wire::asks::PendingAsks::default();
+        assert!(!asks.respond("no-such-id", Box::new(serde_json::json!({}))));
     }
 
     #[test]
     fn extension_death_settles_its_asks_only() {
         let (seen, routes) = recording();
-        let asks = BackendAsks::new(routes);
+        let asks = tabit_wire::asks::PendingAsks::default();
         let (tx, _rx) = tokio::sync::mpsc::unbounded_channel::<String>();
-        asks.register("a-ext", "req-a".to_string(), tx.clone());
-        asks.register("b-ext", "req-b".to_string(), tx);
+        register_ask(
+            &asks,
+            routes.clone(),
+            "a-ext",
+            "req-a".to_string(),
+            tx.clone(),
+        );
+        register_ask(&asks, routes.clone(), "b-ext", "req-b".to_string(), tx);
 
-        asks.clear_extension("a-ext");
+        asks.retract_owner("a-ext", "the extension process exited");
         let settled = seen.lock().unwrap().clone();
         assert_eq!(settled.len(), 1);
         assert!(settled[0].contains("a-ext"));
         assert!(settled[0].contains("req-a"));
         // b's question survives, still answerable.
-        assert!(asks.respond("req-b", serde_json::json!({})));
+        assert!(asks.respond("req-b", Box::new(serde_json::json!({}))));
+    }
+
+    #[test]
+    fn a_claimed_ask_delivers_by_hand() {
+        let (seen, routes) = recording();
+        let asks = tabit_wire::asks::PendingAsks::default();
+        let (tx, _rx) = tokio::sync::mpsc::unbounded_channel::<String>();
+        register_ask(&asks, routes.clone(), "echo-ext", "req-1".to_string(), tx);
+
+        let claimed = asks.claim("req-1").expect("claimed");
+        assert_eq!(claimed.kind(), "interaction");
+        claimed.deliver(Outcome::Answered(Box::new(
+            serde_json::json!({"text": "hi"}),
+        )));
+        assert_eq!(seen.lock().unwrap().len(), 1, "the settle still announces");
     }
 }

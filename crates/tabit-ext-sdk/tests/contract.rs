@@ -236,7 +236,10 @@ async fn the_ask_example_routes_its_answer() {
         recorded.events()
     );
     let id = recorded.newest_ask("echo").expect("the id");
-    assert!(host.asks().respond(&id, serde_json::json!({"text": "yes"})));
+    assert!(
+        host.asks()
+            .respond(&id, Box::new(serde_json::json!({"text": "yes"})))
+    );
     let result = call.await.expect("joined");
     assert_eq!(result.error, None);
     assert_eq!(result.report, "the user answered: yes");

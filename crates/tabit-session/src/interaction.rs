@@ -7,17 +7,18 @@
 //!
 //! One hub per session worker, the actor's third shared leaf beside
 //! the mailbox and abort: [`InteractionHub::ask`] is called from tool
-//! bodies and hooks (many producers), registers a oneshot in the
-//! pending map, emits `interaction_request` on the event channel, and
-//! awaits; [`InteractionHub::respond`] routes an arriving answer by id
-//! to the one awaiting asker — a sync leaf call needing no worker
-//! attention. Total semantics: an unknown id or a dead asker is a
-//! logged no-op. Every settle site — the first answer (the rest race
-//! onto a gone id and drop), the run-terminal retraction, the
-//! dead-channel dismissal at registration — emits
-//! `interaction_settled` fire-and-forget, so every channel holding
-//! the card can close it; run terminals clear the pending map
-//! (questions die with their chains — drop is the cancellation).
+//! bodies and hooks (many producers), registers its delivery closure
+//! on the shared ask registry, emits `interaction_request` on the
+//! event channel, and awaits; [`InteractionHub::respond`] routes an
+//! arriving answer by id to the one awaiting asker — a sync leaf call
+//! needing no worker attention. Total semantics: an unknown id or a
+//! dead asker is a logged no-op. Every settle site — the first answer
+//! (the rest race onto a gone id and drop), the run-terminal
+//! retraction, the dead-channel dismissal at registration — emits
+//! `interaction_settled` fire-and-forget (the closure's settle arm),
+//! so every channel holding the card can close it; run terminals
+//! clear the pending map (questions die with their chains — drop is
+//! the cancellation).
 
 use std::sync::Arc;
 
@@ -26,6 +27,7 @@ use tokio::sync::{mpsc, oneshot};
 
 use rig_agent::tool::interaction::{InteractionOutcome, UserInteraction};
 use tabit_protocol::{EventFrame, SessionEvent, StreamId};
+use tabit_wire::asks::Outcome;
 
 use crate::ids::new_entry_id;
 use crate::notice::NoticeSink;
@@ -44,8 +46,9 @@ struct Inner {
     notices: NoticeSink,
     /// Open questions by id: where the answer payload goes — the
     /// shared registry ([`tabit_wire::asks`]), one law for every
-    /// node.
-    pending: tabit_wire::asks::PendingAsks<oneshot::Sender<serde_json::Value>>,
+    /// node. The owner key is the session's stream.
+    owner: String,
+    pending: tabit_wire::asks::PendingAsks,
 }
 
 /// The session's interaction router. Cheap to clone (one `Arc`).
@@ -58,9 +61,11 @@ impl InteractionHub {
     /// Build the hub over the worker's event channel, stamped with the
     /// session's stream.
     pub fn new(events: mpsc::UnboundedSender<EventFrame>, stream: StreamId) -> Self {
+        let owner = stream.as_str().to_string();
         Self {
             inner: Arc::new(Inner {
                 notices: NoticeSink::new(&events, stream),
+                owner,
                 pending: tabit_wire::asks::PendingAsks::default(),
             }),
         }
@@ -72,31 +77,21 @@ impl InteractionHub {
         Arc::new(self.clone())
     }
 
-    /// Deliver an answer. Returns whether it reached a live asker (a
+    /// Deliver an answer. Returns whether the id was ours to answer (a
     /// miss is the total-semantics no-op — the question went away with
-    /// its run). The first answer settles the id: the entry is removed
+    /// its run). The first answer settles the id: the entry is claimed
     /// atomically with the lookup, so a racing second answer finds
     /// nothing and drops, and the settlement is announced to every
     /// channel still holding the card.
     pub fn respond(&self, id: &str, payload: serde_json::Value) -> bool {
-        let sender = self.inner.pending.take(id);
-        match sender {
-            Some(sender) => {
-                let delivered = sender.send(payload).is_ok();
-                let _ = self
-                    .inner
-                    .notices
-                    .emit(SessionEvent::InteractionSettled { id: id.to_string() });
-                delivered
-            }
-            None => {
-                tracing::debug!(
-                    interaction_id = id,
-                    "interaction response for an unknown or closed request — dropped"
-                );
-                false
-            }
+        let claimed = self.inner.pending.respond(id, Box::new(payload));
+        if !claimed {
+            tracing::debug!(
+                interaction_id = id,
+                "interaction response for an unknown or closed request — dropped"
+            );
         }
+        claimed
     }
 
     /// Retract every open question. Called at run terminals: the askers
@@ -104,19 +99,7 @@ impl InteractionHub {
     /// retraction settles its id — a channel that missed whatever
     /// ended the run still learns its card is dead.
     pub fn clear_pending(&self) {
-        let retracted: Vec<String> = self
-            .inner
-            .pending
-            .retract_all()
-            .into_iter()
-            .map(|(id, _)| id)
-            .collect();
-        for id in retracted {
-            let _ = self
-                .inner
-                .notices
-                .emit(SessionEvent::InteractionSettled { id });
-        }
+        self.inner.pending.retract_all("the run ended");
     }
 
     /// Register the question, surface it, await the answer. Drop is
@@ -128,7 +111,23 @@ impl InteractionHub {
     async fn ask_once(&self, ui_type: &str, payload: serde_json::Value) -> InteractionOutcome {
         let (sender, receiver) = oneshot::channel();
         let id = new_entry_id();
-        self.inner.pending.insert(id.clone(), sender);
+        let notices = self.inner.notices.clone();
+        let settled_id = id.clone();
+        self.inner.pending.insert(
+            id.clone(),
+            &self.inner.owner,
+            "interaction",
+            move |outcome| {
+                // The delivery: resolve the awaiting asker, then
+                // announce the settlement — whichever way it settled.
+                if let Outcome::Answered(answer) = outcome {
+                    let _ = sender.send(tabit_wire::asks::unanswer::<serde_json::Value>(answer));
+                }
+                let _ = notices.emit(SessionEvent::InteractionSettled {
+                    id: settled_id.clone(),
+                });
+            },
+        );
         let sent = self.inner.notices.emit(SessionEvent::InteractionRequest {
             id: id.clone(),
             ui_type: ui_type.to_string(),
@@ -139,11 +138,9 @@ impl InteractionHub {
             // will ever answer. The question settles at registration —
             // announced for whoever still consumes the channel, though
             // a dead channel makes that nobody (fail-soft either way).
-            drop(self.inner.pending.take(&id));
-            let _ = self
-                .inner
-                .notices
-                .emit(SessionEvent::InteractionSettled { id: id.clone() });
+            self.inner
+                .pending
+                .orphan(&id, "the event channel is dead at registration");
             return InteractionOutcome::Dismissed;
         }
         match receiver.await {

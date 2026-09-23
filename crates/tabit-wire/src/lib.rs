@@ -10,13 +10,19 @@
         clippy::unwrap_used
     )
 )]
-//! The frozen wire's runtimes for spawned tabit-core children (the
-//! extraction the extension-SDK round builds on — ruled 2026-09:
-//! share what is the same).
+//! The frozen wire's shared node mechanisms and the runtimes for
+//! spawned tabit-core children (the extraction the extension-SDK
+//! round builds on — ruled 2026-09: share what is the same):
 //!
-//! Two modules, one concern — being the client end of the frontend
-//! protocol to a tabit-core process:
-//!
+//! - [`router`]: THE event router — register by kind or wildcard,
+//!   dispatch, retract by owner; each callback owns its own dispatch
+//!   (a thread, a pipe, a channel — the router never queues).
+//! - [`asks`]: THE pending-question registry — one entry per open
+//!   round-trip (an owner key plus a delivery closure over
+//!   answered-or-orphaned); answers are races, the first arrival
+//!   claims, late arrivals drop.
+//! - [`routing`]: the ChildRouter — route-all line forwarding with
+//!   learned grandchild tables (the Ethernet-switch model).
 //! - [`process`]: the child-process substrate every spawning site
 //!   shares (tree-kill wrapping, the stderr ring, the command writer
 //!   whose close is the stdin drop, the grace reaper). Moved from

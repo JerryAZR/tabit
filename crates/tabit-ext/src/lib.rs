@@ -29,5 +29,5 @@ pub mod manifest;
 pub mod protocol;
 pub mod supervisor;
 
-pub use grammar::{BackendAsks, GrammarRoutes};
+pub use grammar::{GrammarRoutes, register_ask};
 pub use supervisor::LaunchContext;

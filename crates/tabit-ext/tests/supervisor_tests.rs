@@ -464,7 +464,7 @@ async fn an_ask_routes_through_the_backend_registry() {
     assert!(
         supervisor
             .asks()
-            .respond(&id, serde_json::json!({"text": "yes"}))
+            .respond(&id, Box::new(serde_json::json!({"text": "yes"})))
     );
     let result = call.await.expect("joined");
     assert_eq!(result.error, None);
@@ -638,8 +638,11 @@ async fn await_resolved_joins_every_handshake() {
     let root = test_dir("resolved");
     install(&root, "aaa-hello", "hello");
     install(&root, "zzz-mute", "mute");
+    // The bound exists for the mute (it resolves only by timing out);
+    // the hello must ack well inside it even under a loaded gate run,
+    // or the Alive await below races a load-spiked handshake.
     let (supervisor, mut events) =
-        supervisor::launch_root(&root, Duration::from_millis(300), test_host());
+        supervisor::launch_root(&root, Duration::from_secs(2), test_host());
     supervisor.await_resolved().await;
     // Both verdicts stand — the join did not return on the first.
     let reports = supervisor.reports();
@@ -743,7 +746,7 @@ async fn a_hook_ask_decides_through_the_backend_registry() {
     assert!(
         supervisor
             .asks()
-            .respond(&id, serde_json::json!({"selected": ["Allow"]}))
+            .respond(&id, Box::new(serde_json::json!({"selected": ["Allow"]})))
     );
     let decision = hook.await.expect("joined");
     assert_eq!(decision, tabit_ext::protocol::HookDecision::Run);
@@ -775,7 +778,7 @@ async fn a_hook_ask_decides_through_the_backend_registry() {
     assert!(
         supervisor
             .asks()
-            .respond(&id, serde_json::json!({"selected": ["Deny"]}))
+            .respond(&id, Box::new(serde_json::json!({"selected": ["Deny"]})))
     );
     let decision = hook.await.expect("joined");
     assert!(matches!(
@@ -987,7 +990,7 @@ async fn the_shared_grammar_flows_both_directions_over_the_pipe() {
     // The answer routes back by id, and settlement is announced.
     assert!(supervisor.asks().respond(
         "g-1",
-        serde_json::json!({"selected": [], "text": "go ahead"})
+        Box::new(serde_json::json!({"selected": [], "text": "go ahead"}))
     ));
     let settled = wait_for(|| {
         recorded
@@ -1011,8 +1014,10 @@ async fn the_shared_grammar_flows_both_directions_over_the_pipe() {
     );
 
     // Death settles the asks: none are open, but the sweep is the
-    // contract — clear_extension on a live registry is quiet.
-    supervisor.asks().clear_extension("grammar-ext");
+    // contract — an owner retraction on a live registry is quiet.
+    supervisor
+        .asks()
+        .retract_owner("grammar-ext", "the test ends");
     supervisor.shutdown().await;
 }
 
