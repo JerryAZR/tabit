@@ -17,7 +17,8 @@
 use std::collections::HashSet;
 use std::sync::Mutex;
 
-use tabit_ext_sdk::{Decision, Extension, consult};
+use tabit_ext_sdk::{Extension, consult};
+use tabit_protocol::points;
 
 /// Sessions already titled — once each, keyed by the hook payload's
 /// session identity (the per-session state rule; one process serves
@@ -25,21 +26,24 @@ use tabit_ext_sdk::{Decision, Extension, consult};
 static TITLED: Mutex<Option<HashSet<String>>> = Mutex::new(None);
 
 fn main() {
-    tabit_ext_sdk::serve(Extension::new().consult(consult("tool_result", title_once)));
+    tabit_ext_sdk::serve(Extension::new().consult(consult::<points::ToolResult, _>(title_once)));
 }
 
-fn title_once(ctx: &tabit_ext_sdk::Ctx, event: serde_json::Value) -> Result<Decision, String> {
+/// The observer point's body: do the title once per session, owe
+/// nothing back (`Ok(())` — the unit answer is the honest shape for
+/// an observer).
+fn title_once(ctx: &tabit_ext_sdk::Ctx, event: serde_json::Value) -> Result<(), String> {
     let session = event["session"].as_str().unwrap_or_default().to_string();
     {
         let mut titled = tabit_ext_sdk_lock(&TITLED);
         let seen = titled.get_or_insert_with(HashSet::new);
         if !session.is_empty() && !seen.insert(session.clone()) {
-            return Ok(Decision::keep()); // already titled — once per session
+            return Ok(()); // already titled — once per session
         }
     }
-    // A failure is treated as absence (the ruling): the result hook
-    // keeps its presentation either way, and the failure lands on
-    // stderr where the host's report can find it.
+    // A failure is treated as absence (the ruling): the observer
+    // owes nothing either way, and the failure lands on stderr
+    // where the host's report can find it.
     match ctx.complete(
         "Write a three-to-five word title for this coding session, \
          based on the tool work so far. Reply with the title only.",
@@ -57,7 +61,7 @@ fn title_once(ctx: &tabit_ext_sdk::Ctx, event: serde_json::Value) -> Result<Deci
             eprintln!("autotitle: the title prompt failed: {error}");
         }
     }
-    Ok(Decision::keep())
+    Ok(())
 }
 
 /// The poison-recovering lock idiom (the same shape as the SDK's own

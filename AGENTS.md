@@ -60,8 +60,12 @@ Current workspace layout:
   `UserInteraction`)
 - `crates/rig-derive` — `#[rig_tool]` proc macros
 - `crates/rig` — facade crate re-exporting the three above
-- `crates/tabit-protocol` — the frontend protocol vocabulary (commands,
-  stamped events, handshake frames; `FRONTEND.md` is the contract)
+- `crates/tabit-protocol` — the shared vocabulary crate (commands,
+  stamped events, handshake frames; `FRONTEND.md` is the contract),
+  plus `points` — the hook-point declarations (the per-point ruling,
+  2026-09: each point names its wire name, its answer type, and its
+  neutral; the SDK and the host serialize the same types, no
+  hand-kept wire mirror)
 - `crates/tabit-config` — provider/model configuration plus the
   settings layers (`settings.toml`: the extension disable list —
   packages mount by default; the built-in gate opt-out

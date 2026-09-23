@@ -12,9 +12,10 @@
 //! structural — the two handler shapes cannot be confused):
 //!
 //! - **tools** — the model calls them; the body returns its result.
-//! - **consultations** (`consult`) — the engine's hook points; the
-//!   handler returns a decision (run/skip, keep), and the host
-//!   waits for it.
+//! - **consultations** (`consult`) — the engine's hook points, one
+//!   declaration per point ([`tabit_protocol::points`]); the handler
+//!   returns the point's own answer type (a gate returns a verdict,
+//!   an observer returns `()`), and the host waits for it.
 //! - **watches** (`watch`) — event kinds (the frontend grammar's
 //!   wire tags, [`tabit_protocol::tags`]); the handler observes,
 //!   returns nothing.
@@ -30,7 +31,7 @@
 //! tests keep crate and docs honest).
 
 // serde_json's `Value` indexing returns Null for missing keys — it
-// never panics — and that ergonomics is the point: the
+// never panics — and that ergonomics is the point of this crate: the
 // author-facing API stays `args["field"]`.
 #![cfg_attr(test, allow(clippy::expect_used, clippy::panic, clippy::unwrap_used))]
 #![allow(clippy::indexing_slicing, clippy::type_complexity)]
@@ -42,14 +43,13 @@ use std::sync::{Arc, Mutex};
 
 use serde::Serialize;
 use serde_json::{Value, json};
-use tabit_ext::protocol::{
-    ExtFrame, HOOK_POINTS, HookDecision, HookResult, HostFrame, ServiceVerb, ToolWireResult,
-};
+use tabit_ext::protocol::{ExtFrame, HookResult, HostFrame, ServiceVerb, ToolWireResult};
+use tabit_protocol::points::HookPoint;
 use tabit_protocol::{EventFrame, SessionCommand, SessionEvent};
 
 /// The extension protocol this SDK speaks — must match the host's
 /// exactly (the pipe is a frozen contract, not a negotiated one).
-const PROTOCOL_VERSION: u32 = 3;
+const PROTOCOL_VERSION: u32 = 4;
 
 pub mod children;
 
@@ -166,57 +166,36 @@ where
     }
 }
 
-/// What a consultation decided — the wire's `HookDecision`, in the
-/// SDK's hand. v1: run the call, skip it with the in-band message,
-/// or keep a result's presentation.
-#[derive(Debug, Clone)]
-pub enum Decision {
-    Run,
-    Skip { message: String },
-    Keep,
-}
+/// A consultation handler after type erasure: the event payload plus
+/// the context, returning the point's answer serialized (the host
+/// waits for it).
+type ErasedConsult = Box<dyn Fn(&Ctx, Value) -> Result<Value, String> + Send + Sync>;
 
-impl Decision {
-    pub fn run() -> Self {
-        Decision::Run
-    }
-    pub fn skip(message: impl Into<String>) -> Self {
-        Decision::Skip {
-            message: message.into(),
-        }
-    }
-    pub fn keep() -> Self {
-        Decision::Keep
-    }
-}
-
-/// A consultation handler: the event payload plus the context (a
-/// policy may need the human mid-hook). The host waits for the
-/// decision.
-pub type ConsultBody = Box<dyn Fn(&Ctx, Value) -> Result<Decision, String> + Send + Sync>;
-
-/// One declared consultation. The point must be one of the host's
-/// hook points (`HOOK_POINTS`) — anything else refuses loudly at
-/// registration, not silently mid-run.
+/// One declared consultation. The point and its answer type pair at
+/// registration — [`consult::<P>`] is the only constructor, so a
+/// `tool_result` consult cannot return a verdict.
 pub struct ConsultDef {
-    pub point: String,
-    body: ConsultBody,
+    pub point: &'static str,
+    body: ErasedConsult,
 }
 
-/// Declare a consultation on one hook point.
-pub fn consult<F>(point: &str, body: F) -> ConsultDef
+/// Declare a consultation on one hook point: the body returns the
+/// point's own answer type (`P::Answer` — a gate a
+/// [`tabit_protocol::points::CallVerdict`], an observer `()`), and
+/// the point's name comes with the type. There is no point-name
+/// argument to get wrong.
+pub fn consult<P, F>(body: F) -> ConsultDef
 where
-    F: Fn(&Ctx, Value) -> Result<Decision, String> + Send + Sync + 'static,
+    P: HookPoint,
+    F: Fn(&Ctx, Value) -> Result<P::Answer, String> + Send + Sync + 'static,
 {
-    if !HOOK_POINTS.contains(&point) {
-        die(&format!(
-            "unknown hook point `{point}` (known: {})",
-            HOOK_POINTS.join(", ")
-        ));
-    }
     ConsultDef {
-        point: point.to_string(),
-        body: Box::new(body),
+        point: P::NAME,
+        body: Box::new(move |ctx, payload| {
+            let answer = (body)(ctx, payload)?;
+            serde_json::to_value(answer)
+                .map_err(|error| format!("the answer does not serialize: {error}"))
+        }),
     }
 }
 
@@ -531,7 +510,7 @@ pub fn serve(extension: Extension) -> ! {
         hooks: consults
             .iter()
             .map(|consult| tabit_ext::protocol::HookDecl {
-                event: consult.point.clone(),
+                event: consult.point.to_string(),
             })
             .collect(),
         watch: watches.iter().map(|w| w.kind.clone()).collect(),
@@ -678,10 +657,9 @@ fn run_body(shared: &Arc<Shared>, call_id: String, name: String, args: Value, to
 
 /// One dispatched consultation. **A failing handler is treated as
 /// absence** (ruled 2026-09: dead or broken resolve identically —
-/// the neutral decision, run for call points / keep for result
-/// points; a failed *tool call* is the model-visible failure). The
-/// handler's own error paths can choose otherwise; the SDK's
-/// failure handling cannot.
+/// the point's declared neutral; a failed *tool call* is the
+/// model-visible failure). The handler's own error paths can choose
+/// otherwise; the SDK's failure handling cannot.
 fn run_consult(
     shared: &Arc<Shared>,
     hook_id: String,
@@ -689,46 +667,28 @@ fn run_consult(
     consults: &[ConsultDef],
     payload: Value,
 ) -> ExtFrame {
-    fn neutral(point: &str) -> HookDecision {
-        if point == "tool_result" {
-            HookDecision::Keep
-        } else {
-            HookDecision::Run
-        }
-    }
     let Some(consult) = consults.iter().find(|consult| consult.point == event) else {
         // No subscription: a newer host's event point this SDK
-        // predates — absence.
+        // predates — absence, the declared neutral for the name.
         return ExtFrame::HookResult(HookResult {
             hook_id,
-            decision: neutral(event),
+            answer: tabit_protocol::points::neutral_wire(event),
         });
     };
     let ctx = Ctx {
         correlation: Some(hook_id.clone()),
         shared: shared.clone(),
     };
-    let decision = std::panic::catch_unwind(AssertUnwindSafe(|| (consult.body)(&ctx, payload)))
+    let answer = std::panic::catch_unwind(AssertUnwindSafe(|| (consult.body)(&ctx, payload)))
         .unwrap_or_else(|_| Err("the consultation handler panicked".to_string()));
-    let decision = decision.unwrap_or_else(|error| {
+    let answer = answer.unwrap_or_else(|error| {
         let _ = writeln!(
             std::io::stderr(),
             "tabit extension: the handler failed: {error}"
         );
-        match neutral(event) {
-            HookDecision::Keep => Decision::Keep,
-            _ => Decision::Run,
-        }
+        tabit_protocol::points::neutral_wire(event)
     });
-    let wire = match decision {
-        Decision::Run => HookDecision::Run,
-        Decision::Skip { message } => HookDecision::Skip { message },
-        Decision::Keep => HookDecision::Keep,
-    };
-    ExtFrame::HookResult(HookResult {
-        hook_id,
-        decision: wire,
-    })
+    ExtFrame::HookResult(HookResult { hook_id, answer })
 }
 
 /// A watch body's panic is reported, never fatal — observation must
@@ -859,9 +819,9 @@ mod tests {
     #[test]
     fn a_failing_consultation_is_absence_run_for_call_points() {
         let shared = shared();
-        let consults = [consult("tool_call", |_ctx, _payload| {
-            Err("boom".to_string())
-        })];
+        let consults = [consult::<tabit_protocol::points::ToolCall, _>(
+            |_ctx, _payload| Err::<tabit_protocol::points::CallVerdict, _>("boom".to_string()),
+        )];
         let frame = run_consult(
             &shared,
             "h-1".to_string(),
@@ -870,20 +830,18 @@ mod tests {
             json!({}),
         );
         match frame {
-            ExtFrame::HookResult(HookResult {
-                decision: HookDecision::Run,
-                ..
-            }) => {}
-            other => panic!("the neutral decision for a call point: {other:?}"),
+            ExtFrame::HookResult(HookResult { answer, .. })
+                if answer == json!({"verdict": "run"}) => {}
+            other => panic!("the neutral answer for a call point: {other:?}"),
         }
     }
 
     #[test]
-    fn a_failing_consultation_is_absence_keep_for_result_points() {
+    fn a_failing_consultation_is_absence_unit_for_result_points() {
         let shared = shared();
-        let consults = [consult("tool_result", |_ctx, _payload| {
-            Err("boom".to_string())
-        })];
+        let consults = [consult::<tabit_protocol::points::ToolResult, _>(
+            |_ctx, _payload| Err::<(), _>("boom".to_string()),
+        )];
         let frame = run_consult(
             &shared,
             "h-2".to_string(),
@@ -892,11 +850,8 @@ mod tests {
             json!({}),
         );
         match frame {
-            ExtFrame::HookResult(HookResult {
-                decision: HookDecision::Keep,
-                ..
-            }) => {}
-            other => panic!("the neutral decision for a result point: {other:?}"),
+            ExtFrame::HookResult(HookResult { answer, .. }) if answer.is_null() => {}
+            other => panic!("the neutral answer for a result point: {other:?}"),
         }
     }
 
@@ -905,11 +860,33 @@ mod tests {
         let shared = shared();
         let frame = run_consult(&shared, "h-3".to_string(), "tool_call", &[], json!({}));
         match frame {
-            ExtFrame::HookResult(HookResult {
-                decision: HookDecision::Run,
-                ..
-            }) => {}
-            other => panic!("absence is the neutral decision: {other:?}"),
+            ExtFrame::HookResult(HookResult { answer, .. })
+                if answer == json!({"verdict": "run"}) => {}
+            other => panic!("absence is the neutral answer: {other:?}"),
+        }
+    }
+
+    #[test]
+    fn the_answer_serializes_from_the_shared_type() {
+        let shared = shared();
+        let consults = [consult::<tabit_protocol::points::ToolCall, _>(
+            |_ctx, _payload| {
+                Ok(tabit_protocol::points::CallVerdict::Skip {
+                    message: "not tonight".to_string(),
+                })
+            },
+        )];
+        let frame = run_consult(
+            &shared,
+            "h-4".to_string(),
+            "tool_call",
+            &consults,
+            json!({}),
+        );
+        match frame {
+            ExtFrame::HookResult(HookResult { answer, .. })
+                if answer == json!({"verdict": "skip", "message": "not tonight"}) => {}
+            other => panic!("the verdict rode the wire as its own type: {other:?}"),
         }
     }
 }

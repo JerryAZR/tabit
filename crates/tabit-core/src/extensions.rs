@@ -26,7 +26,7 @@ use rig_agent::agent::hook::{ToolCallAction, ToolResultAction};
 use rig_agent::agent::{HookStack, on};
 use rig_agent::tool::{DynamicTool, ToolContext};
 use rig_core::tool::{ToolExecutionError, content_parts};
-use tabit_ext::protocol::{HookDecision, ToolDecl};
+use tabit_ext::protocol::ToolDecl;
 use tabit_ext::supervisor::{ExtensionHandle, ExtensionReport, Status, Supervisor};
 use tabit_protocol::{
     AvailableExtension, AvailableExtensionTool, ExtensionConflict, ExtensionConflictKind,
@@ -296,9 +296,11 @@ fn proxy(handle: ExtensionHandle, extension: String, decl: ToolDecl) -> DynamicT
 
 /// Forward one pre-call hook to an extension. The payload carries
 /// what a policy needs: the session identity (per-session state), the
-/// tool, the arguments. A dead lane fails **open** — crash isolation:
-/// one dead package cannot brick the tool phase, and the death itself
-/// is reported loudly (stderr, the catalog's dead standing).
+/// tool, the arguments. The verdict is the point's own answer type
+/// (`CallVerdict`), parsed at the delivery; a dead lane or a failed
+/// handler fails **open** — the neutral verdict, crash isolation: one
+/// dead package cannot brick the tool phase, and the death itself is
+/// reported loudly (stderr, the catalog's dead standing).
 fn forward_tool_call<'a>(
     handle: ExtensionHandle,
     ctx: &'a rig_agent::agent::HookContext,
@@ -312,19 +314,24 @@ fn forward_tool_call<'a>(
     let services = ctx.host_services();
     let token = ctx.run_token().unwrap_or_default();
     Box::pin(async move {
-        match handle.hook("tool_call", payload, services, token).await {
-            Ok(HookDecision::Skip { message }) => ToolCallAction::skip(message),
-            // Run is the neutral answer; Keep on a call point is
-            // protocol misuse — treat it as neutral, not fatal.
-            Ok(_) => ToolCallAction::run(),
+        match handle
+            .hook::<tabit_protocol::points::ToolCall>(payload, services, token)
+            .await
+        {
+            Ok(tabit_protocol::points::CallVerdict::Skip { message }) => {
+                ToolCallAction::skip(message)
+            }
+            Ok(tabit_protocol::points::CallVerdict::Run) => ToolCallAction::run(),
             Err(_) => ToolCallAction::run(),
         }
     })
 }
 
 /// Forward one post-result hook: the presentation rides the payload
-/// (rendered), and Keep is the only v1 wire decision — result-hook
-/// consumers are observers for now.
+/// (rendered). The point is an observer — its answer type is the
+/// unit, owed as completion, not as a decision (presentation
+/// rewrites exist as engine actions and carry on no wire until a
+/// consumer asks).
 fn forward_tool_result<'a>(
     handle: ExtensionHandle,
     ctx: &'a rig_agent::agent::HookContext,
@@ -339,9 +346,11 @@ fn forward_tool_result<'a>(
     let services = ctx.host_services();
     let token = ctx.run_token().unwrap_or_default();
     Box::pin(async move {
-        // Keep either way: the only wire decision, and the fail-open
-        // answer for a dead lane (a cancel resolves the same way).
-        let _ = handle.hook("tool_result", payload, services, token).await;
+        // Keep either way: the observer point has no decision to
+        // make, and a dead lane or failed handler is absence.
+        let _ = handle
+            .hook::<tabit_protocol::points::ToolResult>(payload, services, token)
+            .await;
         ToolResultAction::keep()
     })
 }

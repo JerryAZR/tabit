@@ -264,19 +264,26 @@ as tool registration.
 task 3)
 
 Forwarded hooks are the tool lane's sibling: `hook { hook_id, event,
-payload }` out, `hook_result { hook_id, decision }` back, v1
-decisions `run`, `skip { message }`, `keep` (rewrites and stops are
-engine actions that carry on no wire until a consumer asks). The
+payload }` out, `hook_result { hook_id, answer }` back — **the answer
+is the point's own type, serialized** (the per-point ruling,
+2026-09; the declarations live in `tabit-protocol`'s `points`, one
+shared definition on both ends — no hand-kept wire mirror). The pipe
+carries the answer untyped and only the point's consumer parses it.
+Protocol v4 answers: `tool_call` a verdict — `run` /
+`skip { message }` (rewrites and stops are engine actions that
+carry on no wire until a consumer asks) — and `tool_result` the
+unit (observers do stuff synchronously and owe nothing back). The
 payload carries the session identity, the tool, the args (and the
 presentation for `tool_result`); the session identity is what
-per-session policy state keys on. Mid-hook asks ride the same
-interaction lift (the correlation id is the hook's). Registrations
+per-session policy state keys on. Mid-hook asks ride the grammar's
+direct emission (the correlation id is the hook's). Registrations
 compose in scan order through `HookStack::merge` — one priority law.
 
 **A failing hook is treated as absence; a failed tool call is the
 model-visible failure.** Dead or broken resolve identically (ruled
 2026-09): a hook whose extension died, errored, or panicked resolves
-with the neutral decision for its point (run / keep) — crash
+with the point's declared neutral (the gate's `run`, the observer's
+unit) — crash
 isolation: one broken package cannot brick the tool phase, and the
 failure is reported loudly (the host's dead standing; the SDK's
 stderr) — while a tool *execution* that dies or errors is the
@@ -456,21 +463,20 @@ Implications:
   (`interaction_request { id, title, body, options, free_text }` /
   `interaction_response { id, option?, text? }`) is generic on
   purpose: reuse it; do not invent new popup frames.
-- **The extension pipe's lift (task 2) mirrors the engine's
-  capability verbatim**: `interaction_request { call_id, id, ui_type,
-  payload }` in, `interaction_response { id, outcome }` back
-  (`outcome: null` is the dismissal) — `ui_type` + opaque payload,
-  so extensions use the same `native:*` templates core tools do. The
-  `call_id` routes to the session whose proxy call is executing; no
-  capability on that call (a non-interactive session) answers
-  dismissed — fail closed, exactly as core tools behave.
+- **The extension pipe's lift (task 2) mirrored the engine's
+  capability verbatim** — `interaction_request { call_id, id, ui_type,
+  payload }` in, `interaction_response { id, outcome }` back. Deleted
+  with protocol v3: asks ride the grammar's direct emission now, and
+  the routed response is the one shape every asker shares. (Recorded
+  for the shape it established: `ui_type` + opaque payload, the same
+  `native:*` templates core tools use, answers by id.)
 - **Whose panic is whose** (ruled 2026-09): the lifted ask's future
   is CORE's code — we wrote it, we do not expect it to fail, and if
   it does an assumption is violated, so it panics (the crash hook
   exits the binary; nothing contains it — continuing in that state
   is undefined). An extension's OWN handler failures are the other
   class and stay graceful on its side of the pipe: the SDK's catch
-  answers the neutral decision and reports to stderr.
+  answers the point's neutral and reports to stderr.
 - The capability reaches sites through **contexts**: the tool body
   via `ToolContext`'s typed map (the `CancellationToken` precedent);
   the tool-call gate by hook construction. Other hook points gain

@@ -43,8 +43,8 @@ use std::time::Duration;
 use crate::grammar::{GrammarRoutes, register_ask};
 use crate::manifest::{self, Discovered, Manifest};
 use crate::protocol::{
-    Ack, EXTENSION_PROTOCOL_VERSION, ExtFrame, HOOK_POINTS, HookDecision, HookDecl, HostFrame,
-    ServiceVerb, ToolDecl, ToolWireResult,
+    Ack, EXTENSION_PROTOCOL_VERSION, ExtFrame, HookDecl, HookResult, HostFrame, ServiceVerb,
+    ToolDecl, ToolWireResult,
 };
 use rig_agent::tool::services::{HostServices, ModelPromptOk, ModelPromptRequest, ServiceUsage};
 use tabit_wire::process::ChildWrapper;
@@ -341,50 +341,52 @@ impl ExtensionHandle {
         let _ = self.lane.commands.send(frame);
     }
 
-    /// Forward one hook event to the extension and await its decision
-    /// (the hook lane, checklist task 3). Same shape as [`call`]: the
-    /// session's host-service capability rides along for mid-hook
-    /// envelope requests, a dead lane is a transport error — the
-    /// caller owns the policy mapping (the binary fails policy open:
-    /// run/keep), while a death *during* the await resolves through
-    /// the lane's drain with the same fallback.
-    pub async fn hook(
+    /// Forward one hook event to the extension and await its answer —
+    /// the point's own type, parsed off the wire at the delivery
+    /// (`P::Answer`: the pairing is a compile-time guarantee — a
+    /// `tool_result` consult cannot answer a verdict). Same shape as
+    /// [`call`]: the session's host-service capability rides along for
+    /// mid-hook envelope requests, a dead lane is a transport error —
+    /// the caller owns the policy mapping — while a death *during*
+    /// the await and a cancellation resolve through the delivery
+    /// closure with the point's declared neutral: **fail open**, the
+    /// one home of the fallback.
+    pub async fn hook<P: tabit_protocol::points::HookPoint>(
         &self,
-        event: &str,
         payload: serde_json::Value,
         services: Option<Arc<dyn HostServices>>,
         cancel: tokio_util::sync::CancellationToken,
-    ) -> Result<HookDecision, String> {
-        let fallback = if event == "tool_result" {
-            HookDecision::Keep
-        } else {
-            HookDecision::Run
-        };
+    ) -> Result<P::Answer, String> {
         let hook_id = format!(
             "{}-h{}",
             self.lane.name,
             self.lane.next_call_id.fetch_add(1, Ordering::Relaxed)
         );
         let (tx, rx) = tokio::sync::oneshot::channel();
-        let fail_open = fallback.clone();
         self.lane.pending.insert(
             hook_id.clone(),
             &self.lane.name,
             KIND_HOOK,
             move |outcome| {
-                let decision = match outcome {
+                let answer = match outcome {
                     tabit_wire::asks::Outcome::Answered(answer) => {
-                        tabit_wire::asks::unanswer::<HookDecision>(answer)
+                        let frame = tabit_wire::asks::unanswer::<HookResult>(answer);
+                        match serde_json::from_value::<P::Answer>(frame.answer) {
+                            Ok(answer) => Ok(answer),
+                            // A malformed answer is a failed handler:
+                            // the Err the caller folds to the neutral.
+                            Err(error) => Err(format!("the hook answer does not parse: {error}")),
+                        }
                     }
-                    // A death resolves the policy FAIL OPEN — the
-                    // neutral decision for its point (crash
-                    // isolation: one dead package cannot brick the
-                    // tool phase, while the death itself is reported
-                    // loudly); a failed *execution* answers with its
-                    // error. The asymmetry is the ruling.
-                    tabit_wire::asks::Outcome::Orphaned(_) => fail_open,
+                    // A death resolves the point FAIL OPEN — its
+                    // declared neutral (crash isolation: one dead
+                    // package cannot brick the tool phase, while the
+                    // death itself is reported loudly); a failed
+                    // *execution* answers with its error. The
+                    // asymmetry is the ruling.
+                    tabit_wire::asks::Outcome::Orphaned(_) => Ok(P::neutral()),
                 };
-                let _ = tx.send(decision);
+                let _ = tx.send(answer);
             },
         );
         self.lane.attach_context(&hook_id, services);
@@ -394,7 +396,7 @@ impl ExtensionHandle {
         }
         let frame = serde_json::to_string(&HostFrame::Hook {
             hook_id: hook_id.clone(),
-            event: event.to_string(),
+            event: P::NAME.to_string(),
             payload,
         })
         .map_err(|error| format!("cannot encode the hook event: {error}"))?;
@@ -402,26 +404,28 @@ impl ExtensionHandle {
             self.abandon(&hook_id);
             return Err(format!("extension `{}` is not running", self.lane.name));
         }
-        // Cancellation resolves the policy FAIL OPEN (the ruling's
+        // Cancellation resolves the point FAIL OPEN (the ruling's
         // symmetry: a hook the host gave up on is treated as
-        // absence, the neutral decision for its point) while telling
-        // the guest to stop — a wedged policy extension must not
+        // absence — the neutral for its point) while telling the
+        // guest to stop — a wedged policy extension must not
         // outlive the run it was gating.
         let outcome = tokio::select! {
-            decision = rx => decision,
+            answer = rx => answer,
             _ = cancel.cancelled() => {
                 self.cancel(&hook_id);
-                return Ok(fallback);
+                return Ok(P::neutral());
             }
         };
         match outcome {
-            Ok(decision) => Ok(decision),
+            // A parse failure rides as the handler's Err — the caller
+            // folds it to the neutral (fail open).
+            Ok(result) => result,
             Err(_) => {
                 self.abandon(&hook_id);
                 // The lane died and its drain answers every pending
-                // item with the fallback; reaching here means our
+                // item with the neutral; reaching here means our
                 // entry was gone first — answer the same.
-                Ok(fallback)
+                Ok(P::neutral())
             }
         }
     }
@@ -834,26 +838,25 @@ async fn supervise(
                             None => {}
                         }
                     }
-                    Ok(ExtFrame::HookResult(result)) => match lane.pending.claim(&result.hook_id) {
-                        Some(claimed) if claimed.kind() == KIND_HOOK => {
-                            claimed.deliver(tabit_wire::asks::Outcome::Answered(Box::new(
-                                result.decision,
-                            )));
-                            lane.end_call(&result.hook_id);
+                    Ok(ExtFrame::HookResult(result)) => {
+                        let hook_id = result.hook_id.clone();
+                        match lane.pending.claim(&hook_id) {
+                            Some(claimed) if claimed.kind() == KIND_HOOK => {
+                                claimed
+                                    .deliver(tabit_wire::asks::Outcome::Answered(Box::new(result)));
+                                lane.end_call(&hook_id);
+                            }
+                            Some(_) => {
+                                refuse(
+                                    &mut handshake_tx,
+                                    &mut death_tx,
+                                    format!("sent a hook result for a non-hook id `{hook_id}`"),
+                                );
+                                break;
+                            }
+                            None => {}
                         }
-                        Some(_) => {
-                            refuse(
-                                &mut handshake_tx,
-                                &mut death_tx,
-                                format!(
-                                    "sent a hook result for a non-hook id `{}`",
-                                    result.hook_id
-                                ),
-                            );
-                            break;
-                        }
-                        None => {}
-                    },
+                    }
                     Ok(ExtFrame::ServiceRequest {
                         request_id,
                         call_id,
@@ -1174,11 +1177,11 @@ fn validate(ack: &Ack) -> Result<(), String> {
         ));
     }
     for hook in &ack.hooks {
-        if !HOOK_POINTS.contains(&hook.event.as_str()) {
+        if !tabit_protocol::points::LIST.contains(&hook.event.as_str()) {
             return Err(format!(
                 "subscribes to unknown hook point `{}` (known: {})",
                 hook.event,
-                HOOK_POINTS.join(", ")
+                tabit_protocol::points::LIST.join(", ")
             ));
         }
     }

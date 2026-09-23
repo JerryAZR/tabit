@@ -29,6 +29,7 @@
 
 mod events;
 mod model;
+pub mod points;
 mod protocol;
 pub mod templates;
 mod usage;

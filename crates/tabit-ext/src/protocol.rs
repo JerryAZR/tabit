@@ -28,14 +28,18 @@
 //! envelope's interaction ask (verb zero): the routing
 //! generalization's direct grammar emission superseded it, and a
 //! wrapper nobody needs is deleted, not windowed — `model_prompt`
-//! is the envelope's one verb.
+//! is the envelope's one verb. v4 makes hook answers per-point (the
+//! 2026-09 ruling): the one `HookDecision` union dies, `hook_result`
+//! carries the point's own answer type serialized
+//! ([`tabit_protocol::points`]) — one shared definition on both ends,
+//! no hand-kept wire mirror.
 
 use serde::{Deserialize, Serialize};
 
 /// The extension protocol this host speaks. An extension acking a
 /// different version is refused at the handshake — the pipe is a
 /// frozen contract, not a negotiated one.
-pub const EXTENSION_PROTOCOL_VERSION: u32 = 3;
+pub const EXTENSION_PROTOCOL_VERSION: u32 = 4;
 
 /// One tool the extension serves, declared at the handshake. The
 /// schema is the model-facing JSON Schema; the host turns it into a
@@ -48,17 +52,13 @@ pub struct ToolDecl {
 }
 
 /// One hook point the extension subscribes to, declared at the
-/// handshake. The names are the engine's hook event points.
+/// handshake. The names are the declared hook points
+/// ([`tabit_protocol::points::LIST`]) — anything else refuses the
+/// handshake.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct HookDecl {
     pub event: String,
 }
-
-/// The hook points a v1 extension may subscribe to: the engine's
-/// closure surface (`on::tool_call` ships; `on::tool_result` joins
-/// with checklist task 3, which is its consumer). Anything else
-/// refuses the handshake — pause points stay enumerable.
-pub const HOOK_POINTS: &[&str] = &["tool_call", "tool_result"];
 
 /// The capabilities one process serves, declared once at the
 /// handshake (the byte-stability law: no re-declaration, no drift).
@@ -145,30 +145,17 @@ pub enum HostFrame {
     },
 }
 
-/// What a forwarded hook decided (checklist task 3). v1 carries the
-/// consumed decisions only: a policy hook runs the call or skips it
-/// with the in-band message (the denial channel), a result hook keeps
-/// the presentation. Rewrites and stops exist as engine actions but
-/// carry on no wire until a consumer asks for them.
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
-#[serde(tag = "decision", rename_all = "snake_case")]
-pub enum HookDecision {
-    /// Execute the call (the neutral action).
-    Run,
-    /// Do not execute; the message is the feedback the model sees.
-    Skip { message: String },
-    /// Keep the result's presentation as-is (the neutral action for
-    /// `tool_result` hooks).
-    Keep,
-}
-
-/// A hook decision on the wire, correlated by the forwarded event's
-/// id.
+/// A hook answer on the wire, correlated by the forwarded event's
+/// id. The payload is the point's own answer type serialized
+/// ([`tabit_protocol::points`] — the shared definition both ends
+/// hold); the pipe carries it untyped and only the point's consumer
+/// parses it back, the same participant-blind law as every routed
+/// payload. An answer that does not parse is a failed handler — the
+/// consumer resolves the point's neutral (fail open).
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub struct HookResult {
     pub hook_id: String,
-    #[serde(flatten)]
-    pub decision: HookDecision,
+    pub answer: serde_json::Value,
 }
 
 /// The envelope's verbs: fixed and typed per protocol version (the
@@ -253,7 +240,7 @@ mod tests {
         .unwrap();
         assert_eq!(
             line,
-            r#"{"type":"initialize","protocol_version":3,"core_path":"C:/bin/tabit-core.exe","cwd":"C:/work/proj"}"#
+            r#"{"type":"initialize","protocol_version":4,"core_path":"C:/bin/tabit-core.exe","cwd":"C:/work/proj"}"#
         );
         let back: HostFrame = serde_json::from_str(&line).unwrap();
         match back {
@@ -398,6 +385,51 @@ mod tests {
         };
         let line = serde_json::to_string(&frame).unwrap();
         assert_eq!(line, r#"{"type":"cancel","call_id":"echo-3"}"#);
+    }
+
+    #[test]
+    fn the_hook_lane_carries_the_points_own_answer() {
+        // v4: the envelope is untyped — the point's answer type
+        // (tabit_protocol::points) rides inside it whole, both
+        // directions pinned as bytes.
+        let verdict = ExtFrame::HookResult(HookResult {
+            hook_id: "gate-1-h2".to_string(),
+            answer: serde_json::to_value(tabit_protocol::points::CallVerdict::Skip {
+                message: "not tonight".to_string(),
+            })
+            .unwrap(),
+        });
+        let line = serde_json::to_string(&verdict).unwrap();
+        assert_eq!(
+            line,
+            r#"{"type":"hook_result","hook_id":"gate-1-h2","answer":{"verdict":"skip","message":"not tonight"}}"#
+        );
+        match serde_json::from_str::<ExtFrame>(&line).unwrap() {
+            ExtFrame::HookResult(result) => {
+                let verdict =
+                    serde_json::from_value::<tabit_protocol::points::CallVerdict>(result.answer)
+                        .unwrap();
+                assert_eq!(
+                    verdict,
+                    tabit_protocol::points::CallVerdict::Skip {
+                        message: "not tonight".to_string()
+                    }
+                );
+            }
+            _ => panic!("wrong frame"),
+        }
+
+        // The observer point's unit answer: null on the wire (the
+        // unit's encoding, by definition).
+        let observed = ExtFrame::HookResult(HookResult {
+            hook_id: "title-1-h1".to_string(),
+            answer: serde_json::Value::Null,
+        });
+        let line = serde_json::to_string(&observed).unwrap();
+        assert_eq!(
+            line,
+            r#"{"type":"hook_result","hook_id":"title-1-h1","answer":null}"#
+        );
     }
 
     #[test]

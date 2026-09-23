@@ -666,15 +666,14 @@ async fn a_hook_round_trips_its_decision() {
     await_status(&mut events, "allower", |s| matches!(s, Status::Alive)).await;
     let handle = supervisor.extension("allower").expect("installed");
     let decision = handle
-        .hook(
-            "tool_call",
+        .hook::<tabit_protocol::points::ToolCall>(
             serde_json::json!({"session": "s1", "tool": "bash", "args": "{\"command\":\"ls\"}"}),
             None,
             run_token(),
         )
         .await
         .expect("the hook resolves");
-    assert_eq!(decision, tabit_ext::protocol::HookDecision::Run);
+    assert_eq!(decision, tabit_protocol::points::CallVerdict::Run);
     supervisor.shutdown().await;
 }
 
@@ -686,8 +685,7 @@ async fn a_hook_skip_carries_its_message() {
     await_status(&mut events, "denier", |s| matches!(s, Status::Alive)).await;
     let handle = supervisor.extension("denier").expect("installed");
     let decision = handle
-        .hook(
-            "tool_call",
+        .hook::<tabit_protocol::points::ToolCall>(
             serde_json::json!({"tool": "bash"}),
             None,
             run_token(),
@@ -696,7 +694,7 @@ async fn a_hook_skip_carries_its_message() {
         .expect("the hook resolves");
     assert_eq!(
         decision,
-        tabit_ext::protocol::HookDecision::Skip {
+        tabit_protocol::points::CallVerdict::Skip {
             message: "the double denies".to_string()
         }
     );
@@ -716,8 +714,7 @@ async fn a_hook_ask_decides_through_the_backend_registry() {
     // Allowed: the answer routes by id, the hook runs the call.
     let hook = tokio::spawn(async move {
         handle
-            .hook(
-                "tool_call",
+            .hook::<tabit_protocol::points::ToolCall>(
                 serde_json::json!({"tool": "bash"}),
                 None,
                 run_token(),
@@ -749,14 +746,13 @@ async fn a_hook_ask_decides_through_the_backend_registry() {
             .respond(&id, Box::new(serde_json::json!({"selected": ["Allow"]})))
     );
     let decision = hook.await.expect("joined");
-    assert_eq!(decision, tabit_ext::protocol::HookDecision::Run);
+    assert_eq!(decision, tabit_protocol::points::CallVerdict::Run);
 
     // Denied: the same flow, a Block answer skips with the reason.
     let handle = supervisor.extension("asker").expect("installed");
     let hook = tokio::spawn(async move {
         handle
-            .hook(
-                "tool_call",
+            .hook::<tabit_protocol::points::ToolCall>(
                 serde_json::json!({"tool": "bash"}),
                 None,
                 run_token(),
@@ -783,7 +779,7 @@ async fn a_hook_ask_decides_through_the_backend_registry() {
     let decision = hook.await.expect("joined");
     assert!(matches!(
         decision,
-        tabit_ext::protocol::HookDecision::Skip { .. }
+        tabit_protocol::points::CallVerdict::Skip { .. }
     ));
     supervisor.shutdown().await;
 }
@@ -799,8 +795,7 @@ async fn a_death_answers_pending_policy_with_the_fail_open_fallback() {
         let handle = handle.clone();
         tokio::spawn(async move {
             handle
-                .hook(
-                    "tool_call",
+                .hook::<tabit_protocol::points::ToolCall>(
                     serde_json::json!({"tool": "bash"}),
                     None,
                     run_token(),
@@ -818,7 +813,7 @@ async fn a_death_answers_pending_policy_with_the_fail_open_fallback() {
         .expect("the drain answers within the bound")
         .expect("the task lives")
         .expect("the hook resolves");
-    assert_eq!(decision, tabit_ext::protocol::HookDecision::Run);
+    assert_eq!(decision, tabit_protocol::points::CallVerdict::Run);
 }
 
 /// The cancellation contract (the sandboxed-bash consumer's gap):

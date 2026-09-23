@@ -372,11 +372,12 @@ async fn the_autotitle_example_prompts_the_model_over_the_envelope() {
         prompted: prompted.clone(),
     });
     let result = serde_json::json!({"result": "42 lines changed"});
-    let decision = handle
-        .hook("tool_result", result, Some(services), run_token())
+    // The observer point's answer is the unit — owed as completion,
+    // not as a decision, so there is nothing to bind.
+    handle
+        .hook::<tabit_protocol::points::ToolResult>(result, Some(services), run_token())
         .await
         .expect("resolves");
-    assert!(matches!(decision, tabit_ext::protocol::HookDecision::Keep));
     {
         let prompted = prompted.lock().expect("prompted lock");
         assert_eq!(prompted.len(), 1, "one prompt, once per session");

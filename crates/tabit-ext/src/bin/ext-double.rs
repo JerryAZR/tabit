@@ -102,7 +102,7 @@ fn main() {
         }
         _ => {
             emit(json!({
-                "type": "ack", "protocol_version": 3,
+                "type": "ack", "protocol_version": 4,
                 "tools": [], "hooks": [], "watch": [],
             }));
             if behavior == "die-post-ack" {
@@ -129,7 +129,7 @@ fn main() {
 /// mirror everything the host sends back as reportable events.
 fn serve_grammar() {
     emit(json!({
-        "type": "ack", "protocol_version": 3,
+        "type": "ack", "protocol_version": 4,
         "tools": [], "hooks": [],
         "watch": ["session_opened", "interaction_settled"],
     }));
@@ -167,7 +167,7 @@ fn serve_grammar() {
 /// pipe is one lane, and this double keeps it honest.
 fn serve_tools(tools: Value) {
     emit(json!({
-        "type": "ack", "protocol_version": 3,
+        "type": "ack", "protocol_version": 4,
         "tools": tools, "hooks": [], "watch": [],
     }));
     let behavior = std::env::args().nth(1).unwrap_or_default();
@@ -300,7 +300,7 @@ fn serve_tools(tools: Value) {
 /// sequentially. The behavior picks the decision path.
 fn serve_hooks(behavior: &str) {
     emit(json!({
-        "type": "ack", "protocol_version": 3,
+        "type": "ack", "protocol_version": 4,
         "tools": [], "hooks": [{"event": "tool_call"}], "watch": [],
     }));
     loop {
@@ -315,7 +315,7 @@ fn serve_hooks(behavior: &str) {
         match behavior {
             "hooks-skip" => emit(json!({
                 "type": "hook_result", "hook_id": hook_id,
-                "decision": "skip", "message": "the double denies",
+                "answer": {"verdict": "skip", "message": "the double denies"},
             })),
             "hooks-hang" => {
                 let _ = hook_id; // never answers: the drain test's wedge
@@ -353,15 +353,23 @@ fn serve_hooks(behavior: &str) {
                     }
                 };
                 let allowed = answer["payload"]["selected"][0].as_str() == Some("Allow");
+                let (verdict, message) = if allowed {
+                    ("run", Value::Null)
+                } else {
+                    ("skip", json!("denied by the answer"))
+                };
+                let mut answer = json!({"verdict": verdict});
+                if !message.is_null() {
+                    answer["message"] = message;
+                }
                 emit(json!({
                     "type": "hook_result", "hook_id": hook_id,
-                    "decision": if allowed { "run" } else { "skip" },
-                    "message": if allowed { Value::Null } else { json!("denied by the answer") },
+                    "answer": answer,
                 }));
             }
             _ => emit(json!({
                 "type": "hook_result", "hook_id": hook_id,
-                "decision": "run",
+                "answer": {"verdict": "run"},
             })),
         }
     }
