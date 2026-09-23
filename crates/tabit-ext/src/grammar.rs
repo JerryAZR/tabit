@@ -28,21 +28,24 @@ use tabit_protocol::{SessionCommand, SessionEvent};
 /// arriving as events); events are emissions to fan out, origin-
 /// stamped with the speaking extension's id (attribution, not
 /// permission — the trust model is install-consent).
+/// Where one parsed command goes — an action for the host to
+/// perform (answers arrive as events).
+pub type CommandRoute = Arc<dyn Fn(SessionCommand) + Send + Sync>;
+
+/// Where one extension-emitted event goes — the outbound fan-out,
+/// stamped with its origin.
+pub type EventRoute = Arc<dyn Fn(&str, SessionEvent) + Send + Sync>;
+
 #[derive(Clone)]
 pub struct GrammarRoutes {
-    #[allow(clippy::type_complexity)]
-    command: Arc<dyn Fn(SessionCommand) + Send + Sync>,
-    #[allow(clippy::type_complexity)]
-    event: Arc<dyn Fn(&str, SessionEvent) + Send + Sync>,
+    command: CommandRoute,
+    event: EventRoute,
 }
 
 impl GrammarRoutes {
     /// Wire the two directions. One constructor, no defaults to drift
     /// on: every launcher states both routes.
-    pub fn new(
-        command: Arc<dyn Fn(SessionCommand) + Send + Sync>,
-        event: Arc<dyn Fn(&str, SessionEvent) + Send + Sync>,
-    ) -> Self {
+    pub fn new(command: CommandRoute, event: EventRoute) -> Self {
         Self { command, event }
     }
 
