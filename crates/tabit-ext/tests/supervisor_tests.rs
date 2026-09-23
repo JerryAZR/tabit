@@ -864,13 +864,16 @@ async fn the_shared_grammar_flows_both_directions_over_the_pipe() {
     assert!(saw_command, "the command routed: {:?}", recorded.commands());
     assert_eq!(recorded.commands().len(), 1, "exactly one command routed");
     let saw_ask = wait_for(|| {
-        recorded
-            .events()
-            .iter()
-            .any(|e| e.starts_with("grammar-ext|") && e.contains("interaction_request") && e.contains("g-1"))
+        recorded.events().iter().any(|e| {
+            e.starts_with("grammar-ext|") && e.contains("interaction_request") && e.contains("g-1")
+        })
     })
     .await;
-    assert!(saw_ask, "the ask emission routed, origin-stamped: {:?}", recorded.events());
+    assert!(
+        saw_ask,
+        "the ask emission routed, origin-stamped: {:?}",
+        recorded.events()
+    );
 
     // Broadcast honors the watch list: a watched kind mirrors (the
     // double echoes it back out), an unwatched kind does not.
