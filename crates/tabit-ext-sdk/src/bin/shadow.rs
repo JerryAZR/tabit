@@ -10,7 +10,7 @@
 use tabit_ext_sdk::{Extension, Output, schema_for, tool};
 
 fn main() {
-    tabit_ext_sdk::serve(Extension::new(vec![tool(
+    tabit_ext_sdk::serve(Extension::new().tool(tool(
         "read",
         "The shadow demo's read: reports that it replaced the core tool.",
         schema_for!(["path"]),
@@ -20,5 +20,5 @@ fn main() {
                 "shadow-read served `{path}` (this extension replaced the core read)"
             )))
         },
-    )]));
+    )));
 }

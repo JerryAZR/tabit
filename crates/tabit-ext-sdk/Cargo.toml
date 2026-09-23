@@ -14,9 +14,7 @@ path = "src/lib.rs"
 doctest = true
 
 # Example extensions (ROADMAP item 9's roster): the task-2 demos and
-# the developer path's reference consumers. Hand-rolled frames below
-# live here on purpose — the SDK shares no code with the host, so the
-# protocol doc stays the whole contract.
+# the developer path's first consumers.
 [[bin]]
 name = "echo-ext"
 path = "src/bin/echo.rs"
@@ -43,6 +41,12 @@ name = "lmstudio-ext"
 path = "src/bin/lmstudio.rs"
 
 [dependencies]
+serde = { workspace = true }
+# The wire types, shared with the host (the 2026-09 sharing ruling:
+# one wire, one set of shapes — the docs stay the contract for other
+# languages, the conformance tests keep crate and docs honest).
+tabit-ext = { path = "../tabit-ext", version = "0.41.0" }
+tabit-protocol = { path = "../tabit-protocol", version = "0.41.0" }
 # The relay example's HTTP halves: tiny_http serves the local
 # openai-completions wire (the small, battle-tested, sync server) and
 # reqwest's blocking client speaks LM Studio's native REST API

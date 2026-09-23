@@ -8,46 +8,58 @@
 #![allow(clippy::indexing_slicing)]
 
 use serde_json::json;
-use tabit_ext_sdk::{Extension, Output, schema_for, tool};
+use tabit_ext_sdk::{Extension, Output, schema_for, tool, watch};
+use tabit_protocol::{SessionEvent, tags};
 
 fn main() {
-    tabit_ext_sdk::serve(Extension::new(vec![
-        tool(
-            "echo",
-            "Echo the given text back verbatim.",
-            schema_for!(["text"]),
-            |args, _| {
-                let text = args["text"].as_str().unwrap_or_default();
-                Ok(Output::with_details(
-                    format!("echo: {text}"),
-                    json!({"length": text.len()}),
-                ))
-            },
-        ),
-        tool(
-            "ask",
-            "Ask the user a question and report their answer.",
-            schema_for!(["question"]),
-            |args, ask| {
-                let question = args["question"].as_str().unwrap_or_default().to_string();
-                let Some(answer) = ask.ask(
-                    "native:select_any",
-                    json!({
-                        "title": "The extension asks",
-                        "body": question,
-                        "options": [],
-                        "free_text": true,
-                    }),
-                ) else {
-                    return Ok(Output::from(
-                        "the user dismissed the question without answering",
-                    ));
+    tabit_ext_sdk::serve(
+        Extension::new()
+            .tool(tool(
+                "echo",
+                "Echo the given text back verbatim.",
+                schema_for!(["text"]),
+                |args, _| {
+                    let text = args["text"].as_str().unwrap_or_default();
+                    Ok(Output::with_details(
+                        format!("echo: {text}"),
+                        json!({"length": text.len()}),
+                    ))
+                },
+            ))
+            .tool(tool(
+                "ask",
+                "Ask the user a question and report their answer.",
+                schema_for!(["question"]),
+                |args, ctx| {
+                    let question = args["question"].as_str().unwrap_or_default().to_string();
+                    let Some(answer) = ctx.ask(
+                        "native:select_any",
+                        json!({
+                            "title": "The extension asks",
+                            "body": question,
+                            "options": [],
+                            "free_text": true,
+                        }),
+                    ) else {
+                        return Ok(Output::from(
+                            "the user dismissed the question without answering",
+                        ));
+                    };
+                    Ok(Output::from(format!(
+                        "the user answered: {}",
+                        answer["text"].as_str().unwrap_or("<no text>")
+                    )))
+                },
+            ))
+            .watch(watch(tags::INTERACTION_SETTLED, |ctx, event| {
+                // The watch lane's demo: observe a settled card and emit
+                // a notice into the grammar (surfaced origin-stamped).
+                let SessionEvent::InteractionSettled { id } = event else {
+                    return;
                 };
-                Ok(Output::from(format!(
-                    "the user answered: {}",
-                    answer["text"].as_str().unwrap_or("<no text>")
-                )))
-            },
-        ),
-    ]));
+                ctx.emit(SessionEvent::error_session(format!(
+                    "echo-ext saw card `{id}` settle"
+                )));
+            })),
+    );
 }

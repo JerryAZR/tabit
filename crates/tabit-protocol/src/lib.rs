@@ -33,6 +33,7 @@ mod protocol;
 pub mod templates;
 mod usage;
 
+pub use events::tags;
 pub use events::{
     AvailableExtension, AvailableExtensionTool, AvailableSession, AvailableSkill, DiscardedMessage,
     ErrorKind, ExtensionConflict, ExtensionConflictKind, ExtensionsCatalog, RunFailedKind,

@@ -2,9 +2,11 @@ use super::*;
 
 const TURN: &str = "0192uuidv7turn";
 
-#[test]
-fn events_round_trip_through_json() {
-    let events = vec![
+/// One instance of every event kind — the round-trip corpus and the
+/// tag pinning share it, so a new variant lands here with its test
+/// (the convention this crate already keeps).
+fn all_events() -> Vec<SessionEvent> {
+    vec![
         SessionEvent::UserMessage {
             text: "hi".to_string(),
             entry_id: "0192uuidv7user".to_string(),
@@ -194,12 +196,71 @@ fn events_round_trip_through_json() {
             turn_id: TURN.to_string(),
             item: serde_json::json!({"web_search_call": {}}),
         },
-    ];
+        SessionEvent::SessionOpened {
+            id: "0199".to_string(),
+            path: "C:/w/s.jsonl".to_string(),
+            cwd: "C:/work/proj".to_string(),
+            model: crate::ModelSelection::new("p", "m"),
+            resumed: true,
+            parent: None,
+            parent_call: None,
+        },
+        SessionEvent::CompactionBegin,
+        SessionEvent::CompactionDelta {
+            text: "summary text".to_string(),
+        },
+        SessionEvent::CompactionStep {
+            id: "c1".to_string(),
+            usage: crate::Usage {
+                input_tokens: 900,
+                output_tokens: 60,
+                total_tokens: 960,
+                ..crate::Usage::default()
+            },
+            cost: Some(0.00096),
+        },
+        SessionEvent::CompactionRetried,
+        SessionEvent::CompactionEnd { tokens_after: 4321 },
+        SessionEvent::CompactionFailed {
+            message: "short history".to_string(),
+        },
+    ]
+}
+
+#[test]
+fn events_round_trip_through_json() {
+    let events = all_events();
     for event in &events {
         let json = serde_json::to_string(event).expect("serialize");
         let back: SessionEvent = serde_json::from_str(&json).expect("parse");
         assert_eq!(back, *event);
     }
+}
+
+/// The tag mapping is pinned three ways: the wire's `type`, the
+/// enum's [`SessionEvent::tag`], and the list's membership — all
+/// three must agree for every kind in the corpus.
+#[test]
+fn every_tag_agrees_with_the_wire_the_enum_and_the_list() {
+    let events = all_events();
+    for event in &events {
+        let wire = serde_json::to_value(event).expect("serialize");
+        let wire_tag = wire["type"].as_str().unwrap_or_default();
+        let tag = event.tag();
+        assert_eq!(tag, wire_tag, "the enum's tag matches the wire: {event:?}");
+        assert!(
+            SessionEvent::is_known_tag(tag),
+            "the list carries the tag: {tag}"
+        );
+    }
+    // The corpus may carry several instances of one kind (errors
+    // especially); the set must still be exactly the list.
+    let mut seen: Vec<&str> = events.iter().map(|e| e.tag()).collect();
+    seen.sort_unstable();
+    seen.dedup();
+    let mut listed = tags::LIST.to_vec();
+    listed.sort_unstable();
+    assert_eq!(seen, listed, "the list is exactly one entry per kind");
 
     // The error carrier: kind is an open string; kind-specific structure
     // (the pending count) rides only when present.

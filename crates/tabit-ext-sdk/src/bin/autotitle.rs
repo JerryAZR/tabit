@@ -17,7 +17,7 @@
 use std::collections::HashSet;
 use std::sync::Mutex;
 
-use tabit_ext_sdk::{Decision, Extension, hook};
+use tabit_ext_sdk::{Decision, Extension, consult};
 
 /// Sessions already titled — once each, keyed by the hook payload's
 /// session identity (the per-session state rule; one process serves
@@ -25,10 +25,10 @@ use tabit_ext_sdk::{Decision, Extension, hook};
 static TITLED: Mutex<Option<HashSet<String>>> = Mutex::new(None);
 
 fn main() {
-    tabit_ext_sdk::serve(Extension::new(vec![]).with_hooks(vec![hook("tool_result", title_once)]));
+    tabit_ext_sdk::serve(Extension::new().consult(consult("tool_result", title_once)));
 }
 
-fn title_once(event: serde_json::Value, ask: &tabit_ext_sdk::Ask) -> Result<Decision, String> {
+fn title_once(ctx: &tabit_ext_sdk::Ctx, event: serde_json::Value) -> Result<Decision, String> {
     let session = event["session"].as_str().unwrap_or_default().to_string();
     {
         let mut titled = tabit_ext_sdk_lock(&TITLED);
@@ -40,7 +40,7 @@ fn title_once(event: serde_json::Value, ask: &tabit_ext_sdk::Ask) -> Result<Deci
     // A failure is treated as absence (the ruling): the result hook
     // keeps its presentation either way, and the failure lands on
     // stderr where the host's report can find it.
-    match ask.model_prompt(
+    match ctx.complete(
         "Write a three-to-five word title for this coding session, \
          based on the tool work so far. Reply with the title only.",
         None,

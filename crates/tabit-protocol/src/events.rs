@@ -704,3 +704,130 @@ impl RunFailedKind {
 #[cfg(test)]
 #[path = "events_tests.rs"]
 mod tests;
+
+impl SessionEvent {
+    /// The wire tag of one event kind — the `type` field's value. The
+    /// match is exhaustive by construction: a new variant breaks this
+    /// compile until it is tagged, so the mapping cannot silently rot
+    /// (the constants below and the serialization round-trip tests pin
+    /// the rest).
+    #[must_use]
+    pub const fn tag(&self) -> &'static str {
+        match self {
+            SessionEvent::RunAborted { .. } => tags::RUN_ABORTED,
+            SessionEvent::UserMessage { .. } => tags::USER_MESSAGE,
+            SessionEvent::MessageQueued { .. } => tags::MESSAGE_QUEUED,
+            SessionEvent::MessagesDiscarded { .. } => tags::MESSAGES_DISCARDED,
+            SessionEvent::TurnStarted { .. } => tags::TURN_STARTED,
+            SessionEvent::TurnCommitted { .. } => tags::TURN_COMMITTED,
+            SessionEvent::TextDelta { .. } => tags::TEXT_DELTA,
+            SessionEvent::ReasoningDelta { .. } => tags::REASONING_DELTA,
+            SessionEvent::ToolCall { .. } => tags::TOOL_CALL,
+            SessionEvent::ToolResult { .. } => tags::TOOL_RESULT,
+            SessionEvent::TurnRetried { .. } => tags::TURN_RETRIED,
+            SessionEvent::CompletionCall { .. } => tags::COMPLETION_CALL,
+            SessionEvent::TurnTruncated { .. } => tags::TURN_TRUNCATED,
+            SessionEvent::RunFinished { .. } => tags::RUN_FINISHED,
+            SessionEvent::RunFailed { .. } => tags::RUN_FAILED,
+            SessionEvent::Error { .. } => tags::ERROR,
+            SessionEvent::ReplayStarted { .. } => tags::REPLAY_STARTED,
+            SessionEvent::ReplayDone => tags::REPLAY_DONE,
+            SessionEvent::CheckedOut { .. } => tags::CHECKED_OUT,
+            SessionEvent::SessionsAvailable { .. } => tags::SESSIONS_AVAILABLE,
+            SessionEvent::SkillsAvailable { .. } => tags::SKILLS_AVAILABLE,
+            SessionEvent::ExtensionsAvailable { .. } => tags::EXTENSIONS_AVAILABLE,
+            SessionEvent::SessionOpened { .. } => tags::SESSION_OPENED,
+            SessionEvent::ModelChanged { .. } => tags::MODEL_CHANGED,
+            SessionEvent::NativeItem { .. } => tags::NATIVE_ITEM,
+            SessionEvent::InteractionRequest { .. } => tags::INTERACTION_REQUEST,
+            SessionEvent::InteractionSettled { .. } => tags::INTERACTION_SETTLED,
+            SessionEvent::CompactionBegin => tags::COMPACTION_BEGIN,
+            SessionEvent::CompactionDelta { .. } => tags::COMPACTION_DELTA,
+            SessionEvent::CompactionStep { .. } => tags::COMPACTION_STEP,
+            SessionEvent::CompactionRetried => tags::COMPACTION_RETRIED,
+            SessionEvent::CompactionEnd { .. } => tags::COMPACTION_END,
+            SessionEvent::CompactionFailed { .. } => tags::COMPACTION_FAILED,
+        }
+    }
+
+    /// Whether `kind` names a real event kind (a wire tag).
+    #[must_use]
+    pub fn is_known_tag(kind: &str) -> bool {
+        tags::LIST.contains(&kind)
+    }
+}
+
+/// The wire tags as constants — the watch-list vocabulary (the
+/// subscription keys name event kinds; these are their spellings).
+pub mod tags {
+    pub const RUN_ABORTED: &str = "run_aborted";
+    pub const USER_MESSAGE: &str = "user_message";
+    pub const MESSAGE_QUEUED: &str = "message_queued";
+    pub const MESSAGES_DISCARDED: &str = "messages_discarded";
+    pub const TURN_STARTED: &str = "turn_started";
+    pub const TURN_COMMITTED: &str = "turn_committed";
+    pub const TEXT_DELTA: &str = "text_delta";
+    pub const REASONING_DELTA: &str = "reasoning_delta";
+    pub const TOOL_CALL: &str = "tool_call";
+    pub const TOOL_RESULT: &str = "tool_result";
+    pub const TURN_RETRIED: &str = "turn_retried";
+    pub const COMPLETION_CALL: &str = "completion_call";
+    pub const TURN_TRUNCATED: &str = "turn_truncated";
+    pub const RUN_FINISHED: &str = "run_finished";
+    pub const RUN_FAILED: &str = "run_failed";
+    pub const ERROR: &str = "error";
+    pub const REPLAY_STARTED: &str = "replay_started";
+    pub const REPLAY_DONE: &str = "replay_done";
+    pub const CHECKED_OUT: &str = "checked_out";
+    pub const SESSIONS_AVAILABLE: &str = "sessions_available";
+    pub const SKILLS_AVAILABLE: &str = "skills_available";
+    pub const EXTENSIONS_AVAILABLE: &str = "extensions_available";
+    pub const SESSION_OPENED: &str = "session_opened";
+    pub const MODEL_CHANGED: &str = "model_changed";
+    pub const NATIVE_ITEM: &str = "native_item";
+    pub const INTERACTION_REQUEST: &str = "interaction_request";
+    pub const INTERACTION_SETTLED: &str = "interaction_settled";
+    pub const COMPACTION_BEGIN: &str = "compaction_begin";
+    pub const COMPACTION_DELTA: &str = "compaction_delta";
+    pub const COMPACTION_STEP: &str = "compaction_step";
+    pub const COMPACTION_RETRIED: &str = "compaction_retried";
+    pub const COMPACTION_END: &str = "compaction_end";
+    pub const COMPACTION_FAILED: &str = "compaction_failed";
+
+    /// Every tag, one per kind — registration validation reads this.
+    pub const LIST: &[&str] = &[
+        RUN_ABORTED,
+        USER_MESSAGE,
+        MESSAGE_QUEUED,
+        MESSAGES_DISCARDED,
+        TURN_STARTED,
+        TURN_COMMITTED,
+        TEXT_DELTA,
+        REASONING_DELTA,
+        TOOL_CALL,
+        TOOL_RESULT,
+        TURN_RETRIED,
+        COMPLETION_CALL,
+        TURN_TRUNCATED,
+        RUN_FINISHED,
+        RUN_FAILED,
+        ERROR,
+        REPLAY_STARTED,
+        REPLAY_DONE,
+        CHECKED_OUT,
+        SESSIONS_AVAILABLE,
+        SKILLS_AVAILABLE,
+        EXTENSIONS_AVAILABLE,
+        SESSION_OPENED,
+        MODEL_CHANGED,
+        NATIVE_ITEM,
+        INTERACTION_REQUEST,
+        INTERACTION_SETTLED,
+        COMPACTION_BEGIN,
+        COMPACTION_DELTA,
+        COMPACTION_STEP,
+        COMPACTION_RETRIED,
+        COMPACTION_END,
+        COMPACTION_FAILED,
+    ];
+}

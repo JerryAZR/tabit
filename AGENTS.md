@@ -101,10 +101,15 @@ Current workspace layout:
   engine hook events over the same pipe (policy fails open on a dead
   extension)
 - `crates/tabit-ext-sdk` — the extension SDK, the guest side of the
-  same pipe: the dispatcher owning the loop (ack, tool-call dispatch
-  to bodies, result serialization, ask lifts) so authors write tool
-  bodies only; hand-rolled frames sharing no code with the host —
-  the protocol doc's reference consumer. Ships the example
+  same pipe: authors register tools, consultations, and watched event
+  kinds; the SDK owns the loop (handshake from the registration,
+  every invocation on its own worker thread — handlers block, ask,
+  emit, command, concurrently — and the unconditional drain) and
+  hands each handler one context (command, emit, ask over the
+  grammar, complete, the cancelled poll). Shares the host's wire
+  types (the 2026-09 sharing ruling: one wire, one set of shapes;
+  EXTENSIONS.md stays the contract for other languages, the
+  conformance tests keep crate and docs honest). Ships the example
   extensions (`echo-ext`, `shadow-ext`, the clash pair, `lmstudio-ext` —
   the provider relay speaking LM Studio's native REST API behind a
   `providers.toml` fragment; `autotitle-ext` — the `model_prompt`

@@ -86,7 +86,7 @@ fn main() {
             }
         });
     }
-    tabit_ext_sdk::serve(tabit_ext_sdk::Extension::new(vec![]));
+    tabit_ext_sdk::serve(tabit_ext_sdk::Extension::new());
 }
 
 /// One HTTP exchange: the openai-completions wire in, the answer out.

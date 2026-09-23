@@ -73,7 +73,7 @@ impl Recorded {
 }
 
 /// Poll until true, bounded.
-async fn wait_for(check: impl Fn() -> bool) -> bool {
+async fn wait_for(mut check: impl FnMut() -> bool) -> bool {
     let deadline = std::time::Instant::now() + BOUND;
     while std::time::Instant::now() < deadline {
         if check() {
@@ -239,6 +239,44 @@ async fn the_ask_example_routes_its_answer() {
     let result = call.await.expect("joined");
     assert_eq!(result.error, None);
     assert_eq!(result.report, "the user answered: yes");
+    // The watch lane: echo watches `interaction_settled`. The
+    // harness has no pump (the json edge's forwarder owns the
+    // mirror), so this test plays the pump's one broadcast when the
+    // settlement appears — then the watch's own emission must come
+    // back on the recording: typed delivery, thread-dispatched, no
+    // cancellation owed.
+    let mut frame = None;
+    let mirrored = wait_for(|| {
+        frame = recorded
+            .events()
+            .iter()
+            .filter_map(|e| e.strip_prefix("echo|"))
+            .filter_map(|rest| serde_json::from_str::<tabit_protocol::EventFrame>(rest).ok())
+            .find(|f| {
+                matches!(
+                    f.event,
+                    tabit_protocol::SessionEvent::InteractionSettled { .. }
+                )
+            });
+        frame.is_some()
+    })
+    .await;
+    if !mirrored {
+        panic!("no settlement to mirror: {:?}", recorded.events());
+    }
+    host.broadcast(&frame.expect("the wait proved it"));
+    assert!(
+        wait_for(|| {
+            recorded.events().iter().any(|e| {
+                e.starts_with("echo|")
+                    && e.contains("error")
+                    && e.contains(&format!("saw card `{id}` settle"))
+            })
+        })
+        .await,
+        "the watch observed the settlement and emitted: {:?}",
+        recorded.events()
+    );
     host.shutdown().await;
 }
 

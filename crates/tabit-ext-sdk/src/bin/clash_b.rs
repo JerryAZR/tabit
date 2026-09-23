@@ -10,7 +10,7 @@
 use tabit_ext_sdk::{Extension, Output, schema_for, tool};
 
 fn main() {
-    tabit_ext_sdk::serve(Extension::new(vec![tool(
+    tabit_ext_sdk::serve(Extension::new().tool(tool(
         "clashy",
         "The clash pair's shared name (this is the refused newcomer).",
         schema_for!(["text"]),
@@ -20,5 +20,5 @@ fn main() {
                 args["text"].as_str().unwrap_or_default()
             )))
         },
-    )]));
+    )));
 }
