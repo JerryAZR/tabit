@@ -37,7 +37,7 @@ use std::sync::{Arc, Mutex};
 use tabit_log::lock::lock;
 use tabit_protocol::{
     ClientFrame, EventFrame, ModelSelection, PROTOCOL_VERSION, ServerControlFrame, ServerFrame,
-    StreamId,
+    SessionCommand, SessionEvent, StreamId,
 };
 use tokio::io::{AsyncBufReadExt, BufReader};
 use tokio_util::sync::CancellationToken;
@@ -473,6 +473,143 @@ impl ChildHandle {
     pub async fn wait_exit(&mut self) {
         let _ = (&mut self.reaper).await;
     }
+
+    /// Submit the child's task (one user message) — the first half of
+    /// [`Self::settle`]'s recipe, split so a driver can steer between
+    /// them.
+    pub fn prompt(&self, task: String) {
+        self.send_line(tabit_protocol::to_wire_line(&SessionCommand::Message {
+            session: self.id.clone(),
+            text: task,
+        }));
+    }
+
+    /// Drive the child to its run terminal under the abort leash —
+    /// THE fold every driver shares (core's subagent tool and the
+    /// extension SDK's owned children alike; one implementation, the
+    /// Nth-fold law). The terminal scan over this child's stream
+    /// (grandchildren's frames skip — their owners forward them),
+    /// the crash synthesis, and the abort courtesy-with-deadline all
+    /// live here; mapping the settlement to the driver's own
+    /// vocabulary is the caller's policy.
+    pub async fn settle(&mut self, token: Option<CancellationToken>) -> Settlement {
+        let mut events: Vec<SessionEvent> = Vec::new();
+        let started_at_ms = unix_ms();
+        loop {
+            let cancelled = async {
+                match &token {
+                    Some(token) => token.cancelled().await,
+                    None => std::future::pending().await,
+                }
+            };
+            tokio::select! {
+                _ = cancelled => {
+                    // Abort is a courtesy with a deadline: forward the
+                    // abort, close stdin (the child aborts, flushes,
+                    // exits — or the reaper kills the tree at the
+                    // grace), and report Aborted now. The driver never
+                    // waits on the child's cooperation.
+                    self.send_line(tabit_protocol::to_wire_line(&SessionCommand::Abort {
+                        session: self.id.clone(),
+                    }));
+                    self.close();
+                    return Settlement::Aborted {
+                        output: String::new(),
+                        events,
+                    };
+                }
+                frame = self.frames.recv() => {
+                    let Some(frame) = frame else {
+                        // The stream ended without a terminal: the child
+                        // process died. The crash report carries the
+                        // exit status and the stderr tail, shaped as the
+                        // run-failed event the drivers already keep.
+                        events.push(SessionEvent::RunFailed {
+                            message: self.crash_report(),
+                            kind: tabit_protocol::RunFailedKind::ENGINE.to_string(),
+                            started_at_ms,
+                            completed_at_ms: unix_ms(),
+                        });
+                        return Settlement::Crashed { events };
+                    };
+                    if frame.stream.as_ref() != Some(&self.stream) {
+                        continue; // A grandchild's frame — already forwarded.
+                    }
+                    let event = frame.event;
+                    let terminal = match &event {
+                        SessionEvent::RunFinished { output, .. } => {
+                            Some((Terminal::Completed, output.clone()))
+                        }
+                        SessionEvent::RunAborted { output, .. } => {
+                            Some((Terminal::Aborted, output.clone()))
+                        }
+                        SessionEvent::RunFailed { message, .. } => {
+                            Some((Terminal::Failed, message.clone()))
+                        }
+                        _ => None,
+                    };
+                    events.push(event);
+                    if let Some((terminal, text)) = terminal {
+                        self.close();
+                        return match terminal {
+                            Terminal::Completed => Settlement::Completed {
+                                output: text,
+                                events,
+                            },
+                            Terminal::Aborted => Settlement::Aborted {
+                                output: text,
+                                events,
+                            },
+                            Terminal::Failed => Settlement::FailedWith {
+                                message: text,
+                                events,
+                            },
+                        };
+                    }
+                }
+            }
+        }
+    }
+}
+
+/// Which terminal the driven child's run reached — the fold's
+/// private discriminator.
+enum Terminal {
+    Completed,
+    Aborted,
+    Failed,
+}
+
+/// How a driven child's run ended — the wire-level settlement the
+/// drivers map to their own vocabularies.
+#[derive(Debug, Clone)]
+pub enum Settlement {
+    /// The run finished; `output` is the final answer.
+    Completed {
+        output: String,
+        events: Vec<SessionEvent>,
+    },
+    /// The run aborted (the leash fired, or the child aborted
+    /// itself); `output` is whatever partial text it produced.
+    Aborted {
+        output: String,
+        events: Vec<SessionEvent>,
+    },
+    /// The run failed; `message` is the failure.
+    FailedWith {
+        message: String,
+        events: Vec<SessionEvent>,
+    },
+    /// The child process died without a terminal (a run-failed event
+    /// with the crash report heads `events`).
+    Crashed { events: Vec<SessionEvent> },
+}
+
+fn unix_ms() -> u64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|duration| duration.as_millis() as u64)
+        .unwrap_or_default()
 }
 
 impl Drop for ChildHandle {

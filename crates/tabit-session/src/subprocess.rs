@@ -28,10 +28,11 @@
 //!   write-behind flush for persisted children; it never buys the
 //!   parent's latency.
 
+use crate::session::RunSummary;
 use crate::subagent::SpawnContext;
 use rig_agent::completion::Message;
 use std::sync::Arc;
-use tabit_protocol::{ModelSelection, SessionCommand, SessionEvent};
+use tabit_protocol::{ModelSelection, SessionEvent};
 use tabit_wire::client::ChildSpec;
 use tokio_util::sync::CancellationToken;
 
@@ -182,7 +183,10 @@ impl SubprocessChild {
     }
 
     /// Send the task and drive to the child's terminal under the
-    /// leash — [`SpawnContext::drive_subprocess`]'s body. The child
+    /// leash — [`SpawnContext::drive_subprocess`]'s body: the
+    /// shared fold runs the wire recipe (the terminal scan, the
+    /// abort courtesy, the crash synthesis); this adapter maps the
+    /// settlement to the session's [`RunSummary`]. The child
     /// announces itself (its `--parent` flag spoke at the source);
     /// its frames are already on the frontend's channel.
     pub(crate) async fn drive(
@@ -190,86 +194,24 @@ impl SubprocessChild {
         task: Message,
         token: Option<CancellationToken>,
     ) -> crate::session::RunSummary {
-        let text = message_text(&task);
-        self.handle
-            .send_line(tabit_protocol::to_wire_line(&SessionCommand::Message {
-                session: self.handle.id().to_string(),
-                text,
-            }));
-
-        let stream = self.handle.stream().clone();
-        let mut events: Vec<SessionEvent> = Vec::new();
-        // The synthetic terminal's bracket: the child's run began when
-        // this drive did.
-        let started_at_ms = crate::ids::now_unix_ms();
-        loop {
-            let cancelled = async {
-                match &token {
-                    Some(token) => token.cancelled().await,
-                    None => std::future::pending().await,
-                }
-            };
-            tokio::select! {
-                _ = cancelled => {
-                    // Abort is a courtesy with a deadline (the ruling):
-                    // forward the abort, close stdin (the child aborts,
-                    // flushes, exits — or the reaper kills the tree at
-                    // the grace), and report Aborted now. The parent's
-                    // tool body never waits on the child's cooperation.
-                    self.handle.send_line(tabit_protocol::to_wire_line(
-                        &SessionCommand::Abort { session: self.handle.id().to_string() },
-                    ));
-                    self.handle.close();
-                    return crate::session::RunSummary {
-                        outcome: crate::session::RunOutcome::Aborted,
-                        output: String::new(),
-                        events,
-                    };
-                }
-                frame = self.handle.frames().recv() => {
-                    let Some(frame) = frame else {
-                        // The stream ended without a terminal: the child
-                        // process died. A synthetic RunFailed carries the
-                        // exit status and the stderr tail — the same
-                        // mapping the tool's Failed arm already keeps.
-                        events.push(SessionEvent::RunFailed {
-                            message: self.handle.crash_report(),
-                            kind: tabit_protocol::RunFailedKind::ENGINE.to_string(),
-                            started_at_ms,
-                            completed_at_ms: crate::ids::now_unix_ms(),
-                        });
-                        return crate::session::RunSummary {
-                            outcome: crate::session::RunOutcome::Failed,
-                            output: String::new(),
-                            events,
-                        };
-                    };
-                    if frame.stream.as_ref() != Some(&stream) {
-                        continue; // A grandchild's frame — already forwarded.
-                    }
-                    let event = frame.event;
-                    let terminal = match &event {
-                        SessionEvent::RunFinished { output, .. } => {
-                            Some((crate::session::RunOutcome::Completed, output.clone()))
-                        }
-                        SessionEvent::RunAborted { output, .. } => {
-                            Some((crate::session::RunOutcome::Aborted, output.clone()))
-                        }
-                        SessionEvent::RunFailed { message, .. } => {
-                            Some((crate::session::RunOutcome::Failed, message.clone()))
-                        }
-                        _ => None,
-                    };
-                    events.push(event);
-                    if let Some((outcome, output)) = terminal {
-                        self.handle.close();
-                        return crate::session::RunSummary {
-                            outcome,
-                            output,
-                            events,
-                        };
-                    }
-                }
+        self.handle.prompt(message_text(&task));
+        let settlement = self.handle.settle(token).await;
+        match settlement {
+            tabit_wire::client::Settlement::Completed { output, events } => RunSummary {
+                outcome: crate::session::RunOutcome::Completed,
+                output,
+                events,
+            },
+            tabit_wire::client::Settlement::Aborted { output, events } => RunSummary {
+                outcome: crate::session::RunOutcome::Aborted,
+                output,
+                events,
+            },
+            tabit_wire::client::Settlement::FailedWith { message, events } => {
+                RunFailed::synthesized(message, events)
+            }
+            tabit_wire::client::Settlement::Crashed { events } => {
+                RunFailed::synthesized("the subagent process died unexpectedly".to_string(), events)
             }
         }
     }
@@ -285,4 +227,47 @@ impl SubprocessChild {
 /// message carries no text parts; the child treats it as the task).
 fn message_text(message: &Message) -> String {
     crate::session::wire::user_text(message)
+}
+
+/// A failed settlement as a [`RunSummary`] — the failure's event
+/// heads the collected events, so the tool's message-mining arm
+/// (`summary_result`) reads it exactly as it read the child's own
+/// run-failed terminal.
+struct RunFailed;
+
+impl RunFailed {
+    fn synthesized(message: String, mut events: Vec<SessionEvent>) -> RunSummary {
+        let completed_at_ms = events
+            .iter()
+            .rev()
+            .find_map(|event| match event {
+                SessionEvent::RunFailed {
+                    completed_at_ms, ..
+                } => Some(*completed_at_ms),
+                _ => None,
+            })
+            .unwrap_or_default();
+        let started_at_ms = events
+            .iter()
+            .rev()
+            .find_map(|event| match event {
+                SessionEvent::RunFailed { started_at_ms, .. } => Some(*started_at_ms),
+                _ => None,
+            })
+            .unwrap_or(completed_at_ms);
+        events.insert(
+            0,
+            SessionEvent::RunFailed {
+                message,
+                kind: tabit_protocol::RunFailedKind::ENGINE.to_string(),
+                started_at_ms,
+                completed_at_ms,
+            },
+        );
+        RunSummary {
+            outcome: crate::session::RunOutcome::Failed,
+            output: String::new(),
+            events,
+        }
+    }
 }

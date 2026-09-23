@@ -540,7 +540,10 @@ order.
 ```
 
 - `interaction_request { id, ui_type, payload }` — an event, stamped
-  with the asking session's stream. `id` is backend-minted (UUIDv7,
+  with the asking session's stream — which may be a session you have
+  not seen announced (an extension's hidden child asking through its
+  owner): render the card anyway; the stamp is attribution, not a
+  promise the session is known. `id` is backend-minted (UUIDv7,
   born at acknowledgment); `ui_type` names the widget; `payload` is
   the asker's cargo.
 - `interaction_response { session, id, payload }` — a command,
