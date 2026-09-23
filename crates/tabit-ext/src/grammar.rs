@@ -90,8 +90,10 @@ impl GrammarRoutes {
 /// the host re-emits it (origin-stamped) to the watching channels, and
 /// the answer — a sessionless `interaction_response`, routed by id —
 /// lands here and is written back down the asking extension's pipe.
-/// The id namespace is global by convention (UUIDv7, like every
-/// protocol id); settlement is announced as `interaction_settled`
+/// Ask ids are unique per minter, prefixed by the minting lane or
+/// call identity, so namespaces cannot collide (core mints UUIDv7;
+/// the SDK mints lane-prefixed counters — one vocabulary, dialects
+/// by construction); settlement is announced as `interaction_settled`
 /// through the same routes, so every channel holding the card closes
 /// it. A dead asking extension loses its entries at the death site
 /// (settled, announced) — no answer can strand.

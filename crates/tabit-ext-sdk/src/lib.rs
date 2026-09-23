@@ -318,7 +318,7 @@ impl Ctx {
     /// no cancellation (nothing is owed); their flag never flips.
     pub fn cancelled(&self) -> bool {
         match &self.correlation {
-            Some(id) => tabit_ext_sdk_lock(&self.shared.cancelled).contains(id),
+            Some(id) => sdk_lock(&self.shared.cancelled).contains(id),
             None => false,
         }
     }
@@ -349,7 +349,7 @@ impl Ctx {
     pub fn ask(&self, ui_type: &str, payload: Value) -> Option<Value> {
         let id = next_request_id(self.correlation.as_deref().unwrap_or("watch"), "ask");
         let (tx, rx) = std::sync::mpsc::channel::<Value>();
-        tabit_ext_sdk_lock(&self.shared.grammar_asks).insert(id.clone(), tx);
+        sdk_lock(&self.shared.grammar_asks).insert(id.clone(), tx);
         let sent = emit(
             &self.shared,
             &SessionEvent::InteractionRequest {
@@ -359,7 +359,7 @@ impl Ctx {
             },
         );
         if !sent {
-            tabit_ext_sdk_lock(&self.shared.grammar_asks).remove(&id);
+            sdk_lock(&self.shared.grammar_asks).remove(&id);
             return None;
         }
         // The wait honors cancellation: the run aborting under this
@@ -369,12 +369,12 @@ impl Ctx {
         loop {
             match rx.recv_timeout(std::time::Duration::from_millis(100)) {
                 Ok(answer) => {
-                    tabit_ext_sdk_lock(&self.shared.grammar_asks).remove(&id);
+                    sdk_lock(&self.shared.grammar_asks).remove(&id);
                     return Some(answer);
                 }
                 Err(std::sync::mpsc::RecvTimeoutError::Timeout) => {
                     if self.cancelled() {
-                        tabit_ext_sdk_lock(&self.shared.grammar_asks).remove(&id);
+                        sdk_lock(&self.shared.grammar_asks).remove(&id);
                         return None;
                     }
                 }
@@ -506,7 +506,7 @@ pub fn serve(extension: Extension) -> ! {
             initialize["protocol_version"]
         ));
     }
-    *tabit_ext_sdk_lock(&shared.core_path) = initialize["core_path"].as_str().map(str::to_string);
+    *sdk_lock(&shared.core_path) = initialize["core_path"].as_str().map(str::to_string);
     let ack = ExtFrame::Ack {
         protocol_version: PROTOCOL_VERSION,
         tools: tools
@@ -567,7 +567,7 @@ fn dispatch_line(
                 });
             }
             HostFrame::Cancel { call_id } => {
-                tabit_ext_sdk_lock(&shared.cancelled).insert(call_id);
+                sdk_lock(&shared.cancelled).insert(call_id);
             }
             HostFrame::ServiceResponse {
                 request_id,
@@ -575,7 +575,7 @@ fn dispatch_line(
                 error,
             } => {
                 let reply = ServiceReply { result, error };
-                if let Some(sender) = tabit_ext_sdk_lock(&shared.asks).remove(&request_id) {
+                if let Some(sender) = sdk_lock(&shared.asks).remove(&request_id) {
                     let _ = sender.send(reply);
                 }
             }
@@ -607,7 +607,7 @@ fn dispatch_line(
     {
         // A routed answer to one of our grammar asks: resolve by id;
         // a late response for a gone waiter drops.
-        if let Some(sender) = tabit_ext_sdk_lock(&shared.grammar_asks).remove(&id) {
+        if let Some(sender) = sdk_lock(&shared.grammar_asks).remove(&id) {
             let _ = sender.send(payload);
         }
         return;
@@ -726,7 +726,7 @@ pub(crate) fn register_relay(
     id: &str,
     sender: std::sync::mpsc::Sender<Value>,
 ) {
-    tabit_ext_sdk_lock(&shared.grammar_asks).insert(id.to_string(), sender);
+    sdk_lock(&shared.grammar_asks).insert(id.to_string(), sender);
 }
 
 pub(crate) fn catch_unwind_silently(body: impl FnOnce()) {
@@ -750,7 +750,7 @@ fn panic_note(panic: Box<dyn std::any::Any + Send>) -> String {
 }
 
 fn emit<T: Serialize>(shared: &Arc<Shared>, frame: &T) -> bool {
-    let _guard = tabit_ext_sdk_lock(&shared.stdout);
+    let _guard = sdk_lock(&shared.stdout);
     let stdout = std::io::stdout();
     let mut handle = stdout.lock();
     let Ok(text) = serde_json::to_string(frame) else {
@@ -776,20 +776,20 @@ fn request(
     verb: ServiceVerb,
 ) -> Result<ServiceReply, String> {
     let (tx, rx) = std::sync::mpsc::channel::<ServiceReply>();
-    tabit_ext_sdk_lock(&shared.asks).insert(id.to_string(), tx);
+    sdk_lock(&shared.asks).insert(id.to_string(), tx);
     let frame = ExtFrame::ServiceRequest {
         request_id: id.to_string(),
         call_id: call_id.to_string(),
         verb,
     };
     if !emit(shared, &frame) {
-        tabit_ext_sdk_lock(&shared.asks).remove(id);
+        sdk_lock(&shared.asks).remove(id);
         return Err("the host closed the pipe".to_string());
     }
     let reply = rx
         .recv()
         .map_err(|_| "the host closed the pipe".to_string());
-    tabit_ext_sdk_lock(&shared.asks).remove(id);
+    sdk_lock(&shared.asks).remove(id);
     reply
 }
 
@@ -810,7 +810,7 @@ fn die(reason: &str) -> ! {
 
 /// The lock helper — same shape as the workspace's `tabit_log::lock`
 /// claim (poison-recovering).
-fn tabit_ext_sdk_lock<T: ?Sized>(mutex: &Mutex<T>) -> std::sync::MutexGuard<'_, T> {
+pub(crate) fn sdk_lock<T: ?Sized>(mutex: &Mutex<T>) -> std::sync::MutexGuard<'_, T> {
     mutex.lock().unwrap_or_else(|poison| poison.into_inner())
 }
 

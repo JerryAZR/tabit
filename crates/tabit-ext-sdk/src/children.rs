@@ -161,7 +161,7 @@ impl Child {
         let registry = Arc::new(Registry {
             observation: Mutex::new(HashMap::new()),
             generic: Mutex::new(None),
-            ask_answerers: Mutex::new(vec![Arc::new(forward_and_relay)]),
+            ask_answerers: Mutex::new(vec![Arc::new(forward_frame)]),
             ask_default: Mutex::new(true),
             commands: Mutex::new(None),
         });
@@ -171,7 +171,7 @@ impl Child {
         // is installed above and yields to the first author
         // registration.
         if options.forwarding {
-            *lock(&registry.generic) = Some(Arc::new(forward_frame));
+            *crate::sdk_lock(&registry.generic) = Some(Arc::new(forward_frame));
         }
 
         // The driver task owns the handle on the SDK's runtime: one
@@ -231,7 +231,7 @@ impl Child {
             }
         });
 
-        *lock(&registry.commands) = Some(cmd_tx.clone());
+        *crate::sdk_lock(&registry.commands) = Some(cmd_tx.clone());
         Ok(Child {
             id: Arc::new(id),
             commands: cmd_tx,
@@ -275,7 +275,7 @@ impl Child {
     /// one that arrives after another (or after the question died)
     /// is a tolerated no-op.
     pub fn answer(&self, id: &str, payload: serde_json::Value) {
-        if let Some(commands) = lock(&self.registry.commands).clone() {
+        if let Some(commands) = crate::sdk_lock(&self.registry.commands).clone() {
             let _ = commands.send(ChildCmd::Answer {
                 id: id.to_string(),
                 payload,
@@ -315,7 +315,7 @@ impl Registry {
                     .to_string(),
             );
         }
-        lock(&self.observation)
+        crate::sdk_lock(&self.observation)
             .entry(kind.to_string())
             .or_default()
             .push(Arc::new(move |ctx: &Ctx, frame: &EventFrame| {
@@ -331,10 +331,10 @@ impl Registry {
     where
         F: Fn(&Ctx, &EventFrame) + Send + Sync + 'static,
     {
-        let mut answerers = lock(&self.ask_answerers);
-        if *lock(&self.ask_default) {
+        let mut answerers = crate::sdk_lock(&self.ask_answerers);
+        if *crate::sdk_lock(&self.ask_default) {
             answerers.clear();
-            *lock(&self.ask_default) = false;
+            *crate::sdk_lock(&self.ask_default) = false;
         }
         answerers.push(Arc::new(body));
         Ok(())
@@ -361,8 +361,8 @@ fn dispatch_frame(ctx: &Ctx, registry_arc: &Arc<Registry>, frame: EventFrame) {
         };
         let (tx, rx) = std::sync::mpsc::channel::<serde_json::Value>();
         crate::register_relay(&shared, &id, tx);
-        let answerers = lock(&registry.ask_answerers).clone();
-        let default_stands = *lock(&registry.ask_default);
+        let answerers = crate::sdk_lock(&registry.ask_answerers).clone();
+        let default_stands = *crate::sdk_lock(&registry.ask_default);
         for answerer in answerers {
             let frame = frame.clone();
             spawn_handler(shared.clone(), move |ctx| answerer(&ctx, &frame));
@@ -376,7 +376,7 @@ fn dispatch_frame(ctx: &Ctx, registry_arc: &Arc<Registry>, frame: EventFrame) {
                 // documented shape — the author's timeout is author
                 // code).
                 if let Ok(answer) = rx.recv()
-                    && let Some(commands) = lock(&registry_ref.commands).clone()
+                    && let Some(commands) = crate::sdk_lock(&registry_ref.commands).clone()
                 {
                     let _ = commands.send(ChildCmd::Answer {
                         id,
@@ -387,12 +387,12 @@ fn dispatch_frame(ctx: &Ctx, registry_arc: &Arc<Registry>, frame: EventFrame) {
         }
         return;
     }
-    let specifics = lock(&registry.observation)
+    let specifics = crate::sdk_lock(&registry.observation)
         .get(kind)
         .cloned()
         .unwrap_or_default();
     let has_specifics = !specifics.is_empty();
-    let generic = lock(&registry.generic).clone();
+    let generic = crate::sdk_lock(&registry.generic).clone();
     for handler in specifics {
         let frame = frame.clone();
         spawn_handler(shared.clone(), move |ctx| handler(&ctx, &frame));
@@ -410,23 +410,13 @@ fn spawn_handler(shared: std::sync::Arc<Shared>, body: impl FnOnce(Ctx) + Send +
     });
 }
 
-/// The shipped forward callback (the generic slot): the frame
-/// crosses verbatim (stream preserved; the host re-stamps the
-/// origin, naming this extension as the conduit).
+/// The shipped forward callback (the generic slot and the ask
+/// default): the frame crosses verbatim (stream preserved; the host
+/// re-stamps the origin, naming this extension as the conduit). The
+/// ask install site differs only in what the dispatcher registers
+/// alongside it — the id relay that carries routed answers home.
 fn forward_frame(ctx: &Ctx, frame: &EventFrame) {
     let _ = emit(&ctx.shared_clone(), frame);
-}
-
-/// The ask slot's shipped default: forward the child's card verbatim
-/// — the dispatcher registers the id relay alongside it (a routed
-/// answer from any channel carries home by id), which is the whole
-/// difference from the generic forward callback.
-fn forward_and_relay(ctx: &Ctx, frame: &EventFrame) {
-    let _ = emit(&ctx.shared_clone(), frame);
-}
-
-fn lock<T: ?Sized>(mutex: &Mutex<T>) -> std::sync::MutexGuard<'_, T> {
-    mutex.lock().unwrap_or_else(|poison| poison.into_inner())
 }
 
 /// The SDK's one runtime for owned children (multi-thread; the
@@ -467,7 +457,7 @@ mod tests {
             .on(tags::RUN_FINISHED, |_ctx, _event| {})
             .expect("and so does the second — observation composes");
         assert_eq!(
-            lock(&registry.observation)
+            crate::sdk_lock(&registry.observation)
                 .get(tags::RUN_FINISHED)
                 .map(Vec::len),
             Some(2)
@@ -493,14 +483,17 @@ mod tests {
         registry
             .on_ask(|_ctx: &Ctx, _frame: &EventFrame| {})
             .expect("the first replaces the default");
-        assert!(!*lock(&registry.ask_default), "the default yielded");
-        assert_eq!(lock(&registry.ask_answerers).len(), 1);
+        assert!(
+            !*crate::sdk_lock(&registry.ask_default),
+            "the default yielded"
+        );
+        assert_eq!(crate::sdk_lock(&registry.ask_answerers).len(), 1);
         // ...and further registrations stack — any may answer, the
         // child arbitrates, late answers are no-ops (the co-frontend
         // law one hop down).
         registry
             .on_ask(|_ctx: &Ctx, _frame: &EventFrame| {})
             .expect("the second stacks");
-        assert_eq!(lock(&registry.ask_answerers).len(), 2);
+        assert_eq!(crate::sdk_lock(&registry.ask_answerers).len(), 2);
     }
 }
