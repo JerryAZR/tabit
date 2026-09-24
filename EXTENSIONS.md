@@ -249,17 +249,36 @@ the ask table and answered through it, the watch surface is
 subscriptions, an author's `ask`/`emit`/`command` are the node's
 ask-with-additional-receivers, emission, and outbound command — while
 the author-facing surface (tools, consultations, watches, children,
-the four directions on `Ctx`) never grew a router concept. What
+the four directions on `Ctx`) never grew a router concept. The SDK is
+**async** (owner ruling 2026-09): bodies are futures, an ask awaits
+its promise natively, cancellation is a wake not a poll. What
 remains SDK-local is policy, not routing: the cancelled set, the
-frozen dialect's handshake and result frames, the pipe's one writer
-thread, and the children's ask policy — the card surface at the
-arrival lane (the settle fold's tap, the one place that is the
-child's pipe: the node's fan is arrival-lane-blind, so the shipped
-forward-and-relay default and the author answerer list live there,
-crossing cards verbatim and retiring on the first registration). One
-behavior the unification buys, recorded: the extension's watches now
-hear its own emissions and its own cards' settles (the local
-loopback), not only the host's mirrors.
+frozen dialect's handshake and result frames, the pipe's one line
+pump, and the children's ask policy — the card surface at the
+arrival lane (the client's pump-order seam: the node's fan is
+arrival-lane-blind, so the shipped forward-and-relay default and the
+author answerer list live there, crossing cards verbatim and
+retiring on the first registration). One behavior the unification
+buys, recorded: the extension's watches now hear its own emissions
+and its own cards' settles (the local loopback), not only the host's
+mirrors.
+
+**The lift mode.** Relaying someone's card — lifting a child's or
+grandchild's ask to your own host — is the one flow with a settle
+obligation at every step, and the SDK ships it correct by default so
+most authors plug-and-play: the shipped forward-and-relay default
+crosses the card verbatim (the arrival lane's own write), the stdio's
+one subscription to the settle kind carries every settle announce
+back (an origin's, a sweep's, a grandchild's), and `Ctx::ask` closes
+its own loop (the request and its settle announce cross by the same
+fan). The law the mode implements, stated from the requestor side
+(owner ruling 2026-09, a doc law — no semantic-layer enforcement
+exists): **when you stop waiting on the thing requested (answer
+received, or no longer needed), send a settled event — to the same
+channel the request was sent to.** Subscribing an ask-type kind
+carries its settle pair by construction (the node's co-subscription
+rule), so a watcher already implements the handler; the obligation is
+the *emission*.
 
 **Manual forwarding re-stamps by default.** A forwarded frame
 carrying the child's stamp teaches every receiver the child's

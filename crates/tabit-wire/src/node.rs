@@ -619,6 +619,18 @@ impl<C: Routed> Node<C> {
     /// extension's own card — the answer routes by id, not stream).
     /// The asker dying retracts by owner; the promise reads as
     /// dismissal.
+    ///
+    /// The settle law this side (owner ruling 2026-09, a doc law):
+    /// **when you stop waiting on the thing requested (answer
+    /// received, or no longer needed), send a settled event — to the
+    /// same channel the request was sent to.** This method is the
+    /// law's one correct implementation for an origin (both the
+    /// request and the announce cross by this fan, whatever resolves
+    /// or sweeps the promise); a hand-rolled lift that forwards a
+    /// card by other means owns its own settle emission, and
+    /// subscribing the ask kind carries the settle pair by
+    /// construction (the co-subscription rule) so the handler side
+    /// needs no separate act.
     pub fn ask_on(
         &self,
         owner: &str,

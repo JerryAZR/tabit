@@ -70,8 +70,11 @@ Current workspace layout:
   settings layers (`settings.toml`: the extension disable list —
   packages mount by default; the built-in gate opt-out
   (`[gate] enabled = false`) — the gate mounts by default; user +
-  workspace union, `$TABIT_SETTINGS` replaces the user file; see
-  `ROADMAP.md`)
+  workspace union, `$TABIT_SETTINGS` replaces the user file; the
+  same replace pattern for providers: `$TABIT_CONFIG` replaces the
+  home `providers.toml` (set but missing is an error, never a
+  fallthrough), `$TABIT_CONFIG_EXTRA` appends one more candidate;
+  see `ROADMAP.md`)
 - `crates/tabit-log` — the durable-conversation layer between
   providers and agents: the session log (the entry vocabulary and
   tree, format-versioned), the write-behind writer, the parser, the
@@ -97,11 +100,18 @@ Current workspace layout:
   answers are races, the first wins; an entry owing no settle
   obligation closes on its answer — the answer is its settle);
   `client.rs` spawns a tabit-core child
-  in `--json` role (the child-role CLI knobs as one builder) and
+  in `--json` role (the child-role CLI knobs as one builder;
+  `on_node` is THE lane mount — the client's own pump arms the
+  child's lane at the handshake and intakes every stamped arrival
+  through it, one mount for the bridge and the SDK's owned
+  children) and
   speaks the frontend protocol to it — the bounded handshake, the
-  frame pump, the command writer, the reaper; `process.rs` (moved
+  frame pump, the reaper; `process.rs` (moved
   from tabit-ext) is the substrate every spawning site shares
-  (tree-kill wrapping, the stderr ring, the grace reaper). Consumers:
+  (tree-kill wrapping, the stderr ring, the grace reaper,
+  `spawn_line_writer` — THE pipe pump: one ordered queue, one
+  exclusive writer, every tokio pipe site's outbound lines).
+  Consumers:
   the subagent bridge, the extension host, and the extension SDK;
   the wire's serve side is the session host's functional layer on
   its node (`tabit-session`'s edge + endpoint)
@@ -162,18 +172,22 @@ Current workspace layout:
   answered through it, watches are subscriptions, the author's
   ask/emit/command ride the node's override-path ask, emission fan,
   and outbound command; owned children are lanes — the transit entry
-  is the relay, the ask surface (the shipped forward-and-relay
-  default, the author answerers) lives at the arrival lane where the
-  per-child scope is truth, death sweeps the child's everything; the
-  stdio carries exactly one default subscription, the settle kind —
-  the card law's close vocabulary always crosses) — so the author
+  is the relay, the ask surface (the shipped lift mode's
+  forward-and-relay default, the author answerers) lives at the
+  client's pump-order seam where the per-child scope is truth, death
+  sweeps the child's everything; the stdio carries exactly one
+  default subscription, the settle kind — the card law's close
+  vocabulary always crosses) — so the author
   surface stays
   purely functional: one context per handler (command, emit, ask,
-  complete, the cancelled poll), every invocation on its own worker
-  thread, and one writer thread owning the pipe. Shares the host's
-  wire types (the 2026-09 sharing ruling: one wire, one set of
-  shapes; EXTENSIONS.md stays the contract for other languages, the
-  conformance tests keep crate and docs honest). Ships the example
+  complete, the cancelled poll). The SDK is async (owner ruling
+  2026-09): bodies are futures, asks await their promises natively,
+  cancellation is a wake not a poll, every invocation is its own
+  task, and the pipe's one writer is the wire's line pump. Shares
+  the host's wire types (the 2026-09 sharing ruling: one wire, one
+  set of shapes; EXTENSIONS.md stays the contract for other
+  languages, the conformance tests keep crate and docs honest).
+  Ships the example
   extensions (`echo-ext`, `shadow-ext`, the clash pair, `lmstudio-ext` —
   the provider relay speaking LM Studio's native REST API behind a
   `providers.toml` fragment; `autotitle-ext` — the `model_prompt`
