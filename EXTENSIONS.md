@@ -179,8 +179,13 @@ The four directions, one sentence each:
   entry-owned-settles rule): the extension emits
   `interaction_settled { id }` when its ask's answer comes home, and
   the host's sweep announces on the extension's death — so no
-  channel holds a card that can never be answered. Unknown ids are
-  the race's tolerated drop.
+  channel holds a card that can never be answered. The ask's
+  lifecycle (open → answered → settled) makes that airtight: the
+  answered entry stays open, carrying the settle announce death owes
+  it, until the extension's settle crosses (closing it) or the sweep
+  runs the obligation — an extension dying between its answer and
+  its announce still closes the card. Unknown ids are the race's
+  tolerated drop.
 
 Handshake additions (extension protocol **v2**): `initialize`
 carries `core_path` (the running backend's own executable — the host

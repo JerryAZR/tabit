@@ -39,18 +39,24 @@
 //!    minting silent round-trips (tool calls, service requests)
 //!    hold them through [`Node::hold`] — a hand-emitted ask frame
 //!    has no answer route home.
-//! 5. **Response-type commands claim the ask-table entry** — the
-//!    correlation-kind law: an ask's kind is the tag of the response
-//!    that answers it, and a wrong-kind answer is consumed loudly
-//!    (an error emission naming the break), never delivered to a
-//!    closure expecting another shape. First answer wins; a miss
-//!    drops as the race's tolerated loser. **The settle is an event
-//!    and routes like one**: the single producer is the origin (its
-//!    promise resolving) or a death's sweep, and a settle arriving
-//!    at a node clears that id's entry there (an origin's promise
-//!    reads dismissal; a routed entry dies) — the id is the
-//!    identifier, so single-producer discipline settles a request
-//!    exactly once.
+//! 5. **Responses answer ask-table entries, and an ask's lifecycle
+//!    is open → answered → settled.** The correlation-kind law: an
+//!    entry's kind is the tag of the response that answers it, and a
+//!    wrong-kind answer is consumed loudly (an error emission naming
+//!    the break), never delivered to a closure expecting another
+//!    shape. The first answer wins and TRANSITIONS the entry — the
+//!    delivery runs, further answers route nowhere — but answered is
+//!    not settled: the entry stays open, carrying the obligation
+//!    death owes it (a transit entry's settle announce), until the
+//!    settle's arrival or a sweep closes it — so an origin dying
+//!    between the answer and its announce cannot strand a card. A
+//!    miss drops as the race's tolerated loser. **The settle is an
+//!    event and routes like one**: the single producer is the origin
+//!    (its promise resolving) or a death's sweep, and a settle
+//!    arriving at a node closes that id's entry there (an answered
+//!    entry's normal end; an open one's promise reads dismissal) —
+//!    the id is the identifier, so single-producer discipline settles
+//!    a request exactly once.
 //!
 //! The primitive both layers speak is the [`Channel`] — one routable
 //! destination in three flavors (the in-process functional layer, the
@@ -414,8 +420,17 @@ impl<C: Routed> Node<C> {
                 // death — and is why the closures may announce their
                 // settles there: the settle that cleared this entry
                 // is already in flight.
+                // Law 5's other half: an arriving settle CLOSES the
+                // id's entry — an answered entry's normal end (the
+                // obligation is fulfilled, not owed), an open one's
+                // promise reading dismissal as its sender drops,
+                // without running the Orphaned arm. That is what
+                // keeps Orphaned meaning exactly one thing — swept by
+                // death — and is why the closures may announce their
+                // settles there: the settle that cleared this entry
+                // is already in flight.
                 if let SessionEvent::InteractionSettled { id } = &frame.event {
-                    drop(self.asks.claim(id));
+                    self.asks.discard(id);
                 }
                 // Law 4: an arriving ask registers against the
                 // channel it arrived on. The registration's delivery
@@ -423,12 +438,18 @@ impl<C: Routed> Node<C> {
                 // answer onward on resolution, and announces the
                 // settle only when its sweep is the settle's only
                 // producer (this participant died holding the ask —
-                // the origin can no longer speak for it).
+                // the origin can no longer speak for it). The
+                // answered entry's obligation is the same announce —
+                // death taking the origin AFTER the answer but before
+                // its settle crossed still closes the card (the
+                // open → answered → settled lifecycle).
                 if let Some((id, _)) = frame.ask() {
                     let asker = from.clone();
                     let ask_id = id.to_string();
                     let settled = self.settle_frame(&ask_id, frame.stream.clone());
+                    let swept_settled = self.settle_frame(&ask_id, frame.stream.clone());
                     let events = self.events.clone();
+                    let obligation_events = self.events.clone();
                     let registered = self.asks.register(
                         ask_id.clone(),
                         from.owner(),
@@ -445,6 +466,12 @@ impl<C: Routed> Node<C> {
                                 events.dispatch(&settled);
                             }
                         },
+                        Some(Box::new(move || {
+                            // The answered-but-unsettled sweep: the
+                            // origin died between the answer and its
+                            // announce — the settle is ours to make.
+                            obligation_events.dispatch(&swept_settled);
+                        })),
                     );
                     if !registered {
                         // The mint law, decided atomically with the
@@ -635,7 +662,10 @@ impl<C: Routed> Node<C> {
         kind: &'static str,
         deliver: impl FnOnce(Outcome) + Send + 'static,
     ) -> bool {
-        if self.asks.register(id.to_string(), owner, kind, deliver) {
+        if self
+            .asks
+            .register(id.to_string(), owner, kind, deliver, None)
+        {
             true
         } else {
             lock(&self.violation)(owner, id);
@@ -648,15 +678,15 @@ impl<C: Routed> Node<C> {
     /// racing answer finds a gone id and drops, and no settle runs
     /// (the asker moved on by its own path).
     pub fn discard(&self, id: &str) {
-        drop(self.asks.claim(id));
+        self.asks.discard(id);
     }
 
-    /// A dialect response claiming the ask table — law 5 for frames
-    /// that are not commands (`tool_result`, `hook_result`,
-    /// `service_response`): the claim, the correlation-kind check,
-    /// the delivery. The entry is consumed whatever the outcome; the
-    /// caller owns the policy each arm gets (a wrong kind is a
-    /// contract break — the command path reports it as an error
+    /// A response claiming the ask table — law 5, kind-checked, over
+    /// the entry's lifecycle: the open entry's delivery runs and the
+    /// entry lingers **answered** (further answers route nowhere)
+    /// until its settle closes it. `Delivered` means exactly that
+    /// first leg. The caller owns each arm's policy (a wrong kind is
+    /// a contract break — the command path reports it as an error
     /// event, a lane treats it as death).
     pub fn answer(
         &self,
@@ -664,13 +694,11 @@ impl<C: Routed> Node<C> {
         kind: &str,
         answer: Box<dyn std::any::Any + Send>,
     ) -> AnswerOutcome {
-        match self.asks.claim(id) {
-            Some(claimed) if claimed.kind() == kind => {
-                claimed.deliver(Outcome::Answered(answer));
-                AnswerOutcome::Delivered
-            }
-            Some(mismatched) => AnswerOutcome::WrongKind(mismatched.kind()),
-            None => AnswerOutcome::Missed,
+        use crate::asks::PendingAnswer;
+        match self.asks.answer(id, kind, answer) {
+            PendingAnswer::Answered => AnswerOutcome::Delivered,
+            PendingAnswer::Missed => AnswerOutcome::Missed,
+            PendingAnswer::WrongKind(kind) => AnswerOutcome::WrongKind(kind),
         }
     }
 

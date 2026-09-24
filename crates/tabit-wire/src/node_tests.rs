@@ -1384,8 +1384,8 @@ fn a_held_sender_minted_id_is_contained_not_fatal() {
 #[test]
 fn the_mint_decision_is_atomic_with_the_registration() {
     let asks = crate::asks::PendingAsks::default();
-    assert!(asks.register("id".to_string(), "a", "interaction", |_| {}));
-    assert!(!asks.register("id".to_string(), "b", "interaction", |_| {}));
+    assert!(asks.register("id".to_string(), "a", "interaction", |_| {}, None));
+    assert!(!asks.register("id".to_string(), "b", "interaction", |_| {}, None));
     // The winner's entry survived under the original owner.
     assert!(asks.held("id"));
     asks.retract_owner("a", "done");
@@ -1432,4 +1432,84 @@ fn an_owner_holds_a_kind_once() {
         .filter(|line| line.contains("interaction_settled"))
         .count();
     assert_eq!(settled_count, 1, "the settle crossed the lane once");
+}
+
+/// The lifecycle ruling's own scenario, over the net: a GUEST origin
+/// (an extension — it emits the ask as a raw frame and announces the
+/// settle as a separate one, unlike a session node whose origin
+/// announces atomically in the answer delivery). The ask registers at
+/// the host as a transit entry carrying the answered-sweep
+/// obligation; the answer delivers down the lane; the guest dies
+/// BEFORE its settle crosses. The sweep runs the obligation: the card
+/// closes. The lost-settle window is closed.
+#[test]
+fn a_guest_origin_dying_after_the_answer_still_closes_the_card() {
+    let host = Arc::new(Node::new("host"));
+    let (_layer, saw) = stub_layer(&host, "layer");
+
+    // The guest's lane: a plain line channel, nothing subscribed
+    // (the extension's stdio).
+    let guest_lines: Arc<Mutex<Vec<String>>> = Arc::new(Mutex::new(Vec::new()));
+    let sink = guest_lines.clone();
+    let guest_lane = Channel::line("guest-ext", move |line: &str| {
+        sink.lock().expect("test lock").push(line.to_string());
+    });
+
+    // The guest mints and emits its ask as a raw frame.
+    let id = "guest-ext-req-1".to_string();
+    host.intake(
+        &guest_lane,
+        Inbound::Event(EventFrame {
+            stream: None,
+            origin: None,
+            ttl: None,
+            event: SessionEvent::InteractionRequest {
+                id: id.clone(),
+                ui_type: "native:select_any".to_string(),
+                payload: json!({"body": "the origin will die mid-announce"}),
+            },
+        }),
+    );
+    assert!(
+        saw.has("interaction_request"),
+        "the ask surfaced: {:?}",
+        saw.events()
+    );
+
+    // The host answers: the transit entry delivers the line down the
+    // lane and lingers ANSWERED (no settle announce — the origin
+    // owes it, and it is a guest, so nothing announces here).
+    host.intake(
+        &Channel::local("frontend", |_| {}, |_| {}),
+        Inbound::Command(SessionCommand::InteractionResponse {
+            session: None,
+            id: id.clone(),
+            payload: json!({"text": "yes"}),
+        }),
+    );
+    let settles = || {
+        saw.events()
+            .iter()
+            .filter(|seen| seen.starts_with(&format!("settled:{id}")))
+            .count()
+    };
+    assert_eq!(settles(), 0, "the answer itself announced nothing");
+    assert!(
+        guest_lines
+            .lock()
+            .expect("test lock")
+            .iter()
+            .any(|line| line.contains("interaction_response")),
+        "the answer crossed down the lane"
+    );
+
+    // The guest dies before its settle crosses. The sweep runs the
+    // answered entry's obligation: exactly one settle.
+    host.retract("guest-ext", "the extension exited");
+    assert_eq!(
+        settles(),
+        1,
+        "the sweep announced the settle the dead origin owed: {:?}",
+        saw.events()
+    );
 }
