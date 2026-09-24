@@ -40,13 +40,14 @@ use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
-use crate::grammar::{GrammarRoutes, register_ask};
 use crate::manifest::{self, Discovered, Manifest};
 use crate::protocol::{
     Ack, EXTENSION_PROTOCOL_VERSION, ExtFrame, HookDecl, HookResult, HostFrame, ServiceVerb,
     ToolDecl, ToolWireResult,
 };
 use rig_agent::tool::services::{HostServices, ModelPromptOk, ModelPromptRequest, ServiceUsage};
+use std::io::Write;
+use tabit_wire::node::{AnswerOutcome, Channel, Inbound, Node, violation_panic};
 use tabit_wire::process::ChildWrapper;
 use tabit_wire::process::{self, wrap_command};
 use tokio::io::{AsyncBufReadExt, BufReader};
@@ -156,55 +157,67 @@ impl ChildState {
     }
 }
 
-/// The correlation-kind tags the lane's forwarded items register
-/// under (read back at the reader's kind check — a tool result
-/// answering a hook id, or the reverse, is a contract break).
-const KIND_CALL: &str = "tool-call";
-const KIND_HOOK: &str = "hook";
+/// The correlation-kind tags the lane's forwarded items hold — the
+/// tag of the response frame that answers them (the correlation-kind
+/// law, read back at the claim: a tool result answering a hook id, or
+/// the reverse, is a contract break).
+const KIND_TOOL_RESULT: &str = "tool_result";
+const KIND_HOOK_RESULT: &str = "hook_result";
+const KIND_SERVICE_RESPONSE: &str = "service_response";
 
 /// The host-side half of one extension's pipe after the spawn: the
-/// outgoing frame lane, the pending-call registry, and the envelope's
-/// call contexts.
+/// pipe's one writer (the commands channel everything serializes
+/// through), the lane's **node face** — the [`Channel`] whose
+/// deliveries are the node's whole vocabulary for this pipe (watched
+/// event lines in via its subscriptions, grammar-ask answers and
+/// learning-routed commands out) — and the envelope's call contexts.
 struct Lane {
     name: String,
     commands: tokio::sync::mpsc::UnboundedSender<String>,
-    /// Open forwarded items (calls and hooks) on the shared ask
-    /// registry: the delivery closure resolves the awaiting caller,
-    /// and its `Orphaned` arm is the death policy — the transport
-    /// failure for a call, the fail-open fallback for a hook.
-    pending: tabit_wire::asks::PendingAsks,
+    /// The node-facing face of this pipe. Held asks deliver answers
+    /// through it; the watch list subscribes it; intake from it is
+    /// the reader's door for the shared grammar.
+    channel: Channel,
     /// The open items' session capabilities — the envelope's
     /// correlation table for mid-call service requests (a
     /// `model_prompt` routes through the asking session). Kept in
-    /// step with `pending` at every departure site.
+    /// step with the ask table at every departure site.
     contexts: Mutex<HashMap<String, Arc<dyn HostServices>>>,
     next_call_id: AtomicU64,
-    /// Set at the pipe's end (EOF or garbage), before the pending
-    /// drain — a call registering after death fails fast instead of
+    /// Set at the pipe's end (EOF or garbage), before the node sweep
+    /// — a call registering after death fails fast instead of
     /// awaiting a result that can never come.
     dead: AtomicBool,
 }
 
 impl Lane {
     fn new(name: String, commands: tokio::sync::mpsc::UnboundedSender<String>) -> Arc<Self> {
+        // The channel's deliveries ride the same writer as every
+        // directed frame: one pipe, one serialization point.
+        let writer = commands.clone();
+        let channel = Channel::line(&name, move |line: &str| {
+            let _ = writer.send(line.to_string());
+        });
         Arc::new(Self {
             name,
             commands,
-            pending: tabit_wire::asks::PendingAsks::default(),
+            channel,
             contexts: Mutex::new(HashMap::new()),
             next_call_id: AtomicU64::new(1),
             dead: AtomicBool::new(false),
         })
     }
 
-    /// The pipe's last act: settle every pending item orphaned with
-    /// the death's reason — executions read it as their failure,
-    /// policy as its fail-open fallback — then stay dead-flagged for
-    /// late arrivals.
-    fn die(&self, reason: &str) {
+    /// The pipe's last act: sweep the lane's everything on the node —
+    /// subscriptions, learned routes, and open round-trips (each
+    /// delivery closure owning its failure arm: executions read the
+    /// sweep as their transport failure, policy as its fail-open
+    /// fallback, grammar asks settle announced) — then stay
+    /// dead-flagged for late arrivals.
+    fn die(&self, node: &Node, reason: &str) {
         self.dead.store(true, Ordering::SeqCst);
         tabit_log::lock::lock(&self.contexts).clear();
-        self.pending.retract_all(reason);
+        node.retract(&self.name, reason);
     }
 
     /// Attach (or, with `None`, skip) an item's session capability.
@@ -234,6 +247,7 @@ impl Lane {
 #[derive(Clone)]
 pub struct ExtensionHandle {
     lane: Arc<Lane>,
+    node: Arc<Node>,
 }
 
 impl ExtensionHandle {
@@ -245,7 +259,7 @@ impl ExtensionHandle {
     /// tools behave on a non-interactive session. `cancel` is the
     /// run's token: firing it sends [`HostFrame::Cancel`] down the
     /// pipe (the guest's signal to stop — the token-and-detach
-    /// contract, crossing the process boundary), removes the pending
+    /// contract, crossing the process boundary), discards the held
     /// entry (racing asks answer dismissed), and fails the call.
     pub async fn call(
         &self,
@@ -261,10 +275,10 @@ impl ExtensionHandle {
         );
         let (tx, rx) = tokio::sync::oneshot::channel();
         let failure_id = call_id.clone();
-        self.lane.pending.insert(
-            call_id.clone(),
+        self.node.hold(
             &self.lane.name,
-            KIND_CALL,
+            &call_id,
+            KIND_TOOL_RESULT,
             move |outcome| {
                 let result = match outcome {
                     tabit_wire::asks::Outcome::Answered(answer) => {
@@ -281,10 +295,10 @@ impl ExtensionHandle {
             },
         );
         self.lane.attach_context(&call_id, services);
-        // The dead check rides after the insert and inside the same
-        // ordering as `die`'s store-then-drain, so a death between
-        // insert and check is caught either by the flag or by the
-        // drain itself.
+        // The dead check rides after the hold and inside the same
+        // ordering as `die`'s flag-then-sweep, so a death between
+        // hold and check is caught either by the flag or by the
+        // sweep itself.
         if self.lane.dead.load(Ordering::SeqCst) {
             self.abandon(&call_id);
             return Err(format!("extension `{}` is not running", self.lane.name));
@@ -323,7 +337,7 @@ impl ExtensionHandle {
     /// settling — the awaiter has moved on by its own path, and a
     /// racing answer finds a gone id, tolerated.
     fn abandon(&self, call_id: &str) {
-        drop(self.lane.pending.claim(call_id));
+        self.node.discard(call_id);
         self.lane.end_call(call_id);
     }
 
@@ -363,10 +377,10 @@ impl ExtensionHandle {
             self.lane.next_call_id.fetch_add(1, Ordering::Relaxed)
         );
         let (tx, rx) = tokio::sync::oneshot::channel();
-        self.lane.pending.insert(
-            hook_id.clone(),
+        self.node.hold(
             &self.lane.name,
-            KIND_HOOK,
+            &hook_id,
+            KIND_HOOK_RESULT,
             move |outcome| {
                 let answer = match outcome {
                     tabit_wire::asks::Outcome::Answered(answer) => {
@@ -438,15 +452,9 @@ impl ExtensionHandle {
 pub struct Supervisor {
     closing: CancellationToken,
     children: Vec<Supervised>,
-    /// The host node's event router (one mechanism with every node):
-    /// each alive lane subscribes its watched kinds at the ack (the
-    /// callback writes the wire line down its stdin); death retracts
-    /// the lane's every registration.
-    router: Arc<tabit_wire::router::Router>,
-    /// The extension-asked questions' registry (the shared ask
-    /// mechanism, one per node) — the glue's id-first dispatch
-    /// consults it before routing a response to the session host.
-    asks: Arc<tabit_wire::asks::PendingAsks>,
+    /// The process's node — every lane's face hangs on it, and the
+    /// proxy handles hold it for their holds and answers.
+    node: Arc<Node>,
 }
 
 struct Supervised {
@@ -474,12 +482,14 @@ pub fn launch_root(
     launch(manifest::scan(root), handshake_timeout, host)
 }
 
-/// The host facts and routes one launch serves every pipe with (the
-/// routing generalization): where the shared grammar goes, the binary
-/// path owned-session spawners need, and the backend cwd.
+/// The host facts one launch serves every pipe with: the node every
+/// lane mounts on (one net per process — the lanes' subscriptions,
+/// asks, and learned routes live in its tables), the binary path
+/// owned-session spawners need, and the backend cwd.
 pub struct LaunchContext {
-    /// Where parsed commands and extension emissions go.
-    pub routes: GrammarRoutes,
+    /// The host's node — the same net the session host and the
+    /// subprocess bridge ride.
+    pub node: Arc<Node>,
     /// The running backend's own executable path (`initialize`'s
     /// `core_path` — the host IS the binary).
     pub core_path: String,
@@ -503,9 +513,30 @@ pub fn launch(
 ) {
     let closing = CancellationToken::new();
     let (events_tx, events_rx) = tokio::sync::mpsc::unbounded_channel();
-    let asks = Arc::new(tabit_wire::asks::PendingAsks::default());
-    let launch_router_holder = Arc::new(tabit_wire::router::Router::default());
-    let supervise_router = launch_router_holder.clone();
+    let lanes: Arc<Mutex<HashMap<String, CancellationToken>>> =
+        Arc::new(Mutex::new(HashMap::new()));
+    // The mint-law containment (the 2026-09 ruling): the lanes are
+    // killable senders, so a violation contains by killing the
+    // offending lane — one violator dies, not the host. Anything
+    // else re-registered a live id on this node's tables and is the
+    // sanctioned crash it always was.
+    {
+        let lanes = lanes.clone();
+        host.node.on_mint_violation(move |owner, id| {
+            let token = tabit_log::lock::lock(&lanes).get(owner).cloned();
+            match token {
+                Some(token) => {
+                    let _ = writeln!(
+                        std::io::stderr(),
+                        "tabit: killing extension `{owner}` — it re-registered the live ask id `{id}`"
+                    );
+                    token.cancel();
+                }
+                None => violation_panic(owner, id),
+            }
+        });
+    }
+    let node = host.node.clone();
     let mut children = Vec::new();
     for found in found {
         match found {
@@ -519,20 +550,24 @@ pub fn launch(
                 // channel the writer owns.
                 let (command_tx, command_rx) = tokio::sync::mpsc::unbounded_channel::<String>();
                 let lane = Lane::new(name.clone(), command_tx);
+                // The containment kill token: cancelling it is the
+                // mint-violation policy for this lane.
+                let killed = CancellationToken::new();
+                tabit_log::lock::lock(&lanes).insert(name.clone(), killed.clone());
                 let task = tokio::spawn(supervise(
                     dir.clone(),
                     manifest,
                     handshake_timeout,
                     closing.clone(),
+                    killed,
                     state.clone(),
                     lane.clone(),
                     events_tx.clone(),
                     command_rx,
                     host.core_path.clone(),
                     host.cwd.clone(),
-                    host.routes.clone(),
-                    asks.clone(),
-                    supervise_router.clone(),
+                    node.clone(),
+                    lanes.clone(),
                 ));
                 children.push(Supervised {
                     name,
@@ -553,7 +588,7 @@ pub fn launch(
                 let (dead_commands, dead_reader) = tokio::sync::mpsc::unbounded_channel::<String>();
                 drop(dead_reader); // sends on a dead lane fail, never queue
                 let lane = Lane::new(name.clone(), dead_commands);
-                lane.die(&reason);
+                lane.die(&node, &reason);
                 let status = state.transition(Status::Dead { reason }, Vec::new(), Vec::new());
                 let _ = events_tx.send(ExtensionEvent {
                     name: name.clone(),
@@ -575,40 +610,23 @@ pub fn launch(
         Supervisor {
             closing,
             children,
-            asks,
-            router: launch_router_holder,
+            node,
         },
         events_rx,
     )
 }
 
 impl Supervisor {
-    /// An empty supervisor — print mode's assembly holds one so every
-    /// consumer has a single shape (real hosts get a supervisor over
-    /// their scan, even when it finds nothing).
-    pub fn empty() -> Supervisor {
+    /// An empty supervisor over the process's node — print mode's
+    /// assembly holds one so every consumer has a single shape (real
+    /// hosts get a supervisor over their scan, even when it finds
+    /// nothing).
+    pub fn empty(node: Arc<Node>) -> Supervisor {
         Supervisor {
             closing: CancellationToken::new(),
             children: Vec::new(),
-            asks: Arc::new(tabit_wire::asks::PendingAsks::default()),
-            router: Arc::new(tabit_wire::router::Router::default()),
+            node,
         }
-    }
-
-    /// The extension-ask registry — the id-first dispatch surface for
-    /// the glue.
-    pub fn asks(&self) -> Arc<tabit_wire::asks::PendingAsks> {
-        self.asks.clone()
-    }
-
-    /// Fan one event frame out to every watching extension (the
-    /// participant-blind mirror: the primary frontend is subscriber
-    /// zero on the pump's side; these lanes are the rest). The frame
-    /// is serialized once; a lane takes the line iff its watch list
-    /// contains the event's kind. Fire-and-forget — a dead or slow
-    /// lane's writer drops the line, never blocks the pump.
-    pub fn broadcast(&self, frame: &tabit_protocol::EventFrame) {
-        self.router.dispatch(frame);
     }
 
     /// The standing of every extension, resolved so far and current.
@@ -649,6 +667,7 @@ impl Supervisor {
             .find(|child| child.name == name)
             .map(|child| ExtensionHandle {
                 lane: child.lane.clone(),
+                node: self.node.clone(),
             })
     }
 
@@ -682,22 +701,23 @@ async fn supervise(
     manifest: Manifest,
     handshake_timeout: Duration,
     supervisor_closing: CancellationToken,
+    killed: CancellationToken,
     state: Arc<ChildState>,
     lane: Arc<Lane>,
     events: tokio::sync::mpsc::UnboundedSender<ExtensionEvent>,
     command_rx: tokio::sync::mpsc::UnboundedReceiver<String>,
     core_path: String,
     cwd: String,
-    routes: GrammarRoutes,
-    asks: Arc<tabit_wire::asks::PendingAsks>,
-    router: Arc<tabit_wire::router::Router>,
+    node: Arc<Node>,
+    lanes: Arc<Mutex<HashMap<String, CancellationToken>>>,
 ) {
     // A child of the supervisor's token: this extension's failure
     // closes only its own pipe (fail_before_ack cancels this one),
     // while host shutdown cascades through the hierarchy to every
     // child. One shared token here was the fleet-kill bug — one
     // broken package's pre-ack failure tore down every healthy
-    // sibling, silently (the review round's top finding).
+    // sibling, silently (the review round's top finding). `killed`
+    // is the containment door: the mint-law policy cancels it.
     let closing = supervisor_closing.child_token();
     let (program, args) = resolve_entry(&dir, &manifest.entry);
     let spawned = wrap_command(&program, &args, &dir).spawn();
@@ -710,7 +730,8 @@ async fn supervise(
                 &events,
                 &manifest.name,
                 format!("cannot spawn `{}`: {error}", program.display()),
-                &router,
+                &node,
+                &lanes,
             );
             return;
         }
@@ -726,7 +747,8 @@ async fn supervise(
                 &events,
                 &manifest.name,
                 "opened no stdin".to_string(),
-                &router,
+                &node,
+                &lanes,
             )
             .await;
             return;
@@ -743,7 +765,8 @@ async fn supervise(
                 &events,
                 &manifest.name,
                 "opened no stdout".to_string(),
-                &router,
+                &node,
+                &lanes,
             )
             .await;
             return;
@@ -760,7 +783,8 @@ async fn supervise(
                 &events,
                 &manifest.name,
                 "opened no stderr".to_string(),
-                &router,
+                &node,
+                &lanes,
             )
             .await;
             return;
@@ -772,25 +796,28 @@ async fn supervise(
     // contract — the closing token IS the pipe close).
     spawn_command_writer(stdin, command_rx, closing.clone());
 
-    // The frame reader: handshake outcome first, then the tool lane
-    // (results resolved, asks lifted). Compatibility is one-directional
-    // (ruled 2026-09): a NEWER host keeps an older extension working
-    // (the host sends only what the extension declared; the extension
-    // side is told to ignore frames it does not know), but an
-    // extension speaking vocabulary its host lacks — an unparseable
-    // line, an unknown frame type, a result answering the wrong kind
-    // of correlation — is a contract break: death, with the snippet.
-    // An extension built for a later host must be refused, not run
-    // half-working; additions the EXTENSION can emit ride the
-    // protocol version so older hosts refuse at the handshake's
-    // exact match instead of mid-stream.
+    // The frame reader: handshake outcome first, then the lanes.
+    // Everything the shared grammar carries enters through the
+    // node's intake from the lane's channel — one door, every law
+    // (commands route, stamped frames forward verbatim, unstamped
+    // emissions attribute their origin, and an interaction request
+    // registers its ask with the answer routing home down this same
+    // lane). Compatibility is one-directional (ruled 2026-09): a
+    // NEWER host keeps an older extension working (the host sends
+    // only what the extension declared; the extension side is told
+    // to ignore frames it does not know), but an extension speaking
+    // vocabulary its host lacks — an unparseable line, an unknown
+    // frame type, a result answering the wrong kind of correlation —
+    // is a contract break: death, with the snippet. An extension
+    // built for a later host must be refused, not run half-working;
+    // additions the EXTENSION can emit ride the protocol version so
+    // older hosts refuse at the handshake's exact match instead of
+    // mid-stream.
     let (handshake_tx, handshake_rx) = tokio::sync::oneshot::channel::<Handshake>();
     let (death_tx, mut death_rx) = tokio::sync::oneshot::channel::<String>();
     {
         let lane = lane.clone();
-        let routes = routes.clone();
-        let asks = asks.clone();
-        let reader_router = router.clone();
+        let node = node.clone();
         tokio::spawn(async move {
             let mut lines = BufReader::new(stdout).lines();
             let mut handshake_tx = Some(handshake_tx);
@@ -815,46 +842,43 @@ async fn supervise(
                     }
                     Ok(ExtFrame::ToolResult(result)) => {
                         // The correlation-kind law: a tool result must
-                        // answer a call. The kind tag rides the entry;
-                        // the wrong kind is a contract break (death),
-                        // the gone id a tolerated drop.
+                        // answer a call. The wrong kind is a contract
+                        // break (death); the gone id a tolerated drop.
                         let call_id = result.call_id.clone();
-                        match lane.pending.claim(&call_id) {
-                            Some(claimed) if claimed.kind() == KIND_CALL => {
-                                claimed
-                                    .deliver(tabit_wire::asks::Outcome::Answered(Box::new(result)));
+                        match node.answer(&call_id, KIND_TOOL_RESULT, Box::new(result)) {
+                            AnswerOutcome::Delivered => {
                                 lane.end_call(&call_id);
                             }
-                            Some(_) => {
+                            AnswerOutcome::WrongKind(kind) => {
                                 refuse(
                                     &mut handshake_tx,
                                     &mut death_tx,
-                                    format!("sent a tool result for a non-call id `{call_id}`"),
+                                    format!(
+                                        "sent a tool result for a non-call id `{call_id}` ({kind})"
+                                    ),
                                 );
                                 break;
                             }
-                            // An answer to an already-gone call (the
-                            // asker detached): dropped, not a fault.
-                            None => {}
+                            AnswerOutcome::Missed => {}
                         }
                     }
                     Ok(ExtFrame::HookResult(result)) => {
                         let hook_id = result.hook_id.clone();
-                        match lane.pending.claim(&hook_id) {
-                            Some(claimed) if claimed.kind() == KIND_HOOK => {
-                                claimed
-                                    .deliver(tabit_wire::asks::Outcome::Answered(Box::new(result)));
+                        match node.answer(&hook_id, KIND_HOOK_RESULT, Box::new(result)) {
+                            AnswerOutcome::Delivered => {
                                 lane.end_call(&hook_id);
                             }
-                            Some(_) => {
+                            AnswerOutcome::WrongKind(kind) => {
                                 refuse(
                                     &mut handshake_tx,
                                     &mut death_tx,
-                                    format!("sent a hook result for a non-hook id `{hook_id}`"),
+                                    format!(
+                                        "sent a hook result for a non-hook id `{hook_id}` ({kind})"
+                                    ),
                                 );
                                 break;
                             }
-                            None => {}
+                            AnswerOutcome::Missed => {}
                         }
                     }
                     Ok(ExtFrame::ServiceRequest {
@@ -862,43 +886,28 @@ async fn supervise(
                         call_id,
                         verb,
                     }) => {
-                        dispatch_service(lane.clone(), request_id, call_id, verb);
+                        hold_service(node.clone(), lane.clone(), request_id, call_id, verb);
                     }
                     // Not a lane frame: the shared grammar rides the
                     // same lines (flat, byte-identical with the
-                    // frontend edge). Commands are actions. Frames
-                    // follow one law: stamped frames FORWARD verbatim
-                    // (an owned child's traffic, stream preserved),
-                    // unstamped frames are emissions (backend-level,
-                    // origin-stamped) — and an interaction request
-                    // registers its ask either way, so the routed
-                    // answer finds this lane. A line parseable as
-                    // none of these is the contract break it always
-                    // was.
+                    // frontend edge), entering through the node's
+                    // intake from this lane — commands route, frames
+                    // fan (stamped verbatim, unstamped
+                    // origin-attributed to the lane), and an
+                    // interaction request registers its ask with the
+                    // answer routing home down this pipe. A line
+                    // parseable as none of these is the contract
+                    // break it always was.
                     Err(_) => {
                         if let Ok(command) =
                             serde_json::from_str::<tabit_protocol::SessionCommand>(&line)
                         {
-                            routes.command(command);
+                            node.intake(&lane.channel, Inbound::Command(command));
                             continue;
                         }
                         if let Ok(frame) = serde_json::from_str::<tabit_protocol::EventFrame>(&line)
                         {
-                            if let tabit_protocol::SessionEvent::InteractionRequest { id, .. } =
-                                &frame.event
-                            {
-                                register_ask(
-                                    &asks,
-                                    routes.clone(),
-                                    &lane.name,
-                                    id.clone(),
-                                    lane.commands.clone(),
-                                );
-                            }
-                            match frame.stream {
-                                Some(_) => routes.forward(&lane.name, frame),
-                                None => routes.event(&lane.name, frame.event),
-                            }
+                            node.intake(&lane.channel, Inbound::Event(frame));
                             continue;
                         }
                         refuse(
@@ -915,12 +924,11 @@ async fn supervise(
             }
             // EOF: the pipe is closed — before the ack it is a failed
             // handshake, after it the process is gone. Either way the
-            // lane dies first (fail the pending calls), then the
+            // lane dies first (the node sweep settles its open
+            // round-trips and retracts its registrations), then the
             // verdict crosses.
             let reason = "the extension process died mid-call".to_string();
-            lane.die(&reason);
-            asks.retract_owner(&lane.name, &reason);
-            reader_router.retract_owner(&lane.name);
+            lane.die(&node, &reason);
             if let Some(tx) = handshake_tx.take() {
                 let _ = tx.send(Handshake::Failed("closed before the handshake".to_string()));
             } else if let Some(tx) = death_tx.take() {
@@ -959,7 +967,8 @@ async fn supervise(
                 &events,
                 &manifest.name,
                 reason,
-                &router,
+                &node,
+                &lanes,
             )
             .await;
             return;
@@ -975,7 +984,8 @@ async fn supervise(
             &events,
             &manifest.name,
             reason,
-            &router,
+            &node,
+            &lanes,
         )
         .await;
         return;
@@ -987,14 +997,12 @@ async fn supervise(
         watch,
         ..
     } = ack;
-    // The ack's watch list subscribes the lane's writer on the host
-    // router — a subscriber is a callback; this one pushes the wire
-    // line down the lane's stdin.
+    // The ack's watch list subscribes the lane's channel on the
+    // node: each watched kind's frames reach the lane's event
+    // delivery, which writes the wire line down its stdin. Death
+    // retracts the lane's every registration (the node sweep).
     for kind in &watch {
-        let commands = lane.commands.clone();
-        router.register(kind, &manifest.name, move |frame| {
-            let _ = commands.send(tabit_protocol::to_wire_line(frame));
-        });
+        node.subscribe_channel(kind, &lane.channel);
     }
     let status = state.transition(Status::Alive, tools, hooks);
     let _ = events.send(ExtensionEvent {
@@ -1024,6 +1032,15 @@ async fn supervise(
             let _ = exit;
             "the extension process exited while its stdout stayed open".to_string()
         }
+        _ = killed.cancelled() => {
+            // The mint-law containment: this sender re-registered a
+            // live ask id on the node's table — state proven
+            // untrustworthy — kill the tree now (no grace).
+            process::kill_now(&mut process, &closing).await;
+            let reason = "killed: it re-registered a live ask id (the mint law)".to_string();
+            resolve_dead(&state, &lane, &events, &manifest.name, reason, &node, &lanes);
+            return;
+        }
     };
     let exit = reap_with_grace(&mut process).await;
     let reason = match exit {
@@ -1036,23 +1053,45 @@ async fn supervise(
     } else {
         format!("{reason}\nstderr tail:\n{tail}")
     };
-    // The reader never saw this death (stdout stayed open), so its
-    // ask-settling did not run: settle here.
-    asks.retract_owner(&manifest.name, &reason);
-    resolve_dead(&state, &lane, &events, &manifest.name, reason, &router);
+    resolve_dead(
+        &state,
+        &lane,
+        &events,
+        &manifest.name,
+        reason,
+        &node,
+        &lanes,
+    );
 }
 
-/// The envelope dispatcher: route one extension service request to
-/// the session whose call or hook is in flight (the call's
-/// capability context) and carry the answer back down the pipe. The
-/// verbs are fixed (the task-5 ruling); `model_prompt` is the one
-/// verb, billed through the call's capability. No capability on the
-/// call's context (a non-interactive session, or the call already
-/// gone) errors — fail closed, exactly as core tools behave. (The
-/// interaction ask rode this envelope as verb zero until the
-/// routing generalization replaced it with direct grammar
-/// emission — deleted with extension protocol v3.)
-fn dispatch_service(lane: Arc<Lane>, request_id: String, call_id: String, verb: ServiceVerb) {
+/// Hold one extension service request on the node's ask table (the
+/// ruling: service requests are asks — the response claims by id)
+/// and dispatch its verb. The delivery writes the response line back
+/// down the asking lane whatever settles it; the lane's death sweep
+/// discards the entry (the pipe is gone — fail-soft by design).
+fn hold_service(
+    node: Arc<Node>,
+    lane: Arc<Lane>,
+    request_id: String,
+    call_id: String,
+    verb: ServiceVerb,
+) {
+    let commands = lane.commands.clone();
+    let id = request_id.clone();
+    node.hold(
+        &lane.name,
+        &request_id,
+        KIND_SERVICE_RESPONSE,
+        move |outcome| {
+            if let tabit_wire::asks::Outcome::Answered(answer) = outcome {
+                let frame = tabit_wire::asks::unanswer::<HostFrame>(answer);
+                #[allow(clippy::expect_used)] // sanctioned crash: pure-data serialization
+                let line = serde_json::to_string(&frame).expect("HostFrame always serializes");
+                let _ = commands.send(line);
+            }
+        },
+    );
+    let node = node.clone();
     tokio::spawn(async move {
         let services = lane.capability(&call_id);
         let response = match verb {
@@ -1105,11 +1144,10 @@ fn dispatch_service(lane: Arc<Lane>, request_id: String, call_id: String, verb: 
                 }
             }
         };
-        // Pure data over a serde type — the impossible failure is the
-        // sanctioned crash, never a silent empty line.
-        #[allow(clippy::expect_used)] // sanctioned crash: pure-data serialization
-        let frame = serde_json::to_string(&response).expect("HostFrame always serializes");
-        let _ = lane.commands.send(frame);
+        // The response claims the held entry by id (the ruling: the
+        // ask table is the one round-trip law); a late response
+        // after the lane's sweep finds a gone id and drops.
+        let _ = node.answer(&id, KIND_SERVICE_RESPONSE, Box::new(response));
     });
 }
 
@@ -1200,10 +1238,11 @@ async fn fail_before_ack(
     events: &tokio::sync::mpsc::UnboundedSender<ExtensionEvent>,
     name: &str,
     reason: String,
-    router: &Arc<tabit_wire::router::Router>,
+    node: &Arc<Node>,
+    lanes: &Arc<Mutex<HashMap<String, CancellationToken>>>,
 ) {
     process::kill_now(process, closing).await;
-    resolve_dead(state, lane, events, name, reason, router);
+    resolve_dead(state, lane, events, name, reason, node, lanes);
 }
 
 // The post-ack close lives in [`tabit_wire::process::reap_with_grace`]
@@ -1214,10 +1253,11 @@ fn resolve_dead(
     events: &tokio::sync::mpsc::UnboundedSender<ExtensionEvent>,
     name: &str,
     reason: String,
-    router: &Arc<tabit_wire::router::Router>,
+    node: &Arc<Node>,
+    lanes: &Arc<Mutex<HashMap<String, CancellationToken>>>,
 ) {
-    lane.die("the extension is not running");
-    router.retract_owner(&lane.name);
+    lane.die(node, "the extension is not running");
+    tabit_log::lock::lock(lanes).remove(&lane.name);
     // (Ask settling lives at the death sites that can see the asks
     // registry: the reader end and the exit branch.) The pre-ack and
     // spawn-failure paths funnel here and cannot carry open asks. — announced, so no channel holds a card that can never be

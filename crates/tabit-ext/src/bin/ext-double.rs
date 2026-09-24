@@ -157,6 +157,14 @@ fn serve_grammar() {
         ) {
             continue;
         }
+        // A well-behaved origin announces the settle when its ask's
+        // answer comes home (the entry-owned-settles rule — g-1 was
+        // ours).
+        if kind == "interaction_response"
+            && let Some(id) = frame["id"].as_str()
+        {
+            emit(json!({"type": "interaction_settled", "id": id}));
+        }
         emit(json!({
             "type": "error", "kind": "session", "message": line.trim(),
         }));
@@ -210,6 +218,12 @@ fn serve_tools(tools: Value) {
                     if frame["type"] == "interaction_response"
                         && frame["id"] == format!("{call_id}-ask")
                     {
+                        // A well-behaved origin announces its settle
+                        // (the entry-owned-settles rule).
+                        emit(json!({
+                            "type": "interaction_settled",
+                            "id": format!("{call_id}-ask"),
+                        }));
                         break format!(
                             "answered: {}",
                             frame["payload"]["text"].as_str().unwrap_or("<no text>")
@@ -349,6 +363,12 @@ fn serve_hooks(behavior: &str) {
                     if frame["type"] == "interaction_response"
                         && frame["id"] == format!("{hook_id}-ask")
                     {
+                        // A well-behaved origin announces its settle
+                        // (the entry-owned-settles rule).
+                        emit(json!({
+                            "type": "interaction_settled",
+                            "id": format!("{hook_id}-ask"),
+                        }));
                         break frame;
                     }
                 };

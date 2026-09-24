@@ -24,33 +24,7 @@ use crate::endpoint::{SessionCommandLink, SessionHost, SessionInfo};
 /// Serve the backend over `reader`/`writer` until the client closes its
 /// input. Returns the process exit code: 0 normally, 1 on a handshake
 /// version mismatch (the connection is rejected and closed).
-#[cfg(test)] // the plain-glue entry: production edges carry their own glue
-pub async fn serve<R, W>(host: SessionHost, reader: R, writer: W) -> i32
-where
-    R: BufRead + Send + 'static,
-    W: Write + Send + 'static,
-{
-    // The plain glue: commands go to the host's own link, nothing is
-    // mirrored (print-mode-style edges and the in-crate tests — no
-    // extension host in sight).
-    let link = host.command_link();
-    let dispatch: std::sync::Arc<dyn Fn(SessionCommand) + Send + Sync> =
-        std::sync::Arc::new(move |command| link.send(command));
-    let mirror: std::sync::Arc<dyn Fn(&EventFrame) + Send + Sync> = std::sync::Arc::new(|_| {});
-    serve_with_glue(host, reader, writer, dispatch, mirror).await
-}
-
-/// [`serve`] with the routing-generalization glue supplied: where
-/// commands route (id-first through the extension ask registry, then
-/// the host) and what mirrors each event frame (the extension watch
-/// lanes).
-pub async fn serve_with_glue<R, W>(
-    mut host: SessionHost,
-    reader: R,
-    writer: W,
-    dispatch: std::sync::Arc<dyn Fn(SessionCommand) + Send + Sync>,
-    mirror: std::sync::Arc<dyn Fn(&EventFrame) + Send + Sync>,
-) -> i32
+pub async fn serve<R, W>(mut host: SessionHost, reader: R, writer: W) -> i32
 where
     R: BufRead + Send + 'static,
     W: Write + Send + 'static,
@@ -71,6 +45,10 @@ where
     // stdout, draining one ordered channel so the handshake ack can
     // never land behind an event.
     let reader_tx = writer_tx.clone();
+    let dispatch = {
+        let link = host.command_link();
+        std::sync::Arc::new(move |command: SessionCommand| link.send(command))
+    };
     let reader_task = tokio::task::spawn_blocking(move || {
         read_loop(reader, link, dispatch, reader_tx, &info, gate_tx)
     });
@@ -87,7 +65,6 @@ where
         host.take_events(),
         writer_tx.clone(),
         gate_rx,
-        mirror,
         host.stream_end_signal(),
     ));
 
@@ -122,7 +99,6 @@ async fn forward_events(
     stream: Option<mpsc::UnboundedReceiver<EventFrame>>,
     out: mpsc::UnboundedSender<ServerFrame>,
     mut gate: tokio::sync::watch::Receiver<bool>,
-    mirror: std::sync::Arc<dyn Fn(&EventFrame) + Send + Sync>,
     end: CancellationToken,
 ) {
     let Some(mut stream) = stream else {
@@ -142,19 +118,16 @@ async fn forward_events(
         tokio::select! {
             frame = stream.recv() => {
                 let Some(frame) = frame else { return };
-                // The participant-blind fan-out: the primary frontend is
-                // subscriber zero (this write); every watching extension's
-                // lane takes the same line from the mirror. Frames cross
-                // verbatim, hop budget included — the consumer ignores
-                // what it doesn't know.
-                mirror(&frame);
+                // Frames cross verbatim, hop budget included — the
+                // consumer ignores what it doesn't know (watching
+                // extension lanes hear the same frames through their
+                // own node subscriptions, not through this writer).
                 let _ = out.send(ServerFrame::Event(frame));
             }
             _ = end.cancelled() => {
                 // The wind-down awaited every worker join before firing
                 // this: drain what landed, then stop.
                 while let Ok(frame) = stream.try_recv() {
-                    mirror(&frame);
                     let _ = out.send(ServerFrame::Event(frame));
                 }
                 return;

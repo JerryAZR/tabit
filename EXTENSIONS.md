@@ -170,14 +170,17 @@ The four directions, one sentence each:
   unknown kind matches nothing (tolerated, not refused). The primary
   frontend is subscriber zero — the same frames, unfiltered, on
   stdout; the pump's fan-out is participant-blind.
-- **Answers back**: the frontend's `interaction_response` is routed
-  **id-first** — an id registered by an extension ask delivers the
-  serialized command line back down that extension's pipe
-  (`session` omitted; the id is the correlation) and announces
-  `interaction_settled { id }` (v17) to every subscriber. Unknown
-  ids fall through to the session host's own hub (the total no-op).
-  An extension dying settles its open asks — announced, so no
-  channel holds a card that can never be answered.
+- **Answers back**: the frontend's `interaction_response` claims the
+  node's ONE ask table by id (the id-first seam is gone — a session
+  card and an extension's grammar ask are the same law): an id
+  registered by an extension ask delivers the serialized command
+  line back down that extension's pipe (`session` omitted; the id is
+  the correlation). The **origin announces the settle** (the
+  entry-owned-settles rule): the extension emits
+  `interaction_settled { id }` when its ask's answer comes home, and
+  the host's sweep announces on the extension's death — so no
+  channel holds a card that can never be answered. Unknown ids are
+  the race's tolerated drop.
 
 Handshake additions (extension protocol **v2**): `initialize`
 carries `core_path` (the running backend's own executable — the host

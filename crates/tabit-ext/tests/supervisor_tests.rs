@@ -30,14 +30,28 @@ const BOUND: Duration = Duration::from_secs(15);
 
 /// A never-fired run token for call sites that test the steady
 /// state (cancellation has its own tests).
-/// The launch context tests serve: grammar that records what crossed
-/// (commands and events both), and placeholder host facts.
+/// The launch context tests serve: a bare node and placeholder host
+/// facts.
 fn test_host() -> tabit_ext::LaunchContext {
     tabit_ext::LaunchContext {
-        routes: tabit_ext::GrammarRoutes::noop(),
+        node: std::sync::Arc::new(tabit_wire::node::Node::new("test")),
         core_path: "tabit-core".to_string(),
         cwd: ".".to_string(),
     }
+}
+
+/// Answer one open ask by id through the node's table — the honest
+/// frontend shape (a response entering the net claims wherever the
+/// entry lives).
+fn answer(node: &tabit_wire::node::Node, id: &str, payload: serde_json::Value) {
+    node.intake(
+        &tabit_wire::node::Channel::local("test", |_| {}, |_| {}),
+        tabit_wire::node::Inbound::Command(tabit_protocol::SessionCommand::InteractionResponse {
+            session: None,
+            id: id.to_string(),
+            payload,
+        }),
+    );
 }
 
 fn run_token() -> tokio_util::sync::CancellationToken {
@@ -461,11 +475,7 @@ async fn an_ask_routes_through_the_backend_registry() {
         .and_then(|e| e.split("\"id\":\"").nth(1))
         .and_then(|rest| rest.split('"').next().map(str::to_string))
         .expect("the ask id");
-    assert!(
-        supervisor
-            .asks()
-            .respond(&id, Box::new(serde_json::json!({"text": "yes"})))
-    );
+    answer(&recorded.net(), &id, serde_json::json!({"text": "yes"}));
     let result = call.await.expect("joined");
     assert_eq!(result.error, None);
     assert_eq!(result.report, "answered: yes");
@@ -740,10 +750,10 @@ async fn a_hook_ask_decides_through_the_backend_registry() {
         .and_then(|e| e.split("\"id\":\"").nth(1))
         .and_then(|rest| rest.split('"').next().map(str::to_string))
         .expect("the ask id");
-    assert!(
-        supervisor
-            .asks()
-            .respond(&id, Box::new(serde_json::json!({"selected": ["Allow"]})))
+    answer(
+        &recorded.net(),
+        &id,
+        serde_json::json!({"selected": ["Allow"]}),
     );
     let decision = hook.await.expect("joined");
     assert_eq!(decision, tabit_protocol::points::CallVerdict::Run);
@@ -771,10 +781,10 @@ async fn a_hook_ask_decides_through_the_backend_registry() {
         .and_then(|e| e.split("\"id\":\"").nth(1))
         .and_then(|rest| rest.split('"').next().map(str::to_string))
         .expect("the second ask id");
-    assert!(
-        supervisor
-            .asks()
-            .respond(&id, Box::new(serde_json::json!({"selected": ["Deny"]})))
+    answer(
+        &recorded.net(),
+        &id,
+        serde_json::json!({"selected": ["Deny"]}),
     );
     let decision = hook.await.expect("joined");
     assert!(matches!(
@@ -862,37 +872,32 @@ async fn cancelling_the_run_token_cancels_the_call_across_the_pipe() {
 /// What the recording routes captured, in arrival order.
 #[derive(Default, Clone)]
 struct Recorded {
-    commands: std::sync::Arc<std::sync::Mutex<Vec<String>>>,
+    node: std::sync::OnceLock<std::sync::Arc<tabit_wire::node::Node>>,
     events: std::sync::Arc<std::sync::Mutex<Vec<String>>>,
 }
 
 impl Recorded {
     fn host(&self) -> tabit_ext::LaunchContext {
-        let commands = self.commands.clone();
         let events = self.events.clone();
+        let node = std::sync::Arc::new(tabit_wire::node::Node::new("test"));
+        node.subscribe_all("recorder", move |frame: &tabit_protocol::EventFrame| {
+            let origin = frame.origin.clone().unwrap_or_else(|| "-".to_string());
+            events.lock().unwrap().push(format!(
+                "{origin}|{}",
+                serde_json::to_string(&frame.event).unwrap()
+            ));
+        });
+        self.node.get_or_init(|| node.clone());
         tabit_ext::LaunchContext {
-            routes: tabit_ext::GrammarRoutes::new(
-                std::sync::Arc::new(move |command| {
-                    commands
-                        .lock()
-                        .unwrap()
-                        .push(serde_json::to_string(&command).unwrap());
-                }),
-                std::sync::Arc::new(move |origin, event| {
-                    events.lock().unwrap().push(format!(
-                        "{origin}|{}",
-                        serde_json::to_string(&event).unwrap()
-                    ));
-                }),
-                std::sync::Arc::new(|_, _| {}),
-            ),
+            node,
             core_path: "tabit-core".to_string(),
             cwd: ".".to_string(),
         }
     }
 
-    fn commands(&self) -> Vec<String> {
-        self.commands.lock().unwrap().clone()
+    /// The recorded net (set by `host`).
+    fn net(&self) -> std::sync::Arc<tabit_wire::node::Node> {
+        self.node.get().expect("host() ran first").clone()
     }
 
     fn events(&self) -> Vec<String> {
@@ -914,19 +919,22 @@ async fn the_shared_grammar_flows_both_directions_over_the_pipe() {
         supervisor::launch_root(&root, HANDSHAKE_TIMEOUT, recorded.host());
     await_status(&mut events, "grammar-ext", |s| matches!(s, Status::Alive)).await;
 
-    // The double's opening emissions crossed: one command, one ask.
-    // Both race the Alive transition (the ack lands before the
-    // double's next writes are processed), so poll for them — never
-    // assert on an instantaneous snapshot.
+    // The double's command crossed and ENTERED THE NET: no session
+    // `boot-session` exists on the test's node, so the uniform miss
+    // error is the command's observable routing outcome (it raced
+    // the Alive transition, so poll — never assert on a snapshot).
     let saw_command = wait_for(|| {
         recorded
-            .commands()
+            .events()
             .iter()
-            .any(|c| c.contains("steered by the extension"))
+            .any(|e| e.contains("no session") && e.contains("boot-session"))
     })
     .await;
-    assert!(saw_command, "the command routed: {:?}", recorded.commands());
-    assert_eq!(recorded.commands().len(), 1, "exactly one command routed");
+    assert!(
+        saw_command,
+        "the command entered the node's routing: {:?}",
+        recorded.events()
+    );
     let saw_ask = wait_for(|| {
         recorded.events().iter().any(|e| {
             e.starts_with("grammar-ext|") && e.contains("interaction_request") && e.contains("g-1")
@@ -955,19 +963,23 @@ async fn the_shared_grammar_flows_both_directions_over_the_pipe() {
             parent_call: None,
         },
     };
-    supervisor.broadcast(&watched);
+    let net = recorded.net();
+    let emit_from = tabit_wire::node::Channel::local("test", |_| {}, |_| {});
+    net.emit(&emit_from, watched);
     let unwatched = tabit_protocol::EventFrame {
         stream: None,
         origin: None,
         ttl: None,
         event: tabit_protocol::SessionEvent::CompactionBegin,
     };
-    supervisor.broadcast(&unwatched);
+    net.emit(&emit_from, unwatched);
+    // The double's echo carries its origin attribution (the raw
+    // emission also passes the recorder — origin "-"; the MIRROR is
+    // the echoed copy, origin "grammar-ext").
     let echoed = wait_for(|| {
-        recorded
-            .events()
-            .iter()
-            .any(|e| e.contains("session_opened") && e.contains("0198"))
+        recorded.events().iter().any(|e| {
+            e.starts_with("grammar-ext|") && e.contains("session_opened") && e.contains("0198")
+        })
     })
     .await;
     assert!(
@@ -979,16 +991,18 @@ async fn the_shared_grammar_flows_both_directions_over_the_pipe() {
         !wait_for_short(|| recorded
             .events()
             .iter()
-            .any(|e| e.contains("compaction_begin")))
+            .any(|e| e.starts_with("grammar-ext|") && e.contains("compaction_begin")))
         .await,
         "the unwatched kind never mirrors"
     );
 
-    // The answer routes back by id, and settlement is announced.
-    assert!(supervisor.asks().respond(
+    // The answer routes back by id (through the node's table — the
+    // origin, the double, announces the settle).
+    answer(
+        &recorded.net(),
         "g-1",
-        Box::new(serde_json::json!({"selected": [], "text": "go ahead"}))
-    ));
+        serde_json::json!({"selected": [], "text": "go ahead"}),
+    );
     let settled = wait_for(|| {
         recorded
             .events()
@@ -1010,11 +1024,6 @@ async fn the_shared_grammar_flows_both_directions_over_the_pipe() {
         recorded.events()
     );
 
-    // Death settles the asks: none are open, but the sweep is the
-    // contract — an owner retraction on a live registry is quiet.
-    supervisor
-        .asks()
-        .retract_owner("grammar-ext", "the test ends");
     supervisor.shutdown().await;
 }
 

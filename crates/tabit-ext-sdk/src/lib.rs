@@ -602,8 +602,12 @@ fn dispatch_line(
         serde_json::from_str::<SessionCommand>(line)
     {
         // A routed answer to one of our grammar asks: resolve by id;
-        // a late response for a gone waiter drops.
+        // a late response for a gone waiter drops. Either way the
+        // origin announces the settle (the entry-owned-settles
+        // ruling: the origin is the answer's producer) — hit or
+        // miss, every channel holding the card closes it.
         let _ = shared.grammar_asks.respond(&id, Box::new(payload));
+        emit(shared, &SessionEvent::InteractionSettled { id: id.clone() });
         return;
     }
     // The double tolerates garbage; the SDK exits loud — a malformed

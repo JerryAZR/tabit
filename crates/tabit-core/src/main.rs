@@ -39,7 +39,6 @@ use std::io::Write as _;
 use std::path::PathBuf;
 use std::sync::Arc;
 use tabit_config::{AuthConfig, TabitConfig};
-use tabit_protocol::EventFrame;
 use tabit_protocol::SessionCommand;
 use tabit_session::SessionEvent;
 use tabit_session::{
@@ -1038,33 +1037,18 @@ fn run() -> Result<i32, String> {
             // concurrently inside their supervision tasks, so a
             // broken package costs one boot, loudly, and never
             // delays a healthy sibling.
-            // The grammar bridges: extensions speak the shared grammar
-            // from their first post-ack line, but the session host (the
-            // grammar's other end) spawns after the extension boot —
-            // the channels hold whatever crosses in between, and the
-            // drain tasks started after the spawn serve it in order.
-            let (grammar_cmd_tx, mut grammar_cmd_rx) =
-                tokio::sync::mpsc::unbounded_channel::<SessionCommand>();
-            let (grammar_evt_tx, mut grammar_evt_rx) =
-                tokio::sync::mpsc::unbounded_channel::<(String, SessionEvent)>();
-            let (grammar_fwd_tx, mut grammar_fwd_rx) =
-                tokio::sync::mpsc::unbounded_channel::<(String, EventFrame)>();
+            // The lanes mount on the process's node — the same net
+            // the session host and the subprocess bridge ride: every
+            // extension's grammar lines enter through the node's
+            // intake from its lane, and its watch list subscribes the
+            // lane's channel. No bridges, no drains — the grammar's
+            // other end (the session host) reads the same tables.
+            // The frontend stream mounts FIRST: extensions speak from
+            // their first post-ack line, before the session host
+            // spawns, and the early frames must find it subscribed.
+            let frontend = tabit_session::mount_frontend(&host_node());
             let launch_context = tabit_ext::LaunchContext {
-                routes: tabit_ext::GrammarRoutes::new(
-                    std::sync::Arc::new(move |command| {
-                        let _ = grammar_cmd_tx.send(command);
-                    }),
-                    std::sync::Arc::new(move |origin, event| {
-                        let _ = grammar_evt_tx.send((origin.to_string(), event));
-                    }),
-                    // Verbatim frame forwarding rides the same bridge
-                    // discipline: a stamped frame from an extension
-                    // crosses stream-preserved (an owned child's
-                    // traffic through its owner's pipe).
-                    std::sync::Arc::new(move |origin: &str, frame: tabit_protocol::EventFrame| {
-                        let _ = grammar_fwd_tx.send((origin.to_string(), frame));
-                    }),
-                ),
+                node: host_node(),
                 // The host IS the binary: owned-session spawners get
                 // the running executable, never a resolution search.
                 core_path: std::env::current_exe()
@@ -1105,56 +1089,12 @@ fn run() -> Result<i32, String> {
             print_banner(&session);
             let wiring = host_wiring(&args, &registry, SessionStore::project_default(), &mounted);
             Ok(runtime.block_on(async {
-                let handle = SessionHost::spawn(session, startup_notes, wiring);
-                let asks = mounted.supervisor().asks();
-                let link = handle.command_link();
-                let backend_sink = handle.backend_sink();
-                // Id-first dispatch (participant-blind by id): an
-                // answer claiming a backend ask routes to its
-                // extension; everything else is a session command.
-                let dispatch: std::sync::Arc<dyn Fn(SessionCommand) + Send + Sync> =
-                    std::sync::Arc::new(move |command| {
-                        if let SessionCommand::InteractionResponse { id, payload, .. } = &command
-                            && asks.respond(id, Box::new(payload.clone()))
-                        {
-                            return;
-                        }
-                        link.send(command);
-                    });
-                // The emission bridge: extension-emitted events fan out
-                // origin-stamped on the host's channel.
-                let sink = backend_sink;
-                let forward_sink = handle.backend_sink();
-                tokio::spawn(async move {
-                    while let Some((origin, event)) = grammar_evt_rx.recv().await {
-                        sink.emit(&origin, event);
-                    }
-                });
-                // The forwarding bridge: stamped frames cross verbatim
-                // (stream preserved, origin naming the conduit).
-                tokio::spawn(async move {
-                    while let Some((origin, frame)) = grammar_fwd_rx.recv().await {
-                        forward_sink.forward(&origin, frame);
-                    }
-                });
-                // The command bridge drains through the same dispatch.
-                let bridge_dispatch = dispatch.clone();
-                tokio::spawn(async move {
-                    while let Some(command) = grammar_cmd_rx.recv().await {
-                        bridge_dispatch(command);
-                    }
-                });
-                let mirror: std::sync::Arc<dyn Fn(&EventFrame) + Send + Sync> =
-                    std::sync::Arc::new({
-                        let supervisor = mounted.supervisor().clone();
-                        move |frame| supervisor.broadcast(frame)
-                    });
-                tabit_session::edge::serve_with_glue(
+                let handle =
+                    SessionHost::spawn_with_frontend(session, startup_notes, wiring, frontend);
+                tabit_session::edge::serve(
                     handle,
                     std::io::BufReader::new(std::io::stdin()),
                     std::io::stdout(),
-                    dispatch,
-                    mirror,
                 )
                 .await
             }))

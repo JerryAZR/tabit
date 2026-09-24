@@ -35,26 +35,32 @@ const BOUND: Duration = Duration::from_secs(45);
 /// The recorded grammar: what crossed, in arrival order.
 #[derive(Default, Clone)]
 struct Recorded {
+    node: std::sync::OnceLock<std::sync::Arc<tabit_wire::node::Node>>,
     events: std::sync::Arc<std::sync::Mutex<Vec<String>>>,
 }
 
 impl Recorded {
     fn host(&self) -> tabit_ext::LaunchContext {
         let events = self.events.clone();
+        let node = std::sync::Arc::new(tabit_wire::node::Node::new("test"));
+        node.subscribe_all("recorder", move |frame: &tabit_protocol::EventFrame| {
+            let origin = frame.origin.clone().unwrap_or_else(|| "-".to_string());
+            events.lock().unwrap().push(format!(
+                "{origin}|{}",
+                serde_json::to_string(&frame.event).unwrap()
+            ));
+        });
+        self.node.get_or_init(|| node.clone());
         tabit_ext::LaunchContext {
-            routes: tabit_ext::GrammarRoutes::new(
-                std::sync::Arc::new(|_| {}),
-                std::sync::Arc::new(move |origin, event| {
-                    events.lock().unwrap().push(format!(
-                        "{origin}|{}",
-                        serde_json::to_string(&event).unwrap()
-                    ));
-                }),
-                std::sync::Arc::new(|_, _| {}),
-            ),
+            node,
             core_path: "tabit-core".to_string(),
             cwd: ".".to_string(),
         }
+    }
+
+    /// The recorded net (set by `host`).
+    fn net(&self) -> std::sync::Arc<tabit_wire::node::Node> {
+        self.node.get().expect("host() ran first").clone()
     }
 
     fn events(&self) -> Vec<String> {
@@ -89,7 +95,7 @@ async fn wait_for(mut check: impl FnMut() -> bool) -> bool {
 /// the host facts a real boot would carry.
 fn host_ctx() -> tabit_ext::LaunchContext {
     tabit_ext::LaunchContext {
-        routes: tabit_ext::GrammarRoutes::noop(),
+        node: std::sync::Arc::new(tabit_wire::node::Node::new("test")),
         core_path: "tabit-core".to_string(),
         cwd: ".".to_string(),
     }
@@ -236,9 +242,13 @@ async fn the_ask_example_routes_its_answer() {
         recorded.events()
     );
     let id = recorded.newest_ask("echo").expect("the id");
-    assert!(
-        host.asks()
-            .respond(&id, Box::new(serde_json::json!({"text": "yes"})))
+    recorded.net().intake(
+        &tabit_wire::node::Channel::local("test", |_| {}, |_| {}),
+        tabit_wire::node::Inbound::Command(tabit_protocol::SessionCommand::InteractionResponse {
+            session: None,
+            id: id.clone(),
+            payload: serde_json::json!({"text": "yes"}),
+        }),
     );
     let result = call.await.expect("joined");
     assert_eq!(result.error, None);
@@ -268,7 +278,10 @@ async fn the_ask_example_routes_its_answer() {
     if !mirrored {
         panic!("no settlement to mirror: {:?}", recorded.events());
     }
-    host.broadcast(&frame.expect("the wait proved it"));
+    recorded.net().emit(
+        &tabit_wire::node::Channel::local("test", |_| {}, |_| {}),
+        frame.expect("the wait proved it"),
+    );
     assert!(
         wait_for(|| {
             recorded.events().iter().any(|e| {

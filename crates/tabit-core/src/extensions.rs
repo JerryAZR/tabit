@@ -57,18 +57,13 @@ impl Mounted {
     /// extension host): one shape for every assembly.
     pub fn none() -> Mounted {
         Mounted {
-            supervisor: std::sync::Arc::new(Supervisor::empty()),
+            supervisor: std::sync::Arc::new(Supervisor::empty(std::sync::Arc::new(
+                tabit_session::Node::new("print"),
+            ))),
             tools: Vec::new(),
             hooks: HookStack::new(),
             catalog: ExtensionsCatalog::default(),
         }
-    }
-
-    /// The supervised extension host this assembly mounted — the
-    /// routing-generalization glue reads its ask registry and mirror
-    /// surface from here.
-    pub fn supervisor(&self) -> &std::sync::Arc<Supervisor> {
-        &self.supervisor
     }
 
     /// Assemble from the supervisor's **resolved** reports (call

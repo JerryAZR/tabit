@@ -192,6 +192,21 @@ pub fn parse_shared(line: &str) -> Option<Inbound<SessionCommand>> {
         .map(Inbound::Command)
 }
 
+/// What became of a response claiming the ask table — [`Node::answer`]'s
+/// report to its caller, which owns the policy for each arm.
+pub enum AnswerOutcome {
+    /// The entry existed, its kind matched, the answer was delivered.
+    Delivered,
+    /// The race's tolerated loser: no entry (unknown, already
+    /// answered, or retracted).
+    Missed,
+    /// The entry existed but answers a different kind — a
+    /// correlation-kind contract break. The entry is consumed, the
+    /// answer never delivered; the caller decides how loud (the
+    /// command path emits the error; a lane treats it as death).
+    WrongKind(&'static str),
+}
+
 /// One node: the routing layer. Owns the three tables over the
 /// shared organs — subscribers ([`Router`]), the ask table
 /// ([`PendingAsks`]), the learned routes — and the uniform laws that
@@ -227,8 +242,10 @@ type ViolationPolicy = Box<dyn Fn(&str, &str) + Send + Sync>;
 /// The default policy: the sanctioned crash. The sender may be this
 /// node's own stdin, which cannot be contained — and no containment
 /// policy registered means nobody claimed the sender is killable.
+/// Public for the containment policies that keep it as their
+/// unknown-owner arm (the one home for the crash text).
 #[allow(clippy::panic)] // sanctioned crash: the mint law was violated
-fn violation_panic(owner: &str, id: &str) {
+pub fn violation_panic(owner: &str, id: &str) {
     panic!(
         "ask id `{id}` re-registered by `{owner}` — the mint law was violated (no containment policy registered)"
     );
@@ -482,13 +499,8 @@ impl<C: Routed> Node<C> {
     /// learning table (law 2); the rest dispatch by type (law 3).
     fn route_command(&self, command: C) {
         if let Some((id, payload)) = command.response() {
-            match self.asks.claim(id) {
-                // The correlation-kind law: the entry's kind is the
-                // tag of the response that answers it.
-                Some(claimed) if claimed.kind() == command.route_key() => {
-                    claimed.deliver(Outcome::Answered(Box::new(payload.clone())));
-                }
-                Some(mismatched) => {
+            match self.answer(id, command.route_key(), Box::new(payload.clone())) {
+                AnswerOutcome::WrongKind(kind) => {
                     // A wrong-kind answer is consumed loudly, never
                     // delivered to a closure expecting another shape
                     // — an external contract break stays external.
@@ -499,13 +511,11 @@ impl<C: Routed> Node<C> {
                         event: SessionEvent::error_session(format!(
                             "a `{}` answered a `{}` question (`{id}`) — a contract break, dropped",
                             command.route_key(),
-                            mismatched.kind(),
+                            kind,
                         )),
                     });
                 }
-                None => {
-                    // The race's loser — a tolerated drop.
-                }
+                AnswerOutcome::Delivered | AnswerOutcome::Missed => {}
             }
             return;
         }
@@ -596,6 +606,37 @@ impl<C: Routed> Node<C> {
         deliver: impl FnOnce(Outcome) + Send + 'static,
     ) {
         self.asks.insert(id.to_string(), owner, kind, deliver);
+    }
+
+    /// Discard a held round-trip without settling — the asker's own
+    /// give-up (a cancelled call, a dead lane): the entry goes, a
+    /// racing answer finds a gone id and drops, and no settle runs
+    /// (the asker moved on by its own path).
+    pub fn discard(&self, id: &str) {
+        drop(self.asks.claim(id));
+    }
+
+    /// A dialect response claiming the ask table — law 5 for frames
+    /// that are not commands (`tool_result`, `hook_result`,
+    /// `service_response`): the claim, the correlation-kind check,
+    /// the delivery. The entry is consumed whatever the outcome; the
+    /// caller owns the policy each arm gets (a wrong kind is a
+    /// contract break — the command path reports it as an error
+    /// event, a lane treats it as death).
+    pub fn answer(
+        &self,
+        id: &str,
+        kind: &str,
+        answer: Box<dyn std::any::Any + Send>,
+    ) -> AnswerOutcome {
+        match self.asks.claim(id) {
+            Some(claimed) if claimed.kind() == kind => {
+                claimed.deliver(Outcome::Answered(answer));
+                AnswerOutcome::Delivered
+            }
+            Some(mismatched) => AnswerOutcome::WrongKind(mismatched.kind()),
+            None => AnswerOutcome::Missed,
+        }
     }
 
     /// A participant died: its subscriptions, learned routes, and

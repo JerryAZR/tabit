@@ -397,6 +397,65 @@ impl SessionCommandLink {
     }
 }
 
+/// The frontend's event stream, mounted on the node — constructible
+/// **before any functional layer exists**. Extensions speak the
+/// shared grammar from their first post-ack line, and the extension
+/// boot precedes the session host's spawn (tools exist at session
+/// build), so the stream must be subscribed first or the early
+/// frames fan to nobody.
+pub struct FrontendStream {
+    events: mpsc::UnboundedReceiver<EventFrame>,
+    /// The sender the death-watch awaits (dropped receivers close
+    /// it); held here so the host — which spawns inside a runtime —
+    /// owns the watcher task.
+    events_tx: mpsc::UnboundedSender<EventFrame>,
+    /// The startup hold: frames arriving before the host's first
+    /// emissions land buffer here (extensions speak from their first
+    /// post-ack line — before the session host exists — and the
+    /// pinned startup order, ack → session_opened → notes → catalog,
+    /// must not have them interleaved ahead of it).
+    held: Arc<Mutex<Vec<EventFrame>>>,
+    started: Arc<std::sync::atomic::AtomicBool>,
+    /// Fires when the stream's receiver drops — the frontend-death
+    /// signal; the host (whenever it spawns) owns the door it opens.
+    gone: CancellationToken,
+}
+
+/// Mount the frontend stream on the node: the facade channel
+/// (subscribed to every event, its delivery feeding the stream), and
+/// the receiver-drop watcher that fires `gone`.
+pub fn mount_frontend(node: &Arc<Node>) -> FrontendStream {
+    let (event_tx, event_rx) = mpsc::unbounded_channel::<EventFrame>();
+    let send_events = event_tx.clone();
+    let held: Arc<Mutex<Vec<EventFrame>>> = Arc::new(Mutex::new(Vec::new()));
+    let started = Arc::new(std::sync::atomic::AtomicBool::new(false));
+    let frontend = Channel::local(
+        "frontend",
+        {
+            let held = held.clone();
+            let started = started.clone();
+            move |frame: &EventFrame| {
+                // Before the host's first emissions: hold (the startup
+                // order is the contract); after: straight through.
+                if started.load(std::sync::atomic::Ordering::Acquire) {
+                    let _ = send_events.send(frame.clone());
+                } else {
+                    lock(&held).push(frame.clone());
+                }
+            }
+        },
+        |_| {},
+    );
+    node.subscribe_channel_all(&frontend);
+    FrontendStream {
+        events: event_rx,
+        events_tx: event_tx,
+        held,
+        started,
+        gone: CancellationToken::new(),
+    }
+}
+
 impl SessionHost {
     /// Hand the boot `session` to the host and get the frontend handle
     /// back. Must be called inside a tokio runtime (the workers and
@@ -404,8 +463,24 @@ impl SessionHost {
     /// (model-preference degradations from selection) and the session
     /// catalog are the host's first emissions — they land right after
     /// the transport's handshake ack, ahead of anything a worker can
-    /// produce.
+    /// produce. Mounts a fresh frontend stream — for boots where
+    /// anything speaks before the host exists, mount first and use
+    /// [`SessionHost::spawn_with_frontend`].
     pub fn spawn(boot: Session, startup_notes: Vec<String>, wiring: SessionHostWiring) -> Self {
+        let frontend = mount_frontend(&wiring.node);
+        Self::spawn_with_frontend(boot, startup_notes, wiring, frontend)
+    }
+
+    /// [`SessionHost::spawn`] over a pre-mounted frontend stream (the
+    /// binary's json boot: the extension host speaks from its first
+    /// post-ack line, before this host exists, so the stream must
+    /// already be subscribed).
+    pub fn spawn_with_frontend(
+        boot: Session,
+        startup_notes: Vec<String>,
+        wiring: SessionHostWiring,
+        frontend: FrontendStream,
+    ) -> Self {
         let info = SessionInfo {
             session_id: boot.id().to_string(),
             session_path: boot.wire_path(),
@@ -416,13 +491,13 @@ impl SessionHost {
         let boot_id = info.session_id.clone();
         let boot_stream = StreamId::new(boot_id.clone());
         let node = wiring.node.clone();
+        let event_rx = frontend.events;
+        let frontend_events_tx = frontend.events_tx;
+        let frontend_gone = frontend.gone;
+        let frontend_held = frontend.held;
+        let frontend_started = frontend.started;
+        let frontend_tx = frontend_events_tx.clone();
 
-        // The event stream: the frontend channel's delivery feeds it,
-        // and the first send that finds no receiver is frontend death
-        // — the door aborts every run and winds the workers down (the
-        // old channel-death watcher, living where the death is
-        // detected).
-        let (event_tx, event_rx) = mpsc::unbounded_channel::<EventFrame>();
         let workers: Arc<Mutex<HashMap<String, Arc<Worker>>>> =
             Arc::new(Mutex::new(HashMap::new()));
         let closing_stats: Arc<Mutex<HashMap<String, SessionStats>>> =
@@ -444,28 +519,26 @@ impl SessionHost {
                 }
             })
         };
-        let send_events = event_tx.clone();
-        let frontend = Channel::local(
-            "frontend",
-            move |frame: &EventFrame| {
-                let _ = send_events.send(frame.clone());
-            },
-            |_| {},
-        );
-        node.subscribe_channel_all(&frontend);
-
-        // The frontend-death watcher: the receiver's drop IS the
-        // frontend's death, whatever the reason — detected directly
-        // (the sender's `closed`), not on the next failed emission
-        // (a worker parked on a card emits nothing, and must still
-        // wind down). The door aborts every in-flight run and pulls
-        // the wind-down token; the old channel-death watcher's exact
-        // semantics, on the node's frontend channel.
+        // The frontend-death watchers, both spawned here (the mount
+        // may run outside a runtime; the host never does). The
+        // receiver's drop IS the frontend's death, whatever the
+        // reason — detected directly (the sender's `closed`), not on
+        // the next failed emission (a worker parked on a card emits
+        // nothing, and must still wind down). The door the drop opens
+        // aborts every in-flight run and pulls the wind-down token —
+        // the old channel-death watcher's exact semantics.
         {
-            let watch_tx = event_tx.clone();
-            let death = death.clone();
+            let watch_tx = frontend_events_tx;
+            let gone = frontend_gone.clone();
             tokio::spawn(async move {
                 watch_tx.closed().await;
+                gone.cancel();
+            });
+        }
+        {
+            let death = death.clone();
+            tokio::spawn(async move {
+                frontend_gone.cancelled().await;
                 death();
             });
         }
@@ -475,6 +548,15 @@ impl SessionHost {
         let host_channel = Channel::local("host", |_| {}, |_| {});
         let sink = HostSink::new(&node, &host_channel);
         let backend_sink = BackendSink::new(&node, &host_channel);
+
+        // The startup hold flips live BEFORE the host's first
+        // emission: from here the stream takes everything direct,
+        // and the pre-host buffer — whatever the lanes said during
+        // the boot (the extension host speaks before this host
+        // exists) — flushes AFTER the startup announcements, so the
+        // pinned order (ack → session_opened → notes → catalog) is
+        // never interleaved ahead of by early extension traffic.
+        frontend_started.store(true, std::sync::atomic::Ordering::Release);
 
         // The boot worker first: the startup announcements emit from
         // its channel, which is what teaches the learning table where
@@ -568,6 +650,13 @@ impl SessionHost {
                     conflicts: wiring.extensions.conflicts.clone(),
                 },
             );
+        }
+
+        // The startup hold's second half: the announcements have
+        // landed; the boot's early lane traffic now crosses, behind
+        // them, in arrival order.
+        for frame in std::mem::take(&mut *lock(&frontend_held)) {
+            let _ = frontend_tx.send(frame);
         }
 
         // Lifecycle by type (law 3): the host's own module, on the
