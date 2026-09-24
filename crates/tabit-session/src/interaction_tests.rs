@@ -404,7 +404,6 @@ async fn frontend_death_with_a_card_open_winds_the_worker_down() {
             frame,
             Some(tabit_protocol::EventFrame {
                 origin: None,
-                ttl: None,
                 event: SessionEvent::InteractionRequest { .. },
                 ..
             })

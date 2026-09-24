@@ -448,16 +448,7 @@ impl SessionHost {
         let frontend = Channel::local(
             "frontend",
             move |frame: &EventFrame| {
-                // The hop budget is the net's internal tripwire; the
-                // frontend's stream is a terminal sink, so its frames
-                // cross unstamped — the frozen wire's shape, for the
-                // transport forwarder, the tests, and print mode
-                // alike.
-                let frame = EventFrame {
-                    ttl: None,
-                    ..frame.clone()
-                };
-                let _ = send_events.send(frame);
+                let _ = send_events.send(frame.clone());
             },
             |_| {},
         );

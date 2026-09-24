@@ -20,6 +20,18 @@ could observe — gets an entry here in the same commit.
 
 ## v18 (current)
 
+### wire: event frames carry `ttl` — the node net's hop budget, verbatim (2026-09)
+
+The backend's session host rides the node runtime now, and a node
+does not know (and must not know) who reads its stdio — a frontend,
+an extension, a supervisor are all just the channel. So the hop
+budget stamps every emission and crosses the wire as a `ttl` field
+on event frames. It is the net's internal routing-loop tripwire and
+carries no frontend meaning; consumers ignore it (its absence means
+an older backend). No `PROTOCOL_VERSION` bump: the field is additive
+in both directions.
+*Migration:* none required — ignore the field.
+
 ### wire: the routing generalization — `origin` on events, optional `interaction_response.session` (2026-09)
 
 Stamped event frames may now carry `origin` — the id of the

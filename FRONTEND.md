@@ -41,7 +41,11 @@ for interaction cards (§8); v18 rode the routing generalization —
 stamped events may carry `origin` (the speaking extension, on
 re-emitted emissions), and `interaction_response.session` became
 optional (omitted only on the backend's routed-back answers to
-extension asks; frontends keep echoing the card's stamp). Each
+extension asks; frontends keep echoing the card's stamp); within v18,
+event frames may also carry `ttl` — the node net's internal hop budget,
+serialized verbatim because a node does not know (and must not know)
+who reads its stdio: the consumer ignores the field (its absence means
+an older backend). Each
 version landed as one
 protocol-version bump with no compatibility period; always check the
 ack's `protocol_version`. (`tabit-core --list` prints a human table —
