@@ -23,21 +23,22 @@ fn main() {
         "delegate",
         "Run a task in an owned child session and report its final answer.",
         schema_for!(["task"]),
-        |args, ctx| {
+        |args, ctx| async move {
             let task = args["task"].as_str().unwrap_or_default().to_string();
             let cwd = std::env::current_dir().unwrap_or_else(|_| ".".into());
             let mut options = ChildOptions::new(cwd);
             if let Some(model) = args["model"].as_str() {
                 options = options.model(model);
             }
-            let child = Child::create(ctx, options)
+            let child = Child::create(&ctx, options)
+                .await
                 .map_err(|error| format!("the child did not start: {error}"))?;
-            child.on(tags::SESSION_OPENED, |ctx, _event| {
+            child.on(tags::SESSION_OPENED, |ctx, _event| async move {
                 ctx.emit(SessionEvent::error_session(
                     "child-ext saw the child open its session",
                 ));
             })?;
-            match child.run(task)? {
+            match child.run(task).await? {
                 tabit_wire::client::Settlement::Completed { output, .. } => {
                     Ok(Output::from(if output.trim().is_empty() {
                         "The child completed without a final answer.".to_string()

@@ -79,41 +79,59 @@ pub fn crash_tail(ring: &StderrRing) -> String {
     tail.join("\n")
 }
 
-/// One LF-terminated, flushed line onto a child's stdin.
-pub async fn write_line(stdin: &mut tokio::process::ChildStdin, line: &str) -> std::io::Result<()> {
-    stdin.write_all(line.as_bytes()).await?;
-    stdin.write_all(b"\n").await?;
-    stdin.flush().await
+/// One LF-terminated, flushed line onto any async sink.
+pub async fn write_line<W: tokio::io::AsyncWrite + Unpin>(
+    write: &mut W,
+    line: &str,
+) -> std::io::Result<()> {
+    write.write_all(line.as_bytes()).await?;
+    write.write_all(b"\n").await?;
+    write.flush().await
 }
 
-/// The command writer: lines in, stdin out. The closing token IS the
-/// pipe close (the drive holds a sender clone, so dropping senders
-/// cannot be the mechanism): on close, everything already queued
-/// (the abort line that raced it) is written, then the pipe drops —
-/// EOF, the child's death contract.
-pub fn spawn_command_writer(
-    mut stdin: tokio::process::ChildStdin,
-    mut commands: tokio::sync::mpsc::UnboundedReceiver<String>,
-    closing: CancellationToken,
-) {
+/// The line pump: one ordered queue in, one exclusive writer out —
+/// the pipe-writing shape every tokio site shares (the client's and
+/// supervisor's child stdin; the async SDK's stdout). `closing` is
+/// the close signal when the writer must outlive its senders (a held
+/// sender clone means dropping senders cannot be the mechanism): on
+/// close, everything already queued (the abort line that raced it)
+/// is written, then the writer drops — EOF, a pipe's death contract.
+/// `None` rides the senders' drop as the close. A failing write ends
+/// the pump (the pipe is broken; each site's reader notices its own
+/// way).
+pub fn spawn_line_writer<W>(
+    mut write: W,
+    mut lines: tokio::sync::mpsc::UnboundedReceiver<String>,
+    closing: Option<CancellationToken>,
+) where
+    W: tokio::io::AsyncWrite + Unpin + Send + 'static,
+{
     tokio::spawn(async move {
+        let Some(closing) = closing else {
+            while let Some(line) = lines.recv().await {
+                if write_line(&mut write, &line).await.is_err() {
+                    break;
+                }
+            }
+            return;
+        };
         loop {
             let line = tokio::select! {
                 _ = closing.cancelled() => {
                     // Deliver what the close raced, then drop the pipe.
-                    while let Ok(line) = commands.try_recv() {
-                        if write_line(&mut stdin, &line).await.is_err() {
+                    while let Ok(line) = lines.try_recv() {
+                        if write_line(&mut write, &line).await.is_err() {
                             return;
                         }
                     }
                     break;
                 }
-                line = commands.recv() => match line {
+                line = lines.recv() => match line {
                     Some(line) => line,
                     None => break,
                 },
             };
-            if write_line(&mut stdin, &line).await.is_err() {
+            if write_line(&mut write, &line).await.is_err() {
                 break;
             }
         }

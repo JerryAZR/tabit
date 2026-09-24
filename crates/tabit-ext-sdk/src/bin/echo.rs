@@ -18,7 +18,7 @@ fn main() {
                 "echo",
                 "Echo the given text back verbatim.",
                 schema_for!(["text"]),
-                |args, _| {
+                |args, _ctx| async move {
                     let text = args["text"].as_str().unwrap_or_default();
                     Ok(Output::with_details(
                         format!("echo: {text}"),
@@ -30,17 +30,20 @@ fn main() {
                 "ask",
                 "Ask the user a question and report their answer.",
                 schema_for!(["question"]),
-                |args, ctx| {
+                |args, ctx| async move {
                     let question = args["question"].as_str().unwrap_or_default().to_string();
-                    let Some(answer) = ctx.ask(
-                        "native:select_any",
-                        json!({
-                            "title": "The extension asks",
-                            "body": question,
-                            "options": [],
-                            "free_text": true,
-                        }),
-                    ) else {
+                    let Some(answer) = ctx
+                        .ask(
+                            "native:select_any",
+                            json!({
+                                "title": "The extension asks",
+                                "body": question,
+                                "options": [],
+                                "free_text": true,
+                            }),
+                        )
+                        .await
+                    else {
                         return Ok(Output::from(
                             "the user dismissed the question without answering",
                         ));
@@ -51,7 +54,7 @@ fn main() {
                     )))
                 },
             ))
-            .watch(watch(tags::INTERACTION_SETTLED, |ctx, event| {
+            .watch(watch(tags::INTERACTION_SETTLED, |ctx, event| async move {
                 // The watch lane's demo: observe a settled card and emit
                 // a notice into the grammar (surfaced origin-stamped).
                 let SessionEvent::InteractionSettled { id } = event else {

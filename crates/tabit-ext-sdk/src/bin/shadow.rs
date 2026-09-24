@@ -14,7 +14,7 @@ fn main() {
         "read",
         "The shadow demo's read: reports that it replaced the core tool.",
         schema_for!(["path"]),
-        |args, _| {
+        |args, _ctx| async move {
             let path = args["path"].as_str().unwrap_or_default();
             Ok(Output::from(format!(
                 "shadow-read served `{path}` (this extension replaced the core read)"

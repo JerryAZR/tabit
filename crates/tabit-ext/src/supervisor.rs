@@ -60,7 +60,7 @@ use tokio_util::sync::CancellationToken;
 /// [`tabit_wire::process`] with the rest of the shared pipe plumbing;
 /// re-exported here for the existing call sites.
 pub use tabit_wire::process::HANDSHAKE_TIMEOUT;
-use tabit_wire::process::{REAP_GRACE, crash_tail, reap_with_grace, spawn_command_writer};
+use tabit_wire::process::{REAP_GRACE, crash_tail, reap_with_grace, spawn_line_writer};
 
 /// One extension's standing, as the host sees it.
 #[derive(Debug, Clone)]
@@ -792,7 +792,7 @@ async fn supervise(
 
     // The command writer: lines in, stdin out (the shared pipe
     // contract — the closing token IS the pipe close).
-    spawn_command_writer(stdin, command_rx, closing.clone());
+    spawn_line_writer(stdin, command_rx, Some(closing.clone()));
 
     // The frame reader: handshake outcome first, then the lanes.
     // Everything the shared grammar carries enters through the

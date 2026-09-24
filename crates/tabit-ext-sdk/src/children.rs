@@ -38,6 +38,8 @@
 //! call's cancellation via the settle leash, drop). Nobody else
 //! commands it.
 
+use std::future::Future;
+use std::pin::Pin;
 use std::sync::{Arc, Mutex};
 
 use tabit_protocol::{EventFrame, SessionEvent, tags};
@@ -98,9 +100,11 @@ impl ChildOptions {
     }
 }
 
-/// One frame handler: the frame, not the bare event — forwarding and
-/// ask-owning both need the stream stamp.
-type FrameHandler = Arc<dyn Fn(&Ctx, &EventFrame) + Send + Sync>;
+/// One frame handler after erasure: a cloned context plus the frame
+/// (not the bare event — forwarding and ask-owning both need the
+/// stream stamp), returning the handler's future.
+type FrameHandler =
+    Arc<dyn Fn(Ctx, EventFrame) -> Pin<Box<dyn Future<Output = ()> + Send>> + Send + Sync>;
 
 /// The per-child ask policy, consulted at the arrival lane (the
 /// settle fold's tap): whether the shipped forward-and-relay default
@@ -201,14 +205,14 @@ fn lane_action(
 pub struct Child {
     id: Arc<String>,
     shared: Arc<Shared>,
-    commands: std::sync::mpsc::Sender<ChildCmd>,
+    commands: tokio::sync::mpsc::UnboundedSender<ChildCmd>,
     asks: Arc<AskPolicy>,
 }
 
 enum ChildCmd {
     Run {
         task: String,
-        reply: std::sync::mpsc::Sender<Result<Settlement, String>>,
+        reply: tokio::sync::oneshot::Sender<Result<Settlement, String>>,
     },
     Kill,
 }
@@ -217,7 +221,7 @@ impl Child {
     /// Spawn one owned child. The binary is the host's own (the
     /// initialize's `core_path` — the host IS the binary); the spawn
     /// resolves the handshake before this call returns.
-    pub fn create(ctx: &Ctx, options: ChildOptions) -> Result<Child, String> {
+    pub async fn create(ctx: &Ctx, options: ChildOptions) -> Result<Child, String> {
         let shared = ctx.shared_clone();
         let core_path = ctx.core_path()?;
         let mut spec = ChildSpec::new(std::path::PathBuf::from(core_path), options.cwd);
@@ -259,8 +263,8 @@ impl Child {
                 LaneAction::Answerers => {
                     for answerer in answerers {
                         let frame = frame.clone();
-                        crate::spawn_handler(policy_shared.clone(), move |ctx| {
-                            answerer(&ctx, &frame);
+                        crate::spawn_observation(policy_shared.clone(), move |ctx| {
+                            answerer(ctx, frame)
                         });
                     }
                 }
@@ -277,9 +281,9 @@ impl Child {
         // The driver task owns the handle on the SDK's runtime: one
         // loop — commands in, the shared settle fold per run, the
         // settlement reported back.
-        let (spawn_tx, spawn_rx) = std::sync::mpsc::channel::<Result<String, String>>();
-        let (cmd_tx, cmd_rx) = std::sync::mpsc::channel::<ChildCmd>();
-        runtime().spawn(async move {
+        let (spawn_tx, spawn_rx) = tokio::sync::oneshot::channel::<Result<String, String>>();
+        let (cmd_tx, mut cmd_rx) = tokio::sync::mpsc::unbounded_channel::<ChildCmd>();
+        tokio::spawn(async move {
             let mut handle = match spec.spawn().await {
                 Ok(handle) => handle,
                 Err(error) => {
@@ -288,7 +292,7 @@ impl Child {
                 }
             };
             let _ = spawn_tx.send(Ok(handle.id().to_string()));
-            while let Ok(command) = cmd_rx.recv() {
+            while let Some(command) = cmd_rx.recv().await {
                 match command {
                     ChildCmd::Run { task, reply } => {
                         handle.prompt(task);
@@ -303,7 +307,7 @@ impl Child {
             // mount's sweep clears the node.
         });
         let id = spawn_rx
-            .recv()
+            .await
             .map_err(|_| "the child driver died at the spawn".to_string())??;
 
         Ok(Child {
@@ -327,21 +331,19 @@ impl Child {
     /// owner is the ingress-skip key (a frame arriving on the lane
     /// never bounces back down it), and the observations must not
     /// share it — they would be skipped with the lane.
-    pub fn on<F>(&self, kind: &str, body: F) -> Result<(), String>
+    pub fn on<F, Fut>(&self, kind: &str, body: F) -> Result<(), String>
     where
-        F: Fn(&Ctx, &SessionEvent) + Send + Sync + 'static,
+        F: Fn(Ctx, SessionEvent) -> Fut + Send + Sync + 'static,
+        Fut: Future<Output = ()> + Send + 'static,
     {
         refuse_ask_kind(kind)?;
         let shared = self.shared.clone();
-        let body = Arc::new(body);
+        let body: crate::ErasedWatch = Arc::new(move |ctx, event| Box::pin(body(ctx, event)));
         let owner = format!("{}#on", self.id);
         self.shared.node.subscribe(kind, &owner, move |frame| {
             let event = frame.event.clone();
             let (shared, body) = (shared.clone(), body.clone());
-            std::thread::spawn(move || {
-                let ctx = Ctx::watch_context(shared);
-                crate::catch_unwind_silently(move || body(&ctx, &event));
-            });
+            crate::spawn_observation(shared, move |ctx| body(ctx, event));
         });
         Ok(())
     }
@@ -358,11 +360,13 @@ impl Child {
     /// question to users itself (its own card) relays the answer it
     /// receives. Answerers hear the card and its settle (the pair —
     /// whoever surfaces a card hears it close).
-    pub fn on_ask<F>(&self, body: F) -> Result<(), String>
+    pub fn on_ask<F, Fut>(&self, body: F) -> Result<(), String>
     where
-        F: Fn(&Ctx, &EventFrame) + Send + Sync + 'static,
+        F: Fn(Ctx, EventFrame) -> Fut + Send + Sync + 'static,
+        Fut: Future<Output = ()> + Send + 'static,
     {
-        self.asks.register_answerer(Arc::new(body));
+        self.asks
+            .register_answerer(Arc::new(move |ctx, frame| Box::pin(body(ctx, frame))));
         Ok(())
     }
 
@@ -378,15 +382,15 @@ impl Child {
             .answer(id, KIND_INTERACTION, Box::new(payload));
     }
 
-    /// Run one task to the child's terminal (blocking — the shared
-    /// settle fold). The child's asks surface per the policy while
-    /// the run is in flight.
-    pub fn run(&self, task: String) -> Result<Settlement, String> {
-        let (tx, rx) = std::sync::mpsc::channel::<Result<Settlement, String>>();
+    /// Run one task to the child's terminal (the shared settle fold).
+    /// The child's asks surface per the policy while the run is in
+    /// flight.
+    pub async fn run(&self, task: String) -> Result<Settlement, String> {
+        let (tx, rx) = tokio::sync::oneshot::channel::<Result<Settlement, String>>();
         self.commands
             .send(ChildCmd::Run { task, reply: tx })
             .map_err(|_| "the child's driver is gone".to_string())?;
-        rx.recv()
+        rx.await
             .map_err(|_| "the child's driver is gone".to_string())?
     }
 
@@ -396,20 +400,6 @@ impl Child {
     pub fn kill(&self) {
         let _ = self.commands.send(ChildCmd::Kill);
     }
-}
-
-/// The SDK's one runtime (multi-thread; the settle folds and spawns,
-/// and the ask promise bridges ride it).
-pub(crate) fn runtime() -> &'static tokio::runtime::Runtime {
-    static RUNTIME: std::sync::OnceLock<tokio::runtime::Runtime> = std::sync::OnceLock::new();
-    RUNTIME.get_or_init(|| {
-        #[allow(clippy::expect_used)]
-        // sanctioned crash: a runtime that fails to build cannot be served around
-        tokio::runtime::Builder::new_multi_thread()
-            .enable_all()
-            .build()
-            .expect("the owned-children runtime builds")
-    })
 }
 
 /// The observation path's vocabulary guard: the card kind owes an
@@ -448,8 +438,8 @@ mod tests {
         let (action, _) = asks.lane_action(true, tags::RUN_FINISHED);
         assert!(matches!(action, LaneAction::Forward));
 
-        asks.register_answerer(Arc::new(|_ctx: &Ctx, _frame: &EventFrame| {}));
-        asks.register_answerer(Arc::new(|_ctx: &Ctx, _frame: &EventFrame| {}));
+        asks.register_answerer(Arc::new(|_ctx: Ctx, _frame: EventFrame| Box::pin(async {})));
+        asks.register_answerer(Arc::new(|_ctx: Ctx, _frame: EventFrame| Box::pin(async {})));
         {
             let state = sdk_lock(&asks.inner);
             assert_eq!(state.answerers.len(), 2, "author registrations stack");

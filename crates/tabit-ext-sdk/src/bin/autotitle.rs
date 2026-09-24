@@ -17,7 +17,7 @@
 use std::collections::HashSet;
 use std::sync::Mutex;
 
-use tabit_ext_sdk::{Extension, consult};
+use tabit_ext_sdk::{Ctx, Extension, consult};
 use tabit_protocol::points;
 
 /// Sessions already titled — once each, keyed by the hook payload's
@@ -26,13 +26,13 @@ use tabit_protocol::points;
 static TITLED: Mutex<Option<HashSet<String>>> = Mutex::new(None);
 
 fn main() {
-    tabit_ext_sdk::serve(Extension::new().consult(consult::<points::ToolResult, _>(title_once)));
+    tabit_ext_sdk::serve(Extension::new().consult(consult::<points::ToolResult, _, _>(title_once)));
 }
 
 /// The observer point's body: do the title once per session, owe
 /// nothing back (`Ok(())` — the unit answer is the honest shape for
 /// an observer).
-fn title_once(ctx: &tabit_ext_sdk::Ctx, event: serde_json::Value) -> Result<(), String> {
+async fn title_once(ctx: Ctx, event: serde_json::Value) -> Result<(), String> {
     let session = event["session"].as_str().unwrap_or_default().to_string();
     {
         let mut titled = tabit_ext_sdk_lock(&TITLED);
@@ -44,12 +44,15 @@ fn title_once(ctx: &tabit_ext_sdk::Ctx, event: serde_json::Value) -> Result<(), 
     // A failure is treated as absence (the ruling): the observer
     // owes nothing either way, and the failure lands on stderr
     // where the host's report can find it.
-    match ctx.complete(
-        "Write a three-to-five word title for this coding session, \
-         based on the tool work so far. Reply with the title only.",
-        None,
-        Some(256),
-    ) {
+    match ctx
+        .complete(
+            "Write a three-to-five word title for this coding session, \
+             based on the tool work so far. Reply with the title only.",
+            None,
+            Some(256),
+        )
+        .await
+    {
         Ok(prompt) => {
             eprintln!(
                 "autotitle: `{}` ({} tokens, billed to this session)",
@@ -65,8 +68,10 @@ fn title_once(ctx: &tabit_ext_sdk::Ctx, event: serde_json::Value) -> Result<(), 
 }
 
 /// The poison-recovering lock idiom (the same shape as the SDK's own
-/// and `tabit_log::lock`'s): a poisoned mutex recovers — the set is
-/// a once-per-session hint, not accounting state.
-fn tabit_ext_sdk_lock<T>(cell: &Mutex<Option<T>>) -> std::sync::MutexGuard<'_, Option<T>> {
-    cell.lock().unwrap_or_else(|poisoned| poisoned.into_inner())
+/// lock helper — restated so the bin owns its copy).
+fn tabit_ext_sdk_lock<T: ?Sized>(mutex: &Mutex<T>) -> std::sync::MutexGuard<'_, T> {
+    match mutex.lock() {
+        Ok(guard) => guard,
+        Err(poison) => poison.into_inner(),
+    }
 }

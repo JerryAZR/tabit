@@ -7,6 +7,12 @@
 //! guest's node under the SDK (the node architecture, 2026-09):
 //! authors never meet the router or the channel concepts.
 //!
+//! The SDK is async (owner ruling 2026-09): bodies are futures, an
+//! ask awaits its promise natively, cancellation is a wake not a
+//! poll — honest about how the core works. Every invocation runs on
+//! its own task, so tools and hooks execute concurrently and a
+//! blocked body cannot stall the pipe.
+//!
 //! The registries are disjoint by vocabulary (the category error is
 //! structural — the two handler shapes cannot be confused):
 //!
@@ -25,19 +31,16 @@
 //! path and surfaces origin-stamped), `ask` (emit an interaction
 //! request, await the routed answer), `complete` (one bare model
 //! completion, call-correlated), and `cancelled` (the cooperative
-//! abort poll). Handlers are plain functions — they may block, ask,
-//! emit, command — and never the loop: every invocation runs on its
-//! own worker thread, so tools and hooks execute concurrently and a
-//! blocked body cannot stall the pipe.
+//! abort poll).
 //!
 //! The wire laws this side of the pipe: a tool call, a hook, a
 //! service request are asks (the taxonomy ruling) — each arriving
 //! call is held on the node's ask table against the host's channel
 //! and answered through it; an extension's own ask crosses by
 //! [`Node::ask_on`]'s additional receivers (the override path — the
-//! extension's stdio subscribes to nothing by default); the settle
-//! announce rides the same fan, so the host's transit card closes.
-//! The SDK shares the host's wire types (the 2026-09 sharing
+//! extension's stdio subscribes to the settle kind alone), and the
+//! settle announce rides the same fan, so the host's transit card
+//! closes. The SDK shares the host's wire types (the 2026-09 sharing
 //! ruling: one wire, one set of shapes — the docs stay the contract
 //! for other languages, the conformance tests keep crate and docs
 //! honest).
@@ -48,8 +51,9 @@
 #![cfg_attr(test, allow(clippy::expect_used, clippy::panic, clippy::unwrap_used))]
 #![allow(clippy::indexing_slicing, clippy::type_complexity)]
 
-use std::io::{BufRead, Write};
-use std::panic::AssertUnwindSafe;
+use std::future::Future;
+use std::io::Write as _;
+use std::pin::Pin;
 use std::sync::{Arc, Mutex};
 
 use serde::Serialize;
@@ -62,6 +66,7 @@ use tabit_protocol::points::HookPoint;
 use tabit_protocol::{EventFrame, SessionCommand, SessionEvent, tags};
 use tabit_wire::asks::Outcome;
 use tabit_wire::node::{Channel, Node, parse_shared};
+use tokio::io::AsyncBufReadExt;
 
 /// The extension protocol this SDK speaks — must match the host's
 /// exactly (the pipe is a frozen contract, not a negotiated one).
@@ -70,6 +75,21 @@ const PROTOCOL_VERSION: u32 = 4;
 pub mod children;
 
 pub use children::{Child, ChildOptions};
+
+/// The SDK's one runtime (multi-thread): the pipe loop, every
+/// invocation task, the ask promise bridges, and the owned
+/// children's settle folds all ride it.
+pub(crate) fn runtime() -> &'static tokio::runtime::Runtime {
+    static RUNTIME: std::sync::OnceLock<tokio::runtime::Runtime> = std::sync::OnceLock::new();
+    RUNTIME.get_or_init(|| {
+        #[allow(clippy::expect_used)]
+        // sanctioned crash: a runtime that fails to build cannot be served around
+        tokio::runtime::Builder::new_multi_thread()
+            .enable_all()
+            .build()
+            .expect("the SDK runtime builds")
+    })
+}
 
 /// One extension's whole declaration, built by registering tools,
 /// consultations, and watches; `serve` derives the handshake from
@@ -157,35 +177,44 @@ impl Output {
     }
 }
 
-/// A tool body: the arguments plus the context (blocking calls, ask
-/// the user, emit, command — the loop keeps reading regardless).
-pub type Body = Box<dyn Fn(Value, &Ctx) -> Result<Output, String> + Send + Sync>;
+/// A tool body after erasure: the arguments plus a cloned context,
+/// returning the body's future (blocking awaits, asks, emits,
+/// commands — the loop keeps reading regardless).
+type ErasedBody = Box<
+    dyn Fn(Value, Ctx) -> Pin<Box<dyn Future<Output = Result<Output, String>> + Send>>
+        + Send
+        + Sync,
+>;
 
 /// One declared tool.
 pub struct ToolDef {
     name: String,
     description: String,
     schema: Value,
-    body: Body,
+    body: ErasedBody,
 }
 
-/// Declare a tool.
-pub fn tool<F>(name: &str, description: &str, schema: Value, body: F) -> ToolDef
+/// Declare a tool: the body is an async function of the arguments
+/// and a cloneable context.
+pub fn tool<F, Fut>(name: &str, description: &str, schema: Value, body: F) -> ToolDef
 where
-    F: Fn(Value, &Ctx) -> Result<Output, String> + Send + Sync + 'static,
+    F: Fn(Value, Ctx) -> Fut + Send + Sync + 'static,
+    Fut: Future<Output = Result<Output, String>> + Send + 'static,
 {
     ToolDef {
         name: name.to_string(),
         description: description.to_string(),
         schema,
-        body: Box::new(body),
+        body: Box::new(move |args, ctx| Box::pin(body(args, ctx))),
     }
 }
 
-/// A consultation handler after type erasure: the event payload plus
-/// the context, returning the point's answer serialized (the host
-/// waits for it).
-type ErasedConsult = Box<dyn Fn(&Ctx, Value) -> Result<Value, String> + Send + Sync>;
+/// A consultation handler after type erasure: a cloned context plus
+/// the event payload, returning the point's answer serialized (the
+/// host waits for it).
+type ErasedConsult = Box<
+    dyn Fn(Ctx, Value) -> Pin<Box<dyn Future<Output = Result<Value, String>> + Send>> + Send + Sync,
+>;
 
 /// One declared consultation. The point and its answer type pair at
 /// registration — [`consult::<P>`] is the only constructor, so a
@@ -195,43 +224,51 @@ pub struct ConsultDef {
     body: ErasedConsult,
 }
 
-/// Declare a consultation on one hook point: the body returns the
-/// point's own answer type (`P::Answer` — a gate a
+/// Declare a consultation on one hook point: the async body returns
+/// the point's own answer type (`P::Answer` — a gate a
 /// [`tabit_protocol::points::CallVerdict`], an observer `()`), and
 /// the point's name comes with the type. There is no point-name
 /// argument to get wrong.
-pub fn consult<P, F>(body: F) -> ConsultDef
+pub fn consult<P, F, Fut>(body: F) -> ConsultDef
 where
     P: HookPoint,
-    F: Fn(&Ctx, Value) -> Result<P::Answer, String> + Send + Sync + 'static,
+    F: Fn(Ctx, Value) -> Fut + Send + Sync + 'static,
+    Fut: Future<Output = Result<P::Answer, String>> + Send + 'static,
 {
     ConsultDef {
         point: P::NAME,
-        body: Box::new(move |ctx, payload| {
-            let answer = (body)(ctx, payload)?;
-            serde_json::to_value(answer)
-                .map_err(|error| format!("the answer does not serialize: {error}"))
+        body: Box::new({
+            let body = std::sync::Arc::new(body);
+            move |ctx, payload| {
+                let body = body.clone();
+                Box::pin(async move {
+                    let answer = body(ctx, payload).await?;
+                    serde_json::to_value(answer)
+                        .map_err(|error| format!("the answer does not serialize: {error}"))
+                })
+            }
         }),
     }
 }
 
-/// A watch handler: the typed event plus the context. Observation
-/// only — nothing is owed back, nothing is cancelled (no pending
-/// entry exists for a watch).
-pub type WatchBody = Box<dyn Fn(&Ctx, SessionEvent) + Send + Sync>;
+/// A watch handler after erasure: a cloned context plus the typed
+/// event, observing (nothing owed, nothing cancelled).
+type ErasedWatch =
+    Arc<dyn Fn(Ctx, SessionEvent) -> Pin<Box<dyn Future<Output = ()> + Send>> + Send + Sync>;
 
 /// One declared watch. The kind must name a real event kind (a
 /// wire tag, [`tabit_protocol::tags`]) — a typo'd kind watches
 /// nothing, so it refuses loudly at registration instead.
 pub struct WatchDef {
     pub kind: String,
-    body: Arc<WatchBody>,
+    body: ErasedWatch,
 }
 
-/// Declare a watch on one event kind.
-pub fn watch<F>(kind: &str, body: F) -> WatchDef
+/// Declare a watch on one event kind: an async observer.
+pub fn watch<F, Fut>(kind: &str, body: F) -> WatchDef
 where
-    F: Fn(&Ctx, SessionEvent) + Send + Sync + 'static,
+    F: Fn(Ctx, SessionEvent) -> Fut + Send + Sync + 'static,
+    Fut: Future<Output = ()> + Send + 'static,
 {
     if !SessionEvent::is_known_tag(kind) {
         die(&format!(
@@ -240,13 +277,7 @@ where
     }
     WatchDef {
         kind: kind.to_string(),
-        body: Arc::new(Box::new(body)),
-    }
-}
-
-impl WatchDef {
-    fn arc_body(&self) -> &Arc<WatchBody> {
-        &self.body
+        body: Arc::new(move |ctx, event| Box::pin(body(ctx, event))),
     }
 }
 
@@ -267,9 +298,10 @@ macro_rules! schema_for {
 }
 
 /// The handler context: the four directions plus the abort poll.
-/// Cheap to hold (one `Arc`); valid for the handler's invocation —
-/// the correlation it carries names the call or consultation the
-/// host would cancel.
+/// Cheap to clone (one `Arc` and an optional correlation); valid for
+/// the handler's invocation — the correlation it carries names the
+/// call or consultation the host would cancel.
+#[derive(Clone)]
 pub struct Ctx {
     correlation: Option<String>,
     shared: Arc<Shared>,
@@ -310,10 +342,25 @@ impl Ctx {
     /// stop — and return whatever partial result is honest. A body
     /// that never checks simply finishes into the void. Watches have
     /// no cancellation (nothing is owed); their flag never flips.
+    /// An awaited [`Ctx::ask`] resolves `None` on the same wake —
+    /// polling is for the body's own phases.
     pub fn cancelled(&self) -> bool {
         match &self.correlation {
             Some(id) => sdk_lock(&self.shared.cancelled).contains(id),
             None => false,
+        }
+    }
+
+    /// Await this invocation's cancellation, if it ever comes — the
+    /// ask's resolve-or-cancel race and any body that prefers
+    /// `await` over poll.
+    async fn cancelled_wake(&self) {
+        loop {
+            let notified = self.shared.cancel_notify.notified();
+            if self.cancelled() {
+                return;
+            }
+            notified.await;
         }
     }
 
@@ -328,11 +375,11 @@ impl Ctx {
 
     /// Emit any session event into the shared grammar — it crosses
     /// the pipe by the additional-receiver path (this node's stdio
-    /// subscribes to nothing; naming it per emission is the override
-    /// path) and surfaces to the frontend and subscribers,
-    /// origin-stamped with this extension's id at the host's intake
-    /// (attribution, not permission). Local watchers of the kind
-    /// hear it too — the layer's own loopback.
+    /// subscribes to the settle kind alone; naming it per emission
+    /// is the override path) and surfaces to the frontend and
+    /// subscribers, origin-stamped with this extension's id at the
+    /// host's intake (attribution, not permission). Local watchers
+    /// of the kind hear it too — the layer's own loopback.
     pub fn emit(&self, event: SessionEvent) {
         self.shared.node.emit_to(
             &self.shared.layer,
@@ -349,12 +396,12 @@ impl Ctx {
     /// Ask the user: emit an `interaction_request` into the shared
     /// grammar and await the routed `interaction_response` by id.
     /// `ui_type` + opaque payload mirror the templates core tools
-    /// use (`native:*` qualifies). Blocks the handler's thread until
-    /// answered; the cancellation of this invocation's run resolves
-    /// `None` (the card stays open — the run's completion sweeps it
-    /// with its settle announced, so the card closes everywhere),
-    /// and the pipe's death resolves `None` too — fail closed.
-    pub fn ask(&self, ui_type: &str, payload: Value) -> Option<Value> {
+    /// use (`native:*` qualifies). The await resolves on the answer,
+    /// on this invocation's cancellation (`None` — the card stays
+    /// open; the call's completion sweeps it with its settle
+    /// announced, so the card closes everywhere), and on the pipe's
+    /// death (`None` too — fail closed).
+    pub async fn ask(&self, ui_type: &str, payload: Value) -> Option<Value> {
         let owner = self
             .correlation
             .clone()
@@ -366,25 +413,13 @@ impl Ctx {
             ui_type,
             payload,
         );
-        // The promise resolves on the node (a tokio oneshot); the
-        // wait polls cancellation, so it lives on this handler's own
-        // thread — the runtime task is the bridge between them.
-        let (answered, wait) = std::sync::mpsc::channel::<Value>();
-        children::runtime().spawn(async move {
-            if let Ok(answer) = promise.await {
-                let _ = answered.send(answer);
-            }
-        });
-        loop {
-            match wait.recv_timeout(std::time::Duration::from_millis(100)) {
-                Ok(answer) => return Some(answer),
-                Err(std::sync::mpsc::RecvTimeoutError::Timeout) => {
-                    if self.cancelled() {
-                        return None;
-                    }
-                }
-                Err(std::sync::mpsc::RecvTimeoutError::Disconnected) => return None,
-            }
+        tokio::select! {
+            answer = promise => answer.ok(),
+            // The cancellation of this invocation's run: abandon the
+            // await (the host-side card settles whenever the user
+            // answers it; the call's completion sweep announces any
+            // card left behind).
+            _ = self.cancelled_wake() => None,
         }
     }
 
@@ -395,7 +430,7 @@ impl Ctx {
     /// this extension's name and rides the result. Needs a call or
     /// consultation correlation — a watch observes, it does not
     /// spend.
-    pub fn complete(
+    pub async fn complete(
         &self,
         prompt: &str,
         model: Option<&str>,
@@ -416,7 +451,7 @@ impl Ctx {
         if let (Some(model), ServiceVerb::ModelPrompt { model: slot, .. }) = (model, &mut verb) {
             *slot = Some(model.to_string());
         }
-        let (reply_tx, reply_rx) = std::sync::mpsc::channel::<ServiceReply>();
+        let (reply_tx, reply_rx) = tokio::sync::oneshot::channel::<ServiceReply>();
         let owner = call_id.clone();
         self.shared
             .node
@@ -435,7 +470,7 @@ impl Ctx {
             return Err("the host closed the pipe".to_string());
         }
         let reply = reply_rx
-            .recv()
+            .await
             .map_err(|_| "the host closed the pipe".to_string())?;
         match reply.error {
             Some(message) => Err(message),
@@ -480,7 +515,7 @@ fn next_request_id(family_root: &str, family: &str) -> String {
     uuid::Uuid::now_v7().to_string()
 }
 
-/// Everything the pipe and the worker threads share: the guest's
+/// Everything the pipe and the invocation tasks share: the guest's
 /// node with its two faces, the pipe's one writer, and the
 /// functional layer's own state.
 struct Shared {
@@ -498,15 +533,16 @@ struct Shared {
     layer: Channel,
     /// The pipe's one writer: every outbound line — the dialect's
     /// frames (the ack, results, envelope requests) and the shared
-    /// grammar's alike — queues here, and the writer thread owns
-    /// stdout exclusively. No caller ever blocks on the pipe (a
-    /// worker thread, the children's runtime, the loop itself); a
-    /// dead pipe is the writer's exit, the process's end.
-    pipe: std::sync::mpsc::Sender<String>,
+    /// grammar's alike — queues here, and the line pump owns stdout
+    /// exclusively. No invocation ever blocks on the pipe; a dead
+    /// pipe is the loop's EOF, the process's end.
+    pipe: tokio::sync::mpsc::UnboundedSender<String>,
     /// Correlation ids (calls, consultations) the host cancelled —
     /// long-running handlers poll [`Ctx::cancelled`] and stop: kill
-    /// the sandbox, drop the wedge, stop billing.
+    /// the sandbox, drop the wedge, stop billing. The notify wakes
+    /// every waiter the cancel arm can find.
     cancelled: Mutex<std::collections::HashSet<String>>,
+    cancel_notify: tokio::sync::Notify,
     /// The host's own executable (the initialize's `core_path`) —
     /// owned children spawn it.
     core_path: Mutex<Option<String>>,
@@ -514,8 +550,7 @@ struct Shared {
 
 impl Shared {
     /// One dialect frame out (the frozen pipe's own lanes — not the
-    /// shared grammar, nothing routes it): serialize, queue. A dead
-    /// pipe is the end, not a failure.
+    /// shared grammar, nothing routes it): serialize, queue.
     fn write_frame<T: Serialize>(&self, frame: &T) -> bool {
         let Ok(text) = serde_json::to_string(frame) else {
             return false;
@@ -523,6 +558,15 @@ impl Shared {
         write_line(&self.pipe, &text);
         true
     }
+}
+
+/// One line out the pipe — every outbound line (the dialect's frames
+/// and the shared grammar alike) queues through the one pump, so
+/// ordering is the queue's and no invocation blocks on the pipe.
+fn write_line(pipe: &tokio::sync::mpsc::UnboundedSender<String>, line: &str) {
+    // A send fails only against a dead pump — the pipe is broken and
+    // the loop's EOF is already in motion.
+    let _ = pipe.send(line.to_string());
 }
 
 /// The dispatcher: answer the initialize, ack (the registration
@@ -536,116 +580,162 @@ pub fn serve(extension: Extension) -> ! {
         watches,
     } = extension;
     let (tools, consults, watches) = (Arc::new(tools), Arc::new(consults), Arc::new(watches));
-    let node = Arc::new(Node::new(&format!("ext-{}", std::process::id())));
-    // The mint-law policy for a guest: the only sender that can
-    // re-register a live id on this node's tables is the host, and a
-    // host that does has broken the pipe's contract — the honest
-    // death, not a thread-panic that wedges the call it came on.
-    node.on_mint_violation(|_owner, id| {
-        die(&format!(
-            "the host re-registered the live ask id `{id}` — the mint law, the pipe's contract"
-        ));
-    });
-    // The pipe's one writer: a dedicated thread owning stdout, fed by
-    // an unbounded queue. Every outbound line crosses through it, so
-    // no caller (a worker thread, the children's runtime, the loop)
-    // ever blocks on the pipe; a dead pipe is the writer's exit.
-    let (pipe_tx, pipe_rx) = std::sync::mpsc::channel::<String>();
-    std::thread::spawn(move || {
-        let stdout = std::io::stdout();
-        let mut handle = stdout.lock();
-        for line in pipe_rx {
-            if writeln!(handle, "{line}")
-                .and_then(|()| handle.flush())
-                .is_err()
-            {
-                std::process::exit(0); // the pipe is gone: the end, not a failure
-            }
+    runtime().block_on(async move {
+        let node = Arc::new(Node::new(&format!("ext-{}", std::process::id())));
+        // The mint-law policy for a guest: the only sender that can
+        // re-register a live id on this node's tables is the host,
+        // and a host that does has broken the pipe's contract — the
+        // honest death, not a task-panic that wedges the call it
+        // came on.
+        node.on_mint_violation(|_owner, id| {
+            die(&format!(
+                "the host re-registered the live ask id `{id}` — the mint law, the pipe's contract"
+            ));
+        });
+        // The pipe's one writer: the shared line pump over stdout,
+        // closed by the senders' drop.
+        let (pipe_tx, pipe_rx) = tokio::sync::mpsc::unbounded_channel::<String>();
+        tabit_wire::process::spawn_line_writer(tokio::io::stdout(), pipe_rx, None);
+        let pipe_writer = pipe_tx.clone();
+        let stdio = Channel::line("host", move |line: &str| write_line(&pipe_writer, line));
+        let layer = Channel::local("sdk", |_| {}, |_| {});
+        // The card law's close vocabulary: the stdio carries exactly
+        // one subscription — the settle kind. Every settle announce
+        // (the extension's own asks, a swept question, a child's or a
+        // grandchild's) crosses the pipe by it, so no channel holds
+        // a card that can never be answered; a settle arriving from
+        // the host never bounces back (the ingress law).
+        node.subscribe_channel(tags::INTERACTION_SETTLED, &stdio);
+        let shared = Arc::new(Shared {
+            node: node.clone(),
+            stdio: stdio.clone(),
+            layer,
+            pipe: pipe_tx,
+            cancelled: Mutex::new(std::collections::HashSet::new()),
+            cancel_notify: tokio::sync::Notify::new(),
+            core_path: Mutex::new(None),
+        });
+
+        // The handshake: the initialize must be the first line, and
+        // its version must be ours exactly. The host facts ride it;
+        // the core's own executable is the owned-children spawner's
+        // path.
+        let first = read_line().await;
+        let initialize = serde_json::from_str::<Value>(&first)
+            .map_err(|error| format!("the first line is not the initialize: {error}"))
+            .unwrap_or_else(|reason| die(&reason));
+        if initialize["type"] != "initialize" {
+            die("the first line is not the initialize");
+        }
+        if initialize["protocol_version"].as_u64() != Some(PROTOCOL_VERSION as u64) {
+            die(&format!(
+                "this host speaks protocol version {}, this extension speaks {PROTOCOL_VERSION}",
+                initialize["protocol_version"]
+            ));
+        }
+        *sdk_lock(&shared.core_path) = initialize["core_path"].as_str().map(str::to_string);
+        let ack = ExtFrame::Ack {
+            protocol_version: PROTOCOL_VERSION,
+            tools: tools
+                .iter()
+                .map(|tool| tabit_ext::protocol::ToolDecl {
+                    name: tool.name.clone(),
+                    description: tool.description.clone(),
+                    schema: tool.schema.clone(),
+                })
+                .collect(),
+            hooks: consults
+                .iter()
+                .map(|consult| tabit_ext::protocol::HookDecl {
+                    event: consult.point.to_string(),
+                })
+                .collect(),
+            watch: watches.iter().map(|w| w.kind.clone()).collect(),
+        };
+        shared.write_frame(&ack);
+
+        // The watch surface: one subscription per watched kind on the
+        // guest's node (the host mirrors the ack's kinds across the
+        // pipe; the arrivals fan here). Each handler runs on its own
+        // task — observation never blocks the loop. A card-kind watch
+        // carries its settle co-subscription (the node's card law).
+        for watch in watches.iter() {
+            let kind = watch.kind.clone();
+            let body = watch.body.clone();
+            let watch_shared = shared.clone();
+            node.subscribe(&kind, "watch", move |frame: &EventFrame| {
+                let shared = watch_shared.clone();
+                let body = body.clone();
+                let event = frame.event.clone();
+                spawn_observation(shared, move |ctx| body(ctx, event));
+            });
+        }
+
+        // The loop: the frozen dialect's lanes first (the pipe's own
+        // frames), then the shared grammar through the node's intake —
+        // one door, every law. Everything the host can send arrives
+        // here.
+        let mut lines = tokio::io::BufReader::new(tokio::io::stdin()).lines();
+        loop {
+            let line = match lines.next_line().await {
+                Ok(Some(line)) => line,
+                _ => std::process::exit(0), // EOF: the host closed, so are we
+            };
+            dispatch_line(&shared, &line, &tools, &consults);
+        }
+    })
+}
+
+/// One invocation on its own task with a fresh watch context — the
+/// subscription callbacks' dispatch (a blocked handler must never
+/// stall the fan that called it). A panicking body is reported on
+/// stderr, never fatal.
+pub(crate) fn spawn_observation<Fut>(
+    shared: Arc<Shared>,
+    body: impl FnOnce(Ctx) -> Fut + Send + 'static,
+) where
+    Fut: Future<Output = ()> + Send + 'static,
+{
+    tokio::spawn(async move {
+        let ctx = Ctx::watch_context(shared);
+        // The body runs as its own task so a panic is reported, never
+        // fatal — observation must not take the process down.
+        if let Err(join) = tokio::spawn(body(ctx)).await {
+            let _ = writeln!(
+                std::io::stderr(),
+                "tabit extension: a handler panicked: {}",
+                panic_note_from_join(join)
+            );
         }
     });
-    let pipe_writer = pipe_tx.clone();
-    let stdio = Channel::line("host", move |line: &str| write_line(&pipe_writer, line));
-    let layer = Channel::local("sdk", |_| {}, |_| {});
-    // The card law's close vocabulary: the stdio carries exactly one
-    // default subscription — the settle kind. Every settle announce
-    // (the extension's own asks, a swept question, a child's or a
-    // grandchild's) crosses the pipe by it, so no channel holds a
-    // card that can never be answered; a settle arriving from the
-    // host never bounces back (the ingress law).
-    node.subscribe_channel(tags::INTERACTION_SETTLED, &stdio);
-    let shared = Arc::new(Shared {
-        node: node.clone(),
-        stdio: stdio.clone(),
-        layer,
-        pipe: pipe_tx,
-        cancelled: Mutex::new(std::collections::HashSet::new()),
-        core_path: Mutex::new(None),
-    });
+}
 
-    // The handshake: the initialize must be the first line, and its
-    // version must be ours exactly. The host facts ride it; the
-    // core's own executable is the owned-children spawner's path.
-    let first = read_line();
-    let initialize = serde_json::from_str::<Value>(&first)
-        .map_err(|error| format!("the first line is not the initialize: {error}"))
-        .unwrap_or_else(|reason| die(&reason));
-    if initialize["type"] != "initialize" {
-        die("the first line is not the initialize");
+/// A task's panic as the report line (a failed handler never takes
+/// the process down).
+fn panic_note_from_join(error: tokio::task::JoinError) -> String {
+    match error.try_into_panic() {
+        Ok(panic) => panic_note(panic),
+        Err(_) => "the task was cancelled".to_string(),
     }
-    if initialize["protocol_version"].as_u64() != Some(PROTOCOL_VERSION as u64) {
-        die(&format!(
-            "this host speaks protocol version {}, this extension speaks {PROTOCOL_VERSION}",
-            initialize["protocol_version"]
-        ));
-    }
-    *sdk_lock(&shared.core_path) = initialize["core_path"].as_str().map(str::to_string);
-    let ack = ExtFrame::Ack {
-        protocol_version: PROTOCOL_VERSION,
-        tools: tools
-            .iter()
-            .map(|tool| tabit_ext::protocol::ToolDecl {
-                name: tool.name.clone(),
-                description: tool.description.clone(),
-                schema: tool.schema.clone(),
-            })
-            .collect(),
-        hooks: consults
-            .iter()
-            .map(|consult| tabit_ext::protocol::HookDecl {
-                event: consult.point.to_string(),
-            })
-            .collect(),
-        watch: watches.iter().map(|w| w.kind.clone()).collect(),
-    };
-    shared.write_frame(&ack);
+}
 
-    // The watch surface: one subscription per watched kind on the
-    // guest's node (the host mirrors the ack's kinds across the
-    // pipe; the arrivals fan here). Each handler runs on its own
-    // thread — observation never blocks the loop. A card-kind watch
-    // carries its settle co-subscription (the node's card law).
-    for watch in watches.iter() {
-        let kind = watch.kind.clone();
-        let body = watch.arc_body().clone();
-        let watch_shared = shared.clone();
-        node.subscribe(&kind, "watch", move |frame: &EventFrame| {
-            let shared = watch_shared.clone();
-            let body = body.clone();
-            let event = frame.event.clone();
-            std::thread::spawn(move || {
-                let ctx = Ctx::watch_context(shared);
-                catch_unwind_silently(move || body(&ctx, event));
-            });
-        });
+fn panic_note(panic: Box<dyn std::any::Any + Send>) -> String {
+    if let Some(text) = panic.downcast_ref::<String>() {
+        text.clone()
+    } else if let Some(text) = panic.downcast_ref::<&str>() {
+        (*text).to_string()
+    } else {
+        "<no message>".to_string()
     }
+}
 
-    // The loop: the frozen dialect's lanes first (the pipe's own
-    // frames), then the shared grammar through the node's intake —
-    // one door, every law. Everything the host can send arrives here.
-    loop {
-        let line = read_line();
-        dispatch_line(&shared, &line, &tools, &consults);
+async fn read_line() -> String {
+    let mut line = String::new();
+    let mut stdin = tokio::io::BufReader::new(tokio::io::stdin());
+    if stdin.read_line(&mut line).await.unwrap_or(0) == 0 {
+        std::process::exit(0); // EOF: the host closed, so are we
     }
+    line
 }
 
 /// One inbound line: the dialect's parse (the host's own frames),
@@ -664,7 +754,7 @@ fn dispatch_line(
                 args,
             } => {
                 let (shared, tools) = (shared.clone(), tools.clone());
-                std::thread::spawn(move || run_call(&shared, call_id, name, args, &tools));
+                tokio::spawn(async move { run_call(&shared, call_id, name, args, &tools).await });
             }
             HostFrame::Hook {
                 hook_id,
@@ -672,12 +762,13 @@ fn dispatch_line(
                 payload,
             } => {
                 let (shared, consults) = (shared.clone(), consults.clone());
-                std::thread::spawn(move || {
-                    run_consult(&shared, hook_id, &event, &consults, payload)
+                tokio::spawn(async move {
+                    run_consult(&shared, hook_id, &event, &consults, payload).await
                 });
             }
             HostFrame::Cancel { call_id } => {
                 sdk_lock(&shared.cancelled).insert(call_id);
+                shared.cancel_notify.notify_waiters();
             }
             HostFrame::ServiceResponse {
                 request_id,
@@ -723,7 +814,13 @@ fn dispatch_line(
 /// error results — the pipe never hangs on a broken body. When the
 /// call completes, its own unanswered asks die with it (each settle
 /// announced — a card the body left behind closes everywhere).
-fn run_call(shared: &Arc<Shared>, call_id: String, name: String, args: Value, tools: &[ToolDef]) {
+async fn run_call(
+    shared: &Arc<Shared>,
+    call_id: String,
+    name: String,
+    args: Value,
+    tools: &[ToolDef],
+) {
     let owner = call_id.clone();
     let writer = shared.clone();
     let held = shared.node.try_hold(
@@ -746,34 +843,44 @@ fn run_call(shared: &Arc<Shared>, call_id: String, name: String, args: Value, to
         correlation: Some(call_id.clone()),
         shared: shared.clone(),
     };
-    let result = match std::panic::catch_unwind(AssertUnwindSafe(move || {
-        let Some(tool) = tools.iter().find(|tool| tool.name == name) else {
-            return ToolWireResult {
-                call_id,
-                error: Some(format!("this extension serves no tool `{name}`")),
-                report: String::new(),
-                details: None,
-            };
-        };
-        match (tool.body)(args, &ctx) {
-            Ok(output) => ToolWireResult {
-                call_id,
-                error: None,
-                report: output.report,
-                details: output.details,
-            },
-            Err(error) => ToolWireResult {
-                call_id,
-                error: Some(error),
-                report: String::new(),
-                details: None,
-            },
+    // The body runs as its own task: a panic becomes the error result
+    // (the pipe never hangs on a broken body).
+    let body = match tools.iter().find(|tool| tool.name == name) {
+        None => {
+            let _ = shared.node.answer(
+                &owner,
+                KIND_TOOL_RESULT,
+                Box::new(ToolWireResult {
+                    call_id,
+                    error: Some(format!("this extension serves no tool `{name}`")),
+                    report: String::new(),
+                    details: None,
+                }),
+            );
+            shared.node.retract_asks(&owner, "the call completed");
+            return;
         }
-    })) {
-        Ok(result) => result,
-        Err(panic) => ToolWireResult {
-            call_id: owner.clone(),
-            error: Some(format!("the tool body panicked: {}", panic_note(panic))),
+        Some(tool) => tokio::spawn((tool.body)(args, ctx)),
+    };
+    let result = match body.await {
+        Ok(Ok(output)) => ToolWireResult {
+            call_id,
+            error: None,
+            report: output.report,
+            details: output.details,
+        },
+        Ok(Err(error)) => ToolWireResult {
+            call_id,
+            error: Some(error),
+            report: String::new(),
+            details: None,
+        },
+        Err(join) => ToolWireResult {
+            call_id,
+            error: Some(format!(
+                "the tool body panicked: {}",
+                panic_note_from_join(join)
+            )),
             report: String::new(),
             details: None,
         },
@@ -790,7 +897,7 @@ fn run_call(shared: &Arc<Shared>, call_id: String, name: String, args: Value, to
 /// failed *tool call* is the model-visible failure). The handler's
 /// own error paths can choose otherwise; the SDK's failure handling
 /// cannot.
-fn run_consult(
+async fn run_consult(
     shared: &Arc<Shared>,
     hook_id: String,
     event: &str,
@@ -817,7 +924,7 @@ fn run_consult(
         correlation: Some(hook_id.clone()),
         shared: shared.clone(),
     };
-    let answer = consult_answer(event, consults, &ctx, payload);
+    let answer = consult_answer(event, consults, ctx, payload).await;
     let _ = shared.node.answer(
         &owner,
         KIND_HOOK_RESULT,
@@ -830,72 +937,32 @@ fn run_consult(
 
 /// The consultation body's answer: the point's own type serialized,
 /// or its declared neutral for a failing or absent handler.
-fn consult_answer(event: &str, consults: &[ConsultDef], ctx: &Ctx, payload: Value) -> Value {
+async fn consult_answer(event: &str, consults: &[ConsultDef], ctx: Ctx, payload: Value) -> Value {
     let Some(consult) = consults.iter().find(|consult| consult.point == event) else {
         // No subscription: a newer host's event point this SDK
         // predates — absence, the declared neutral for the name.
         return tabit_protocol::points::neutral_wire(event);
     };
-    std::panic::catch_unwind(AssertUnwindSafe(|| (consult.body)(ctx, payload)))
-        .unwrap_or_else(|_| Err("the consultation handler panicked".to_string()))
-        .unwrap_or_else(|error| {
+    // The body runs as its own task: a failed OR panicking handler
+    // resolves as absence (the point's declared neutral).
+    match tokio::spawn((consult.body)(ctx, payload)).await {
+        Ok(Ok(answer)) => answer,
+        Ok(Err(error)) => {
             let _ = writeln!(
                 std::io::stderr(),
                 "tabit extension: the handler failed: {error}"
             );
             tabit_protocol::points::neutral_wire(event)
-        })
-}
-
-/// A watch body's panic is reported, never fatal — observation must
-/// not take the process down.
-pub(crate) fn catch_unwind_silently(body: impl FnOnce()) {
-    if let Err(panic) = std::panic::catch_unwind(AssertUnwindSafe(body)) {
-        let _ = writeln!(
-            std::io::stderr(),
-            "tabit extension: a watch handler panicked: {}",
-            panic_note(panic)
-        );
+        }
+        Err(join) => {
+            let _ = writeln!(
+                std::io::stderr(),
+                "tabit extension: the handler panicked: {}",
+                panic_note_from_join(join)
+            );
+            tabit_protocol::points::neutral_wire(event)
+        }
     }
-}
-
-/// One handler invocation on its own thread with a fresh watch
-/// context — the subscription callbacks' dispatch (a blocked handler
-/// must never stall the fan that called it).
-pub(crate) fn spawn_handler(shared: Arc<Shared>, body: impl FnOnce(Ctx) + Send + 'static) {
-    std::thread::spawn(move || {
-        let ctx = Ctx::watch_context(shared);
-        catch_unwind_silently(move || body(ctx));
-    });
-}
-
-fn panic_note(panic: Box<dyn std::any::Any + Send>) -> String {
-    if let Some(text) = panic.downcast_ref::<String>() {
-        text.clone()
-    } else if let Some(text) = panic.downcast_ref::<&str>() {
-        (*text).to_string()
-    } else {
-        "<no message>".to_string()
-    }
-}
-
-/// One line out the pipe — every outbound line (the dialect's frames
-/// and the shared grammar alike) queues through the one writer, so
-/// ordering is the queue's and no caller blocks on the pipe.
-fn write_line(pipe: &std::sync::mpsc::Sender<String>, line: &str) {
-    // A send fails only against a dead writer — the writer exits the
-    // process on a dead pipe, so the end is already in motion.
-    let _ = pipe.send(line.to_string());
-}
-
-fn read_line() -> String {
-    let mut line = String::new();
-    let stdin = std::io::stdin();
-    let mut lock = stdin.lock();
-    if lock.read_line(&mut line).unwrap_or(0) == 0 {
-        std::process::exit(0); // EOF: the host closed, so are we
-    }
-    line
 }
 
 fn die(reason: &str) -> ! {
@@ -916,9 +983,9 @@ pub(crate) mod tests {
     pub(crate) fn shared() -> Arc<Shared> {
         let node = Arc::new(Node::new("test"));
         // A pipe to nowhere: sends drop silently (nothing in these
-        // tests writes, and the writer thread is serve's business).
-        let (pipe_tx, pipe_rx) = std::sync::mpsc::channel::<String>();
-        drop(pipe_rx);
+        // tests writes, and the writer pump is serve's business).
+        let (pipe_tx, mut pipe_rx) = tokio::sync::mpsc::unbounded_channel::<String>();
+        pipe_rx.close();
         let pipe_writer = pipe_tx.clone();
         let stdio = Channel::line("host", move |line: &str| write_line(&pipe_writer, line));
         let layer = Channel::local("sdk", |_| {}, |_| {});
@@ -928,21 +995,25 @@ pub(crate) mod tests {
             layer,
             pipe: pipe_tx,
             cancelled: Mutex::new(std::collections::HashSet::new()),
+            cancel_notify: tokio::sync::Notify::new(),
             core_path: Mutex::new(None),
         })
     }
 
-    #[test]
-    fn a_failing_consultation_is_absence_run_for_call_points() {
-        let consults = [consult::<tabit_protocol::points::ToolCall, _>(
-            |_ctx, _payload| Err::<tabit_protocol::points::CallVerdict, _>("boom".to_string()),
+    #[tokio::test]
+    async fn a_failing_consultation_is_absence_run_for_call_points() {
+        let consults = [consult::<tabit_protocol::points::ToolCall, _, _>(
+            |_ctx, _payload| async {
+                Err::<tabit_protocol::points::CallVerdict, _>("boom".to_string())
+            },
         )];
         let answer = consult_answer(
             "tool_call",
             &consults,
-            &Ctx::watch_context(shared()),
+            Ctx::watch_context(shared()),
             json!({}),
-        );
+        )
+        .await;
         assert_eq!(
             answer,
             json!({"verdict": "run"}),
@@ -950,23 +1021,25 @@ pub(crate) mod tests {
         );
     }
 
-    #[test]
-    fn a_failing_consultation_is_absence_unit_for_result_points() {
-        let consults = [consult::<tabit_protocol::points::ToolResult, _>(
-            |_ctx, _payload| Err::<(), _>("boom".to_string()),
+    #[tokio::test]
+    async fn a_failing_consultation_is_absence_unit_for_result_points() {
+        let consults = [consult::<tabit_protocol::points::ToolResult, _, _>(
+            |_ctx, _payload| async { Err::<(), _>("boom".to_string()) },
         )];
         let answer = consult_answer(
             "tool_result",
             &consults,
-            &Ctx::watch_context(shared()),
+            Ctx::watch_context(shared()),
             json!({}),
-        );
+        )
+        .await;
         assert!(answer.is_null(), "the neutral answer for a result point");
     }
 
-    #[test]
-    fn an_unsubscribed_point_is_absence() {
-        let answer = consult_answer("tool_call", &[], &Ctx::watch_context(shared()), json!({}));
+    #[tokio::test]
+    async fn an_unsubscribed_point_is_absence() {
+        let answer =
+            consult_answer("tool_call", &[], Ctx::watch_context(shared()), json!({})).await;
         assert_eq!(
             answer,
             json!({"verdict": "run"}),
@@ -974,10 +1047,10 @@ pub(crate) mod tests {
         );
     }
 
-    #[test]
-    fn the_answer_serializes_from_the_shared_type() {
-        let consults = [consult::<tabit_protocol::points::ToolCall, _>(
-            |_ctx, _payload| {
+    #[tokio::test]
+    async fn the_answer_serializes_from_the_shared_type() {
+        let consults = [consult::<tabit_protocol::points::ToolCall, _, _>(
+            |_ctx, _payload| async {
                 Ok(tabit_protocol::points::CallVerdict::Skip {
                     message: "not tonight".to_string(),
                 })
@@ -986,9 +1059,10 @@ pub(crate) mod tests {
         let answer = consult_answer(
             "tool_call",
             &consults,
-            &Ctx::watch_context(shared()),
+            Ctx::watch_context(shared()),
             json!({}),
-        );
+        )
+        .await;
         assert_eq!(
             answer,
             json!({"verdict": "skip", "message": "not tonight"}),

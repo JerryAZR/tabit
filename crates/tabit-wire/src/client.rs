@@ -55,8 +55,8 @@ use tokio_util::sync::CancellationToken;
 
 use crate::node::{Channel, Inbound, Node};
 use crate::process::{
-    HANDSHAKE_TIMEOUT, crash_tail, kill_now, reap_with_grace, spawn_command_writer,
-    spawn_stderr_ring, wrap_command,
+    HANDSHAKE_TIMEOUT, crash_tail, kill_now, reap_with_grace, spawn_line_writer, spawn_stderr_ring,
+    wrap_command,
 };
 
 /// Sees one stamped frame in pump order, with the speaking child's
@@ -323,7 +323,7 @@ impl ChildSpec {
         // line crossed first) is written, then the pipe drops — EOF,
         // the child's death contract.
         let (command_tx, command_rx) = tokio::sync::mpsc::unbounded_channel::<String>();
-        spawn_command_writer(stdin, command_rx, closing.clone());
+        spawn_line_writer(stdin, command_rx, Some(closing.clone()));
 
         // The stderr ring — the crash report's tail.
         let ring = spawn_stderr_ring(stderr);

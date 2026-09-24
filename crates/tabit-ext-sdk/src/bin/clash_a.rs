@@ -14,7 +14,7 @@ fn main() {
         "clashy",
         "The clash pair's shared name (this is the incumbent).",
         schema_for!(["text"]),
-        |args, _| {
+        |args, _ctx| async move {
             Ok(Output::from(format!(
                 "clash-a served: {}",
                 args["text"].as_str().unwrap_or_default()
