@@ -393,7 +393,15 @@ impl<C: Routed> Node<C> {
                 if frame.stream.is_none() && frame.origin.is_none() {
                     frame.origin = Some(from.owner().to_string());
                 }
-                // Law 1: the stamp teaches the stream's channel.
+                // Law 1: the stamp teaches the stream's channel. Any
+                // stamped arrival teaches — including one naming a
+                // stream this node already routed elsewhere. That is
+                // the ruled surface (2026-09): standard practice is
+                // every node minting its own UUIDs, so a stream id
+                // belongs to whoever minted it; a sender teaching a
+                // route for an id it did not mint is off the
+                // standard path and owns what follows. The table is
+                // attribution, not permission.
                 if let Some(stream) = frame.stream.as_ref().map(StreamId::as_str) {
                     lock(&self.learned).insert(stream.to_string(), from.clone());
                 }
