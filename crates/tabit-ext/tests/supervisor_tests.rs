@@ -1050,3 +1050,26 @@ async fn wait_for_short(check: impl Fn() -> bool) -> bool {
     }
     false
 }
+
+/// The contained hold door over the real pipe (the review round's
+/// major finding): a guest re-sending a live service-request id — a
+/// plain retry bug — meets the containment, not a host panic. The
+/// lane dies with the mint reason; the supervisor and the rest of
+/// the process live.
+#[tokio::test]
+async fn a_duplicate_service_request_id_kills_the_lane_not_the_host() {
+    let root = test_dir("svc-dupe");
+    install(&root, "dupe", "svc-dupe");
+    let (supervisor, mut events) = supervisor::launch_root(&root, HANDSHAKE_TIMEOUT, test_host());
+    await_status(&mut events, "dupe", |s| matches!(s, Status::Alive)).await;
+    let dead = await_status(&mut events, "dupe", |s| matches!(s, Status::Dead { .. })).await;
+    let reason = dead_reason(&dead.status);
+    assert!(
+        reason.contains("mint law"),
+        "the death names the containment: {reason}"
+    );
+    // The supervisor itself is intact — reports answer, the event
+    // channel lives.
+    assert_eq!(supervisor.reports().len(), 1);
+    supervisor.shutdown().await;
+}

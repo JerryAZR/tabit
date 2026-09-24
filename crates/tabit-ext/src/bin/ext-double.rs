@@ -64,7 +64,7 @@ fn main() {
         | "late-unknown" => {}
         "die-pre-ack" => std::process::exit(1),
         "tools-echo" | "tools-fail" | "tools-ask" | "tools-shadow" | "tools-model"
-        | "tools-cancel" | "grammar" => {}
+        | "tools-cancel" | "grammar" | "svc-dupe" => {}
         "hooks-allow" | "hooks-skip" | "hooks-ask" | "hooks-hang" => {}
         other => {
             eprintln!("ext-double: unknown behavior `{other}`");
@@ -92,6 +92,26 @@ fn main() {
         }
         "tools-echo" => serve_tools(json!([tool_decl("echo")])),
         "grammar" => serve_grammar(),
+        // The mint-law violation over the real pipe: the same
+        // service-request id sent twice (a plain retry bug in a
+        // hand-rolled guest). The host must contain it — kill this
+        // lane — never crash.
+        "svc-dupe" => {
+            emit(json!({
+                "type": "ack", "protocol_version": 4,
+                "tools": [], "hooks": [], "watch": [],
+            }));
+            for _ in 0..2 {
+                emit(json!({
+                    "type": "service_request",
+                    "request_id": "dupe-1",
+                    "call_id": "dupe-1",
+                    "verb": "model_prompt",
+                    "prompt": "same id twice",
+                }));
+            }
+            drain();
+        }
         "tools-fail" => serve_tools(json!([tool_decl("boom")])),
         "tools-ask" => serve_tools(json!([tool_decl("ask")])),
         "tools-shadow" => serve_tools(json!([tool_decl("read")])),

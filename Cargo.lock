@@ -5079,6 +5079,7 @@ dependencies = [
  "tiny_http",
  "tokio",
  "tokio-util",
+ "uuid",
 ]
 
 [[package]]

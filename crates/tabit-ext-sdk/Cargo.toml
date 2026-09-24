@@ -50,6 +50,7 @@ serde = { workspace = true }
 # Owned children: the shared client and its async runtime (the settle
 # folds and spawns ride one static runtime inside the SDK).
 tabit-wire = { path = "../tabit-wire", version = "0.41.0" }
+uuid = { workspace = true, features = ["v7"] }
 tokio = { workspace = true, features = ["rt-multi-thread", "macros", "time"] }
 tokio-util = { version = "0.7", default-features = false }
 # The wire types, shared with the host (the 2026-09 sharing ruling:

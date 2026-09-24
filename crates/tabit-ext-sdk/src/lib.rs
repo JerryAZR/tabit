@@ -38,7 +38,6 @@
 
 use std::io::{BufRead, Write};
 use std::panic::AssertUnwindSafe;
-use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 
 use serde::Serialize;
@@ -433,13 +432,14 @@ pub struct ModelPrompt {
     pub total_tokens: u64,
 }
 
-static SHARED_COUNTER: AtomicU64 = AtomicU64::new(1);
-
+/// The id mint (2026-09 ruling): a UUIDv7 — collision-freedom by
+/// construction, never naming conventions (ids cross the pipe and
+/// register on the host's one table; a name-grammar collision would
+/// be a mint-law violation that kills the wrong lane). The family
+/// parameter stays for diagnostics.
 fn next_request_id(family_root: &str, family: &str) -> String {
-    format!(
-        "{family_root}-{family}-{}",
-        SHARED_COUNTER.fetch_add(1, Ordering::Relaxed)
-    )
+    let _ = (family_root, family);
+    uuid::Uuid::now_v7().to_string()
 }
 
 /// Everything the loop and the worker threads share.

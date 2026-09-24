@@ -417,23 +417,11 @@ impl<C: Routed> Node<C> {
                 // producer (this participant died holding the ask —
                 // the origin can no longer speak for it).
                 if let Some((id, _)) = frame.ask() {
-                    if self.asks.held(id) {
-                        // The mint law: a live id re-registered. The
-                        // violating sender is external — contain it
-                        // (the registered policy kills the sender's
-                        // lane; the default panics, for the sender may
-                        // be this node's own stdin, which cannot be
-                        // contained). The frame dies with the
-                        // violation either way: the table's state was
-                        // just proven untrustworthy for it.
-                        lock(&self.violation)(from.owner(), id);
-                        return;
-                    }
                     let asker = from.clone();
                     let ask_id = id.to_string();
                     let settled = self.settle_frame(&ask_id, frame.stream.clone());
                     let events = self.events.clone();
-                    self.asks.insert(
+                    let registered = self.asks.register(
                         ask_id.clone(),
                         from.owner(),
                         KIND_INTERACTION,
@@ -450,6 +438,19 @@ impl<C: Routed> Node<C> {
                             }
                         },
                     );
+                    if !registered {
+                        // The mint law, decided atomically with the
+                        // registration: a live id re-registered. The
+                        // violating sender is external — contain it
+                        // (the registered policy kills the sender's
+                        // lane; the default panics, for the sender may
+                        // be this node's own stdin, which cannot be
+                        // contained). The frame dies with the
+                        // violation either way: the table's state was
+                        // just proven untrustworthy for it.
+                        lock(&self.violation)(from.owner(), id);
+                        return;
+                    }
                 }
                 self.events.dispatch_skipping(&frame, &[from.owner()]);
             }
@@ -598,6 +599,11 @@ impl<C: Routed> Node<C> {
     /// `kind` is the tag of the response that answers it (the
     /// correlation-kind law); the delivery resolves the site's
     /// awaiter, its `Orphaned` arm is the site's fail-open policy.
+    ///
+    /// For ids THIS node minted: a live id re-registered is our own
+    /// bug and the sanctioned crash. For ids arriving from a sender
+    /// (a proxied guest's service-request id, a relayed request),
+    /// use [`Node::try_hold`] — the containment door.
     pub fn hold(
         &self,
         owner: &str,
@@ -606,6 +612,27 @@ impl<C: Routed> Node<C> {
         deliver: impl FnOnce(Outcome) + Send + 'static,
     ) {
         self.asks.insert(id.to_string(), owner, kind, deliver);
+    }
+
+    /// [`Node::hold`] for an id a sender minted and crossed a pipe:
+    /// a live id is the sender's mint-law violation — the registered
+    /// containment policy fires (kill the sender) and `false`
+    /// returns; the caller drops the frame with it (the table's
+    /// state was just proven untrustworthy for it). Registration and
+    /// the mint decision are one atomic act.
+    pub fn try_hold(
+        &self,
+        owner: &str,
+        id: &str,
+        kind: &'static str,
+        deliver: impl FnOnce(Outcome) + Send + 'static,
+    ) -> bool {
+        if self.asks.register(id.to_string(), owner, kind, deliver) {
+            true
+        } else {
+            lock(&self.violation)(owner, id);
+            false
+        }
     }
 
     /// Discard a held round-trip without settling — the asker's own

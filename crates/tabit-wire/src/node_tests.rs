@@ -1341,3 +1341,95 @@ fn manual_forwards_are_verbatim_from_the_lane_or_re_stamped_from_the_layer() {
         "the re-stamped forward's command never reached the child"
     );
 }
+
+/// The contained hold door (the review round's major finding): an id
+/// a SENDER minted and crossed a pipe, held under a live id, is the
+/// sender's violation — the policy fires, the entry is untouched,
+/// and nothing panics.
+#[test]
+fn a_held_sender_minted_id_is_contained_not_fatal() {
+    let node: Arc<Node> = Arc::new(Node::new("core"));
+    let contained: Arc<Mutex<Vec<String>>> = Arc::new(Mutex::new(Vec::new()));
+    let sink = contained.clone();
+    node.on_mint_violation(move |owner, id| {
+        sink.lock()
+            .expect("test lock")
+            .push(format!("{owner}:{id}"));
+    });
+
+    let first = node.try_hold("lane-a", "svc-1", "service_response", |_| {});
+    assert!(first, "the fresh id held");
+    // The same id arrives again — a plain guest retry bug.
+    let second = node.try_hold("lane-a", "svc-1", "service_response", |_| {});
+    assert!(!second, "the live id refused");
+    assert_eq!(
+        contained.lock().expect("test lock").clone(),
+        vec!["lane-a:svc-1".to_string()],
+        "the policy met the violator"
+    );
+    // The surviving entry is untouched and still answerable.
+    assert!(
+        matches!(
+            node.answer("svc-1", "service_response", Box::new(serde_json::json!({}))),
+            crate::node::AnswerOutcome::Delivered
+        ),
+        "the original entry was untouched by the containment"
+    );
+}
+
+/// The registration's atomicity: the mint decision and the insert
+/// are one act (the review round's race finding — no pre-check to
+/// both pass). Two sequential registrations of one id: exactly one
+/// wins, the loser is contained, never a panic.
+#[test]
+fn the_mint_decision_is_atomic_with_the_registration() {
+    let asks = crate::asks::PendingAsks::default();
+    assert!(asks.register("id".to_string(), "a", "interaction", |_| {}));
+    assert!(!asks.register("id".to_string(), "b", "interaction", |_| {}));
+    // The winner's entry survived under the original owner.
+    assert!(asks.held("id"));
+    asks.retract_owner("a", "done");
+    assert!(!asks.held("id"));
+}
+
+/// One owner holds one kind once: the card co-subscription beside an
+/// explicit settle watch (a watch list naming both kinds) delivers
+/// each settled frame ONCE, not twice.
+#[test]
+fn an_owner_holds_a_kind_once() {
+    let node = Arc::new(Node::new("core"));
+    // The watch list names BOTH card kinds; the lane channel is
+    // subscribed to each (the ack loop's verbatim shape).
+    let lines: Arc<Mutex<Vec<String>>> = Arc::new(Mutex::new(Vec::new()));
+    let writer = lines.clone();
+    let lane = Channel::line("watcher", move |line: &str| {
+        writer.lock().expect("test lock").push(line.to_string());
+    });
+    node.subscribe_channel(tags::INTERACTION_REQUEST, &lane);
+    node.subscribe_channel(tags::INTERACTION_SETTLED, &lane);
+
+    let (layer, saw) = stub_layer(&node, "layer");
+    let awaiter = node.ask(
+        "layer",
+        &StreamId::new("s-1"),
+        "native:select_any",
+        json!({}),
+    );
+    node.intake(
+        &layer,
+        Inbound::Command(SessionCommand::InteractionResponse {
+            session: None,
+            id: request_id(&saw),
+            payload: json!({"text": "yes"}),
+        }),
+    );
+    drop(awaiter.blocking_recv());
+
+    let settled_count = lines
+        .lock()
+        .expect("test lock")
+        .iter()
+        .filter(|line| line.contains("interaction_settled"))
+        .count();
+    assert_eq!(settled_count, 1, "the settle crossed the lane once");
+}

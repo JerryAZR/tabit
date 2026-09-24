@@ -556,6 +556,11 @@ impl SessionHost {
         // exists) — flushes AFTER the startup announcements, so the
         // pinned order (ack → session_opened → notes → catalog) is
         // never interleaved ahead of by early extension traffic.
+        // (The flip-to-flush span is synchronous and await-free: on
+        // the binary's current-thread runtime nothing can land
+        // inside it. A multi-threaded embedder could race a frame
+        // into that span ahead of the buffer — the guarantee is
+        // scoped to await-free spawns.)
         frontend_started.store(true, std::sync::atomic::Ordering::Release);
 
         // The boot worker first: the startup announcements emit from

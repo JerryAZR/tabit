@@ -98,8 +98,35 @@ impl PendingAsks {
         );
     }
 
-    /// Whether the id is currently held (the mint-law check —
-    /// callers decide containment before re-registering).
+    /// Register, deciding the mint law under ONE lock claim: a live
+    /// id registers nothing and reports `false` — the caller routes
+    /// the violation through the containment policy. Atomic by
+    /// construction: two concurrent arrivals of one fresh id cannot
+    /// both pass a pre-check, because there is no pre-check.
+    pub fn register(
+        &self,
+        id: String,
+        owner: &str,
+        kind: &'static str,
+        deliver: impl FnOnce(Outcome) + Send + 'static,
+    ) -> bool {
+        let mut pending = lock(&self.pending);
+        if pending.contains_key(&id) {
+            return false;
+        }
+        pending.insert(
+            id,
+            PendingAsk {
+                owner: owner.to_string(),
+                kind,
+                deliver: Box::new(deliver),
+            },
+        );
+        true
+    }
+
+    /// Whether the id is currently held (probes and tests; the
+    /// containment decision belongs to [`Self::register]).
     pub fn held(&self, id: &str) -> bool {
         lock(&self.pending).contains_key(id)
     }
@@ -138,7 +165,12 @@ impl PendingAsks {
             .map(|(id, _)| id.clone())
             .collect();
         for id in matching {
-            if let Some(ask) = lock(&self.pending).remove(&id) {
+            // Bind the removal before delivering: no lock guard — not
+            // even an if-let scrutinee temporary — outlives the
+            // delivery (which may re-enter nothing today, but owes
+            // the contract nothing either).
+            let ask = lock(&self.pending).remove(&id);
+            if let Some(ask) = ask {
                 (ask.deliver)(Outcome::Orphaned(reason.to_string()));
             }
         }

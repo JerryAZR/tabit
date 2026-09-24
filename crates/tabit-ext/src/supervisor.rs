@@ -47,7 +47,7 @@ use crate::protocol::{
 };
 use rig_agent::tool::services::{HostServices, ModelPromptOk, ModelPromptRequest, ServiceUsage};
 use std::io::Write;
-use tabit_wire::node::{AnswerOutcome, Channel, Inbound, Node, violation_panic};
+use tabit_wire::node::{AnswerOutcome, Channel, Node, parse_shared, violation_panic};
 use tabit_wire::process::ChildWrapper;
 use tabit_wire::process::{self, wrap_command};
 use tokio::io::{AsyncBufReadExt, BufReader};
@@ -899,15 +899,8 @@ async fn supervise(
                     // parseable as none of these is the contract
                     // break it always was.
                     Err(_) => {
-                        if let Ok(command) =
-                            serde_json::from_str::<tabit_protocol::SessionCommand>(&line)
-                        {
-                            node.intake(&lane.channel, Inbound::Command(command));
-                            continue;
-                        }
-                        if let Ok(frame) = serde_json::from_str::<tabit_protocol::EventFrame>(&line)
-                        {
-                            node.intake(&lane.channel, Inbound::Event(frame));
+                        if let Some(inbound) = parse_shared(&line) {
+                            node.intake(&lane.channel, inbound);
                             continue;
                         }
                         refuse(
@@ -1078,7 +1071,11 @@ fn hold_service(
 ) {
     let commands = lane.commands.clone();
     let id = request_id.clone();
-    node.hold(
+    // The id is the GUEST's mint, crossed the pipe — the contained
+    // door: a live id is the sender's violation (the policy kills
+    // the lane) and the request dies with it, un-dispatched. The
+    // frame never panics the host on an external bug.
+    let held = node.try_hold(
         &lane.name,
         &request_id,
         KIND_SERVICE_RESPONSE,
@@ -1091,6 +1088,9 @@ fn hold_service(
             }
         },
     );
+    if !held {
+        return;
+    }
     let node = node.clone();
     tokio::spawn(async move {
         let services = lane.capability(&call_id);
@@ -1256,13 +1256,13 @@ fn resolve_dead(
     node: &Arc<Node>,
     lanes: &Arc<Mutex<HashMap<String, CancellationToken>>>,
 ) {
-    lane.die(node, "the extension is not running");
+    // The real reason reaches the sweep: every orphaned round-trip's
+    // failure text names the actual death (the exit code, the crash
+    // tail, the mint kill) — the model-visible error is the honest
+    // one. The reader-EOF path swept earlier with its own reason;
+    // re-sweeping here is idempotent (the entries are gone).
+    lane.die(node, &reason);
     tabit_log::lock::lock(lanes).remove(&lane.name);
-    // (Ask settling lives at the death sites that can see the asks
-    // registry: the reader end and the exit branch.) The pre-ack and
-    // spawn-failure paths funnel here and cannot carry open asks. — announced, so no channel holds a card that can never be
-    // answered. (Callers without an asks registry — the spawn-failure
-    // path — cannot have open asks either; the settle is idempotent.)
     // The declared capabilities survive the death — the catalog's
     // "what it would have served" report. (Pre-ack deaths never
     // recorded any; post-ack deaths keep their ack's declarations.)

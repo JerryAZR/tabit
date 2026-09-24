@@ -133,28 +133,39 @@ impl<T> Default for Router<T> {
 
 impl<T: Routed> Router<T> {
     /// Subscribe to one kind. Many subscribers may hold one kind; all
-    /// run.
+    /// run. One owner holds a kind once: a re-registration of an
+    /// interest it already declared is a duplicate delivery in the
+    /// making (the card co-subscription beside an explicit settle
+    /// watch; a watch list naming a kind twice), so it is a no-op.
     pub fn register<F>(&self, kind: &str, owner: &str, callback: F)
     where
         F: Fn(&T) + Send + Sync + 'static,
     {
-        lock(&self.by_kind)
-            .entry(kind.to_string())
-            .or_default()
-            .push(Subscriber {
-                owner: owner.to_string(),
-                callback: Arc::new(callback),
-            });
+        let mut held = lock(&self.by_kind);
+        let subscribers = held.entry(kind.to_string()).or_default();
+        if subscribers.iter().any(|s| s.owner == owner) {
+            return;
+        }
+        subscribers.push(Subscriber {
+            owner: owner.to_string(),
+            callback: Arc::new(callback),
+        });
     }
 
     /// Subscribe to every kind (relays and taps — the
     /// forward-everything policies, and the functional layer's
-    /// catch-all when it prefers one intake).
+    /// catch-all when it prefers one intake). One owner holds the
+    /// wildcard once (the same no-op-on-repeat law as
+    /// [`Self::register`]).
     pub fn register_all<F>(&self, owner: &str, callback: F)
     where
         F: Fn(&T) + Send + Sync + 'static,
     {
-        lock(&self.wildcard).push(Subscriber {
+        let mut wildcards = lock(&self.wildcard);
+        if wildcards.iter().any(|s| s.owner == owner) {
+            return;
+        }
+        wildcards.push(Subscriber {
             owner: owner.to_string(),
             callback: Arc::new(callback),
         });

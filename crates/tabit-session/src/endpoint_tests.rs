@@ -3453,3 +3453,46 @@ async fn an_unrepairable_overflow_leaves_the_failure_standing() {
     );
     std::fs::remove_dir_all(store.dir()).ok();
 }
+
+/// The frontend stream's startup hold (the ported bridges' ordering):
+/// a frame crossing the net BEFORE the host spawns lands strictly
+/// behind the host's startup announcements — the pinned
+/// session_opened → catalog sequence is never preceded by early
+/// extension traffic.
+#[tokio::test]
+async fn pre_host_traffic_lands_behind_the_startup_announcements() {
+    let store = temp_store("endpoint-startup-hold");
+    let session = Factory::new(vec![text_turn("never")])
+        .into_builder(store.clone())
+        .create("C:/w")
+        .expect("session");
+    let wiring = plain_wiring(&store);
+    let node = wiring.node.clone();
+
+    // A lane speaks before the host exists, through the mounted
+    // stream (the real shape: the extension boots between the mount
+    // and the spawn). Traffic before the mount itself reaches
+    // nothing — no subscriber exists — and is not this test's
+    // subject.
+    let lane = crate::Channel::local("early-ext", |_| {}, |_| {});
+    let frontend = crate::mount_frontend(&node);
+    node.emit(
+        &lane,
+        crate::EventFrame {
+            stream: None,
+            origin: None,
+            ttl: None,
+            event: crate::SessionEvent::error_session("the early extension speaks".to_string()),
+        },
+    );
+
+    let mut handle = SessionHost::spawn_with_frontend(session, Vec::new(), wiring, frontend);
+    let frames = drain(&mut handle).await;
+    let tags: Vec<&str> = frames.iter().map(|f| f.event.tag()).collect();
+    assert_eq!(
+        tags,
+        vec!["session_opened", "sessions_available", "error"],
+        "the announcements lead, the early frame follows behind them"
+    );
+    std::fs::remove_dir_all(store.dir()).ok();
+}

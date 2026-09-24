@@ -57,9 +57,7 @@ impl Mounted {
     /// extension host): one shape for every assembly.
     pub fn none() -> Mounted {
         Mounted {
-            supervisor: std::sync::Arc::new(Supervisor::empty(std::sync::Arc::new(
-                tabit_session::Node::new("print"),
-            ))),
+            supervisor: std::sync::Arc::new(Supervisor::empty(crate::host_node())),
             tools: Vec::new(),
             hooks: HookStack::new(),
             catalog: ExtensionsCatalog::default(),
