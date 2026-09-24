@@ -42,7 +42,7 @@ use std::sync::{Arc, Mutex};
 
 use tabit_protocol::{EventFrame, SessionEvent, tags};
 use tabit_wire::client::{ChildSpec, Settlement};
-use tabit_wire::node::{Channel, Inbound, KIND_INTERACTION};
+use tabit_wire::node::KIND_INTERACTION;
 
 use crate::{Ctx, Shared, sdk_lock};
 
@@ -233,30 +233,52 @@ impl Child {
         if let Some(max_turns) = options.max_turns {
             spec = spec.max_turns(max_turns);
         }
-        // The death seam: the reaper's exit tap sweeps the child's
-        // every registration on the node — its lane (the learned
-        // routes, the transit asks, each settle announced — the sweep
-        // is those settles' single producer, and the stdio's settle
-        // subscription carries the announce across) and its
-        // observation registrations (the `#on` owner).
+        // The lane mount is the client's (`on_node`): armed inside the
+        // frame pump at the handshake, every stamped arrival intaking
+        // through the lane, the exit sweeping it (routes, transit
+        // asks, settles announced — the stdio's settle subscription
+        // carries the announce across).
+        spec = spec.on_node(shared.node.clone());
+        // The card surface rides the pump-order policy seam, AFTER
+        // the mount's intake (an answerer may answer the moment the
+        // transit entry exists) and always-live — not only during
+        // runs: a card crossing the child's pipe surfaces the moment
+        // it arrives.
+        let asks = Arc::new(AskPolicy::shipped());
+        let policy_asks = asks.clone();
+        let policy_shared = shared.clone();
+        let forwarding = options.forwarding;
+        spec = spec.on_stamped_frame(Arc::new(move |_child: &str, frame: &EventFrame| {
+            let (action, answerers) = policy_asks.lane_action(forwarding, frame.event.tag());
+            match action {
+                // The verbatim crossing: the write alone — the
+                // mount's intake already taught the route and fanned
+                // the local subscribers, so this is never a second
+                // delivery.
+                LaneAction::Forward => policy_shared.stdio.send_event(frame),
+                LaneAction::Answerers => {
+                    for answerer in answerers {
+                        let frame = frame.clone();
+                        crate::spawn_handler(policy_shared.clone(), move |ctx| {
+                            answerer(&ctx, &frame);
+                        });
+                    }
+                }
+                LaneAction::None => {}
+            }
+        }));
+        // The observation registrations sweep with the child too (the
+        // `#on` owner — the mount's sweep covers the lane's id only).
         let sweep = shared.node.clone();
         spec = spec.on_exit(Arc::new(move |id| {
-            sweep.retract(id, "the child exited");
             sweep.retract(&format!("{id}#on"), "the child exited");
         }));
 
         // The driver task owns the handle on the SDK's runtime: one
-        // loop — commands in, the shared settle fold under the tap
-        // that feeds the node's intake, the settlement reported per
-        // run. The lane is built here (it needs the handshake's id).
+        // loop — commands in, the shared settle fold per run, the
+        // settlement reported back.
         let (spawn_tx, spawn_rx) = std::sync::mpsc::channel::<Result<String, String>>();
         let (cmd_tx, cmd_rx) = std::sync::mpsc::channel::<ChildCmd>();
-        let forwarding = options.forwarding;
-        let node = shared.node.clone();
-        let stdio = shared.stdio.clone();
-        let driver_shared = shared.clone();
-        let asks = Arc::new(AskPolicy::shipped());
-        let driver_asks = asks.clone();
         runtime().spawn(async move {
             let mut handle = match spec.spawn().await {
                 Ok(handle) => handle,
@@ -265,64 +287,20 @@ impl Child {
                     return;
                 }
             };
-            // The child's lane: a channel over the handle's writer —
-            // the transit deliveries (answers home, routed commands)
-            // cross the child's stdin through it. Its owner is the
-            // child's id: the arrival-skip and the death-sweep key
-            // for everything routed, held, or learned on this pipe.
-            let writer = handle.commands();
-            let lane = Channel::line(handle.id(), move |line: &str| {
-                let _ = writer.send(line.to_string());
-            });
             let _ = spawn_tx.send(Ok(handle.id().to_string()));
             while let Ok(command) = cmd_rx.recv() {
                 match command {
                     ChildCmd::Run { task, reply } => {
                         handle.prompt(task);
-                        let asks = driver_asks.clone();
-                        let shared = driver_shared.clone();
-                        let node = node.clone();
-                        let lane = lane.clone();
-                        let stdio = stdio.clone();
-                        let settled = handle
-                            .settle_with_tap(None, move |frame| {
-                                // The arrival — this pipe, and only
-                                // this pipe: every frame through the
-                                // node's intake first (the transit
-                                // cards register, the observation
-                                // fans — an answerer may answer the
-                                // moment the entry exists), then the
-                                // lane's own crossing rules.
-                                node.intake(&lane, Inbound::Event(frame.clone()));
-                                let (action, answerers) =
-                                    asks.lane_action(forwarding, frame.event.tag());
-                                match action {
-                                    // The verbatim crossing: the write
-                                    // alone — the intake already
-                                    // taught the route and fanned the
-                                    // local subscribers, so this is
-                                    // never a second delivery.
-                                    LaneAction::Forward => stdio.send_event(frame),
-                                    LaneAction::Answerers => {
-                                        for answerer in answerers {
-                                            let frame = frame.clone();
-                                            crate::spawn_handler(shared.clone(), move |ctx| {
-                                                answerer(&ctx, &frame);
-                                            });
-                                        }
-                                    }
-                                    LaneAction::None => {}
-                                }
-                            })
-                            .await;
+                        let settled = handle.settle(None).await;
                         let _ = reply.send(Ok(settled));
                     }
                     ChildCmd::Kill => handle.close(),
                 }
             }
             // The commands sender drops with the Child clones; the
-            // handle drops here — the reaper bounds the exit, and its
-            // tap sweeps the node.
+            // handle drops here — the reaper bounds the exit, and the
+            // mount's sweep clears the node.
         });
         let id = spawn_rx
             .recv()
@@ -449,6 +427,7 @@ fn refuse_ask_kind(kind: &str) -> Result<(), String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use tabit_wire::node::{Channel, Inbound};
 
     /// The ask law: the shipped default owns the card kind's
     /// crossing until the first author answerer retires it;

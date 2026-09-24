@@ -8,20 +8,21 @@
 //! shared client owns the wire (handshake, pump, reaper); this
 //! adapter owns the session machinery hung on its seams:
 //!
-//! - **the child's lane on the node**: the pump's tap intakes every
-//!   stamped frame through the child's channel — one act, three laws
-//!   served. The frame fans to whoever subscribes (the frontend's
-//!   forwarder — forward, don't re-stamp: the child's stamps are
-//!   already its session ids); its stamp teaches the learning table
-//!   which child subtree owns the id, so a command addressed to a
-//!   grandchild walks hop by hop; and an ask minted in the child's
-//!   subtree registers its answer route home through the same lane.
-//!   The child's backend-level frames (the handshake, its catalog,
-//!   its unstamped errors) are consumed in the client — they would
-//!   collide with the parent's connection-level fold.
-//! - **the exit sweep**: the exit tap retracts the child's lane —
-//!   its learned routes and any in-flight transit asks sweep with it
-//!   (the death's settles announce, law 5).
+//! - **the child's lane on the node** ([`ChildSpec::on_node`] — the
+//!   client's own mount): the pump arms the lane at the handshake's
+//!   resolution and intakes every stamped frame through it — one
+//!   act, three laws served. The frame fans to whoever subscribes
+//!   (the frontend's forwarder — forward, don't re-stamp: the
+//!   child's stamps are already its session ids); its stamp teaches
+//!   the learning table which child subtree owns the id, so a
+//!   command addressed to a grandchild walks hop by hop; and an ask
+//!   minted in the child's subtree registers its answer route home
+//!   through the same lane. The child's backend-level frames (the
+//!   handshake, its catalog, its unstamped errors) are consumed in
+//!   the client — they would collide with the parent's
+//!   connection-level fold. The exit sweeps the lane — learned
+//!   routes and in-flight transit asks go with it (the death's
+//!   settles announce, law 5).
 //! - **the drive fold**: one task to a terminal under the abort
 //!   leash, mapped to the session's [`RunSummary`].
 //! - **abort is a courtesy with a deadline** (owner ruling 2026-09):
@@ -35,10 +36,11 @@
 use crate::session::RunSummary;
 use crate::subagent::SpawnContext;
 use rig_agent::completion::Message;
-use std::sync::{Arc, OnceLock};
-use tabit_protocol::{EventFrame, ModelSelection, SessionEvent};
+use std::sync::Arc;
+use tabit_protocol::{ModelSelection, SessionEvent};
 use tabit_wire::client::ChildSpec;
-use tabit_wire::node::{Channel, Inbound, Node};
+use tabit_wire::node::Node;
+
 use tokio_util::sync::CancellationToken;
 
 /// Shapes one subprocess child before the spawn: the child-role flags
@@ -138,35 +140,15 @@ impl SubprocessBuilder {
         self
     }
 
-    /// Run the child: spawn, handshake, register the lane. Errors are
-    /// display strings — the caller (a tool body) turns them into its
-    /// failure report.
+    /// Run the child: spawn, handshake, mount the lane. The mount is
+    /// the client's ([`ChildSpec::on_node`]): the lane arms inside
+    /// the frame pump at the handshake's resolution — no frame can
+    /// beat it — every stamped arrival intakes through it, and the
+    /// child's exit sweeps it (routes, transit asks, settles
+    /// announced). Errors are display strings — the caller (a tool
+    /// body) turns them into its failure report.
     pub async fn spawn(self) -> Result<SubprocessChild, String> {
-        // The child's lane: set the moment the handle exists (events
-        // only flow after the handshake, which `spawn` awaited — no
-        // frame can beat the set). The tap intakes through it; the
-        // exit retracts it.
-        let lane: Arc<OnceLock<Channel>> = Arc::new(OnceLock::new());
-        let tap_lane = lane.clone();
-        let tap_node = self.node.clone();
-        let sweep_node = self.node.clone();
-        let spec = self
-            .spec
-            .on_stamped_frame(Arc::new(move |_child: &str, frame: &EventFrame| {
-                if frame.stream.is_some()
-                    && let Some(lane) = tap_lane.get()
-                {
-                    tap_node.intake(lane, Inbound::Event(frame.clone()));
-                }
-            }))
-            .on_exit(Arc::new(move |child| {
-                sweep_node.retract(child, "the child exited");
-            }));
-        let handle = spec.spawn().await?;
-        let commands = handle.commands();
-        let _ = lane.set(Channel::line(handle.id(), move |line: &str| {
-            let _ = commands.send(line.to_string());
-        }));
+        let handle = self.spec.on_node(self.node).spawn().await?;
         Ok(SubprocessChild { handle })
     }
 }
@@ -222,6 +204,12 @@ impl SubprocessChild {
     /// process fully reclaimed).
     pub async fn wait_exit(&mut self) {
         self.handle.wait_exit().await;
+    }
+
+    /// Begin the child's shutdown (idempotent): stdin closes, the
+    /// reaper's grace bounds the exit with the tree kill.
+    pub fn close(&self) {
+        self.handle.close();
     }
 }
 

@@ -175,3 +175,112 @@ async fn a_missing_executable_fails_the_spawn_with_the_exe_named() {
     };
     assert!(error.contains("tabit-child.exe"), "{error}");
 }
+
+/// The bridge's mount invariant, over a REAL child: the child's
+/// first stamped frames — its `session_opened` lands right after the
+/// handshake ack, usually in the same pipe read — must reach the
+/// node's fan (the frontend's subscription hears them; the learning
+/// table learns the child's stream). The pre-mount bug this pins:
+/// the lane was caller-assembled after `spawn` returned, so any
+/// frame the pump read before the caller set the lane dropped from
+/// the fan silently (the run still worked — the fold has its own
+/// mirror — but the frontend never saw the child open).
+#[tokio::test]
+async fn a_childs_first_frames_reach_the_node_fan() {
+    let core = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+        .join("..")
+        .join("..")
+        .join("target")
+        .join("debug")
+        .join("tabit-core.exe");
+    if !core.is_file() {
+        eprintln!(
+            "bridge e2e: no tabit-core.exe at {} — \
+             run the workspace suite (scripts/test.sh) to cover it",
+            core.display()
+        );
+        return;
+    }
+    // A minimal offline config, isolated to this test: the child
+    // parses the provider and never calls it (no message is sent —
+    // the child boots, announces, and is killed). The env claim is
+    // ours alone in this test run.
+    let dir = std::env::temp_dir().join(format!("tabit-bridge-e2e-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(dir.join("cwd")).expect("cwd dir");
+    std::fs::create_dir_all(dir.join("ext")).expect("ext dir");
+    std::fs::write(
+        dir.join("providers.toml"),
+        "[providers.offline]\nbase_url = \"http://127.0.0.1:9/v1\"\n\
+         api = \"openai-completions\"\nkeyless = true\n\n\
+         [[providers.offline.models]]\nid = \"dead\"\n",
+    )
+    .expect("the offline provider fragment");
+    unsafe { std::env::set_var("TABIT_CONFIG", dir.join("providers.toml")) };
+
+    let node = std::sync::Arc::new(tabit_wire::node::Node::new("test"));
+    let seen: std::sync::Arc<std::sync::Mutex<Vec<String>>> =
+        std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
+    let sink = seen.clone();
+    node.subscribe_all("recorder", move |frame: &tabit_protocol::EventFrame| {
+        let note = format!(
+            "{}@{}",
+            frame.event.tag(),
+            frame
+                .stream
+                .as_ref()
+                .map(|s| s.as_str().to_string())
+                .unwrap_or_default()
+        );
+        sink.lock().expect("test lock").push(note);
+    });
+    let parts = std::sync::Arc::new(super::SubagentParts {
+        node: node.clone(),
+        exe: core,
+        tools: Vec::new(),
+        max_turns: 1,
+        extensions: dir.join("ext"),
+    });
+    let offline = tabit_protocol::ModelSelection::new("offline", "dead");
+    let ctx = super::SpawnContext::new(
+        parts,
+        "parent-session".to_string(),
+        offline.clone(),
+        dir.join("cwd"),
+    );
+    let mut child = ctx
+        .spawn_subprocess()
+        .cwd(dir.join("cwd"))
+        .model(offline)
+        .ephemeral(true)
+        .spawn()
+        .await
+        .expect("the child spawned and handshook");
+    unsafe { std::env::remove_var("TABIT_CONFIG") };
+    let id = child.id().to_string();
+
+    // Bounded wait: the child's opening announcement must reach the
+    // fan, stamped with the child's stream.
+    let opened = tokio::time::timeout(std::time::Duration::from_secs(20), async {
+        loop {
+            if seen
+                .lock()
+                .expect("test lock")
+                .iter()
+                .any(|note| note.starts_with("session_opened") && note.ends_with(&id))
+            {
+                return;
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+        }
+    })
+    .await;
+    let _ = std::fs::remove_dir_all(&dir);
+    child.close();
+    let _ = child.wait_exit().await;
+    assert!(
+        opened.is_ok(),
+        "the child's session_opened never reached the node's fan: {:?}",
+        seen.lock().expect("test lock")
+    );
+}

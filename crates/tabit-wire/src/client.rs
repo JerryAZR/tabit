@@ -53,6 +53,7 @@ use tabit_protocol::{
 use tokio::io::{AsyncBufReadExt, BufReader};
 use tokio_util::sync::CancellationToken;
 
+use crate::node::{Channel, Inbound, Node};
 use crate::process::{
     HANDSHAKE_TIMEOUT, crash_tail, kill_now, reap_with_grace, spawn_command_writer,
     spawn_stderr_ring, wrap_command,
@@ -87,6 +88,10 @@ pub struct ChildSpec {
     preamble: Option<String>,
     on_stamped_frame: Option<StampedFrameTap>,
     on_exit: Option<ExitTap>,
+    /// The node mount (see [`ChildSpec::on_node`]) — the lane, the
+    /// stamped-arrival intake, and the exit sweep, all owned by the
+    /// pump so no caller can race them.
+    node: Option<Arc<Node>>,
 }
 
 impl ChildSpec {
@@ -109,6 +114,7 @@ impl ChildSpec {
             preamble: None,
             on_stamped_frame: None,
             on_exit: None,
+            node: None,
         }
     }
 
@@ -194,9 +200,11 @@ impl ChildSpec {
         self
     }
 
-    /// The pump-order tap for stamped frames (the bridge's
-    /// forward-and-learn seam). Frames cross to the handle's channel
-    /// either way; the tap is the extra, ordered look.
+    /// The pump-order tap for stamped frames — the per-frame policy
+    /// seam, fired AFTER the node mount's intake (a policy may answer
+    /// a card the moment its transit entry exists). Frames cross to
+    /// the handle's channel either way; the tap is the extra, ordered
+    /// look.
     pub fn on_stamped_frame(mut self, tap: StampedFrameTap) -> Self {
         self.on_stamped_frame = Some(tap);
         self
@@ -206,6 +214,22 @@ impl ChildSpec {
     /// reaper finished with the process.
     pub fn on_exit(mut self, tap: ExitTap) -> Self {
         self.on_exit = Some(tap);
+        self
+    }
+
+    /// Mount the child on a node — THE lane mount, one home for every
+    /// driver (the bridge, the SDK's owned children): the child's
+    /// lane (a channel over its own writer, owned by the handshake's
+    /// id) is constructed inside the frame pump at the handshake's
+    /// resolution — before any later frame can be read, so nothing
+    /// can beat it (the caller-assembled mount this replaces dropped
+    /// a child's first frames whenever they shared the pipe read with
+    /// the ack). Every stamped arrival intakes through the lane (the
+    /// fan, the learning table, the ask route home); the child's exit
+    /// retracts the lane (learned routes and transit asks sweep with
+    /// it, every stranded card settling announced).
+    pub fn on_node(mut self, node: Arc<Node>) -> Self {
+        self.node = Some(node);
         self
     }
 
@@ -228,6 +252,7 @@ impl ChildSpec {
             preamble,
             on_stamped_frame,
             on_exit,
+            node: mount,
         } = self;
 
         let mut args: Vec<String> = vec!["--json".to_string()];
@@ -305,14 +330,21 @@ impl ChildSpec {
 
         // The frame pump: handshake frames resolve here, stamped
         // frames cross as-is (their stream stamps are already their
-        // session ids) and reach the tap in pump order, everything
-        // mirrored to the frames channel.
+        // session ids) and reach the mount's intake and the tap in
+        // pump order, everything mirrored to the frames channel.
+        // The mount's lane is constructed at the handshake's
+        // resolution — the same pump iteration that saw the ack — so
+        // no later frame can beat it, whatever pipe read it arrived
+        // in.
         let (frame_tx, frame_rx) = tokio::sync::mpsc::unbounded_channel::<EventFrame>();
         let (handshake_tx, handshake_rx) = tokio::sync::oneshot::channel::<Handshake>();
+        let lane_writer = command_tx.clone();
+        let pump_mount = mount.clone();
         tokio::spawn(async move {
             let mut lines = BufReader::new(stdout).lines();
             let mut child_id: Option<String> = None;
             let mut handshake_tx = Some(handshake_tx);
+            let mut lane: Option<Channel> = None;
             while let Ok(Some(line)) = lines.next_line().await {
                 let Ok(frame) = serde_json::from_str::<ServerFrame>(&line) else {
                     continue;
@@ -323,6 +355,16 @@ impl ChildSpec {
                             let outcome = match &control {
                                 ServerControlFrame::InitializeAck { session_id, .. } => {
                                     child_id = Some(session_id.clone());
+                                    // The lane mount: armed here, in
+                                    // the pump's own order — before
+                                    // any Event frame is read.
+                                    if pump_mount.is_some() {
+                                        let writer = lane_writer.clone();
+                                        lane =
+                                            Some(Channel::line(session_id, move |line: &str| {
+                                                let _ = writer.send(line.to_string());
+                                            }));
+                                    }
                                     Handshake::Acked(session_id.clone())
                                 }
                                 ServerControlFrame::InitializeRejected { reason } => {
@@ -339,12 +381,30 @@ impl ChildSpec {
                         // — consumed here, never forwarded.
                     }
                     ServerFrame::Event(frame) => {
+                        // The mount's intake first (the transit cards
+                        // register, the observation fans — a policy
+                        // tap may answer the moment the entry
+                        // exists); the policy tap after, in pump
+                        // order; the fold's mirror either way.
+                        if let (Some(node), Some(lane)) = (&pump_mount, &lane)
+                            && frame.stream.is_some()
+                        {
+                            node.intake(lane, Inbound::Event(frame.clone()));
+                        }
                         if let (Some(tap), Some(id)) = (&on_stamped_frame, &child_id) {
                             tap(id, &frame);
                         }
                         let _ = frame_tx.send(frame);
                     }
                 }
+            }
+            // The pipe's end sweeps the mounted lane: learned routes
+            // and transit asks go, every stranded card settling
+            // announced. (The reaper's exit path sweeps too — this is
+            // the stdout-closed shape, that one the process shape;
+            // the sweep is idempotent.)
+            if let (Some(node), Some(id)) = (&pump_mount, &child_id) {
+                node.retract(id, "the child pipe closed");
             }
         });
 
@@ -379,6 +439,7 @@ impl ChildSpec {
         let closing_for_reaper = closing.clone();
         let exit = Arc::new(Mutex::new(None::<String>));
         let exit_for_reaper = exit.clone();
+        let sweep_mount = mount.clone();
         let join = tokio::spawn(async move {
             let status = tokio::select! {
                 status = process.wait() => Some(status),
@@ -391,6 +452,12 @@ impl ChildSpec {
             if let Some(status) = status {
                 *lock(&exit_for_reaper) =
                     Some(format!("exit code {}", status.code().unwrap_or(-1)));
+            }
+            // The mounted lane sweeps with the process (the pump's
+            // own sweep covers the stdout-EOF shape; this one covers
+            // a grandchild holding the pipe open past the exit).
+            if let Some(node) = &sweep_mount {
+                node.retract(&child_id_for_exit, "the child exited");
             }
             if let Some(tap) = &on_exit {
                 tap(&child_id_for_exit);
@@ -502,20 +569,10 @@ impl ChildHandle {
     /// (grandchildren's frames skip — their owners forward them),
     /// the crash synthesis, and the abort courtesy-with-deadline all
     /// live here; mapping the settlement to the driver's own
-    /// vocabulary is the caller's policy.
+    /// vocabulary is the caller's policy. (The frame *policy* seam
+    /// is the spec's [`ChildSpec::on_stamped_frame`] — fired in pump
+    /// order beside this fold's own consumption, never racing it.)
     pub async fn settle(&mut self, token: Option<CancellationToken>) -> Settlement {
-        self.settle_with_tap(token, |_| {}).await
-    }
-
-    /// [`Self::settle`] with a per-frame tap — every frame of this
-    /// child's run reaches the tap (before the fold's own handling)
-    /// so a driver's event subscribers and THE one fold share the
-    /// stream instead of racing two readers over it.
-    pub async fn settle_with_tap(
-        &mut self,
-        token: Option<CancellationToken>,
-        tap: impl Fn(&EventFrame),
-    ) -> Settlement {
         let mut events: Vec<SessionEvent> = Vec::new();
         let started_at_ms = unix_ms();
         loop {
@@ -555,7 +612,6 @@ impl ChildHandle {
                         });
                         return Settlement::Crashed { events };
                     };
-                    tap(&frame);
                     if frame.stream.as_ref() != Some(&self.stream) {
                         continue; // A grandchild's frame — already forwarded.
                     }

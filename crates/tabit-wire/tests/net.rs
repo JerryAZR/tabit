@@ -26,6 +26,7 @@ use std::time::{Duration, Instant};
 
 use serde_json::{Value, json};
 use tabit_protocol::{EventFrame, SessionCommand, SessionEvent, StreamId};
+use tabit_wire::client::ChildSpec;
 use tabit_wire::node::{Channel, Inbound, Node, parse_shared};
 
 fn stub_mode() -> bool {
@@ -303,5 +304,86 @@ fn the_net_laws_hold_over_real_pipes() {
         requests(),
         first_count,
         "no echo growth: the net is stable after the settle"
+    );
+}
+
+/// The built `stub_child` example's path — a sibling of this test
+/// binary under the active target dir (robust to `--target-dir`
+/// overrides). `None` when the example was not built.
+fn stub_child_exe() -> Option<std::path::PathBuf> {
+    let exe = std::env::current_exe().ok()?;
+    let name = if cfg!(windows) {
+        "stub_child.exe"
+    } else {
+        "stub_child"
+    };
+    let examples = exe.parent()?.parent()?.join("examples");
+    let stub = examples.join(name);
+    stub.is_file().then_some(stub)
+}
+
+/// The client's mount invariant, deterministically exposed: a child
+/// whose first stamped frame shares the pipe read with the handshake
+/// ack must still see that frame reach the node's fan. The
+/// caller-assembled mount this test once reproduced (a OnceLock lane
+/// set after `spawn` returned) dropped the burst — the pump read and
+/// tapped it inside the same buffer the ack came in, before the
+/// caller's set could run, three runs out of three. The fix is the
+/// mount's home: [`ChildSpec::on_node`] arms the lane inside the
+/// pump at the handshake's resolution, so nothing can beat it.
+#[test]
+fn the_childs_burst_frame_reaches_the_mounted_lane() {
+    let Some(stub) = stub_child_exe() else {
+        eprintln!(
+            "client burst test: no stub_child example built - run the workspace suite to cover it"
+        );
+        return;
+    };
+    let parent: Arc<Node> = Arc::new(Node::new("parent"));
+    let saw: Arc<Mutex<Vec<String>>> = Arc::new(Mutex::new(Vec::new()));
+    let sink = saw.clone();
+    parent.subscribe_all("recorder", move |frame: &EventFrame| {
+        sink.lock().expect("test lock").push(format!(
+            "{}@{}",
+            frame.event.tag(),
+            frame
+                .stream
+                .as_ref()
+                .map(|s| s.as_str())
+                .unwrap_or_default()
+        ));
+    });
+
+    let spec = ChildSpec::new(stub, std::env::temp_dir()).on_node(parent.clone());
+    let runtime = tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()
+        .expect("the test runtime");
+    // Everything inside one block_on: the current-thread runtime must
+    // stay driven for the pump to poll while the test waits.
+    let (reached, report) = runtime.block_on(async move {
+        let mut handle = spec.spawn().await.expect("spawn");
+        let deadline = Instant::now() + Duration::from_secs(10);
+        let reached = loop {
+            if saw
+                .lock()
+                .expect("test lock")
+                .iter()
+                .any(|seen| seen.contains("error") && seen.ends_with("stub-sess"))
+            {
+                break true;
+            }
+            if Instant::now() > deadline {
+                break false;
+            }
+            tokio::time::sleep(Duration::from_millis(20)).await;
+        };
+        handle.close();
+        let _ = handle.wait_exit().await;
+        (reached, saw.lock().expect("test lock").clone())
+    });
+    assert!(
+        reached,
+        "the burst frame reached the node's fan: {report:?}"
     );
 }
