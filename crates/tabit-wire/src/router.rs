@@ -165,15 +165,19 @@ impl<T: Routed> Router<T> {
     /// own their dispatch (thread, channel, pipe) — the router only
     /// finds and calls.
     pub fn dispatch(&self, frame: &T) {
-        self.dispatch_skipping(frame, "");
+        self.dispatch_skipping(frame, &[]);
     }
 
-    /// Route one frame, never to the subscriber the frame arrived
-    /// through — the Ethernet ingress law: a switch does not forward
-    /// back out the port a frame came in on. Arrivals fan through
-    /// this; locally-originated frames flood every subscriber
+    /// Route one frame, never to the subscribers named in `skip` —
+    /// the Ethernet ingress law (a switch does not forward back out
+    /// the port a frame came in on: arrivals skip the ingress
+    /// channel's owner) and the additional-receiver dedup (an
+    /// emission naming extra channels delivers to them directly, so
+    /// a channel that would also hear via subscription is skipped
+    /// there — one delivery, never two). Locally-originated frames
+    /// with no extra channels flood every subscriber
     /// ([`dispatch`]).
-    pub fn dispatch_skipping(&self, frame: &T, ingress: &str) {
+    pub fn dispatch_skipping(&self, frame: &T, skip: &[&str]) {
         let kind_subscribers = lock(&self.by_kind)
             .get(frame.route_key())
             .cloned()
@@ -184,12 +188,12 @@ impl<T: Routed> Router<T> {
         // arrived under.
         let wildcards = lock(&self.wildcard).clone();
         for subscriber in kind_subscribers {
-            if subscriber.owner != ingress {
+            if !skip.contains(&subscriber.owner.as_str()) {
                 (subscriber.callback)(frame);
             }
         }
         for subscriber in wildcards {
-            if subscriber.owner != ingress {
+            if !skip.contains(&subscriber.owner.as_str()) {
                 (subscriber.callback)(frame);
             }
         }

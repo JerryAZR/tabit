@@ -17,7 +17,13 @@
 //!    to arrivals only). Node-originated frames carry a **hop
 //!    budget** (the TTL tripwire): each crossing decrements, expiry
 //!    drops the frame loudly — a misconfigured routing loop,
-//!    normally never fired.
+//!    normally never fired. A **local emission may name additional
+//!    receivers** (the 2026-09 override-path ruling): channels the
+//!    frame is delivered to directly, beside the fan, deduplicated
+//!    against subscription — the way a node whose stdio subscribes
+//!    to nothing still speaks across it (subscription is
+//!    hearing-only; the additional-receiver fact never crosses the
+//!    wire).
 //! 2. **Session-addressed commands route by the learning table** —
 //!    one lookup, no separate worker map; a miss is the uniform
 //!    unstamped `error { kind: session }` (the failure belongs to no
@@ -428,7 +434,7 @@ impl<C: Routed> Node<C> {
                         },
                     );
                 }
-                self.events.dispatch_skipping(&frame, from.owner());
+                self.events.dispatch_skipping(&frame, &[from.owner()]);
             }
             Inbound::Command(command) => self.route_command(command),
         }
@@ -442,14 +448,33 @@ impl<C: Routed> Node<C> {
     /// its own emissions — is untouched by it). Ask minting is NOT
     /// this path: local askers hold promises from [`Node::ask`],
     /// silent round-trips hold through [`Node::hold`].
-    pub fn emit(&self, from: &Channel, mut frame: EventFrame) {
+    pub fn emit(&self, from: &Channel, frame: EventFrame) {
+        self.emit_to(from, &[], frame);
+    }
+
+    /// [`Node::emit`] with the override path (2026-09 ruling): a
+    /// local emission may name **additional receivers** — channels
+    /// the frame is delivered to directly, beside the subscriber fan.
+    /// This is how a node whose stdio subscribes to nothing still
+    /// speaks across it (an extension's own asks and events leave by
+    /// naming the stdio; its children's arrivals do not auto-cross —
+    /// subscription stays hearing-only). Deduplicated by owner: a
+    /// channel that would also hear via subscription is skipped
+    /// there, so no receiver sees the frame twice. The
+    /// additional-receiver fact is a parameter of the emission, never
+    /// a frame field — it does not exist on the wire.
+    pub fn emit_to(&self, from: &Channel, additional: &[Channel], mut frame: EventFrame) {
         if frame.ttl.is_none() {
             frame.ttl = Some(HOP_BUDGET);
         }
         if let Some(stream) = frame.stream.as_ref().map(StreamId::as_str) {
             lock(&self.learned).insert(stream.to_string(), from.clone());
         }
-        self.events.dispatch(&frame);
+        let skip: Vec<&str> = additional.iter().map(Channel::owner).collect();
+        for channel in additional {
+            channel.deliver_event(&frame);
+        }
+        self.events.dispatch_skipping(&frame, &skip);
     }
 
     /// A command crossing this node: response-type claims the ask

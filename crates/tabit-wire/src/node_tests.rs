@@ -1089,3 +1089,160 @@ fn a_hand_emitted_ask_on_a_local_channel_has_no_answer_home() {
         saw.events()
     );
 }
+
+/// The override path (2026-09 ruling): a local emission may name
+/// additional receivers — delivered directly, beside the subscriber
+/// fan, so a node whose stdio subscribes to nothing still speaks
+/// across it.
+#[test]
+fn an_emission_can_name_additional_receivers() {
+    let node = Arc::new(Node::new("ext"));
+    let (layer, saw) = stub_layer(&node, "layer");
+
+    // The stdio: a line channel subscribed to NOTHING (the opt-in
+    // ruling — hearing only).
+    let up_the_pipe: Arc<Mutex<Vec<String>>> = Arc::new(Mutex::new(Vec::new()));
+    let sink = up_the_pipe.clone();
+    let stdio = Channel::line("stdio", move |line: &str| {
+        sink.lock().expect("test lock").push(line.to_string());
+    });
+
+    node.emit_to(
+        &layer,
+        &[stdio],
+        EventFrame {
+            stream: None,
+            origin: None,
+            ttl: None,
+            event: SessionEvent::error_session("the ext speaks".to_string()),
+        },
+    );
+
+    // It crossed the pipe AND the fan reached the subscriber.
+    assert_eq!(up_the_pipe.lock().expect("test lock").len(), 1);
+    assert!(
+        saw.has("error:session@-"),
+        "the fan is untouched by the override: {:?}",
+        saw.events()
+    );
+}
+
+/// The dedup: a channel that would also hear via subscription —
+/// because it is one — receives exactly once.
+#[test]
+fn additional_receivers_dedupe_against_subscriptions() {
+    let node = Arc::new(Node::new("core"));
+    let (layer, _saw) = stub_layer(&node, "layer");
+
+    let heard: Arc<Mutex<Vec<String>>> = Arc::new(Mutex::new(Vec::new()));
+    let sink = heard.clone();
+    let both = Channel::local(
+        "both",
+        move |frame: &EventFrame| {
+            sink.lock()
+                .expect("test lock")
+                .push(frame.event.tag().to_string());
+        },
+        |_| {},
+    );
+    {
+        let deliver = heard.clone();
+        node.subscribe(tags::ERROR, "both", move |frame: &EventFrame| {
+            deliver
+                .lock()
+                .expect("test lock")
+                .push(frame.event.tag().to_string());
+        });
+    }
+
+    node.emit_to(
+        &layer,
+        &[both],
+        EventFrame {
+            stream: None,
+            origin: None,
+            ttl: None,
+            event: SessionEvent::error_session("once".to_string()),
+        },
+    );
+    assert_eq!(
+        heard.lock().expect("test lock").len(),
+        1,
+        "a channel that hears via subscription AND is named additional sees the frame once"
+    );
+}
+
+/// The ruling's whole scenario at an extension-shaped node: the
+/// stdio subscribes to nothing, so a child's arrivals do not
+/// auto-cross it — while the layer's own speech (and its manual
+/// forward of a captured frame) leaves by naming it.
+#[test]
+fn an_extension_shaped_node_speaks_but_does_not_relay() {
+    let node: Arc<Node> = Arc::new(Node::new("ext"));
+
+    let up_the_pipe: Arc<Mutex<Vec<String>>> = Arc::new(Mutex::new(Vec::new()));
+    let sink = up_the_pipe.clone();
+    let stdio = Channel::line("stdio", move |line: &str| {
+        sink.lock().expect("test lock").push(line.to_string());
+    });
+
+    // The layer captures message-shaped events (its opt-in watch) and
+    // holds the stdio for its own speech.
+    let captured: Arc<Mutex<Vec<String>>> = Arc::new(Mutex::new(Vec::new()));
+    let sink = captured.clone();
+    node.subscribe("text_delta", "capture", move |frame: &EventFrame| {
+        let note = match &frame.event {
+            SessionEvent::TextDelta { text, .. } => text.clone(),
+            event => event.tag().to_string(),
+        };
+        sink.lock().expect("test lock").push(note);
+    });
+
+    // A child's frame arrives from its lane: the capture hears it,
+    // the stdio (subscribed to nothing) does not carry it up.
+    let child_lane = Channel::line("child", |_| {});
+    node.intake(
+        &child_lane,
+        Inbound::Event(EventFrame {
+            stream: Some(StreamId::new("child-sess")),
+            origin: None,
+            ttl: None,
+            event: SessionEvent::TextDelta {
+                turn_id: "t".to_string(),
+                text: "the child streams".to_string(),
+            },
+        }),
+    );
+    assert_eq!(
+        captured.lock().expect("test lock").clone(),
+        vec!["the child streams".to_string()],
+        "the opt-in capture heard the child"
+    );
+    assert!(
+        up_the_pipe.lock().expect("test lock").is_empty(),
+        "nothing auto-crosses the stdio"
+    );
+
+    // The layer's manual forward of the captured frame: re-emitted
+    // with the stdio as an additional receiver, FROM the lane the
+    // frame arrived on (re-teaching the lane is idempotent; teaching
+    // the stdio would hijack the child's route).
+    node.emit_to(
+        &child_lane,
+        &[stdio],
+        EventFrame {
+            stream: Some(StreamId::new("child-sess")),
+            origin: None,
+            ttl: None,
+            event: SessionEvent::TextDelta {
+                turn_id: "t".to_string(),
+                text: "the child streams".to_string(),
+            },
+        },
+    );
+    assert_eq!(
+        up_the_pipe.lock().expect("test lock").len(),
+        1,
+        "the manual forward crossed"
+    );
+}

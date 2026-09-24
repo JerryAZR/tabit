@@ -84,7 +84,10 @@ Current workspace layout:
   tables and their one law each (events by type + the learning
   table, commands by learning table or by type, asks by id —
   `Channel` the routable primitive: the in-process layer, the
-  process's stdio, a spawned node's stdio); `router.rs` is THE
+  process's stdio, a spawned node's stdio; a local emission may name
+  additional receivers — the override path by which a node whose
+  stdio subscribes to nothing still speaks across it, deduplicated
+  against subscription and never serialized); `router.rs` is THE
   event router (register by kind or wildcard, dispatch, retract by
   owner — each callback owns its own dispatch); `asks.rs` is THE
   pending-question registry (one entry per open round-trip: an owner
