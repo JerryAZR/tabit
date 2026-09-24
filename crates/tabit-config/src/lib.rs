@@ -205,11 +205,14 @@ impl TabitConfig {
         Self::from_toml_str(&raw, path)
     }
 
-    /// Load the default config: the file named by `$TABIT_CONFIG`, else
-    /// `<home>/.tabit/providers.toml`. `$TABIT_CONFIG` is the
-    /// debugging/local override — point it at a scratch config instead of
-    /// touching the real one. (A future CLI flag will outrank the env var;
-    /// more specific scopes win.) Fails with [`ConfigError::NotFound`]
+    /// Load the default config: the file named by `$TABIT_CONFIG`
+    /// (which **replaces** the home location — set but missing is
+    /// [`ConfigError::NotFound`], no fallthrough), else
+    /// `<home>/.tabit/providers.toml`; `$TABIT_CONFIG_EXTRA` appends
+    /// one more candidate. The env vars are the debugging/local
+    /// override — point at a scratch config instead of touching the
+    /// real one. (A future CLI flag will outrank the env vars; more
+    /// specific scopes win.) Fails with [`ConfigError::NotFound`]
     /// listing every candidate when none exists.
     pub fn load_default() -> Result<Self, ConfigError> {
         let candidates = default_config_paths();
@@ -401,15 +404,21 @@ fn validate_provider(provider_id: &str, provider: &Provider, issues: &mut Vec<St
     }
 }
 
-/// The default config search path: `$TABIT_CONFIG`, then
-/// `<home>/.tabit/providers.toml`.
+/// The default config search path. `$TABIT_CONFIG` **replaces** the
+/// home file (the `$TABIT_SETTINGS`/`$TABIT_AUTH` pattern — a set
+/// but missing path is [`ConfigError::NotFound`], never a silent
+/// fallthrough to the user's real config); `$TABIT_CONFIG_EXTRA`
+/// appends one more candidate after whatever the base is (the
+/// additional-layer knob).
 fn default_config_paths() -> Vec<PathBuf> {
     let mut paths = Vec::new();
     if let Some(from_env) = std::env::var_os("TABIT_CONFIG") {
         paths.push(PathBuf::from(from_env));
-    }
-    if let Some(home) = home_dir() {
+    } else if let Some(home) = home_dir() {
         paths.push(home.join(".tabit").join("providers.toml"));
+    }
+    if let Some(extra) = std::env::var_os("TABIT_CONFIG_EXTRA") {
+        paths.push(PathBuf::from(extra));
     }
     paths
 }

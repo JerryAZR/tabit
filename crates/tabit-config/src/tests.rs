@@ -246,10 +246,9 @@ fn load_reads_a_real_file() {
 
 #[test]
 fn load_default_lists_candidates_when_nothing_exists() {
-    // Point TABIT_CONFIG at a path that does not exist and remove any home
-    // candidates from play by checking only that the error is NotFound and
-    // names the env-provided candidate. A real home file would make this
-    // test environment-dependent, so we only assert on the env candidate.
+    // $TABIT_CONFIG REPLACES the home location: set but missing is
+    // NotFound, deterministically — never a silent fallthrough to the
+    // user's real config (the replacement ruling 2026-09).
     let _guard = OVERRIDE_ENV_LOCK.lock().expect("env lock");
     let missing = std::env::temp_dir().join("tabit-config-tests/nope.toml");
     // SAFETY: serialized by OVERRIDE_ENV_LOCK.
@@ -266,10 +265,8 @@ fn load_default_lists_candidates_when_nothing_exists() {
             let msg = err.to_string();
             assert!(msg.contains("nope.toml"), "{msg}");
         }
-        // A home config may legitimately exist on this machine; that is not
-        // a failure of the lookup logic, so the test accepts it.
-        Ok(_) => {}
         Err(other) => panic!("unexpected error: {other}"),
+        Ok(_config) => panic!("a set-but-missing TABIT_CONFIG must not fall through"),
     }
 }
 
@@ -306,6 +303,81 @@ api = "openai-completions"
         .expect("config came from the override file, not the home default");
     assert_eq!(provider.base_url, "http://127.0.0.1:9999/v1");
     std::fs::remove_file(&path).expect("cleanup");
+}
+
+/// `$TABIT_CONFIG_EXTRA` appends one more candidate behind the base:
+/// the base wins when it exists, the extra serves when it alone
+/// does.
+#[test]
+fn load_default_appends_tabit_config_extra() {
+    let _guard = OVERRIDE_ENV_LOCK.lock().expect("env lock");
+    let dir = std::env::temp_dir().join("tabit-config-tests");
+    std::fs::create_dir_all(&dir).expect("temp dir");
+    let base = dir.join("extra_base.toml");
+    let extra = dir.join("extra_only.toml");
+    std::fs::write(
+        &base,
+        r#"
+[providers.base-wins]
+base_url = "http://127.0.0.1:1/v1"
+api = "openai-completions"
+"#,
+    )
+    .expect("write base");
+    std::fs::write(
+        &extra,
+        r#"
+[providers.extra-serves]
+base_url = "http://127.0.0.1:2/v1"
+api = "openai-completions"
+"#,
+    )
+    .expect("write extra");
+    // The base outranks the extra: first-found wins.
+    // SAFETY: serialized by OVERRIDE_ENV_LOCK.
+    unsafe {
+        std::env::set_var("TABIT_CONFIG", &base);
+        std::env::set_var("TABIT_CONFIG_EXTRA", &extra);
+    }
+    let config = TabitConfig::load_default().expect("loaded");
+    // SAFETY: see above.
+    unsafe {
+        std::env::remove_var("TABIT_CONFIG");
+        std::env::remove_var("TABIT_CONFIG_EXTRA");
+    }
+    assert!(
+        config.provider("base-wins").is_some(),
+        "the base outranks the extra"
+    );
+    // The extra alone serves when the base is missing (replace
+    // semantics: a set-but-missing base is NotFound, so this needs
+    // the extra to be found).
+    // SAFETY: serialized by OVERRIDE_ENV_LOCK.
+    unsafe {
+        std::env::set_var(
+            "TABIT_CONFIG",
+            std::env::temp_dir().join("tabit-config-tests/absent.toml"),
+        );
+        std::env::set_var("TABIT_CONFIG_EXTRA", &extra);
+    }
+    let result = TabitConfig::load_default();
+    // SAFETY: see above.
+    unsafe {
+        std::env::remove_var("TABIT_CONFIG");
+        std::env::remove_var("TABIT_CONFIG_EXTRA");
+    }
+    match result {
+        Ok(config) => assert!(
+            config.provider("extra-serves").is_some(),
+            "the extra serves when the base is missing"
+        ),
+        // A home config may exist on this machine only when neither
+        // candidate exists — impossible here (the extra exists), so
+        // any NotFound is a bug.
+        Err(other) => panic!("the extra candidate must serve: {other}"),
+    }
+    std::fs::remove_file(&base).expect("cleanup");
+    std::fs::remove_file(&extra).expect("cleanup");
 }
 
 #[test]
