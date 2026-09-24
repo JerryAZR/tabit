@@ -35,6 +35,11 @@ impl Saw {
 /// The stub functional layer: a local channel that subscribes to
 /// every event kind and records, with a mailbox the learning table
 /// routes into. Returns the channel and the recording.
+/// The TTL test's cross-wiring slots (the two sides reference each
+/// other; OnceLock breaks the cycle).
+static A_SIDE: OnceLock<Channel> = OnceLock::new();
+static B_SIDE: OnceLock<Channel> = OnceLock::new();
+
 fn stub_layer(node: &Node, name: &str) -> (Channel, Saw) {
     let saw = Saw::default();
     let events = saw.events.clone();
@@ -104,6 +109,7 @@ fn stamped(session: &str) -> EventFrame {
     EventFrame {
         stream: Some(StreamId::new(session)),
         origin: None,
+        ttl: None,
         event: SessionEvent::error_session(format!("the {session} stream's first emission")),
     }
 }
@@ -131,6 +137,7 @@ fn events_fan_by_type_and_compose() {
         EventFrame {
             stream: Some(StreamId::new("s-1")),
             origin: None,
+            ttl: None,
             event: SessionEvent::RunFinished {
                 output: String::new(),
                 started_at_ms: 0,
@@ -413,6 +420,7 @@ fn unstamped_arrivals_are_attributed_and_stamped_cross_verbatim() {
         EventFrame {
             stream: None,
             origin: None,
+            ttl: None,
             event: SessionEvent::error_session("an emission".to_string()),
         },
     );
@@ -473,12 +481,14 @@ fn a_wrong_kind_answer_breaks_loudly_not_fatal() {
     assert_eq!(saw.events().len(), before, "the consumed entry is gone");
 }
 
-/// Law 4's first-arrival rule: an ask's echo re-arriving on another
-/// channel cannot steal the entry — the answer routes to the first
-/// arrival's channel.
+/// Law 4's collision rule (2026-09 ruling): an ask's echo
+/// re-arriving finds the entry live and PANICS — a mint-law
+/// violation, surfaced, never masked (the TTL law kills accidental
+/// echo loops before they ever reach this).
 #[test]
-fn an_ask_echo_cannot_steal_the_entry() {
-    let node = Arc::new(Node::new("core"));
+#[should_panic(expected = "the mint law was violated")]
+fn an_ask_echo_re_registered_panics() {
+    let node: Arc<Node> = Arc::new(Node::new("core"));
     let first_lines: Arc<Mutex<Vec<String>>> = Arc::new(Mutex::new(Vec::new()));
     let second_lines: Arc<Mutex<Vec<String>>> = Arc::new(Mutex::new(Vec::new()));
 
@@ -494,39 +504,17 @@ fn an_ask_echo_cannot_steal_the_entry() {
     let ask = EventFrame {
         stream: None,
         origin: None,
+        ttl: None,
         event: SessionEvent::InteractionRequest {
             id: "ext-a-ask-1".to_string(),
             ui_type: "native:select_any".to_string(),
             payload: json!({}),
         },
     };
-    // The ask arrives; its echo re-arrives on the other channel.
+    // The ask arrives; its echo re-arrives on the other channel —
+    // the live id re-registers, the sanctioned crash.
     node.intake(&first, Inbound::Event(ask.clone()));
     node.intake(&second, Inbound::Event(ask));
-
-    node.intake(
-        &Channel::local("frontend", |_| {}, |_| {}),
-        Inbound::Command(SessionCommand::InteractionResponse {
-            session: None,
-            id: "ext-a-ask-1".to_string(),
-            payload: json!({"text": "home"}),
-        }),
-    );
-
-    let first = first_lines.lock().expect("test lock").clone();
-    let second = second_lines.lock().expect("test lock").clone();
-    assert!(
-        first
-            .iter()
-            .any(|line| line.contains("interaction_response") && line.contains("ext-a-ask-1")),
-        "the answer routed to the first arrival: {first:?}"
-    );
-    assert!(
-        !second
-            .iter()
-            .any(|line| line.contains("interaction_response")),
-        "the echo's channel got nothing: {second:?}"
-    );
 }
 
 /// Law 1's ingress half: a mirrored frame arriving back on the pipe
@@ -585,8 +573,8 @@ fn a_run_death_retracts_asks_but_keeps_routes() {
 
     node.retract_asks("run-1", "the run ended");
     assert!(
-        saw.has("settled:core-a1@sess-1"),
-        "the run's question settled, announced: {:?}",
+        saw.has("settled:core-a1"),
+        "the run's question settled, announced by the sweep: {:?}",
         saw.events()
     );
 
@@ -601,5 +589,155 @@ fn a_run_death_retracts_asks_but_keeps_routes() {
         saw.commands(),
         vec!["abort"],
         "the layer's route survived the run's death"
+    );
+}
+
+/// Law 5's routing half: the origin's settle, passing through a node
+/// that still holds a routed entry for the ask, clears it — a late
+/// answer at that node finds nothing and drops.
+#[test]
+fn a_routing_settle_clears_entries_on_arrival() {
+    let parent = Arc::new(Node::new("parent"));
+    let child = Arc::new(Node::new("child"));
+    let _child_at_parent = wire(&parent, &child, "child");
+
+    let (parent_layer, parent_saw) = stub_layer(&parent, "parent-layer");
+    let (_child_layer, _child_saw) = stub_layer(&child, "child-layer");
+
+    // The child asks; the parent's routed entry exists; the origin's
+    // run dies — the sweep's settle routes up through the parent,
+    // clearing its routed entry.
+    drop(child.ask(
+        "child-layer",
+        &StreamId::new("sess-child"),
+        "native:select_any",
+        json!({"body": "cleared en route"}),
+    ));
+    child.retract_asks("child-layer", "the run ended");
+    std::thread::sleep(Duration::from_millis(20));
+
+    // A late answer at the parent: a miss (the entry cleared), not a
+    // mismatch — no error fired, nothing delivered.
+    let before = parent_saw.events().len();
+    parent.intake(
+        &parent_layer,
+        Inbound::Command(SessionCommand::InteractionResponse {
+            session: None,
+            id: "child-a1".to_string(),
+            payload: json!({"text": "too late"}),
+        }),
+    );
+    assert_eq!(
+        parent_saw.events().len(),
+        before,
+        "the cleared entry made the late answer a silent drop"
+    );
+}
+
+/// The TTL tripwire: a frame forwarded in a cycle across two nodes
+/// dies at the hop budget, loudly — normally it never fires.
+#[test]
+fn the_ttl_tripwire_kills_cross_node_loops() {
+    let a = Arc::new(Node::new("a"));
+    let b = Arc::new(Node::new("b"));
+    let saw: Arc<Mutex<Vec<String>>> = Arc::new(Mutex::new(Vec::new()));
+
+    // The misconfigured cycle: each side forwards everything it
+    // hears into the other node's intake via the FORWARDING side's
+    // own channel — a distinct arrival owner each hop, so the
+    // ingress law cannot break it; only the budget can.
+    let a_node = a.clone();
+    let b_node = b.clone();
+    let a_side = Channel::line("a-fwd", move |line: &str| {
+        if let (Some(channel), Some(inbound)) = (B_SIDE.get(), parse_shared(line)) {
+            b_node.intake(channel, inbound);
+        }
+    });
+    let b_node2 = b.clone();
+    let a_node2 = a.clone();
+    let b_side = Channel::line("b-fwd", move |line: &str| {
+        if let (Some(channel), Some(inbound)) = (A_SIDE.get(), parse_shared(line)) {
+            a_node2.intake(channel, inbound);
+        }
+    });
+    let _ = (a_node, b_node2);
+    B_SIDE.set(b_side.clone()).ok();
+    A_SIDE.set(a_side.clone()).ok();
+
+    let sink = saw.clone();
+    a.subscribe_all("recorder", move |frame| {
+        sink.lock()
+            .expect("test lock")
+            .push(frame.event.tag().to_string());
+    });
+    // Both nodes forward everything they hear across the cycle.
+    a.subscribe_channel_all(&a_side);
+    b.subscribe_channel_all(&b_side);
+
+    // A local emission enters the cycle.
+    let (a_layer, _a_saw) = stub_layer(&a, "a-layer");
+    a.emit(
+        &a_layer,
+        EventFrame {
+            stream: None,
+            origin: None,
+            ttl: None,
+            event: SessionEvent::error_session("into the loop".to_string()),
+        },
+    );
+
+    // The cycle runs, TTL-bound: it ends in the loud tripwire error,
+    // and the total frame count is bounded by the budget.
+    std::thread::sleep(Duration::from_millis(50));
+    let seen = saw.lock().expect("test lock").clone();
+    assert!(
+        seen.len() <= 70,
+        "the hop budget bounded the cycle: {} frames: {seen:?}",
+        seen.len()
+    );
+    assert!(
+        seen.last().map(String::as_str) == Some("error"),
+        "the loop's last gasp is the loud tripwire: {seen:?}"
+    );
+}
+
+/// The co-subscription rule: subscribing the request kind also
+/// subscribes the settle — the card lifecycle is one interest.
+#[test]
+fn subscribing_requests_hears_the_settles() {
+    let node = Arc::new(Node::new("core"));
+    let seen: Arc<Mutex<Vec<String>>> = Arc::new(Mutex::new(Vec::new()));
+    let sink = seen.clone();
+    node.subscribe("interaction_request", "cards", move |frame| {
+        sink.lock()
+            .expect("test lock")
+            .push(frame.event.tag().to_string());
+    });
+
+    let (layer, _saw) = stub_layer(&node, "layer");
+    let awaiter = node.ask(
+        "layer",
+        &StreamId::new("s-1"),
+        "native:select_any",
+        json!({}),
+    );
+    node.intake(
+        &layer,
+        Inbound::Command(SessionCommand::InteractionResponse {
+            session: None,
+            id: "core-a1".to_string(),
+            payload: json!({"text": "yes"}),
+        }),
+    );
+    drop(awaiter.blocking_recv());
+
+    let seen = seen.lock().expect("test lock").clone();
+    assert_eq!(
+        seen,
+        vec![
+            "interaction_request".to_string(),
+            "interaction_settled".to_string()
+        ],
+        "the one interest heard the card open and close"
     );
 }

@@ -210,6 +210,7 @@ mod tests {
         EventFrame {
             stream: None,
             origin: None,
+            ttl: None,
             event: kind_event,
         }
     }

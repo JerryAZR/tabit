@@ -60,6 +60,7 @@ impl NoticeSink {
             .send(EventFrame {
                 stream: Some(self.stream.clone()),
                 origin: None,
+                ttl: None,
                 event,
             })
             .is_ok()
@@ -110,6 +111,7 @@ impl HostSink {
         let _ = self.events.send(EventFrame {
             stream,
             origin: None,
+            ttl: None,
             event,
         });
     }
@@ -153,6 +155,7 @@ impl BackendSink {
         let stamped = EventFrame {
             stream: frame.stream,
             origin: Some(origin.to_string()),
+            ttl: None,
             event: frame.event,
         };
         events.send(stamped).is_ok()
@@ -168,6 +171,7 @@ impl BackendSink {
             .send(EventFrame {
                 stream: None,
                 origin: Some(origin.to_string()),
+                ttl: None,
                 event,
             })
             .is_ok()

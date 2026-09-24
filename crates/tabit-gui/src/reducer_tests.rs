@@ -8,6 +8,7 @@ const BOOT: &str = "s1";
 fn event(event: SessionEvent) -> InMsg {
     InMsg::Event(Box::new(EventFrame {
         origin: None,
+        ttl: None,
         stream: Some(StreamId::new(BOOT)),
         event,
     }))
@@ -17,6 +18,7 @@ fn event(event: SessionEvent) -> InMsg {
 fn from(stream: &str, event: SessionEvent) -> InMsg {
     InMsg::Event(Box::new(EventFrame {
         origin: None,
+        ttl: None,
         stream: Some(StreamId::new(stream)),
         event,
     }))
@@ -27,6 +29,7 @@ fn from(stream: &str, event: SessionEvent) -> InMsg {
 fn backend(event: SessionEvent) -> InMsg {
     InMsg::Event(Box::new(EventFrame {
         origin: None,
+        ttl: None,
         stream: None,
         event,
     }))

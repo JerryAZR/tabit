@@ -944,6 +944,7 @@ async fn the_shared_grammar_flows_both_directions_over_the_pipe() {
     let watched = tabit_protocol::EventFrame {
         stream: None,
         origin: None,
+        ttl: None,
         event: tabit_protocol::SessionEvent::SessionOpened {
             id: "0198".to_string(),
             path: String::new(),
@@ -958,6 +959,7 @@ async fn the_shared_grammar_flows_both_directions_over_the_pipe() {
     let unwatched = tabit_protocol::EventFrame {
         stream: None,
         origin: None,
+        ttl: None,
         event: tabit_protocol::SessionEvent::CompactionBegin,
     };
     supervisor.broadcast(&unwatched);

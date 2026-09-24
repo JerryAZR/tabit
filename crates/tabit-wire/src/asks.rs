@@ -72,9 +72,12 @@ impl Default for PendingAsks {
 }
 
 impl PendingAsks {
-    /// Register one awaiting question under its id. A colliding id
-    /// (the asker reused a live id — its bug, not a routing event)
-    /// replaces the earlier entry.
+    /// Register one awaiting question under its id. A live id
+    /// re-registered is a mint-law violation — two producers minted
+    /// one namespace — and the sanctioned crash (2026-09 ruling:
+    /// fail loud, never mask it; the TTL law kills accidental echo
+    /// loops before they ever reach this).
+    #[allow(clippy::panic)] // sanctioned crash: the mint law was violated
     pub fn insert(
         &self,
         id: String,
@@ -82,30 +85,9 @@ impl PendingAsks {
         kind: &'static str,
         deliver: impl FnOnce(Outcome) + Send + 'static,
     ) {
-        lock(&self.pending).insert(
-            id,
-            PendingAsk {
-                owner: owner.to_string(),
-                kind,
-                deliver: Box::new(deliver),
-            },
-        );
-    }
-
-    /// Register one awaiting question under its id only when the id
-    /// is not already held — **first arrival wins** (an ask's echo
-    /// re-arriving at a node must not steal the entry the first
-    /// arrival registered). Returns whether this call registered.
-    pub fn insert_if_absent(
-        &self,
-        id: String,
-        owner: &str,
-        kind: &'static str,
-        deliver: impl FnOnce(Outcome) + Send + 'static,
-    ) -> bool {
         let mut pending = lock(&self.pending);
         if pending.contains_key(&id) {
-            return false;
+            panic!("ask id `{id}` is already live — the mint law was violated");
         }
         pending.insert(
             id,
@@ -115,7 +97,6 @@ impl PendingAsks {
                 deliver: Box::new(deliver),
             },
         );
-        true
     }
 
     /// Claim one question without settling it: read its kind, then
@@ -258,23 +239,14 @@ mod tests {
         assert!(!asks.orphan("no-such-id", "died"));
     }
 
+    /// The 2026-09 ruling: a live id re-registered is a mint-law
+    /// violation — the sanctioned crash, never a masked replace.
     #[test]
-    fn a_colliding_id_replaces() {
+    #[should_panic(expected = "the mint law was violated")]
+    fn a_live_id_re_registered_panics() {
         let asks = PendingAsks::default();
-        let (seen_first, deliver_first) = recording();
-        asks.insert("req-1".to_string(), "a", "interaction", deliver_first);
-        let (seen_second, deliver_second) = recording();
-        asks.insert("req-1".to_string(), "a", "interaction", deliver_second);
-
-        assert!(asks.respond("req-1", Box::new(1u32)));
-        assert!(
-            seen_first.lock().expect("test lock").is_empty(),
-            "the replaced entry never settles"
-        );
-        assert_eq!(
-            *seen_second.lock().expect("test lock"),
-            vec!["answered: 1".to_string()]
-        );
+        asks.insert("req-1".to_string(), "a", "interaction", recording().1);
+        asks.insert("req-1".to_string(), "a", "interaction", recording().1);
     }
 
     #[test]

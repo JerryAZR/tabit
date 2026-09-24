@@ -66,6 +66,14 @@ pub struct EventFrame {
     /// the backend emits.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub origin: Option<String>,
+    /// The remaining hops this frame may cross — the livelock
+    /// tripwire (2026-09 ruling): each node's intake decrements, and
+    /// expiry drops the frame loudly (a misconfigured routing loop —
+    /// normally it never fires). Absent means unbounded (old
+    /// speakers, local-only traffic); node-originated frames carry
+    /// the budget.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub ttl: Option<u8>,
     /// The event itself; its `type` tag flattens next to `stream`.
     #[serde(flatten)]
     pub event: SessionEvent,

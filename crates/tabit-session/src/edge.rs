@@ -579,11 +579,13 @@ id = "m"
             .filter_map(|frame| match frame {
                 ServerFrame::Event(EventFrame {
                     origin: None,
+                    ttl: None,
                     event: crate::SessionEvent::UserMessage { text, .. },
                     ..
                 }) if kind == "user" => Some(text.as_str()),
                 ServerFrame::Event(EventFrame {
                     origin: None,
+                    ttl: None,
                     event: crate::SessionEvent::TextDelta { text, .. },
                     ..
                 }) if kind == "delta" => Some(text.as_str()),
@@ -681,6 +683,7 @@ id = "m"
         let opened = frames.iter().find_map(|frame| match frame {
             ServerFrame::Event(EventFrame {
                 origin: None,
+                ttl: None,
                 event: crate::SessionEvent::SessionOpened { id, model, .. },
                 ..
             }) => Some((id.clone(), model.clone())),
@@ -696,6 +699,7 @@ id = "m"
             frames.last(),
             Some(ServerFrame::Event(EventFrame {
                 origin: None,
+                ttl: None,
                 event: crate::SessionEvent::RunFinished { output, .. },
                 ..
             })) if output == "hello"
@@ -755,6 +759,7 @@ id = "m"
                     frame,
                     ServerFrame::Event(EventFrame {
                         origin: None,
+                        ttl: None,
                         event: crate::SessionEvent::Error { kind, .. },
                         ..
                     }) if kind == "model"
@@ -772,6 +777,7 @@ id = "m"
                     frame,
                     ServerFrame::Event(EventFrame {
                         origin: None,
+                        ttl: None,
                         event: crate::SessionEvent::UserMessage { .. },
                         ..
                     })
@@ -966,6 +972,7 @@ id = "m"
                 frame,
                 ServerFrame::Event(EventFrame {
                     origin: None,
+                    ttl: None,
                     event: crate::SessionEvent::SessionOpened { .. },
                     ..
                 })
@@ -1164,6 +1171,7 @@ id = "m"
                     frame,
                     ServerFrame::Event(EventFrame {
                         origin: None,
+                        ttl: None,
                         event: crate::SessionEvent::SessionsAvailable { sessions },
                         ..
                     }) if sessions.iter().any(|s| s.id == session_id)
@@ -1176,6 +1184,7 @@ id = "m"
         let opened = frames.iter().find_map(|frame| match frame {
             ServerFrame::Event(EventFrame {
                 origin: None,
+                ttl: None,
                 event: crate::SessionEvent::SessionOpened { cwd, path, .. },
                 ..
             }) => Some((cwd.clone(), path.clone())),
@@ -1185,6 +1194,7 @@ id = "m"
         assert!(!opened_cwd.is_empty(), "the boot announces its cwd");
         if let ServerFrame::Event(EventFrame {
             origin: None,
+            ttl: None,
             event: crate::SessionEvent::SessionsAvailable { sessions },
             ..
         }) = &frames[catalog_at]
@@ -1249,6 +1259,7 @@ id = "m"
             frames.iter().any(|frame| matches!(frame,
                 ServerFrame::Event(EventFrame {
                     origin: None,
+                    ttl: None,
                     event: crate::SessionEvent::TextDelta { text, .. },
                     ..
                 }) if text == "first answer"
@@ -1267,6 +1278,7 @@ id = "m"
                 frame,
                 ServerFrame::Event(EventFrame {
                     origin: None,
+                    ttl: None,
                     event: crate::SessionEvent::ReplayStarted { .. },
                     ..
                 })
@@ -1382,6 +1394,7 @@ id = "m"
                 .find_map(|line| match serde_json::from_str::<ServerFrame>(&line) {
                     Ok(ServerFrame::Event(EventFrame {
                         origin: None,
+                        ttl: None,
                         stream: Some(stream),
                         event: crate::SessionEvent::SessionOpened { id, .. },
                         ..
@@ -1551,6 +1564,7 @@ id = "m"
             .find_map(|line| match serde_json::from_str::<ServerFrame>(&line) {
                 Ok(ServerFrame::Event(EventFrame {
                     origin: None,
+                    ttl: None,
                     event: crate::SessionEvent::UserMessage { text, entry_id },
                     ..
                 })) if text == "hi" => Some(entry_id),

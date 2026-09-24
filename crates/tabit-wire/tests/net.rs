@@ -87,6 +87,7 @@ fn stub_node_role() {
                     EventFrame {
                         stream: Some(StreamId::new(session.clone())),
                         origin: None,
+                        ttl: None,
                         event: SessionEvent::error_session(format!("stub got: {text}")),
                     },
                 );
@@ -118,6 +119,7 @@ fn stub_node_role() {
         EventFrame {
             stream: Some(StreamId::new("stub-sess")),
             origin: None,
+            ttl: None,
             event: SessionEvent::error_session("stub session opened".to_string()),
         },
     );

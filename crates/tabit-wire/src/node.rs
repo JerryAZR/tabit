@@ -11,10 +11,13 @@
 //! 1. **Events route by type** to subscribers (they compose), every
 //!    stamped arrival **teaches the learning table** the stream's
 //!    channel — including the in-process functional layer's own
-//!    emissions — and **never return to the channel they arrived on**
-//!    (the Ethernet ingress law: a switch does not forward back out
-//!    the port a frame came in on — without it, mirror-and-relay
-//!    wirings echo-loop).
+//!    emissions — and **never return to the channel they arrived
+//!    on** (the Ethernet ingress law; local loopback — the layer
+//!    hearing its own emissions — is untouched, for the skip applies
+//!    to arrivals only). Node-originated frames carry a **hop
+//!    budget** (the TTL tripwire): each crossing decrements, expiry
+//!    drops the frame loudly — a misconfigured routing loop,
+//!    normally never fired.
 //! 2. **Session-addressed commands route by the learning table** —
 //!    one lookup, no separate worker map; a miss is the uniform
 //!    unstamped `error { kind: session }` (the failure belongs to no
@@ -23,20 +26,25 @@
 //!    layer's handler table (the same router mechanism, keyed by
 //!    command tag).
 //! 4. **Arriving asks register against the channel they arrived
-//!    on**, first arrival wins — nobody registers asks, and an echo
-//!    re-arriving cannot steal the entry. Local askers mint through
-//!    [`Node::ask`] (the promise path); sites minting silent
-//!    round-trips (tool calls, service requests) hold them through
-//!    [`Node::hold`] — a hand-emitted ask frame has no answer route
-//!    home.
+//!    on** — nobody registers asks. A live id re-registering is a
+//!    mint-law violation and the sanctioned crash (the TTL law kills
+//!    accidental echo loops before they ever reach this). Local
+//!    askers mint through [`Node::ask`] (the promise path); sites
+//!    minting silent round-trips (tool calls, service requests)
+//!    hold them through [`Node::hold`] — a hand-emitted ask frame
+//!    has no answer route home.
 //! 5. **Response-type commands claim the ask-table entry** — the
 //!    correlation-kind law: an ask's kind is the tag of the response
 //!    that answers it, and a wrong-kind answer is consumed loudly
 //!    (an error emission naming the break), never delivered to a
-//!    closure expecting another shape. First answer wins, the settle
-//!    (`interaction_settled`, stamped with the asking stream) is
-//!    announced from one home — the registration's delivery — and a
-//!    miss drops as the race's tolerated loser.
+//!    closure expecting another shape. First answer wins; a miss
+//!    drops as the race's tolerated loser. **The settle is an event
+//!    and routes like one**: the single producer is the origin (its
+//!    promise resolving) or a death's sweep, and a settle arriving
+//!    at a node clears that id's entry there (an origin's promise
+//!    reads dismissal; a routed entry dies) — the id is the
+//!    identifier, so single-producer discipline settles a request
+//!    exactly once.
 //!
 //! The primitive both layers speak is the [`Channel`] — one routable
 //! destination in three flavors (the in-process functional layer, the
@@ -61,6 +69,11 @@ mod tests;
 /// The interaction ask's kind: the tag of the response that answers
 /// it (the correlation-kind law, law 5).
 const KIND_INTERACTION: &str = "interaction_response";
+
+/// The hop budget node-originated frames carry — the TTL tripwire's
+/// ceiling. Comfortably above any real net's depth; expiry means a
+/// misconfigured routing loop, normally never fired.
+const HOP_BUDGET: u8 = 32;
 
 /// One delivery closure: what a channel does with a frame it is
 /// handed.
@@ -217,11 +230,23 @@ impl<C: Routed> Node<C> {
     // --- The functional layer's mounts ---
 
     /// Subscribe to one event kind (many may hold a kind; all run).
+    /// The card lifecycle is one interest: subscribing
+    /// `interaction_request` also subscribes
+    /// `interaction_settled` — whoever displays a card also hears it
+    /// close (the co-subscription rule, node-enforced so the wire
+    /// stays fine-grained — no bundles).
     pub fn subscribe<F>(&self, kind: &str, owner: &str, callback: F)
     where
         F: Fn(&EventFrame) + Send + Sync + 'static,
     {
-        self.events.register(kind, owner, callback);
+        let callback = Arc::new(callback);
+        let paired = callback.clone();
+        self.events
+            .register(kind, owner, move |frame| callback(frame));
+        if kind == "interaction_request" {
+            self.events
+                .register("interaction_settled", owner, move |frame| paired(frame));
+        }
     }
 
     /// Subscribe a channel to one event kind — the common wiring (a
@@ -230,9 +255,16 @@ impl<C: Routed> Node<C> {
     pub fn subscribe_channel(&self, kind: &str, channel: &Channel) {
         let owner = channel.owner().to_string();
         let channel = channel.clone();
+        let paired = channel.clone();
         self.events.register(kind, &owner, move |frame| {
             channel.deliver_event(frame);
         });
+        if kind == "interaction_request" {
+            self.events
+                .register("interaction_settled", &owner, move |frame| {
+                    paired.deliver_event(frame);
+                });
+        }
     }
 
     /// Subscribe to every event kind (the relays, taps, and
@@ -275,12 +307,31 @@ impl<C: Routed> Node<C> {
 
     /// One frame arrived on a channel — the routing layer's single
     /// intake. Events learn and fan — never back out the ingress
-    /// (law 1) — with arriving asks registering on the way (law 4);
-    /// commands resolve, route by learning table, or dispatch by
-    /// type. Everything the net does to a frame happens here.
+    /// (law 1) — with arriving asks registering and arriving settles
+    /// clearing on the way (law 4); commands resolve, route by
+    /// learning table, or dispatch by type. Everything the net does
+    /// to a frame happens here.
     pub fn intake(&self, from: &Channel, inbound: Inbound<C>) {
         match inbound {
             Inbound::Event(mut frame) => {
+                // The TTL tripwire: each crossing decrements; expiry
+                // drops the frame loudly — a misconfigured routing
+                // loop, normally never fired.
+                if let Some(ttl) = frame.ttl {
+                    if ttl == 0 {
+                        self.events.dispatch(&EventFrame {
+                            stream: None,
+                            origin: None,
+                            ttl: Some(HOP_BUDGET),
+                            event: SessionEvent::error_session(format!(
+                                "a `{}` frame exceeded its hop budget — a routing loop?",
+                                frame.event.tag(),
+                            )),
+                        });
+                        return;
+                    }
+                    frame.ttl = Some(ttl - 1);
+                }
                 // Attribution, not permission: an unstamped emission
                 // names its speaker; a stamped frame is someone
                 // else's traffic and crosses verbatim.
@@ -291,16 +342,22 @@ impl<C: Routed> Node<C> {
                 if let Some(stream) = frame.stream.as_ref().map(StreamId::as_str) {
                     lock(&self.learned).insert(stream.to_string(), from.clone());
                 }
+                // Law 5's other half: an arriving settle clears this
+                // node's entry for the id (an origin's promise reads
+                // dismissal; a routed entry dies) — the settle is an
+                // event and routes like one.
+                if let SessionEvent::InteractionSettled { id } = &frame.event {
+                    self.asks.orphan(id, "settled elsewhere");
+                }
                 // Law 4: an arriving ask registers against the
-                // channel it arrived on — first arrival wins, so an
-                // echo cannot steal the entry. The settle announces
-                // from the delivery, stamped with the asking stream.
+                // channel it arrived on. A live id re-registering is
+                // a mint-law violation — the sanctioned crash (the
+                // TTL law kills accidental echo loops before they
+                // ever reach this).
                 if let Some((id, _)) = frame.ask() {
                     let asker = from.clone();
                     let ask_id = id.to_string();
-                    let settled = self.settle_frame(&ask_id, frame.stream.clone());
-                    let events = self.events.clone();
-                    self.asks.insert_if_absent(
+                    self.asks.insert(
                         ask_id.clone(),
                         from.owner(),
                         KIND_INTERACTION,
@@ -308,7 +365,9 @@ impl<C: Routed> Node<C> {
                             if let Outcome::Answered(boxed) = outcome {
                                 asker.deliver_answer(&ask_id, unanswer::<Value>(boxed));
                             }
-                            events.dispatch(&settled);
+                            // No settle emission here: routed entries
+                            // clear when the origin's settle passes
+                            // through (single producer — the origin).
                         },
                     );
                 }
@@ -319,12 +378,17 @@ impl<C: Routed> Node<C> {
     }
 
     /// The local functional layer emits: teach the learning table the
-    /// emitting channel (law 1 includes the in-process layer), then
-    /// fan to every subscriber — a locally-originated frame floods
-    /// all ports (the ingress law applies to arrivals only). Ask
-    /// minting is NOT this path: local askers hold promises from
-    /// [`Node::ask`], silent round-trips hold through [`Node::hold`].
-    pub fn emit(&self, from: &Channel, frame: EventFrame) {
+    /// emitting channel (law 1 includes the in-process layer), stamp
+    /// the hop budget, then fan to every subscriber — a
+    /// locally-originated frame floods all ports (the ingress law
+    /// applies to arrivals only; local loopback — the layer hearing
+    /// its own emissions — is untouched by it). Ask minting is NOT
+    /// this path: local askers hold promises from [`Node::ask`],
+    /// silent round-trips hold through [`Node::hold`].
+    pub fn emit(&self, from: &Channel, mut frame: EventFrame) {
+        if frame.ttl.is_none() {
+            frame.ttl = Some(HOP_BUDGET);
+        }
         if let Some(stream) = frame.stream.as_ref().map(StreamId::as_str) {
             lock(&self.learned).insert(stream.to_string(), from.clone());
         }
@@ -349,6 +413,7 @@ impl<C: Routed> Node<C> {
                     self.events.dispatch(&EventFrame {
                         stream: None,
                         origin: None,
+                        ttl: Some(HOP_BUDGET),
                         event: SessionEvent::error_session(format!(
                             "a `{}` answered a `{}` question (`{id}`) — a contract break, dropped",
                             command.route_key(),
@@ -375,6 +440,7 @@ impl<C: Routed> Node<C> {
                     self.events.dispatch(&EventFrame {
                         stream: None,
                         origin: None,
+                        ttl: Some(HOP_BUDGET),
                         event: SessionEvent::error_session(format!(
                             "no session `{session}` on this node"
                         )),
@@ -410,14 +476,21 @@ impl<C: Routed> Node<C> {
             .insert(id.clone(), owner, KIND_INTERACTION, move |outcome| {
                 if let Outcome::Answered(boxed) = outcome {
                     let _ = resolve.send(unanswer::<Value>(boxed));
+                    // The origin is the settle's single producer: the
+                    // promise resolved, the card closes, and the
+                    // routed settle clears every entry the ask left
+                    // on its way out.
+                    events.dispatch(&settled);
                 }
-                // Orphaned: the sender drops, the awaiter reads
-                // dismissal. Either way the settle announces.
-                events.dispatch(&settled);
+                // Orphaned: the awaiter reads dismissal. The settle
+                // was emitted by whoever orphaned it (a death's
+                // sweep, or the settle that cleared it) — emitting
+                // again would settle twice.
             });
         self.events.dispatch(&EventFrame {
             stream: Some(stream.clone()),
             origin: None,
+            ttl: Some(HOP_BUDGET),
             event: SessionEvent::InteractionRequest {
                 id,
                 ui_type: ui_type.to_string(),
@@ -445,29 +518,44 @@ impl<C: Routed> Node<C> {
     }
 
     /// A participant died: its subscriptions, learned routes, and
-    /// open asks sweep by owner — orphaned asks settling announced
-    /// (from their deliveries), so no channel holds a card that can
-    /// never be answered.
+    /// open asks sweep by owner — the swept questions settling
+    /// announced (the sweep is those settles' single producer), so
+    /// every channel holding a card learns it can never be answered
+    /// and every origin holding a promise reads its dismissal when
+    /// the settle routes through.
     pub fn retract(&self, owner: &str, reason: &str) {
         self.events.retract_owner(owner);
         lock(&self.learned).retain(|_, channel| channel.owner() != owner);
-        self.asks.retract_owner(owner, reason);
+        for id in self.asks.retract_owner(owner, reason) {
+            self.announce_sweep_settle(&id);
+        }
     }
 
     /// The run-terminal sweep: the questions die with their run, the
     /// owner's routes and subscriptions outlive it (the participant
     /// and its run are different deaths).
     pub fn retract_asks(&self, owner: &str, reason: &str) {
-        self.asks.retract_owner(owner, reason);
+        for id in self.asks.retract_owner(owner, reason) {
+            self.announce_sweep_settle(&id);
+        }
     }
 
-    /// The settle frame an ask's delivery announces: id-only, stamped
-    /// with the asking stream (frontends fold by stream).
+    /// The settle frame an origin emits: carrying the asking id (the
+    /// identifier — one session may hold several concurrent
+    /// requests) and the asking stream (for stream-folding
+    /// frontends).
     fn settle_frame(&self, id: &str, stream: Option<StreamId>) -> EventFrame {
         EventFrame {
             stream,
             origin: None,
+            ttl: Some(HOP_BUDGET),
             event: SessionEvent::InteractionSettled { id: id.to_string() },
         }
+    }
+
+    /// A death's settle for a swept id: the id is all a holder needs
+    /// (the sweep may not know the asking stream).
+    fn announce_sweep_settle(&self, id: &str) {
+        self.events.dispatch(&self.settle_frame(id, None));
     }
 }
