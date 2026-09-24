@@ -166,11 +166,15 @@ value, switch on `type` when recognized) and log the rest.
    `false`). Match → `initialize_ack` with **protocol-level facts
    only** (the version and the boot session's id — everything else
    arrives by event, 2026-09 ruling: the boot session is announced
-   exactly like every other). The next frame is `session_opened`
-   with the boot's facts (id, path, active model, `resumed`), then
+   exactly like every other). The next frame **the core emits** is
+   `session_opened` with the boot's facts (id, path, active model,
+   `resumed`), then
    the session catalog, then the skills catalog (v8 — only when
    discovery found something), then — if you asked — the replay
-   pass, then live traffic. `resumed: false` after you asked the
+   pass, then live traffic. (Participants are peers: another
+   participant's frames — an extension's, origin-stamped — may
+   interleave ahead of the core's own startup sequence, in arrival
+   order; tolerate them as you tolerate any origin-stamped frame.) `resumed: false` after you asked the
    backend to resume means the store was empty and the backend
    **started fresh — an absorbed miss, not an error**; show a small
    note. Mismatch → `initialize_rejected { reason }` and the

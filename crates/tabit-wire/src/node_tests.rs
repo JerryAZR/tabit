@@ -1141,19 +1141,13 @@ fn additional_receivers_dedupe_against_subscriptions() {
         move |frame: &EventFrame| {
             sink.lock()
                 .expect("test lock")
-                .push(frame.event.tag().to_string());
+                .push(format!("channel:{}", frame.event.tag()));
         },
         |_| {},
     );
-    {
-        let deliver = heard.clone();
-        node.subscribe(tags::ERROR, "both", move |frame: &EventFrame| {
-            deliver
-                .lock()
-                .expect("test lock")
-                .push(frame.event.tag().to_string());
-        });
-    }
+    // The channel is subscribed AND will be named additional: it
+    // must see the frame once (dedup by identity).
+    node.subscribe_channel(tags::ERROR, &both);
 
     node.emit_to(
         &layer,
@@ -1166,9 +1160,49 @@ fn additional_receivers_dedupe_against_subscriptions() {
         },
     );
     assert_eq!(
-        heard.lock().expect("test lock").len(),
-        1,
+        heard.lock().expect("test lock").as_slice(),
+        ["channel:error".to_string()].as_slice(),
         "a channel that hears via subscription AND is named additional sees the frame once"
+    );
+}
+
+/// The ingress skip matches channel identity, never owner strings: a
+/// plain callback sharing the arrival channel's owner still hears
+/// arrivals from that channel (the child's own observation handlers —
+/// the shape the `{id}#on` suffix once worked around).
+#[test]
+fn the_ingress_skip_matches_identity_not_owner_strings() {
+    let node: Arc<Node> = Arc::new(Node::new("ext"));
+    let heard: Arc<Mutex<Vec<String>>> = Arc::new(Mutex::new(Vec::new()));
+
+    // The child's lane — the arrival channel, owned "child-1".
+    let lane = Channel::local("child-1", |_| {}, |_| {});
+    // The child's observation handler: a plain CALLBACK under the
+    // same owner string — the ingress skip must not touch it (the
+    // string-based skip once ate exactly this shape).
+    let sink = heard.clone();
+    node.subscribe(tags::RUN_FINISHED, "child-1", move |_| {
+        sink.lock().expect("test lock").push("callback".to_string());
+    });
+
+    node.intake(
+        &lane,
+        Inbound::Event(EventFrame {
+            stream: None,
+            origin: None,
+            ttl: None,
+            event: SessionEvent::RunFinished {
+                output: String::new(),
+                started_at_ms: 0,
+                completed_at_ms: 0,
+                durable: false,
+            },
+        }),
+    );
+    assert_eq!(
+        &*heard.lock().expect("test lock"),
+        &vec!["callback".to_string()],
+        "the same-owner callback heard the arrival"
     );
 }
 

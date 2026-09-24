@@ -98,10 +98,14 @@ impl Routed for SessionCommand {
     }
 }
 
-/// One subscriber: an owner (for retraction sweeps) and the callback
-/// the router calls with each matching frame.
+/// One subscriber: an owner (for retraction sweeps), the channel it
+/// delivers to (`None` for a plain callback — the ingress skip never
+/// applies to callbacks, only to a channel that would bounce a frame
+/// back out the pipe it arrived on), and the callback the router
+/// calls with each matching frame.
 struct Subscriber<T> {
     owner: String,
+    channel: Option<u64>,
     callback: Arc<dyn Fn(&T) + Send + Sync>,
 }
 
@@ -109,6 +113,7 @@ impl<T> Clone for Subscriber<T> {
     fn clone(&self) -> Self {
         Self {
             owner: self.owner.clone(),
+            channel: self.channel,
             callback: self.callback.clone(),
         }
     }
@@ -141,6 +146,20 @@ impl<T: Routed> Router<T> {
     where
         F: Fn(&T) + Send + Sync + 'static,
     {
+        self.register_channel(kind, owner, None, callback)
+    }
+
+    /// [`Self::register`] as a channel subscription: the subscriber
+    /// delivers to the named channel, so the ingress skip (a frame
+    /// never re-emits out the channel it arrived on) and the
+    /// additional-receiver dedup apply to it by **channel identity**
+    /// — never to plain callbacks (a callback is code, not a pipe:
+    /// it cannot bounce, and skipping it is collateral damage; the
+    /// 2026-09 identity ruling, replacing skip-by-owner-string).
+    pub fn register_channel<F>(&self, kind: &str, owner: &str, channel: Option<u64>, callback: F)
+    where
+        F: Fn(&T) + Send + Sync + 'static,
+    {
         let mut held = lock(&self.by_kind);
         let subscribers = held.entry(kind.to_string()).or_default();
         if subscribers.iter().any(|s| s.owner == owner) {
@@ -148,6 +167,7 @@ impl<T: Routed> Router<T> {
         }
         subscribers.push(Subscriber {
             owner: owner.to_string(),
+            channel,
             callback: Arc::new(callback),
         });
     }
@@ -161,12 +181,22 @@ impl<T: Routed> Router<T> {
     where
         F: Fn(&T) + Send + Sync + 'static,
     {
+        self.register_all_channel(owner, None, callback)
+    }
+
+    /// [`Self::register_all`] as a channel subscription (the
+    /// identity-skip twin of [`Self::register_channel`]).
+    pub fn register_all_channel<F>(&self, owner: &str, channel: Option<u64>, callback: F)
+    where
+        F: Fn(&T) + Send + Sync + 'static,
+    {
         let mut wildcards = lock(&self.wildcard);
         if wildcards.iter().any(|s| s.owner == owner) {
             return;
         }
         wildcards.push(Subscriber {
             owner: owner.to_string(),
+            channel,
             callback: Arc::new(callback),
         });
     }
@@ -179,16 +209,17 @@ impl<T: Routed> Router<T> {
         self.dispatch_skipping(frame, &[]);
     }
 
-    /// Route one frame, never to the subscribers named in `skip` —
-    /// the Ethernet ingress law (a switch does not forward back out
-    /// the port a frame came in on: arrivals skip the ingress
-    /// channel's owner) and the additional-receiver dedup (an
-    /// emission naming extra channels delivers to them directly, so
-    /// a channel that would also hear via subscription is skipped
-    /// there — one delivery, never two). Locally-originated frames
-    /// with no extra channels flood every subscriber
-    /// ([`dispatch`]).
-    pub fn dispatch_skipping(&self, frame: &T, skip: &[&str]) {
+    /// Route one frame, never to the subscribers delivering to the
+    /// channels named in `skip` — the Ethernet ingress law (a switch
+    /// does not forward back out the port a frame came in on) and
+    /// the additional-receiver dedup (an emission naming extra
+    /// channels delivers to them directly, so the channel that would
+    /// also hear via subscription is skipped there — one delivery,
+    /// never two). Both match by **channel identity**: a plain
+    /// callback is never skipped (it cannot bounce; the 2026-09
+    /// identity ruling). Locally-originated frames with no extra
+    /// channels flood every subscriber ([`dispatch`]).
+    pub fn dispatch_skipping(&self, frame: &T, skip: &[u64]) {
         let kind_subscribers = lock(&self.by_kind)
             .get(frame.route_key())
             .cloned()
@@ -199,12 +230,12 @@ impl<T: Routed> Router<T> {
         // arrived under.
         let wildcards = lock(&self.wildcard).clone();
         for subscriber in kind_subscribers {
-            if !skip.contains(&subscriber.owner.as_str()) {
+            if !subscriber.channel.is_some_and(|id| skip.contains(&id)) {
                 (subscriber.callback)(frame);
             }
         }
         for subscriber in wildcards {
-            if !skip.contains(&subscriber.owner.as_str()) {
+            if !subscriber.channel.is_some_and(|id| skip.contains(&id)) {
                 (subscriber.callback)(frame);
             }
         }
@@ -233,7 +264,7 @@ impl Router<EventFrame> {
         for channel in extra {
             channel.deliver_event(frame);
         }
-        let skip: Vec<&str> = extra.iter().map(crate::node::Channel::owner).collect();
+        let skip: Vec<u64> = extra.iter().map(crate::node::Channel::id).collect();
         self.dispatch_skipping(frame, &skip);
     }
 }

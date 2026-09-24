@@ -100,13 +100,15 @@ pub type SessionSource = Arc<dyn Fn() -> Result<(Session, Vec<String>), String> 
 pub type OpenSessionSource =
     Arc<dyn Fn(&str) -> Result<(Session, Vec<String>), String> + Send + Sync>;
 
-/// Everything the host needs beyond the boot session: the node (the
-/// routing layer this host mounts on — the assembly creates it once,
-/// so the subprocess bridge's children register their lanes on the
-/// same net), the store (the startup catalog), the two session
-/// builders, and the boot announcement's `parent` (a `--parent`
-/// child process names its spawner; `None` for every user-facing
-/// host).
+/// The host's STRUCTURE — everything mountable before any data
+/// exists (owner ruling 2026-09, the prepared-supervisor model): the
+/// node (the routing layer this host mounts on — the assembly creates
+/// it once, so the subprocess bridge's children register their lanes
+/// on the same net), the store, and the boot announcement's lineage.
+/// Mounting the structure first is what lets chatty participants
+/// speak from their handshake onward: any node may send anything a
+/// frontend can (`new_session` at least), so the command surface —
+/// the by-type handlers — must exist before the first child boots.
 #[derive(Clone)]
 pub struct SessionHostWiring {
     /// The node this host and its children share — one net per
@@ -114,10 +116,6 @@ pub struct SessionHostWiring {
     pub node: Arc<Node>,
     /// The sessions directory the catalog lists.
     pub store: SessionStore,
-    /// Build a fresh session (`new_session`).
-    pub create: SessionSource,
-    /// Load a stored session by id (`open_session`).
-    pub open: OpenSessionSource,
     /// The `parent` field on the boot session's announcement — the
     /// child-role flag speaking at the source of truth.
     pub boot_parent: Option<String>,
@@ -125,6 +123,18 @@ pub struct SessionHostWiring {
     /// the spawning tool call's correlation id, crossing the same
     /// way `boot_parent` does. Present only in a child-role boot.
     pub boot_parent_call: Option<String>,
+}
+
+/// The host's DATA — the parts that only exist once the boot's
+/// gathering is done (the extension handshakes resolved, the tools
+/// mounted): the two session builders and the startup catalogs.
+/// Arrives with the boot session at [`SessionHostMount::attach`].
+#[derive(Clone)]
+pub struct SessionHostData {
+    /// Build a fresh session (`new_session`).
+    pub create: SessionSource,
+    /// Load a stored session by id (`open_session`).
+    pub open: OpenSessionSource,
     /// The skills catalog's wire snapshot, announced once at startup
     /// after the session catalog (empty = no announcement)
     pub skills: Vec<tabit_protocol::AvailableSkill>,
@@ -402,12 +412,13 @@ impl SessionCommandLink {
 /// (the boot's routing is ready before any data is gathered — the
 /// extensions boot next, the session host last, and every frame any
 /// of them emits from its first line crosses through this stream in
-/// arrival order). The pinned startup sequence (FRONTEND.md §3:
-/// `session_opened` is the next frame after the ack) is guaranteed
-/// by the extension contract, not by buffering: extensions are
-/// reactive — nothing outbound before their first inbound frame (the
-/// SDK's shape; EXTENSIONS.md's ruling) — so nothing can precede the
-/// session host's announcements but the announcements' own order.
+/// arrival order). Participants are peers, not subordinates: any
+/// node may speak from its handshake onward (a co-frontend
+/// extension's `new_session`, a child's steer), so the net's
+/// structure — this stream, the tables, the by-type handlers — is
+/// complete before the first child boots, and no buffering exists
+/// anywhere: the boot's own announcements land behind whatever
+/// crossed earlier, in arrival order.
 pub struct FrontendStream {
     events: mpsc::UnboundedReceiver<EventFrame>,
     /// The sender the death-watch awaits (dropped receivers close
@@ -440,40 +451,40 @@ pub fn mount_frontend(node: &Arc<Node>) -> FrontendStream {
     }
 }
 
-impl SessionHost {
-    /// Hand the boot `session` to the host and get the frontend handle
-    /// back. Must be called inside a tokio runtime (the workers and
-    /// the wind-down task spawn here). The startup notes
-    /// (model-preference degradations from selection) and the session
-    /// catalog are the host's first emissions — they land right after
-    /// the transport's handshake ack, ahead of anything a worker can
-    /// produce. Mounts a fresh frontend stream — for boots where
-    /// anything speaks before the host exists, mount first and use
-    /// [`SessionHost::spawn_with_frontend`].
-    pub fn spawn(boot: Session, startup_notes: Vec<String>, wiring: SessionHostWiring) -> Self {
-        let frontend = mount_frontend(&wiring.node);
-        Self::spawn_with_frontend(boot, startup_notes, wiring, frontend)
-    }
+/// The mounted-but-unattached host: the structure is up (the
+/// frontend stream, the host's channel and sink, the by-type
+/// lifecycle handlers, the death doors), the boot session and the
+/// boot's data are not. Chatty participants that spoke before the
+/// attach — any node may, from its handshake onward — had their
+/// lifecycle commands parked; [`SessionHostMount::attach`] serves
+/// them in arrival order, behind the boot's announcements.
+pub struct SessionHostMount {
+    wiring: SessionHostWiring,
+    events: mpsc::UnboundedReceiver<EventFrame>,
+    events_tx: mpsc::UnboundedSender<EventFrame>,
+    gone: CancellationToken,
+    workers: Arc<Mutex<HashMap<String, Arc<Worker>>>>,
+    joins: Arc<Mutex<Vec<JoinHandle<()>>>>,
+    closing_stats: Arc<Mutex<HashMap<String, SessionStats>>>,
+    worker_shutdown: CancellationToken,
+    stream_end: CancellationToken,
+    sink: HostSink,
+    door: Arc<Lifecycle>,
+}
 
-    /// [`SessionHost::spawn`] over a pre-mounted frontend stream (the
-    /// binary's json boot: the extension host speaks from its first
-    /// post-ack line, before this host exists, so the stream must
-    /// already be subscribed).
-    pub fn spawn_with_frontend(
-        boot: Session,
-        startup_notes: Vec<String>,
-        wiring: SessionHostWiring,
-        frontend: FrontendStream,
-    ) -> Self {
-        let info = SessionInfo {
-            session_id: boot.id().to_string(),
-            session_path: boot.wire_path(),
-            session_cwd: boot.cwd().display().to_string(),
-            model: boot.selection(),
-            resumed: boot.resumed(),
-        };
-        let boot_id = info.session_id.clone();
-        let boot_stream = StreamId::new(boot_id.clone());
+impl SessionHost {
+    /// Mount the host's STRUCTURE — callable (and called) before any
+    /// data exists and before any child process boots: the frontend
+    /// stream, the host's channel and sink, the worker tables, the
+    /// death doors, the wind-down, and the by-type lifecycle handlers
+    /// on the node's command table. From this moment the net accepts
+    /// every participant's speech: session-addressed commands route
+    /// by the learning table (a miss is the uniform error — sessions
+    /// do not exist yet, and that is a routed outcome, not a drop),
+    /// and lifecycle commands park until [`SessionHostMount::attach`]
+    /// arms their builders. Must run inside a tokio runtime (the
+    /// watchers and the wind-down spawn here).
+    pub fn mount(wiring: SessionHostWiring, frontend: FrontendStream) -> SessionHostMount {
         let node = wiring.node.clone();
         let event_rx = frontend.events;
         let frontend_events_tx = frontend.events_tx;
@@ -500,16 +511,14 @@ impl SessionHost {
                 }
             })
         };
-        // The frontend-death watchers, both spawned here (the mount
-        // may run outside a runtime; the host never does). The
-        // receiver's drop IS the frontend's death, whatever the
-        // reason — detected directly (the sender's `closed`), not on
-        // the next failed emission (a worker parked on a card emits
-        // nothing, and must still wind down). The door the drop opens
-        // aborts every in-flight run and pulls the wind-down token —
-        // the old channel-death watcher's exact semantics.
+        // The frontend-death watchers (the receiver's drop IS the
+        // frontend's death, whatever the reason — detected directly
+        // via the sender's `closed`, not on the next failed emission:
+        // a worker parked on a card emits nothing, and must still
+        // wind down). The door the drop opens aborts every in-flight
+        // run and pulls the wind-down token.
         {
-            let watch_tx = frontend_events_tx;
+            let watch_tx = frontend_events_tx.clone();
             let gone = frontend_gone.clone();
             tokio::spawn(async move {
                 watch_tx.closed().await;
@@ -518,8 +527,9 @@ impl SessionHost {
         }
         {
             let death = death.clone();
+            let gone = frontend_gone.clone();
             tokio::spawn(async move {
-                frontend_gone.cancelled().await;
+                gone.cancelled().await;
                 death();
             });
         }
@@ -528,6 +538,137 @@ impl SessionHost {
         // lifecycle errors) and the link's way in.
         let host_channel = Channel::local("host", |_| {}, |_| {});
         let sink = HostSink::new(&node, &host_channel);
+
+        // The lifecycle door — the by-type handlers, live from here.
+        // Until attach arms the builders, arrivals park (the drain is
+        // the attach's last act).
+        let door = Arc::new(Lifecycle {
+            node: node.clone(),
+            sink: sink.clone(),
+            workers: workers.clone(),
+            joins: joins.clone(),
+            stats: closing_stats.clone(),
+            worker_shutdown: worker_shutdown.clone(),
+            core: std::sync::OnceLock::new(),
+            parked: Mutex::new(Vec::new()),
+        });
+        {
+            let created = door.clone();
+            node.handle("new_session", "host", move |command: &SessionCommand| {
+                if matches!(command, SessionCommand::NewSession) {
+                    created.new_session();
+                }
+            });
+            let opened = door.clone();
+            node.handle("open_session", "host", move |command: &SessionCommand| {
+                if let SessionCommand::OpenSession { id } = command {
+                    opened.open_session(id);
+                }
+            });
+        }
+
+        // The wind-down task: once the shutdown token is pulled, await
+        // every worker join (each captures its last event) and then
+        // end the stream.
+        {
+            let worker_shutdown = worker_shutdown.clone();
+            let joins = joins.clone();
+            let stream_end = stream_end.clone();
+            tokio::spawn(async move {
+                worker_shutdown.cancelled().await;
+                loop {
+                    let join = {
+                        let mut held = lock(&joins);
+                        if held.is_empty() {
+                            break;
+                        }
+                        held.remove(0)
+                    };
+                    let _ = join.await;
+                }
+                stream_end.cancel();
+            });
+        }
+
+        SessionHostMount {
+            wiring,
+            events: event_rx,
+            events_tx: frontend_events_tx,
+            gone: frontend_gone,
+            workers,
+            joins,
+            closing_stats,
+            worker_shutdown,
+            stream_end,
+            sink,
+            door,
+        }
+    }
+
+    /// The fused boot for callers with everything at hand (print
+    /// mode, tests): mount the structure, attach the boot at once.
+    pub fn spawn(
+        boot: Session,
+        startup_notes: Vec<String>,
+        wiring: SessionHostWiring,
+        data: SessionHostData,
+    ) -> Self {
+        let frontend = mount_frontend(&wiring.node);
+        Self::spawn_with_frontend(boot, startup_notes, wiring, data, frontend)
+    }
+
+    /// [`SessionHost::spawn`] over a pre-mounted frontend stream.
+    pub fn spawn_with_frontend(
+        boot: Session,
+        startup_notes: Vec<String>,
+        wiring: SessionHostWiring,
+        data: SessionHostData,
+        frontend: FrontendStream,
+    ) -> Self {
+        Self::mount(wiring, frontend).attach(boot, startup_notes, data)
+    }
+}
+
+impl SessionHostMount {
+    /// Attach the boot: spawn the boot worker, emit the pinned
+    /// startup announcements (the session, its notes, the catalogs),
+    /// arm the lifecycle door's data, and serve whatever parked
+    /// during the gathering — in arrival order, behind the
+    /// announcements.
+    pub fn attach(
+        self,
+        boot: Session,
+        startup_notes: Vec<String>,
+        data: SessionHostData,
+    ) -> SessionHost {
+        let SessionHostMount {
+            wiring,
+            events: event_rx,
+            events_tx: frontend_events_tx,
+            gone: frontend_gone,
+            workers,
+            joins,
+            closing_stats,
+            worker_shutdown,
+            stream_end,
+            sink,
+            door,
+        } = self;
+        let _ = (&frontend_events_tx, &frontend_gone); // watched at mount
+        let info = SessionInfo {
+            session_id: boot.id().to_string(),
+            session_path: boot.wire_path(),
+            session_cwd: boot.cwd().display().to_string(),
+            model: boot.selection(),
+            resumed: boot.resumed(),
+        };
+        let boot_id = info.session_id.clone();
+        let boot_stream = StreamId::new(boot_id.clone());
+        let node = wiring.node.clone();
+
+        // The host's own channel (mounted): backend-level emissions
+        // (catalog, lifecycle errors) and the link's way in.
+        let host_channel = Channel::local("host", |_| {}, |_| {});
         let backend_sink = BackendSink::new(&node, &host_channel);
 
         // The boot worker first: the startup announcements emit from
@@ -602,11 +743,11 @@ impl SessionHost {
         // backend-level for the same reason (one process, one cwd,
         // one skill set). Only when discovery found something: an
         // empty announcement is noise with no state to clear.
-        if !wiring.skills.is_empty() {
+        if !data.skills.is_empty() {
             sink.emit(
                 None,
                 SessionEvent::SkillsAvailable {
-                    skills: wiring.skills.clone(),
+                    skills: data.skills.clone(),
                 },
             );
         }
@@ -614,66 +755,23 @@ impl SessionHost {
         // same backend-level reasons (one process, one extension
         // host), and the conflict reports are load-time facts: they
         // belong to the boot that produced them.
-        if !wiring.extensions.extensions.is_empty() {
+        if !data.extensions.extensions.is_empty() {
             sink.emit(
                 None,
                 SessionEvent::ExtensionsAvailable {
-                    extensions: wiring.extensions.extensions.clone(),
-                    conflicts: wiring.extensions.conflicts.clone(),
+                    extensions: data.extensions.extensions.clone(),
+                    conflicts: data.extensions.conflicts.clone(),
                 },
             );
         }
 
-        // Lifecycle by type (law 3): the host's own module, on the
-        // node's handler table.
-        {
-            let lifecycle = Lifecycle {
-                node: node.clone(),
-                sink: sink.clone(),
-                workers: workers.clone(),
-                wiring,
-                joins: joins.clone(),
-                stats: closing_stats.clone(),
-                worker_shutdown: worker_shutdown.clone(),
-            };
-            let created = lifecycle.clone();
-            node.handle("new_session", "host", move |command: &SessionCommand| {
-                if matches!(command, SessionCommand::NewSession) {
-                    created.new_session();
-                }
-            });
-            let opened = lifecycle;
-            node.handle("open_session", "host", move |command: &SessionCommand| {
-                if let SessionCommand::OpenSession { id } = command {
-                    opened.open_session(id);
-                }
-            });
-        }
+        // The lifecycle door arms (its handlers have been live since
+        // the mount) and whatever parked during the gathering serves
+        // now, in arrival order, behind the announcements.
+        door.arm(data);
+        door.drain_parked();
 
-        // The wind-down task: once the shutdown token is pulled, await
-        // every worker join (each captures its last event) and then
-        // end the stream.
-        {
-            let worker_shutdown = worker_shutdown.clone();
-            let joins = joins.clone();
-            let stream_end = stream_end.clone();
-            tokio::spawn(async move {
-                worker_shutdown.cancelled().await;
-                loop {
-                    let join = {
-                        let mut held = lock(&joins);
-                        if held.is_empty() {
-                            break;
-                        }
-                        held.remove(0)
-                    };
-                    let _ = join.await;
-                }
-                stream_end.cancel();
-            });
-        }
-
-        Self {
+        SessionHost {
             info,
             events: Some(event_rx),
             node,
@@ -685,7 +783,9 @@ impl SessionHost {
             stream_end,
         }
     }
+}
 
+impl SessionHost {
     /// The boot session's facts, captured when the host took over.
     pub fn info(&self) -> &SessionInfo {
         &self.info
@@ -839,27 +939,85 @@ impl SessionHost {
     }
 }
 
-/// The host's lifecycle module (by-type on the node's handler table):
-/// `new_session` builds through the wiring, `open_session` loads or
-/// re-replays, and every spawned worker's channel is registered into
-/// the learning table by its own announcement (the emit teaches).
-#[derive(Clone)]
+/// The host's lifecycle door (by-type on the node's handler table,
+/// live from the MOUNT — the prepared-supervisor law: any node may
+/// speak from its handshake onward, so the command surface exists
+/// before the first child boots). `new_session` builds through the
+/// data, `open_session` loads or re-replays, and every spawned
+/// worker's channel is registered into the learning table by its own
+/// announcement (the emit teaches). The builders are the boot's DATA
+/// — they arrive at attach; an arrival before that parks, and is
+/// served in arrival order once armed.
 struct Lifecycle {
     node: Arc<Node>,
     sink: HostSink,
     workers: Arc<Mutex<HashMap<String, Arc<Worker>>>>,
-    wiring: SessionHostWiring,
     joins: Arc<Mutex<Vec<JoinHandle<()>>>>,
     stats: Arc<Mutex<HashMap<String, SessionStats>>>,
     worker_shutdown: CancellationToken,
+    /// The builders, once the boot's gathering is done. `None` means
+    /// the host is still mounting-to-attach: lifecycle arrivals park.
+    core: std::sync::OnceLock<LifecycleCore>,
+    parked: Mutex<Vec<ParkedLifecycle>>,
+}
+
+/// The lifecycle door's data half: what only exists after the boot's
+/// gathering resolved.
+struct LifecycleCore {
+    create: SessionSource,
+    open: OpenSessionSource,
+}
+
+/// One lifecycle command that arrived before the data did.
+enum ParkedLifecycle {
+    NewSession,
+    OpenSession { id: String },
 }
 
 impl Lifecycle {
+    /// Arm the door (the attach act): the builders exist, and
+    /// whatever parked during the gathering serves now, in arrival
+    /// order, behind the boot's announcements.
+    fn arm(&self, data: SessionHostData) {
+        let _ = self.core.set(LifecycleCore {
+            create: data.create,
+            open: data.open,
+        });
+    }
+
+    fn drain_parked(&self) {
+        for parked in std::mem::take(&mut *lock(&self.parked)) {
+            match parked {
+                ParkedLifecycle::NewSession => self.serve_new_session(),
+                ParkedLifecycle::OpenSession { id } => self.serve_open_session(&id),
+            }
+        }
+    }
+
+    fn new_session(&self) {
+        if self.core.get().is_none() {
+            lock(&self.parked).push(ParkedLifecycle::NewSession);
+            return;
+        }
+        self.serve_new_session();
+    }
+
+    fn open_session(&self, id: &str) {
+        if self.core.get().is_none() {
+            lock(&self.parked).push(ParkedLifecycle::OpenSession { id: id.to_string() });
+            return;
+        }
+        self.serve_open_session(id);
+    }
+
     /// `new_session`: announce, then spawn. The creation frame and its
     /// notes land ahead of anything the worker can emit (emitted
     /// here, before any command can have reached it).
-    fn new_session(&self) {
-        let (session, notes) = match (self.wiring.create)() {
+    fn serve_new_session(&self) {
+        let Some(core) = self.core.get() else {
+            return;
+        };
+        let (session, notes) = match (core.create)() {
             Ok(built) => built,
             Err(message) => {
                 self.sink.emit(
@@ -913,12 +1071,15 @@ impl Lifecycle {
     /// `open_session`: already open means re-replay (idempotent);
     /// otherwise load, surface the notes, spawn, and answer with the
     /// pass — the pass itself is the acknowledgment.
-    fn open_session(&self, id: &str) {
+    fn serve_open_session(&self, id: &str) {
         if let Some(worker) = lock(&self.workers).get(id).cloned() {
             worker.deliver_replay();
             return;
         }
-        let (session, notes) = match (self.wiring.open)(id) {
+        let Some(core) = self.core.get() else {
+            return;
+        };
+        let (session, notes) = match (core.open)(id) {
             Ok(loaded) => loaded,
             Err(message) => {
                 self.sink.emit(

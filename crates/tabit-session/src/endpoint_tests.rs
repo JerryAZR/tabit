@@ -17,13 +17,11 @@ fn plain_wiring(store: &SessionStore) -> SessionHostWiring {
         node: std::sync::Arc::new(crate::Node::new("test")),
         boot_parent: None,
         boot_parent_call: None,
-        skills: Vec::new(),
-        extensions: Default::default(),
         store: store.clone(),
-        create: std::sync::Arc::new(|| Err("new_session is not driven".to_string())),
-        open: std::sync::Arc::new(|_| Err("open_session is not driven".to_string())),
     }
 }
+
+use crate::tests::plain_data;
 
 /// The boot session id, as the host's consumer learns it.
 fn boot_id(handle: &SessionHost) -> String {
@@ -119,6 +117,7 @@ async fn startup_degradations_are_the_workers_first_frames() {
         session,
         vec!["default_model `gone` is not usable".to_string()],
         plain_wiring(&store),
+        plain_data(),
     );
     let id = boot_id(&handle);
 
@@ -164,14 +163,15 @@ async fn the_skills_catalog_follows_the_session_catalog() {
         .into_builder(store.clone())
         .create("C:/w")
         .expect("session");
-    let mut wiring = plain_wiring(&store);
-    wiring.skills = vec![tabit_protocol::AvailableSkill {
+    let wiring = plain_wiring(&store);
+    let mut data = plain_data();
+    data.skills = vec![tabit_protocol::AvailableSkill {
         name: "lint".to_string(),
         description: "Lint".to_string(),
         location: "C:/w/.tabit/skills/lint/SKILL.md".to_string(),
         level: "workspace".to_string(),
     }];
-    let mut handle = SessionHost::spawn(session, Vec::new(), wiring);
+    let mut handle = SessionHost::spawn(session, Vec::new(), wiring, data);
     let id = boot_id(&handle);
     handle.message(&id, "go");
     let frames = drain(&mut handle).await;
@@ -203,7 +203,7 @@ async fn the_skills_catalog_follows_the_session_catalog() {
         .into_builder(store.clone())
         .create("C:/w")
         .expect("session");
-    let mut handle = SessionHost::spawn(session, Vec::new(), plain_wiring(&store));
+    let mut handle = SessionHost::spawn(session, Vec::new(), plain_wiring(&store), plain_data());
     let id = boot_id(&handle);
     handle.message(&id, "go");
     let frames = drain(&mut handle).await;
@@ -223,7 +223,7 @@ async fn an_idle_message_runs_to_completion_over_the_stream() {
         .into_builder(store.clone())
         .create("C:/w")
         .expect("session");
-    let mut handle = SessionHost::spawn(session, Vec::new(), plain_wiring(&store));
+    let mut handle = SessionHost::spawn(session, Vec::new(), plain_wiring(&store), plain_data());
     let id = boot_id(&handle);
 
     handle.message(&id, "hi");
@@ -265,7 +265,7 @@ async fn a_message_mid_run_steers_instead_of_starting_a_second_run() {
         .dynamic_tool(slow_tool())
         .create("C:/w")
         .expect("session");
-    let mut handle = SessionHost::spawn(session, Vec::new(), plain_wiring(&store));
+    let mut handle = SessionHost::spawn(session, Vec::new(), plain_wiring(&store), plain_data());
     let id = boot_id(&handle);
 
     handle.message(&id, "run the tool");
@@ -333,7 +333,7 @@ async fn two_rapid_messages_both_land_in_order() {
         .into_builder(store.clone())
         .create("C:/w")
         .expect("session");
-    let mut handle = SessionHost::spawn(session, Vec::new(), plain_wiring(&store));
+    let mut handle = SessionHost::spawn(session, Vec::new(), plain_wiring(&store), plain_data());
     let id = boot_id(&handle);
 
     handle.message(&id, "first");
@@ -358,7 +358,7 @@ async fn abort_while_idle_discards_queued_messages() {
         .into_builder(store.clone())
         .create("C:/w")
         .expect("session");
-    let mut handle = SessionHost::spawn(session, Vec::new(), plain_wiring(&store));
+    let mut handle = SessionHost::spawn(session, Vec::new(), plain_wiring(&store), plain_data());
     let id = boot_id(&handle);
 
     // Queued while idle (the worker cannot have started: no await yet),
@@ -401,7 +401,7 @@ async fn abort_mid_run_discards_the_queue_and_ends_the_run() {
         .dynamic_tool(slow_tool())
         .create("C:/w")
         .expect("session");
-    let mut handle = SessionHost::spawn(session, Vec::new(), plain_wiring(&store));
+    let mut handle = SessionHost::spawn(session, Vec::new(), plain_wiring(&store), plain_data());
     let id = boot_id(&handle);
 
     handle.message(&id, "run the tool");
@@ -497,7 +497,7 @@ async fn abort_preempts_while_a_tool_body_blocks() {
         .dynamic_tool(blocking_tool())
         .create("C:/w")
         .expect("session");
-    let mut handle = SessionHost::spawn(session, Vec::new(), plain_wiring(&store));
+    let mut handle = SessionHost::spawn(session, Vec::new(), plain_wiring(&store), plain_data());
     let id = boot_id(&handle);
 
     handle.message(&id, "run the tool");
@@ -535,7 +535,7 @@ async fn a_failed_run_emits_run_failed_and_ends_the_stream_cleanly() {
         .dynamic_tool(echo_tool())
         .create("C:/w")
         .expect("session");
-    let mut handle = SessionHost::spawn(session, Vec::new(), plain_wiring(&store));
+    let mut handle = SessionHost::spawn(session, Vec::new(), plain_wiring(&store), plain_data());
     let id = boot_id(&handle);
 
     handle.message(&id, "will fail");
@@ -559,7 +559,7 @@ async fn a_link_outlives_the_handle_and_still_submits() {
         .into_builder(store.clone())
         .create("C:/w")
         .expect("session");
-    let mut handle = SessionHost::spawn(session, Vec::new(), plain_wiring(&store));
+    let mut handle = SessionHost::spawn(session, Vec::new(), plain_wiring(&store), plain_data());
     let id = boot_id(&handle);
     let link = handle.command_link();
 
@@ -605,9 +605,9 @@ async fn new_session_runs_a_second_stream_and_both_route_by_id() {
         node: std::sync::Arc::new(crate::Node::new("test")),
         boot_parent: None,
         boot_parent_call: None,
-        skills: Vec::new(),
-        extensions: Default::default(),
         store: store.clone(),
+    };
+    let data = SessionHostData {
         create: std::sync::Arc::new(move || {
             Factory::new(vec![text_turn("new answer")])
                 .into_builder(create_store.clone())
@@ -616,8 +616,10 @@ async fn new_session_runs_a_second_stream_and_both_route_by_id() {
                 .map_err(|error| error.to_string())
         }),
         open: std::sync::Arc::new(|_| Err("not driven".to_string())),
+        skills: Vec::new(),
+        extensions: Default::default(),
     };
-    let mut handle = SessionHost::spawn(session, Vec::new(), wiring);
+    let mut handle = SessionHost::spawn(session, Vec::new(), wiring, data);
     let boot = boot_id(&handle);
     let link = handle.command_link();
 
@@ -707,9 +709,9 @@ async fn open_session_loads_a_stored_session_and_replays_it() {
         node: std::sync::Arc::new(crate::Node::new("test")),
         boot_parent: None,
         boot_parent_call: None,
-        skills: Vec::new(),
-        extensions: Default::default(),
         store: store.clone(),
+    };
+    let data = SessionHostData {
         create: std::sync::Arc::new(|| Err("not driven".to_string())),
         open: std::sync::Arc::new(move |id: &str| {
             let path = open_store
@@ -725,8 +727,10 @@ async fn open_session_loads_a_stored_session_and_replays_it() {
                 .map(|(session, _)| (session, Vec::new()))
                 .map_err(|error| error.to_string())
         }),
+        skills: Vec::new(),
+        extensions: Default::default(),
     };
-    let mut handle = SessionHost::spawn(boot_session, Vec::new(), wiring);
+    let mut handle = SessionHost::spawn(boot_session, Vec::new(), wiring, data);
     let boot = boot_id(&handle);
 
     // Lazy loading: the startup catalog lists the stored session (the
@@ -857,9 +861,9 @@ async fn open_session_emits_its_model_notes_ahead_of_the_replay() {
         node: std::sync::Arc::new(crate::Node::new("test")),
         boot_parent: None,
         boot_parent_call: None,
-        skills: Vec::new(),
-        extensions: Default::default(),
         store: store.clone(),
+    };
+    let data = SessionHostData {
         create: std::sync::Arc::new(|| Err("not driven".to_string())),
         open: std::sync::Arc::new(move |id: &str| {
             let path = open_store
@@ -880,8 +884,10 @@ async fn open_session_emits_its_model_notes_ahead_of_the_replay() {
                 })
                 .map_err(|error| error.to_string())
         }),
+        skills: Vec::new(),
+        extensions: Default::default(),
     };
-    let mut handle = SessionHost::spawn(boot_session, Vec::new(), wiring);
+    let mut handle = SessionHost::spawn(boot_session, Vec::new(), wiring, data);
     boot_id(&handle);
 
     handle.command_link().send(SessionCommand::OpenSession {
@@ -918,7 +924,7 @@ async fn an_unknown_session_target_is_a_backend_level_session_error() {
         .into_builder(store.clone())
         .create("C:/w")
         .expect("session");
-    let mut handle = SessionHost::spawn(session, Vec::new(), plain_wiring(&store));
+    let mut handle = SessionHost::spawn(session, Vec::new(), plain_wiring(&store), plain_data());
 
     handle.command_link().send(SessionCommand::Message {
         session: "no-such".to_string(),
@@ -962,7 +968,7 @@ async fn a_replay_request_streams_the_pass_onto_the_event_channel() {
         .resume(&path)
         .expect("resume")
         .0;
-    let mut handle = SessionHost::spawn(session, Vec::new(), plain_wiring(&store));
+    let mut handle = SessionHost::spawn(session, Vec::new(), plain_wiring(&store), plain_data());
     let id = boot_id(&handle);
 
     handle.replay(&id);
@@ -1044,11 +1050,13 @@ async fn a_catalog_failure_is_the_carrier_in_place_of_the_announcement() {
             node: std::sync::Arc::new(crate::Node::new("test")),
             boot_parent: None,
             boot_parent_call: None,
-            skills: Vec::new(),
-            extensions: Default::default(),
             store: SessionStore::new(&dir),
+        },
+        SessionHostData {
             create: std::sync::Arc::new(|| Err("not driven".to_string())),
             open: std::sync::Arc::new(|_| Err("not driven".to_string())),
+            skills: Vec::new(),
+            extensions: Default::default(),
         },
     );
 
@@ -1086,15 +1094,17 @@ async fn lifecycle_failures_and_notes_ride_the_carrier() {
             node: std::sync::Arc::new(crate::Node::new("test")),
             boot_parent: None,
             boot_parent_call: None,
-            skills: Vec::new(),
-            extensions: Default::default(),
             store: store.clone(),
-            // The builder degrades: the failure is boot-stamped, the
-            // notes are new-session-stamped.
+        },
+        // The builder degrades: the failure is boot-stamped, the
+        // notes are new-session-stamped.
+        SessionHostData {
             create: std::sync::Arc::new(|| {
                 Err("any model to run with (providers.toml defines no models)".to_string())
             }),
             open: std::sync::Arc::new(|id: &str| Err(format!("no stored session with id `{id}`"))),
+            skills: Vec::new(),
+            extensions: Default::default(),
         },
     );
     let _boot = boot_id(&handle);
@@ -1146,9 +1156,9 @@ async fn a_created_sessions_selection_notes_follow_its_stream() {
             node: std::sync::Arc::new(crate::Node::new("test")),
             boot_parent: None,
             boot_parent_call: None,
-            skills: Vec::new(),
-            extensions: Default::default(),
             store: store.clone(),
+        },
+        SessionHostData {
             create: std::sync::Arc::new(move || {
                 Factory::new(vec![text_turn("new answer")])
                     .into_builder(create_store.clone())
@@ -1162,6 +1172,8 @@ async fn a_created_sessions_selection_notes_follow_its_stream() {
                     .map_err(|error| error.to_string())
             }),
             open: std::sync::Arc::new(|_| Err("not driven".to_string())),
+            skills: Vec::new(),
+            extensions: Default::default(),
         },
     );
     handle.command_link().send(SessionCommand::NewSession);
@@ -1217,9 +1229,9 @@ async fn new_session_is_never_blocked_by_a_running_session() {
         node: std::sync::Arc::new(crate::Node::new("test")),
         boot_parent: None,
         boot_parent_call: None,
-        skills: Vec::new(),
-        extensions: Default::default(),
         store: store.clone(),
+    };
+    let data = SessionHostData {
         create: std::sync::Arc::new(move || {
             Factory::new(vec![text_turn("new answer")])
                 .into_builder(create_store.clone())
@@ -1228,8 +1240,10 @@ async fn new_session_is_never_blocked_by_a_running_session() {
                 .map_err(|error| error.to_string())
         }),
         open: std::sync::Arc::new(|_| Err("not driven".to_string())),
+        skills: Vec::new(),
+        extensions: Default::default(),
     };
-    let mut handle = SessionHost::spawn(session, Vec::new(), wiring);
+    let mut handle = SessionHost::spawn(session, Vec::new(), wiring, data);
     let boot = boot_id(&handle);
     let link = handle.command_link();
 
@@ -1301,7 +1315,7 @@ async fn a_post_abort_message_survives_and_runs() {
         .dynamic_tool(slow_tool())
         .create("C:/w")
         .expect("session");
-    let mut handle = SessionHost::spawn(session, Vec::new(), plain_wiring(&store));
+    let mut handle = SessionHost::spawn(session, Vec::new(), plain_wiring(&store), plain_data());
     let id = boot_id(&handle);
     let link = handle.command_link();
 
@@ -1380,9 +1394,9 @@ async fn frontend_death_aborts_every_sessions_run() {
         node: std::sync::Arc::new(crate::Node::new("test")),
         boot_parent: None,
         boot_parent_call: None,
-        skills: Vec::new(),
-        extensions: Default::default(),
         store: store.clone(),
+    };
+    let data = SessionHostData {
         create: std::sync::Arc::new(move || {
             Factory::new(vec![tool_turn("t2", "slow"), text_turn("never")])
                 .into_builder(create_store.clone())
@@ -1392,8 +1406,10 @@ async fn frontend_death_aborts_every_sessions_run() {
                 .map_err(|error| error.to_string())
         }),
         open: std::sync::Arc::new(|_| Err("not driven".to_string())),
+        skills: Vec::new(),
+        extensions: Default::default(),
     };
-    let mut handle = SessionHost::spawn(session, Vec::new(), wiring);
+    let mut handle = SessionHost::spawn(session, Vec::new(), wiring, data);
     let boot = boot_id(&handle);
     let link = handle.command_link();
 
@@ -1490,7 +1506,7 @@ async fn a_replay_request_for_a_running_session_answers_after_its_terminal() {
         .dynamic_tool(slow_tool())
         .create("C:/w")
         .expect("session");
-    let mut handle = SessionHost::spawn(session, Vec::new(), plain_wiring(&store));
+    let mut handle = SessionHost::spawn(session, Vec::new(), plain_wiring(&store), plain_data());
     let id = boot_id(&handle);
 
     handle.message(&id, "run the slow tool");
@@ -1643,7 +1659,7 @@ async fn checkout_rewinds_replays_and_branches_the_next_prompt() {
     .into_builder(store.clone())
     .create("C:/w")
     .expect("session");
-    let mut handle = SessionHost::spawn(session, Vec::new(), plain_wiring(&store));
+    let mut handle = SessionHost::spawn(session, Vec::new(), plain_wiring(&store), plain_data());
     let id = boot_id(&handle);
 
     // Two exchanges, each to its terminal; then an idle checkout at
@@ -1694,7 +1710,7 @@ async fn a_checkout_during_a_run_aborts_it_then_rewinds_at_the_beat() {
         .dynamic_tool(slow_tool())
         .create("C:/w")
         .expect("session");
-    let mut handle = SessionHost::spawn(session, Vec::new(), plain_wiring(&store));
+    let mut handle = SessionHost::spawn(session, Vec::new(), plain_wiring(&store), plain_data());
     let id = boot_id(&handle);
 
     handle.message(&id, "go");
@@ -1849,7 +1865,7 @@ id = "bare"
         .into_builder_with_config(store.clone(), config, ModelSelection::new("p", "m"))
         .create("C:/w")
         .expect("session");
-    let mut handle = SessionHost::spawn(session, Vec::new(), plain_wiring(&store));
+    let mut handle = SessionHost::spawn(session, Vec::new(), plain_wiring(&store), plain_data());
     let id = boot_id(&handle);
     let mut frames = Vec::new();
 
@@ -1921,7 +1937,7 @@ async fn a_model_switch_lands_at_receive_and_announces() {
         .into_builder(store.clone())
         .create("C:/w")
         .expect("session");
-    let mut handle = SessionHost::spawn(session, Vec::new(), plain_wiring(&store));
+    let mut handle = SessionHost::spawn(session, Vec::new(), plain_wiring(&store), plain_data());
     let id = boot_id(&handle);
 
     // One exchange, then an idle switch: it lands at receive — entry,
@@ -1981,7 +1997,7 @@ async fn a_bad_model_ref_errors_at_receive_and_parks_nothing() {
         .into_builder(store.clone())
         .create("C:/w")
         .expect("session");
-    let mut handle = SessionHost::spawn(session, Vec::new(), plain_wiring(&store));
+    let mut handle = SessionHost::spawn(session, Vec::new(), plain_wiring(&store), plain_data());
     let id = boot_id(&handle);
 
     let mut frames = Vec::new();
@@ -2033,7 +2049,7 @@ async fn a_mid_run_model_switch_lands_at_receive_under_the_run() {
         .dynamic_tool(slow_tool())
         .create("C:/w")
         .expect("session");
-    let mut handle = SessionHost::spawn(session, Vec::new(), plain_wiring(&store));
+    let mut handle = SessionHost::spawn(session, Vec::new(), plain_wiring(&store), plain_data());
     let id = boot_id(&handle);
 
     // Provably mid-run (the slow tool is executing): the switch lands
@@ -2090,7 +2106,7 @@ async fn a_model_switch_survives_an_abort() {
         .dynamic_tool(slow_tool())
         .create("C:/w")
         .expect("session");
-    let mut handle = SessionHost::spawn(session, Vec::new(), plain_wiring(&store));
+    let mut handle = SessionHost::spawn(session, Vec::new(), plain_wiring(&store), plain_data());
     let id = boot_id(&handle);
 
     // Mid-run switch, then abort: the switch is a state write, not run
@@ -2144,7 +2160,7 @@ async fn rapid_model_switches_each_land_and_the_last_wins() {
         .into_builder(store.clone())
         .create("C:/w")
         .expect("session");
-    let mut handle = SessionHost::spawn(session, Vec::new(), plain_wiring(&store));
+    let mut handle = SessionHost::spawn(session, Vec::new(), plain_wiring(&store), plain_data());
     let id = boot_id(&handle);
 
     // Two switches back-to-back: both land (each command is its own
@@ -2200,7 +2216,7 @@ async fn a_model_switch_precedes_a_parked_checkout() {
         .dynamic_tool(slow_tool())
         .create("C:/w")
         .expect("session");
-    let mut handle = SessionHost::spawn(session, Vec::new(), plain_wiring(&store));
+    let mut handle = SessionHost::spawn(session, Vec::new(), plain_wiring(&store), plain_data());
     let id = boot_id(&handle);
 
     // Switch then checkout, both mid-run: the switch lands at receive
@@ -2262,7 +2278,7 @@ async fn checkout_discards_what_was_submitted_before_it_and_keeps_the_rest() {
         .into_builder(store.clone())
         .create("C:/w")
         .expect("session");
-    let mut handle = SessionHost::spawn(session, Vec::new(), plain_wiring(&store));
+    let mut handle = SessionHost::spawn(session, Vec::new(), plain_wiring(&store), plain_data());
     let id = boot_id(&handle);
 
     // One exchange to its terminal, so the worker is provably back in
@@ -2332,7 +2348,7 @@ async fn parked_checkouts_collapse_to_the_last_and_spaced_ones_execute() {
         .into_builder(store.clone())
         .create("C:/w")
         .expect("session");
-    let mut handle = SessionHost::spawn(session, Vec::new(), plain_wiring(&store));
+    let mut handle = SessionHost::spawn(session, Vec::new(), plain_wiring(&store), plain_data());
     let id = boot_id(&handle);
 
     let mut frames = Vec::new();
@@ -2448,7 +2464,7 @@ async fn a_checkout_parked_at_the_close_executes_before_wind_down() {
         .into_builder(store.clone())
         .create("C:/w")
         .expect("session");
-    let mut handle = SessionHost::spawn(session, Vec::new(), plain_wiring(&store));
+    let mut handle = SessionHost::spawn(session, Vec::new(), plain_wiring(&store), plain_data());
     let id = boot_id(&handle);
 
     let mut frames = Vec::new();
@@ -2491,7 +2507,7 @@ async fn an_unknown_entry_checkout_is_an_error_and_a_no_op() {
         .into_builder(store.clone())
         .create("C:/w")
         .expect("session");
-    let mut handle = SessionHost::spawn(session, Vec::new(), plain_wiring(&store));
+    let mut handle = SessionHost::spawn(session, Vec::new(), plain_wiring(&store), plain_data());
     let id = boot_id(&handle);
 
     let mut frames = Vec::new();
@@ -2535,7 +2551,7 @@ async fn an_unknown_checkout_during_a_run_errors_immediately() {
         .dynamic_tool(slow_tool())
         .create("C:/w")
         .expect("session");
-    let mut handle = SessionHost::spawn(session, Vec::new(), plain_wiring(&store));
+    let mut handle = SessionHost::spawn(session, Vec::new(), plain_wiring(&store), plain_data());
     let id = boot_id(&handle);
 
     // Verification is loop-independent: routed while the slow tool is
@@ -2591,7 +2607,7 @@ async fn an_abort_discards_a_pending_checkout() {
         .dynamic_tool(slow_tool())
         .create("C:/w")
         .expect("session");
-    let mut handle = SessionHost::spawn(session, Vec::new(), plain_wiring(&store));
+    let mut handle = SessionHost::spawn(session, Vec::new(), plain_wiring(&store), plain_data());
     let id = boot_id(&handle);
 
     // Checkout first, abort right behind it — drop-all-pending-intent:
@@ -2649,7 +2665,7 @@ async fn a_pass_answers_ahead_of_a_queued_message_at_the_beat() {
         .into_builder(store.clone())
         .create("C:/w")
         .expect("session");
-    let mut handle = SessionHost::spawn(session, Vec::new(), plain_wiring(&store));
+    let mut handle = SessionHost::spawn(session, Vec::new(), plain_wiring(&store), plain_data());
     let id = boot_id(&handle);
 
     // One exchange to its terminal, so the worker is back in its wait;
@@ -2703,7 +2719,7 @@ async fn an_id_announced_mid_run_is_validatable_the_moment_it_is_knowable() {
         .dynamic_tool(slow_tool())
         .create("C:/w")
         .expect("session");
-    let mut handle = SessionHost::spawn(session, Vec::new(), plain_wiring(&store));
+    let mut handle = SessionHost::spawn(session, Vec::new(), plain_wiring(&store), plain_data());
     let id = boot_id(&handle);
 
     // Publication precedes announcement: the steer's user_message id
@@ -2765,7 +2781,7 @@ async fn a_checkout_targeting_a_queued_steer_misses_and_is_a_no_op() {
         .dynamic_tool(slow_tool())
         .create("C:/w")
         .expect("session");
-    let mut handle = SessionHost::spawn(session, Vec::new(), plain_wiring(&store));
+    let mut handle = SessionHost::spawn(session, Vec::new(), plain_wiring(&store), plain_data());
     let id = boot_id(&handle);
 
     // A queued steer is announced (message_queued, born-early id) but
@@ -2841,7 +2857,7 @@ async fn a_continue_starts_a_run_over_the_existing_conversation() {
         .into_builder(store.clone())
         .create("C:/w")
         .expect("session");
-    let mut handle = SessionHost::spawn(session, Vec::new(), plain_wiring(&store));
+    let mut handle = SessionHost::spawn(session, Vec::new(), plain_wiring(&store), plain_data());
     let id = boot_id(&handle);
 
     handle.message(&id, "go");
@@ -2884,7 +2900,7 @@ async fn a_continue_on_an_empty_conversation_is_a_noop() {
         .into_builder(store.clone())
         .create("C:/w")
         .expect("session");
-    let mut handle = SessionHost::spawn(session, Vec::new(), plain_wiring(&store));
+    let mut handle = SessionHost::spawn(session, Vec::new(), plain_wiring(&store), plain_data());
     let id = boot_id(&handle);
 
     handle.continue_run(&id);
@@ -2917,7 +2933,7 @@ async fn a_replay_parked_at_close_is_served_before_wind_down() {
         .into_builder(store.clone())
         .create("C:/w")
         .expect("session");
-    let mut handle = SessionHost::spawn(session, Vec::new(), plain_wiring(&store));
+    let mut handle = SessionHost::spawn(session, Vec::new(), plain_wiring(&store), plain_data());
     let id = boot_id(&handle);
 
     handle.message(&id, "go");
@@ -2951,7 +2967,7 @@ async fn abort_then_checkout_composes_at_the_pause_point() {
         .dynamic_tool(slow_tool())
         .create("C:/w")
         .expect("session");
-    let mut handle = SessionHost::spawn(session, Vec::new(), plain_wiring(&store));
+    let mut handle = SessionHost::spawn(session, Vec::new(), plain_wiring(&store), plain_data());
     let id = boot_id(&handle);
 
     // The composition a frontend sends when it wants stop-then-rewind:
@@ -3021,7 +3037,7 @@ async fn a_blocked_store_blocks_starts_and_recovers() {
         .into_builder(store.clone())
         .create("C:/w")
         .expect("session (the file is deferred)");
-    let mut handle = SessionHost::spawn(session, Vec::new(), plain_wiring(&base));
+    let mut handle = SessionHost::spawn(session, Vec::new(), plain_wiring(&base), plain_data());
     let id = boot_id(&handle);
 
     // The free turn: the fresh session's probe skips under the gate,
@@ -3173,7 +3189,7 @@ async fn the_idle_door_compacts_after_a_large_run_and_the_file_holds_the_entry()
     .create("C:/w")
     .expect("session");
     let path = session.path().expect("file-backed").to_path_buf();
-    let mut handle = SessionHost::spawn(session, Vec::new(), plain_wiring(&store));
+    let mut handle = SessionHost::spawn(session, Vec::new(), plain_wiring(&store), plain_data());
     let id = boot_id(&handle);
     handle.message(&id, "go");
     tokio::time::sleep(Duration::from_millis(200)).await;
@@ -3288,7 +3304,7 @@ async fn the_compact_command_forces_the_box_on_an_idle_session() {
     )
     .create("C:/w")
     .expect("session");
-    let mut handle = SessionHost::spawn(session, Vec::new(), plain_wiring(&store));
+    let mut handle = SessionHost::spawn(session, Vec::new(), plain_wiring(&store), plain_data());
     let id = boot_id(&handle);
     handle.message(&id, "go");
     tokio::time::sleep(Duration::from_millis(200)).await;
@@ -3348,7 +3364,7 @@ async fn an_overflow_failure_is_intercepted_compacted_and_the_run_retried() {
     .create("C:/w")
     .expect("session");
     let path = session.path().expect("file-backed").to_path_buf();
-    let mut handle = SessionHost::spawn(session, Vec::new(), plain_wiring(&store));
+    let mut handle = SessionHost::spawn(session, Vec::new(), plain_wiring(&store), plain_data());
     let id = boot_id(&handle);
     handle.message(&id, "go");
     tokio::time::sleep(Duration::from_millis(200)).await;
@@ -3435,7 +3451,7 @@ async fn an_unrepairable_overflow_leaves_the_failure_standing() {
         )
         .create("C:/w")
         .expect("session");
-    let mut handle = SessionHost::spawn(session, Vec::new(), plain_wiring(&store));
+    let mut handle = SessionHost::spawn(session, Vec::new(), plain_wiring(&store), plain_data());
     let id = boot_id(&handle);
     handle.message(&id, "go");
     let frames = drain(&mut handle).await;
@@ -3489,7 +3505,8 @@ async fn the_stream_is_live_from_the_mount_in_arrival_order() {
         },
     );
 
-    let mut handle = SessionHost::spawn_with_frontend(session, Vec::new(), wiring, frontend);
+    let mut handle =
+        SessionHost::spawn_with_frontend(session, Vec::new(), wiring, plain_data(), frontend);
     let frames = drain(&mut handle).await;
     let tags: Vec<&str> = frames.iter().map(|f| f.event.tag()).collect();
     assert_eq!(
@@ -3497,5 +3514,65 @@ async fn the_stream_is_live_from_the_mount_in_arrival_order() {
         vec!["error", "session_opened", "sessions_available"],
         "live from the mount, in arrival order — no buffer, no drop"
     );
+    std::fs::remove_dir_all(store.dir()).ok();
+}
+
+/// The prepared-supervisor law (owner ruling 2026-09): any node may
+/// send anything a frontend can from its handshake onward — a
+/// co-frontend's `new_session` arriving while the boot's data is
+/// still gathering parks (the builders ARE that data), and serves in
+/// arrival order behind the boot's announcements.
+#[tokio::test]
+async fn an_early_new_session_parks_until_the_boot_attaches() {
+    let store = temp_store("endpoint-early-new-session");
+    let session = Factory::new(vec![text_turn("never")])
+        .into_builder(store.clone())
+        .create("C:/w")
+        .expect("session");
+    let wiring = plain_wiring(&store);
+    let node = wiring.node.clone();
+
+    // The structure mounts; the chatty participant speaks through an
+    // extension-shaped lane BEFORE the boot session or the builders
+    // exist — exactly the window a co-frontend's post-ack
+    // new_session lands in.
+    let structure = SessionHost::mount(wiring, crate::mount_frontend(&node));
+    let lane = crate::Channel::local("co-frontend", |_| {}, |_| {});
+    node.intake(
+        &lane,
+        tabit_wire::node::Inbound::Command(SessionCommand::NewSession),
+    );
+
+    // The boot's data arrives (a builder that CAN build), the boot
+    // attaches — and the parked command serves behind the
+    // announcements.
+    let create_store = store.clone();
+    let data = SessionHostData {
+        create: std::sync::Arc::new(move || {
+            Factory::new(vec![text_turn("new answer")])
+                .into_builder(create_store.clone())
+                .create("C:/w")
+                .map(|session| (session, Vec::new()))
+                .map_err(|error| error.to_string())
+        }),
+        ..plain_data()
+    };
+    let mut handle = structure.attach(session, Vec::new(), data);
+    let boot = boot_id(&handle);
+    let frames = drain(&mut handle).await;
+    let opened: Vec<String> = frames
+        .iter()
+        .filter_map(|frame| match &frame.event {
+            SessionEvent::SessionOpened { id, .. } => Some(id.clone()),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(
+        opened.len(),
+        2,
+        "the boot's announcement and the parked session's: {opened:?}"
+    );
+    assert_eq!(opened[0], boot, "the boot's announcement leads");
+    assert_ne!(opened[1], boot, "the parked session follows behind it");
     std::fs::remove_dir_all(store.dir()).ok();
 }

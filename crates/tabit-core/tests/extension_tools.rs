@@ -657,6 +657,7 @@ fn spawn_raw(work: &Path, extensions_root: &Path, config: &Path, home: &Path) ->
 /// into an empty user config (the fragment is the only provider), the
 /// model call rides the relay, and the relay translates to LM Studio's
 /// native REST API — four processes: backend, relay, native mock.
+
 #[test]
 fn a_providers_fragment_relays_a_model_call_over_the_native_api() {
     let stage = stage("relay", &[]);
@@ -753,7 +754,7 @@ fn a_providers_fragment_relays_a_model_call_over_the_native_api() {
                     }));
                 }
                 SessionEvent::RunFailed { message, .. } => {
-                    assert!(failure_beat_sent, "beat 1 must succeed first");
+                    assert!(failure_beat_sent, "beat 1 must succeed first: {message}");
                     assert!(message.contains("LM Studio answered"), "{message}");
                     return;
                 }

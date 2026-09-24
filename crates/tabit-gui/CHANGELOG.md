@@ -4,6 +4,18 @@ What moved in the frontend protocol, newest first — the companion to
 FRONTEND.md (the frozen contract). Read FRONTEND.md to build a
 frontend; read this to keep one current.
 
+## 2026-09-25 — expectation
+
+- Other participants' frames (an extension's, origin-stamped) may
+  now interleave ahead of the core's own startup sequence — the
+  "next frame after the ack is `session_opened`" guarantee now
+  scopes to the core's own emissions (participants are peers;
+  EXTENSIONS.md). FRONTEND.md §3 carries the caveat. Before this,
+  the backend buffered early extension frames behind the startup
+  announcements; frontends that display or queue origin-stamped
+  frames as they arrive need no change.
+
+
 Two entry kinds, because the contract is both the wire and the
 expectations around it (the ISA rule: an instruction set is also the
 software/hardware contract, not just the encodings):

@@ -271,13 +271,6 @@ impl Child {
                 LaneAction::None => {}
             }
         }));
-        // The observation registrations sweep with the child too (the
-        // `#on` owner — the mount's sweep covers the lane's id only).
-        let sweep = shared.node.clone();
-        spec = spec.on_exit(Arc::new(move |id| {
-            sweep.retract(&format!("{id}#on"), "the child exited");
-        }));
-
         // The driver task owns the handle on the SDK's runtime: one
         // loop — commands in, the shared settle fold per run, the
         // settlement reported back.
@@ -323,14 +316,12 @@ impl Child {
         &self.id
     }
 
-    /// Observe one event kind (typed, thread-dispatched like every
+    /// Observe one event kind (typed, task-dispatched like every
     /// invocation). Observation composes: the child's handlers, the
     /// extension's watches of the same kind, and other children's
-    /// all hear the fan — the node's one subscription surface. The
-    /// registrations carry their own owner (`{id}#on`): the lane's
-    /// owner is the ingress-skip key (a frame arriving on the lane
-    /// never bounces back down it), and the observations must not
-    /// share it — they would be skipped with the lane.
+    /// all hear the fan — the node's one subscription surface, owned
+    /// by the child's id (the death sweep's key: the mount's exit
+    /// sweep retracts it with everything else the child holds).
     pub fn on<F, Fut>(&self, kind: &str, body: F) -> Result<(), String>
     where
         F: Fn(Ctx, SessionEvent) -> Fut + Send + Sync + 'static,
@@ -339,7 +330,7 @@ impl Child {
         refuse_ask_kind(kind)?;
         let shared = self.shared.clone();
         let body: crate::ErasedWatch = Arc::new(move |ctx, event| Box::pin(body(ctx, event)));
-        let owner = format!("{}#on", self.id);
+        let owner = (*self.id).clone();
         self.shared.node.subscribe(kind, &owner, move |frame| {
             let event = frame.event.clone();
             let (shared, body) = (shared.clone(), body.clone());
@@ -454,9 +445,10 @@ mod tests {
         assert!(matches!(action, LaneAction::Answerers));
     }
 
-    /// The observation owner is not the lane's owner: a frame
-    /// arriving on the lane skips the lane's owner (the ingress law)
-    /// — the observations, under their own owner, still hear it.
+    /// The ingress skip matches channel identity, never owner
+    /// strings: the child's observation handler — a plain callback
+    /// owned by the lane's own id — still hears frames arriving on
+    /// the lane.
     #[test]
     fn the_observation_owner_is_not_the_lanes() {
         let shared = crate::tests::shared();
@@ -464,11 +456,9 @@ mod tests {
         let lane = Channel::local("child-1", |_| {}, |_| {});
         let heard = std::sync::Arc::new(std::sync::Mutex::new(0u32));
         let sink = heard.clone();
-        node.subscribe(
-            tags::RUN_FINISHED,
-            &format!("{}#on", lane.owner()),
-            move |_| *sink.lock().expect("test lock") += 1,
-        );
+        node.subscribe(tags::RUN_FINISHED, lane.owner(), move |_| {
+            *sink.lock().expect("test lock") += 1
+        });
         node.intake(
             &lane,
             Inbound::Event(EventFrame {

@@ -148,18 +148,24 @@ any session command, then any session event; a line parseable as
 none of the three is the contract break it always was (death with
 the snippet). The two tag namespaces are disjoint and stay so.
 
-**Extensions are reactive** (owner ruling 2026-09, the no-buffer
-ruling): nothing is sent upstream before the first inbound frame
-reaches the pipe. Every outbound frame answers something — a tool
-result answers a call, a hook result a hook, a service response a
-request, a grammar emission rides a handler reacting to traffic that
-arrived. This is what guarantees the frontend contract's pinned
-startup sequence (FRONTEND.md §3: `session_opened` is the next frame
-after the ack) with no buffering anywhere: the core mounts its
-frontend stream first (structure), then gathers extensions and their
-data, then spawns the session host and announces — and no extension
-can speak into that window, so nothing precedes the announcements
-but the announcements' own order.
+**Participants are peers, not subordinates** (owner ruling 2026-09,
+correcting the reactivity claim): any node may send anything a
+frontend can from its handshake onward — a co-frontend extension's
+`new_session` right after its ack, a subagent child's steer — with
+no supervisor action required and no reactivity constraint. The
+corresponding duty is the parent's: **be structurally prepared
+before the child can speak.** The core's boot is structure, then
+data: the frontend stream mounts first (every frame from every
+participant's first line crosses it, in arrival order — no buffering
+anywhere), then the session host's command surface (the by-type
+lifecycle handlers) goes live, then the extensions gather, then the
+session builds. What the structure cannot answer yet — a lifecycle
+command whose builders are the boot's still-gathering data — parks,
+and serves in arrival order behind the boot's announcements
+(FRONTEND.md §3's `session_opened`-leads sequence holds for the
+core's own emissions; other participants' frames may interleave
+ahead of them, in arrival order, and frontends tolerate them as they
+tolerate any origin-stamped frame).
 
 The four directions, one sentence each:
 

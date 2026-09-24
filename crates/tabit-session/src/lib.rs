@@ -97,8 +97,8 @@ pub use tabit_log::writer;
 
 pub use context_manager::{CheckoutError, ContextManager};
 pub use endpoint::{
-    FrontendStream, OpenSessionSource, SessionCommandLink, SessionHost, SessionHostWiring,
-    SessionInfo, SessionSource, mount_frontend,
+    FrontendStream, OpenSessionSource, SessionCommandLink, SessionHost, SessionHostData,
+    SessionHostMount, SessionHostWiring, SessionInfo, SessionSource, mount_frontend,
 };
 pub use entry::{
     EntryKind, SESSION_FORMAT_MAJOR, SESSION_FORMAT_MINOR, SessionEntry, SessionHeader,

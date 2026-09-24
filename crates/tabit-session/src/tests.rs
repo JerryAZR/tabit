@@ -24,6 +24,17 @@ fn file_path(session: &crate::Session) -> &std::path::Path {
     session.path().expect("file-backed")
 }
 
+/// The refusing session builders as the boot's data half (tests
+/// that never drive session lifecycle).
+pub(crate) fn plain_data() -> crate::SessionHostData {
+    crate::SessionHostData {
+        create: std::sync::Arc::new(|| Err("new_session is not driven".to_string())),
+        open: std::sync::Arc::new(|_| Err("open_session is not driven".to_string())),
+        skills: Vec::new(),
+        extensions: Default::default(),
+    }
+}
+
 pub(crate) fn temp_store(tag: &str) -> SessionStore {
     let dir = std::env::temp_dir()
         .join("tabit-session-tests")

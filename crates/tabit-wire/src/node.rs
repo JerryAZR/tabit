@@ -108,6 +108,12 @@ type AnswerDelivery = Arc<dyn Fn(&str, Value) + Send + Sync>;
 /// identically.
 #[derive(Clone)]
 pub struct Channel {
+    /// The channel's process-unique identity — the ingress-skip and
+    /// dedup key (the 2026-09 identity ruling: a frame never re-emits
+    /// out the channel it arrived on, matched exactly, never by the
+    /// owner string — the owner is the participant key, and one
+    /// participant may hold many channels and many callbacks).
+    id: u64,
     owner: Arc<str>,
     /// A subscription delivery — an event frame the channel asked to
     /// hear.
@@ -121,7 +127,19 @@ pub struct Channel {
     command: Delivery<SessionCommand>,
 }
 
+/// The identity mint — one counter, every channel unique.
+fn next_channel_id() -> u64 {
+    use std::sync::atomic::{AtomicU64, Ordering};
+    static NEXT: AtomicU64 = AtomicU64::new(1);
+    NEXT.fetch_add(1, Ordering::Relaxed)
+}
+
 impl Channel {
+    /// The channel's process-unique identity — the skip key.
+    pub fn id(&self) -> u64 {
+        self.id
+    }
+
     /// The in-process functional layer's channel: typed callbacks.
     /// `on_event` hears what this layer subscribed to; `on_command`
     /// receives commands the learning table routes here (the layer's
@@ -132,6 +150,7 @@ impl Channel {
         C: Fn(&SessionCommand) + Send + Sync + 'static,
     {
         Self {
+            id: next_channel_id(),
             owner: Arc::from(owner),
             event: Arc::new(on_event),
             // Local askers hold promises at the ask table; there is
@@ -152,6 +171,7 @@ impl Channel {
         let write_event = write.clone();
         let write_answer = write.clone();
         Self {
+            id: next_channel_id(),
             owner: Arc::from(owner),
             event: Arc::new(move |frame| write_event(&to_wire_line(frame))),
             answer: Arc::new(move |id, payload| {
@@ -340,16 +360,22 @@ impl<C: Routed> Node<C> {
     /// kind). The channel's owner is the sweep key.
     pub fn subscribe_channel(&self, kind: &str, channel: &Channel) {
         let owner = channel.owner().to_string();
+        let id = channel.id();
         let channel = channel.clone();
         let paired = channel.clone();
-        self.events.register(kind, &owner, move |frame| {
-            channel.deliver_event(frame);
-        });
+        self.events
+            .register_channel(kind, &owner, Some(id), move |frame| {
+                channel.deliver_event(frame);
+            });
         if kind == tags::INTERACTION_REQUEST {
-            self.events
-                .register(tags::INTERACTION_SETTLED, &owner, move |frame| {
+            self.events.register_channel(
+                tags::INTERACTION_SETTLED,
+                &owner,
+                Some(id),
+                move |frame| {
                     paired.deliver_event(frame);
-                });
+                },
+            );
         }
     }
 
@@ -366,9 +392,10 @@ impl<C: Routed> Node<C> {
     /// (a child forwarding all its traffic to its parent's pipe).
     pub fn subscribe_channel_all(&self, channel: &Channel) {
         let owner = channel.owner().to_string();
+        let id = channel.id();
         let channel = channel.clone();
         self.events
-            .register_all(&owner, move |frame| channel.deliver_event(frame));
+            .register_all_channel(&owner, Some(id), move |frame| channel.deliver_event(frame));
     }
 
     /// Handle one command type on this node (the functional layer's
@@ -504,7 +531,7 @@ impl<C: Routed> Node<C> {
                         return;
                     }
                 }
-                self.events.dispatch_skipping(&frame, &[from.owner()]);
+                self.events.dispatch_skipping(&frame, &[from.id()]);
             }
             Inbound::Command(command) => self.route_command(command),
         }

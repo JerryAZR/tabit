@@ -919,11 +919,38 @@ async fn the_shared_grammar_flows_both_directions_over_the_pipe() {
         supervisor::launch_root(&root, HANDSHAKE_TIMEOUT, recorded.host());
     await_status(&mut events, "grammar-ext", |s| matches!(s, Status::Alive)).await;
 
+    // The double's command crossed and ENTERED THE NET: no session
+    // `boot-session` exists on the test's node, so the uniform miss
+    // error is the command's observable routing outcome (it raced
+    // the Alive transition, so poll — never assert on a snapshot).
+    // The double is deliberately chatty from the ack (the peers
+    // ruling) — the prepared node takes it with nothing parked.
+    let saw_command = wait_for(|| {
+        recorded
+            .events()
+            .iter()
+            .any(|e| e.contains("no session") && e.contains("boot-session"))
+    })
+    .await;
+    assert!(
+        saw_command,
+        "the command entered the node's routing: {:?}",
+        recorded.events()
+    );
+    let saw_ask = wait_for(|| {
+        recorded.events().iter().any(|e| {
+            e.starts_with("grammar-ext|") && e.contains("interaction_request") && e.contains("g-1")
+        })
+    })
+    .await;
+    assert!(
+        saw_ask,
+        "the ask emission routed, origin-stamped: {:?}",
+        recorded.events()
+    );
+
     // Broadcast honors the watch list: a watched kind mirrors (the
-    // double echoes it back out), an unwatched kind does not. The
-    // double is reactive (the no-buffer ruling): this broadcast is
-    // also its trigger — its steer and its ask ride the mirrored
-    // announcement, after the first inbound frame reached it.
+    // double echoes it back out), an unwatched kind does not.
     let watched = tabit_protocol::EventFrame {
         stream: None,
         origin: None,
@@ -948,34 +975,6 @@ async fn the_shared_grammar_flows_both_directions_over_the_pipe() {
         event: tabit_protocol::SessionEvent::CompactionBegin,
     };
     net.emit(&emit_from, unwatched);
-
-    // The double's command crossed and ENTERED THE NET: no session
-    // `boot-session` exists on the test's node, so the uniform miss
-    // error is the command's observable routing outcome (it trails
-    // the broadcast, so poll — never assert on a snapshot).
-    let saw_command = wait_for(|| {
-        recorded
-            .events()
-            .iter()
-            .any(|e| e.contains("no session") && e.contains("boot-session"))
-    })
-    .await;
-    assert!(
-        saw_command,
-        "the command entered the node's routing: {:?}",
-        recorded.events()
-    );
-    let saw_ask = wait_for(|| {
-        recorded.events().iter().any(|e| {
-            e.starts_with("grammar-ext|") && e.contains("interaction_request") && e.contains("g-1")
-        })
-    })
-    .await;
-    assert!(
-        saw_ask,
-        "the ask emission routed, origin-stamped: {:?}",
-        recorded.events()
-    );
     // The double's echo carries its origin attribution (the raw
     // emission also passes the recorder — origin "-"; the MIRROR is
     // the echoed copy, origin "grammar-ext").

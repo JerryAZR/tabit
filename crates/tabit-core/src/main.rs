@@ -1043,14 +1043,32 @@ fn run() -> Result<i32, String> {
             // intake from its lane, and its watch list subscribes the
             // lane's channel. No bridges, no drains — the grammar's
             // other end (the session host) reads the same tables.
-            // The boot is structure, then data: the frontend stream
-            // mounts FIRST (the net's routing is complete before any
-            // participant exists), extensions gather next, the
-            // session builds last. Extensions are reactive (nothing
-            // outbound before their first inbound frame — the
-            // no-buffer ruling), so the pinned startup sequence
-            // needs no ordering machinery anywhere.
+            // The boot is structure, then data. Structure first: the
+            // frontend stream (every frame any participant emits from
+            // its first line crosses it), then the session host's
+            // command surface — the by-type lifecycle handlers, live
+            // before any child can speak. Participants are peers, not
+            // subordinates (owner ruling 2026-09): any node may send
+            // anything a frontend can from its handshake onward (a
+            // co-frontend's `new_session`, a child's steer), so the
+            // net must be prepared before the first child boots —
+            // lifecycle arrivals before the data exists park, and
+            // serve behind the boot's announcements. Data next: the
+            // extensions gather; the session builds last.
             let frontend = tabit_session::mount_frontend(&host_node());
+            // The mount spawns (the death watchers, the wind-down), so
+            // it runs on the runtime — the whole boot sits inside it.
+            let structure = runtime.block_on(async {
+                SessionHost::mount(
+                    SessionHostWiring {
+                        node: host_node(),
+                        store: SessionStore::project_default(),
+                        boot_parent: args.parent.clone(),
+                        boot_parent_call: args.parent_call.clone(),
+                    },
+                    frontend,
+                )
+            });
             let launch_context = tabit_ext::LaunchContext {
                 node: host_node(),
                 // The host IS the binary: owned-session spawners get
@@ -1091,10 +1109,9 @@ fn run() -> Result<i32, String> {
                 Err(detail) => return json_startup_failure(&detail),
             };
             print_banner(&session);
-            let wiring = host_wiring(&args, &registry, SessionStore::project_default(), &mounted);
+            let data = host_data(&args, &registry, &SessionStore::project_default(), &mounted);
             Ok(runtime.block_on(async {
-                let handle =
-                    SessionHost::spawn_with_frontend(session, startup_notes, wiring, frontend);
+                let handle = structure.attach(session, startup_notes, data);
                 tabit_session::edge::serve(
                     handle,
                     std::io::BufReader::new(std::io::stdin()),
@@ -1169,9 +1186,15 @@ fn print_mode(args: &Args, registry: &ModelRegistry) -> Result<i32, String> {
         .map_err(|e| e.to_string())?
         .block_on(async {
             let empty_mount = std::sync::Arc::new(extensions::Mounted::none());
-            let wiring =
-                host_wiring(args, registry, SessionStore::project_default(), &empty_mount);
-            let mut handle = SessionHost::spawn(session, startup_notes, wiring);
+            let store = SessionStore::project_default();
+            let wiring = SessionHostWiring {
+                node: host_node(),
+                store: store.clone(),
+                boot_parent: args.parent.clone(),
+                boot_parent_call: args.parent_call.clone(),
+            };
+            let data = host_data(args, registry, &store, &empty_mount);
+            let mut handle = SessionHost::spawn(session, startup_notes, wiring, data);
             let boot = handle.info().session_id.clone();
             {
                 let link = handle.command_link();
@@ -1446,20 +1469,22 @@ fn parse_answer(session: &str, id: &str, options: &[String], line: &str) -> Sess
     }
 }
 
-/// The host's session wiring: how `new_session`/`open_session` build
-/// sessions — the same assembly as the boot (config, tools, preamble),
-/// behind closures so tabit-session stays free of front-facing wiring.
-/// The process's `--model`/`--max-turns` apply to sessions created
-/// later; `open_session` resolves by stored id and resumes that file.
+/// The host's session builders — the boot's DATA half (what only
+/// exists once the extension handshakes resolved): how
+/// `new_session`/`open_session` build sessions, the same assembly as
+/// the boot (config, tools, preamble), behind closures so
+/// tabit-session stays free of front-facing wiring. The process's
+/// `--model`/`--max-turns` apply to sessions created later;
+/// `open_session` resolves by stored id and resumes that file.
 /// One registry for the whole process (the ruling: providers are user
 /// config, not per-session) — every session the host builds shares
 /// the provider client caches.
-fn host_wiring(
+fn host_data(
     args: &Args,
     registry: &ModelRegistry,
-    store: SessionStore,
+    store: &SessionStore,
     extensions: &std::sync::Arc<extensions::Mounted>,
-) -> SessionHostWiring {
+) -> tabit_session::SessionHostData {
     let fresh_args = Args {
         session: None,
         continue_newest: false,
@@ -1476,11 +1501,7 @@ fn host_wiring(
     let open_registry = registry.clone();
     let open_store = store.clone();
     let open_extensions = extensions.clone();
-    SessionHostWiring {
-        store,
-        node: host_node(),
-        boot_parent: args.parent.clone(),
-        boot_parent_call: args.parent_call.clone(),
+    tabit_session::SessionHostData {
         skills: skills_catalog().available(),
         extensions: extensions.catalog.clone(),
         create: Arc::new(move || {

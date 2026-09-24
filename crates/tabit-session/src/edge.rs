@@ -245,6 +245,7 @@ async fn write_loop<W: Write>(mut rx: mpsc::UnboundedReceiver<ServerFrame>, mut 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::endpoint::SessionHostData;
     use crate::{
         EventFrame, ModelSelection, Session, SessionBuilder, SessionHost, SessionHostWiring,
         SessionSource, SessionStore,
@@ -362,16 +363,22 @@ id = "m"
     /// Host wiring over the test store. `create` defaults to a clear
     /// failure (most tests never drive `new_session`); tests that do
     /// pass their own builder.
-    fn test_wiring(dir: &Path, create: SessionSource) -> SessionHostWiring {
+    fn test_wiring(dir: &Path) -> SessionHostWiring {
         SessionHostWiring {
             node: std::sync::Arc::new(crate::Node::new("test")),
             boot_parent: None,
             boot_parent_call: None,
+            store: SessionStore::new(dir),
+        }
+    }
+
+    /// The refusing builders as the data half; `create` overrides.
+    fn test_data(create: SessionSource) -> SessionHostData {
+        SessionHostData {
+            create,
+            open: Arc::new(|_| Err("open_session is not driven by this test".to_string())),
             skills: Vec::new(),
             extensions: Default::default(),
-            store: SessionStore::new(dir),
-            create,
-            open: Arc::new(move |_| Err("open_session is not driven by this test".to_string())),
         }
     }
 
@@ -422,7 +429,8 @@ id = "m"
         let handle = SessionHost::spawn(
             session,
             Vec::new(),
-            test_wiring(&test_dir(tag), unusable_create()),
+            test_wiring(&test_dir(tag)),
+            test_data(unusable_create()),
         );
         let out = SharedOut::default();
         let code = serve(handle, Cursor::new(input.as_bytes().to_vec()), out.clone()).await;
@@ -529,7 +537,8 @@ id = "m"
         let handle = SessionHost::spawn(
             session,
             Vec::new(),
-            test_wiring(&test_dir("live"), unusable_create()),
+            test_wiring(&test_dir("live")),
+            test_data(unusable_create()),
         );
         let out = SharedOut::default();
         let serve_task = tokio::spawn(serve(
@@ -604,7 +613,8 @@ id = "m"
         let handle = SessionHost::spawn(
             session,
             Vec::new(),
-            test_wiring(&test_dir(tag), unusable_create()),
+            test_wiring(&test_dir(tag)),
+            test_data(unusable_create()),
         );
         let out = SharedOut::default();
         let (tx_in, rx_in) = std::sync::mpsc::channel::<String>();
@@ -703,7 +713,8 @@ id = "m"
         let handle = SessionHost::spawn(
             session,
             vec!["the resumed session's model `gone/m` is not usable".to_string()],
-            test_wiring(&test_dir("degraded-startup"), unusable_create()),
+            test_wiring(&test_dir("degraded-startup")),
+            test_data(unusable_create()),
         );
         let out = SharedOut::default();
         let (tx_in, rx_in) = std::sync::mpsc::channel::<String>();
@@ -798,7 +809,8 @@ id = "m"
         let handle = SessionHost::spawn(
             session,
             Vec::new(),
-            test_wiring(&test_dir("preinit"), unusable_create()),
+            test_wiring(&test_dir("preinit")),
+            test_data(unusable_create()),
         );
         let out = SharedOut::default();
         let (tx_in, rx_in) = std::sync::mpsc::channel::<String>();
@@ -865,7 +877,8 @@ id = "m"
         let handle = SessionHost::spawn(
             session,
             Vec::new(),
-            test_wiring(&test_dir("eof-abort"), unusable_create()),
+            test_wiring(&test_dir("eof-abort")),
+            test_data(unusable_create()),
         );
         let out = SharedOut::default();
         let (tx_in, rx_in) = std::sync::mpsc::channel::<String>();
@@ -1024,7 +1037,8 @@ id = "m"
         let handle = SessionHost::spawn(
             session,
             Vec::new(),
-            test_wiring(&test_dir("panic-reader"), unusable_create()),
+            test_wiring(&test_dir("panic-reader")),
+            test_data(unusable_create()),
         );
         let code = serve(handle, PanickingReader, SharedOut::default()).await;
         assert_eq!(code, 1);
@@ -1034,7 +1048,8 @@ id = "m"
         let handle = SessionHost::spawn(
             session,
             Vec::new(),
-            test_wiring(&test_dir("error-reader"), unusable_create()),
+            test_wiring(&test_dir("error-reader")),
+            test_data(unusable_create()),
         );
         let code = serve(handle, ErroringReader, SharedOut::default()).await;
         assert_eq!(code, 0);
@@ -1044,7 +1059,8 @@ id = "m"
         let handle = SessionHost::spawn(
             session,
             Vec::new(),
-            test_wiring(&test_dir("fail-writer"), unusable_create()),
+            test_wiring(&test_dir("fail-writer")),
+            test_data(unusable_create()),
         );
         let code = serve(
             handle,
@@ -1108,7 +1124,12 @@ id = "m"
             .resume(&path)
             .unwrap()
             .0;
-        let handle = SessionHost::spawn(session, Vec::new(), test_wiring(&dir, unusable_create()));
+        let handle = SessionHost::spawn(
+            session,
+            Vec::new(),
+            test_wiring(&dir),
+            test_data(unusable_create()),
+        );
 
         let out = SharedOut::default();
         let (tx_in, rx_in) = std::sync::mpsc::channel::<String>();
@@ -1338,11 +1359,13 @@ id = "m"
                 node: std::sync::Arc::new(crate::Node::new("test")),
                 boot_parent: None,
                 boot_parent_call: None,
-                skills: Vec::new(),
-                extensions: Default::default(),
                 store: SessionStore::new(&dir),
+            },
+            SessionHostData {
                 create,
                 open,
+                skills: Vec::new(),
+                extensions: Default::default(),
             },
         );
         let out = SharedOut::default();
@@ -1442,7 +1465,12 @@ id = "m"
         ];
         let session = test_session_with("eof-burst", vec![slow], vec![slow_tool()]);
         let dir = test_dir("eof-burst");
-        let handle = SessionHost::spawn(session, Vec::new(), test_wiring(&dir, unusable_create()));
+        let handle = SessionHost::spawn(
+            session,
+            Vec::new(),
+            test_wiring(&dir),
+            test_data(unusable_create()),
+        );
         let out = SharedOut::default();
         // The piped-burst shape (initialize + message + immediate EOF)
         // needs the session id, which is only knowable after the ack —
@@ -1522,7 +1550,8 @@ id = "m"
         let handle = SessionHost::spawn(
             session,
             Vec::new(),
-            test_wiring(&test_dir("checkout"), unusable_create()),
+            test_wiring(&test_dir("checkout")),
+            test_data(unusable_create()),
         );
         let out = SharedOut::default();
         let serve_task = tokio::spawn(serve(
