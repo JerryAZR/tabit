@@ -1513,3 +1513,66 @@ fn a_guest_origin_dying_after_the_answer_still_closes_the_card() {
         saw.events()
     );
 }
+
+/// The override-path ask (the SDK's own card): the request AND the
+/// settle announce cross to the additional receivers — a pipe that
+/// subscribes to nothing still hears both — the local fan hears the
+/// frame once (the dedup), and the card carries no stream stamp (a
+/// session-less asker; the answer routes by id).
+#[test]
+fn ask_on_crosses_the_request_and_the_settle_to_the_additionals() {
+    let node = Arc::new(Node::new("ext"));
+    let (_layer, saw) = stub_layer(&node, "watches");
+
+    let pipe_lines: Arc<Mutex<Vec<String>>> = Arc::new(Mutex::new(Vec::new()));
+    let sink = pipe_lines.clone();
+    let pipe = Channel::line("host", move |line: &str| {
+        sink.lock().expect("test lock").push(line.to_string());
+    });
+
+    let awaiter = node.ask_on(
+        "call-1",
+        &[pipe],
+        None,
+        "native:select_any",
+        json!({"body": "the extension asks"}),
+    );
+    let lines = pipe_lines.lock().expect("test lock").clone();
+    assert_eq!(
+        lines.len(),
+        1,
+        "the request crossed the pipe once: {lines:?}"
+    );
+    assert!(
+        lines[0].contains("interaction_request"),
+        "the crossed line is the card: {lines:?}"
+    );
+    assert!(
+        !lines[0].contains("\"stream\""),
+        "a session-less card carries no stream stamp: {lines:?}"
+    );
+    assert!(
+        saw.has("interaction_request"),
+        "the local fan heard it too (loopback): {:?}",
+        saw.events()
+    );
+
+    // The answer walks home by id; the settle announce crosses the
+    // same pipe — whoever heard the card by that fan hears it close.
+    node.intake(
+        &Channel::local("host", |_| {}, |_| {}),
+        Inbound::Command(SessionCommand::InteractionResponse {
+            session: None,
+            id: request_id(&saw),
+            payload: json!({"text": "yes"}),
+        }),
+    );
+    let answer = awaiter.blocking_recv().expect("the answer resolved");
+    assert_eq!(answer["text"], "yes");
+    let lines = pipe_lines.lock().expect("test lock").clone();
+    assert_eq!(lines.len(), 2, "the settle announce crossed: {lines:?}");
+    assert!(
+        lines[1].contains("interaction_settled"),
+        "the second line is the settle: {lines:?}"
+    );
+}

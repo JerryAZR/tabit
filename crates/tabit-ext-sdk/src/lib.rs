@@ -1,12 +1,11 @@
-//! The tabit extension SDK: the guest library for the frozen pipe.
-//! Authors register tools, consultations, and watched event kinds;
-//! the SDK owns the loop (handshake, dispatch, the unconditional
-//! drain), derives the handshake's declarations from the
-//! registration, and hands every handler one context object
-//! carrying the utilities. Handlers are plain functions — they may
-//! block, ask, emit, command — and never the loop: every invocation
-//! runs on its own worker thread, so tools and hooks execute
-//! concurrently and a blocked body cannot stall the pipe.
+//! The tabit extension SDK: the guest's functional layer over its
+//! node. Authors register tools, consultations, and watched event
+//! kinds; the SDK owns the pipe (handshake, the frozen dialect's
+//! lanes, the unconditional drain) and derives the handshake's
+//! declarations from the registration. The routing — whose frames
+//! cross, how answers walk home, what a death sweeps — is the
+//! guest's node under the SDK (the node architecture, 2026-09):
+//! authors never meet the router or the channel concepts.
 //!
 //! The registries are disjoint by vocabulary (the category error is
 //! structural — the two handler shapes cannot be confused):
@@ -22,13 +21,26 @@
 //!
 //! The context ([`Ctx`]) exposes the four directions: `command`
 //! (any session command, frontend-grade addressing), `emit` (any
-//! session event — surfaced origin-stamped), `ask` (emit an
-//! interaction request, await the routed answer), `complete` (one
-//! bare model completion, call-correlated), and `cancelled` (the
-//! cooperative abort poll). The SDK shares the host's wire types
-//! (the 2026-09 sharing ruling: one wire, one set of shapes — the
-//! docs stay the contract for other languages, the conformance
-//! tests keep crate and docs honest).
+//! session event — it crosses the pipe by the additional-receiver
+//! path and surfaces origin-stamped), `ask` (emit an interaction
+//! request, await the routed answer), `complete` (one bare model
+//! completion, call-correlated), and `cancelled` (the cooperative
+//! abort poll). Handlers are plain functions — they may block, ask,
+//! emit, command — and never the loop: every invocation runs on its
+//! own worker thread, so tools and hooks execute concurrently and a
+//! blocked body cannot stall the pipe.
+//!
+//! The wire laws this side of the pipe: a tool call, a hook, a
+//! service request are asks (the taxonomy ruling) — each arriving
+//! call is held on the node's ask table against the host's channel
+//! and answered through it; an extension's own ask crosses by
+//! [`Node::ask_on`]'s additional receivers (the override path — the
+//! extension's stdio subscribes to nothing by default); the settle
+//! announce rides the same fan, so the host's transit card closes.
+//! The SDK shares the host's wire types (the 2026-09 sharing
+//! ruling: one wire, one set of shapes — the docs stay the contract
+//! for other languages, the conformance tests keep crate and docs
+//! honest).
 
 // serde_json's `Value` indexing returns Null for missing keys — it
 // never panics — and that ergonomics is the point of this crate: the
@@ -42,9 +54,14 @@ use std::sync::{Arc, Mutex};
 
 use serde::Serialize;
 use serde_json::{Value, json};
-use tabit_ext::protocol::{ExtFrame, HookResult, HostFrame, ServiceVerb, ToolWireResult};
+use tabit_ext::protocol::{
+    ExtFrame, HookResult, HostFrame, KIND_HOOK_RESULT, KIND_SERVICE_RESPONSE, KIND_TOOL_RESULT,
+    ServiceVerb, ToolWireResult,
+};
 use tabit_protocol::points::HookPoint;
-use tabit_protocol::{EventFrame, SessionCommand, SessionEvent};
+use tabit_protocol::{EventFrame, SessionCommand, SessionEvent, tags};
+use tabit_wire::asks::Outcome;
+use tabit_wire::node::{Channel, Node, parse_shared};
 
 /// The extension protocol this SDK speaks — must match the host's
 /// exactly (the pipe is a frozen contract, not a negotiated one).
@@ -302,17 +319,31 @@ impl Ctx {
 
     /// Issue any session command — the frontend grammar verbatim,
     /// frontend-grade addressing (the ids arrive on watched events:
-    /// `session_opened`, the boot announcement). Fire-and-forget:
-    /// effects arrive as the events you watch.
+    /// `session_opened`, the boot announcement). The line crosses
+    /// the pipe and routes at the host, where the sessions live;
+    /// effects arrive as the events you watch. Fire-and-forget.
     pub fn command(&self, command: SessionCommand) {
-        let _ = emit(&self.shared, &command);
+        self.shared.stdio.send_command(&command);
     }
 
-    /// Emit any session event into the shared grammar — it surfaces
-    /// to the frontend and subscribers, origin-stamped with this
-    /// extension's id (attribution, not permission).
+    /// Emit any session event into the shared grammar — it crosses
+    /// the pipe by the additional-receiver path (this node's stdio
+    /// subscribes to nothing; naming it per emission is the override
+    /// path) and surfaces to the frontend and subscribers,
+    /// origin-stamped with this extension's id at the host's intake
+    /// (attribution, not permission). Local watchers of the kind
+    /// hear it too — the layer's own loopback.
     pub fn emit(&self, event: SessionEvent) {
-        let _ = emit(&self.shared, &event);
+        self.shared.node.emit_to(
+            &self.shared.layer,
+            std::slice::from_ref(&self.shared.stdio),
+            EventFrame {
+                stream: None,
+                origin: None,
+                ttl: None,
+                event,
+            },
+        );
     }
 
     /// Ask the user: emit an `interaction_request` into the shared
@@ -320,48 +351,35 @@ impl Ctx {
     /// `ui_type` + opaque payload mirror the templates core tools
     /// use (`native:*` qualifies). Blocks the handler's thread until
     /// answered; the cancellation of this invocation's run resolves
-    /// `None` (the card may still be answered behind us — a late
-    /// response finds no waiter and drops), and the pipe's death
-    /// resolves `None` too — fail closed.
+    /// `None` (the card stays open — the run's completion sweeps it
+    /// with its settle announced, so the card closes everywhere),
+    /// and the pipe's death resolves `None` too — fail closed.
     pub fn ask(&self, ui_type: &str, payload: Value) -> Option<Value> {
         let owner = self
             .correlation
             .clone()
             .unwrap_or_else(|| "watch".to_string());
-        let id = next_request_id(&owner, "ask");
-        let (tx, rx) = std::sync::mpsc::channel::<Value>();
-        self.shared
-            .grammar_asks
-            .insert(id.clone(), &owner, "interaction", move |outcome| {
-                if let tabit_wire::asks::Outcome::Answered(answer) = outcome {
-                    let _ = tx.send(tabit_wire::asks::unanswer::<Value>(answer));
-                }
-            });
-        let sent = emit(
-            &self.shared,
-            &SessionEvent::InteractionRequest {
-                id: id.clone(),
-                ui_type: ui_type.to_string(),
-                payload,
-            },
+        let promise = self.shared.node.ask_on(
+            &owner,
+            std::slice::from_ref(&self.shared.stdio),
+            None,
+            ui_type,
+            payload,
         );
-        if !sent {
-            drop(self.shared.grammar_asks.claim(&id));
-            return None;
-        }
-        // The wait honors cancellation: the run aborting under this
-        // invocation abandons the ask (the host-side card settles
-        // whenever the user answers it; the routed response then
-        // finds no waiter).
+        // The promise resolves on the node (a tokio oneshot); the
+        // wait polls cancellation, so it lives on this handler's own
+        // thread — the runtime task is the bridge between them.
+        let (answered, wait) = std::sync::mpsc::channel::<Value>();
+        children::runtime().spawn(async move {
+            if let Ok(answer) = promise.await {
+                let _ = answered.send(answer);
+            }
+        });
         loop {
-            match rx.recv_timeout(std::time::Duration::from_millis(100)) {
-                Ok(answer) => {
-                    drop(self.shared.grammar_asks.claim(&id));
-                    return Some(answer);
-                }
+            match wait.recv_timeout(std::time::Duration::from_millis(100)) {
+                Ok(answer) => return Some(answer),
                 Err(std::sync::mpsc::RecvTimeoutError::Timeout) => {
                     if self.cancelled() {
-                        drop(self.shared.grammar_asks.claim(&id));
                         return None;
                     }
                 }
@@ -398,7 +416,27 @@ impl Ctx {
         if let (Some(model), ServiceVerb::ModelPrompt { model: slot, .. }) = (model, &mut verb) {
             *slot = Some(model.to_string());
         }
-        let reply = request(&self.shared, call_id, &id, verb)?;
+        let (reply_tx, reply_rx) = std::sync::mpsc::channel::<ServiceReply>();
+        let owner = call_id.clone();
+        self.shared
+            .node
+            .hold(&owner, &id, KIND_SERVICE_RESPONSE, move |outcome| {
+                if let Outcome::Answered(boxed) = outcome {
+                    let _ = reply_tx.send(tabit_wire::asks::unanswer::<ServiceReply>(boxed));
+                }
+            });
+        let frame = ExtFrame::ServiceRequest {
+            request_id: id.clone(),
+            call_id: call_id.clone(),
+            verb,
+        };
+        if !self.shared.write_frame(&frame) {
+            self.shared.node.discard(&id);
+            return Err("the host closed the pipe".to_string());
+        }
+        let reply = reply_rx
+            .recv()
+            .map_err(|_| "the host closed the pipe".to_string())?;
         match reply.error {
             Some(message) => Err(message),
             None => {
@@ -442,16 +480,29 @@ fn next_request_id(family_root: &str, family: &str) -> String {
     uuid::Uuid::now_v7().to_string()
 }
 
-/// Everything the loop and the worker threads share.
+/// Everything the pipe and the worker threads share: the guest's
+/// node with its two faces, the pipe's one writer, and the
+/// functional layer's own state.
 struct Shared {
-    stdout: std::sync::Mutex<()>,
-    /// Envelope requests in flight, by request id — the delivery
-    /// closure wakes the blocked body's thread with the reply.
-    asks: tabit_wire::asks::PendingAsks,
-    /// Grammar asks in flight: interaction-request ids the extension
-    /// minted, awaiting their routed interaction responses (or, for a
-    /// relayed child's ask, carrying the answer home to the child).
-    grammar_asks: tabit_wire::asks::PendingAsks,
+    /// The guest's routing layer — every table and law this side of
+    /// the pipe. Held asks answer through it; watches and the
+    /// children's registrations ride it; emissions leave by its fan.
+    node: Arc<Node>,
+    /// The pipe's shared-grammar face — the host's channel. Arriving
+    /// frames enter through it (the loop's intake); the extension's
+    /// own speech names it as an additional receiver.
+    stdio: Channel,
+    /// The functional layer's own face — the emission anchor (the
+    /// unstamped emissions' `from`; the re-stamped-forward
+    /// interception surface, when that preset exists).
+    layer: Channel,
+    /// The pipe's one writer: every outbound line — the dialect's
+    /// frames (the ack, results, envelope requests) and the shared
+    /// grammar's alike — queues here, and the writer thread owns
+    /// stdout exclusively. No caller ever blocks on the pipe (a
+    /// worker thread, the children's runtime, the loop itself); a
+    /// dead pipe is the writer's exit, the process's end.
+    pipe: std::sync::mpsc::Sender<String>,
     /// Correlation ids (calls, consultations) the host cancelled —
     /// long-running handlers poll [`Ctx::cancelled`] and stop: kill
     /// the sandbox, drop the wedge, stop billing.
@@ -459,6 +510,19 @@ struct Shared {
     /// The host's own executable (the initialize's `core_path`) —
     /// owned children spawn it.
     core_path: Mutex<Option<String>>,
+}
+
+impl Shared {
+    /// One dialect frame out (the frozen pipe's own lanes — not the
+    /// shared grammar, nothing routes it): serialize, queue. A dead
+    /// pipe is the end, not a failure.
+    fn write_frame<T: Serialize>(&self, frame: &T) -> bool {
+        let Ok(text) = serde_json::to_string(frame) else {
+            return false;
+        };
+        write_line(&self.pipe, &text);
+        true
+    }
 }
 
 /// The dispatcher: answer the initialize, ack (the registration
@@ -472,10 +536,48 @@ pub fn serve(extension: Extension) -> ! {
         watches,
     } = extension;
     let (tools, consults, watches) = (Arc::new(tools), Arc::new(consults), Arc::new(watches));
+    let node = Arc::new(Node::new(&format!("ext-{}", std::process::id())));
+    // The mint-law policy for a guest: the only sender that can
+    // re-register a live id on this node's tables is the host, and a
+    // host that does has broken the pipe's contract — the honest
+    // death, not a thread-panic that wedges the call it came on.
+    node.on_mint_violation(|_owner, id| {
+        die(&format!(
+            "the host re-registered the live ask id `{id}` — the mint law, the pipe's contract"
+        ));
+    });
+    // The pipe's one writer: a dedicated thread owning stdout, fed by
+    // an unbounded queue. Every outbound line crosses through it, so
+    // no caller (a worker thread, the children's runtime, the loop)
+    // ever blocks on the pipe; a dead pipe is the writer's exit.
+    let (pipe_tx, pipe_rx) = std::sync::mpsc::channel::<String>();
+    std::thread::spawn(move || {
+        let stdout = std::io::stdout();
+        let mut handle = stdout.lock();
+        for line in pipe_rx {
+            if writeln!(handle, "{line}")
+                .and_then(|()| handle.flush())
+                .is_err()
+            {
+                std::process::exit(0); // the pipe is gone: the end, not a failure
+            }
+        }
+    });
+    let pipe_writer = pipe_tx.clone();
+    let stdio = Channel::line("host", move |line: &str| write_line(&pipe_writer, line));
+    let layer = Channel::local("sdk", |_| {}, |_| {});
+    // The card law's close vocabulary: the stdio carries exactly one
+    // default subscription — the settle kind. Every settle announce
+    // (the extension's own asks, a swept question, a child's or a
+    // grandchild's) crosses the pipe by it, so no channel holds a
+    // card that can never be answered; a settle arriving from the
+    // host never bounces back (the ingress law).
+    node.subscribe_channel(tags::INTERACTION_SETTLED, &stdio);
     let shared = Arc::new(Shared {
-        stdout: std::sync::Mutex::new(()),
-        asks: tabit_wire::asks::PendingAsks::default(),
-        grammar_asks: tabit_wire::asks::PendingAsks::default(),
+        node: node.clone(),
+        stdio: stdio.clone(),
+        layer,
+        pipe: pipe_tx,
         cancelled: Mutex::new(std::collections::HashSet::new()),
         core_path: Mutex::new(None),
     });
@@ -515,18 +617,18 @@ pub fn serve(extension: Extension) -> ! {
             .collect(),
         watch: watches.iter().map(|w| w.kind.clone()).collect(),
     };
-    emit(&shared, &ack);
+    shared.write_frame(&ack);
 
-    // The watch surface: the shared router (one mechanism with every
-    // other node); each handler's callback owns its dispatch — a
-    // thread with a fresh watch context, panics reported never
-    // fatal.
-    let router = Arc::new(tabit_wire::router::Router::default());
+    // The watch surface: one subscription per watched kind on the
+    // guest's node (the host mirrors the ack's kinds across the
+    // pipe; the arrivals fan here). Each handler runs on its own
+    // thread — observation never blocks the loop. A card-kind watch
+    // carries its settle co-subscription (the node's card law).
     for watch in watches.iter() {
         let kind = watch.kind.clone();
         let body = watch.arc_body().clone();
         let watch_shared = shared.clone();
-        router.register(&kind, "watch", move |frame: &tabit_protocol::EventFrame| {
+        node.subscribe(&kind, "watch", move |frame: &EventFrame| {
             let shared = watch_shared.clone();
             let body = body.clone();
             let event = frame.event.clone();
@@ -537,23 +639,22 @@ pub fn serve(extension: Extension) -> ! {
         });
     }
 
-    // The dispatch loop: every invocation (a tool call, a
-    // consultation, a watched event) runs on its own worker thread —
-    // handlers may block, concurrently, and the loop keeps reading.
+    // The loop: the frozen dialect's lanes first (the pipe's own
+    // frames), then the shared grammar through the node's intake —
+    // one door, every law. Everything the host can send arrives here.
     loop {
         let line = read_line();
-        dispatch_line(&shared, &line, &tools, &consults, &router);
+        dispatch_line(&shared, &line, &tools, &consults);
     }
 }
 
-/// One inbound line: the parse cascade (host lanes first, then the
-/// shared grammar's frames), then the routing.
+/// One inbound line: the dialect's parse (the host's own frames),
+/// then the shared grammar's parse into the node's intake.
 fn dispatch_line(
     shared: &Arc<Shared>,
     line: &str,
     tools: &Arc<Vec<ToolDef>>,
     consults: &Arc<Vec<ConsultDef>>,
-    router: &Arc<tabit_wire::router::Router>,
 ) {
     if let Ok(host) = serde_json::from_str::<HostFrame>(line) {
         match host {
@@ -563,7 +664,7 @@ fn dispatch_line(
                 args,
             } => {
                 let (shared, tools) = (shared.clone(), tools.clone());
-                std::thread::spawn(move || run_body(&shared, call_id, name, args, &tools));
+                std::thread::spawn(move || run_call(&shared, call_id, name, args, &tools));
             }
             HostFrame::Hook {
                 hook_id,
@@ -572,8 +673,7 @@ fn dispatch_line(
             } => {
                 let (shared, consults) = (shared.clone(), consults.clone());
                 std::thread::spawn(move || {
-                    let frame = run_consult(&shared, hook_id, &event, &consults, payload);
-                    let _ = emit(&shared, &frame);
+                    run_consult(&shared, hook_id, &event, &consults, payload)
                 });
             }
             HostFrame::Cancel { call_id } => {
@@ -584,30 +684,32 @@ fn dispatch_line(
                 result,
                 error,
             } => {
-                let reply = ServiceReply { result, error };
-                // A miss is a late or unknown id — tolerated.
-                let _ = shared.asks.respond(&request_id, Box::new(reply));
+                // The response claims its held round-trip by id: a
+                // miss is a late or unknown id — tolerated; a
+                // wrong-kind answer is a contract break — the same
+                // death the host gives our mirror-image breaks.
+                match shared.node.answer(
+                    &request_id,
+                    KIND_SERVICE_RESPONSE,
+                    Box::new(ServiceReply { result, error }),
+                ) {
+                    tabit_wire::node::AnswerOutcome::WrongKind(kind) => die(&format!(
+                        "a service response answered a `{kind}` question (`{request_id}`) — a contract break"
+                    )),
+                    tabit_wire::node::AnswerOutcome::Delivered
+                    | tabit_wire::node::AnswerOutcome::Missed => {}
+                }
             }
             HostFrame::Initialize { .. } => {} // a re-send: tolerated, ignored
         }
         return;
     }
-    if let Ok(frame) = serde_json::from_str::<EventFrame>(line) {
-        // A watched event, typed — through the shared router like
-        // every other frame this node dispatches.
-        router.dispatch(&frame);
-        return;
-    }
-    if let Ok(SessionCommand::InteractionResponse { id, payload, .. }) =
-        serde_json::from_str::<SessionCommand>(line)
-    {
-        // A routed answer to one of our grammar asks: resolve by id;
-        // a late response for a gone waiter drops. Either way the
-        // origin announces the settle (the entry-owned-settles
-        // ruling: the origin is the answer's producer) — hit or
-        // miss, every channel holding the card closes it.
-        let _ = shared.grammar_asks.respond(&id, Box::new(payload));
-        emit(shared, &SessionEvent::InteractionSettled { id: id.clone() });
+    if let Some(inbound) = parse_shared(line) {
+        // The shared grammar: watched events, routed answers,
+        // session-addressed commands — the node's intake owns every
+        // law (the answer claims the ask table; an event fans;
+        // a command routes or dispatches by type).
+        shared.node.intake(&shared.stdio, inbound);
         return;
     }
     // The double tolerates garbage; the SDK exits loud — a malformed
@@ -615,106 +717,138 @@ fn dispatch_line(
     die(&format!("unparseable line from the host: {line}"));
 }
 
-/// One dispatched tool call: find the body, run it (panics become
-/// error results — the pipe never hangs on a broken body), send the
-/// result.
-fn run_body(shared: &Arc<Shared>, call_id: String, name: String, args: Value, tools: &[ToolDef]) {
-    let Some(tool) = tools.iter().find(|tool| tool.name == name) else {
-        let _ = emit(
-            shared,
-            &ExtFrame::ToolResult(ToolWireResult {
-                call_id,
-                error: Some(format!("this extension serves no tool `{name}`")),
-                report: String::new(),
-                details: None,
-            }),
-        );
+/// One dispatched tool call — an arriving ask (the taxonomy law):
+/// held on the node's table against the host's channel, the body's
+/// outcome the answer, the delivery the result line. Panics become
+/// error results — the pipe never hangs on a broken body. When the
+/// call completes, its own unanswered asks die with it (each settle
+/// announced — a card the body left behind closes everywhere).
+fn run_call(shared: &Arc<Shared>, call_id: String, name: String, args: Value, tools: &[ToolDef]) {
+    let owner = call_id.clone();
+    let writer = shared.clone();
+    let held = shared.node.try_hold(
+        shared.stdio.owner(),
+        &call_id,
+        KIND_TOOL_RESULT,
+        move |outcome| {
+            if let Outcome::Answered(boxed) = outcome {
+                let result = tabit_wire::asks::unanswer::<ToolWireResult>(boxed);
+                let _ = writer.write_frame(&ExtFrame::ToolResult(result));
+            }
+        },
+    );
+    if !held {
+        // The violation policy fired (a live id re-registered); the
+        // frame dies with it.
         return;
-    };
+    }
     let ctx = Ctx {
         correlation: Some(call_id.clone()),
         shared: shared.clone(),
     };
-    let outcome = std::panic::catch_unwind(AssertUnwindSafe(|| (tool.body)(args, &ctx)));
-    let frame = match outcome {
-        Ok(Ok(output)) => ExtFrame::ToolResult(ToolWireResult {
-            call_id,
-            error: None,
-            report: output.report,
-            details: output.details,
-        }),
-        Ok(Err(error)) => ExtFrame::ToolResult(ToolWireResult {
-            call_id,
-            error: Some(error),
-            report: String::new(),
-            details: None,
-        }),
-        Err(panic) => ExtFrame::ToolResult(ToolWireResult {
-            call_id,
+    let result = match std::panic::catch_unwind(AssertUnwindSafe(move || {
+        let Some(tool) = tools.iter().find(|tool| tool.name == name) else {
+            return ToolWireResult {
+                call_id,
+                error: Some(format!("this extension serves no tool `{name}`")),
+                report: String::new(),
+                details: None,
+            };
+        };
+        match (tool.body)(args, &ctx) {
+            Ok(output) => ToolWireResult {
+                call_id,
+                error: None,
+                report: output.report,
+                details: output.details,
+            },
+            Err(error) => ToolWireResult {
+                call_id,
+                error: Some(error),
+                report: String::new(),
+                details: None,
+            },
+        }
+    })) {
+        Ok(result) => result,
+        Err(panic) => ToolWireResult {
+            call_id: owner.clone(),
             error: Some(format!("the tool body panicked: {}", panic_note(panic))),
             report: String::new(),
             details: None,
-        }),
+        },
     };
-    let _ = emit(shared, &frame);
+    let _ = shared
+        .node
+        .answer(&owner, KIND_TOOL_RESULT, Box::new(result));
+    shared.node.retract_asks(&owner, "the call completed");
 }
 
-/// One dispatched consultation. **A failing handler is treated as
-/// absence** (ruled 2026-09: dead or broken resolve identically —
-/// the point's declared neutral; a failed *tool call* is the
-/// model-visible failure). The handler's own error paths can choose
-/// otherwise; the SDK's failure handling cannot.
+/// One dispatched consultation — an arriving ask like a call. **A
+/// failing handler is treated as absence** (ruled 2026-09: dead or
+/// broken resolve identically — the point's declared neutral; a
+/// failed *tool call* is the model-visible failure). The handler's
+/// own error paths can choose otherwise; the SDK's failure handling
+/// cannot.
 fn run_consult(
     shared: &Arc<Shared>,
     hook_id: String,
     event: &str,
     consults: &[ConsultDef],
     payload: Value,
-) -> ExtFrame {
-    let Some(consult) = consults.iter().find(|consult| consult.point == event) else {
-        // No subscription: a newer host's event point this SDK
-        // predates — absence, the declared neutral for the name.
-        return ExtFrame::HookResult(HookResult {
-            hook_id,
-            answer: tabit_protocol::points::neutral_wire(event),
-        });
-    };
+) {
+    let owner = hook_id.clone();
+    let writer = shared.clone();
+    let held = shared.node.try_hold(
+        shared.stdio.owner(),
+        &hook_id,
+        KIND_HOOK_RESULT,
+        move |outcome| {
+            if let Outcome::Answered(boxed) = outcome {
+                let result = tabit_wire::asks::unanswer::<HookResult>(boxed);
+                let _ = writer.write_frame(&ExtFrame::HookResult(result));
+            }
+        },
+    );
+    if !held {
+        return;
+    }
     let ctx = Ctx {
         correlation: Some(hook_id.clone()),
         shared: shared.clone(),
     };
-    let answer = std::panic::catch_unwind(AssertUnwindSafe(|| (consult.body)(&ctx, payload)))
-        .unwrap_or_else(|_| Err("the consultation handler panicked".to_string()));
-    let answer = answer.unwrap_or_else(|error| {
-        let _ = writeln!(
-            std::io::stderr(),
-            "tabit extension: the handler failed: {error}"
-        );
-        tabit_protocol::points::neutral_wire(event)
-    });
-    ExtFrame::HookResult(HookResult { hook_id, answer })
+    let answer = consult_answer(event, consults, &ctx, payload);
+    let _ = shared.node.answer(
+        &owner,
+        KIND_HOOK_RESULT,
+        Box::new(HookResult { hook_id, answer }),
+    );
+    shared
+        .node
+        .retract_asks(&owner, "the consultation completed");
+}
+
+/// The consultation body's answer: the point's own type serialized,
+/// or its declared neutral for a failing or absent handler.
+fn consult_answer(event: &str, consults: &[ConsultDef], ctx: &Ctx, payload: Value) -> Value {
+    let Some(consult) = consults.iter().find(|consult| consult.point == event) else {
+        // No subscription: a newer host's event point this SDK
+        // predates — absence, the declared neutral for the name.
+        return tabit_protocol::points::neutral_wire(event);
+    };
+    std::panic::catch_unwind(AssertUnwindSafe(|| (consult.body)(ctx, payload)))
+        .unwrap_or_else(|_| Err("the consultation handler panicked".to_string()))
+        .unwrap_or_else(|error| {
+            let _ = writeln!(
+                std::io::stderr(),
+                "tabit extension: the handler failed: {error}"
+            );
+            tabit_protocol::points::neutral_wire(event)
+        })
 }
 
 /// A watch body's panic is reported, never fatal — observation must
 /// not take the process down.
-/// Register a relayed child ask: the routed answer resolves through
-/// the same registry the extension's own asks use; the receiver
-/// carries it home to the child.
-pub(crate) fn register_relay(
-    shared: &Arc<Shared>,
-    owner: &str,
-    id: &str,
-    sender: std::sync::mpsc::Sender<Value>,
-) {
-    shared
-        .grammar_asks
-        .insert(id.to_string(), owner, "interaction", move |outcome| {
-            if let tabit_wire::asks::Outcome::Answered(answer) = outcome {
-                let _ = sender.send(tabit_wire::asks::unanswer::<Value>(answer));
-            }
-        });
-}
-
 pub(crate) fn catch_unwind_silently(body: impl FnOnce()) {
     if let Err(panic) = std::panic::catch_unwind(AssertUnwindSafe(body)) {
         let _ = writeln!(
@@ -723,6 +857,16 @@ pub(crate) fn catch_unwind_silently(body: impl FnOnce()) {
             panic_note(panic)
         );
     }
+}
+
+/// One handler invocation on its own thread with a fresh watch
+/// context — the subscription callbacks' dispatch (a blocked handler
+/// must never stall the fan that called it).
+pub(crate) fn spawn_handler(shared: Arc<Shared>, body: impl FnOnce(Ctx) + Send + 'static) {
+    std::thread::spawn(move || {
+        let ctx = Ctx::watch_context(shared);
+        catch_unwind_silently(move || body(ctx));
+    });
 }
 
 fn panic_note(panic: Box<dyn std::any::Any + Send>) -> String {
@@ -735,54 +879,13 @@ fn panic_note(panic: Box<dyn std::any::Any + Send>) -> String {
     }
 }
 
-fn emit<T: Serialize>(shared: &Arc<Shared>, frame: &T) -> bool {
-    let _guard = sdk_lock(&shared.stdout);
-    let stdout = std::io::stdout();
-    let mut handle = stdout.lock();
-    let Ok(text) = serde_json::to_string(frame) else {
-        return false;
-    };
-    if writeln!(handle, "{text}")
-        .and_then(|()| handle.flush())
-        .is_err()
-    {
-        std::process::exit(0); // the pipe is gone: the end, not a failure
-    }
-    true
-}
-
-/// One envelope roundtrip: emit the request (the call correlation
-/// plus the verb's payload under the `service_request` frame), await
-/// the reply by request id. `Err` is the pipe's end — the host is
-/// gone and no answer can ever come.
-fn request(
-    shared: &Arc<Shared>,
-    call_id: &str,
-    id: &str,
-    verb: ServiceVerb,
-) -> Result<ServiceReply, String> {
-    let (tx, rx) = std::sync::mpsc::channel::<ServiceReply>();
-    shared
-        .asks
-        .insert(id.to_string(), call_id, "service", move |outcome| {
-            if let tabit_wire::asks::Outcome::Answered(answer) = outcome {
-                let _ = tx.send(tabit_wire::asks::unanswer::<ServiceReply>(answer));
-            }
-        });
-    let frame = ExtFrame::ServiceRequest {
-        request_id: id.to_string(),
-        call_id: call_id.to_string(),
-        verb,
-    };
-    if !emit(shared, &frame) {
-        drop(shared.asks.claim(id));
-        return Err("the host closed the pipe".to_string());
-    }
-    let reply = rx
-        .recv()
-        .map_err(|_| "the host closed the pipe".to_string());
-    drop(shared.asks.claim(id));
-    reply
+/// One line out the pipe — every outbound line (the dialect's frames
+/// and the shared grammar alike) queues through the one writer, so
+/// ordering is the queue's and no caller blocks on the pipe.
+fn write_line(pipe: &std::sync::mpsc::Sender<String>, line: &str) {
+    // A send fails only against a dead writer — the writer exits the
+    // process on a dead pipe, so the end is already in motion.
+    let _ = pipe.send(line.to_string());
 }
 
 fn read_line() -> String {
@@ -807,14 +910,23 @@ pub(crate) fn sdk_lock<T: ?Sized>(mutex: &Mutex<T>) -> std::sync::MutexGuard<'_,
 }
 
 #[cfg(test)]
-mod tests {
+pub(crate) mod tests {
     use super::*;
 
     pub(crate) fn shared() -> Arc<Shared> {
+        let node = Arc::new(Node::new("test"));
+        // A pipe to nowhere: sends drop silently (nothing in these
+        // tests writes, and the writer thread is serve's business).
+        let (pipe_tx, pipe_rx) = std::sync::mpsc::channel::<String>();
+        drop(pipe_rx);
+        let pipe_writer = pipe_tx.clone();
+        let stdio = Channel::line("host", move |line: &str| write_line(&pipe_writer, line));
+        let layer = Channel::local("sdk", |_| {}, |_| {});
         Arc::new(Shared {
-            stdout: std::sync::Mutex::new(()),
-            asks: tabit_wire::asks::PendingAsks::default(),
-            grammar_asks: tabit_wire::asks::PendingAsks::default(),
+            node,
+            stdio,
+            layer,
+            pipe: pipe_tx,
             cancelled: Mutex::new(std::collections::HashSet::new()),
             core_path: Mutex::new(None),
         })
@@ -822,57 +934,48 @@ mod tests {
 
     #[test]
     fn a_failing_consultation_is_absence_run_for_call_points() {
-        let shared = shared();
         let consults = [consult::<tabit_protocol::points::ToolCall, _>(
             |_ctx, _payload| Err::<tabit_protocol::points::CallVerdict, _>("boom".to_string()),
         )];
-        let frame = run_consult(
-            &shared,
-            "h-1".to_string(),
+        let answer = consult_answer(
             "tool_call",
             &consults,
+            &Ctx::watch_context(shared()),
             json!({}),
         );
-        match frame {
-            ExtFrame::HookResult(HookResult { answer, .. })
-                if answer == json!({"verdict": "run"}) => {}
-            other => panic!("the neutral answer for a call point: {other:?}"),
-        }
+        assert_eq!(
+            answer,
+            json!({"verdict": "run"}),
+            "the neutral answer for a call point"
+        );
     }
 
     #[test]
     fn a_failing_consultation_is_absence_unit_for_result_points() {
-        let shared = shared();
         let consults = [consult::<tabit_protocol::points::ToolResult, _>(
             |_ctx, _payload| Err::<(), _>("boom".to_string()),
         )];
-        let frame = run_consult(
-            &shared,
-            "h-2".to_string(),
+        let answer = consult_answer(
             "tool_result",
             &consults,
+            &Ctx::watch_context(shared()),
             json!({}),
         );
-        match frame {
-            ExtFrame::HookResult(HookResult { answer, .. }) if answer.is_null() => {}
-            other => panic!("the neutral answer for a result point: {other:?}"),
-        }
+        assert!(answer.is_null(), "the neutral answer for a result point");
     }
 
     #[test]
     fn an_unsubscribed_point_is_absence() {
-        let shared = shared();
-        let frame = run_consult(&shared, "h-3".to_string(), "tool_call", &[], json!({}));
-        match frame {
-            ExtFrame::HookResult(HookResult { answer, .. })
-                if answer == json!({"verdict": "run"}) => {}
-            other => panic!("absence is the neutral answer: {other:?}"),
-        }
+        let answer = consult_answer("tool_call", &[], &Ctx::watch_context(shared()), json!({}));
+        assert_eq!(
+            answer,
+            json!({"verdict": "run"}),
+            "absence is the neutral answer"
+        );
     }
 
     #[test]
     fn the_answer_serializes_from_the_shared_type() {
-        let shared = shared();
         let consults = [consult::<tabit_protocol::points::ToolCall, _>(
             |_ctx, _payload| {
                 Ok(tabit_protocol::points::CallVerdict::Skip {
@@ -880,17 +983,16 @@ mod tests {
                 })
             },
         )];
-        let frame = run_consult(
-            &shared,
-            "h-4".to_string(),
+        let answer = consult_answer(
             "tool_call",
             &consults,
+            &Ctx::watch_context(shared()),
             json!({}),
         );
-        match frame {
-            ExtFrame::HookResult(HookResult { answer, .. })
-                if answer == json!({"verdict": "skip", "message": "not tonight"}) => {}
-            other => panic!("the verdict rode the wire as its own type: {other:?}"),
-        }
+        assert_eq!(
+            answer,
+            json!({"verdict": "skip", "message": "not tonight"}),
+            "the verdict rode the wire as its own type"
+        );
     }
 }

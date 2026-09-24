@@ -401,3 +401,81 @@ async fn the_autotitle_example_prompts_the_model_over_the_envelope() {
     }
     host.shutdown().await;
 }
+
+/// The owned-children demo, end to end against a real `tabit-core`
+/// child: the tool spawns the child (the handshake's `core_path` is
+/// the backend's own binary), the child opens a session and fails its
+/// task (no model is configured — offline by design), and the run
+/// settles. The observation demo rides along: the child's
+/// `session_opened` reaches the tool's `on` handler (per-child
+/// observation composes with the default silence — no forwarding), and
+/// its emission crosses the pipe origin-stamped.
+#[tokio::test]
+async fn the_child_example_spawns_observes_and_settles() {
+    // The child spawner resolves `core_path` as an executable: the
+    // workspace build's own backend, a sibling of this test's bins.
+    let core = std::path::Path::new(env!("CARGO_BIN_EXE_child-ext"))
+        .parent()
+        .map(|dir| dir.join("tabit-core.exe"))
+        .filter(|path| path.is_file());
+    let Some(core) = core else {
+        eprintln!(
+            "child-ext e2e: no tabit-core.exe beside the test bins — \
+             run the workspace suite (scripts/test.sh) to cover it"
+        );
+        return;
+    };
+    // Offline by design: the child's model is an EXPLICIT reference
+    // to a provider whose endpoint is a dead loopback port, defined
+    // by the env config layer the whole spawn chain inherits — the
+    // run fails on a refused loopback connection, never touching the
+    // user's real providers or any live network (rule 5). The env
+    // claim is ours alone: no other test in this binary reads
+    // config, so the unsafety's precondition holds by construction.
+    let isolated_config = test_dir("child-ext-config").join("providers.toml");
+    std::fs::write(
+        &isolated_config,
+        "[providers.offline]\nbase_url = \"http://127.0.0.1:9/v1\"\napi = \"openai-completions\"\n\
+         keyless = true\n\n[[providers.offline.models]]\nid = \"dead\"\n",
+    )
+    .expect("the offline provider fragment");
+    unsafe { std::env::set_var("TABIT_CONFIG", &isolated_config) };
+
+    let root = test_dir("child-ext");
+    install(&root, "child-ext", env!("CARGO_BIN_EXE_child-ext"));
+    let recorded = Recorded::default();
+    let mut ctx = recorded.host();
+    ctx.core_path = core.display().to_string();
+    let (host, mut events) = supervisor::launch_root(&root, HANDSHAKE_TIMEOUT, ctx);
+    await_alive(&mut events, "child-ext").await;
+    let handle = host.extension("child-ext").expect("installed");
+
+    let result = handle
+        .call(
+            "delegate",
+            serde_json::json!({"task": "say hello", "model": "offline/dead"}),
+            None,
+            run_token(),
+        )
+        .await
+        .expect("the call resolves");
+    unsafe { std::env::remove_var("TABIT_CONFIG") };
+    assert_eq!(result.error, None, "the delegation itself worked");
+    assert!(
+        result.report.starts_with("The child failed"),
+        "the child ran and failed without a model: {}",
+        result.report
+    );
+    assert!(
+        wait_for(|| {
+            recorded
+                .events()
+                .iter()
+                .any(|e| e.starts_with("child-ext|") && e.contains("saw the child open"))
+        })
+        .await,
+        "the observation heard the child and its emission crossed: {:?}",
+        recorded.events()
+    );
+    host.shutdown().await;
+}

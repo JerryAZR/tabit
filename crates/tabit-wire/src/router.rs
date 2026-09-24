@@ -221,6 +221,23 @@ impl<T: Routed> Router<T> {
     }
 }
 
+impl Router<EventFrame> {
+    /// The emission fan with additional receivers (the 2026-09
+    /// override-path ruling): the named channels are delivered to
+    /// directly, then the subscribers fan — each additional's owner
+    /// skipped there, so no receiver sees the frame twice. One
+    /// mechanism for [`crate::node::Node::emit_to`] and the ask
+    /// table's settle announces: whoever heard the card by this fan
+    /// hears it close by the same fan.
+    pub fn dispatch_with_extra(&self, frame: &EventFrame, extra: &[crate::node::Channel]) {
+        for channel in extra {
+            channel.deliver_event(frame);
+        }
+        let skip: Vec<&str> = extra.iter().map(crate::node::Channel::owner).collect();
+        self.dispatch_skipping(frame, &skip);
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

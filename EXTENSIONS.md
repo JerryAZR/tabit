@@ -4,9 +4,10 @@ The extension development record. **The substrate is ruled (2026-09,
 below) and implemented through checklist task 4 — `crates/tabit-ext`:
 discovery and the enablement gate, the initialize/ack handshake,
 supervision, the death policy, the tool lane, the hook lane, the
-skills tables; `crates/tabit-ext-sdk`: the guest dispatcher and the
-example packages (the permission gate included — it lives here now,
-not in core).** Host-service frames (task 5) and install (task 6)
+skills tables; `crates/tabit-ext-sdk`: the guest's functional layer
+over its node (the port, 2026-09 — the private dispatcher and
+registries died onto the routing layer) and the example packages.**
+Host-service frames (task 5) and install (task 6)
 land with their checklist tasks (ROADMAP item 9). Every entry names
 the decision, where it is recorded, and what it implies for extension
 authors. Entries record **existing design decisions**; nothing about
@@ -180,12 +181,15 @@ The four directions, one sentence each:
   `interaction_settled { id }` when its ask's answer comes home, and
   the host's sweep announces on the extension's death — so no
   channel holds a card that can never be answered. The ask's
-  lifecycle (open → answered → settled) makes that airtight: the
-  answered entry stays open, carrying the settle announce death owes
-  it, until the extension's settle crosses (closing it) or the sweep
-  runs the obligation — an extension dying between its answer and
-  its announce still closes the card. Unknown ids are the race's
-  tolerated drop.
+  lifecycle (open → answered → settled) makes that airtight for
+  cards: a transit entry that has been answered stays open, carrying
+  the settle announce death owes it, until the extension's settle
+  crosses (closing it) or the sweep runs the obligation — an
+  extension dying between its answer and its announce still closes
+  the card. An entry owing no obligation (a tool call, a hook, a
+  service round-trip — no settle vocabulary exists for it) closes on
+  its answer: the answer IS its settle, and lingering would only
+  leak. Unknown ids are the race's tolerated drop.
 
 Handshake additions (extension protocol **v2**): `initialize`
 carries `core_path` (the running backend's own executable — the host
@@ -216,7 +220,13 @@ child's lane and fan only to the extension's opted-in captures. The
 extension's own speech — its asks, its derived events, its forwards
 — leaves by naming the stdio as an **additional receiver** of the
 emission (the override path; the fact is an emission parameter,
-never on the wire).
+never on the wire). One exception the card law forces: **the settle
+kind always crosses** (the shipped SDK subscribes the stdio to
+`interaction_settled` and nothing else) — a settle is the close
+vocabulary of a card, and no channel may hold a card that can never
+be answered, so every settle announce (an origin's, a death sweep's,
+a grandchild's) reaches the pipe by subscription rather than by
+policy.
 
 **Opt-in — session-equivalent routing (the preset).** The extension
 registers its stdio for the session event vocabulary and becomes,
@@ -231,10 +241,25 @@ opt-ins between the two ends are just shorter registration sets.
 The SDK is expected to stay (owner ruling 2026-09): its reason to
 exist is the abstraction — extension authors focus on functionality
 (tools, hooks, asks) and never meet the router or the channel
-concepts underneath. The node port's success criterion follows: the
-SDK's dispatcher machinery dies onto the node while its author-facing
-surface stays purely functional, and the post-port judgement reviews
-exactly that divide.
+concepts underneath. The port landed on that criterion: the SDK's
+dispatcher machinery is dead — the guest runs a node whose stdio is
+the pipe's shared-grammar face (the loop is the dialect's parse
+cascade into `Node::intake`), every arriving call and hook is held on
+the ask table and answered through it, the watch surface is
+subscriptions, an author's `ask`/`emit`/`command` are the node's
+ask-with-additional-receivers, emission, and outbound command — while
+the author-facing surface (tools, consultations, watches, children,
+the four directions on `Ctx`) never grew a router concept. What
+remains SDK-local is policy, not routing: the cancelled set, the
+frozen dialect's handshake and result frames, the pipe's one writer
+thread, and the children's ask policy — the card surface at the
+arrival lane (the settle fold's tap, the one place that is the
+child's pipe: the node's fan is arrival-lane-blind, so the shipped
+forward-and-relay default and the author answerer list live there,
+crossing cards verbatim and retiring on the first registration). One
+behavior the unification buys, recorded: the extension's watches now
+hear its own emissions and its own cards' settles (the local
+loopback), not only the host's mirrors.
 
 **Manual forwarding re-stamps by default.** A forwarded frame
 carrying the child's stamp teaches every receiver the child's

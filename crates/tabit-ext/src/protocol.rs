@@ -41,6 +41,15 @@ use serde::{Deserialize, Serialize};
 /// frozen contract, not a negotiated one.
 pub const EXTENSION_PROTOCOL_VERSION: u32 = 4;
 
+/// The correlation-kind tags of the dialect's round-trips — the tag
+/// of the response frame that answers each (the correlation-kind
+/// law, read back at the ask table's claim on both sides of the
+/// pipe). Declared here, beside the frames they name, so host and
+/// guest cannot drift.
+pub const KIND_TOOL_RESULT: &str = "tool_result";
+pub const KIND_HOOK_RESULT: &str = "hook_result";
+pub const KIND_SERVICE_RESPONSE: &str = "service_response";
+
 /// One tool the extension serves, declared at the handshake. The
 /// schema is the model-facing JSON Schema; the host turns it into a
 /// proxy tool at assembly that forwards calls over this pipe.

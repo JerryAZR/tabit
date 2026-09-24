@@ -8,13 +8,15 @@
 //!
 //! The entry's lifecycle (ruled 2026-09): **open → answered →
 //! settled.** The first answer transitions the entry — the delivery
-//! runs, further answers route nowhere — but the entry STAYS OPEN,
-//! because answered is not settled: the settle announcement may
-//! still be in flight from the origin, and if death takes the origin
-//! first, the sweep runs the entry's carried obligation (a transit
-//! entry announces its settle; an origin that already announced
-//! carries none). The settle's arrival closes the entry (the
-//! claim-and-discard law), and so does any sweep. **Answers are
+//! runs, further answers route nowhere — and whether the entry then
+//! lingers turns on one fact: **does death still owe it anything?**
+//! An entry carrying a sweep obligation (a transit card, whose settle
+//! the origin may still be sending) lingers answered until the
+//! settle's arrival or a sweep closes it. An entry owing nothing
+//! closes on its answer — the answer IS its settle: the round-trips
+//! with no settle vocabulary (a tool call, a hook forward, a service
+//! request; an origin whose delivery already announced) have nothing
+//! left to wait for, and lingering would only leak. **Answers are
 //! races**: the first arrival wins, later answers find the answered
 //! or gone id and are tolerated no-ops. Death policy — fallbacks,
 //! failure results, settlement announcements — is each closure's
@@ -170,10 +172,15 @@ impl PendingAsks {
     /// route nowhere (the tolerated race loser), and the entry
     /// TRANSITIONS — answered, not settled — carrying its sweep
     /// obligation until the settle's arrival (or a sweep) closes it.
-    /// A wrong-kind answer consumes the entry loudly (the contract
-    /// break); a gone id is the tolerated drop.
+    /// An entry owing no obligation closes with its delivery: the
+    /// answer IS its settle (the round-trips with no settle
+    /// vocabulary — a tool call, a hook forward, a service request;
+    /// an origin whose delivery already announced — have nothing
+    /// left to wait for, and lingering would leak). A wrong-kind
+    /// answer consumes the entry loudly (the contract break); a gone
+    /// id is the tolerated drop.
     pub fn answer(&self, id: &str, kind: &str, answer: Box<dyn Any + Send>) -> PendingAnswer {
-        let ask = {
+        let deliver = {
             let mut pending = lock(&self.pending);
             let Some(ask) = pending.get_mut(id) else {
                 return PendingAnswer::Missed;
@@ -182,27 +189,31 @@ impl PendingAsks {
                 // The contract-break entry dies whole: delivery and
                 // obligation both drop, never run.
                 let wrong_kind = ask.kind;
-                let removed = pending.remove(id);
-                drop(removed);
+                pending.remove(id);
                 return PendingAnswer::WrongKind(wrong_kind);
             }
-            match std::mem::replace(&mut ask.state, AskState::Answered(None)) {
+            let state = std::mem::replace(&mut ask.state, AskState::Answered(None));
+            match state {
                 // Already answered: further answers route nowhere.
                 AskState::Answered(_) => return PendingAnswer::Missed,
-                // The open delivery leaves; the obligation it carried
-                // becomes the answered entry's sweep debt.
-                AskState::Open(deliver, obligation) => {
-                    if let AskState::Answered(slot) = &mut ask.state {
-                        *slot = obligation;
+                AskState::Open(deliver, obligation) => match obligation {
+                    Some(obligation) => {
+                        ask.state = AskState::Answered(Some(obligation));
+                        deliver
                     }
-                    deliver
-                }
+                    // No debt owed: the answer is the settle — the
+                    // entry closes with the delivery, nothing lingers.
+                    None => {
+                        pending.remove(id);
+                        deliver
+                    }
+                },
             }
         };
         // The delivery runs with no lock held — it may re-enter the
         // registry (an origin's answer arm announces through the
         // events router; nothing here forbids it).
-        ask(Outcome::Answered(answer));
+        deliver(Outcome::Answered(answer));
         PendingAnswer::Answered
     }
 
@@ -213,48 +224,6 @@ impl PendingAsks {
     /// obligation) drops unrun.
     pub fn discard(&self, id: &str) {
         drop(lock(&self.pending).remove(id));
-    }
-
-    /// Claim one open question without settling it: read its kind,
-    /// then [`Claimed::deliver`] the outcome — or drop the claim to
-    /// discard the question outright (the delivery closure dies with
-    /// it, so an in-process awaiter reads disconnection). `None` is
-    /// the dead or already-answered id.
-    pub fn claim(&self, id: &str) -> Option<Claimed> {
-        let removed = lock(&self.pending).remove(id);
-        match removed {
-            Some(PendingAsk {
-                kind,
-                state: AskState::Open(deliver, _),
-                ..
-            }) => Some(Claimed { kind, deliver }),
-            // An answered entry claimed by hand: close it silently
-            // (the settle's arrival shape — the obligation is
-            // fulfilled, not owed).
-            Some(PendingAsk {
-                state: AskState::Answered(obligation),
-                ..
-            }) => {
-                drop(obligation);
-                None
-            }
-            None => None,
-        }
-    }
-
-    /// Deliver one answer the LEGACY way — consume the entry. For
-    /// local registries with no settle vocabulary (the SDK's guest
-    /// tables, where nothing ever sweeps and lingering would leak);
-    /// the node's own table uses [`Self::answer`], the lifecycle
-    /// path. Returns whether the id was ours to answer.
-    pub fn respond(&self, id: &str, answer: Box<dyn Any + Send>) -> bool {
-        match self.claim(id) {
-            Some(claimed) => {
-                claimed.deliver(Outcome::Answered(answer));
-                true
-            }
-            None => false,
-        }
     }
 
     /// Retract every question one owner asked — its death site. An
@@ -299,25 +268,6 @@ fn deliver_swept(swept: Vec<PendingAsk>, reason: &str) {
                 }
             }
         }
-    }
-}
-
-/// One claimed question: its kind for the wire-law check, and the
-/// delivery that settles it.
-pub struct Claimed {
-    kind: &'static str,
-    deliver: Delivery,
-}
-
-impl Claimed {
-    /// The correlation-kind tag the registering site declared.
-    pub fn kind(&self) -> &'static str {
-        self.kind
-    }
-
-    /// Settle the claimed question.
-    pub fn deliver(self, outcome: Outcome) {
-        (self.deliver)(outcome);
     }
 }
 
@@ -374,7 +324,10 @@ mod tests {
     #[test]
     fn an_unknown_id_is_not_ours() {
         let asks = PendingAsks::default();
-        assert!(!asks.respond("no-such-id", Box::new(1u32)));
+        assert!(matches!(
+            asks.answer("no-such-id", "interaction", Box::new(1u32)),
+            PendingAnswer::Missed
+        ));
     }
 
     /// The 2026-09 ruling: a live id re-registered is a mint-law
@@ -475,6 +428,30 @@ mod tests {
         );
     }
 
+    /// An entry owing no obligation closes on its answer (the answer
+    /// is its settle): no lingering, and the id is free — nothing
+    /// but a new mint can occupy it again.
+    #[test]
+    fn an_obligationless_entry_closes_on_its_answer() {
+        let asks = PendingAsks::default();
+        let (seen, deliver) = recording();
+        asks.insert("call-1".to_string(), "lane", "tool-call", deliver);
+        assert!(matches!(
+            asks.answer("call-1", "tool-call", Box::new(5u32)),
+            PendingAnswer::Answered
+        ));
+        assert!(!asks.held("call-1"), "the answer was its settle");
+        assert_eq!(
+            *seen.lock().expect("test lock"),
+            vec!["answered: 5".to_string()]
+        );
+        // The races' losers find a gone id, same as ever.
+        assert!(matches!(
+            asks.answer("call-1", "tool-call", Box::new(6u32)),
+            PendingAnswer::Missed
+        ));
+    }
+
     #[test]
     fn a_death_retracts_only_its_owner() {
         let asks = PendingAsks::default();
@@ -489,7 +466,13 @@ mod tests {
             vec!["orphaned: the process exited".to_string()]
         );
         assert!(seen_b.lock().expect("test lock").is_empty());
-        assert!(asks.respond("req-b", Box::new(2u32)), "b survives");
+        assert!(
+            matches!(
+                asks.answer("req-b", "interaction", Box::new(2u32)),
+                PendingAnswer::Answered
+            ),
+            "b survives"
+        );
     }
 
     #[test]
@@ -509,27 +492,9 @@ mod tests {
             *seen_b.lock().expect("test lock"),
             vec!["orphaned: the run ended".to_string()]
         );
-        assert!(!asks.respond("req-a", Box::new(1u32)));
-    }
-
-    #[test]
-    fn a_claim_reads_its_kind_and_a_dropped_claim_discards() {
-        let asks = PendingAsks::default();
-        let (seen, deliver) = recording();
-        asks.insert("call-1".to_string(), "lane", "tool-call", deliver);
-
-        let claimed = asks.claim("call-1").expect("claimed");
-        assert_eq!(claimed.kind(), "tool-call");
-        claimed.deliver(Outcome::Answered(Box::new(5u32)));
-        assert_eq!(
-            *seen.lock().expect("test lock"),
-            vec!["answered: 5".to_string()]
-        );
-
-        // A dropped claim is the silent discard: no delivery, no
-        // lingering entry.
-        asks.insert("call-2".to_string(), "lane", "tool-call", recording().1);
-        drop(asks.claim("call-2"));
-        assert!(!asks.respond("call-2", Box::new(1u32)));
+        assert!(matches!(
+            asks.answer("req-a", "interaction", Box::new(1u32)),
+            PendingAnswer::Missed
+        ));
     }
 }

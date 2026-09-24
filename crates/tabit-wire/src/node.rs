@@ -45,18 +45,22 @@
 //!    wrong-kind answer is consumed loudly (an error emission naming
 //!    the break), never delivered to a closure expecting another
 //!    shape. The first answer wins and TRANSITIONS the entry — the
-//!    delivery runs, further answers route nowhere — but answered is
-//!    not settled: the entry stays open, carrying the obligation
-//!    death owes it (a transit entry's settle announce), until the
-//!    settle's arrival or a sweep closes it — so an origin dying
-//!    between the answer and its announce cannot strand a card. A
-//!    miss drops as the race's tolerated loser. **The settle is an
-//!    event and routes like one**: the single producer is the origin
-//!    (its promise resolving) or a death's sweep, and a settle
-//!    arriving at a node closes that id's entry there (an answered
-//!    entry's normal end; an open one's promise reads dismissal) —
-//!    the id is the identifier, so single-producer discipline settles
-//!    a request exactly once.
+//!    delivery runs, further answers route nowhere — and whether the
+//!    entry then lingers turns on one fact: whether death still owes
+//!    it anything. An entry carrying a settle obligation (a transit
+//!    card) lingers **answered** until the settle's arrival or a
+//!    sweep closes it — an origin dying between the answer and its
+//!    announce cannot strand a card. An entry owing nothing (a tool
+//!    call, a hook forward, a service round-trip, an origin whose
+//!    delivery already announced) **closes on its answer** — the
+//!    answer is its settle, and lingering would only leak. A miss
+//!    drops as the race's tolerated loser. **The settle is an event
+//!    and routes like one**: the single producer is the origin (its
+//!    promise resolving) or a death's sweep, and a settle arriving at
+//!    a node closes that id's entry there (an answered entry's
+//!    normal end; an open one's promise reads dismissal) — the id is
+//!    the identifier, so single-producer discipline settles a
+//!    request exactly once.
 //!
 //! The primitive both layers speak is the [`Channel`] — one routable
 //! destination in three flavors (the in-process functional layer, the
@@ -79,8 +83,10 @@ use crate::router::{Routed, Router};
 mod tests;
 
 /// The interaction ask's kind: the tag of the response that answers
-/// it (the correlation-kind law, law 5).
-const KIND_INTERACTION: &str = tabit_protocol::command_tags::INTERACTION_RESPONSE;
+/// it (the correlation-kind law, law 5). Public for the guest-side
+/// answerers (the SDK's child relay: `Child::answer` claims the
+/// transit entry the arrival registered).
+pub const KIND_INTERACTION: &str = tabit_protocol::command_tags::INTERACTION_RESPONSE;
 
 /// The hop budget node-originated frames carry — the TTL tripwire's
 /// ceiling. Comfortably above any real net's depth; expiry means a
@@ -164,7 +170,27 @@ impl Channel {
         &self.owner
     }
 
-    fn deliver_event(&self, frame: &EventFrame) {
+    /// Write one command across this channel — the outbound twin of
+    /// the deliveries (a local layer ISSUING a command: the line
+    /// crosses the pipe and routes at the receiving node — sessions
+    /// live there — the sender never routes it locally).
+    pub fn send_command(&self, command: &SessionCommand) {
+        (self.command)(command);
+    }
+
+    /// Hand one event to this channel directly, with no fan and no
+    /// teaching — the arrival lane's own crossing (a verbatim
+    /// forward): the intake already taught the route and fanned the
+    /// local subscribers, so this is the write alone, never a second
+    /// delivery. The in-crate twin of the additional-receiver fan's
+    /// direct leg ([`Router::dispatch_with_extra`]).
+    pub fn send_event(&self, frame: &EventFrame) {
+        (self.event)(frame);
+    }
+
+    /// Hand one event to this channel directly — the additional-
+    /// receiver fan's primitive ([`Router::dispatch_with_extra`]).
+    pub(crate) fn deliver_event(&self, frame: &EventFrame) {
         (self.event)(frame);
     }
 
@@ -411,15 +437,6 @@ impl<C: Routed> Node<C> {
                 if let Some(stream) = frame.stream.as_ref().map(StreamId::as_str) {
                     lock(&self.learned).insert(stream.to_string(), from.clone());
                 }
-                // Law 5's other half: an arriving settle clears this
-                // node's entry for the id by CLAIM-AND-DISCARD — the
-                // entry's closure is dropped, which drops the
-                // promise's sender (the awaiter reads dismissal)
-                // without running the Orphaned arm. That is what
-                // keeps Orphaned meaning exactly one thing — swept by
-                // death — and is why the closures may announce their
-                // settles there: the settle that cleared this entry
-                // is already in flight.
                 // Law 5's other half: an arriving settle CLOSES the
                 // id's entry — an answered entry's normal end (the
                 // obligation is fulfilled, not owed), an open one's
@@ -523,11 +540,7 @@ impl<C: Routed> Node<C> {
         if let Some(stream) = frame.stream.as_ref().map(StreamId::as_str) {
             lock(&self.learned).insert(stream.to_string(), from.clone());
         }
-        let skip: Vec<&str> = additional.iter().map(Channel::owner).collect();
-        for channel in additional {
-            channel.deliver_event(&frame);
-        }
-        self.events.dispatch_skipping(&frame, &skip);
+        self.events.dispatch_with_extra(&frame, additional);
     }
 
     /// A command crossing this node: response-type claims the ask
@@ -580,15 +593,37 @@ impl<C: Routed> Node<C> {
         self.commands.dispatch(&command);
     }
 
-    /// The local asker: register the promise, surface the request,
-    /// await — parallel works unaffected (each asker holds its own
-    /// promise; the table carries the one write that resolves it).
-    /// The asker dying retracts by owner; the promise reads as
-    /// dismissal.
+    /// The local asker, the session's shape: [`Node::ask_on`] with
+    /// no additional receivers (the subscriber fan carries the card
+    /// — the frontend subscribes all) and the session's stream as
+    /// the card's stamp.
     pub fn ask(
         &self,
         owner: &str,
         stream: &StreamId,
+        ui_type: &str,
+        payload: Value,
+    ) -> tokio::sync::oneshot::Receiver<Value> {
+        self.ask_on(owner, &[], Some(stream), ui_type, payload)
+    }
+
+    /// The local asker, full form — parallel works unaffected (each
+    /// asker holds its own promise; the table carries the one write
+    /// that resolves it). The promise registers under `owner` (the
+    /// death/run sweep key); the request AND the settle announce
+    /// cross to the **additional receivers** beside the subscriber
+    /// fan (the override-path ruling: a node whose stdio subscribes
+    /// to nothing still asks across it — and whoever heard the card
+    /// by that fan hears it close by the same fan); `stream` is the
+    /// card's home stream or `None` for a session-less asker (an
+    /// extension's own card — the answer routes by id, not stream).
+    /// The asker dying retracts by owner; the promise reads as
+    /// dismissal.
+    pub fn ask_on(
+        &self,
+        owner: &str,
+        additional: &[Channel],
+        stream: Option<&StreamId>,
         ui_type: &str,
         payload: Value,
     ) -> tokio::sync::oneshot::Receiver<Value> {
@@ -598,8 +633,9 @@ impl<C: Routed> Node<C> {
         // parent), so collision-freedom cannot rest on names.
         let id = uuid::Uuid::now_v7().to_string();
         let (resolve, awaiter) = tokio::sync::oneshot::channel();
-        let settled = self.settle_frame(&id, Some(stream.clone()));
+        let settled = self.settle_frame(&id, stream.cloned());
         let events = self.events.clone();
+        let announce_to: Vec<Channel> = additional.to_vec();
         self.asks
             .insert(id.clone(), owner, KIND_INTERACTION, move |outcome| {
                 // The origin is the settle's producer on resolution;
@@ -612,10 +648,10 @@ impl<C: Routed> Node<C> {
                 }
                 // Orphaned: the sender drops with the closure, the
                 // awaiter reads dismissal.
-                events.dispatch(&settled);
+                events.dispatch_with_extra(&settled, &announce_to);
             });
-        self.events.dispatch(&EventFrame {
-            stream: Some(stream.clone()),
+        let request = EventFrame {
+            stream: stream.cloned(),
             origin: None,
             ttl: Some(HOP_BUDGET),
             event: SessionEvent::InteractionRequest {
@@ -623,7 +659,8 @@ impl<C: Routed> Node<C> {
                 ui_type: ui_type.to_string(),
                 payload,
             },
-        });
+        };
+        self.events.dispatch_with_extra(&request, additional);
         awaiter
     }
 

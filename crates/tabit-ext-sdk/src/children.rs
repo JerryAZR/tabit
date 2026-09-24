@@ -1,29 +1,34 @@
 //! Owned children: an extension's sessions-to-itself, over the
 //! shared client (`tabit-wire`) — the same substrate core's subagent
-//! bridge drives, the same settle fold, the same reaper. The
-//! extension is the child's frontend: its frames arrive here typed,
-//! its asks surface through the owner's pipe, and silence is the
-//! default — nothing crosses to the host's channel unless the
-//! forward callback carries it (the boolean) or the ask slot's
-//! default does.
+//! bridge drives, the same settle fold, the same reaper. The child's
+//! **lane** is a channel on the guest's node: its frames arrive
+//! through the node's intake (each card registering a transit entry
+//! whose delivery carries the answer home down the child's stdin),
+//! its observation registrations live in the node's tables, and its
+//! death sweeps them all — subscriptions, learned routes, and open
+//! asks, every stranded card settling announced.
 //!
 //! The registry laws (the 2026-09 rulings, made structural):
 //!
-//! - **Per-kind lookup, one map probe per frame**, plus a **generic
-//!   slot**. Observation kinds compose: specifics and the generic
-//!   both run (forwarding keeps forwarding the kinds you also
-//!   watch).
-//! - **Asks follow the co-frontend law.** The shipped
-//!   forward-and-relay default surfaces the child's card verbatim
-//!   (stream preserved, the origin naming the conduit once the host
-//!   re-stamps it) and the answer routes home by id through the same
-//!   registry the extension's own asks answer through; the first
-//!   author registration replaces the default (a custom beside it
-//!   would double-surface the card), and author registrations then
-//!   stack — any answerer may answer, the child's hub takes the
-//!   first arrival, a late answer is a tolerated no-op. There is no
-//!   single-owner rule anywhere: answers are races, arbitrated where
-//!   the question lives.
+//! - **Per-kind observation is subscription** on the guest's node
+//!   (owner: the child's id — the death-sweep key). Observation
+//!   composes: the child's `on` handlers, the extension's watches,
+//!   and other children's handlers all hear a kind's fan.
+//! - **Asks follow the co-frontend law, and the card surface is
+//!   arrival-lane truth.** The node's fan is arrival-lane-blind, so
+//!   the per-child ask policy lives in the settle fold's tap — the
+//!   one place that IS the child's pipe: every card crossing it
+//!   (the child's own, a grandchild's relayed through it) reaches
+//!   the surface. The shipped forward-and-relay default crosses
+//!   cards and their settles verbatim to the host — from the
+//!   arrival lane, stamps intact, addressability preserved; the
+//!   first author registration replaces it (a custom beside the
+//!   default would double-surface the card), and author
+//!   registrations then stack — any answerer may answer, the
+//!   child's hub takes the first arrival, a late answer is a
+//!   tolerated no-op. There is no single-owner rule anywhere:
+//!   answers are races, arbitrated where the question lives — the
+//!   transit entry.
 //! - **No lift**: an id-swap re-ask has no reason to exist — the
 //!   child's id-space never mints onto the host stream, and the one
 //!   card a user sees is the child's own.
@@ -37,8 +42,9 @@ use std::sync::{Arc, Mutex};
 
 use tabit_protocol::{EventFrame, SessionEvent, tags};
 use tabit_wire::client::{ChildSpec, Settlement};
+use tabit_wire::node::{Channel, Inbound, KIND_INTERACTION};
 
-use crate::{Ctx, Shared, emit};
+use crate::{Ctx, Shared, sdk_lock};
 
 /// Shape one owned child before the spawn. Everything omitted
 /// inherits the default: ephemeral, the extension's cwd.
@@ -82,10 +88,10 @@ impl ChildOptions {
         self
     }
 
-    /// Forward the child's events verbatim to the host's channel —
-    /// the boolean sugar over installing the shipped forward
-    /// callback in the generic slot (stream preserved, origin naming
-    /// this extension as the conduit).
+    /// Forward the child's non-card events verbatim to the host's
+    /// pipe — the arrival lane's own emission (the child's stamps
+    /// intact, its routes untouched). Cards and settles cross by the
+    /// ask policy's own path, never twice.
     pub fn forwarding(mut self, forwarding: bool) -> Self {
         self.forwarding = forwarding;
         self
@@ -96,23 +102,97 @@ impl ChildOptions {
 /// ask-owning both need the stream stamp.
 type FrameHandler = Arc<dyn Fn(&Ctx, &EventFrame) + Send + Sync>;
 
-/// The per-child frame registry: kind-keyed specifics, one generic
-/// slot, and the single-owner ask slot.
-struct Registry {
-    /// The observation surface: the shared Router (one mechanism
-    /// with the watch surface — the 2026-09 unification).
-    router: tabit_wire::router::Router,
-    /// The ask-answerers: the shipped forward-and-relay default
-    /// yields to the first author registration (a custom beside the
-    /// default would double-surface the card); author registrations
-    /// then stack — any may answer, the child's hub takes the first,
-    /// late answers are tolerated no-ops (the co-frontend law).
-    ask_answerers: Mutex<Vec<FrameHandler>>,
-    /// Whether the shipped default still stands (replaced by the
-    /// first author registration).
-    ask_default: Mutex<bool>,
-    /// The driver's command lane — answers ride it home to the child.
-    commands: Mutex<Option<std::sync::mpsc::Sender<ChildCmd>>>,
+/// The per-child ask policy, consulted at the arrival lane (the
+/// settle fold's tap): whether the shipped forward-and-relay default
+/// still stands, and the author answerers it yielded to. One lock
+/// for both facts — a registration and a consultation never observe
+/// a half-replaced default (a card in that window would surface
+/// nowhere).
+struct AskPolicy {
+    inner: Mutex<AskState>,
+}
+
+struct AskState {
+    /// Whether the shipped default still stands (the first author
+    /// registration retires it — a custom beside the default would
+    /// double-surface the card).
+    default: bool,
+    /// The author answerers, stacking (any may answer; the child's
+    /// hub arbitrates; late answers are tolerated no-ops).
+    answerers: Vec<FrameHandler>,
+}
+
+impl AskPolicy {
+    fn shipped() -> Self {
+        Self {
+            inner: Mutex::new(AskState {
+                default: true,
+                answerers: Vec::new(),
+            }),
+        }
+    }
+
+    /// One author answerer: retires the default (idempotent — only
+    /// the first registration finds it standing), then stacks.
+    fn register_answerer(&self, body: FrameHandler) {
+        let mut state = sdk_lock(&self.inner);
+        state.default = false;
+        state.answerers.push(body);
+    }
+
+    /// What the arrival lane does with one frame's kind, and the
+    /// answerers to reach if that is the action.
+    fn lane_action(&self, forwarding: bool, tag: &str) -> (LaneAction, Vec<FrameHandler>) {
+        let state = sdk_lock(&self.inner);
+        let action = lane_action(state.default, !state.answerers.is_empty(), forwarding, tag);
+        (action, state.answerers.clone())
+    }
+}
+
+/// What the arrival lane does with one frame — the crossing rules in
+/// one place. The card kind belongs to the ask surface (the shipped
+/// default's verbatim crossing, or the author answerers that
+/// replaced it). The settle kind reaches the answerers (the pair —
+/// whoever surfaces a card hears it close) but never crosses here:
+/// settles cross by the stdio's one default subscription whatever
+/// the ask policy — the card law's close vocabulary always crosses.
+/// Everything else crosses only under the forwarding option.
+enum LaneAction {
+    /// The frame crosses to the host verbatim (the arrival lane's
+    /// own write — no fan, no teaching; the intake already did
+    /// both).
+    Forward,
+    /// The frame reaches the author answerers (their threads).
+    Answerers,
+    /// The frame stays local (the intake's fan is all it gets).
+    None,
+}
+
+fn lane_action(
+    default_stands: bool,
+    has_answerers: bool,
+    forwarding: bool,
+    tag: &str,
+) -> LaneAction {
+    if tag == tags::INTERACTION_REQUEST {
+        if default_stands {
+            LaneAction::Forward
+        } else if has_answerers {
+            LaneAction::Answerers
+        } else {
+            LaneAction::None
+        }
+    } else if tag == tags::INTERACTION_SETTLED {
+        if has_answerers {
+            LaneAction::Answerers
+        } else {
+            LaneAction::None
+        }
+    } else if forwarding {
+        LaneAction::Forward
+    } else {
+        LaneAction::None
+    }
 }
 
 /// One owned child: spawn, per-kind observation, one task at a time
@@ -120,21 +200,15 @@ struct Registry {
 #[derive(Clone)]
 pub struct Child {
     id: Arc<String>,
-    shared: Arc<crate::Shared>,
+    shared: Arc<Shared>,
     commands: std::sync::mpsc::Sender<ChildCmd>,
-    registry: Arc<Registry>,
+    asks: Arc<AskPolicy>,
 }
 
 enum ChildCmd {
     Run {
         task: String,
         reply: std::sync::mpsc::Sender<Result<Settlement, String>>,
-    },
-    /// A relayed answer coming home: the interaction response, down
-    /// the child's pipe by id.
-    Answer {
-        id: String,
-        payload: serde_json::Value,
     },
     Kill,
 }
@@ -144,6 +218,7 @@ impl Child {
     /// initialize's `core_path` — the host IS the binary); the spawn
     /// resolves the handshake before this call returns.
     pub fn create(ctx: &Ctx, options: ChildOptions) -> Result<Child, String> {
+        let shared = ctx.shared_clone();
         let core_path = ctx.core_path()?;
         let mut spec = ChildSpec::new(std::path::PathBuf::from(core_path), options.cwd);
         if let Some(reference) = &options.model {
@@ -158,38 +233,31 @@ impl Child {
         if let Some(max_turns) = options.max_turns {
             spec = spec.max_turns(max_turns);
         }
-
-        let ask_shared = ctx.shared_clone();
-        let registry = Arc::new(Registry {
-            router: tabit_wire::router::Router::default(),
-            ask_answerers: Mutex::new(vec![Arc::new(move |ctx: &Ctx, frame: &EventFrame| {
-                let _ = emit(&ask_shared, frame);
-                let _ = ctx;
-            })]),
-            ask_default: Mutex::new(true),
-            commands: Mutex::new(None),
-        });
-        // The generic slot's default: forward-everything when the
-        // boolean says so. The ask slot's default (forward-and-relay —
-        // an unanswered ask hangs a child, so asks surface by default)
-        // is installed above and yields to the first author
-        // registration.
-        let shared = ctx.shared_clone();
-        let forward_shared = shared.clone();
-        if options.forwarding {
-            registry.router.register_all("forward", move |frame| {
-                let _ = emit(&forward_shared, frame);
-            });
-        }
+        // The death seam: the reaper's exit tap sweeps the child's
+        // every registration on the node — its lane (the learned
+        // routes, the transit asks, each settle announced — the sweep
+        // is those settles' single producer, and the stdio's settle
+        // subscription carries the announce across) and its
+        // observation registrations (the `#on` owner).
+        let sweep = shared.node.clone();
+        spec = spec.on_exit(Arc::new(move |id| {
+            sweep.retract(id, "the child exited");
+            sweep.retract(&format!("{id}#on"), "the child exited");
+        }));
 
         // The driver task owns the handle on the SDK's runtime: one
         // loop — commands in, the shared settle fold under the tap
-        // that feeds the dispatcher, the settlement reported per run.
+        // that feeds the node's intake, the settlement reported per
+        // run. The lane is built here (it needs the handshake's id).
         let (spawn_tx, spawn_rx) = std::sync::mpsc::channel::<Result<String, String>>();
-        let (frames_tx, frames_rx) = std::sync::mpsc::channel::<EventFrame>();
         let (cmd_tx, cmd_rx) = std::sync::mpsc::channel::<ChildCmd>();
-        let runtime = runtime();
-        runtime.spawn(async move {
+        let forwarding = options.forwarding;
+        let node = shared.node.clone();
+        let stdio = shared.stdio.clone();
+        let driver_shared = shared.clone();
+        let asks = Arc::new(AskPolicy::shipped());
+        let driver_asks = asks.clone();
+        runtime().spawn(async move {
             let mut handle = match spec.spawn().await {
                 Ok(handle) => handle,
                 Err(error) => {
@@ -197,54 +265,74 @@ impl Child {
                     return;
                 }
             };
+            // The child's lane: a channel over the handle's writer —
+            // the transit deliveries (answers home, routed commands)
+            // cross the child's stdin through it. Its owner is the
+            // child's id: the arrival-skip and the death-sweep key
+            // for everything routed, held, or learned on this pipe.
+            let writer = handle.commands();
+            let lane = Channel::line(handle.id(), move |line: &str| {
+                let _ = writer.send(line.to_string());
+            });
             let _ = spawn_tx.send(Ok(handle.id().to_string()));
             while let Ok(command) = cmd_rx.recv() {
                 match command {
                     ChildCmd::Run { task, reply } => {
                         handle.prompt(task);
+                        let asks = driver_asks.clone();
+                        let shared = driver_shared.clone();
+                        let node = node.clone();
+                        let lane = lane.clone();
+                        let stdio = stdio.clone();
                         let settled = handle
-                            .settle_with_tap(None, |frame| {
-                                let _ = frames_tx.send(frame.clone());
+                            .settle_with_tap(None, move |frame| {
+                                // The arrival — this pipe, and only
+                                // this pipe: every frame through the
+                                // node's intake first (the transit
+                                // cards register, the observation
+                                // fans — an answerer may answer the
+                                // moment the entry exists), then the
+                                // lane's own crossing rules.
+                                node.intake(&lane, Inbound::Event(frame.clone()));
+                                let (action, answerers) =
+                                    asks.lane_action(forwarding, frame.event.tag());
+                                match action {
+                                    // The verbatim crossing: the write
+                                    // alone — the intake already
+                                    // taught the route and fanned the
+                                    // local subscribers, so this is
+                                    // never a second delivery.
+                                    LaneAction::Forward => stdio.send_event(frame),
+                                    LaneAction::Answerers => {
+                                        for answerer in answerers {
+                                            let frame = frame.clone();
+                                            crate::spawn_handler(shared.clone(), move |ctx| {
+                                                answerer(&ctx, &frame);
+                                            });
+                                        }
+                                    }
+                                    LaneAction::None => {}
+                                }
                             })
                             .await;
                         let _ = reply.send(Ok(settled));
-                    }
-                    ChildCmd::Answer { id, payload } => {
-                        handle.send_line(tabit_protocol::to_wire_line(
-                            &tabit_protocol::SessionCommand::InteractionResponse {
-                                session: Some(handle.id().to_string()),
-                                id,
-                                payload,
-                            },
-                        ))
                     }
                     ChildCmd::Kill => handle.close(),
                 }
             }
             // The commands sender drops with the Child clones; the
-            // handle drops here — the reaper bounds the exit.
+            // handle drops here — the reaper bounds the exit, and its
+            // tap sweeps the node.
         });
         let id = spawn_rx
             .recv()
             .map_err(|_| "the child driver died at the spawn".to_string())??;
 
-        // The dispatcher: every frame through the registry, every
-        // handler on its own thread — observation never blocks the
-        // fold's tap.
-        let dispatch_ctx = Ctx::watch_context(ctx.shared_clone());
-        let dispatch_registry = registry.clone();
-        std::thread::spawn(move || {
-            for frame in frames_rx {
-                dispatch_frame(&dispatch_ctx, &dispatch_registry, frame);
-            }
-        });
-
-        *crate::sdk_lock(&registry.commands) = Some(cmd_tx.clone());
         Ok(Child {
             id: Arc::new(id),
             shared,
             commands: cmd_tx,
-            registry,
+            asks,
         })
     }
 
@@ -254,47 +342,66 @@ impl Child {
     }
 
     /// Observe one event kind (typed, thread-dispatched like every
-    /// invocation). Observation composes: many subscribers per kind,
-    /// plus the generic slot (forwarding) when installed.
+    /// invocation). Observation composes: the child's handlers, the
+    /// extension's watches of the same kind, and other children's
+    /// all hear the fan — the node's one subscription surface. The
+    /// registrations carry their own owner (`{id}#on`): the lane's
+    /// owner is the ingress-skip key (a frame arriving on the lane
+    /// never bounces back down it), and the observations must not
+    /// share it — they would be skipped with the lane.
     pub fn on<F>(&self, kind: &str, body: F) -> Result<(), String>
     where
         F: Fn(&Ctx, &SessionEvent) + Send + Sync + 'static,
     {
-        let owner = (*self.id).clone();
-        self.registry.on(kind, &owner, &self.shared, body)
+        refuse_ask_kind(kind)?;
+        let shared = self.shared.clone();
+        let body = Arc::new(body);
+        let owner = format!("{}#on", self.id);
+        self.shared.node.subscribe(kind, &owner, move |frame| {
+            let event = frame.event.clone();
+            let (shared, body) = (shared.clone(), body.clone());
+            std::thread::spawn(move || {
+                let ctx = Ctx::watch_context(shared);
+                crate::catch_unwind_silently(move || body(&ctx, &event));
+            });
+        });
+        Ok(())
     }
 
-    /// Register an ask-answerer for the child. The first
-    /// registration replaces the shipped forward-and-relay default
-    /// (a custom beside it would double-surface the card);
-    /// registrations then stack — any answerer may answer, the
-    /// child's hub takes the first arrival, and a late answer is a
-    /// tolerated no-op (the co-frontend law, applied one hop down).
+    /// Register an ask-answerer for the child — the arrival lane's
+    /// ask surface: every card crossing this child's pipe reaches
+    /// the answerers (the child's own, a grandchild's relayed
+    /// through it). The first registration retires the shipped
+    /// forward-and-relay default (a custom beside it would
+    /// double-surface the card); registrations then stack — any
+    /// answerer may answer, the child's hub takes the first arrival,
+    /// and a late answer is a tolerated no-op (the co-frontend law).
     /// Answer with [`Child::answer`]; a handler that surfaces the
     /// question to users itself (its own card) relays the answer it
-    /// receives.
+    /// receives. Answerers hear the card and its settle (the pair —
+    /// whoever surfaces a card hears it close).
     pub fn on_ask<F>(&self, body: F) -> Result<(), String>
     where
         F: Fn(&Ctx, &EventFrame) + Send + Sync + 'static,
     {
-        self.registry.on_ask(body)
+        self.asks.register_answerer(Arc::new(body));
+        Ok(())
     }
 
-    /// Answer one of the child's questions by id. Races are the
-    /// co-frontend law: the child takes the first answer to land;
-    /// one that arrives after another (or after the question died)
-    /// is a tolerated no-op.
+    /// Answer one of the child's questions by id — the ask table's
+    /// claim: the transit entry's delivery writes the response line
+    /// down the child's stdin. Races are the co-frontend law: the
+    /// child takes the first answer to land; one that arrives after
+    /// another (or after the question died) is a tolerated no-op.
     pub fn answer(&self, id: &str, payload: serde_json::Value) {
-        if let Some(commands) = crate::sdk_lock(&self.registry.commands).clone() {
-            let _ = commands.send(ChildCmd::Answer {
-                id: id.to_string(),
-                payload,
-            });
-        }
+        let _ = self
+            .shared
+            .node
+            .answer(id, KIND_INTERACTION, Box::new(payload));
     }
 
     /// Run one task to the child's terminal (blocking — the shared
-    /// settle fold). The child's asks surface per the registry while
+    /// settle fold). The child's asks surface per the policy while
     /// the run is in flight.
     pub fn run(&self, task: String) -> Result<Settlement, String> {
         let (tx, rx) = std::sync::mpsc::channel::<Result<Settlement, String>>();
@@ -306,121 +413,16 @@ impl Child {
     }
 
     /// Kill the child now (idempotent): stdin closes, the reaper's
-    /// grace bounds the exit with the tree kill.
+    /// grace bounds the exit with the tree kill, and the exit tap
+    /// sweeps the child's every registration.
     pub fn kill(&self) {
         let _ = self.commands.send(ChildCmd::Kill);
     }
 }
 
-impl Registry {
-    /// The observation registration (many per kind; the ask kind is
-    /// refused here — it owes an answer).
-    fn on<F>(
-        &self,
-        kind: &str,
-        owner: &str,
-        shared: &Arc<crate::Shared>,
-        body: F,
-    ) -> Result<(), String>
-    where
-        F: Fn(&Ctx, &SessionEvent) + Send + Sync + 'static,
-    {
-        if kind == tags::INTERACTION_REQUEST {
-            return Err(
-                "interaction_request owes an answer — register with `on_ask` (its answerer list)"
-                    .to_string(),
-            );
-        }
-        let shared = shared.clone();
-        let body = std::sync::Arc::new(body);
-        let owner = owner.to_string();
-        self.router.register(kind, &owner, move |frame| {
-            let event = frame.event.clone();
-            let (shared, body) = (shared.clone(), body.clone());
-            std::thread::spawn(move || {
-                let ctx = Ctx::watch_context(shared);
-                crate::catch_unwind_silently(move || body(&ctx, &event));
-            });
-        });
-        Ok(())
-    }
-
-    /// The ask law: the default yields to the first author
-    /// registration, then registrations stack (any may answer, the
-    /// child arbitrates, late answers are no-ops).
-    fn on_ask<F>(&self, body: F) -> Result<(), String>
-    where
-        F: Fn(&Ctx, &EventFrame) + Send + Sync + 'static,
-    {
-        let mut answerers = crate::sdk_lock(&self.ask_answerers);
-        if *crate::sdk_lock(&self.ask_default) {
-            answerers.clear();
-            *crate::sdk_lock(&self.ask_default) = false;
-        }
-        answerers.push(Arc::new(body));
-        Ok(())
-    }
-}
-
-/// One frame through the registry: the ask slot (single owner), the
-/// kind's specifics, the generic slot for kinds without specifics —
-/// one map probe plus the fallback, the ruled lookup law.
-fn dispatch_frame(ctx: &Ctx, registry_arc: &Arc<Registry>, frame: EventFrame) {
-    let registry = registry_arc;
-    let shared = ctx.shared_clone();
-    let kind = frame.event.tag();
-    if kind == tags::INTERACTION_REQUEST {
-        // The ask arm: the relay registration (the routed answer
-        // finds this child's driver through the extension's own
-        // pending map — the same registry `Ctx::ask` answers
-        // through) stands for the shipped default; every answerer
-        // runs, any may answer, the child's hub takes the first
-        // arrival, late answers are tolerated no-ops.
-        let id = match &frame.event {
-            SessionEvent::InteractionRequest { id, .. } => id.clone(),
-            _ => return,
-        };
-        let (tx, rx) = std::sync::mpsc::channel::<serde_json::Value>();
-        crate::register_relay(&shared, "relay", &id, tx);
-        let answerers = crate::sdk_lock(&registry.ask_answerers).clone();
-        let default_stands = *crate::sdk_lock(&registry.ask_default);
-        for answerer in answerers {
-            let frame = frame.clone();
-            spawn_handler(shared.clone(), move |ctx| answerer(&ctx, &frame));
-        }
-        if default_stands {
-            let registry_ref = registry_arc.clone();
-            spawn_handler(shared, move |_ctx| {
-                // Drain the relay until an answer lands, then carry it
-                // home to the child. A kill ends the loop with the
-                // pipe; a dismissed card starves until then (the
-                // documented shape — the author's timeout is author
-                // code).
-                if let Ok(answer) = rx.recv()
-                    && let Some(commands) = crate::sdk_lock(&registry_ref.commands).clone()
-                {
-                    let _ = commands.send(ChildCmd::Answer {
-                        id,
-                        payload: answer,
-                    });
-                }
-            });
-        }
-        return;
-    }
-    registry.router.dispatch(&frame);
-}
-
-fn spawn_handler(shared: std::sync::Arc<Shared>, body: impl FnOnce(Ctx) + Send + 'static) {
-    std::thread::spawn(move || {
-        let ctx = Ctx::watch_context(shared);
-        crate::catch_unwind_silently(move || body(ctx));
-    });
-}
-
-/// The SDK's one runtime for owned children (multi-thread; the
-/// settle folds and spawns ride it).
-fn runtime() -> &'static tokio::runtime::Runtime {
+/// The SDK's one runtime (multi-thread; the settle folds and spawns,
+/// and the ask promise bridges ride it).
+pub(crate) fn runtime() -> &'static tokio::runtime::Runtime {
     static RUNTIME: std::sync::OnceLock<tokio::runtime::Runtime> = std::sync::OnceLock::new();
     RUNTIME.get_or_init(|| {
         #[allow(clippy::expect_used)]
@@ -432,72 +434,98 @@ fn runtime() -> &'static tokio::runtime::Runtime {
     })
 }
 
+/// The observation path's vocabulary guard: the card kind owes an
+/// answer, and answers belong to the ask policy (`on_ask`).
+fn refuse_ask_kind(kind: &str) -> Result<(), String> {
+    if kind == tags::INTERACTION_REQUEST {
+        return Err(
+            "interaction_request owes an answer — register with `on_ask` (its answerer list)"
+                .to_string(),
+        );
+    }
+    Ok(())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
 
-    fn registry() -> Registry {
-        Registry {
-            router: tabit_wire::router::Router::default(),
-            ask_answerers: Mutex::new(Vec::new()),
-            ask_default: Mutex::new(true),
-            commands: Mutex::new(None),
-        }
-    }
-
-    fn shared() -> std::sync::Arc<crate::Shared> {
-        crate::tests::shared()
-    }
-
-    #[test]
-    fn observation_kinds_compose_many_subscribers() {
-        let registry = registry();
-        let shared = shared();
-        registry
-            .on(tags::RUN_FINISHED, "test", &shared, |_ctx, _event| {})
-            .expect("the first registers");
-        registry
-            .on(tags::RUN_FINISHED, "test", &shared, |_ctx, _event| {})
-            .expect("and so does the second — observation composes");
-        // Two registrations of one kind compose — the router's law;
-        // both succeeded, which is it.
-    }
-
-    #[test]
-    fn the_ask_kind_is_refused_on_the_observation_path() {
-        let registry = registry();
-        assert!(
-            registry
-                .on(
-                    tags::INTERACTION_REQUEST,
-                    "test",
-                    &shared(),
-                    |_ctx, _event| {}
-                )
-                .is_err()
-        );
-    }
-
+    /// The ask law: the shipped default owns the card kind's
+    /// crossing until the first author answerer retires it;
+    /// registrations then stack — and no window exists where a card
+    /// surfaces nowhere.
     #[test]
     fn the_ask_law_defaults_yield_then_authors_stack() {
-        let registry = registry();
-        // The default stands; the first author registration replaces
-        // it (a custom beside the default would double-surface the
-        // card)...
-        registry
-            .on_ask(|_ctx: &Ctx, _frame: &EventFrame| {})
-            .expect("the first replaces the default");
-        assert!(
-            !*crate::sdk_lock(&registry.ask_default),
-            "the default yielded"
+        let asks = AskPolicy::shipped();
+        // The default stands: cards cross verbatim; settles cross by
+        // the stdio's settle subscription (never here); non-cards
+        // cross only under the forwarding option.
+        let (action, _) = asks.lane_action(false, tags::INTERACTION_REQUEST);
+        assert!(matches!(action, LaneAction::Forward));
+        let (action, _) = asks.lane_action(false, tags::INTERACTION_SETTLED);
+        assert!(matches!(action, LaneAction::None));
+        let (action, _) = asks.lane_action(false, tags::RUN_FINISHED);
+        assert!(matches!(action, LaneAction::None));
+        let (action, _) = asks.lane_action(true, tags::RUN_FINISHED);
+        assert!(matches!(action, LaneAction::Forward));
+
+        asks.register_answerer(Arc::new(|_ctx: &Ctx, _frame: &EventFrame| {}));
+        asks.register_answerer(Arc::new(|_ctx: &Ctx, _frame: &EventFrame| {}));
+        {
+            let state = sdk_lock(&asks.inner);
+            assert_eq!(state.answerers.len(), 2, "author registrations stack");
+            assert!(!state.default, "the default yielded");
+        }
+        // The card kind now reaches the answerers, never both; the
+        // settle kind reaches them too (the pair) without crossing.
+        let (action, answerers) = asks.lane_action(true, tags::INTERACTION_REQUEST);
+        assert!(matches!(action, LaneAction::Answerers));
+        assert_eq!(answerers.len(), 2);
+        let (action, _) = asks.lane_action(false, tags::INTERACTION_SETTLED);
+        assert!(matches!(action, LaneAction::Answerers));
+    }
+
+    /// The observation owner is not the lane's owner: a frame
+    /// arriving on the lane skips the lane's owner (the ingress law)
+    /// — the observations, under their own owner, still hear it.
+    #[test]
+    fn the_observation_owner_is_not_the_lanes() {
+        let shared = crate::tests::shared();
+        let node = &shared.node;
+        let lane = Channel::local("child-1", |_| {}, |_| {});
+        let heard = std::sync::Arc::new(std::sync::Mutex::new(0u32));
+        let sink = heard.clone();
+        node.subscribe(
+            tags::RUN_FINISHED,
+            &format!("{}#on", lane.owner()),
+            move |_| *sink.lock().expect("test lock") += 1,
         );
-        assert_eq!(crate::sdk_lock(&registry.ask_answerers).len(), 1);
-        // ...and further registrations stack — any may answer, the
-        // child arbitrates, late answers are no-ops (the co-frontend
-        // law one hop down).
-        registry
-            .on_ask(|_ctx: &Ctx, _frame: &EventFrame| {})
-            .expect("the second stacks");
-        assert_eq!(crate::sdk_lock(&registry.ask_answerers).len(), 2);
+        node.intake(
+            &lane,
+            Inbound::Event(EventFrame {
+                stream: None,
+                origin: None,
+                ttl: None,
+                event: SessionEvent::RunFinished {
+                    output: String::new(),
+                    started_at_ms: 0,
+                    completed_at_ms: 0,
+                    durable: false,
+                },
+            }),
+        );
+        assert_eq!(
+            *heard.lock().expect("test lock"),
+            1,
+            "the observation heard its own child's frame"
+        );
+    }
+
+    /// The observation kind that owes an answer is refused on the
+    /// observation path — it belongs to `on_ask`.
+    #[test]
+    fn the_ask_kind_is_refused_on_the_observation_path() {
+        assert!(refuse_ask_kind(tags::INTERACTION_REQUEST).is_err());
+        assert!(refuse_ask_kind(tags::RUN_FINISHED).is_ok());
     }
 }

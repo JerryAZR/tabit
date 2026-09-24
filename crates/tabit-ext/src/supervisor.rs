@@ -42,8 +42,8 @@ use std::time::Duration;
 
 use crate::manifest::{self, Discovered, Manifest};
 use crate::protocol::{
-    Ack, EXTENSION_PROTOCOL_VERSION, ExtFrame, HookDecl, HookResult, HostFrame, ServiceVerb,
-    ToolDecl, ToolWireResult,
+    Ack, EXTENSION_PROTOCOL_VERSION, ExtFrame, HookDecl, HookResult, HostFrame, KIND_HOOK_RESULT,
+    KIND_SERVICE_RESPONSE, KIND_TOOL_RESULT, ServiceVerb, ToolDecl, ToolWireResult,
 };
 use rig_agent::tool::services::{HostServices, ModelPromptOk, ModelPromptRequest, ServiceUsage};
 use std::io::Write;
@@ -157,13 +157,11 @@ impl ChildState {
     }
 }
 
-/// The correlation-kind tags the lane's forwarded items hold — the
-/// tag of the response frame that answers them (the correlation-kind
-/// law, read back at the claim: a tool result answering a hook id, or
-/// the reverse, is a contract break).
-const KIND_TOOL_RESULT: &str = "tool_result";
-const KIND_HOOK_RESULT: &str = "hook_result";
-const KIND_SERVICE_RESPONSE: &str = "service_response";
+// The correlation-kind tags the lane's forwarded items hold (the
+// correlation-kind law, read back at the claim: a tool result
+// answering a hook id, or the reverse, is a contract break) are
+// declared once in the protocol beside the frames they name —
+// `protocol::{KIND_TOOL_RESULT, KIND_HOOK_RESULT, KIND_SERVICE_RESPONSE}`.
 
 /// The host-side half of one extension's pipe after the spawn: the
 /// pipe's one writer (the commands channel everything serializes

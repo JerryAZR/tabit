@@ -87,12 +87,16 @@ Current workspace layout:
   process's stdio, a spawned node's stdio; a local emission may name
   additional receivers — the override path by which a node whose
   stdio subscribes to nothing still speaks across it, deduplicated
-  against subscription and never serialized); `router.rs` is THE
+  against subscription and never serialized; `ask_on` is the ask
+  with that path — request and settle announce cross to the named
+  receivers); `router.rs` is THE
   event router (register by kind or wildcard, dispatch, retract by
-  owner — each callback owns its own dispatch); `asks.rs` is THE
-  pending-question registry (one entry per open round-trip: an owner
-  key plus a delivery closure over answered-or-orphaned — answers
-  are races, the first wins); `client.rs` spawns a tabit-core child
+  owner or by kind — each callback owns its own dispatch); `asks.rs`
+  is THE pending-question registry (one entry per round-trip: an
+  owner key plus a delivery closure over answered-or-orphaned —
+  answers are races, the first wins; an entry owing no settle
+  obligation closes on its answer — the answer is its settle);
+  `client.rs` spawns a tabit-core child
   in `--json` role (the child-role CLI knobs as one builder) and
   speaks the frontend protocol to it — the bounded handshake, the
   frame pump, the command writer, the reaper; `process.rs` (moved
@@ -151,18 +155,30 @@ Current workspace layout:
   extension)
 - `crates/tabit-ext-sdk` — the extension SDK, the guest side of the
   same pipe: authors register tools, consultations, and watched event
-  kinds; the SDK owns the loop (handshake from the registration,
-  every invocation on its own worker thread — handlers block, ask,
-  emit, command, concurrently — and the unconditional drain) and
-  hands each handler one context (command, emit, ask over the
-  grammar, complete, the cancelled poll). Shares the host's wire
-  types (the 2026-09 sharing ruling: one wire, one set of shapes;
-  EXTENSIONS.md stays the contract for other languages, the
+  kinds; the SDK is the guest's functional layer over its node (the
+  2026-09 port: the private dispatcher and local ask registries are
+  gone — the loop is the dialect's parse cascade into the node's
+  intake, arriving calls and hooks are held on the ask table and
+  answered through it, watches are subscriptions, the author's
+  ask/emit/command ride the node's override-path ask, emission fan,
+  and outbound command; owned children are lanes — the transit entry
+  is the relay, the ask surface (the shipped forward-and-relay
+  default, the author answerers) lives at the arrival lane where the
+  per-child scope is truth, death sweeps the child's everything; the
+  stdio carries exactly one default subscription, the settle kind —
+  the card law's close vocabulary always crosses) — so the author
+  surface stays
+  purely functional: one context per handler (command, emit, ask,
+  complete, the cancelled poll), every invocation on its own worker
+  thread, and one writer thread owning the pipe. Shares the host's
+  wire types (the 2026-09 sharing ruling: one wire, one set of
+  shapes; EXTENSIONS.md stays the contract for other languages, the
   conformance tests keep crate and docs honest). Ships the example
   extensions (`echo-ext`, `shadow-ext`, the clash pair, `lmstudio-ext` —
   the provider relay speaking LM Studio's native REST API behind a
   `providers.toml` fragment; `autotitle-ext` — the `model_prompt`
-  attribution demo) as its bins — `gate-ext` was deleted 2026-09
+  attribution demo, `child-ext` — the owned-children demo) as its
+  bins — `gate-ext` was deleted 2026-09
   (the gate returns as the built-in `tabit-gate`; examples will ride
   the extension SDK when it is developed)
 - `crates/tabit-gui` — the egui frontend (`tabit-gui` binary; spawns
