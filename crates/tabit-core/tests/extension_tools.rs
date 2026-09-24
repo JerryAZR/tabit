@@ -123,6 +123,9 @@ struct Backend {
     child: Child,
     stdin: std::process::ChildStdin,
     lines: Receiver<String>,
+    /// Every frame ever read, in order — a later scan (the grammar
+    /// e2e's `until`) can find a frame an earlier helper consumed.
+    seen: Vec<ServerFrame>,
 }
 
 fn spawn_backend(stage: &Stage, extra_env: &[(&str, String)]) -> Backend {
@@ -184,6 +187,7 @@ fn finish_spawn(mut command: Command) -> Backend {
         child,
         stdin,
         lines: rx,
+        seen: Vec::new(),
     }
 }
 
@@ -201,8 +205,10 @@ impl Backend {
             Err(RecvTimeoutError::Timeout) => panic!("no frame within the bound"),
             Err(RecvTimeoutError::Disconnected) => panic!("the backend closed its stdout"),
         };
-        serde_json::from_str(&line)
-            .unwrap_or_else(|error| panic!("unparseable frame {line}: {error}"))
+        let frame: ServerFrame = serde_json::from_str(&line)
+            .unwrap_or_else(|error| panic!("unparseable frame {line}: {error}"));
+        self.seen.push(frame.clone());
+        frame
     }
 }
 
@@ -1069,6 +1075,15 @@ fn the_shared_grammar_crosses_the_json_edge_end_to_end() {
     // Frames until a predicate holds, bounded — the emissions race
     // the handshake, so scan rather than assume order.
     fn until<F: Fn(&EventFrame) -> bool>(backend: &mut Backend, want: &str, pred: F) -> EventFrame {
+        // Already-read frames first: the double's reactive speech can
+        // land inside the handshake's own scan, and must not be lost
+        // to the helper that happened to read it.
+        if let Some(frame) = backend.seen.iter().rev().find_map(|frame| match frame {
+            ServerFrame::Event(frame) if pred(frame) => Some(frame.clone()),
+            _ => None,
+        }) {
+            return frame;
+        }
         let deadline = std::time::Instant::now() + BOUND;
         while std::time::Instant::now() < deadline {
             let frame = match backend.next_frame() {

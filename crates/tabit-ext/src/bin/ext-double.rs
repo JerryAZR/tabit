@@ -147,21 +147,16 @@ fn main() {
 
 /// The grammar behavior: speak the shared grammar both ways and
 /// mirror everything the host sends back as reportable events.
+/// Reactive (the no-buffer ruling): nothing is sent upstream before
+/// the first inbound frame — the double speaks when the boot's own
+/// announcement mirrors across (its watch's first delivery).
 fn serve_grammar() {
     emit(json!({
         "type": "ack", "protocol_version": 4,
         "tools": [], "hooks": [],
         "watch": ["session_opened", "interaction_settled"],
     }));
-    emit(json!({
-        "type": "message", "session": "boot-session",
-        "text": "steered by the extension",
-    }));
-    emit(json!({
-        "type": "interaction_request", "id": "g-1",
-        "ui_type": "native:select_any",
-        "payload": {"title": "The extension asks", "body": "grammar demo", "options": [], "free_text": true},
-    }));
+    let mut spoken = false;
     // Everything inbound that is not a lane frame is the grammar
     // coming home: mirror it out as an error event so the test's
     // event recorder sees it.
@@ -176,6 +171,22 @@ fn serve_grammar() {
             "tool_call" | "hook" | "cancel" | "service_response"
         ) {
             continue;
+        }
+        // First grammar delivery: the watched boot announcement. The
+        // double's speech rides it — a steer and an ask, both after
+        // the session they name exists (the announcement is what
+        // teaches the host the route).
+        if kind == "session_opened" && !spoken {
+            spoken = true;
+            emit(json!({
+                "type": "message", "session": "boot-session",
+                "text": "steered by the extension",
+            }));
+            emit(json!({
+                "type": "interaction_request", "id": "g-1",
+                "ui_type": "native:select_any",
+                "payload": {"title": "The extension asks", "body": "grammar demo", "options": [], "free_text": true},
+            }));
         }
         // A well-behaved origin announces the settle when its ask's
         // answer comes home (the entry-owned-settles rule — g-1 was

@@ -398,24 +398,22 @@ impl SessionCommandLink {
 }
 
 /// The frontend's event stream, mounted on the node — constructible
-/// **before any functional layer exists**. Extensions speak the
-/// shared grammar from their first post-ack line, and the extension
-/// boot precedes the session host's spawn (tools exist at session
-/// build), so the stream must be subscribed first or the early
-/// frames fan to nobody.
+/// **before any functional layer exists**: the structure-first mount
+/// (the boot's routing is ready before any data is gathered — the
+/// extensions boot next, the session host last, and every frame any
+/// of them emits from its first line crosses through this stream in
+/// arrival order). The pinned startup sequence (FRONTEND.md §3:
+/// `session_opened` is the next frame after the ack) is guaranteed
+/// by the extension contract, not by buffering: extensions are
+/// reactive — nothing outbound before their first inbound frame (the
+/// SDK's shape; EXTENSIONS.md's ruling) — so nothing can precede the
+/// session host's announcements but the announcements' own order.
 pub struct FrontendStream {
     events: mpsc::UnboundedReceiver<EventFrame>,
     /// The sender the death-watch awaits (dropped receivers close
     /// it); held here so the host — which spawns inside a runtime —
     /// owns the watcher task.
     events_tx: mpsc::UnboundedSender<EventFrame>,
-    /// The startup hold: frames arriving before the host's first
-    /// emissions land buffer here (extensions speak from their first
-    /// post-ack line — before the session host exists — and the
-    /// pinned startup order, ack → session_opened → notes → catalog,
-    /// must not have them interleaved ahead of it).
-    held: Arc<Mutex<Vec<EventFrame>>>,
-    started: Arc<std::sync::atomic::AtomicBool>,
     /// Fires when the stream's receiver drops — the frontend-death
     /// signal; the host (whenever it spawns) owns the door it opens.
     gone: CancellationToken,
@@ -427,22 +425,10 @@ pub struct FrontendStream {
 pub fn mount_frontend(node: &Arc<Node>) -> FrontendStream {
     let (event_tx, event_rx) = mpsc::unbounded_channel::<EventFrame>();
     let send_events = event_tx.clone();
-    let held: Arc<Mutex<Vec<EventFrame>>> = Arc::new(Mutex::new(Vec::new()));
-    let started = Arc::new(std::sync::atomic::AtomicBool::new(false));
     let frontend = Channel::local(
         "frontend",
-        {
-            let held = held.clone();
-            let started = started.clone();
-            move |frame: &EventFrame| {
-                // Before the host's first emissions: hold (the startup
-                // order is the contract); after: straight through.
-                if started.load(std::sync::atomic::Ordering::Acquire) {
-                    let _ = send_events.send(frame.clone());
-                } else {
-                    lock(&held).push(frame.clone());
-                }
-            }
+        move |frame: &EventFrame| {
+            let _ = send_events.send(frame.clone());
         },
         |_| {},
     );
@@ -450,8 +436,6 @@ pub fn mount_frontend(node: &Arc<Node>) -> FrontendStream {
     FrontendStream {
         events: event_rx,
         events_tx: event_tx,
-        held,
-        started,
         gone: CancellationToken::new(),
     }
 }
@@ -494,9 +478,6 @@ impl SessionHost {
         let event_rx = frontend.events;
         let frontend_events_tx = frontend.events_tx;
         let frontend_gone = frontend.gone;
-        let frontend_held = frontend.held;
-        let frontend_started = frontend.started;
-        let frontend_tx = frontend_events_tx.clone();
 
         let workers: Arc<Mutex<HashMap<String, Arc<Worker>>>> =
             Arc::new(Mutex::new(HashMap::new()));
@@ -548,20 +529,6 @@ impl SessionHost {
         let host_channel = Channel::local("host", |_| {}, |_| {});
         let sink = HostSink::new(&node, &host_channel);
         let backend_sink = BackendSink::new(&node, &host_channel);
-
-        // The startup hold flips live BEFORE the host's first
-        // emission: from here the stream takes everything direct,
-        // and the pre-host buffer — whatever the lanes said during
-        // the boot (the extension host speaks before this host
-        // exists) — flushes AFTER the startup announcements, so the
-        // pinned order (ack → session_opened → notes → catalog) is
-        // never interleaved ahead of by early extension traffic.
-        // (The flip-to-flush span is synchronous and await-free: on
-        // the binary's current-thread runtime nothing can land
-        // inside it. A multi-threaded embedder could race a frame
-        // into that span ahead of the buffer — the guarantee is
-        // scoped to await-free spawns.)
-        frontend_started.store(true, std::sync::atomic::Ordering::Release);
 
         // The boot worker first: the startup announcements emit from
         // its channel, which is what teaches the learning table where
@@ -655,13 +622,6 @@ impl SessionHost {
                     conflicts: wiring.extensions.conflicts.clone(),
                 },
             );
-        }
-
-        // The startup hold's second half: the announcements have
-        // landed; the boot's early lane traffic now crosses, behind
-        // them, in arrival order.
-        for frame in std::mem::take(&mut *lock(&frontend_held)) {
-            let _ = frontend_tx.send(frame);
         }
 
         // Lifecycle by type (law 3): the host's own module, on the

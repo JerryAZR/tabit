@@ -3454,14 +3454,18 @@ async fn an_unrepairable_overflow_leaves_the_failure_standing() {
     std::fs::remove_dir_all(store.dir()).ok();
 }
 
-/// The frontend stream's startup hold (the ported bridges' ordering):
-/// a frame crossing the net BEFORE the host spawns lands strictly
-/// behind the host's startup announcements — the pinned
-/// session_opened → catalog sequence is never preceded by early
-/// extension traffic.
+/// The frontend stream's structure-first law: the stream is live
+/// from the mount (any frame any layer emits after it crosses —
+/// nothing is dropped for arriving "too early"), and ordering is
+/// arrival order. The pinned §3 sequence (session_opened leads the
+/// backend's own announcements) is guaranteed by the extension
+/// contract — extensions are reactive, nothing outbound before their
+/// first inbound frame — not by any buffering; a frame that DOES
+/// precede the host's spawn (a contract-breaking extension) simply
+/// lands ahead of the announcements, in arrival order.
 #[tokio::test]
-async fn pre_host_traffic_lands_behind_the_startup_announcements() {
-    let store = temp_store("endpoint-startup-hold");
+async fn the_stream_is_live_from_the_mount_in_arrival_order() {
+    let store = temp_store("endpoint-structure-first");
     let session = Factory::new(vec![text_turn("never")])
         .into_builder(store.clone())
         .create("C:/w")
@@ -3469,11 +3473,10 @@ async fn pre_host_traffic_lands_behind_the_startup_announcements() {
     let wiring = plain_wiring(&store);
     let node = wiring.node.clone();
 
-    // A lane speaks before the host exists, through the mounted
-    // stream (the real shape: the extension boots between the mount
-    // and the spawn). Traffic before the mount itself reaches
-    // nothing — no subscriber exists — and is not this test's
-    // subject.
+    // A lane speaks after the mount but before the host exists. The
+    // real boot has no such speaker (extensions are reactive); this
+    // is the ordering law's raw shape, pinned without the contract's
+    // courtesy: the frame crosses, and it lands where it happened.
     let lane = crate::Channel::local("early-ext", |_| {}, |_| {});
     let frontend = crate::mount_frontend(&node);
     node.emit(
@@ -3491,8 +3494,8 @@ async fn pre_host_traffic_lands_behind_the_startup_announcements() {
     let tags: Vec<&str> = frames.iter().map(|f| f.event.tag()).collect();
     assert_eq!(
         tags,
-        vec!["session_opened", "sessions_available", "error"],
-        "the announcements lead, the early frame follows behind them"
+        vec!["error", "session_opened", "sessions_available"],
+        "live from the mount, in arrival order — no buffer, no drop"
     );
     std::fs::remove_dir_all(store.dir()).ok();
 }

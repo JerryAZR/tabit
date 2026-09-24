@@ -148,6 +148,19 @@ any session command, then any session event; a line parseable as
 none of the three is the contract break it always was (death with
 the snippet). The two tag namespaces are disjoint and stay so.
 
+**Extensions are reactive** (owner ruling 2026-09, the no-buffer
+ruling): nothing is sent upstream before the first inbound frame
+reaches the pipe. Every outbound frame answers something — a tool
+result answers a call, a hook result a hook, a service response a
+request, a grammar emission rides a handler reacting to traffic that
+arrived. This is what guarantees the frontend contract's pinned
+startup sequence (FRONTEND.md §3: `session_opened` is the next frame
+after the ack) with no buffering anywhere: the core mounts its
+frontend stream first (structure), then gathers extensions and their
+data, then spawns the session host and announces — and no extension
+can speak into that window, so nothing precedes the announcements
+but the announcements' own order.
+
 The four directions, one sentence each:
 
 - **Commands out** (extension → host): any session command,

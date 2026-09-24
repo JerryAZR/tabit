@@ -1043,9 +1043,13 @@ fn run() -> Result<i32, String> {
             // intake from its lane, and its watch list subscribes the
             // lane's channel. No bridges, no drains — the grammar's
             // other end (the session host) reads the same tables.
-            // The frontend stream mounts FIRST: extensions speak from
-            // their first post-ack line, before the session host
-            // spawns, and the early frames must find it subscribed.
+            // The boot is structure, then data: the frontend stream
+            // mounts FIRST (the net's routing is complete before any
+            // participant exists), extensions gather next, the
+            // session builds last. Extensions are reactive (nothing
+            // outbound before their first inbound frame — the
+            // no-buffer ruling), so the pinned startup sequence
+            // needs no ordering machinery anywhere.
             let frontend = tabit_session::mount_frontend(&host_node());
             let launch_context = tabit_ext::LaunchContext {
                 node: host_node(),
