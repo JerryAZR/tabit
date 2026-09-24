@@ -178,12 +178,17 @@ impl<T: Routed> Router<T> {
             .get(frame.route_key())
             .cloned()
             .unwrap_or_default();
+        // Both lists are cloned out before any callback runs: a
+        // callback may re-enter the router (an emitting subscriber,
+        // a relay cycling back) and must never meet the lock it
+        // arrived under.
+        let wildcards = lock(&self.wildcard).clone();
         for subscriber in kind_subscribers {
             if subscriber.owner != ingress {
                 (subscriber.callback)(frame);
             }
         }
-        for subscriber in lock(&self.wildcard).iter() {
+        for subscriber in wildcards {
             if subscriber.owner != ingress {
                 (subscriber.callback)(frame);
             }

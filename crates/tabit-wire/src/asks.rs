@@ -75,8 +75,7 @@ impl PendingAsks {
     /// Register one awaiting question under its id. A live id
     /// re-registered is a mint-law violation — two producers minted
     /// one namespace — and the sanctioned crash (2026-09 ruling:
-    /// fail loud, never mask it; the TTL law kills accidental echo
-    /// loops before they ever reach this).
+    /// fail loud, never mask it).
     #[allow(clippy::panic)] // sanctioned crash: the mint law was violated
     pub fn insert(
         &self,
@@ -137,9 +136,10 @@ impl PendingAsks {
     }
 
     /// Retract every question one owner asked — its death site. Each
-    /// settles orphaned, its reason the death's; the swept ids return
-    /// so the caller can announce the settlements its surface demands.
-    pub fn retract_owner(&self, owner: &str, reason: &str) -> Vec<String> {
+    /// settles orphaned, its reason the death's; the swept (id, kind)
+    /// pairs return so the caller announces only the settlements its
+    /// vocabulary owns — held round-trips are not cards.
+    pub fn retract_owner(&self, owner: &str, reason: &str) -> Vec<(String, &'static str)> {
         let matching: Vec<String> = lock(&self.pending)
             .iter()
             .filter(|(_, ask)| ask.owner == owner)
@@ -148,8 +148,9 @@ impl PendingAsks {
         let mut swept = Vec::new();
         for id in matching {
             if let Some(ask) = lock(&self.pending).remove(&id) {
+                let kind = ask.kind;
                 (ask.deliver)(Outcome::Orphaned(reason.to_string()));
-                swept.push(id);
+                swept.push((id, kind));
             }
         }
         swept
@@ -157,14 +158,16 @@ impl PendingAsks {
 
     /// Retract everything (a terminal's sweep — the askers died with
     /// their run). Each settles orphaned, its reason the terminal's;
-    /// the swept ids return for settlement announcements.
-    pub fn retract_all(&self, reason: &str) -> Vec<String> {
+    /// the swept (id, kind) pairs return for settlement
+    /// announcements.
+    pub fn retract_all(&self, reason: &str) -> Vec<(String, &'static str)> {
         let swept: Vec<(String, PendingAsk)> = lock(&self.pending).drain().collect();
         swept
             .into_iter()
             .map(|(id, ask)| {
+                let kind = ask.kind;
                 (ask.deliver)(Outcome::Orphaned(reason.to_string()));
-                id
+                (id, kind)
             })
             .collect()
     }

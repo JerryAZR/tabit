@@ -239,6 +239,14 @@ pub enum ClientFrame {
     Command(SessionCommand),
 }
 
+/// The command tag constants — [`SessionCommand::tag`]'s values,
+/// pinned in one place for the routing layer's by-type tables (the
+/// command twin of the event [`tags`](crate::tags)).
+pub mod command_tags {
+    /// The answer to an ask: the interaction ask's kind tag.
+    pub const INTERACTION_RESPONSE: &str = "interaction_response";
+}
+
 impl SessionCommand {
     /// The wire tag of one command kind — the `type` field's value
     /// (the command twin of [`SessionEvent::tag`]; the routing layer's

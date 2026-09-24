@@ -41,6 +41,7 @@ pub use events::{
     SessionEvent, ToolResultStatus,
 };
 pub use model::{Cost, ModelFacts, ModelSelection};
+pub use protocol::command_tags;
 pub use protocol::{
     ClientFrame, EventFrame, PROTOCOL_VERSION, ServerControlFrame, ServerFrame, SessionCommand,
     StreamId, to_wire_line,

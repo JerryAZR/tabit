@@ -35,11 +35,6 @@ impl Saw {
 /// The stub functional layer: a local channel that subscribes to
 /// every event kind and records, with a mailbox the learning table
 /// routes into. Returns the channel and the recording.
-/// The TTL test's cross-wiring slots (the two sides reference each
-/// other; OnceLock breaks the cycle).
-static A_SIDE: OnceLock<Channel> = OnceLock::new();
-static B_SIDE: OnceLock<Channel> = OnceLock::new();
-
 fn stub_layer(node: &Node, name: &str) -> (Channel, Saw) {
     let saw = Saw::default();
     let events = saw.events.clone();
@@ -635,46 +630,47 @@ fn a_routing_settle_clears_entries_on_arrival() {
 }
 
 /// The TTL tripwire: a frame forwarded in a cycle across two nodes
-/// dies at the hop budget, loudly — normally it never fires.
+/// dies at the hop budget — normally it never fires. The wiring is
+/// the load-bearing part: each node's FORWARDING channel (its
+/// subscriber) is a different object than the channel its intake
+/// sees as the arrival (a distinct owner), so the ingress law
+/// cannot break the cycle — only the budget can.
 #[test]
 fn the_ttl_tripwire_kills_cross_node_loops() {
     let a = Arc::new(Node::new("a"));
     let b = Arc::new(Node::new("b"));
-    let saw: Arc<Mutex<Vec<String>>> = Arc::new(Mutex::new(Vec::new()));
+    let laps: Arc<Mutex<u32>> = Arc::new(Mutex::new(0));
 
-    // The misconfigured cycle: each side forwards everything it
-    // hears into the other node's intake via the FORWARDING side's
-    // own channel — a distinct arrival owner each hop, so the
-    // ingress law cannot break it; only the budget can.
-    let a_node = a.clone();
+    // The arrival channels: what each node's intake names as the
+    // source (never a subscriber — the ingress skip never fires).
+    let a_arrival = Channel::line("a-arr", |_| {});
+    let b_arrival = Channel::line("b-arr", |_| {});
+
+    // The forwarding channels: each node's everything-subscriber,
+    // writing into the other node's intake over the arrival channel.
     let b_node = b.clone();
-    let a_side = Channel::line("a-fwd", move |line: &str| {
-        if let (Some(channel), Some(inbound)) = (B_SIDE.get(), parse_shared(line)) {
-            b_node.intake(channel, inbound);
+    let b_side = b_arrival.clone();
+    let a_fwd = Channel::line("a-fwd", move |line: &str| {
+        if let Some(inbound) = parse_shared(line) {
+            b_node.intake(&b_side, inbound);
         }
     });
-    let b_node2 = b.clone();
-    let a_node2 = a.clone();
-    let b_side = Channel::line("b-fwd", move |line: &str| {
-        if let (Some(channel), Some(inbound)) = (A_SIDE.get(), parse_shared(line)) {
-            a_node2.intake(channel, inbound);
+    let a_node = a.clone();
+    let a_side = a_arrival.clone();
+    let b_fwd = Channel::line("b-fwd", move |line: &str| {
+        if let Some(inbound) = parse_shared(line) {
+            a_node.intake(&a_side, inbound);
         }
     });
-    let _ = (a_node, b_node2);
-    B_SIDE.set(b_side.clone()).ok();
-    A_SIDE.set(a_side.clone()).ok();
 
-    let sink = saw.clone();
-    a.subscribe_all("recorder", move |frame| {
-        sink.lock()
-            .expect("test lock")
-            .push(frame.event.tag().to_string());
+    let counter = laps.clone();
+    a.subscribe_all("recorder", move |_| {
+        *counter.lock().expect("test lock") += 1;
     });
-    // Both nodes forward everything they hear across the cycle.
-    a.subscribe_channel_all(&a_side);
-    b.subscribe_channel_all(&b_side);
+    a.subscribe_channel_all(&a_fwd);
+    b.subscribe_channel_all(&b_fwd);
 
-    // A local emission enters the cycle.
+    // A local emission enters the cycle; the budget bounds it.
     let (a_layer, _a_saw) = stub_layer(&a, "a-layer");
     a.emit(
         &a_layer,
@@ -686,19 +682,128 @@ fn the_ttl_tripwire_kills_cross_node_loops() {
         },
     );
 
-    // The cycle runs, TTL-bound: it ends in the loud tripwire error,
-    // and the total frame count is bounded by the budget.
-    std::thread::sleep(Duration::from_millis(50));
-    let seen = saw.lock().expect("test lock").clone();
+    let bounded = *laps.lock().expect("test lock");
+    // One budget of 32 crossings means ~16 arrivals back at `a`
+    // beside the emission — a single-lap number would mean the
+    // ingress law (not the budget) broke the cycle.
     assert!(
-        seen.len() <= 70,
-        "the hop budget bounded the cycle: {} frames: {seen:?}",
-        seen.len()
+        (5..=20).contains(&bounded),
+        "the cycle genuinely ran and the budget bounded it: {bounded} laps"
+    );
+    std::thread::sleep(Duration::from_millis(30));
+    assert_eq!(
+        *laps.lock().expect("test lock"),
+        bounded,
+        "the cycle terminated — no residual growth"
+    );
+}
+
+/// A wildcard subscriber may emit from inside dispatch (the most
+/// natural functional-layer act: hear an event, derive one) — the
+/// router's callback runs outside its locks.
+#[test]
+fn a_subscriber_may_emit_from_inside_dispatch() {
+    let node = Arc::new(Node::new("core"));
+    let seen: Arc<Mutex<Vec<String>>> = Arc::new(Mutex::new(Vec::new()));
+
+    let sink = seen.clone();
+    node.subscribe(tags::ERROR, "watcher", move |frame| {
+        sink.lock()
+            .expect("test lock")
+            .push(frame.event.tag().to_string());
+    });
+
+    let (layer, _saw) = stub_layer(&node, "layer");
+    {
+        let emitter = node.clone();
+        let layer = layer.clone();
+        node.subscribe_all("deriver", move |frame| {
+            // Hear an error, derive a run_finished — an emit while
+            // dispatch holds the wildcard iteration.
+            if matches!(frame.event, SessionEvent::Error { .. }) {
+                let layer = layer.clone();
+                emitter.emit(
+                    &layer,
+                    EventFrame {
+                        stream: None,
+                        origin: None,
+                        ttl: None,
+                        event: SessionEvent::RunFinished {
+                            output: String::new(),
+                            started_at_ms: 0,
+                            completed_at_ms: 0,
+                            durable: false,
+                        },
+                    },
+                );
+            }
+        });
+    }
+
+    node.emit(
+        &layer,
+        EventFrame {
+            stream: None,
+            origin: None,
+            ttl: None,
+            event: SessionEvent::error_session("the trigger".to_string()),
+        },
+    );
+
+    let seen = seen.lock().expect("test lock").clone();
+    assert_eq!(
+        seen,
+        vec!["error".to_string()],
+        "the derived frame fanned without deadlocking"
+    );
+    let _ = &layer;
+}
+
+/// The sweep speaks card vocabulary only: held round-trips (tool
+/// calls, service requests) orphan silently — no settle announces
+/// for a non-card.
+#[test]
+fn a_death_sweep_settles_cards_not_held_round_trips() {
+    let node = Arc::new(Node::new("core"));
+    let (layer, saw) = stub_layer(&node, "layer");
+
+    let orphaned = Arc::new(Mutex::new(false));
+    let sink = orphaned.clone();
+    node.hold("lane", "call-9", "tool_result", move |outcome| {
+        if let crate::asks::Outcome::Orphaned(_) = outcome {
+            *sink.lock().expect("test lock") = true;
+        }
+    });
+    // A card beside it, for contrast.
+    drop(node.ask(
+        "lane",
+        &StreamId::new("s-1"),
+        "native:select_any",
+        json!({}),
+    ));
+
+    node.retract("lane", "the lane died");
+    assert!(
+        *orphaned.lock().expect("test lock"),
+        "the held call orphaned (the site's fail-open ran)"
+    );
+    assert_eq!(
+        saw.events()
+            .iter()
+            .filter(|seen| seen.starts_with("settled:"))
+            .count(),
+        1,
+        "exactly the card settled — the held call spoke nothing: {:?}",
+        saw.events()
     );
     assert!(
-        seen.last().map(String::as_str) == Some("error"),
-        "the loop's last gasp is the loud tripwire: {seen:?}"
+        saw.events()
+            .iter()
+            .any(|s| s.starts_with("settled:core-a1")),
+        "the card's settle announced: {:?}",
+        saw.events()
     );
+    let _ = layer;
 }
 
 /// The co-subscription rule: subscribing the request kind also

@@ -27,8 +27,8 @@
 //!    command tag).
 //! 4. **Arriving asks register against the channel they arrived
 //!    on** — nobody registers asks. A live id re-registering is a
-//!    mint-law violation and the sanctioned crash (the TTL law kills
-//!    accidental echo loops before they ever reach this). Local
+//!    mint-law violation and the sanctioned crash (the 2026-09
+//!    ruling, applied verbatim to arrivals and mints alike). Local
 //!    askers mint through [`Node::ask`] (the promise path); sites
 //!    minting silent round-trips (tool calls, service requests)
 //!    hold them through [`Node::hold`] — a hand-emitted ask frame
@@ -52,12 +52,13 @@
 //! shared grammar identically.
 
 use std::collections::HashMap;
+use std::io::Write;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 
 use serde_json::Value;
 use tabit_log::lock::lock;
-use tabit_protocol::{EventFrame, SessionCommand, SessionEvent, StreamId, to_wire_line};
+use tabit_protocol::{EventFrame, SessionCommand, SessionEvent, StreamId, tags, to_wire_line};
 
 use crate::asks::{Outcome, PendingAsks, unanswer};
 use crate::router::{Routed, Router};
@@ -68,7 +69,7 @@ mod tests;
 
 /// The interaction ask's kind: the tag of the response that answers
 /// it (the correlation-kind law, law 5).
-const KIND_INTERACTION: &str = "interaction_response";
+const KIND_INTERACTION: &str = tabit_protocol::command_tags::INTERACTION_RESPONSE;
 
 /// The hop budget node-originated frames carry — the TTL tripwire's
 /// ceiling. Comfortably above any real net's depth; expiry means a
@@ -243,9 +244,9 @@ impl<C: Routed> Node<C> {
         let paired = callback.clone();
         self.events
             .register(kind, owner, move |frame| callback(frame));
-        if kind == "interaction_request" {
+        if kind == tags::INTERACTION_REQUEST {
             self.events
-                .register("interaction_settled", owner, move |frame| paired(frame));
+                .register(tags::INTERACTION_SETTLED, owner, move |frame| paired(frame));
         }
     }
 
@@ -315,19 +316,20 @@ impl<C: Routed> Node<C> {
         match inbound {
             Inbound::Event(mut frame) => {
                 // The TTL tripwire: each crossing decrements; expiry
-                // drops the frame loudly — a misconfigured routing
-                // loop, normally never fired.
+                // drops the frame and reports on stderr — a
+                // misconfigured routing loop, normally never fired.
+                // The report is deliberately NOT an event: an event
+                // re-enters the very net that is looping (relayed
+                // onward, re-expiring, re-emitting — the tripwire
+                // would fuel what it caught); stderr terminates.
                 if let Some(ttl) = frame.ttl {
                     if ttl == 0 {
-                        self.events.dispatch(&EventFrame {
-                            stream: None,
-                            origin: None,
-                            ttl: Some(HOP_BUDGET),
-                            event: SessionEvent::error_session(format!(
-                                "a `{}` frame exceeded its hop budget — a routing loop?",
-                                frame.event.tag(),
-                            )),
-                        });
+                        let _ = writeln!(
+                            std::io::stderr(),
+                            "tabit node `{}`: a `{}` frame expired its hop budget — a routing loop?",
+                            self.name,
+                            frame.event.tag(),
+                        );
                         return;
                     }
                     frame.ttl = Some(ttl - 1);
@@ -477,9 +479,9 @@ impl<C: Routed> Node<C> {
                 if let Outcome::Answered(boxed) = outcome {
                     let _ = resolve.send(unanswer::<Value>(boxed));
                     // The origin is the settle's single producer: the
-                    // promise resolved, the card closes, and the
-                    // routed settle clears every entry the ask left
-                    // on its way out.
+                    // promise resolved and the card closes; the
+                    // settle's fan clears the entries the answer's
+                    // transit did not already claim on its way home.
                     events.dispatch(&settled);
                 }
                 // Orphaned: the awaiter reads dismissal. The settle
@@ -526,8 +528,13 @@ impl<C: Routed> Node<C> {
     pub fn retract(&self, owner: &str, reason: &str) {
         self.events.retract_owner(owner);
         lock(&self.learned).retain(|_, channel| channel.owner() != owner);
-        for id in self.asks.retract_owner(owner, reason) {
-            self.announce_sweep_settle(&id);
+        for (id, kind) in self.asks.retract_owner(owner, reason) {
+            // Only cards speak card vocabulary: held round-trips
+            // (tool calls, service requests) orphan silently — the
+            // site's closure carries its own fail-open policy.
+            if kind == KIND_INTERACTION {
+                self.announce_sweep_settle(&id);
+            }
         }
     }
 
@@ -535,8 +542,10 @@ impl<C: Routed> Node<C> {
     /// owner's routes and subscriptions outlive it (the participant
     /// and its run are different deaths).
     pub fn retract_asks(&self, owner: &str, reason: &str) {
-        for id in self.asks.retract_owner(owner, reason) {
-            self.announce_sweep_settle(&id);
+        for (id, kind) in self.asks.retract_owner(owner, reason) {
+            if kind == KIND_INTERACTION {
+                self.announce_sweep_settle(&id);
+            }
         }
     }
 
