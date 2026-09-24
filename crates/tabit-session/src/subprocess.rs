@@ -8,16 +8,20 @@
 //! shared client owns the wire (handshake, pump, reaper); this
 //! adapter owns the session machinery hung on its seams:
 //!
-//! - **forward, don't re-stamp**: the pump's tap forwards every
-//!   stamped frame to the real frontend as-is (the child's stamps are
-//!   already its session ids) and **learns** — the Ethernet-switch
-//!   model — which child subtree owns the id, so a command addressed
-//!   to a grandchild walks hop by hop (see [`tabit_wire::routing`]). The
-//!   child's backend-level frames (the handshake, its catalog, its
-//!   unstamped errors) are consumed in the client — they would
+//! - **the child's lane on the node**: the pump's tap intakes every
+//!   stamped frame through the child's channel — one act, three laws
+//!   served. The frame fans to whoever subscribes (the frontend's
+//!   forwarder — forward, don't re-stamp: the child's stamps are
+//!   already its session ids); its stamp teaches the learning table
+//!   which child subtree owns the id, so a command addressed to a
+//!   grandchild walks hop by hop; and an ask minted in the child's
+//!   subtree registers its answer route home through the same lane.
+//!   The child's backend-level frames (the handshake, its catalog,
+//!   its unstamped errors) are consumed in the client — they would
 //!   collide with the parent's connection-level fold.
-//! - **registration**: spawn registers the router's delivery lane;
-//!   the exit tap unregisters (the reaper's cleanup).
+//! - **the exit sweep**: the exit tap retracts the child's lane —
+//!   its learned routes and any in-flight transit asks sweep with it
+//!   (the death's settles announce, law 5).
 //! - **the drive fold**: one task to a terminal under the abort
 //!   leash, mapped to the session's [`RunSummary`].
 //! - **abort is a courtesy with a deadline** (owner ruling 2026-09):
@@ -31,9 +35,10 @@
 use crate::session::RunSummary;
 use crate::subagent::SpawnContext;
 use rig_agent::completion::Message;
-use std::sync::Arc;
-use tabit_protocol::{ModelSelection, SessionEvent};
+use std::sync::{Arc, OnceLock};
+use tabit_protocol::{EventFrame, ModelSelection, SessionEvent};
 use tabit_wire::client::ChildSpec;
+use tabit_wire::node::{Channel, Inbound, Node};
 use tokio_util::sync::CancellationToken;
 
 /// Shapes one subprocess child before the spawn: the child-role flags
@@ -41,47 +46,21 @@ use tokio_util::sync::CancellationToken;
 /// inherits the default (ephemeral, the parent's cwd).
 pub struct SubprocessBuilder {
     spec: ChildSpec,
-    router: Arc<tabit_wire::routing::ChildRouter>,
+    node: Arc<Node>,
 }
 
 impl SubprocessBuilder {
     /// Begin from a spawner's context — the exe, the parent identity,
-    /// the shared router, and the weak frontend handle all come from
-    /// the assembly's parts.
+    /// the shared node, and the child's flags all come from the
+    /// assembly's parts.
     pub fn new(ctx: &SpawnContext) -> Self {
         let parts = ctx.parts();
-        // The pump-order policy rides the shared Router (one
-        // mechanism with every node): the upstream relay is a
-        // wildcard subscriber (forward-don't-re-stamp, to the real
-        // frontend); the learning table is taught by the tap wrapper,
-        // which is where the speaking child's id lives (the
-        // descendant is the frame's stamp, the child is the tap's
-        // per-frame parameter — a Router callback sees only the
-        // frame).
-        let router = std::sync::Arc::new(tabit_wire::router::Router::default());
-        let tap_router = parts.router.clone();
-        if let Some(notice) = ctx.notice() {
-            router.register_all("relay", move |frame: &tabit_protocol::EventFrame| {
-                if frame.stream.is_some() {
-                    notice.forward(frame.clone());
-                }
-            });
-        }
         let spec = ChildSpec::new(parts.exe.clone(), ctx.parent_cwd().to_path_buf())
             .parent(ctx.parent_id().to_string())
-            .extensions(parts.extensions.clone())
-            .on_stamped_frame(Arc::new({
-                let router = router.clone();
-                move |child: &str, frame: &tabit_protocol::EventFrame| {
-                    if let Some(stream) = &frame.stream {
-                        tap_router.learn(stream.as_str(), child);
-                    }
-                    router.dispatch(frame);
-                }
-            }));
+            .extensions(parts.extensions.clone());
         Self {
             spec,
-            router: parts.router.clone(),
+            node: parts.node.clone(),
         }
     }
 
@@ -139,7 +118,7 @@ impl SubprocessBuilder {
     }
 
     /// The child's preamble — crosses as `--preamble` and replaces
-    /// the default base (identity and standing body); the environment
+    /// the default base (identity and standing body). The environment
     /// block, AGENTS.md files, and skills catalog append as usual.
     /// The spawner owns the child's voice; tabit still owns the
     /// truthful context. Absent, the child builds its own default
@@ -159,21 +138,36 @@ impl SubprocessBuilder {
         self
     }
 
-    /// Run the child: spawn, handshake, registration. Errors are
+    /// Run the child: spawn, handshake, register the lane. Errors are
     /// display strings — the caller (a tool body) turns them into its
     /// failure report.
     pub async fn spawn(self) -> Result<SubprocessChild, String> {
-        let router = self.router.clone();
-        let spec = self.spec.on_exit(Arc::new(move |child| {
-            router.unregister(child);
-        }));
+        // The child's lane: set the moment the handle exists (events
+        // only flow after the handshake, which `spawn` awaited — no
+        // frame can beat the set). The tap intakes through it; the
+        // exit retracts it.
+        let lane: Arc<OnceLock<Channel>> = Arc::new(OnceLock::new());
+        let tap_lane = lane.clone();
+        let tap_node = self.node.clone();
+        let sweep_node = self.node.clone();
+        let spec = self
+            .spec
+            .on_stamped_frame(Arc::new(move |_child: &str, frame: &EventFrame| {
+                if frame.stream.is_some()
+                    && let Some(lane) = tap_lane.get()
+                {
+                    tap_node.intake(lane, Inbound::Event(frame.clone()));
+                }
+            }))
+            .on_exit(Arc::new(move |child| {
+                sweep_node.retract(child, "the child exited");
+            }));
         let handle = spec.spawn().await?;
-        let child = SubprocessChild {
-            handle,
-            router: self.router,
-        };
-        child.register();
-        Ok(child)
+        let commands = handle.commands();
+        let _ = lane.set(Channel::line(handle.id(), move |line: &str| {
+            let _ = commands.send(line.to_string());
+        }));
+        Ok(SubprocessChild { handle })
     }
 }
 
@@ -182,17 +176,9 @@ impl SubprocessBuilder {
 /// reaper's tree kill).
 pub struct SubprocessChild {
     handle: tabit_wire::client::ChildHandle,
-    router: Arc<tabit_wire::routing::ChildRouter>,
 }
 
 impl SubprocessChild {
-    /// Register the router's delivery lane (the spawn's second half —
-    /// the exit tap above is the first).
-    fn register(&self) {
-        self.router
-            .register(self.handle.id(), self.handle.commands());
-    }
-
     /// The child session's id — its stream stamp and routing address.
     pub fn id(&self) -> &str {
         self.handle.id()

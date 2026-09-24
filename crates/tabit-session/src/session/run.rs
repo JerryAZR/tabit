@@ -304,15 +304,14 @@ impl Session {
         ))
             as std::sync::Arc<dyn rig_agent::tool::services::HostServices>);
         // Subagent support, when mounted: the per-run capability is the
-        // parts plus THIS parent's identity and channels, snapshot at
-        // open (a mid-run model switch reaches the next run's children).
+        // parts plus THIS parent's identity, snapshot at open (a
+        // mid-run model switch reaches the next run's children).
         if let Some(parts) = &self.subagent_parts {
             tool_context.insert(std::sync::Arc::new(crate::subagent::SpawnContext::new(
                 parts.clone(),
                 self.id.clone(),
                 self.selection(),
                 self.cwd.clone(),
-                self.event_tap.get().cloned(),
             )));
         }
         // The skills catalog (one discovery per process): the `skill`

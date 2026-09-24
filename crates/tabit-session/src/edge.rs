@@ -17,6 +17,7 @@ use tabit_protocol::{
     ClientFrame, PROTOCOL_VERSION, ServerControlFrame, ServerFrame, SessionCommand,
 };
 use tokio::sync::mpsc;
+use tokio_util::sync::CancellationToken;
 
 use crate::endpoint::{SessionCommandLink, SessionHost, SessionInfo};
 
@@ -79,12 +80,15 @@ where
     // the whole connection — not only at wind-down. (v1 bug: events
     // accumulated unread in the actor's channel until the client
     // closed stdin; the GUI sat at "queued" forever while the run was
-    // already streaming.)
+    // already streaming.) The stream's end signal fires after every
+    // worker's last event has landed (the host's wind-down awaits the
+    // joins first), so draining what remains and stopping is lossless.
     let forwarder_task = tokio::spawn(forward_events(
         host.take_events(),
         writer_tx.clone(),
         gate_rx,
         mirror,
+        host.stream_end_signal(),
     ));
 
     // A panicked reader thread is a broken edge: exit nonzero.
@@ -112,12 +116,14 @@ where
 
 /// Pump the actor's event stream into the writer channel until the
 /// stream ends — gated on the handshake: nothing forwards before the
-/// ack has been sent.
+/// ack has been sent, and nothing follows the host's wind-down
+/// signal (fired only after every worker's last event landed).
 async fn forward_events(
     stream: Option<mpsc::UnboundedReceiver<EventFrame>>,
     out: mpsc::UnboundedSender<ServerFrame>,
     mut gate: tokio::sync::watch::Receiver<bool>,
     mirror: std::sync::Arc<dyn Fn(&EventFrame) + Send + Sync>,
+    end: CancellationToken,
 ) {
     let Some(mut stream) = stream else {
         return;
@@ -132,12 +138,29 @@ async fn forward_events(
             return;
         }
     }
-    while let Some(frame) = stream.recv().await {
-        // The participant-blind fan-out: the primary frontend is
-        // subscriber zero (this write); every watching extension's
-        // lane takes the same line from the mirror.
-        mirror(&frame);
-        let _ = out.send(ServerFrame::Event(frame));
+    loop {
+        tokio::select! {
+            frame = stream.recv() => {
+                let Some(frame) = frame else { return };
+                // The participant-blind fan-out: the primary frontend is
+                // subscriber zero (this write); every watching extension's
+                // lane takes the same line from the mirror. (Frames
+                // arrive hop-unstamped: the facade channel's delivery
+                // strips the net-internal budget — the frozen wire's
+                // shape.)
+                mirror(&frame);
+                let _ = out.send(ServerFrame::Event(frame));
+            }
+            _ = end.cancelled() => {
+                // The wind-down awaited every worker join before firing
+                // this: drain what landed, then stop.
+                while let Ok(frame) = stream.try_recv() {
+                    mirror(&frame);
+                    let _ = out.send(ServerFrame::Event(frame));
+                }
+                return;
+            }
+        }
     }
 }
 
@@ -369,7 +392,7 @@ id = "m"
     /// pass their own builder.
     fn test_wiring(dir: &Path, create: SessionSource) -> SessionHostWiring {
         SessionHostWiring {
-            children: crate::ChildRouter::shared(),
+            node: std::sync::Arc::new(crate::Node::new("test")),
             boot_parent: None,
             boot_parent_call: None,
             skills: Vec::new(),
@@ -1352,7 +1375,7 @@ id = "m"
             session,
             Vec::new(),
             SessionHostWiring {
-                children: crate::ChildRouter::shared(),
+                node: std::sync::Arc::new(crate::Node::new("test")),
                 boot_parent: None,
                 boot_parent_call: None,
                 skills: Vec::new(),

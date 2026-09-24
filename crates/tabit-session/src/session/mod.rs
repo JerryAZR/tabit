@@ -208,17 +208,10 @@ impl Session {
 
     /// Attach the frontend channel module-level emissions forward
     /// through (subagent child events, the compaction bracket). Called
-    /// once by the session worker at spawn; the sink keeps the notice
-    /// discipline (weak, pre-stamped — the stream ends with the
-    /// frontend).
-    pub fn attach_event_tap(
-        &mut self,
-        events: &tokio::sync::mpsc::UnboundedSender<tabit_protocol::EventFrame>,
-    ) {
-        let _ = self.event_tap.set(crate::notice::NoticeSink::new(
-            events,
-            tabit_protocol::StreamId::new(self.id.clone()),
-        ));
+    /// once by the session worker at spawn — a sink over the session's
+    /// channel, stamped with the session's stream.
+    pub fn attach_event_tap(&mut self, sink: crate::notice::NoticeSink) {
+        let _ = self.event_tap.set(sink);
     }
 
     /// The session id.

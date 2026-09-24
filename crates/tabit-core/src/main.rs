@@ -572,16 +572,23 @@ fn print_banner(session: &Session) {
     }
 }
 
-/// The process-wide child registry — one table per process by design
-/// (the host routes through it, subagent spawns register into it), so
-/// a `OnceLock` is the honest shape rather than threading an `Arc`
-/// through every assembly site.
-fn child_router() -> std::sync::Arc<tabit_session::ChildRouter> {
-    static ROUTER: std::sync::OnceLock<std::sync::Arc<tabit_session::ChildRouter>> =
+/// The process's node — the one routing layer the session host and
+/// its subprocess children mount on (one net per process, by design:
+/// the host's routes and the children's lanes live in one learning
+/// table), so a `OnceLock` is the honest shape rather than threading
+/// an `Arc` through every assembly site. The name is the ask-id mint
+/// — unique per process, never colliding with a child's (a child
+/// names its node by its boot session's uuid).
+fn host_node() -> std::sync::Arc<tabit_session::Node> {
+    static NODE: std::sync::OnceLock<std::sync::Arc<tabit_session::Node>> =
         std::sync::OnceLock::new();
-    ROUTER
-        .get_or_init(tabit_session::ChildRouter::shared)
-        .clone()
+    NODE.get_or_init(|| {
+        std::sync::Arc::new(tabit_session::Node::new(&format!(
+            "core-{}",
+            std::process::id()
+        )))
+    })
+    .clone()
 }
 
 static SKILLS_CATALOG: std::sync::OnceLock<std::sync::Arc<tabit_session::skills::Skills>> =
@@ -750,7 +757,7 @@ fn assemble_session(
     let subagents = std::sync::Arc::new(tabit_session::subagent::SubagentParts {
         tools: retain_filtered(children, &allow, &deny),
         max_turns: args.max_turns.unwrap_or(tabit_session::DEFAULT_MAX_TURNS),
-        router: child_router(),
+        node: host_node(),
         exe: tabit_exe()?,
         // Children boot their own hosts against the parent's root
         // (the same packages, the same rules).
@@ -1527,7 +1534,7 @@ fn host_wiring(
     let open_extensions = extensions.clone();
     SessionHostWiring {
         store,
-        children: child_router(),
+        node: host_node(),
         boot_parent: args.parent.clone(),
         boot_parent_call: args.parent_call.clone(),
         skills: skills_catalog().available(),

@@ -50,13 +50,9 @@ impl Session {
 
     /// Attach the persist-state notice sink (flag 8's degraded /
     /// recovered events): the entry guard emits them through here.
-    /// Called by the session worker at spawn; see [`crate::notice`] for
-    /// the channel discipline.
-    pub(crate) fn attach_persist_notices(
-        &self,
-        events: &tokio::sync::mpsc::UnboundedSender<tabit_protocol::EventFrame>,
-        stream: tabit_protocol::StreamId,
-    ) {
-        let _ = self.persist_notices.set(NoticeSink::new(events, stream));
+    /// Called by the session worker at spawn — a sink over the
+    /// session's channel.
+    pub(crate) fn attach_persist_notices(&self, sink: NoticeSink) {
+        let _ = self.persist_notices.set(sink);
     }
 }

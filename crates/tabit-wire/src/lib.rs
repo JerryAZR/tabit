@@ -27,8 +27,6 @@
 //!   round-trip (an owner key plus a delivery closure over
 //!   answered-or-orphaned); answers are races, the first arrival
 //!   claims, late arrivals drop.
-//! - [`routing`]: the ChildRouter — route-all line forwarding with
-//!   learned grandchild tables (the Ethernet-switch model).
 //! - [`process`]: the child-process substrate every spawning site
 //!   shares (tree-kill wrapping, the stderr ring, the command writer
 //!   whose close is the stdin drop, the grace reaper). Moved from
@@ -41,12 +39,12 @@
 //!   extension SDK's owned-session wrapper is the second.
 //!
 //! The wire's serve side lives with the host it drives
-//! (`tabit-session`'s edge module) — one server, no sharing need;
-//! this crate is the many-clients half.
+//! (`tabit-session`'s edge module, mounted on its node — the session
+//! host and the subprocess bridge both ride `node`); this crate is
+//! the many-clients half.
 
 pub mod asks;
 pub mod client;
 pub mod node;
 pub mod process;
 pub mod router;
-pub mod routing;

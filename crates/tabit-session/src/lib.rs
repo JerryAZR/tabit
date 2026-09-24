@@ -120,7 +120,7 @@ pub use tabit_protocol::{
     ClientFrame, EventFrame, ModelSelection, PROTOCOL_VERSION, ServerControlFrame, ServerFrame,
     SessionCommand, SessionEvent, StreamId,
 };
-pub use tabit_wire::routing::ChildRouter;
+pub use tabit_wire::node::Node;
 pub use tree::{SessionTree, TreeFault};
 pub use writer::{SessionWriter, SharedBuffer, WriteBuffer};
 

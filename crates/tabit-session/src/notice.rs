@@ -1,179 +1,159 @@
-//! The notice channel: the one home of the session's frontend-channel
-//! discipline.
-//!
-//! A notice is an event emitted *outside* the run's event fold —
+//! The notice sinks: the functional layer's emission handles. A
+//! notice is an event emitted *outside* the run's event fold —
 //! mailbox acknowledgments (`message_queued`, `messages_discarded`),
 //! persist degraded/recovered transitions, interaction requests, the
-//! worker's command-time errors, the register announcement. Every one
-//! rides the same unbounded [`EventFrame`] channel the run's events do,
-//! and every holder plays by one rule: **weak, so the stream ends with
-//! the frontend**. A strong sender held past the frontend's lifetime
-//! would keep the channel open after every real consumer is gone (the
-//! termination contract); a dead channel therefore means nobody is
-//! left to tell, and emitting into one is a no-op.
+//! worker's command-time errors, the register announcement.
 //!
-//! Two shapes cover every holder: [`NoticeSink`] for holders born with
-//! the channel (the interaction hub, the endpoint worker), and
-//! [`NoticeSlot`] for the attach-once case — the sink does not exist
-//! until the resident worker spawns, so the mailbox and the persist
-//! notices keep an `Arc<NoticeSlot>` the worker sets exactly once
-//! (`OnceLock`; clones share the one attach through the `Arc`).
+//! A sink is three facts — the node, the channel to emit from, and
+//! (where it is a session's) the stream stamp — and emission is one
+//! act: [`Node::emit`] from the channel. Who hears the frame (the
+//! frontend's forwarder, watching extensions) is the routing layer's
+//! business, decided by subscription; the emitter never thinks about
+//! it. The channel is load-bearing, not plumbing: a session-stamped
+//! emission from the session's channel is what teaches the learning
+//! table that the session lives there (law 1), so every sink must
+//! hold the channel its session routes through.
+//!
+//! Two shapes cover every holder: [`NoticeSink`] for the
+//! session-stamped emitters (the worker, the interaction hub, the
+//! module-level taps) and [`HostSink`]/[`BackendSink`] for the
+//! host-level ones (lifecycle announcements, catalog) — the
+//! backend-level sink adds the origin attribution the routing
+//! generalization pinned (extensions speak the shared grammar
+//! origin-stamped).
+
+use std::sync::Arc;
 
 use tabit_protocol::{EventFrame, SessionEvent, StreamId};
-use tokio::sync::mpsc;
+use tabit_wire::node::{Channel, Node};
 
-/// The session's stamped, weak handle on the frontend's event channel.
-/// The channel and the stream stamp are one value because they are one
-/// fact: they attach together, or not at all — an emission can never
-/// find a channel without its stamp.
+/// The attach-once cell for a sink that does not exist until the
+/// resident worker spawns (mailbox, persist, and module-level taps):
+/// the worker sets it exactly once at spawn; a second attempt is
+/// ignored, and an unset cell means nobody is there to tell yet.
+pub(crate) type NoticeSlot = std::sync::OnceLock<NoticeSink>;
+
+/// The session's stamped emission handle: emits as the session's
+/// worker channel, stamped with the session's stream.
 ///
 /// Publicly an opaque token: a spawner outside a host wiring (tests,
 /// alternative assemblies) can hold and pass `None`, but only the
-/// crate mints real sinks ([`NoticeSink::new`] stays crate-private —
-/// the one downgrade site).
+/// crate mints real sinks ([`NoticeSink::new`] stays crate-private).
 #[derive(Clone)]
 pub struct NoticeSink {
-    events: mpsc::WeakUnboundedSender<EventFrame>,
+    node: Arc<Node>,
+    channel: Channel,
     stream: StreamId,
 }
 
 impl NoticeSink {
-    /// Downgrade the channel's strong end into a notice sink — the one
-    /// downgrade site, so every holder is weak from here on.
-    pub(crate) fn new(events: &mpsc::UnboundedSender<EventFrame>, stream: StreamId) -> Self {
+    /// Mint the sink over the worker's channel — the one construction
+    /// site, so the channel/stamp pairing is always the worker's own.
+    pub(crate) fn new(node: &Arc<Node>, channel: &Channel, stream: StreamId) -> Self {
         Self {
-            events: events.downgrade(),
+            node: node.clone(),
+            channel: channel.clone(),
             stream,
         }
     }
 
-    /// Emit a notice, stamped with the session's stream. Returns whether
-    /// the channel was live to take the frame: a dead or never-attached
-    /// channel is a silent no-op for fire-and-forget notices, but the
-    /// interaction hub's ask cares — an ask that cannot reach a
-    /// frontend resolves dismissed instead of hanging.
-    pub(crate) fn emit(&self, event: SessionEvent) -> bool {
-        let Some(events) = self.events.upgrade() else {
-            return false;
-        };
-        events
-            .send(EventFrame {
+    /// Emit a notice, stamped with the session's stream. The frame
+    /// fans to every subscriber through the node; nobody hearing it
+    /// (a dead frontend) is the routing layer's silence, not an
+    /// error to report.
+    pub(crate) fn emit(&self, event: SessionEvent) {
+        self.node.emit(
+            &self.channel,
+            EventFrame {
                 stream: Some(self.stream.clone()),
                 origin: None,
                 ttl: None,
                 event,
-            })
-            .is_ok()
-    }
-
-    /// Send a frame that already carries its own stamp — the subprocess
-    /// bridge's rule (forward, don't re-stamp): a child's frame keeps
-    /// the child's stream id as it crosses onto the parent's channel.
-    /// Same liveness contract as [`Self::emit`].
-    pub(crate) fn forward(&self, frame: EventFrame) -> bool {
-        let Some(events) = self.events.upgrade() else {
-            return false;
-        };
-        events.send(frame).is_ok()
+            },
+        );
     }
 }
 
-/// The endpoint's own way onto the channel: the strong-sender
-/// sibling of the weak sinks. Exactly one place in a node holds the
-/// strong end (the endpoint — its drop at wind-down IS the
-/// stream-end contract), and this type makes that the stamped-triple
-/// discipline's one strong site instead of twenty hand-written
-/// literals.
+/// The host's own way onto the net: lifecycle announcements, the
+/// startup catalog — emissions that are nobody's session (`None` =
+/// backend-level) or a session's opening frames before its worker
+/// exists.
+#[derive(Clone)]
 pub struct HostSink {
-    events: mpsc::UnboundedSender<EventFrame>,
-}
-
-impl Clone for HostSink {
-    fn clone(&self) -> Self {
-        Self {
-            events: self.events.clone(),
-        }
-    }
+    node: Arc<Node>,
+    channel: Channel,
 }
 
 impl HostSink {
-    /// The one construction site (beside the channel itself).
-    pub(crate) fn new(events: &mpsc::UnboundedSender<EventFrame>) -> Self {
+    /// The one construction site, over the host's channel.
+    pub(crate) fn new(node: &Arc<Node>, channel: &Channel) -> Self {
         Self {
-            events: events.clone(),
+            node: node.clone(),
+            channel: channel.clone(),
         }
     }
 
-    /// Put one event on the channel, stamped with its stream
-    /// (`None` = backend-level). The send is fire-and-forget like
-    /// every sink: a dead channel means the frontend is gone.
+    /// Put one event on the net, stamped with its stream (`None` =
+    /// backend-level).
     pub fn emit(&self, stream: Option<StreamId>, event: SessionEvent) {
-        let _ = self.events.send(EventFrame {
-            stream,
-            origin: None,
-            ttl: None,
-            event,
-        });
+        self.node.emit(
+            &self.channel,
+            EventFrame {
+                stream,
+                origin: None,
+                ttl: None,
+                event,
+            },
+        );
     }
 }
 
-/// The attach-once cell for a sink that does not exist until the
-/// resident worker spawns (mailbox and persist notices). `set` runs
-/// exactly once, at spawn; a second attempt is ignored, and `None`
-/// before the attach means the same as a dead channel after it —
-/// nobody is there to tell.
-pub(crate) type NoticeSlot = std::sync::OnceLock<NoticeSink>;
-
-/// The backend's weak handle on the same channel, for emissions that
-/// are nobody's session: an extension speaking the shared grammar
-/// emits events origin-stamped and unstamped by stream (the routing
-/// generalization — routing is participant-blind, the origin field is
-/// the attribution). Same weak discipline as [`NoticeSink`]: the
-/// stream ends with the frontend, and a dead channel means nobody is
-/// left to tell.
+/// The backend's origin-stamped handle, for emissions that are
+/// nobody's session: an extension speaking the shared grammar emits
+/// events origin-stamped and unstamped by stream (the routing
+/// generalization — routing is participant-blind, the origin field
+/// is the attribution).
 #[derive(Clone)]
 pub struct BackendSink {
-    events: mpsc::WeakUnboundedSender<EventFrame>,
+    node: Arc<Node>,
+    channel: Channel,
 }
 
 impl BackendSink {
-    /// The one downgrade site for backend-level emissions.
-    pub(crate) fn new(events: &mpsc::UnboundedSender<EventFrame>) -> Self {
+    /// The one construction site, over the host's channel.
+    pub(crate) fn new(node: &Arc<Node>, channel: &Channel) -> Self {
         Self {
-            events: events.downgrade(),
+            node: node.clone(),
+            channel: channel.clone(),
         }
     }
 
     /// Forward a frame verbatim — the stream stamp survives, the
     /// origin names the conduit (an owned child's traffic crossing
-    /// its owner's pipe; forward-don't-re-stamp, the bridge tap's
-    /// rule). Returns whether the channel was live.
-    pub fn forward(&self, origin: &str, frame: EventFrame) -> bool {
-        let Some(events) = self.events.upgrade() else {
-            return false;
-        };
-        let stamped = EventFrame {
-            stream: frame.stream,
-            origin: Some(origin.to_string()),
-            ttl: None,
-            event: frame.event,
-        };
-        events.send(stamped).is_ok()
+    /// its owner's pipe; forward-don't-re-stamp, the bridge's rule).
+    pub fn forward(&self, origin: &str, frame: EventFrame) {
+        self.node.emit(
+            &self.channel,
+            EventFrame {
+                stream: frame.stream,
+                origin: Some(origin.to_string()),
+                ttl: frame.ttl,
+                event: frame.event,
+            },
+        );
     }
 
     /// Emit an extension's event, origin-stamped and backend-level
-    /// (no stream). Returns whether the channel was live.
-    pub fn emit(&self, origin: &str, event: SessionEvent) -> bool {
-        let Some(events) = self.events.upgrade() else {
-            return false;
-        };
-        events
-            .send(EventFrame {
+    /// (no stream).
+    pub fn emit(&self, origin: &str, event: SessionEvent) {
+        self.node.emit(
+            &self.channel,
+            EventFrame {
                 stream: None,
                 origin: Some(origin.to_string()),
                 ttl: None,
                 event,
-            })
-            .is_ok()
+            },
+        );
     }
 }

@@ -5,69 +5,46 @@
 //! lives elsewhere and consumes the capability; their vocabulary and
 //! state never leak here.
 //!
-//! One hub per session worker, the actor's third shared leaf beside
-//! the mailbox and abort: [`InteractionHub::ask`] is called from tool
-//! bodies and hooks (many producers), registers its delivery closure
-//! on the shared ask registry, emits `interaction_request` on the
-//! event channel, and awaits; [`InteractionHub::respond`] routes an
-//! arriving answer by id to the one awaiting asker — a sync leaf call
-//! needing no worker attention. Total semantics: an unknown id or a
-//! dead asker is a logged no-op. Every settle site — the first answer
-//! (the rest race onto a gone id and drop), the run-terminal
-//! retraction, the dead-channel dismissal at registration — emits
-//! `interaction_settled` fire-and-forget (the closure's settle arm),
-//! so every channel holding the card can close it; run terminals
-//! clear the pending map (questions die with their chains — drop is
-//! the cancellation).
+//! The hub is the session's thin face over the node's ask law: a
+//! question is [`Node::ask`] (the id minted, the promise held, the
+//! request fanned to whoever displays cards — the routing layer's
+//! business), an arriving answer claims the ask table wherever it
+//! lands (law 5, kind-checked), and settling — the answer, the run's
+//! end, the frontend's death — is the closure's arms: the promise
+//! resolves or reads dismissal, and the settle announcement is the
+//! node's single-producer discipline. What is left for the hub is
+//! the vocabulary mapping: [`InteractionOutcome`] is what tool
+//! bodies and hooks consume, and "questions die with their run" is
+//! [`Self::clear_pending`]'s owner sweep.
 
 use std::sync::Arc;
 
 use futures::future::BoxFuture;
-use tokio::sync::{mpsc, oneshot};
+use tabit_protocol::StreamId;
+use tabit_wire::node::Node;
 
 use rig_agent::tool::interaction::{InteractionOutcome, UserInteraction};
-use tabit_protocol::{EventFrame, SessionEvent, StreamId};
-use tabit_wire::asks::Outcome;
 
-use crate::ids::new_entry_id;
-use crate::notice::NoticeSink;
-
-/// The hub's shared state.
-struct Inner {
-    /// Where requests surface: the worker's event channel (the same one
-    /// every other event rides), held as the notice sink — the handle
-    /// and command links outlive the worker, so the weak discipline of
-    /// [`crate::notice`] is what lets the stream end. A dead channel
-    /// fails the emit, dismissing the asker.
-    ///
-    /// Note: asks bypass `run_one`'s event fold by design — they
-    /// originate on tool-chain tasks, not the worker, and reach the
-    /// channel directly; ordering with run events is channel send order.
-    notices: NoticeSink,
-    /// Open questions by id: where the answer payload goes — the
-    /// shared registry ([`tabit_wire::asks`]), one law for every
-    /// node. The owner key is the session's stream.
-    owner: String,
-    pending: tabit_wire::asks::PendingAsks,
-}
-
-/// The session's interaction router. Cheap to clone (one `Arc`).
+/// The session's interaction face over the node. Cheap to clone (one
+/// `Arc`); one hub per session worker, attached when the worker takes
+/// ownership.
 #[derive(Clone)]
 pub struct InteractionHub {
     inner: Arc<Inner>,
 }
 
+struct Inner {
+    node: Arc<Node>,
+    /// The session's stream — the ask's owner key (the death sweep)
+    /// and the stamp the request carries (the card's home stream).
+    stream: StreamId,
+}
+
 impl InteractionHub {
-    /// Build the hub over the worker's event channel, stamped with the
-    /// session's stream.
-    pub fn new(events: mpsc::UnboundedSender<EventFrame>, stream: StreamId) -> Self {
-        let owner = stream.as_str().to_string();
+    /// Build the hub over the node, speaking as the session's stream.
+    pub fn new(node: Arc<Node>, stream: StreamId) -> Self {
         Self {
-            inner: Arc::new(Inner {
-                notices: NoticeSink::new(&events, stream),
-                owner,
-                pending: tabit_wire::asks::PendingAsks::default(),
-            }),
+            inner: Arc::new(Inner { node, stream }),
         }
     }
 
@@ -77,77 +54,31 @@ impl InteractionHub {
         Arc::new(self.clone())
     }
 
-    /// Deliver an answer. Returns whether the id was ours to answer (a
-    /// miss is the total-semantics no-op — the question went away with
-    /// its run). The first answer settles the id: the entry is claimed
-    /// atomically with the lookup, so a racing second answer finds
-    /// nothing and drops, and the settlement is announced to every
-    /// channel still holding the card.
-    pub fn respond(&self, id: &str, payload: serde_json::Value) -> bool {
-        let claimed = self.inner.pending.respond(id, Box::new(payload));
-        if !claimed {
-            tracing::debug!(
-                interaction_id = id,
-                "interaction response for an unknown or closed request — dropped"
-            );
-        }
-        claimed
-    }
-
-    /// Retract every open question. Called at run terminals: the askers
-    /// died with the run, and the senders must not linger. Each
-    /// retraction settles its id — a channel that missed whatever
+    /// Retract every open question. Called at run terminals: the
+    /// askers died with their run, and the senders must not linger.
+    /// The sweep settles each id — a channel that missed whatever
     /// ended the run still learns its card is dead.
     pub fn clear_pending(&self) {
-        self.inner.pending.retract_all("the run ended");
+        self.inner
+            .node
+            .retract_asks(self.inner.stream.as_str(), "the run ended");
     }
 
     /// Register the question, surface it, await the answer. Drop is
     /// the cancellation: aborting the run (the user, or the frontend
-    /// dying — the endpoint's death watcher aborts) drops the asking
+    /// dying — the endpoint's death door aborts) drops the asking
     /// future and the question goes with it; run terminals clear the
-    /// map. A dead event channel at registration (frontend already
-    /// gone, no pump in flight) resolves as dismissed.
+    /// rest. A dismissed promise (the sender dropped unresolved)
+    /// reads as [`InteractionOutcome::Dismissed`].
     async fn ask_once(&self, ui_type: &str, payload: serde_json::Value) -> InteractionOutcome {
-        let (sender, receiver) = oneshot::channel();
-        let id = new_entry_id();
-        let notices = self.inner.notices.clone();
-        let settled_id = id.clone();
-        self.inner.pending.insert(
-            id.clone(),
-            &self.inner.owner,
-            "interaction",
-            move |outcome| {
-                // The delivery: resolve the awaiting asker, then
-                // announce the settlement — whichever way it settled.
-                if let Outcome::Answered(answer) = outcome {
-                    let _ = sender.send(tabit_wire::asks::unanswer::<serde_json::Value>(answer));
-                }
-                let _ = notices.emit(SessionEvent::InteractionSettled {
-                    id: settled_id.clone(),
-                });
-            },
-        );
-        let sent = self.inner.notices.emit(SessionEvent::InteractionRequest {
-            id: id.clone(),
-            ui_type: ui_type.to_string(),
+        let awaiter = self.inner.node.ask(
+            self.inner.stream.as_str(),
+            &self.inner.stream,
+            ui_type,
             payload,
-        });
-        if !sent {
-            // No pump in flight, or the frontend is already gone: no one
-            // will ever answer. The question settles at registration —
-            // announced for whoever still consumes the channel, though
-            // a dead channel makes that nobody (fail-soft either way).
-            self.inner
-                .pending
-                .orphan(&id, "the event channel is dead at registration");
-            return InteractionOutcome::Dismissed;
-        }
-        match receiver.await {
-            Ok(payload) => InteractionOutcome::Answered(payload),
-            // The sender was dropped without sending — the run ended
-            // under the question (terminal retraction or the death
-            // watcher's abort dropping the asker).
+        );
+        match awaiter.await {
+            Ok(answer) => InteractionOutcome::Answered(answer),
             Err(_) => InteractionOutcome::Dismissed,
         }
     }
@@ -168,121 +99,127 @@ impl UserInteraction for InteractionHub {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use serde_json::json;
+    use tabit_protocol::{EventFrame, SessionCommand, SessionEvent};
 
-    /// The hub plus its channel ends. The returned **strong** sender
-    /// stands in for the worker's pump callback — the only strong
-    /// sender in production, alive exactly while a run is in flight.
-    fn hub_with_channel() -> (
+    /// The hub over a bare node: one recorder subscription is the
+    /// "frontend" — the test drives the card lifecycle the way the
+    /// net does.
+    fn hub_and_recorder() -> (
         InteractionHub,
-        mpsc::UnboundedReceiver<EventFrame>,
-        mpsc::UnboundedSender<EventFrame>,
+        std::sync::Arc<std::sync::Mutex<Vec<String>>>,
+        Arc<Node>,
     ) {
-        let (tx, rx) = mpsc::unbounded_channel();
-        (InteractionHub::new(tx.clone(), StreamId::new("s")), rx, tx)
+        let node = Arc::new(Node::new("test"));
+        let seen: std::sync::Arc<std::sync::Mutex<Vec<String>>> =
+            std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
+        let sink = seen.clone();
+        node.subscribe_all("recorder", move |frame: &EventFrame| {
+            let note = match &frame.event {
+                SessionEvent::InteractionRequest { id, ui_type, .. } => {
+                    format!("request:{id}:{ui_type}")
+                }
+                SessionEvent::InteractionSettled { id } => format!("settled:{id}"),
+                event => event.tag().to_string(),
+            };
+            sink.lock().expect("test lock").push(note);
+        });
+        (
+            InteractionHub::new(node.clone(), StreamId::new("s")),
+            seen,
+            node,
+        )
     }
 
-    fn request_from(frame: &EventFrame) -> (String, String, serde_json::Value) {
-        match &frame.event {
-            SessionEvent::InteractionRequest {
+    /// Wait (bounded) until the request has surfaced — the asker task
+    /// runs concurrently — and return its id (the note is
+    /// `request:{id}:{ui_type}`; the id ends at the first colon).
+    async fn the_request(seen: &std::sync::Arc<std::sync::Mutex<Vec<String>>>) -> String {
+        tokio::time::timeout(std::time::Duration::from_secs(5), async {
+            loop {
+                if let Some(rest) = seen
+                    .lock()
+                    .expect("test lock")
+                    .iter()
+                    .find_map(|note| note.strip_prefix("request:"))
+                {
+                    return rest.split(':').next().unwrap_or_default().to_string();
+                }
+                tokio::time::sleep(std::time::Duration::from_millis(5)).await;
+            }
+        })
+        .await
+        .expect("the request surfaced")
+    }
+
+    #[tokio::test]
+    async fn an_answer_resolves_the_asker_and_settles_the_card() {
+        let (hub, seen, node) = hub_and_recorder();
+        let asking = hub.clone();
+        let asker = tokio::spawn(async move {
+            asking
+                .capability()
+                .request(
+                    tabit_protocol::templates::ui::SELECT_ANY,
+                    json!({"prompt": "which file?"}),
+                )
+                .await
+        });
+
+        let id = the_request(&seen).await;
+        // The answer arrives from anywhere — an intake on the node.
+        node.intake(
+            &tabit_wire::node::Channel::local("frontend", |_| {}, |_| {}),
+            tabit_wire::node::Inbound::Command(SessionCommand::InteractionResponse {
+                session: None,
                 id,
-                ui_type,
-                payload,
-                ..
-            } => (id.clone(), ui_type.clone(), payload.clone()),
-            other => panic!("expected an interaction request, got {other:?}"),
-        }
-    }
-
-    #[tokio::test]
-    async fn an_answer_routes_to_its_awaiting_asker() {
-        let (hub, mut rx, _tx) = hub_with_channel();
-        let capability = hub.capability();
-        let asker = tokio::spawn(async move {
-            capability
-                .request(
-                    tabit_protocol::templates::ui::SELECT_ANY,
-                    serde_json::json!({"prompt": "which file?"}),
-                )
-                .await
-        });
-
-        // The hub is payload-blind: ui_type and payload pass through
-        // verbatim, stamped with the session's stream.
-        let frame = rx.recv().await.expect("request emitted");
-        assert_eq!(frame.stream.as_ref().map(StreamId::as_str), Some("s"));
-        let (id, ui_type, payload) = request_from(&frame);
-        assert_eq!(ui_type, tabit_protocol::templates::ui::SELECT_ANY);
-        assert_eq!(payload, serde_json::json!({"prompt": "which file?"}));
-
-        assert!(hub.respond(&id, serde_json::json!({"text": "main.rs"})));
+                payload: json!({"text": "main.rs"}),
+            }),
+        );
         assert_eq!(
             asker.await.expect("asker finished"),
-            InteractionOutcome::Answered(serde_json::json!({"text": "main.rs"}))
+            InteractionOutcome::Answered(json!({"text": "main.rs"}))
         );
-        // Settling is announced: the next frame on the channel closes
-        // the card for every holder.
-        let settled = rx.recv().await.expect("settlement emitted");
-        assert_eq!(
-            settled.event,
-            SessionEvent::InteractionSettled { id: id.clone() }
-        );
-        // First answer wins; a racing second answer finds a gone id,
-        // drops, and re-announces nothing.
-        assert!(!hub.respond(&id, serde_json::json!({"text": "lib.rs"})));
-        assert!(rx.try_recv().is_err(), "no second settlement");
-    }
-
-    #[tokio::test]
-    async fn a_response_for_an_unknown_id_is_a_total_no_op() {
-        let (hub, _rx, _tx) = hub_with_channel();
-        assert!(!hub.respond("no-such-id", serde_json::json!({"option": "Allow"})));
-    }
-
-    #[tokio::test]
-    async fn an_ask_without_a_strong_sender_reports_the_dismissal() {
-        // No pump in flight (or the frontend gone): the weak upgrade
-        // fails and the ask resolves dismissed instead of hanging.
-        let (tx, _rx) = mpsc::unbounded_channel();
-        let hub = InteractionHub::new(tx, StreamId::new("s")); // the only strong sender drops here
-        assert_eq!(
-            hub.capability()
-                .request(
-                    tabit_protocol::templates::ui::SELECT_ANY,
-                    serde_json::json!({})
-                )
-                .await,
-            InteractionOutcome::Dismissed
+        let seen = seen.lock().expect("test lock");
+        assert!(
+            seen.iter().any(|note| note.starts_with("settled:")),
+            "the settle announced: {seen:?}"
         );
     }
 
     #[tokio::test]
-    async fn clearing_pending_retracts_open_questions_as_dismissed() {
-        let (hub, mut rx, _tx) = hub_with_channel();
-        let capability = hub.capability();
+    async fn clearing_pending_dismisses_the_open_question() {
+        let (hub, seen, node) = hub_and_recorder();
+        let asking = hub.clone();
         let asker = tokio::spawn(async move {
-            capability
-                .request(
-                    tabit_protocol::templates::ui::SELECT_ANY,
-                    serde_json::json!({}),
-                )
+            asking
+                .capability()
+                .request(tabit_protocol::templates::ui::SELECT_ANY, json!({}))
                 .await
         });
-        let frame = rx.recv().await.expect("request emitted");
-        let (id, _, _) = request_from(&frame);
+
+        let id = the_request(&seen).await;
         hub.clear_pending();
-        // The retracted response is a no-op, and the asker resolves
-        // dismissed.
-        assert!(!hub.respond(&id, serde_json::json!({"option": "Allow"})));
         assert_eq!(
             asker.await.expect("asker finished"),
             InteractionOutcome::Dismissed
         );
-        // The retraction settled the id — announced, like every settle
-        // site.
-        let settled = rx.recv().await.expect("retraction settlement emitted");
+        // The retracted response is a no-op — the entry is gone.
+        node.intake(
+            &tabit_wire::node::Channel::local("frontend", |_| {}, |_| {}),
+            tabit_wire::node::Inbound::Command(SessionCommand::InteractionResponse {
+                session: None,
+                id,
+                payload: json!({"text": "too late"}),
+            }),
+        );
+        let seen = seen.lock().expect("test lock");
         assert_eq!(
-            settled.event,
-            SessionEvent::InteractionSettled { id: id.clone() }
+            seen.iter()
+                .filter(|note| note.starts_with("settled:"))
+                .count(),
+            1,
+            "exactly one settle — the sweep's: {seen:?}"
         );
     }
 }

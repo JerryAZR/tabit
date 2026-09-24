@@ -11,8 +11,7 @@
 //! with the child's cwd as the **process** cwd — the OS enforces the
 //! scope every tool, extension, and path inside resolves against.
 //! Everything a session command does works on a child structurally:
-//! the child is a full session host, routing
-//! ([`tabit_wire::routing`]) forwards wire lines to it, and there is no
+//! the child is a full session host on its own node, and there is no
 //! child-specific consumption code anywhere by design.
 //!
 //! The framework's surface is exactly the parent-half machinery a
@@ -35,10 +34,11 @@ use tokio_util::sync::CancellationToken;
 /// and access — not policy: the default child toolset and budget are
 /// conveniences to filter or ignore.
 pub struct SubagentParts {
-    /// The child registry the host routes through — spawns register
-    /// here, routing's second table reads here (one table per
-    /// process; the assembly shares it with the host wiring).
-    pub router: Arc<tabit_wire::routing::ChildRouter>,
+    /// The node the host and its children share — spawns register
+    /// their lanes on it (the learning table carries child and
+    /// grandchild routes alike), so this must be the same net the
+    /// session host mounts on.
+    pub node: Arc<tabit_wire::node::Node>,
     /// The tabit executable subprocess children spawn (`--json` child
     /// role). The assembly resolves it to the current executable, no
     /// exceptions (the pi self-spawn pattern) — children are this very
@@ -58,36 +58,33 @@ pub struct SubagentParts {
     pub max_turns: usize,
 }
 
-/// The per-run spawn context: this parent's identity and channels,
-/// snapshot at run open, over the process-wide [`SubagentParts`].
-/// Mounted into each run's [`ToolContext`] when the assembly enables
-/// subagents; extension tools read the same capability.
+/// The per-run spawn context: this parent's identity, snapshot at
+/// run open, over the process-wide [`SubagentParts`]. Mounted into
+/// each run's [`ToolContext`] when the assembly enables subagents;
+/// extension tools read the same capability.
 pub struct SpawnContext {
     parts: Arc<SubagentParts>,
     parent_id: String,
     parent_selection: ModelSelection,
     parent_cwd: PathBuf,
-    notice: Option<crate::notice::NoticeSink>,
 }
 
 impl SpawnContext {
-    /// Build the per-run context from the session's state and its
-    /// attached channels. The run opener calls this; tests and
-    /// alternative assemblies (a tool that spawns without a mounted
-    /// run) construct it directly — every argument is public state.
+    /// Build the per-run context from the session's state. The run
+    /// opener calls this; tests and alternative assemblies (a tool
+    /// that spawns without a mounted run) construct it directly —
+    /// every argument is public state.
     pub fn new(
         parts: Arc<SubagentParts>,
         parent_id: String,
         parent_selection: ModelSelection,
         parent_cwd: PathBuf,
-        notice: Option<crate::notice::NoticeSink>,
     ) -> Self {
         Self {
             parts,
             parent_id,
             parent_selection,
             parent_cwd,
-            notice,
         }
     }
 
@@ -110,12 +107,6 @@ impl SpawnContext {
     /// This parent's working directory — the inheritance default.
     pub fn parent_cwd(&self) -> &std::path::Path {
         &self.parent_cwd
-    }
-
-    /// The frontend channel's weak, pre-stamped handle — the subprocess
-    /// bridge forwards the child process's frames through it, as-is.
-    pub(crate) fn notice(&self) -> Option<crate::notice::NoticeSink> {
-        self.notice.clone()
     }
 
     /// Begin a subprocess child: the bridge builder. The OS enforces

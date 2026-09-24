@@ -78,38 +78,44 @@ Current workspace layout:
   context manager (the resident tree + the model-facing history
   view), the delta-token regime compaction reads — engine-free,
   consumed by rig-agent and tabit-session
-- `crates/tabit-wire` — the frozen wire's client role, the shared
-  node mechanisms, and the child-process substrate (the 2026-09
-  extraction: share what is the same): `router.rs` is THE event
-  router (register by kind or wildcard, dispatch, retract by owner —
-  each callback owns its own dispatch); `asks.rs` is THE
+- `crates/tabit-wire` — the frozen wire's client role and the node
+  runtime every tabit process is (routing layer + functional layer,
+  the 2026-09 architecture): `node.rs` is the node — the three
+  tables and their one law each (events by type + the learning
+  table, commands by learning table or by type, asks by id —
+  `Channel` the routable primitive: the in-process layer, the
+  process's stdio, a spawned node's stdio); `router.rs` is THE
+  event router (register by kind or wildcard, dispatch, retract by
+  owner — each callback owns its own dispatch); `asks.rs` is THE
   pending-question registry (one entry per open round-trip: an owner
   key plus a delivery closure over answered-or-orphaned — answers
-  are races, the first wins); `routing.rs` is the ChildRouter
-  (route-all line forwarding with learned grandchild tables — the
-  Ethernet-switch model); `client.rs` spawns a tabit-core child in
-  `--json` role (the child-role CLI knobs as one builder) and speaks
-  the frontend protocol to it — the bounded handshake, the frame
-  pump (forward-don't-re-stamp, with the router's learn/forward
-  tap), the command writer, the reaper; `process.rs` (moved from
-  tabit-ext) is the substrate every spawning site shares (tree-kill
-  wrapping, the stderr ring, the grace reaper). Consumers: the
-  subagent bridge, the extension host, and the extension SDK; the
-  wire's serve side lives with the host (`tabit-session`'s edge
-  module) — one server, no sharing need
+  are races, the first wins); `client.rs` spawns a tabit-core child
+  in `--json` role (the child-role CLI knobs as one builder) and
+  speaks the frontend protocol to it — the bounded handshake, the
+  frame pump, the command writer, the reaper; `process.rs` (moved
+  from tabit-ext) is the substrate every spawning site shares
+  (tree-kill wrapping, the stderr ring, the grace reaper). Consumers:
+  the subagent bridge, the extension host, and the extension SDK;
+  the wire's serve side is the session host's functional layer on
+  its node (`tabit-session`'s edge + endpoint)
 - `crates/tabit-session` — persistent sessions over the outer loop (native
   only: filesystem-backed; the rig crates keep wasm support), the
   compaction box (`src/compaction/`: the pass machinery, the doors, the
   dials file — every threshold and prompt text as data), the
   skills module (`src/skills.rs`: four-source discovery, the prompt
   catalog, the confined `skill` tool), plus the
-  serve side of the frozen wire (`src/edge.rs`: the json stdio edge —
-  handshake serving, the command loop, the event forwarder with the
-  grammar glue), the
+  serve side of the frozen wire as a functional layer on the node
+  (`src/endpoint.rs`: the session host — workers route by the node's
+  learning table, lifecycle by type, interaction cards by the ask
+  table; `src/edge.rs`: the json stdio edge — handshake serving,
+  the gated forwarder), the
   subagent framework (`subagent.rs`: `SpawnContext` — spawn/drive a
   subprocess child, the one substrate; `subprocess.rs`: the bridge —
-  the session adapter over `tabit-wire`'s client (router taps, the
-  drive fold, the ruled abort shape); the `subagent` tool is the
+  the session adapter over `tabit-wire`'s client (the child's lane
+  on the node: stamped arrivals intake — one act serves the fan,
+  the grandchild learning, and the ask route home; the exit
+  retracts the lane), the drive fold, the ruled abort shape; the
+  `subagent` tool is the
   opinionated example shape extensions override — ROADMAP item 5)
 - `crates/tabit-tools` — coding tools (`read`, `write`, `edit`, `bash`
   — chosen at registration: verified Git Bash, else PowerShell on

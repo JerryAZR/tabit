@@ -30,8 +30,8 @@ use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex, OnceLock};
 use tabit_protocol::SessionEvent;
 use tabit_session::{
-    ChildRouter, ModelSelection, Session, SessionBuilder, SessionHost, SessionHostWiring,
-    SessionStore, subagent,
+    ModelSelection, Node, Session, SessionBuilder, SessionHost, SessionHostWiring, SessionStore,
+    subagent,
 };
 
 /// Env mutation is process-wide — serialize the tests that point
@@ -109,7 +109,7 @@ fn stage_child_config(tag: &str, server: &MockServer) -> PathBuf {
 fn subprocess_parent(
     store: &SessionStore,
     cwd: &Path,
-    router: Arc<ChildRouter>,
+    node: Arc<Node>,
     task: &str,
     overrides: bool,
 ) -> Session {
@@ -132,7 +132,7 @@ id = "m"
     let parts = Arc::new(subagent::SubagentParts {
         tools: Vec::new(),
         max_turns: 8,
-        router,
+        node,
         exe: PathBuf::from(env!("CARGO_BIN_EXE_tabit-core")),
         // Children boot their own hosts — pin an empty root so the
         // suite stays hermetic against the machine's real installs.
@@ -176,10 +176,10 @@ id = "m"
         .expect("parent session")
 }
 
-/// A host over a plain store, sharing the router with the parts.
-fn host(store: &SessionStore, router: Arc<ChildRouter>, session: Session) -> SessionHost {
+/// A host over a plain store, sharing the node with the parts.
+fn host(store: &SessionStore, node: Arc<Node>, session: Session) -> SessionHost {
     let wiring = SessionHostWiring {
-        children: router,
+        node,
         boot_parent: None,
         boot_parent_call: None,
         skills: Vec::new(),
@@ -216,9 +216,9 @@ async fn a_subprocess_child_announces_streams_and_answers_over_the_real_binary()
 
     let parent_cwd = test_dir("happy-parent");
     let store = SessionStore::new(test_dir("happy-store"));
-    let router = ChildRouter::shared();
-    let parent = subprocess_parent(&store, &parent_cwd, router.clone(), "say the words", true);
-    let mut handle = host(&store, router, parent);
+    let node = Arc::new(Node::new("test"));
+    let parent = subprocess_parent(&store, &parent_cwd, node.clone(), "say the words", true);
+    let mut handle = host(&store, node, parent);
     let parent_id = handle.info().session_id.clone();
 
     handle.message(&parent_id, "go");
@@ -372,15 +372,15 @@ async fn aborting_the_parent_returns_promptly_and_the_child_flushes_its_terminal
 
     let parent_cwd = test_dir("abort-parent");
     let store = SessionStore::new(test_dir("abort-store"));
-    let router = ChildRouter::shared();
+    let node = Arc::new(Node::new("test"));
     let parent = subprocess_parent(
         &store,
         &parent_cwd,
-        router.clone(),
+        node.clone(),
         "park on the model",
         false,
     );
-    let mut handle = host(&store, router, parent);
+    let mut handle = host(&store, node, parent);
     let parent_id = handle.info().session_id.clone();
 
     handle.message(&parent_id, "go");
@@ -508,14 +508,13 @@ async fn a_preamble_override_replaces_the_preamble_and_appends_the_context() {
         Arc::new(subagent::SubagentParts {
             tools: Vec::new(),
             max_turns: 8,
-            router: ChildRouter::shared(),
+            node: Arc::new(Node::new("test")),
             exe: PathBuf::from(env!("CARGO_BIN_EXE_tabit-core")),
             extensions: child_cwd.join(".tabit/no-extensions"),
         }),
         "preamble-test-parent".to_string(),
         ModelSelection::new("p", "m"),
         child_cwd.clone(),
-        None,
     );
     let mut child = ctx
         .spawn_subprocess()
@@ -669,7 +668,7 @@ async fn a_subprocess_child_boots_its_own_extension_host_and_serves_its_tools() 
 
     let parent_cwd = test_dir("child-ext-parent");
     let store = SessionStore::new(test_dir("child-ext-store"));
-    let router = ChildRouter::shared();
+    let node = Arc::new(Node::new("test"));
     let config = Arc::new(
         tabit_config::TabitConfig::from_toml_str(
             r#"
@@ -689,7 +688,7 @@ id = "m"
     let parts = Arc::new(subagent::SubagentParts {
         tools: Vec::new(),
         max_turns: 8,
-        router: router.clone(),
+        node: node.clone(),
         exe: PathBuf::from(env!("CARGO_BIN_EXE_tabit-core")),
         extensions: ext_root.clone(),
     });
@@ -720,7 +719,7 @@ id = "m"
         .dynamic_tool(subagent::subagent_tool())
         .create(&parent_cwd.display().to_string())
         .expect("parent session");
-    let mut handle = host(&store, router, parent);
+    let mut handle = host(&store, node.clone(), parent);
     let parent_id = handle.info().session_id.clone();
     handle.message(&parent_id, "go");
 
@@ -766,14 +765,13 @@ id = "m"
         Arc::new(subagent::SubagentParts {
             tools: Vec::new(),
             max_turns: 8,
-            router: ChildRouter::shared(),
+            node: Arc::new(Node::new("test")),
             exe: PathBuf::from(env!("CARGO_BIN_EXE_tabit-core")),
             extensions: ext_root,
         }),
         parent_id.clone(),
         ModelSelection::new("p", "m"),
         parent_cwd.clone(),
-        None,
     );
     let mut denied = deny_ctx
         .spawn_subprocess()

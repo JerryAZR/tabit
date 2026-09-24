@@ -6,7 +6,7 @@ use super::wire::user_text;
 use crate::lock::lock;
 use crate::notice::{NoticeSink, NoticeSlot};
 use rig_agent::completion::Message;
-use tabit_protocol::{EventFrame, SessionEvent, StreamId};
+use tabit_protocol::SessionEvent;
 use tokio_util::sync::CancellationToken;
 
 /// A queued user message with its born-early entry id (PROTOCOL.md v2):
@@ -57,14 +57,11 @@ pub(crate) struct Mailbox {
 }
 
 impl Mailbox {
-    /// Attach the event channel for submit-time notices (the resident
-    /// worker, at spawn), stamped with the session's stream.
-    pub(crate) fn attach_notices(
-        &self,
-        events: &tokio::sync::mpsc::UnboundedSender<EventFrame>,
-        stream: StreamId,
-    ) {
-        let _ = self.notices.set(NoticeSink::new(events, stream));
+    /// Attach the submit-time notice sink (the resident worker, at
+    /// spawn): a sink over the session's channel, stamped with the
+    /// session's stream.
+    pub(crate) fn attach_notices(&self, sink: NoticeSink) {
+        let _ = self.notices.set(sink);
     }
 
     /// A pump began: submissions from here until [`Self::run_ended`] are
@@ -275,15 +272,11 @@ impl Session {
         }
     }
 
-    /// Point the mailbox's submit-time notices at the worker's event
-    /// channel (`message_queued` for live-run submissions), stamped with
-    /// the session's stream. Called by the session worker at spawn,
+    /// Point the mailbox's submit-time notices at the worker's sink
+    /// (`message_queued` for live-run submissions), stamped with the
+    /// session's stream. Called by the session worker at spawn,
     /// alongside [`Self::attach_interaction`].
-    pub fn attach_mailbox_notices(
-        &self,
-        events: &tokio::sync::mpsc::UnboundedSender<EventFrame>,
-        stream: StreamId,
-    ) {
-        self.mailbox.attach_notices(events, stream);
+    pub fn attach_mailbox_notices(&self, sink: NoticeSink) {
+        self.mailbox.attach_notices(sink);
     }
 }
