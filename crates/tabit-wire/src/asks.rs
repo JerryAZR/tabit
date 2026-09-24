@@ -92,6 +92,32 @@ impl PendingAsks {
         );
     }
 
+    /// Register one awaiting question under its id only when the id
+    /// is not already held — **first arrival wins** (an ask's echo
+    /// re-arriving at a node must not steal the entry the first
+    /// arrival registered). Returns whether this call registered.
+    pub fn insert_if_absent(
+        &self,
+        id: String,
+        owner: &str,
+        kind: &'static str,
+        deliver: impl FnOnce(Outcome) + Send + 'static,
+    ) -> bool {
+        let mut pending = lock(&self.pending);
+        if pending.contains_key(&id) {
+            return false;
+        }
+        pending.insert(
+            id,
+            PendingAsk {
+                owner: owner.to_string(),
+                kind,
+                deliver: Box::new(deliver),
+            },
+        );
+        true
+    }
+
     /// Claim one question without settling it: read its kind, then
     /// [`Claimed::deliver`] the answer — or drop the claim to discard
     /// the question outright (the delivery closure dies with it, so

@@ -165,15 +165,28 @@ impl<T: Routed> Router<T> {
     /// own their dispatch (thread, channel, pipe) — the router only
     /// finds and calls.
     pub fn dispatch(&self, frame: &T) {
+        self.dispatch_skipping(frame, "");
+    }
+
+    /// Route one frame, never to the subscriber the frame arrived
+    /// through — the Ethernet ingress law: a switch does not forward
+    /// back out the port a frame came in on. Arrivals fan through
+    /// this; locally-originated frames flood every subscriber
+    /// ([`dispatch`]).
+    pub fn dispatch_skipping(&self, frame: &T, ingress: &str) {
         let kind_subscribers = lock(&self.by_kind)
             .get(frame.route_key())
             .cloned()
             .unwrap_or_default();
         for subscriber in kind_subscribers {
-            (subscriber.callback)(frame);
+            if subscriber.owner != ingress {
+                (subscriber.callback)(frame);
+            }
         }
         for subscriber in lock(&self.wildcard).iter() {
-            (subscriber.callback)(frame);
+            if subscriber.owner != ingress {
+                (subscriber.callback)(frame);
+            }
         }
     }
 

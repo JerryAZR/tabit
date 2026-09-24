@@ -8,25 +8,35 @@
 //!
 //! The net's dataflow law, once each:
 //!
-//! 1. **Events route by type** to subscribers (they compose), and
-//!    every stamped arrival **teaches the learning table** the
-//!    stream's channel — including the in-process functional layer's
-//!    own emissions.
+//! 1. **Events route by type** to subscribers (they compose), every
+//!    stamped arrival **teaches the learning table** the stream's
+//!    channel — including the in-process functional layer's own
+//!    emissions — and **never return to the channel they arrived on**
+//!    (the Ethernet ingress law: a switch does not forward back out
+//!    the port a frame came in on — without it, mirror-and-relay
+//!    wirings echo-loop).
 //! 2. **Session-addressed commands route by the learning table** —
 //!    one lookup, no separate worker map; a miss is the uniform
-//!    `error { kind: session }` emission.
+//!    unstamped `error { kind: session }` (the failure belongs to no
+//!    session — FRONTEND.md's stamp law).
 //! 3. **Non-session commands route by type** to the functional
 //!    layer's handler table (the same router mechanism, keyed by
 //!    command tag).
 //! 4. **Arriving asks register against the channel they arrived
-//!    on** — nobody registers asks; arrival does. Local askers mint
-//!    through [`Node::ask`], whose entry is the promise they await
-//!    (the only local minting path — a hand-emitted ask frame has no
-//!    answer route home).
-//! 5. **Response-type commands claim the ask-table entry** (first
-//!    answer wins), the settle is announced (`interaction_settled`)
-//!    whoever asked, and a miss drops — the race's loser is a
-//!    tolerated no-op.
+//!    on**, first arrival wins — nobody registers asks, and an echo
+//!    re-arriving cannot steal the entry. Local askers mint through
+//!    [`Node::ask`] (the promise path); sites minting silent
+//!    round-trips (tool calls, service requests) hold them through
+//!    [`Node::hold`] — a hand-emitted ask frame has no answer route
+//!    home.
+//! 5. **Response-type commands claim the ask-table entry** — the
+//!    correlation-kind law: an ask's kind is the tag of the response
+//!    that answers it, and a wrong-kind answer is consumed loudly
+//!    (an error emission naming the break), never delivered to a
+//!    closure expecting another shape. First answer wins, the settle
+//!    (`interaction_settled`, stamped with the asking stream) is
+//!    announced from one home — the registration's delivery — and a
+//!    miss drops as the race's tolerated loser.
 //!
 //! The primitive both layers speak is the [`Channel`] — one routable
 //! destination in three flavors (the in-process functional layer, the
@@ -48,10 +58,9 @@ use crate::router::{Routed, Router};
 #[path = "node_tests.rs"]
 mod tests;
 
-/// The ask-table kind tag every ask registers under (the wire's one
-/// ask vocabulary; service round-trips ride their dialect's
-/// `Routed::response` into the same table).
-const KIND_ASK: &str = "ask";
+/// The interaction ask's kind: the tag of the response that answers
+/// it (the correlation-kind law, law 5).
+const KIND_INTERACTION: &str = "interaction_response";
 
 /// One delivery closure: what a channel does with a frame it is
 /// handed.
@@ -172,8 +181,10 @@ pub fn parse_shared(line: &str) -> Option<Inbound<SessionCommand>> {
 /// nodes; a dialect's superset elsewhere).
 pub struct Node<C: Routed = SessionCommand> {
     name: String,
-    /// Event subscribers by kind, plus wildcards — law 1.
-    events: Router<EventFrame>,
+    /// Event subscribers by kind, plus wildcards — law 1. Shared
+    /// with the ask registrations (the settle announcement rides it
+    /// from the delivery closures).
+    events: Arc<Router<EventFrame>>,
     /// Command handlers by type, plus catch-alls — law 3.
     commands: Router<C>,
     /// Open round-trips by id — laws 4 and 5.
@@ -190,7 +201,7 @@ impl<C: Routed> Node<C> {
     pub fn new(name: &str) -> Self {
         Self {
             name: name.to_string(),
-            events: Router::default(),
+            events: Arc::new(Router::default()),
             commands: Router::default(),
             asks: PendingAsks::default(),
             learned: Mutex::new(HashMap::new()),
@@ -263,9 +274,10 @@ impl<C: Routed> Node<C> {
     // --- The routing layer's acts ---
 
     /// One frame arrived on a channel — the routing layer's single
-    /// intake. Events learn and fan (arriving asks registering on the
-    /// way); commands resolve, route by learning table, or dispatch
-    /// by type. Everything the net does to a frame happens here.
+    /// intake. Events learn and fan — never back out the ingress
+    /// (law 1) — with arriving asks registering on the way (law 4);
+    /// commands resolve, route by learning table, or dispatch by
+    /// type. Everything the net does to a frame happens here.
     pub fn intake(&self, from: &Channel, inbound: Inbound<C>) {
         match inbound {
             Inbound::Event(mut frame) => {
@@ -280,21 +292,27 @@ impl<C: Routed> Node<C> {
                     lock(&self.learned).insert(stream.to_string(), from.clone());
                 }
                 // Law 4: an arriving ask registers against the
-                // channel it arrived on — the answer routes home,
-                // whoever answers.
+                // channel it arrived on — first arrival wins, so an
+                // echo cannot steal the entry. The settle announces
+                // from the delivery, stamped with the asking stream.
                 if let Some((id, _)) = frame.ask() {
                     let asker = from.clone();
                     let ask_id = id.to_string();
-                    self.asks
-                        .insert(ask_id.clone(), from.owner(), KIND_ASK, move |outcome| {
+                    let settled = self.settle_frame(&ask_id, frame.stream.clone());
+                    let events = self.events.clone();
+                    self.asks.insert_if_absent(
+                        ask_id.clone(),
+                        from.owner(),
+                        KIND_INTERACTION,
+                        move |outcome| {
                             if let Outcome::Answered(boxed) = outcome {
                                 asker.deliver_answer(&ask_id, unanswer::<Value>(boxed));
                             }
-                            // Orphaned: the asking side is gone; the
-                            // sweep announces the settlement.
-                        });
+                            events.dispatch(&settled);
+                        },
+                    );
                 }
-                self.events.dispatch(&frame);
+                self.events.dispatch_skipping(&frame, from.owner());
             }
             Inbound::Command(command) => self.route_command(command),
         }
@@ -302,9 +320,10 @@ impl<C: Routed> Node<C> {
 
     /// The local functional layer emits: teach the learning table the
     /// emitting channel (law 1 includes the in-process layer), then
-    /// fan. Ask minting is NOT this path — a local asker holds a
-    /// promise from [`Node::ask`]; a hand-emitted ask frame has no
-    /// answer route home.
+    /// fan to every subscriber — a locally-originated frame floods
+    /// all ports (the ingress law applies to arrivals only). Ask
+    /// minting is NOT this path: local askers hold promises from
+    /// [`Node::ask`], silent round-trips hold through [`Node::hold`].
     pub fn emit(&self, from: &Channel, frame: EventFrame) {
         if let Some(stream) = frame.stream.as_ref().map(StreamId::as_str) {
             lock(&self.learned).insert(stream.to_string(), from.clone());
@@ -313,14 +332,34 @@ impl<C: Routed> Node<C> {
     }
 
     /// A command crossing this node: response-type claims the ask
-    /// table (law 5); session-addressed routes by learning table
-    /// (law 2); the rest dispatch by type (law 3).
+    /// table (law 5, kind-checked); session-addressed routes by
+    /// learning table (law 2); the rest dispatch by type (law 3).
     fn route_command(&self, command: C) {
         if let Some((id, payload)) = command.response() {
-            if self.asks.respond(id, Box::new(payload.clone())) {
-                self.announce_settled(id);
+            match self.asks.claim(id) {
+                // The correlation-kind law: the entry's kind is the
+                // tag of the response that answers it.
+                Some(claimed) if claimed.kind() == command.route_key() => {
+                    claimed.deliver(Outcome::Answered(Box::new(payload.clone())));
+                }
+                Some(mismatched) => {
+                    // A wrong-kind answer is consumed loudly, never
+                    // delivered to a closure expecting another shape
+                    // — an external contract break stays external.
+                    self.events.dispatch(&EventFrame {
+                        stream: None,
+                        origin: None,
+                        event: SessionEvent::error_session(format!(
+                            "a `{}` answered a `{}` question (`{id}`) — a contract break, dropped",
+                            command.route_key(),
+                            mismatched.kind(),
+                        )),
+                    });
+                }
+                None => {
+                    // The race's loser — a tolerated drop.
+                }
             }
-            // A miss is the race's loser — a tolerated drop.
             return;
         }
         if let Some(shared) = command.shared_command()
@@ -331,9 +370,10 @@ impl<C: Routed> Node<C> {
                 Some(channel) => channel.deliver_command(shared),
                 None => {
                     // The uniform miss: every node says the same
-                    // thing, stamped with the address that missed.
+                    // thing — unstamped, for the failure belongs to
+                    // no session (FRONTEND.md's stamp law).
                     self.events.dispatch(&EventFrame {
-                        stream: Some(StreamId::new(session)),
+                        stream: None,
                         origin: None,
                         event: SessionEvent::error_session(format!(
                             "no session `{session}` on this node"
@@ -364,13 +404,16 @@ impl<C: Routed> Node<C> {
             self.ask_counter.fetch_add(1, Ordering::Relaxed)
         );
         let (resolve, awaiter) = tokio::sync::oneshot::channel();
+        let settled = self.settle_frame(&id, Some(stream.clone()));
+        let events = self.events.clone();
         self.asks
-            .insert(id.clone(), owner, KIND_ASK, move |outcome| {
+            .insert(id.clone(), owner, KIND_INTERACTION, move |outcome| {
                 if let Outcome::Answered(boxed) = outcome {
                     let _ = resolve.send(unanswer::<Value>(boxed));
                 }
                 // Orphaned: the sender drops, the awaiter reads
-                // dismissal.
+                // dismissal. Either way the settle announces.
+                events.dispatch(&settled);
             });
         self.events.dispatch(&EventFrame {
             stream: Some(stream.clone()),
@@ -384,26 +427,47 @@ impl<C: Routed> Node<C> {
         awaiter
     }
 
+    /// The silent mint: hold a round-trip the site minted — a tool
+    /// call, a hook forward, a service request — under its id, with
+    /// no event emitted and no settle announced (the site owns its
+    /// own outcomes; interaction cards are [`Node::ask`]'s world).
+    /// `kind` is the tag of the response that answers it (the
+    /// correlation-kind law); the delivery resolves the site's
+    /// awaiter, its `Orphaned` arm is the site's fail-open policy.
+    pub fn hold(
+        &self,
+        owner: &str,
+        id: &str,
+        kind: &'static str,
+        deliver: impl FnOnce(Outcome) + Send + 'static,
+    ) {
+        self.asks.insert(id.to_string(), owner, kind, deliver);
+    }
+
     /// A participant died: its subscriptions, learned routes, and
-    /// open asks sweep by owner, and every orphaned ask settles —
-    /// announced, so no channel holds a card that can never be
-    /// answered.
+    /// open asks sweep by owner — orphaned asks settling announced
+    /// (from their deliveries), so no channel holds a card that can
+    /// never be answered.
     pub fn retract(&self, owner: &str, reason: &str) {
         self.events.retract_owner(owner);
         lock(&self.learned).retain(|_, channel| channel.owner() != owner);
-        for id in self.asks.retract_owner(owner, reason) {
-            self.announce_settled(&id);
-        }
+        self.asks.retract_owner(owner, reason);
     }
 
-    /// The settle announcement — law 5's visible half, one home:
-    /// every settle site (an answer, a retraction) says
-    /// `interaction_settled` for the id, fire-and-forget.
-    fn announce_settled(&self, id: &str) {
-        self.events.dispatch(&EventFrame {
-            stream: None,
+    /// The run-terminal sweep: the questions die with their run, the
+    /// owner's routes and subscriptions outlive it (the participant
+    /// and its run are different deaths).
+    pub fn retract_asks(&self, owner: &str, reason: &str) {
+        self.asks.retract_owner(owner, reason);
+    }
+
+    /// The settle frame an ask's delivery announces: id-only, stamped
+    /// with the asking stream (frontends fold by stream).
+    fn settle_frame(&self, id: &str, stream: Option<StreamId>) -> EventFrame {
+        EventFrame {
+            stream,
             origin: None,
             event: SessionEvent::InteractionSettled { id: id.to_string() },
-        });
+        }
     }
 }

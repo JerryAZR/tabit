@@ -5,6 +5,7 @@
 //! net (`tests/net.rs`) holds the same laws over stdio.
 
 use std::sync::{Arc, Mutex, OnceLock};
+use std::time::Duration;
 
 use serde_json::{Value, json};
 use tabit_protocol::{EventFrame, SessionCommand, SessionEvent, StreamId, tags};
@@ -248,8 +249,8 @@ fn a_local_ask_awaits_its_promise_and_the_late_answer_drops() {
     let answer: Value = awaiter.blocking_recv().expect("the promise resolved");
     assert_eq!(answer, json!({"selected": ["Allow"]}));
     assert!(
-        saw.has("settled:core-a1@-"),
-        "the settle announced: {:?}",
+        saw.has("settled:core-a1@s-1"),
+        "the settle announced, stamped with the asking stream: {:?}",
         saw.events()
     );
 
@@ -352,8 +353,8 @@ fn a_death_sweeps_routes_subscriptions_and_asks() {
         }),
     );
     assert!(
-        saw.has("error@sess-child"),
-        "the swept route now misses uniformly: {:?}",
+        saw.has("error@-"),
+        "the swept route misses uniformly, unstamped (no session owns it): {:?}",
         saw.events()
     );
     let _ = layer;
@@ -423,5 +424,182 @@ fn unstamped_arrivals_are_attributed_and_stamped_cross_verbatim() {
         seen,
         vec!["error:child".to_string(), "error:-".to_string()],
         "the emission names its speaker; the relay stays verbatim"
+    );
+}
+
+/// The correlation-kind law: an ask held for one response tag,
+/// answered by another, is consumed loudly — never delivered to a
+/// closure expecting the wrong shape (an external contract break
+/// stays external; the host does not crash on it).
+#[test]
+fn a_wrong_kind_answer_breaks_loudly_not_fatal() {
+    let node = Arc::new(Node::new("core"));
+    let (layer, saw) = stub_layer(&node, "layer");
+
+    let delivered = Arc::new(Mutex::new(false));
+    let sink = delivered.clone();
+    node.hold("layer", "call-1", "tool_result", move |outcome| {
+        if let crate::asks::Outcome::Answered(_) = outcome {
+            *sink.lock().expect("test lock") = true;
+        }
+    });
+
+    // A `tool_result` question answered by an interaction response:
+    // consumed, an error names the break, the delivery never runs.
+    node.intake(
+        &layer,
+        Inbound::Command(SessionCommand::InteractionResponse {
+            session: None,
+            id: "call-1".to_string(),
+            payload: json!({"text": "wrong shape"}),
+        }),
+    );
+    assert!(
+        !*delivered.lock().expect("test lock"),
+        "the wrong-kind answer was never delivered"
+    );
+    assert!(saw.has("error@-"), "the break is loud: {:?}", saw.events());
+
+    // And the entry is gone: the right answer now finds nothing.
+    let before = saw.events().len();
+    node.intake(
+        &layer,
+        Inbound::Command(SessionCommand::InteractionResponse {
+            session: None,
+            id: "call-1".to_string(),
+            payload: json!({}),
+        }),
+    );
+    assert_eq!(saw.events().len(), before, "the consumed entry is gone");
+}
+
+/// Law 4's first-arrival rule: an ask's echo re-arriving on another
+/// channel cannot steal the entry — the answer routes to the first
+/// arrival's channel.
+#[test]
+fn an_ask_echo_cannot_steal_the_entry() {
+    let node = Arc::new(Node::new("core"));
+    let first_lines: Arc<Mutex<Vec<String>>> = Arc::new(Mutex::new(Vec::new()));
+    let second_lines: Arc<Mutex<Vec<String>>> = Arc::new(Mutex::new(Vec::new()));
+
+    let sink = first_lines.clone();
+    let first = Channel::line("ext-a", move |line: &str| {
+        sink.lock().expect("test lock").push(line.to_string());
+    });
+    let sink = second_lines.clone();
+    let second = Channel::line("ext-b", move |line: &str| {
+        sink.lock().expect("test lock").push(line.to_string());
+    });
+
+    let ask = EventFrame {
+        stream: None,
+        origin: None,
+        event: SessionEvent::InteractionRequest {
+            id: "ext-a-ask-1".to_string(),
+            ui_type: "native:select_any".to_string(),
+            payload: json!({}),
+        },
+    };
+    // The ask arrives; its echo re-arrives on the other channel.
+    node.intake(&first, Inbound::Event(ask.clone()));
+    node.intake(&second, Inbound::Event(ask));
+
+    node.intake(
+        &Channel::local("frontend", |_| {}, |_| {}),
+        Inbound::Command(SessionCommand::InteractionResponse {
+            session: None,
+            id: "ext-a-ask-1".to_string(),
+            payload: json!({"text": "home"}),
+        }),
+    );
+
+    let first = first_lines.lock().expect("test lock").clone();
+    let second = second_lines.lock().expect("test lock").clone();
+    assert!(
+        first
+            .iter()
+            .any(|line| line.contains("interaction_response") && line.contains("ext-a-ask-1")),
+        "the answer routed to the first arrival: {first:?}"
+    );
+    assert!(
+        !second
+            .iter()
+            .any(|line| line.contains("interaction_response")),
+        "the echo's channel got nothing: {second:?}"
+    );
+}
+
+/// Law 1's ingress half: a mirrored frame arriving back on the pipe
+/// it came from does not fan out through that pipe again — the
+/// mirror-and-relay wiring cannot echo-loop.
+#[test]
+fn the_ingress_law_breaks_mirror_relay_loops() {
+    let parent = Arc::new(Node::new("parent"));
+    let child = Arc::new(Node::new("child"));
+    let child_at_parent = wire(&parent, &child, "child");
+
+    // The pathological wiring the net test found: the parent mirrors
+    // the ask kind down, the child relays everything up.
+    parent.subscribe_channel("interaction_request", &child_at_parent);
+
+    let (_parent_layer, parent_saw) = stub_layer(&parent, "parent-layer");
+    let (_child_layer, _child_saw) = stub_layer(&child, "child-layer");
+    drop(child.ask(
+        "child-layer",
+        &StreamId::new("sess-child"),
+        "native:select_any",
+        json!({"body": "asked"}),
+    ));
+
+    // Without the ingress law the request ping-ponged unboundedly;
+    // with it, the parent sees the ask exactly once.
+    std::thread::sleep(Duration::from_millis(50));
+    let requests = parent_saw
+        .events()
+        .iter()
+        .filter(|seen| seen.starts_with("interaction_request@"))
+        .count();
+    assert_eq!(
+        requests,
+        1,
+        "the mirrored ask came back once, not in a loop: {:?}",
+        parent_saw.events()
+    );
+}
+
+/// The two deaths: a run dying retracts its questions but not the
+/// participant's routes; a participant dying takes everything.
+#[test]
+fn a_run_death_retracts_asks_but_keeps_routes() {
+    let node = Arc::new(Node::new("core"));
+    let (layer, saw) = stub_layer(&node, "layer");
+    node.emit(&layer, stamped("sess-1"));
+
+    let awaiter = node.ask(
+        "run-1",
+        &StreamId::new("sess-1"),
+        "native:select_any",
+        json!({}),
+    );
+    drop(awaiter); // the asker's run ends: the retraction is its dismissal
+
+    node.retract_asks("run-1", "the run ended");
+    assert!(
+        saw.has("settled:core-a1@sess-1"),
+        "the run's question settled, announced: {:?}",
+        saw.events()
+    );
+
+    // The route outlives the run: a session command still walks.
+    node.intake(
+        &Channel::local("frontend", |_| {}, |_| {}),
+        Inbound::Command(SessionCommand::Abort {
+            session: "sess-1".to_string(),
+        }),
+    );
+    assert_eq!(
+        saw.commands(),
+        vec!["abort"],
+        "the layer's route survived the run's death"
     );
 }

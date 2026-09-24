@@ -280,4 +280,26 @@ fn the_net_laws_hold_over_real_pipes() {
         "the settle announced: {:?}",
         net.saw.lock().expect("test lock")
     );
+
+    // Loop liveness: the mirror (ask kind down) against the stub's
+    // relay-everything-up must not echo — the ingress law holds it.
+    // One ask crosses the pipe exactly once each way, and stays that
+    // way (the first review's suite was green with a livelock
+    // hiding in exactly this wiring).
+    let requests = || {
+        net.saw
+            .lock()
+            .expect("test lock")
+            .iter()
+            .filter(|seen| seen.contains("interaction_request"))
+            .count()
+    };
+    std::thread::sleep(Duration::from_millis(150));
+    let first_count = requests();
+    std::thread::sleep(Duration::from_millis(150));
+    assert_eq!(
+        requests(),
+        first_count,
+        "no echo growth: the net is stable after the settle"
+    );
 }
