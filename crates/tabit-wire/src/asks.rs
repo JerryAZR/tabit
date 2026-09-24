@@ -128,19 +128,6 @@ impl PendingAsks {
         }
     }
 
-    /// Settle one question as orphaned — the answer will never come
-    /// (the asker is going away, the channel is dead). Returns
-    /// whether the id was ours.
-    pub fn orphan(&self, id: &str, reason: &str) -> bool {
-        match self.claim(id) {
-            Some(claimed) => {
-                claimed.deliver(Outcome::Orphaned(reason.to_string()));
-                true
-            }
-            None => false,
-        }
-    }
-
     /// Retract every question one owner asked — its death site. Each
     /// settles orphaned (its reason the death's), the delivery's
     /// `Orphaned` arm owning what settling announces.
@@ -234,7 +221,6 @@ mod tests {
     fn an_unknown_id_is_not_ours() {
         let asks = PendingAsks::default();
         assert!(!asks.respond("no-such-id", Box::new(1u32)));
-        assert!(!asks.orphan("no-such-id", "died"));
     }
 
     /// The 2026-09 ruling: a live id re-registered is a mint-law
@@ -245,19 +231,6 @@ mod tests {
         let asks = PendingAsks::default();
         asks.insert("req-1".to_string(), "a", "interaction", recording().1);
         asks.insert("req-1".to_string(), "a", "interaction", recording().1);
-    }
-
-    #[test]
-    fn an_orphan_settles_with_its_reason() {
-        let asks = PendingAsks::default();
-        let (seen, deliver) = recording();
-        asks.insert("req-1".to_string(), "a", "interaction", deliver);
-
-        assert!(asks.orphan("req-1", "the lane died"));
-        assert_eq!(
-            *seen.lock().expect("test lock"),
-            vec!["orphaned: the lane died".to_string()]
-        );
     }
 
     #[test]

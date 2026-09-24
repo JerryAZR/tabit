@@ -53,7 +53,6 @@
 
 use std::collections::HashMap;
 use std::io::Write;
-use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 
 use serde_json::Value;
@@ -206,7 +205,6 @@ pub struct Node<C: Routed = SessionCommand> {
     /// Stream addresses → the channel they were last heard on —
     /// laws 1 and 2 (the Ethernet-switch learning table).
     learned: Mutex<HashMap<String, Channel>>,
-    ask_counter: AtomicU64,
     /// The mint-law violation policy (2026-09 ruling, containment
     /// option): what to do with a sender that re-registered a live
     /// ask id. The default panics — the sender may be this node's
@@ -231,8 +229,12 @@ fn violation_panic(owner: &str, id: &str) {
 }
 
 impl<C: Routed> Node<C> {
-    /// A node named for its ask-id prefix (one vocabulary of ids per
-    /// process; the name is the mint).
+    /// A node named for its stderr diagnostics (the TTL report's
+    /// label). The name is NOT an id vocabulary: ask ids are UUIDv7s,
+    /// minted process-unique by construction (the ruling 2026-09 —
+    /// the well-established distributed-systems answer; id
+    /// vocabularies cross pipes, so collision-freedom cannot rest on
+    /// naming conventions).
     pub fn new(name: &str) -> Self {
         Self {
             name: name.to_string(),
@@ -240,7 +242,6 @@ impl<C: Routed> Node<C> {
             commands: Router::default(),
             asks: PendingAsks::default(),
             learned: Mutex::new(HashMap::new()),
-            ask_counter: AtomicU64::new(1),
             violation: Mutex::new(Box::new(violation_panic)),
         }
     }
@@ -289,9 +290,9 @@ impl<C: Routed> Node<C> {
         self.events.register(kind, &owner, move |frame| {
             channel.deliver_event(frame);
         });
-        if kind == "interaction_request" {
+        if kind == tags::INTERACTION_REQUEST {
             self.events
-                .register("interaction_settled", &owner, move |frame| {
+                .register(tags::INTERACTION_SETTLED, &owner, move |frame| {
                     paired.deliver_event(frame);
                 });
         }
@@ -520,11 +521,11 @@ impl<C: Routed> Node<C> {
         ui_type: &str,
         payload: Value,
     ) -> tokio::sync::oneshot::Receiver<Value> {
-        let id = format!(
-            "{}-a{}",
-            self.name,
-            self.ask_counter.fetch_add(1, Ordering::Relaxed)
-        );
+        // The mint (ruling 2026-09): a UUIDv7 — process-unique by
+        // construction, time-ordered, the distributed-systems answer.
+        // Id vocabularies cross pipes (a child's ask registers at its
+        // parent), so collision-freedom cannot rest on names.
+        let id = uuid::Uuid::now_v7().to_string();
         let (resolve, awaiter) = tokio::sync::oneshot::channel();
         let settled = self.settle_frame(&id, Some(stream.clone()));
         let events = self.events.clone();

@@ -46,6 +46,9 @@ fn stub_layer(node: &Node, name: &str) -> (Channel, Saw) {
                 SessionEvent::InteractionSettled { id } => {
                     format!("settled:{id}@{}", stamp(&frame.stream))
                 }
+                SessionEvent::InteractionRequest { id, .. } => {
+                    format!("interaction_request:{id}@{}", stamp(&frame.stream))
+                }
                 SessionEvent::Error { kind, .. } => {
                     format!("error:{kind}@{}", stamp(&frame.stream))
                 }
@@ -62,6 +65,19 @@ fn stub_layer(node: &Node, name: &str) -> (Channel, Saw) {
     );
     node.subscribe_channel_all(&channel);
     (channel, saw)
+}
+
+/// The id of the first surfaced request — the honest client shape:
+/// ask ids are UUIDs, learnable only from the request frames.
+fn request_id(saw: &Saw) -> String {
+    saw.events()
+        .iter()
+        .find_map(|note| {
+            note.strip_prefix("interaction_request:")
+                .and_then(|rest| rest.split('@').next())
+        })
+        .expect("a request surfaced")
+        .to_string()
 }
 
 fn stamp(stream: &Option<StreamId>) -> String {
@@ -237,23 +253,25 @@ fn a_local_ask_awaits_its_promise_and_the_late_answer_drops() {
     );
     assert_eq!(
         saw.events(),
-        vec!["interaction_request@s-1".to_string()],
+        vec![format!("interaction_request:{}@s-1", request_id(&saw))],
         "the request surfaced, stamped with the asking stream"
     );
 
-    // The answer arrives from anywhere — here, the same layer.
+    // The answer arrives from anywhere — here, the same layer. The id
+    // is learnable only from the request frame (a UUID mint).
+    let id = request_id(&saw);
     node.intake(
         &layer,
         Inbound::Command(SessionCommand::InteractionResponse {
             session: None,
-            id: "core-a1".to_string(),
+            id: id.clone(),
             payload: json!({"selected": ["Allow"]}),
         }),
     );
     let answer: Value = awaiter.blocking_recv().expect("the promise resolved");
     assert_eq!(answer, json!({"selected": ["Allow"]}));
     assert!(
-        saw.has("settled:core-a1@s-1"),
+        saw.has(&format!("settled:{id}@s-1")),
         "the settle announced, stamped with the asking stream: {:?}",
         saw.events()
     );
@@ -265,7 +283,7 @@ fn a_local_ask_awaits_its_promise_and_the_late_answer_drops() {
         &layer,
         Inbound::Command(SessionCommand::InteractionResponse {
             session: None,
-            id: "core-a1".to_string(),
+            id: request_id(&saw),
             payload: json!({"selected": ["Deny"]}),
         }),
     );
@@ -296,7 +314,10 @@ fn an_arriving_ask_routes_its_answer_home() {
         json!({"body": "from the child"}),
     );
     assert!(
-        parent_saw.has("interaction_request@sess-child"),
+        parent_saw
+            .events()
+            .iter()
+            .any(|seen| seen.starts_with("interaction_request:") && seen.ends_with("@sess-child")),
         "the ask surfaced at the parent: {:?}",
         parent_saw.events()
     );
@@ -307,7 +328,7 @@ fn an_arriving_ask_routes_its_answer_home() {
         &child_at_parent,
         Inbound::Command(SessionCommand::InteractionResponse {
             session: None,
-            id: "child-a1".to_string(),
+            id: request_id(&parent_saw),
             payload: json!({"text": "yes"}),
         }),
     );
@@ -316,7 +337,7 @@ fn an_arriving_ask_routes_its_answer_home() {
         .expect("the promise crossed the net");
     assert_eq!(answer, json!({"text": "yes"}));
     assert!(
-        parent_saw.has("settled:child-a1"),
+        parent_saw.has(&format!("settled:{}", request_id(&parent_saw))),
         "the parent announced the settle it resolved: {:?}",
         parent_saw.events()
     );
@@ -344,7 +365,7 @@ fn a_death_sweeps_routes_subscriptions_and_asks() {
 
     node.retract("child", "the child process exited");
     assert!(
-        saw.has("settled:child-a1"),
+        saw.has(&format!("settled:{}", request_id(&saw))),
         "the orphaned ask settled, announced: {:?}",
         saw.events()
     );
@@ -575,7 +596,7 @@ fn the_ingress_law_breaks_mirror_relay_loops() {
     let requests = parent_saw
         .events()
         .iter()
-        .filter(|seen| seen.starts_with("interaction_request@"))
+        .filter(|seen| seen.starts_with("interaction_request:"))
         .count();
     assert_eq!(
         requests,
@@ -608,7 +629,7 @@ fn a_run_death_retracts_asks_but_keeps_routes() {
         "the live asker reads dismissal — the sweep resolved the promise by dropping it"
     );
     assert!(
-        saw.has("settled:core-a1"),
+        saw.has(&format!("settled:{}", request_id(&saw))),
         "the run's question settled, announced by the sweep: {:?}",
         saw.events()
     );
@@ -658,7 +679,7 @@ fn a_routing_settle_clears_entries_on_arrival() {
         &parent_layer,
         Inbound::Command(SessionCommand::InteractionResponse {
             session: None,
-            id: "child-a1".to_string(),
+            id: request_id(&parent_saw),
             payload: json!({"text": "too late"}),
         }),
     );
@@ -839,7 +860,7 @@ fn a_death_sweep_settles_cards_not_held_round_trips() {
     assert!(
         saw.events()
             .iter()
-            .any(|s| s.starts_with("settled:core-a1")),
+            .any(|s| s.starts_with(&format!("settled:{}", request_id(&saw)))),
         "the card's settle announced: {:?}",
         saw.events()
     );
@@ -859,7 +880,7 @@ fn subscribing_requests_hears_the_settles() {
             .push(frame.event.tag().to_string());
     });
 
-    let (layer, _saw) = stub_layer(&node, "layer");
+    let (layer, saw) = stub_layer(&node, "layer");
     let awaiter = node.ask(
         "layer",
         &StreamId::new("s-1"),
@@ -870,7 +891,7 @@ fn subscribing_requests_hears_the_settles() {
         &layer,
         Inbound::Command(SessionCommand::InteractionResponse {
             session: None,
-            id: "core-a1".to_string(),
+            id: request_id(&saw),
             payload: json!({"text": "yes"}),
         }),
     );
@@ -966,6 +987,7 @@ fn an_arriving_settle_dismisses_the_origin_without_reannouncing() {
         "native:select_any",
         json!({}),
     );
+    let id = request_id(&saw);
     let open = saw.events().len();
 
     // The settle arrives from a channel OTHER than the watching
@@ -976,9 +998,7 @@ fn an_arriving_settle_dismisses_the_origin_without_reannouncing() {
             stream: Some(StreamId::new("s-1")),
             origin: None,
             ttl: None,
-            event: SessionEvent::InteractionSettled {
-                id: "core-a1".to_string(),
-            },
+            event: SessionEvent::InteractionSettled { id },
         }),
     );
     assert!(
@@ -991,14 +1011,14 @@ fn an_arriving_settle_dismisses_the_origin_without_reannouncing() {
         "the arriving settle fanned once and the node derived nothing: {:?}",
         saw.events()
     );
-    assert!(saw.has("settled:core-a1@s-1"));
+    assert!(saw.has(&format!("settled:{}@s-1", request_id(&saw))));
 
     let settled_at = saw.events().len();
     node.intake(
         &layer,
         Inbound::Command(SessionCommand::InteractionResponse {
             session: None,
-            id: "core-a1".to_string(),
+            id: request_id(&saw),
             payload: json!({"text": "too late"}),
         }),
     );

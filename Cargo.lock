@@ -5182,6 +5182,7 @@ dependencies = [
  "tabit-protocol",
  "tokio",
  "tokio-util",
+ "uuid",
  "windows",
 ]
 

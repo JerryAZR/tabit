@@ -22,6 +22,7 @@ process-wrap = { version = "10", default-features = false, features = [
     "process-group",
 ] }
 serde_json = { workspace = true }
+uuid = { workspace = true, features = ["v7"] }
 tabit-log = { path = "../tabit-log", version = "0.41.0" }
 tabit-protocol = { path = "../tabit-protocol", version = "0.41.0" }
 tokio = { workspace = true, features = [
