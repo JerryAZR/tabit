@@ -257,11 +257,6 @@ impl<C: Routed> Node<C> {
         *lock(&self.violation) = Box::new(policy);
     }
 
-    /// The node's name (the ask-id mint's prefix).
-    pub fn name(&self) -> &str {
-        &self.name
-    }
-
     // --- The functional layer's mounts ---
 
     /// Subscribe to one event kind (many may hold a kind; all run).

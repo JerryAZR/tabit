@@ -58,7 +58,22 @@ conformance harness when that grows its event-level scenarios.
 - The whole suite runs offline (cassette replay + test doubles). Doctests
   are NOT included in these numbers (`llvm-cov` was run without
   `--doctests`); they are gated by the same CI run.
-- Current state: **93.61% lines / 92.77% regions** (2,643 of 41,334
+- Current state: **90.58% lines** (4,389 of 46,568; the clean
+  re-collection after the node-runtime increment — the first
+  measurement of the extension arc, which grew the base 41,334 →
+  46,568: tabit-ext/-sdk/-install/-gate, the GUI's growth,
+  tabit-wire, the core binary. The drop from 93.61% is concentrated,
+  not diffuse: ext-sdk 17.4% (the SDK lib runs inside the spawned
+  example bins — the class-6 attribution family at its largest),
+  tabit-core 57.1% and tabit-gui 36.2% (the standing child-role and
+  egui justifications), tabit-gate 82.1% (pi-sanity's corpus is the
+  port plan); the rig crates hold their historical 97.9/96.9,
+  tabit-session 94.1%, tabit-log 92.9%. Regions were not re-derived
+  this round — see the round's methodology notes. The collection
+  raced the round's fills: the first four were compiled into the
+  run, the rest verified with a crate-scoped re-measure
+  (`node.rs` 272/273 post-fill). Before that:
+  **93.61% lines / 92.77% regions** (2,643 of 41,334
   lines; re-measured after the delta-tokens compaction refactor and
   the subagent pairing round — the deferred item below, closed. The
   round's finds: the pass cap had never fired (a 410×2,000-token
@@ -486,6 +501,104 @@ re-measures against known intent rather than discovering it.
   dead-incumbent `plan` tests. The mid-run restoration slice (a
   shadow's death restoring the core tool at the next run open) is
   ruled but unimplemented — its seam is named in EXTENSIONS.md.
+
+## The node runtime round (2026-09): tabit-wire's assessment
+
+The coverage round over `tabit-wire` — the node runtime (node.rs,
+router.rs, asks.rs) against the seven routing laws, plus the
+pre-node child-process substrate the crate also carries. Per file
+(workspace-merged): `node.rs` 98.6% (post-fill scoped: 272/273),
+`asks.rs` 99.4%, `router.rs` 90.2%, `routing.rs` 97.3%,
+`process.rs` 95.6%, `client.rs` 81.8% (its consumers are the
+subprocess bridge and the SDK's owned children — crate-scoped it has
+no tests of its own).
+
+**Filled** (the functional review's finds — every sweep test
+previously dropped the asker's awaiter before sweeping, so the
+promise semantics were implied, not pinned):
+
+- `handle_all` had zero callers and zero tests — the one-intake
+  mount is now pinned
+  (`a_one_intake_layer_handles_every_command_type`).
+- **Dismissal read by a live awaiter**: the run-death sweep test now
+  holds the awaiter and asserts `blocking_recv()` is `Err` — law 6's
+  drop-equals-dismissal, at the reading end.
+- **Claim-and-discard at the origin** (the entry-owned-settles
+  ruling's other half): a settle arriving for a locally-held promise
+  dismisses the awaiter directly, the `Orphaned` arm never runs, the
+  node announces nothing of its own (the arrival IS the settle), and
+  the dismissed entry is gone for a late answer
+  (`an_arriving_settle_dismisses_the_origin_without_reannouncing`).
+- `parse_shared`'s discrimination (event line, command line, noise)
+  — the wire helpers only ever fed valid lines.
+- The local channel's no-op answer delivery: a hand-emitted ask
+  arriving on a LOCAL channel has no answer route home — the
+  documented dead end, now pinned rather than merely reachable.
+- Strictness: the miss-error and wrong-kind assertions now pin
+  `error:session@-` — unstamped AND session-kind (FRONTEND.md's
+  stamp-law shape); before, they matched any unstamped error.
+
+**Deleted, not documented:** `Node::name()` — zero callers (the
+stderr report and the id mint read the field directly). It returns
+with a consumer.
+
+**Justified residue:**
+
+- `node.rs` 297 — the channel co-subscription's closing-brace
+  region; the closure body beside it is covered, in-process and over
+  the real pipes. Class 8.
+- `asks.rs` 48 — `unanswer`'s downcast-fail panic, the sanctioned
+  crash: the correlation-kind law at claim guarantees the shape the
+  closure downcasts, so a mismatch requires an internal pairing bug.
+- `router.rs` 54-56 / 63-68 / 87-89 — the `Routed` trait's symmetry
+  methods the current net never invokes on that side
+  (`EventFrame::session/response/shared_command`,
+  `SessionCommand::ask`): the trait demands all five of every
+  implementor, and each is called where its vocabulary uses it
+  (events mint asks; commands answer them). Class 3.
+- `router.rs` 79-81 / 83 — the `session()` or-pattern arms for
+  Continue/Checkout/Model/Compact (mirrors of the covered
+  Message/Abort arms; routing them would assert serde field names,
+  not routing) and InteractionResponse's arm (unreachable through
+  `route_command`'s order: a response is claimed before session
+  routing is consulted).
+- The TTL expiry's stderr report: the report's terminality IS the
+  design (an error event would re-enter the looping net); the
+  behavioral pins — bounded laps, a terminated cycle — carry the
+  law.
+
+**Deferred** (the port-time list): concurrent askers at the node
+level (the session layer's actor twin — two open cards answered in
+reverse order — holds the semantics until the session-edge port),
+mesh/off-path settle clears, multi-hop settles over real pipes.
+
+`client.rs` / `process.rs` residue is the recorded process-fault
+family (the rejected/hung handshake, the crash-synthesis arms in
+`settle` — one shared fold, verified: both the subprocess bridge and
+the SDK's children route through `ChildHandle::settle` — and the
+pump's garbage-line skip), the deferred `--session` builder, and the
+dead `stream`/`frames` getters on the standing dead-pub-API list;
+increment 2's client generalization revisits the file wholesale.
+
+**Methodology notes from this round:**
+
+- **Stale coverage state poisons the merge.** Profraws left under
+  `target/llvm-cov*` by a pre-extension-arc session merged ghost
+  records — files deleted weeks ago appearing with zero hits,
+  dragging the workspace to a false ~71%. Clean before collecting
+  (`rm -rf target/llvm-cov target/llvm-cov-target`).
+- lcov emits one SF record per compilation (the unit-test build and
+  the integration build of the same file are separate records); a
+  reader must merge — a line is covered if ANY record counted it.
+  Last-record-wins undercounts by exactly the losers.
+- Integration-test files (`tests/*.rs`) do not appear as SF records
+  at all; their library-code exercise merges into the src records
+  (verified: the channel co-subscription closure, reachable only
+  over the real pipes, is covered). Test files are not shipped code.
+- `--html` and `--lcov` cannot combine in one invocation, and lcov
+  BRDA is unmapped without `--branch`; regions were not re-derived
+  this round (previous region figures came from llvm-cov's own
+  summary output).
 
 ## Justified residue
 

@@ -8,7 +8,7 @@ use std::sync::{Arc, Mutex, OnceLock};
 use std::time::Duration;
 
 use serde_json::{Value, json};
-use tabit_protocol::{EventFrame, SessionCommand, SessionEvent, StreamId, tags};
+use tabit_protocol::{EventFrame, SessionCommand, SessionEvent, StreamId, tags, to_wire_line};
 
 use crate::node::{Channel, Inbound, Node, parse_shared};
 
@@ -46,7 +46,9 @@ fn stub_layer(node: &Node, name: &str) -> (Channel, Saw) {
                 SessionEvent::InteractionSettled { id } => {
                     format!("settled:{id}@{}", stamp(&frame.stream))
                 }
-                SessionEvent::Error { .. } => format!("error@{}", stamp(&frame.stream)),
+                SessionEvent::Error { kind, .. } => {
+                    format!("error:{kind}@{}", stamp(&frame.stream))
+                }
                 event => format!("{}@{}", event.tag(), stamp(&frame.stream)),
             };
             events.lock().expect("test lock").push(note);
@@ -355,8 +357,8 @@ fn a_death_sweeps_routes_subscriptions_and_asks() {
         }),
     );
     assert!(
-        saw.has("error@-"),
-        "the swept route misses uniformly, unstamped (no session owns it): {:?}",
+        saw.has("error:session@-"),
+        "the swept route misses uniformly, unstamped and session-kind (no session owns it): {:?}",
         saw.events()
     );
     let _ = layer;
@@ -387,6 +389,35 @@ fn non_session_commands_dispatch_by_type() {
         handled.lock().expect("test lock").clone(),
         vec!["new_session"],
         "only the handled type ran; the unhandled one dropped"
+    );
+}
+
+/// The one-intake mount: `handle_all` sees every command type — the
+/// functional layer that prefers its own dispatch over per-type
+/// handlers.
+#[test]
+fn a_one_intake_layer_handles_every_command_type() {
+    let node: Arc<Node> = Arc::new(Node::new("core"));
+    let seen: Arc<Mutex<Vec<String>>> = Arc::new(Mutex::new(Vec::new()));
+    let sink = seen.clone();
+    node.handle_all("layer", move |command: &SessionCommand| {
+        sink.lock()
+            .expect("test lock")
+            .push(command.tag().to_string());
+    });
+    let edge = Channel::local("edge", |_| {}, |_| {});
+
+    node.intake(&edge, Inbound::Command(SessionCommand::NewSession));
+    node.intake(
+        &edge,
+        Inbound::Command(SessionCommand::OpenSession {
+            id: "s".to_string(),
+        }),
+    );
+    assert_eq!(
+        seen.lock().expect("test lock").clone(),
+        vec!["new_session", "open_session"],
+        "the catch-all heard both non-session commands"
     );
 }
 
@@ -461,7 +492,11 @@ fn a_wrong_kind_answer_breaks_loudly_not_fatal() {
         !*delivered.lock().expect("test lock"),
         "the wrong-kind answer was never delivered"
     );
-    assert!(saw.has("error@-"), "the break is loud: {:?}", saw.events());
+    assert!(
+        saw.has("error:session@-"),
+        "the break is loud, session-kind, unstamped: {:?}",
+        saw.events()
+    );
 
     // And the entry is gone: the right answer now finds nothing.
     let before = saw.events().len();
@@ -551,7 +586,9 @@ fn the_ingress_law_breaks_mirror_relay_loops() {
 }
 
 /// The two deaths: a run dying retracts its questions but not the
-/// participant's routes; a participant dying takes everything.
+/// participant's routes; a participant dying takes everything. The
+/// live asker reads the run-death sweep as dismissal (law 6: the
+/// promise resolves Err when its closure drops unresolved).
 #[test]
 fn a_run_death_retracts_asks_but_keeps_routes() {
     let node = Arc::new(Node::new("core"));
@@ -564,9 +601,12 @@ fn a_run_death_retracts_asks_but_keeps_routes() {
         "native:select_any",
         json!({}),
     );
-    drop(awaiter); // the asker's run ends: the retraction is its dismissal
 
     node.retract_asks("run-1", "the run ended");
+    assert!(
+        awaiter.blocking_recv().is_err(),
+        "the live asker reads dismissal — the sweep resolved the promise by dropping it"
+    );
     assert!(
         saw.has("settled:core-a1"),
         "the run's question settled, announced by the sweep: {:?}",
@@ -907,5 +947,125 @@ fn a_mint_violation_is_contained_by_policy() {
             .any(|line| line.contains("interaction_response")),
         "the original entry was untouched by the containment: {:?}",
         first_lines.lock().expect("test lock")
+    );
+}
+
+/// The claim-and-discard law at the origin: a settle arriving for a
+/// locally-held promise dismisses the awaiter directly — the entry is
+/// claimed and dropped without running the Orphaned arm, so the node
+/// announces no settle of its own (the arrival IS the settle), and
+/// the dismissed entry is gone for any late answer.
+#[test]
+fn an_arriving_settle_dismisses_the_origin_without_reannouncing() {
+    let node = Arc::new(Node::new("core"));
+    let (layer, saw) = stub_layer(&node, "layer");
+
+    let awaiter = node.ask(
+        "run-1",
+        &StreamId::new("s-1"),
+        "native:select_any",
+        json!({}),
+    );
+    let open = saw.events().len();
+
+    // The settle arrives from a channel OTHER than the watching
+    // layer's — the ingress law would skip the layer it came in on.
+    node.intake(
+        &Channel::local("elsewhere", |_| {}, |_| {}),
+        Inbound::Event(EventFrame {
+            stream: Some(StreamId::new("s-1")),
+            origin: None,
+            ttl: None,
+            event: SessionEvent::InteractionSettled {
+                id: "core-a1".to_string(),
+            },
+        }),
+    );
+    assert!(
+        awaiter.blocking_recv().is_err(),
+        "the origin's promise reads dismissal"
+    );
+    assert_eq!(
+        saw.events().len(),
+        open + 1,
+        "the arriving settle fanned once and the node derived nothing: {:?}",
+        saw.events()
+    );
+    assert!(saw.has("settled:core-a1@s-1"));
+
+    let settled_at = saw.events().len();
+    node.intake(
+        &layer,
+        Inbound::Command(SessionCommand::InteractionResponse {
+            session: None,
+            id: "core-a1".to_string(),
+            payload: json!({"text": "too late"}),
+        }),
+    );
+    assert_eq!(
+        saw.events().len(),
+        settled_at,
+        "the late answer was the race's tolerated loser"
+    );
+}
+
+/// The shared parse: an event line, a command line, and noise — the
+/// intake vocabulary's whole discrimination.
+#[test]
+fn parse_shared_discriminates_lines() {
+    let event_line = to_wire_line(&EventFrame {
+        stream: None,
+        origin: None,
+        ttl: None,
+        event: SessionEvent::error_session("an emission".to_string()),
+    });
+    assert!(matches!(parse_shared(&event_line), Some(Inbound::Event(_))));
+
+    let command_line = to_wire_line(&SessionCommand::NewSession);
+    assert!(matches!(
+        parse_shared(&command_line),
+        Some(Inbound::Command(_))
+    ));
+
+    assert!(parse_shared("not a wire line").is_none());
+}
+
+/// A hand-emitted ask arriving on a LOCAL channel has no answer route
+/// home — local channels never take answer delivery (their askers
+/// hold promises from `Node::ask`). The answer claims the entry and
+/// delivers it nowhere: a tolerated dead end, not a corruption.
+#[test]
+fn a_hand_emitted_ask_on_a_local_channel_has_no_answer_home() {
+    let node = Arc::new(Node::new("core"));
+    let (layer, saw) = stub_layer(&node, "layer");
+
+    node.intake(
+        &layer,
+        Inbound::Event(EventFrame {
+            stream: Some(StreamId::new("s-1")),
+            origin: None,
+            ttl: None,
+            event: SessionEvent::InteractionRequest {
+                id: "hand-1".to_string(),
+                ui_type: "native:select_any".to_string(),
+                payload: json!({}),
+            },
+        }),
+    );
+    let open = saw.events().len();
+
+    node.intake(
+        &layer,
+        Inbound::Command(SessionCommand::InteractionResponse {
+            session: None,
+            id: "hand-1".to_string(),
+            payload: json!({"text": "an answer with no route"}),
+        }),
+    );
+    assert_eq!(
+        saw.events().len(),
+        open,
+        "the answer was claimed and delivered nowhere: {:?}",
+        saw.events()
     );
 }
