@@ -194,6 +194,52 @@ the emission-and-await flow over the grammar; abandonment is the
 run's cancellation (the guest reads its cancel frame as the ask
 resolving dismissed, and the call fails cancelled at the leash).
 
+## Extension nodes: the two operating models (2026-09, the node
+architecture)
+
+Every tabit process is a node; an extension is one whose functional
+layer is its tools and hooks. What crosses an extension's stdio is
+decided entirely by registrations — the node is mode-agnostic, and
+the operating model is a registration set:
+
+**Default — no stdio subscription (the leaf participant).** Nothing
+auto-crosses: a child session's cards and deltas arrive from the
+child's lane and fan only to the extension's opted-in captures. The
+extension's own speech — its asks, its derived events, its forwards
+— leaves by naming the stdio as an **additional receiver** of the
+emission (the override path; the fact is an emission parameter,
+never on the wire).
+
+**Opt-in — session-equivalent routing (the preset).** The extension
+registers its stdio for the session event vocabulary and becomes,
+deliberately, what a session host is: forwarding is effectively
+automatic (arrivals fan across verbatim; the learning table was
+taught by the arrival, so routes stay correct with no re-emission),
+and its children are directly addressable through the chain. The
+preset is one named registration helper over the same fine-grained
+surface — bundles live in the SDK, never in the router. Per-kind
+opt-ins between the two ends are just shorter registration sets.
+
+**Manual forwarding re-stamps by default.** A forwarded frame
+carrying the child's stamp teaches every receiver the child's
+address — the router working as intended, and exactly the leak an
+intermediary does not want (upstream would learn the child and send
+commands directly to it, through the chain, past the extension's
+mediation). So the SDK's forward helper re-stamps the frame with the
+extension's own id by default, emitting **from the layer channel**:
+upstream learns the extension, commands arrive addressed to it, and
+the layer — the channel the id now routes to — is the interception
+surface. The verbatim forward (advanced, opt-out) emits from the
+arrival lane instead, keeping the child's stamp and its direct
+addressability; teaching is idempotent either way, and a re-stamped
+forward emitted from the wrong channel (the arrival lane) would
+teach the extension's id to the child's lane — the silent
+mis-route this default exists to prevent.
+
+Ask round-trips are unaffected by re-stamping: correlation is by
+ask id, not stream, so a re-stamped card's answer walks home hop by
+hop exactly as a verbatim one's does.
+
 ## Model-facing names are flat; identity is the pair (2026-09)
 
 The model sees the declared tool name only — no prefix, no namespace

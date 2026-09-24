@@ -1246,3 +1246,98 @@ fn an_extension_shaped_node_speaks_but_does_not_relay() {
         "the manual forward crossed"
     );
 }
+
+/// The two manual-forwarding shapes (2026-09 ruling): verbatim —
+/// from the arrival lane, child's stamp intact, the child stays
+/// directly addressable through the chain; re-stamped — from the
+/// layer, the forwarder's own id, commands come addressed to the
+/// forwarder and route to its layer (the interception surface).
+#[test]
+fn manual_forwards_are_verbatim_from_the_lane_or_re_stamped_from_the_layer() {
+    let node: Arc<Node> = Arc::new(Node::new("ext"));
+    let (layer, saw) = stub_layer(&node, "layer");
+
+    // The ext's stdio up to its host: subscribed to nothing, a pure
+    // writer (what crosses is what the layer sends it).
+    let up: Arc<Mutex<Vec<String>>> = Arc::new(Mutex::new(Vec::new()));
+    let sink = up.clone();
+    let stdio = Channel::line("stdio", move |line: &str| {
+        sink.lock().expect("test lock").push(line.to_string());
+    });
+
+    // The child's lane: its writer records routed commands (the
+    // "child received this" proof).
+    let child_lines: Arc<Mutex<Vec<String>>> = Arc::new(Mutex::new(Vec::new()));
+    let sink = child_lines.clone();
+    let child_lane = Channel::line("child", move |line: &str| {
+        sink.lock().expect("test lock").push(line.to_string());
+    });
+
+    let child_frame = EventFrame {
+        stream: Some(StreamId::new("child-sess")),
+        origin: None,
+        ttl: None,
+        event: SessionEvent::error_session("the child speaks".to_string()),
+    };
+    // The child's frame arrives (teaching the lane; nothing crosses —
+    // the stdio subscribes to nothing), and the ext forwards it
+    // VERBATIM, from the lane, stamp intact.
+    node.intake(&child_lane, Inbound::Event(child_frame.clone()));
+    assert!(
+        up.lock().expect("test lock").is_empty(),
+        "the arrival did not auto-cross"
+    );
+    node.emit_to(&child_lane, std::slice::from_ref(&stdio), child_frame);
+    assert_eq!(
+        up.lock().expect("test lock").len(),
+        1,
+        "the verbatim forward crossed"
+    );
+
+    // Verbatim keeps the child directly addressable: a command for
+    // its stream routes down the child's lane.
+    node.intake(
+        &stdio,
+        Inbound::Command(SessionCommand::Abort {
+            session: "child-sess".to_string(),
+        }),
+    );
+    assert!(
+        child_lines
+            .lock()
+            .expect("test lock")
+            .iter()
+            .any(|line| line.contains("abort")),
+        "the child stayed directly addressable through the chain"
+    );
+
+    // Re-stamped: the ext speaks as itself, from its layer — upstream
+    // learns the ext, and its id routes to the layer (the
+    // interception surface), never to the child.
+    node.emit_to(
+        &layer,
+        std::slice::from_ref(&stdio),
+        EventFrame {
+            stream: Some(StreamId::new("ext")),
+            origin: None,
+            ttl: None,
+            event: SessionEvent::error_session("the child speaks".to_string()),
+        },
+    );
+    node.intake(
+        &stdio,
+        Inbound::Command(SessionCommand::Abort {
+            session: "ext".to_string(),
+        }),
+    );
+    assert_eq!(
+        saw.commands(),
+        vec!["abort"],
+        "the intercepted command reached the layer's mailbox"
+    );
+    assert_eq!(
+        child_lines.lock().expect("test lock").len(),
+        1,
+        "the re-stamped forward's command never reached the child"
+    );
+}
