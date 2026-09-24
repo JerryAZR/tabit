@@ -207,6 +207,27 @@ pub struct Node<C: Routed = SessionCommand> {
     /// laws 1 and 2 (the Ethernet-switch learning table).
     learned: Mutex<HashMap<String, Channel>>,
     ask_counter: AtomicU64,
+    /// The mint-law violation policy (2026-09 ruling, containment
+    /// option): what to do with a sender that re-registered a live
+    /// ask id. The default panics — the sender may be this node's
+    /// own stdin, which cannot be contained; a host whose senders
+    /// are killable lanes registers a policy that kills the sender
+    /// instead (crash isolation: one violator dies, not the host).
+    violation: Mutex<ViolationPolicy>,
+}
+
+/// What a node does to a mint-law violator: receives the sender's
+/// owner and the id it re-registered.
+type ViolationPolicy = Box<dyn Fn(&str, &str) + Send + Sync>;
+
+/// The default policy: the sanctioned crash. The sender may be this
+/// node's own stdin, which cannot be contained — and no containment
+/// policy registered means nobody claimed the sender is killable.
+#[allow(clippy::panic)] // sanctioned crash: the mint law was violated
+fn violation_panic(owner: &str, id: &str) {
+    panic!(
+        "ask id `{id}` re-registered by `{owner}` — the mint law was violated (no containment policy registered)"
+    );
 }
 
 impl<C: Routed> Node<C> {
@@ -220,7 +241,20 @@ impl<C: Routed> Node<C> {
             asks: PendingAsks::default(),
             learned: Mutex::new(HashMap::new()),
             ask_counter: AtomicU64::new(1),
+            violation: Mutex::new(Box::new(violation_panic)),
         }
+    }
+
+    /// Register the mint-law containment policy: what to do with a
+    /// sender that re-registered a live ask id. Killable senders
+    /// (spawned lanes, child processes) get killed by it; the node's
+    /// own mints (`ask`, `hold`) always panic regardless — the
+    /// violator is us.
+    pub fn on_mint_violation<F>(&self, policy: F)
+    where
+        F: Fn(&str, &str) + Send + Sync + 'static,
+    {
+        *lock(&self.violation) = Box::new(policy);
     }
 
     /// The node's name (the ask-id mint's prefix).
@@ -345,31 +379,56 @@ impl<C: Routed> Node<C> {
                     lock(&self.learned).insert(stream.to_string(), from.clone());
                 }
                 // Law 5's other half: an arriving settle clears this
-                // node's entry for the id (an origin's promise reads
-                // dismissal; a routed entry dies) — the settle is an
-                // event and routes like one.
+                // node's entry for the id by CLAIM-AND-DISCARD — the
+                // entry's closure is dropped, which drops the
+                // promise's sender (the awaiter reads dismissal)
+                // without running the Orphaned arm. That is what
+                // keeps Orphaned meaning exactly one thing — swept by
+                // death — and is why the closures may announce their
+                // settles there: the settle that cleared this entry
+                // is already in flight.
                 if let SessionEvent::InteractionSettled { id } = &frame.event {
-                    self.asks.orphan(id, "settled elsewhere");
+                    drop(self.asks.claim(id));
                 }
                 // Law 4: an arriving ask registers against the
-                // channel it arrived on. A live id re-registering is
-                // a mint-law violation — the sanctioned crash (the
-                // TTL law kills accidental echo loops before they
-                // ever reach this).
+                // channel it arrived on. The registration's delivery
+                // owns its vocabulary: the transit entry delivers the
+                // answer onward on resolution, and announces the
+                // settle only when its sweep is the settle's only
+                // producer (this participant died holding the ask —
+                // the origin can no longer speak for it).
                 if let Some((id, _)) = frame.ask() {
+                    if self.asks.held(id) {
+                        // The mint law: a live id re-registered. The
+                        // violating sender is external — contain it
+                        // (the registered policy kills the sender's
+                        // lane; the default panics, for the sender may
+                        // be this node's own stdin, which cannot be
+                        // contained). The frame dies with the
+                        // violation either way: the table's state was
+                        // just proven untrustworthy for it.
+                        lock(&self.violation)(from.owner(), id);
+                        return;
+                    }
                     let asker = from.clone();
                     let ask_id = id.to_string();
+                    let settled = self.settle_frame(&ask_id, frame.stream.clone());
+                    let events = self.events.clone();
                     self.asks.insert(
                         ask_id.clone(),
                         from.owner(),
                         KIND_INTERACTION,
-                        move |outcome| {
-                            if let Outcome::Answered(boxed) = outcome {
+                        move |outcome| match outcome {
+                            Outcome::Answered(boxed) => {
                                 asker.deliver_answer(&ask_id, unanswer::<Value>(boxed));
+                                // No announce on transit: the origin
+                                // produced this settle.
                             }
-                            // No settle emission here: routed entries
-                            // clear when the origin's settle passes
-                            // through (single producer — the origin).
+                            Outcome::Orphaned(_) => {
+                                // The sweep is the single producer
+                                // for this ask: the origin is gone.
+                                events.dispatch(&settled);
+                            }
                         },
                     );
                 }
@@ -476,18 +535,17 @@ impl<C: Routed> Node<C> {
         let events = self.events.clone();
         self.asks
             .insert(id.clone(), owner, KIND_INTERACTION, move |outcome| {
+                // The origin is the settle's producer on resolution;
+                // on its own sweep (a run terminal, a death here) it
+                // is the only producer left. An arriving settle
+                // clears this entry by discard, never by Orphaned —
+                // so announcing on both arms settles exactly once.
                 if let Outcome::Answered(boxed) = outcome {
                     let _ = resolve.send(unanswer::<Value>(boxed));
-                    // The origin is the settle's single producer: the
-                    // promise resolved and the card closes; the
-                    // settle's fan clears the entries the answer's
-                    // transit did not already claim on its way home.
-                    events.dispatch(&settled);
                 }
-                // Orphaned: the awaiter reads dismissal. The settle
-                // was emitted by whoever orphaned it (a death's
-                // sweep, or the settle that cleared it) — emitting
-                // again would settle twice.
+                // Orphaned: the sender drops with the closure, the
+                // awaiter reads dismissal.
+                events.dispatch(&settled);
             });
         self.events.dispatch(&EventFrame {
             stream: Some(stream.clone()),
@@ -528,25 +586,19 @@ impl<C: Routed> Node<C> {
     pub fn retract(&self, owner: &str, reason: &str) {
         self.events.retract_owner(owner);
         lock(&self.learned).retain(|_, channel| channel.owner() != owner);
-        for (id, kind) in self.asks.retract_owner(owner, reason) {
-            // Only cards speak card vocabulary: held round-trips
-            // (tool calls, service requests) orphan silently — the
-            // site's closure carries its own fail-open policy.
-            if kind == KIND_INTERACTION {
-                self.announce_sweep_settle(&id);
-            }
-        }
+        // The sweep is uniform: every entry's Orphaned arm runs, and
+        // the arm owns its vocabulary — interaction entries announce
+        // their settle (the origin can no longer speak for the ask);
+        // held round-trips run their site's fail-open policy and say
+        // nothing. No kind inspection anywhere.
+        self.asks.retract_owner(owner, reason);
     }
 
     /// The run-terminal sweep: the questions die with their run, the
     /// owner's routes and subscriptions outlive it (the participant
     /// and its run are different deaths).
     pub fn retract_asks(&self, owner: &str, reason: &str) {
-        for (id, kind) in self.asks.retract_owner(owner, reason) {
-            if kind == KIND_INTERACTION {
-                self.announce_sweep_settle(&id);
-            }
-        }
+        self.asks.retract_owner(owner, reason);
     }
 
     /// The settle frame an origin emits: carrying the asking id (the
@@ -560,11 +612,5 @@ impl<C: Routed> Node<C> {
             ttl: Some(HOP_BUDGET),
             event: SessionEvent::InteractionSettled { id: id.to_string() },
         }
-    }
-
-    /// A death's settle for a swept id: the id is all a holder needs
-    /// (the sweep may not know the asking stream).
-    fn announce_sweep_settle(&self, id: &str) {
-        self.events.dispatch(&self.settle_frame(id, None));
     }
 }

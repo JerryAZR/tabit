@@ -846,3 +846,66 @@ fn subscribing_requests_hears_the_settles() {
         "the one interest heard the card open and close"
     );
 }
+
+/// The mint law, containment option (2026-09 ruling): a sender that
+/// re-registers a live ask id meets the registered policy — a host
+/// with killable lanes kills the sender; the frame dies with the
+/// violation; the surviving entry is untouched and still answerable.
+#[test]
+fn a_mint_violation_is_contained_by_policy() {
+    let node: Arc<Node> = Arc::new(Node::new("core"));
+    let contained: Arc<Mutex<Vec<String>>> = Arc::new(Mutex::new(Vec::new()));
+
+    let sink = contained.clone();
+    node.on_mint_violation(move |owner, id| {
+        sink.lock()
+            .expect("test lock")
+            .push(format!("{owner}:{id}"));
+    });
+
+    let first_lines: Arc<Mutex<Vec<String>>> = Arc::new(Mutex::new(Vec::new()));
+    let sink = first_lines.clone();
+    let first = Channel::line("lane-a", move |line: &str| {
+        sink.lock().expect("test lock").push(line.to_string());
+    });
+    let second = Channel::line("lane-b", |_| {});
+
+    let ask = EventFrame {
+        stream: None,
+        origin: None,
+        ttl: None,
+        event: SessionEvent::InteractionRequest {
+            id: "lane-a-ask-1".to_string(),
+            ui_type: "native:select_any".to_string(),
+            payload: json!({}),
+        },
+    };
+    node.intake(&first, Inbound::Event(ask.clone()));
+
+    // The violating re-send: contained, not fatal.
+    node.intake(&second, Inbound::Event(ask));
+    assert_eq!(
+        contained.lock().expect("test lock").clone(),
+        vec!["lane-b:lane-a-ask-1".to_string()],
+        "the policy met the violator"
+    );
+
+    // The surviving entry still answers home to the first lane.
+    node.intake(
+        &Channel::local("frontend", |_| {}, |_| {}),
+        Inbound::Command(SessionCommand::InteractionResponse {
+            session: None,
+            id: "lane-a-ask-1".to_string(),
+            payload: json!({"text": "home"}),
+        }),
+    );
+    assert!(
+        first_lines
+            .lock()
+            .expect("test lock")
+            .iter()
+            .any(|line| line.contains("interaction_response")),
+        "the original entry was untouched by the containment: {:?}",
+        first_lines.lock().expect("test lock")
+    );
+}
