@@ -228,6 +228,14 @@ preset is one named registration helper over the same fine-grained
 surface — bundles live in the SDK, never in the router. Per-kind
 opt-ins between the two ends are just shorter registration sets.
 
+The SDK is expected to stay (owner ruling 2026-09): its reason to
+exist is the abstraction — extension authors focus on functionality
+(tools, hooks, asks) and never meet the router or the channel
+concepts underneath. The node port's success criterion follows: the
+SDK's dispatcher machinery dies onto the node while its author-facing
+surface stays purely functional, and the post-port judgement reviews
+exactly that divide.
+
 **Manual forwarding re-stamps by default.** A forwarded frame
 carrying the child's stamp teaches every receiver the child's
 address — the router working as intended, and exactly the leak an
