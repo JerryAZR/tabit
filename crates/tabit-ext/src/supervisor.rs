@@ -473,13 +473,13 @@ struct Supervised {
 /// own scan).
 pub fn launch_root(
     root: &Path,
-    handshake_timeout: Duration,
+    boot_timeout: Duration,
     host: LaunchContext,
 ) -> (
     Supervisor,
     tokio::sync::mpsc::UnboundedReceiver<ExtensionEvent>,
 ) {
-    launch(manifest::scan(root), handshake_timeout, host)
+    launch(manifest::scan(root), boot_timeout, host)
 }
 
 /// The host facts one launch serves every pipe with: the node every
@@ -505,7 +505,7 @@ pub struct LaunchContext {
 /// Must run on the runtime the binary serves from (it spawns).
 pub fn launch(
     found: Vec<Discovered>,
-    handshake_timeout: Duration,
+    boot_timeout: Duration,
     host: LaunchContext,
 ) -> (
     Supervisor,
@@ -557,7 +557,7 @@ pub fn launch(
                 let task = tokio::spawn(supervise(
                     dir.clone(),
                     manifest,
-                    handshake_timeout,
+                    boot_timeout,
                     closing.clone(),
                     killed,
                     state.clone(),
@@ -699,7 +699,7 @@ impl Drop for Supervisor {
 async fn supervise(
     dir: PathBuf,
     manifest: Manifest,
-    handshake_timeout: Duration,
+    boot_timeout: Duration,
     supervisor_closing: CancellationToken,
     killed: CancellationToken,
     state: Arc<ChildState>,
@@ -813,7 +813,7 @@ async fn supervise(
     // additions the EXTENSION can emit ride the protocol version so
     // older hosts refuse at the handshake's exact match instead of
     // mid-stream.
-    let (handshake_tx, handshake_rx) = tokio::sync::oneshot::channel::<Handshake>();
+    let (handshake_tx, handshake_rx) = tokio::sync::oneshot::channel::<Boot>();
     let (death_tx, mut death_rx) = tokio::sync::oneshot::channel::<String>();
     {
         let lane = lane.clone();
@@ -831,7 +831,7 @@ async fn supervise(
                         watch,
                     }) => {
                         if let Some(tx) = handshake_tx.take() {
-                            let _ = tx.send(Handshake::Reported(Report {
+                            let _ = tx.send(Boot::Reported(Report {
                                 protocol_version,
                                 tools,
                                 hooks,
@@ -923,7 +923,7 @@ async fn supervise(
             let reason = "the extension process died mid-call".to_string();
             lane.die(&node, &reason);
             if let Some(tx) = handshake_tx.take() {
-                let _ = tx.send(Handshake::Failed("closed before the report".to_string()));
+                let _ = tx.send(Boot::Failed("closed before the report".to_string()));
             } else if let Some(tx) = death_tx.take() {
                 let _ = tx.send("the extension process exited".to_string());
             }
@@ -935,14 +935,14 @@ async fn supervise(
     // below, and the host's facts cross only after the check).
     let outcome = tokio::select! {
         outcome = handshake_rx => {
-            outcome.unwrap_or(Handshake::Failed("closed before the report".to_string()))
+            outcome.unwrap_or(Boot::Failed("closed before the report".to_string()))
         }
-        _ = tokio::time::sleep(handshake_timeout) => {
-            Handshake::Failed(format!("no report within {handshake_timeout:?}"))
+        _ = tokio::time::sleep(boot_timeout) => {
+            Boot::Failed(format!("no report within {boot_timeout:?}"))
         }
     };
     let report = match outcome {
-        Handshake::Failed(reason) => {
+        Boot::Failed(reason) => {
             fail_before_mount(
                 &mut process,
                 &closing,
@@ -957,7 +957,7 @@ async fn supervise(
             .await;
             return;
         }
-        Handshake::Reported(report) => report,
+        Boot::Reported(report) => report,
     };
     if let Err(reason) = validate(&report) {
         fail_before_mount(
@@ -1156,7 +1156,7 @@ fn hold_service(
 }
 
 /// What the reader decided about the report.
-enum Handshake {
+enum Boot {
     Reported(Report),
     Failed(String),
 }
@@ -1164,13 +1164,13 @@ enum Handshake {
 /// One contract break spotted by the reader: before the report it
 /// fails the mount; after it, it is the death signal.
 fn refuse(
-    handshake_tx: &mut Option<tokio::sync::oneshot::Sender<Handshake>>,
+    handshake_tx: &mut Option<tokio::sync::oneshot::Sender<Boot>>,
     death_tx: &mut Option<tokio::sync::oneshot::Sender<String>>,
     refusal: String,
 ) {
     match handshake_tx.take() {
         Some(tx) => {
-            let _ = tx.send(Handshake::Failed(refusal));
+            let _ = tx.send(Boot::Failed(refusal));
         }
         None => {
             if let Some(tx) = death_tx.take() {

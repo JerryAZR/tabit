@@ -1,7 +1,7 @@
 use super::*;
 use tabit_protocol::{EventFrame, SessionEvent, StreamId};
 
-/// The session the test's [`ack`] boots; every frame from it carries
+/// The session the test's [`report`] boots; every frame from it carries
 /// this stamp (v3: the stream is the session id).
 const BOOT: &str = "s1";
 

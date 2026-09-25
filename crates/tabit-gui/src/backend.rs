@@ -51,8 +51,8 @@ fn backend_bin() -> PathBuf {
 /// Spawn a backend in `cwd` (the project directory), booting the
 /// newest session (`--continue`): returning users get their newest
 /// session; an empty store is absorbed backend-side into a fresh start
-/// (the ack's `resumed: false` carries the note — the pinned startup
-/// contract). Creating and switching sessions are channel commands
+/// (the boot's `session_opened` carries `resumed: false` — the
+/// pinned startup contract). Creating and switching sessions are channel commands
 /// (protocol v3) — never respawns. `repaint` is called after every
 /// message so the UI wakes immediately.
 pub fn spawn(cwd: Option<&Path>, repaint: impl Fn() + Send + 'static) -> std::io::Result<Backend> {

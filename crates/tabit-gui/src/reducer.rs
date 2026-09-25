@@ -43,9 +43,9 @@ pub enum InMsg {
 /// Where the window stands with its backend.
 #[derive(Debug, Clone, PartialEq)]
 pub enum Phase {
-    /// Spawned, handshake in flight.
+    /// Spawned, the report wait in flight.
     Connecting,
-    /// Acked and talking.
+    /// Reported and talking.
     Live,
     /// The backend is gone. `clean` = it was idle when it ended (a
     /// drain-to-EOF after stdin close); anything else is a crash
