@@ -93,7 +93,11 @@ Current workspace layout:
   two doors, `emit` and `intake`), never a frame field, so a pipe's
   crossing policy is plain subscription config — the
   additional-receiver override this replaces was the workaround the
-  origin-blind fan forced); `router.rs` is THE
+  origin-blind fan forced); verbatim crossing is channel
+  machinery alone — the forwarding law: a callback forwarding an
+  ask re-stamps it (the arriving ask consumed at this node, a new
+  ask minted, the linkage held in the callback, never on the wire);
+  `router.rs` is THE
   event router (register by kind or wildcard, dispatch, retract by
   owner — each callback owns its own dispatch); `asks.rs`
   is THE pending-question registry (one entry per round-trip: an

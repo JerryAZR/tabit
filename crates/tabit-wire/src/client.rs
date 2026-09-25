@@ -405,6 +405,12 @@ impl ChildSpec {
                         // tap may answer the moment the entry
                         // exists); the policy tap after, in pump
                         // order; the fold's mirror either way.
+                        // Only stamped frames cross into the
+                        // node (owner ruling 2026-09-25): the
+                        // child's unstamped emissions — its
+                        // backend-level errors — reach the drive
+                        // fold's channel alone and stay out of the
+                        // net until a real need comes up.
                         if let (Some(node), Some(lane)) = (&pump_mount, &lane)
                             && frame.stream.is_some()
                         {

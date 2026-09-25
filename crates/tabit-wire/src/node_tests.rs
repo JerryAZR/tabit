@@ -1668,3 +1668,128 @@ fn an_ask_crosses_the_request_and_the_settle_to_a_local_subscribed_pipe() {
         "the second line is the settle: {lines:?}"
     );
 }
+
+/// The forwarding law (owner ruling 2026-09-25, third round): a
+/// callback forwarding an ask RE-STAMPS it — the child's ask is
+/// consumed at this node (its transit entry the answer route
+/// home), the callback mints its own ask, and the linkage between
+/// the two ids lives in the callback's closure. The wire never sees
+/// the linkage: the pipe carries the surface's own card under a
+/// fresh id, and the child's answer routes home through it.
+#[tokio::test]
+async fn a_callback_forwarding_an_ask_re_stamps_it() {
+    let node = Arc::new(Node::new("ext"));
+
+    // The pipe up to the host (local speech crosses it), and the
+    // child's lane (its writer records what routes home).
+    let up: Arc<Mutex<Vec<String>>> = Arc::new(Mutex::new(Vec::new()));
+    let sink = up.clone();
+    let stdio = Channel::line("stdio", move |line: &str| {
+        sink.lock().expect("test lock").push(line.to_string());
+    });
+    node.subscribe_channel_all(Locality::Local, &stdio);
+    let lane_lines: Arc<Mutex<Vec<String>>> = Arc::new(Mutex::new(Vec::new()));
+    let sink = lane_lines.clone();
+    let lane = Channel::line("child", move |line: &str| {
+        sink.lock().expect("test lock").push(line.to_string());
+    });
+
+    // The intercepting surface: one callback, one linkage. The
+    // arriving card is consumed (its transit entry answers home
+    // down the lane); the surface's own ask crosses the pipe; the
+    // task holds both ids — the linkage exists nowhere else.
+    let surface_node = node.clone();
+    node.subscribe(
+        tags::INTERACTION_REQUEST,
+        "intercept",
+        Locality::Remote,
+        move |frame: &EventFrame| {
+            let SessionEvent::InteractionRequest {
+                id,
+                ui_type,
+                payload,
+                ..
+            } = &frame.event
+            else {
+                return;
+            };
+            let (original, ui_type, payload) = (id.clone(), ui_type.clone(), payload.clone());
+            let node = surface_node.clone();
+            tokio::spawn(async move {
+                if let Ok(answer) = node.ask("intercept", None, &ui_type, payload).await {
+                    node.answer(&original, crate::node::KIND_INTERACTION, Box::new(answer));
+                }
+            });
+        },
+    );
+
+    // The child's card arrives on its lane.
+    node.intake(
+        &lane,
+        Inbound::Event(EventFrame {
+            stream: Some(StreamId::new("child-sess")),
+            origin: None,
+            ttl: None,
+            event: SessionEvent::InteractionRequest {
+                id: "x-1".to_string(),
+                ui_type: "native:select_one".to_string(),
+                payload: json!({"body": "the child asks"}),
+            },
+        }),
+    );
+
+    // The pipe carried the SURFACE's card — a fresh id, never the
+    // child's. (The linkage task runs after intake returns; poll
+    // for its crossing.)
+    let request_line = {
+        let deadline = std::time::Instant::now() + Duration::from_secs(5);
+        loop {
+            let found = up
+                .lock()
+                .expect("test lock")
+                .iter()
+                .find(|line| line.contains("interaction_request"))
+                .cloned();
+            if let Some(line) = found {
+                break line;
+            }
+            assert!(
+                std::time::Instant::now() < deadline,
+                "the surface's ask never crossed the pipe: {:?}",
+                up.lock().expect("test lock")
+            );
+            tokio::time::sleep(Duration::from_millis(5)).await;
+        }
+    };
+    assert!(
+        !request_line.contains("x-1"),
+        "the re-stamped card carries a fresh id: {request_line}"
+    );
+    let surface_id = serde_json::from_str::<Value>(&request_line)
+        .expect("the line parses")
+        .get("id")
+        .and_then(Value::as_str)
+        .expect("the fresh id")
+        .to_string();
+
+    // The host answers the surface's card: the linkage answers the
+    // child's original down its lane.
+    node.intake(
+        &stdio,
+        Inbound::Command(SessionCommand::InteractionResponse {
+            session: None,
+            id: surface_id,
+            payload: json!({"text": "yes"}),
+        }),
+    );
+    tokio::time::sleep(Duration::from_millis(50)).await;
+    assert!(
+        lane_lines
+            .lock()
+            .expect("test lock")
+            .iter()
+            .any(|line| line.contains("x-1")),
+        "the original ask's answer routed home through the linkage: {:?}",
+        lane_lines.lock().expect("test lock")
+    );
+}

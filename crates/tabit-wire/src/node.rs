@@ -206,6 +206,18 @@ impl Channel {
     /// (the intake already taught the route and fanned the local
     /// subscribers, so this is the write alone, never a second
     /// delivery), or a policy surface lifting a card onto a pipe.
+    ///
+    /// **The forwarding law** (owner ruling 2026-09-25, third
+    /// round): a verbatim crossing is CHANNEL machinery — the
+    /// frame moves along its own route, and the ingress law is what
+    /// keeps the loop closed. A CALLBACK that wants to forward an
+    /// ask re-stamps instead: the arriving ask is consumed at this
+    /// node (its transit entry is the answer route home), the
+    /// callback mints its own ask, and the linkage between the two
+    /// ids lives in the callback's closure — invisible on the wire.
+    /// Re-emitting a foreign ask frame verbatim from a callback is
+    /// an implementation error, not a method: it duplicates a live
+    /// id downstream and the mint law kills an innocent.
     pub fn send_event(&self, frame: &EventFrame) {
         (self.event)(frame);
     }
