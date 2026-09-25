@@ -754,7 +754,8 @@ error rather than skipping, reachable or not.)
 - Re-run the collection after material changes and re-classify anything
   that moved from justified to reachable.
 
-## tabit-gui (walking skeleton)
+## tabit-gui — DELETED (2026-09; the gaps below died with the tree,
+kept as the record of what they were)
 
 - `reducer.rs` — **covered** (92.2% lines; the residue is partial
   field combinations in `add` and `Facts` paths).

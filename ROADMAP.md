@@ -929,7 +929,11 @@ assistant.
   Deferred with it: the global implicit preference (`~/.tabit/`
   last-selected file + registry rung below `default_model`) and the
   "selection didn't land" picker signal (open note in PROTOCOL.md).
-- **GUI: egui, the primary frontend (decided).** The TUI milestone
+- **GUI: egui — DELETED (2026-09, owner ruling: the paused
+  frontend's sync twin kept surfacing as an exception on every
+  review; the tree is gone and the TUI candidates lead — the
+  redesign worktree's branch notwithstanding). The rest of this
+  item is the design record.** The TUI milestone
   (the claurst harvest, ~19K LOC) is dead — GPL, ruled out; the
   terminal frontend found its own non-ratatui track (the TUI ruling
   below). The GUI is an egui app (eframe shell, egui style theming)

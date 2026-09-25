@@ -205,22 +205,14 @@ Current workspace layout:
   bins — `gate-ext` was deleted 2026-09
   (the gate returns as the built-in `tabit-gate`; examples will ride
   the extension SDK when it is developed)
-- `crates/tabit-gui` — the egui frontend (`tabit-gui` binary; spawns
-  a `tabit-core --json` child, resolved as its sibling binary or via
-  `TABIT_CORE_BIN`; reducer/view contract in ROADMAP item 7).
-  Its `CHANGELOG.md` is the frontend protocol's changelog —
-  every `PROTOCOL_VERSION` bump or frontend-observable change (wire
-  or behavior) gets an entry in the same commit; FRONTEND.md stays
-  the frozen mechanics contract, TOOLS.md its companion for the
-  built-in tool `details` shapes and interaction templates)
 - `crates/tabit-core` — the backend binary (`tabit-core`): headless,
   no UI and no frontend references — frontends spawn it, never the
   other way. Print mode (`-p <PROMPT>`, `--rewind <n>`) and JSON
   mode (`--json` — the stdio protocol edge) over the session host
   (create / `--continue` / `--session <path>` / `--list`). The
   `tabit` name is reserved for the frontend that ships primary
-  (2026-09: the TUI candidates outpace the GUI; no in-repo binary
-  carries it yet)
+  (2026-09: the egui GUI deleted, the TUI candidates lead; no
+  in-repo binary carries the name yet)
 
 ## Design rules
 
@@ -374,8 +366,8 @@ consistency, never design fit (see the gate bullet below).
   failing tests with panic blocks, compile errors) with cargo's own
   exit codes; `--gate` runs all three legs, and any extra args pass
   through to cargo test (e.g. `-p crate filter`, or
-  `--target-dir target-test` when the GUI holds a lock on
-  `target\debug`). Prefer it over hand-rolled `cargo test | grep`
+  `--target-dir target-test` when a running binary holds a lock
+  on `target\debug`). Prefer it over hand-rolled `cargo test | grep`
   pipelines.
 - Cassettes are byte-sensitive (LF endings enforced via `.gitattributes`).
 - CI rides the latest stable toolchain; keep the local one current
@@ -394,6 +386,12 @@ consistency, never design fit (see the gate bullet below).
   steering, permission checks, and future extension hooks intervene.
 
 ## Not planned
+
+- The egui GUI: **deleted** (2026-09, owner ruling) — the paused
+  frontend's sync twin kept surfacing as the exception on every
+  review, so the tree is gone. The TUI candidates lead (ROADMAP
+  item 7); a future frontend that runs no tokio extracts a sync
+  core into `tabit-wire`'s client rather than growing a twin.
 
 - WebSocket streaming: **removed** — HTTP SSE only.
 - Companion crates (bedrock, gemini-grpc, vector stores, …), `discord-bot`,

@@ -2,12 +2,10 @@
 //! child role and speak the frozen wire to it. This is the runtime
 //! every child-driver shares — the subagent bridge (tabit-session)
 //! and the extension SDK's owned-session wrapper (the sharing ruling
-//! 2026-09; before this, the bridge hand-rolled its own). The GUI
-//! still carries a deliberate sync twin of this runtime (it runs no
-//! tokio; the twin lacks the bounded handshake and the grace reaper)
-//! — a known, paused-frontend exception, not the rule: when the GUI
-//! revives, it either adopts a sync core extracted here or the twin
-//! goes.
+//! 2026-09; before this, the bridge hand-rolled its own). A future
+//! frontend that runs no tokio extracts a sync core here rather than
+//! growing a twin — the egui GUI's twin was deleted with it (2026-09)
+//! precisely because an off-base copy keeps drifting.
 //!
 //! **One mechanism, policies above it.** A node's child frames fan
 //! to local consumers and upstream relay through the shared

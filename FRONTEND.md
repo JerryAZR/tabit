@@ -5,6 +5,11 @@ backend: what the backend provides, what it expects from you, and the
 invariants your UI can rely on. Read this document alone; you should
 not need the codebase to design a frontend.
 
+The protocol's **changelog** lives at the bottom of this doc: every
+`PROTOCOL_VERSION` bump or frontend-observable change (wire or
+behavior) gets an entry in the same commit. (The rule rode the
+deleted GUI's CHANGELOG.md until 2026-09; this doc is its home.)
+
 This doc owns the **mechanics** — wire format, lifecycle, the event
 vocabulary's semantics, invariants. The interpretation layer — how to
 render a specific tool's `details` cargo, the interaction template
@@ -678,3 +683,18 @@ non-terminal errors ride the generic `error { kind }` carrier (§6).
 Model discovery stays config-side (`--model` refs resolve at startup;
 no discovery command is shipped). The write-behind log with its prompt
 barrier shipped (§6; PROTOCOL.md flag 8).
+
+## Changelog
+
+Every `PROTOCOL_VERSION` bump or frontend-observable change (wire
+or behavior) gets an entry here in the same commit. (History before
+v19 rode the deleted GUI's CHANGELOG.md — git history holds it.)
+
+- **v19 (2026-09)** — the report model: the backend's first line is
+  its self-report (`report { protocol_version }`); the spawner is
+  the version check and owns the kill; client lines are bare
+  commands from the first line; startup failures are the report,
+  one unstamped `error { kind: session }`, and a nonzero exit;
+  replay is default-on for resumed boots (`replay_begin { total }`
+  … `replay_end`), on request via `open_session` of an open
+  session.
