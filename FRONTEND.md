@@ -164,17 +164,19 @@ value, switch on `type` when recognized) and log the rest.
 1. Your **first line** must be
    `initialize { protocol_version, replay? }` (`replay` defaults to
    `false`). Match → `initialize_ack` with **protocol-level facts
-   only** (the version and the boot session's id — everything else
-   arrives by event, 2026-09 ruling: the boot session is announced
-   exactly like every other). The next frame **the core emits** is
-   `session_opened` with the boot's facts (id, path, active model,
-   `resumed`), then
-   the session catalog, then the skills catalog (v8 — only when
-   discovery found something), then — if you asked — the replay
-   pass, then live traffic. (Participants are peers: another
-   participant's frames — an extension's, origin-stamped — may
-   interleave ahead of the core's own startup sequence, in arrival
-   order; tolerate them as you tolerate any origin-stamped frame.) `resumed: false` after you asked the
+   only** (the version and the boot session's id). **There is no
+   "next frame" guarantee after the ack** (owner ruling 2026-09):
+   everything after it is the event stream, consumed as events —
+   the boot's own startup sequence (`session_opened` with the
+   boot's facts, the session catalog, the skills catalog when
+   discovery found something, then — if you asked — the replay
+   pass, then live traffic) is today's common order, not a
+   contract; other participants' frames (an extension's,
+   origin-stamped) may interleave anywhere, in arrival order, and
+   a future core may report its own initialization progress ahead
+   of `session_opened` instead. Build on the events' own
+   identities (stamps, kinds), never on their position after the
+   ack. `resumed: false` after you asked the
    backend to resume means the store was empty and the backend
    **started fresh — an absorbed miss, not an error**; show a small
    note. Mismatch → `initialize_rejected { reason }` and the

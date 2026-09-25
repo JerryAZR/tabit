@@ -3473,12 +3473,9 @@ async fn an_unrepairable_overflow_leaves_the_failure_standing() {
 /// The frontend stream's structure-first law: the stream is live
 /// from the mount (any frame any layer emits after it crosses —
 /// nothing is dropped for arriving "too early"), and ordering is
-/// arrival order. The pinned §3 sequence (session_opened leads the
-/// backend's own announcements) is guaranteed by the extension
-/// contract — extensions are reactive, nothing outbound before their
-/// first inbound frame — not by any buffering; a frame that DOES
-/// precede the host's spawn (a contract-breaking extension) simply
-/// lands ahead of the announcements, in arrival order.
+/// arrival order — there is no "next frame after the ack" contract
+/// (the withdrawn guarantee); a chatty participant's frame simply
+/// lands where it happened.
 #[tokio::test]
 async fn the_stream_is_live_from_the_mount_in_arrival_order() {
     let store = temp_store("endpoint-structure-first");
@@ -3489,10 +3486,9 @@ async fn the_stream_is_live_from_the_mount_in_arrival_order() {
     let wiring = plain_wiring(&store);
     let node = wiring.node.clone();
 
-    // A lane speaks after the mount but before the host exists. The
-    // real boot has no such speaker (extensions are reactive); this
-    // is the ordering law's raw shape, pinned without the contract's
-    // courtesy: the frame crosses, and it lands where it happened.
+    // A lane speaks after the mount but before the host exists —
+    // the co-frontend shape (peers may speak from their handshake
+    // onward): the frame crosses, and it lands where it happened.
     let lane = crate::Channel::local("early-ext", |_| {}, |_| {});
     let frontend = crate::mount_frontend(&node);
     node.emit(

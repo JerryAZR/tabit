@@ -255,8 +255,9 @@ impl<T: Routed> Router<T> {
 impl Router<EventFrame> {
     /// The emission fan with additional receivers (the 2026-09
     /// override-path ruling): the named channels are delivered to
-    /// directly, then the subscribers fan — each additional's owner
-    /// skipped there, so no receiver sees the frame twice. One
+    /// directly, then the subscribers fan — each additional channel
+    /// is skipped there by identity, so no receiver sees the frame
+    /// twice. One
     /// mechanism for [`crate::node::Node::emit_to`] and the ask
     /// table's settle announces: whoever heard the card by this fan
     /// hears it close by the same fan.

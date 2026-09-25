@@ -461,14 +461,13 @@ pub fn mount_frontend(node: &Arc<Node>) -> FrontendStream {
 pub struct SessionHostMount {
     wiring: SessionHostWiring,
     events: mpsc::UnboundedReceiver<EventFrame>,
-    events_tx: mpsc::UnboundedSender<EventFrame>,
-    gone: CancellationToken,
     workers: Arc<Mutex<HashMap<String, Arc<Worker>>>>,
     joins: Arc<Mutex<Vec<JoinHandle<()>>>>,
     closing_stats: Arc<Mutex<HashMap<String, SessionStats>>>,
     worker_shutdown: CancellationToken,
     stream_end: CancellationToken,
     sink: HostSink,
+    host_channel: Channel,
     door: Arc<Lifecycle>,
 }
 
@@ -549,8 +548,10 @@ impl SessionHost {
             joins: joins.clone(),
             stats: closing_stats.clone(),
             worker_shutdown: worker_shutdown.clone(),
-            core: std::sync::OnceLock::new(),
-            parked: Mutex::new(Vec::new()),
+            door: Mutex::new(DoorState {
+                armed: None,
+                parked: Vec::new(),
+            }),
         });
         {
             let created = door.clone();
@@ -593,14 +594,13 @@ impl SessionHost {
         SessionHostMount {
             wiring,
             events: event_rx,
-            events_tx: frontend_events_tx,
-            gone: frontend_gone,
             workers,
             joins,
             closing_stats,
             worker_shutdown,
             stream_end,
             sink,
+            host_channel,
             door,
         }
     }
@@ -644,17 +644,15 @@ impl SessionHostMount {
         let SessionHostMount {
             wiring,
             events: event_rx,
-            events_tx: frontend_events_tx,
-            gone: frontend_gone,
             workers,
             joins,
             closing_stats,
             worker_shutdown,
             stream_end,
             sink,
+            host_channel,
             door,
         } = self;
-        let _ = (&frontend_events_tx, &frontend_gone); // watched at mount
         let info = SessionInfo {
             session_id: boot.id().to_string(),
             session_path: boot.wire_path(),
@@ -666,9 +664,8 @@ impl SessionHostMount {
         let boot_stream = StreamId::new(boot_id.clone());
         let node = wiring.node.clone();
 
-        // The host's own channel (mounted): backend-level emissions
-        // (catalog, lifecycle errors) and the link's way in.
-        let host_channel = Channel::local("host", |_| {}, |_| {});
+        // The backend sink rides the mount's host channel — one
+        // channel for the host participant, not a second identity.
         let backend_sink = BackendSink::new(&node, &host_channel);
 
         // The boot worker first: the startup announcements emit from
@@ -769,7 +766,6 @@ impl SessionHostMount {
         // the mount) and whatever parked during the gathering serves
         // now, in arrival order, behind the announcements.
         door.arm(data);
-        door.drain_parked();
 
         SessionHost {
             info,
@@ -955,14 +951,23 @@ struct Lifecycle {
     joins: Arc<Mutex<Vec<JoinHandle<()>>>>,
     stats: Arc<Mutex<HashMap<String, SessionStats>>>,
     worker_shutdown: CancellationToken,
-    /// The builders, once the boot's gathering is done. `None` means
-    /// the host is still mounting-to-attach: lifecycle arrivals park.
-    core: std::sync::OnceLock<LifecycleCore>,
-    parked: Mutex<Vec<ParkedLifecycle>>,
+    /// The door's one state: the armed builders (once the boot's
+    /// gathering is done) and the commands that arrived before them,
+    /// under ONE lock — the park decision and the arm-and-take are
+    /// each a single atomic act, so a command that races the attach
+    /// either parks into the set arm takes or serves through the
+    /// builders arm holds; nothing is lost between them.
+    door: Mutex<DoorState>,
+}
+
+struct DoorState {
+    armed: Option<LifecycleCore>,
+    parked: Vec<ParkedLifecycle>,
 }
 
 /// The lifecycle door's data half: what only exists after the boot's
 /// gathering resolved.
+#[derive(Clone)]
 struct LifecycleCore {
     create: SessionSource,
     open: OpenSessionSource,
@@ -977,46 +982,72 @@ enum ParkedLifecycle {
 impl Lifecycle {
     /// Arm the door (the attach act): the builders exist, and
     /// whatever parked during the gathering serves now, in arrival
-    /// order, behind the boot's announcements.
+    /// order, behind the boot's announcements. Arming and taking the
+    /// parked set is ONE lock claim — a concurrent arrival either
+    /// parks into the set being taken or serves through the builders
+    /// being armed; there is no window between them.
     fn arm(&self, data: SessionHostData) {
-        let _ = self.core.set(LifecycleCore {
-            create: data.create,
-            open: data.open,
-        });
+        let parked = {
+            let mut door = lock(&self.door);
+            door.armed = Some(LifecycleCore {
+                create: data.create,
+                open: data.open,
+            });
+            std::mem::take(&mut door.parked)
+        };
+        let Some(core) = self.armed() else {
+            return;
+        };
+        self.drain(parked, core);
     }
 
-    fn drain_parked(&self) {
-        for parked in std::mem::take(&mut *lock(&self.parked)) {
+    fn armed(&self) -> Option<LifecycleCore> {
+        lock(&self.door).armed.clone()
+    }
+
+    fn drain(&self, parked: Vec<ParkedLifecycle>, core: LifecycleCore) {
+        for parked in parked {
+            // The drain serves with the armed core in hand — the
+            // unarmed case is unrepresentable (the core is a
+            // parameter), so no silent drop exists anywhere.
+            let core = core.clone();
             match parked {
-                ParkedLifecycle::NewSession => self.serve_new_session(),
-                ParkedLifecycle::OpenSession { id } => self.serve_open_session(&id),
+                ParkedLifecycle::NewSession => self.serve_new_session(core),
+                ParkedLifecycle::OpenSession { id } => self.serve_open_session(core, &id),
             }
         }
     }
 
     fn new_session(&self) {
-        if self.core.get().is_none() {
-            lock(&self.parked).push(ParkedLifecycle::NewSession);
-            return;
+        if let Some(core) = self.enter(ParkedLifecycle::NewSession) {
+            self.serve_new_session(core);
         }
-        self.serve_new_session();
     }
 
     fn open_session(&self, id: &str) {
-        if self.core.get().is_none() {
-            lock(&self.parked).push(ParkedLifecycle::OpenSession { id: id.to_string() });
-            return;
+        if let Some(core) = self.enter(ParkedLifecycle::OpenSession { id: id.to_string() }) {
+            self.serve_open_session(core, id);
         }
-        self.serve_open_session(id);
+    }
+
+    /// One arrival through the door: park it (the builders are not
+    /// gathered yet) or hand it the armed builders — one lock claim
+    /// decides which.
+    fn enter(&self, parked: ParkedLifecycle) -> Option<LifecycleCore> {
+        let mut door = lock(&self.door);
+        match door.armed.clone() {
+            Some(core) => Some(core),
+            None => {
+                door.parked.push(parked);
+                None
+            }
+        }
     }
 
     /// `new_session`: announce, then spawn. The creation frame and its
     /// notes land ahead of anything the worker can emit (emitted
     /// here, before any command can have reached it).
-    fn serve_new_session(&self) {
-        let Some(core) = self.core.get() else {
-            return;
-        };
+    fn serve_new_session(&self, core: LifecycleCore) {
         let (session, notes) = match (core.create)() {
             Ok(built) => built,
             Err(message) => {
@@ -1071,14 +1102,11 @@ impl Lifecycle {
     /// `open_session`: already open means re-replay (idempotent);
     /// otherwise load, surface the notes, spawn, and answer with the
     /// pass — the pass itself is the acknowledgment.
-    fn serve_open_session(&self, id: &str) {
+    fn serve_open_session(&self, core: LifecycleCore, id: &str) {
         if let Some(worker) = lock(&self.workers).get(id).cloned() {
             worker.deliver_replay();
             return;
         }
-        let Some(core) = self.core.get() else {
-            return;
-        };
         let (session, notes) = match (core.open)(id) {
             Ok(loaded) => loaded,
             Err(message) => {

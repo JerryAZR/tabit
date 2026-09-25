@@ -161,11 +161,14 @@ anywhere), then the session host's command surface (the by-type
 lifecycle handlers) goes live, then the extensions gather, then the
 session builds. What the structure cannot answer yet — a lifecycle
 command whose builders are the boot's still-gathering data — parks,
-and serves in arrival order behind the boot's announcements
-(FRONTEND.md §3's `session_opened`-leads sequence holds for the
-core's own emissions; other participants' frames may interleave
-ahead of them, in arrival order, and frontends tolerate them as they
-tolerate any origin-stamped frame).
+and serves in arrival order behind the boot's announcements. There is
+no "next frame after the ack" contract at all (owner ruling 2026-09):
+everything after the ack is the event stream — the core's own
+startup sequence is today's common order, not a guarantee; other
+participants' frames interleave in arrival order; a future core may
+report its own initialization progress ahead of `session_opened`.
+Frontends build on the events' own identities (stamps, kinds), never
+on their position after the ack.
 
 The four directions, one sentence each:
 

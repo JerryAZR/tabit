@@ -1076,7 +1076,7 @@ fn the_shared_grammar_crosses_the_json_edge_end_to_end() {
     // Frames until a predicate holds, bounded — the emissions race
     // the handshake, so scan rather than assume order.
     fn until<F: Fn(&EventFrame) -> bool>(backend: &mut Backend, want: &str, pred: F) -> EventFrame {
-        // Already-read frames first: the double's reactive speech can
+        // Already-read frames first: the double's chatty speech can
         // land inside the handshake's own scan, and must not be lost
         // to the helper that happened to read it.
         if let Some(frame) = backend.seen.iter().rev().find_map(|frame| match frame {

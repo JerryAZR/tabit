@@ -1058,11 +1058,12 @@ fn run() -> Result<i32, String> {
             let frontend = tabit_session::mount_frontend(&host_node());
             // The mount spawns (the death watchers, the wind-down), so
             // it runs on the runtime — the whole boot sits inside it.
+            let store = SessionStore::project_default();
             let structure = runtime.block_on(async {
                 SessionHost::mount(
                     SessionHostWiring {
                         node: host_node(),
-                        store: SessionStore::project_default(),
+                        store: store.clone(),
                         boot_parent: args.parent.clone(),
                         boot_parent_call: args.parent_call.clone(),
                     },
@@ -1101,7 +1102,7 @@ fn run() -> Result<i32, String> {
             let (session, startup_notes) = match assemble(
                 &args,
                 &registry,
-                &SessionStore::project_default(),
+                &store,
                 ContinueMiss::StartFresh,
                 Some(mounted.clone()),
             ) {
@@ -1109,7 +1110,7 @@ fn run() -> Result<i32, String> {
                 Err(detail) => return json_startup_failure(&detail),
             };
             print_banner(&session);
-            let data = host_data(&args, &registry, &SessionStore::project_default(), &mounted);
+            let data = host_data(&args, &registry, &store, &mounted);
             Ok(runtime.block_on(async {
                 let handle = structure.attach(session, startup_notes, data);
                 tabit_session::edge::serve(

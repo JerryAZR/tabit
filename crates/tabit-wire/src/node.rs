@@ -555,9 +555,9 @@ impl<C: Routed> Node<C> {
     /// This is how a node whose stdio subscribes to nothing still
     /// speaks across it (an extension's own asks and events leave by
     /// naming the stdio; its children's arrivals do not auto-cross —
-    /// subscription stays hearing-only). Deduplicated by owner: a
-    /// channel that would also hear via subscription is skipped
-    /// there, so no receiver sees the frame twice. The
+    /// subscription stays hearing-only). Deduplicated by channel
+    /// identity: a channel that would also hear via subscription is
+    /// skipped there, so no receiver sees the frame twice. The
     /// additional-receiver fact is a parameter of the emission, never
     /// a frame field — it does not exist on the wire.
     pub fn emit_to(&self, from: &Channel, additional: &[Channel], mut frame: EventFrame) {

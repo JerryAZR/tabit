@@ -447,10 +447,10 @@ mod tests {
 
     /// The ingress skip matches channel identity, never owner
     /// strings: the child's observation handler — a plain callback
-    /// owned by the lane's own id — still hears frames arriving on
-    /// the lane.
+    /// owned by the lane's own id, swept with the child's everything
+    /// in one act — still hears frames arriving on the lane.
     #[test]
-    fn the_observation_owner_is_not_the_lanes() {
+    fn arrivals_on_the_lane_reach_the_same_owner_callback() {
         let shared = crate::tests::shared();
         let node = &shared.node;
         let lane = Channel::local("child-1", |_| {}, |_| {});

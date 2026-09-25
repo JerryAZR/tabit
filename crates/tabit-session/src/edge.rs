@@ -372,13 +372,11 @@ id = "m"
         }
     }
 
-    /// The refusing builders as the data half; `create` overrides.
+    /// The shared refusing builders with one `create` override.
     fn test_data(create: SessionSource) -> SessionHostData {
         SessionHostData {
             create,
-            open: Arc::new(|_| Err("open_session is not driven by this test".to_string())),
-            skills: Vec::new(),
-            extensions: Default::default(),
+            ..crate::tests::plain_data()
         }
     }
 
