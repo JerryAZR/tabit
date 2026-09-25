@@ -70,7 +70,7 @@ use tokio::io::AsyncBufReadExt;
 
 /// The extension protocol this SDK speaks — must match the host's
 /// exactly (the pipe is a frozen contract, not a negotiated one).
-const PROTOCOL_VERSION: u32 = 4;
+const PROTOCOL_VERSION: u32 = 5;
 
 pub mod children;
 
@@ -616,25 +616,14 @@ pub fn serve(extension: Extension) -> ! {
             core_path: Mutex::new(None),
         });
 
-        // The handshake: the initialize must be the first line, and
-        // its version must be ours exactly. The host facts ride it;
+        // The self-report — this extension's FIRST line on the
+        // channel (owner ruling 2026-09-25: children report first,
+        // spawners decide; the host version-checks and kills an
+        // incompatible guest). The host's facts (`core_path`, `cwd`)
+        // arrive later as `host_facts`, whenever the host sends them —
         // the core's own executable is the owned-children spawner's
-        // path.
-        let first = read_line().await;
-        let initialize = serde_json::from_str::<Value>(&first)
-            .map_err(|error| format!("the first line is not the initialize: {error}"))
-            .unwrap_or_else(|reason| die(&reason));
-        if initialize["type"] != "initialize" {
-            die("the first line is not the initialize");
-        }
-        if initialize["protocol_version"].as_u64() != Some(PROTOCOL_VERSION as u64) {
-            die(&format!(
-                "this host speaks protocol version {}, this extension speaks {PROTOCOL_VERSION}",
-                initialize["protocol_version"]
-            ));
-        }
-        *sdk_lock(&shared.core_path) = initialize["core_path"].as_str().map(str::to_string);
-        let ack = ExtFrame::Ack {
+        // path, and it lands in `core_path` then.
+        let report = ExtFrame::Report {
             protocol_version: PROTOCOL_VERSION,
             tools: tools
                 .iter()
@@ -652,7 +641,7 @@ pub fn serve(extension: Extension) -> ! {
                 .collect(),
             watch: watches.iter().map(|w| w.kind.clone()).collect(),
         };
-        shared.write_frame(&ack);
+        shared.write_frame(&report);
 
         // The watch surface: one subscription per watched kind on the
         // guest's node (the host mirrors the ack's kinds across the
@@ -729,15 +718,6 @@ fn panic_note(panic: Box<dyn std::any::Any + Send>) -> String {
     }
 }
 
-async fn read_line() -> String {
-    let mut line = String::new();
-    let mut stdin = tokio::io::BufReader::new(tokio::io::stdin());
-    if stdin.read_line(&mut line).await.unwrap_or(0) == 0 {
-        std::process::exit(0); // EOF: the host closed, so are we
-    }
-    line
-}
-
 /// One inbound line: the dialect's parse (the host's own frames),
 /// then the shared grammar's parse into the node's intake.
 fn dispatch_line(
@@ -791,7 +771,11 @@ fn dispatch_line(
                     | tabit_wire::node::AnswerOutcome::Missed => {}
                 }
             }
-            HostFrame::Initialize { .. } => {} // a re-send: tolerated, ignored
+            HostFrame::HostFacts { core_path, .. } => {
+                // The host's facts, after our report cleared its
+                // check: the owned-children spawner's path.
+                *sdk_lock(&shared.core_path) = Some(core_path);
+            }
         }
         return;
     }

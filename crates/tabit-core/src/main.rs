@@ -128,8 +128,9 @@ binary is the headless backend; the tabit frontend is a separate
 binary that spawns `tabit-core --json`.
 
 print mode: Esc aborts the running turn (line-buffered stdin: Esc then
-Enter). JSON mode: LF-JSONL frames — initialize, then message/abort
-commands in; stamped events out (see the tabit-session protocol module).
+Enter). JSON mode: LF-JSONL frames — the backend's report and
+stamped events out, commands in from the very first line (see the
+tabit-session protocol module).
 
        tabit-core --model <model-id|provider/model>
                                        select the model for this run
@@ -516,10 +517,10 @@ fn print_event(event: &SessionEvent) {
         // error (stderr, exit 1) once the stream has ended.
         SessionEvent::RunFailed { .. } => {}
         // Replay brackets, checkouts, and model changes never reach
-        // print mode (it never requests the pass and has no checkout
+        // print mode (no one requests the pass and it has no checkout
         // surface); the arms exist for exhaustiveness.
-        SessionEvent::ReplayStarted { .. }
-        | SessionEvent::ReplayDone
+        SessionEvent::ReplayBegin { .. }
+        | SessionEvent::ReplayEnd
         | SessionEvent::CheckedOut { .. }
         | SessionEvent::ModelChanged { .. } => {}
         // The compaction bracket (v7): stdout stays the answer channel,
@@ -879,7 +880,7 @@ API keys (only if the endpoint needs one) go in ~/.tabit/auth.toml:
 }
 
 /// JSON-mode setup failure — the config/auth file is the problem — so
-/// the rejection carries the first-run guide (a fresh install has no
+/// the failure carries the first-run guide (a fresh install has no
 /// providers.toml — the most common first run; the message must teach,
 /// not scare).
 fn json_setup_failure(detail: &str) -> Result<i32, String> {
@@ -887,20 +888,31 @@ fn json_setup_failure(detail: &str) -> Result<i32, String> {
 }
 
 /// JSON-mode startup failure that is *not* a config problem (session
-/// unreadable, model unbuildable, cwd gone): reject with the plain
+/// unreadable, model unbuildable, cwd gone): fail with the plain
 /// reason — the setup guide would be advice for a problem the user
 /// does not have.
 fn json_startup_failure(detail: &str) -> Result<i32, String> {
     json_reject(format!("could not start the session: {detail}"))
 }
 
-/// One `initialize_rejected` frame to stdout (a startup screen, not a
-/// crash), the same text on stderr, exit 1.
+/// The report model's startup failure (owner ruling 2026-09-25): the
+/// child has reported (the spawner knows the version and that this
+/// process is alive), then the reason crosses as an unstamped `error`
+/// event — the same grammar every other backend-level failure uses —
+/// and the process exits nonzero. The reason also echoes on stderr
+/// (the human surface).
 fn json_reject(reason: String) -> Result<i32, String> {
-    let frame = tabit_protocol::ServerControlFrame::InitializeRejected {
-        reason: reason.clone(),
+    let report = tabit_protocol::ServerControlFrame::Report {
+        protocol_version: tabit_protocol::PROTOCOL_VERSION,
     };
-    println!("{}", tabit_protocol::to_wire_line(&frame));
+    println!("{}", tabit_protocol::to_wire_line(&report));
+    let event = tabit_protocol::EventFrame {
+        stream: None,
+        origin: None,
+        ttl: None,
+        event: tabit_session::SessionEvent::error_session(reason.clone()),
+    };
+    println!("{}", tabit_protocol::to_wire_line(&event));
     eprintln!("{reason}");
     Ok(1)
 }

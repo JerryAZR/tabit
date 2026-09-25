@@ -48,7 +48,7 @@ who reads its stdio: the consumer ignores the field (its absence means
 an older backend). Each
 version landed as one
 protocol-version bump with no compatibility period; always check the
-ack's `protocol_version`. (`tabit-core --list` prints a human table —
+report's `protocol_version`. (`tabit-core --list` prints a human table —
 there is no JSON listing edge.)
 
 ## 1. Architecture: two processes, one pipe
@@ -64,10 +64,10 @@ tabit-core --json [--continue | --session <path>] [--model <ref>]
   ignore (never protocol data) — but capture it for crash reports.
 - **One backend process hosts many sessions.** The spawn flags select
   the **boot session** — `--continue` resumes the project's newest
-  (nothing to resume → fresh, ack `resumed: false` — §3.1),
+  (nothing to resume → fresh, announce `resumed: false` — §3.1),
   `--session <path>` a specific file, neither a fresh one — and the
-  backend announces the catalog (`sessions_available`) after the
-  handshake. Creating, listing, opening, and switching sessions are
+  backend announces the catalog (`sessions_available`) right after
+  its report. Creating, listing, opening, and switching sessions are
   channel commands (`new_session`, `open_session`; §5) — never process
   tricks. One connection per backend process (ruled scope).
 - **Spawn environment.** Sessions live at `<cwd>/.tabit/sessions`
@@ -112,16 +112,15 @@ arrive as events. Input tolerance: blank lines are skipped, a trailing
 size limit** — tool output can be large; buffer accordingly.
 
 ```
-→ {"type":"initialize","protocol_version":15,"replay":true}
-← {"type":"initialize_ack","protocol_version":15,"session_id":"019…"}
+← {"type":"report","protocol_version":19}
 ← {"type":"session_opened","stream":"019…","id":"019…","path":"…",
    "model":{"provider":"…","model":"…","thinking_level":null},"resumed":true}
 ← {"type":"sessions_available","sessions":[
      {"id":"019…","created_at":"2026-08-22T…","entry_count":14}, … ]}
 ← {"type":"model_changed","stream":"019…","provider":"…","model":"…","thinking_level":null,"context_window":200000,"name":"…","cost":{"input":1.0,"output":4.0,"cache_read":0.1,"cache_write":0.4}}
-← {"type":"replay_started","stream":"019…","total":14}
+← {"type":"replay_begin","stream":"019…","total":14}
 ← … the transcript as finalized events …
-← {"type":"replay_done","stream":"019…"}
+← {"type":"replay_end","stream":"019…"}
 → {"type":"message","session":"019…","text":"who are you?"}
 ← {"type":"user_message","stream":"019…","entry_id":"019…","text":"who are you?"}
 ← {"type":"turn_started","stream":"019…","id":"019…","started_at_ms":1763312345678}
@@ -132,7 +131,7 @@ size limit** — tool output can be large; buffer accordingly.
 ```
 
 The example's send lands while the session is idle (after
-`replay_done`), so it is acknowledged directly by `user_message` — no
+`replay_end`), so it is acknowledged directly by `user_message` — no
 `message_queued` exists for idle sends (§5); a send while a run is
 live is the queued case.
 
@@ -161,60 +160,65 @@ value, switch on `type` when recognized) and log the rest.
 
 ## 3. Handshake, lifecycle, exit codes
 
-1. Your **first line** must be
-   `initialize { protocol_version, replay? }` (`replay` defaults to
-   `false`). Match → `initialize_ack` with **protocol-level facts
-   only** (the version and the boot session's id). **There is no
-   "next frame" guarantee after the ack** (owner ruling 2026-09):
-   everything after it is the event stream, consumed as events —
-   the boot's own startup sequence (`session_opened` with the
-   boot's facts, the session catalog, the skills catalog when
-   discovery found something, then — if you asked — the replay
-   pass, then live traffic) is today's common order, not a
-   contract; other participants' frames (an extension's,
-   origin-stamped) may interleave anywhere, in arrival order, and
-   a future core may report its own initialization progress ahead
-   of `session_opened` instead. Build on the events' own
-   identities (stamps, kinds), never on their position after the
-   ack. `resumed: false` after you asked the
-   backend to resume means the store was empty and the backend
-   **started fresh — an absorbed miss, not an error**; show a small
-   note. Mismatch → `initialize_rejected { reason }` and the
-   process exits 1. A second `initialize` after a successful handshake
-   gets `protocol_error`; the connection stays open. Rejection
-   reasons come in two flavors: config/auth problems carry the
-   first-run setup guide (written for the user — display it);
-   everything else (session unreadable, model unbuildable) carries a
-   plain reason — do not treat it as a config problem.
-2. A command before `initialize`, an unparseable line, or an
-   empty/whitespace-only `message` text gets `protocol_error
-   { message }`; **the connection stays open**. `message` texts are
-   free-form otherwise (multi-line is fine — the wire is line-delimited
-   JSON, and JSON escapes embedded newlines).
-3. `protocol_error` / `initialize_rejected` reasons are free text for
-   humans — display them, never branch on them.
-4. To shut down: **close stdin**. Closing stdin is frontend death
+1. **The backend speaks first** (owner ruling 2026-09-25, the report
+   model): its very first line is `report { protocol_version }` —
+   protocol-level facts only, nothing else. **You** are the version
+   check: a backend whose report names a version you do not speak is
+   yours to kill and clean up (you own the lifecycle — you picked the
+   binary). There is no `initialize`, no ack, no handshake state:
+   after the report, everything is the event stream, and **your
+   commands may flow from your first line onward** — before or after
+   the report; the pipe buffers whatever arrives early. **There is no
+   "next frame" guarantee after the report**: the boot's own startup
+   sequence (`session_opened` with the boot's facts — the session ids
+   you address commands by arrive here, never in the report — the
+   session catalog, the skills catalog when discovery found something,
+   then the replay pass for a resumed boot, then live traffic) is
+   today's common order, not a contract; other participants' frames
+   (an extension's, origin-stamped) may interleave anywhere, in
+   arrival order. Build on the events' own identities (stamps,
+   kinds), never on their position after the report. `resumed: false`
+   after you asked the backend to resume means the store was empty
+   and the backend **started fresh — an absorbed miss, not an
+   error**; show a small note.
+2. **Startup failures** (config/auth problems, session unreadable,
+   model unbuildable) cross as the report, then one unstamped
+   `error { kind: session }` event carrying the reason, then the
+   process exits nonzero. Config/auth reasons carry the first-run
+   setup guide (written for the user — display it); everything else
+   is a plain reason. Recovery is manual: the user fixes the file and
+   you respawn the backend (config is not re-read per request by
+   design).
+3. **Replay is default-on for a resumed boot** (owner ruling
+   2026-09-25): a backend launched with `--continue`/`--session`
+   re-emits its resident chain automatically right after the startup
+   announcements — `replay_begin { total }`, the chain as finalized
+   live events, `replay_end` (the count is a progress denominator;
+   use it or ignore it). A fresh boot replays nothing. On request,
+   any time: `open_session` of an already-open session re-replays it
+   (the door's idempotent path).
+4. An unparseable line or an empty/whitespace-only `message` text
+   gets `protocol_error { message }`; **the connection stays open**.
+   `message` texts are free-form otherwise (multi-line is fine — the
+   wire is line-delimited JSON, and JSON escapes embedded newlines).
+5. `protocol_error` reasons are free text for humans — display them,
+   never branch on them.
+6. To shut down: **close stdin**. Closing stdin is frontend death
    (ruled 2026-08 — the core dies with the frontend, regardless of
    state): an in-flight run is **aborted** (its `run_aborted` terminal
    still flushes before the stream ends), queued messages are
    discarded, and the backend exits. Interrupted results synthesize
    on the next open, exactly like a crash; the log stays durable.
-5. **Exit codes: 101 is the one reliable crash signal.** `1` means
-   handshake rejection (including **first-run setup failures** — no
-   config file: the backend sends `initialize_rejected` whose reason
-   carries a setup guide, then exits; display the reason, it is written
-   for the user — and recovery is manual: the user fixes the file and
-   the frontend respawns the backend; config is not re-read per request
-   by design) or a pre-handshake exit with **no frames** — bad flags
-   only (stderr message; every session/model startup failure arrives
-   as a rejection frame instead, §3.1). `101` is an **internal
-   error**: the process crashed itself
-   — a panic in any task or thread ends the process, so a crashed
-   backend never lingers as a zombie. Display the stderr report and
-   ask the user to send it back. `0` covers one non-clean end: a broken
-   pipe. Otherwise **detect crashes as EOF without a terminal event
-   for the in-flight run**; capture stderr as the explanation — stderr
-   is the **internal**-failure path (panics, the report the user sends
+7. **Exit codes: 101 is the one reliable crash signal.** `1` means a
+   startup failure (the report and error event above; display the
+   reason) or a bad-flags exit with **no frames** (stderr message).
+   `101` is an **internal error**: the process crashed itself — a
+   panic in any task or thread ends the process, so a crashed backend
+   never lingers as a zombie. Display the stderr report and ask the
+   user to send it back. `0` covers one non-clean end: a broken pipe.
+   Otherwise **detect crashes as EOF without a terminal event for the
+   in-flight run**; capture stderr as the explanation — stderr is the
+   **internal**-failure path (panics, the report the user sends
    back); external errors arrive as events (§6) and never require
    mining stderr.
 
@@ -291,7 +295,7 @@ PROTOCOL.md note.
 
 ## 6. Events
 
-`initialize_ack`, `initialize_rejected`, and `protocol_error` are
+The `report` (the backend's first line) and `protocol_error` are
 unstamped control frames; everything else is an event — stamped when
 a session produced it, **unstamped when the backend did** (the
 catalog, and every `kind: session` error — fold
@@ -396,8 +400,8 @@ above — full-text deltas, same ids as live)
 
 | event | payload | when |
 |---|---|---|
-| `replay_started` | `total` | a replay pass begins (startup with `replay: true`, or after `checked_out`). `total` = **events** to come between the brackets (the progress denominator). |
-| `replay_done` | — | the pass ends; live traffic (or quiescence) follows. |
+| `replay_begin` | `total` | a replay pass begins (a resumed boot's automatic pass, an `open_session` re-replay, or after `checked_out`). `total` = **events** to come between the brackets (the progress denominator). |
+| `replay_end` | — | the pass ends; live traffic (or quiescence) follows. |
 
 `usage` objects are protocol-owned:
 `{ input_tokens, output_tokens, total_tokens, cached_input_tokens,
@@ -416,13 +420,14 @@ rewind; the register, not the branch, owns attribution.
 
 ## 7. Replay and checkout: how transcript state moves
 
-**Startup replay.** Send `initialize { protocol_version, replay: true
-}`. After the ack: the session's `model_changed` announcement (§6),
-then `replay_started { total }` → the active branch's
-nodes as finalized events in branch order (`user_message` per user
-node; per assistant node: `turn_started`, full-text deltas, its
-`tool_call`s and `tool_result`s, `completion_call`, `turn_committed`)
-→ `replay_done`. Branch
+**Startup replay.** A resumed boot replays automatically (owner
+ruling 2026-09-25): right after the startup announcements, the
+session's `model_changed` (§6), then `replay_begin { total }` → the
+active branch's nodes as finalized events in branch order
+(`user_message` per user node; per assistant node: `turn_started`,
+full-text deltas, its `tool_call`s and `tool_result`s,
+`completion_call`, `turn_committed`) → `replay_end`. On request, any
+time: `open_session` of an already-open session re-replays it. Branch
 siblings are excluded by construction; ids are the log's ids, identical
 to what a live consumer of the same history saw; no `model_changed`
 ever appears inside the brackets (state is announced live, not
@@ -433,8 +438,8 @@ the roundtrip closed).
 
 **Switching sessions.** Send `open_session { id }`. The full-re-render
 rule (ruled; pi-proven): clear your view of the target session
-optimistically, then apply the pass that follows (`replay_started` →
-finalized events → `replay_done`, stamped with the id). It is the same
+optimistically, then apply the pass that follows (`replay_begin` →
+finalized events → `replay_end`, stamped with the id). It is the same
 shape as startup replay — one transcript-rebuild path in your code,
 and the seam a future streamed suffix replaces. Switching never waits
 on the session you are leaving; if the opened session's own run is in
@@ -458,7 +463,7 @@ code path as every pass), then the replay brackets.
 
 1. **Drop everything you hold for that session** (`base_id` is `null`
    — full re-render, the same rule as switching sessions) and apply
-   the `replay_started` … `replay_done` pass: the rewound chain
+   the `replay_begin` … `replay_end` pass: the rewound chain
    through its **tip** (the tip may sit past `entry_id` by
    repair entries — the honesty note from startup replay).
 2. The aborted run's own epilogue preceded the rewind: its
@@ -511,7 +516,7 @@ flowing while a pass is parked, and at the session's beat the pass is
 served **before** the next message batch— a read requested after a
 message still answers ahead of it. A message's inclusion in a pass is
 decided solely by whether it drained before the beat (drained → in
-the pass; queued → it renders live right after `replay_done`).
+the pass; queued → it renders live right after `replay_end`).
 
 **Valid cut points** (ruled). The atomic unit is the tool roundtrip:
 an assistant turn and its complete result batch commit and rewind
@@ -614,10 +619,11 @@ answer or denial the model saw.
   arbitrarily — attribute by stamp, never by position.
 - **Idle/running is derivable**: running from the first `user_message`
   of a run until its terminal; idle otherwise. Startup (after
-  `replay_done`) is idle. A queued-while-idle message keeps you idle
+  `replay_end`) is idle. A queued-while-idle message keeps you idle
   until it drains.
-- **Recovery is replay.** After a backend crash or restart, the same
-  initialize-with-replay gives you the active chain with the same ids.
+- **Recovery is replay.** After a backend crash or restart, a
+  resumed boot's automatic pass gives you the active chain with the
+  same ids.
   Only pending messages are lost (they were never history — salvage as
   drafts before restarting if you want them); committed-but-unflushed
   entries can be lost to a force-stop (the write-behind window — model

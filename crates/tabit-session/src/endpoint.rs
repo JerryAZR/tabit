@@ -383,27 +383,19 @@ impl Drop for SessionHost {
 pub struct SessionCommandLink {
     node: Arc<Node>,
     host_channel: Channel,
-    workers: Arc<Mutex<HashMap<String, Arc<Worker>>>>,
 }
 
 impl SessionCommandLink {
     /// Submit a command. Fire-and-forget: outcomes arrive as events
     /// (routing by the node's laws — session-addressed by the
     /// learning table, lifecycle by type, responses by ask-table
-    /// claim).
+    /// claim). The replay request rides this too — under the report
+    /// model, replay is the door's idempotent path (`open_session` of
+    /// an already-open session) plus the automatic pass a resumed
+    /// boot serves at attach.
     pub fn send(&self, command: SessionCommand) {
         self.node
             .intake(&self.host_channel, Inbound::Command(command));
-    }
-
-    /// Request a session's replay pass — the transport edge's way in
-    /// (the bridge asks right after the handshake, when the
-    /// `initialize` frame said `replay: true`). Not a wire command:
-    /// the intent parks on the worker directly.
-    pub fn replay(&self, session: &str) {
-        if let Some(worker) = lock(&self.workers).get(session).cloned() {
-            worker.deliver_replay();
-        }
     }
 }
 
@@ -674,7 +666,7 @@ impl SessionHostMount {
         // spawn — it waits).
         let (boot_worker, boot_channel, boot_join) =
             spawn_worker(boot, &node, worker_shutdown.clone(), closing_stats.clone());
-        lock(&workers).insert(boot_id.clone(), boot_worker);
+        lock(&workers).insert(boot_id.clone(), boot_worker.clone());
         lock(&joins).push(boot_join);
         let boot_sink = NoticeSink::new(&node, &boot_channel, boot_stream.clone());
 
@@ -760,6 +752,17 @@ impl SessionHostMount {
                     conflicts: data.extensions.conflicts.clone(),
                 },
             );
+        }
+
+        // A resumed boot replays automatically (owner ruling
+        // 2026-09-25): the resident chain re-emits right after the
+        // announcements — a `--continue`/`--session` connect needs no
+        // request. A fresh boot (or an absorbed `--continue` miss)
+        // has nothing to replay. On request, the door's idempotent
+        // path serves: `open_session` of an already-open session
+        // re-replays it, any time.
+        if info.resumed {
+            boot_worker.deliver_replay();
         }
 
         // The lifecycle door arms (its handlers have been live since
@@ -864,7 +867,7 @@ impl SessionHost {
 
     /// Request a session's replay pass: the resident chain re-emitted
     /// onto the event stream as finalized live events, bracketed by
-    /// `replay_started`/`replay_done`. Fire-and-forget like a command
+    /// `replay_begin`/`replay_end`. Fire-and-forget like a command
     /// — the pass itself is the acknowledgment. Answered at the
     /// session's next idle beat; requests during a run wait for it.
     pub fn replay(&self, session: &str) {
@@ -878,7 +881,6 @@ impl SessionHost {
         SessionCommandLink {
             node: self.node.clone(),
             host_channel: self.host_channel.clone(),
-            workers: self.workers.clone(),
         }
     }
 
@@ -1364,11 +1366,11 @@ fn emit_replay(session: &Session, sink: &NoticeSink) {
     ));
     let events = session.replay_events();
     let total = events.len() as u64;
-    sink.emit(SessionEvent::ReplayStarted { total });
+    sink.emit(SessionEvent::ReplayBegin { total });
     for event in events {
         sink.emit(event);
     }
-    sink.emit(SessionEvent::ReplayDone);
+    sink.emit(SessionEvent::ReplayEnd);
 }
 
 #[cfg(test)]

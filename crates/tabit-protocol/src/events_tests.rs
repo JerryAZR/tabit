@@ -123,8 +123,8 @@ fn all_events() -> Vec<SessionEvent> {
             id: "0199".to_string(),
         },
         SessionEvent::error_model("default_model `gone` is not usable"),
-        SessionEvent::ReplayStarted { total: 7 },
-        SessionEvent::ReplayDone,
+        SessionEvent::ReplayBegin { total: 7 },
+        SessionEvent::ReplayEnd,
         SessionEvent::CheckedOut {
             entry_id: "0197".to_string(),
             base_id: None,

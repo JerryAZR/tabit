@@ -148,7 +148,7 @@ async fn an_exit_before_the_ack_is_dead() {
     install(&root, "early", "die-pre-ack");
     let (supervisor, mut events) = supervisor::launch_root(&root, HANDSHAKE_TIMEOUT, test_host());
     let event = await_status(&mut events, "early", |s| matches!(s, Status::Dead { .. })).await;
-    assert!(dead_reason(&event.status).contains("before the handshake"));
+    assert!(dead_reason(&event.status).contains("before the report"));
     supervisor.shutdown().await;
 }
 
@@ -172,7 +172,7 @@ async fn a_silent_handshake_times_out() {
     let (supervisor, mut events) =
         supervisor::launch_root(&root, Duration::from_millis(300), test_host());
     let event = await_status(&mut events, "mute", |s| matches!(s, Status::Dead { .. })).await;
-    assert!(dead_reason(&event.status).contains("no handshake"));
+    assert!(dead_reason(&event.status).contains("no report"));
     supervisor.shutdown().await;
 }
 

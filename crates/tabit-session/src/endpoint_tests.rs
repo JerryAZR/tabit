@@ -774,8 +774,8 @@ async fn open_session_loads_a_stored_session_and_replays_it() {
             "the pass is stamped with the opened id"
         );
         match frame.event {
-            SessionEvent::ReplayStarted { .. } => {}
-            SessionEvent::ReplayDone => break,
+            SessionEvent::ReplayBegin { .. } => {}
+            SessionEvent::ReplayEnd => break,
             SessionEvent::Error { message, .. } => panic!("open failed: {message}"),
             event => pass.push(kind_of(&event)),
         }
@@ -818,15 +818,15 @@ async fn open_session_loads_a_stored_session_and_replays_it() {
         let frame = until_event(&mut handle, |event| {
             matches!(
                 event,
-                SessionEvent::ReplayStarted { .. }
-                    | SessionEvent::ReplayDone
+                SessionEvent::ReplayBegin { .. }
+                    | SessionEvent::ReplayEnd
                     | SessionEvent::Error { .. }
             )
         })
         .await;
         match frame.event {
-            SessionEvent::ReplayStarted { .. } => pass_two += 1,
-            SessionEvent::ReplayDone => break,
+            SessionEvent::ReplayBegin { .. } => pass_two += 1,
+            SessionEvent::ReplayEnd => break,
             SessionEvent::Error { message, .. } => panic!("re-open failed: {message}"),
             _ => {}
         }
@@ -910,7 +910,7 @@ async fn open_session_emits_its_model_notes_ahead_of_the_replay() {
     );
     // And the pass still follows, whole.
     until_event(&mut handle, |event| {
-        matches!(event, SessionEvent::ReplayDone)
+        matches!(event, SessionEvent::ReplayEnd)
     })
     .await;
     drain(&mut handle).await;
@@ -984,8 +984,8 @@ async fn a_replay_request_streams_the_pass_onto_the_event_channel() {
             // the pass; session-level announcements are not pass
             // content.
             SessionEvent::SessionOpened { .. } | SessionEvent::SessionsAvailable { .. } => {}
-            SessionEvent::ReplayStarted { .. } => pass.push("started".to_string()),
-            SessionEvent::ReplayDone => {
+            SessionEvent::ReplayBegin { .. } => pass.push("started".to_string()),
+            SessionEvent::ReplayEnd => {
                 pass.push("done".to_string());
                 done = true;
             }
@@ -1522,7 +1522,7 @@ async fn a_replay_request_for_a_running_session_answers_after_its_terminal() {
     let finished = loop {
         let frame = handle.next_event().await.expect("the run continues");
         match frame.event {
-            SessionEvent::ReplayStarted { .. } | SessionEvent::ReplayDone => {
+            SessionEvent::ReplayBegin { .. } | SessionEvent::ReplayEnd => {
                 saw_bracket_before_terminal = true;
             }
             SessionEvent::RunFinished { .. } => break frame,
@@ -1540,7 +1540,7 @@ async fn a_replay_request_for_a_running_session_answers_after_its_terminal() {
 
     // …and answers right after it, stamped with the session's id.
     let started = until_event(&mut handle, |event| {
-        matches!(event, SessionEvent::ReplayStarted { .. })
+        matches!(event, SessionEvent::ReplayBegin { .. })
     })
     .await;
     assert_eq!(
@@ -1549,11 +1549,11 @@ async fn a_replay_request_for_a_running_session_answers_after_its_terminal() {
     );
     loop {
         let frame = until_event(&mut handle, |event| {
-            matches!(event, SessionEvent::ReplayDone | SessionEvent::Error { .. })
+            matches!(event, SessionEvent::ReplayEnd | SessionEvent::Error { .. })
         })
         .await;
         match frame.event {
-            SessionEvent::ReplayDone => break,
+            SessionEvent::ReplayEnd => break,
             SessionEvent::Error { message, .. } => panic!("replay failed: {message}"),
             _ => {}
         }
@@ -1605,7 +1605,7 @@ async fn collect_until(
 fn bracket_users(frames: &[EventFrame], checked_at: usize) -> Vec<String> {
     let done_at = frames[checked_at..]
         .iter()
-        .position(|frame| matches!(frame.event, SessionEvent::ReplayDone))
+        .position(|frame| matches!(frame.event, SessionEvent::ReplayEnd))
         .expect("the pass closes");
     user_texts(&frames[checked_at..checked_at + done_at + 1])
 }
@@ -1672,7 +1672,7 @@ async fn checkout_rewinds_replays_and_branches_the_next_prompt() {
     let first_entry = entry_id_of(&frames, "one");
     handle.checkout(&id, &first_entry);
     collect_until(&mut handle, &mut frames, |e| {
-        matches!(e, SessionEvent::ReplayDone)
+        matches!(e, SessionEvent::ReplayEnd)
     })
     .await;
 
@@ -1733,7 +1733,7 @@ async fn a_checkout_during_a_run_aborts_it_then_rewinds_at_the_beat() {
             SessionEvent::CheckedOut { .. } => saw_checked_out = true,
             _ => {}
         }
-        let done = matches!(frame.event, SessionEvent::ReplayDone);
+        let done = matches!(frame.event, SessionEvent::ReplayEnd);
         frames.push(frame);
         if saw_checked_out && done {
             break;
@@ -2239,7 +2239,7 @@ async fn a_model_switch_precedes_a_parked_checkout() {
             }
             _ => {}
         }
-        let done = matches!(frame.event, SessionEvent::ReplayDone);
+        let done = matches!(frame.event, SessionEvent::ReplayEnd);
         frames.push(frame);
         if done {
             break;
@@ -2321,7 +2321,7 @@ async fn checkout_discards_what_was_submitted_before_it_and_keeps_the_rest() {
     let done_at = checked_at
         + frames[checked_at..]
             .iter()
-            .position(|frame| matches!(frame.event, SessionEvent::ReplayDone))
+            .position(|frame| matches!(frame.event, SessionEvent::ReplayEnd))
             .expect("the pass closes");
     let after_at = frames
         .iter()
@@ -2365,7 +2365,7 @@ async fn parked_checkouts_collapse_to_the_last_and_spaced_ones_execute() {
     handle.checkout(&id, &first);
     handle.checkout(&id, &second);
     collect_until(&mut handle, &mut frames, |e| {
-        matches!(e, SessionEvent::ReplayDone)
+        matches!(e, SessionEvent::ReplayEnd)
     })
     .await;
     let checked: Vec<String> = frames
@@ -2389,12 +2389,12 @@ async fn parked_checkouts_collapse_to_the_last_and_spaced_ones_execute() {
     // announcement — idempotent, the rewind never moved it — sits
     // between checked_out and the bracket; the slice starts past the
     // opener so only pass events count).
-    let SessionEvent::ReplayStarted { total } = &frames[survivor_at + 2].event else {
+    let SessionEvent::ReplayBegin { total } = &frames[survivor_at + 2].event else {
         panic!("the register announcement, then the re-render pass opens");
     };
     let pass_len = frames[survivor_at + 3..]
         .iter()
-        .position(|frame| matches!(frame.event, SessionEvent::ReplayDone))
+        .position(|frame| matches!(frame.event, SessionEvent::ReplayEnd))
         .expect("the pass closes");
     assert_eq!(*total, pass_len as u64);
 
@@ -2403,7 +2403,7 @@ async fn parked_checkouts_collapse_to_the_last_and_spaced_ones_execute() {
     // applies only to what parks at the same instant.
     handle.checkout(&id, &first);
     collect_until(&mut handle, &mut frames, |e| {
-        matches!(e, SessionEvent::ReplayDone)
+        matches!(e, SessionEvent::ReplayEnd)
     })
     .await;
     let checked: Vec<String> = frames
@@ -2430,7 +2430,7 @@ async fn parked_checkouts_collapse_to_the_last_and_spaced_ones_execute() {
     // resident set. The branch switch.
     handle.checkout(&id, &second);
     collect_until(&mut handle, &mut frames, |e| {
-        matches!(e, SessionEvent::ReplayDone)
+        matches!(e, SessionEvent::ReplayEnd)
     })
     .await;
     let checked: Vec<String> = frames
@@ -2651,7 +2651,7 @@ async fn an_abort_discards_a_pending_checkout() {
     assert!(
         !frames
             .iter()
-            .any(|frame| matches!(frame.event, SessionEvent::ReplayStarted { .. })),
+            .any(|frame| matches!(frame.event, SessionEvent::ReplayBegin { .. })),
         "no pass followed — nothing rewound"
     );
     assert_eq!(chain_users(&handle, &store), vec!["go"]);
@@ -2679,18 +2679,18 @@ async fn a_pass_answers_ahead_of_a_queued_message_at_the_beat() {
     handle.message(&id, "next");
     handle.replay(&id);
     collect_until(&mut handle, &mut frames, |e| {
-        matches!(e, SessionEvent::ReplayDone)
+        matches!(e, SessionEvent::ReplayEnd)
     })
     .await;
     frames.extend(drain(&mut handle).await);
 
     let pass_at = frames
         .iter()
-        .position(|frame| matches!(frame.event, SessionEvent::ReplayStarted { .. }))
+        .position(|frame| matches!(frame.event, SessionEvent::ReplayBegin { .. }))
         .expect("the pass");
     let done_at = frames
         .iter()
-        .rposition(|frame| matches!(frame.event, SessionEvent::ReplayDone))
+        .rposition(|frame| matches!(frame.event, SessionEvent::ReplayEnd))
         .expect("the pass closes");
     let next_at = frames
         .iter()
@@ -2750,7 +2750,7 @@ async fn an_id_announced_mid_run_is_validatable_the_moment_it_is_knowable() {
             SessionEvent::CheckedOut { .. } => saw_checked_out = true,
             _ => {}
         }
-        let done = matches!(frame.event, SessionEvent::ReplayDone);
+        let done = matches!(frame.event, SessionEvent::ReplayEnd);
         frames.push(frame);
         if saw_checked_out && done {
             break;
@@ -2948,12 +2948,12 @@ async fn a_replay_parked_at_close_is_served_before_wind_down() {
     let rest = drain(&mut handle).await;
     assert!(
         rest.iter()
-            .any(|frame| matches!(frame.event, SessionEvent::ReplayStarted { .. })),
+            .any(|frame| matches!(frame.event, SessionEvent::ReplayBegin { .. })),
         "the parked replay was served ahead of the wind-down"
     );
     assert!(
         rest.iter()
-            .any(|frame| matches!(frame.event, SessionEvent::ReplayDone)),
+            .any(|frame| matches!(frame.event, SessionEvent::ReplayEnd)),
         "and completed before the stream ended"
     );
     std::fs::remove_dir_all(store.dir()).ok();
@@ -2990,7 +2990,7 @@ async fn abort_then_checkout_composes_at_the_pause_point() {
             }
             _ => {}
         }
-        let done = matches!(frame.event, SessionEvent::ReplayDone);
+        let done = matches!(frame.event, SessionEvent::ReplayEnd);
         frames.push(frame);
         if done
             && frames

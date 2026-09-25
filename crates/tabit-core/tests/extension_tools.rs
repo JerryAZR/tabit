@@ -26,8 +26,7 @@ use std::time::Duration;
 use httpmock::MockServer;
 use serde_json::json;
 use tabit_protocol::{
-    ClientFrame, EventFrame, PROTOCOL_VERSION, ServerControlFrame, ServerFrame, SessionCommand,
-    SessionEvent, to_wire_line,
+    EventFrame, ServerControlFrame, ServerFrame, SessionCommand, SessionEvent, to_wire_line,
 };
 
 /// The line-read bound: real processes, real pipes — generous for a
@@ -319,16 +318,18 @@ fn handshake(
     tabit_protocol::ExtensionsCatalog,
     Option<Vec<tabit_protocol::AvailableSkill>>,
 ) {
-    backend.send(&to_wire_line(&ClientFrame::Initialize {
-        protocol_version: PROTOCOL_VERSION,
-        replay: false,
-    }));
     let mut session_id = None;
     let mut catalog = None;
     let mut skills = None;
     loop {
         match backend.next_frame() {
-            ServerFrame::Control(ServerControlFrame::InitializeAck { session_id: id, .. }) => {
+            ServerFrame::Control(ServerControlFrame::Report { .. }) => {}
+            ServerFrame::Event(EventFrame {
+                stream: _,
+                origin: _,
+                ttl: _,
+                event: SessionEvent::SessionOpened { id, .. },
+            }) => {
                 session_id = Some(id);
             }
             ServerFrame::Event(frame) => match frame.event {
@@ -441,14 +442,16 @@ fn a_package_on_the_disable_list_mounts_nowhere() {
     );
 
     let mut backend = spawn_backend(&stage, &[]);
-    backend.send(&to_wire_line(&ClientFrame::Initialize {
-        protocol_version: PROTOCOL_VERSION,
-        replay: false,
-    }));
     let mut session = None;
     loop {
         match backend.next_frame() {
-            ServerFrame::Control(ServerControlFrame::InitializeAck { session_id: id, .. }) => {
+            ServerFrame::Control(ServerControlFrame::Report { .. }) => {}
+            ServerFrame::Event(EventFrame {
+                stream: _,
+                origin: _,
+                ttl: _,
+                event: SessionEvent::SessionOpened { id, .. },
+            }) => {
                 session = Some(id);
             }
             ServerFrame::Event(frame) => match frame.event {
@@ -923,17 +926,17 @@ fn a_model_prompt_round_trips_through_the_session() {
 
 /// The empty-stage handshake: `extensions_available` never announces
 /// with nothing installed, so `handshake` would wait out its bound —
-/// the ack alone carries the boot session id.
+/// the boot's `session_opened` alone carries the session id.
 fn handshake_bare(backend: &mut Backend) -> String {
-    backend.send(&to_wire_line(&ClientFrame::Initialize {
-        protocol_version: PROTOCOL_VERSION,
-        replay: false,
-    }));
     loop {
         match backend.next_frame() {
-            ServerFrame::Control(ServerControlFrame::InitializeAck { session_id, .. }) => {
-                return session_id;
-            }
+            ServerFrame::Control(ServerControlFrame::Report { .. }) => {}
+            ServerFrame::Event(EventFrame {
+                stream: _,
+                origin: _,
+                ttl: _,
+                event: SessionEvent::SessionOpened { id, .. },
+            }) => return id,
             ServerFrame::Control(other) => panic!("unexpected control frame: {other:?}"),
             ServerFrame::Event(_) => {}
         }

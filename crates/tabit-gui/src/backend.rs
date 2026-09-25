@@ -11,7 +11,7 @@ use std::sync::{Arc, Mutex};
 use std::thread;
 
 use tabit_protocol::{
-    ClientFrame, PROTOCOL_VERSION, ServerControlFrame, ServerFrame, SessionCommand, to_wire_line,
+    PROTOCOL_VERSION, ServerControlFrame, ServerFrame, SessionCommand, to_wire_line,
 };
 
 use crate::reducer::InMsg;
@@ -68,23 +68,18 @@ pub fn spawn(cwd: Option<&Path>, repaint: impl Fn() + Send + 'static) -> std::io
     no_console_window(&mut command);
     let mut child = command.spawn()?;
 
-    // Handshake first line out.
+    // The report model (owner ruling 2026-09-25): the backend speaks
+    // first — its self-report is the first stdout line, and commands
+    // flow from here whenever. The `--continue` spawn replays
+    // automatically on the backend side; no request crosses.
     let (writer_tx, writer_rx) = std::sync::mpsc::channel::<String>();
     // Sanctioned crash (AGENTS.md doctrine): pipes are captured the
     // instant Stdio::piped() spawned them.
     #[allow(clippy::expect_used)]
-    let mut stdin = child
+    let stdin = child
         .stdin
         .take()
         .expect("internal invariant violated: stdin pipe captured at spawn");
-    let init = to_wire_line(&ClientFrame::Initialize {
-        protocol_version: PROTOCOL_VERSION,
-        // The GUI holds no state across a backend respawn — the replay
-        // pass rebuilds its transcript (v2 slice 2).
-        replay: true,
-    });
-    let _ = writeln!(stdin, "{init}");
-    let _ = stdin.flush();
 
     let (msg_tx, msg_rx) = std::sync::mpsc::channel::<InMsg>();
     let stderr = Arc::new(Mutex::new(Vec::new()));
@@ -141,14 +136,21 @@ pub fn spawn(cwd: Option<&Path>, repaint: impl Fn() + Send + 'static) -> std::io
                     continue;
                 }
                 match serde_json::from_str::<ServerFrame>(&line) {
-                    Ok(ServerFrame::Control(ServerControlFrame::InitializeAck {
-                        session_id,
-                        ..
-                    })) => {
-                        let _ = tx.send(InMsg::Ack { session_id });
-                    }
-                    Ok(ServerFrame::Control(ServerControlFrame::InitializeRejected { reason })) => {
-                        let _ = tx.send(InMsg::Rejected(reason));
+                    Ok(ServerFrame::Control(ServerControlFrame::Report { protocol_version })) => {
+                        // The spawner's version check (the report
+                        // model's gate): a backend this GUI cannot
+                        // talk to is a kill — the reason crosses like
+                        // a rejection, and the child dies with the
+                        // Backend.
+                        if protocol_version == PROTOCOL_VERSION {
+                            let _ = tx.send(InMsg::Report);
+                        } else {
+                            let _ = tx.send(InMsg::Rejected(format!(
+                                "the backend speaks protocol version {protocol_version} — \
+                                 this GUI speaks {PROTOCOL_VERSION}"
+                            )));
+                            break;
+                        }
                     }
                     Ok(ServerFrame::Control(ServerControlFrame::ProtocolError { message })) => {
                         let _ = tx.send(InMsg::ProtocolError(message));

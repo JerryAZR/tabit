@@ -1,7 +1,8 @@
 //! The serve side of the frozen wire: the stdio edge of the session
 //! protocol (JSON mode). LF-JSONL in both directions — the client's
-//! lines are [`ClientFrame`]s (an `initialize` handshake, then
-//! commands), the server's lines are stamped [`EventFrame`]s plus
+//! lines are bare [`SessionCommand`]s (the report model: no
+//! handshake — commands may flow from the spawner's first line), the
+//! server's lines are its self-report, stamped [`EventFrame`]s, plus
 //! handshake/transport-error control frames. Only protocol bytes reach
 //! stdout; human banners stay on stderr.
 //!
@@ -13,25 +14,23 @@
 
 use std::io::{BufRead, Write};
 use tabit_protocol::EventFrame;
-use tabit_protocol::{
-    ClientFrame, PROTOCOL_VERSION, ServerControlFrame, ServerFrame, SessionCommand,
-};
+use tabit_protocol::{PROTOCOL_VERSION, ServerControlFrame, ServerFrame, SessionCommand};
 use tokio::sync::mpsc;
 use tokio_util::sync::CancellationToken;
 
-use crate::endpoint::{SessionCommandLink, SessionHost, SessionInfo};
+use crate::endpoint::SessionHost;
 
 /// Serve the backend over `reader`/`writer` until the client closes its
-/// input. Returns the process exit code: 0 normally, 1 on a handshake
-/// version mismatch (the connection is rejected and closed).
+/// input (or the stream behind the edge ends). Returns the process
+/// exit code: 0 normally, 1 on a broken reader.
 pub async fn serve<R, W>(mut host: SessionHost, reader: R, writer: W) -> i32
 where
     R: BufRead + Send + 'static,
     W: Write + Send + 'static,
 {
-    // Two feeds into one writer: the reader's control frames (the
-    // ack, protocol errors) and the forwarder's events, each on its
-    // own channel. The writer ends when the FORWARDER's channel
+    // Two feeds into one writer: the control frames (the report, the
+    // reader's protocol errors) and the forwarder's events, each on
+    // its own channel. The writer ends when the FORWARDER's channel
     // closes — the forwarder is the stream's producer, and its end is
     // the deterministic one (the reader thread parks in a blocking
     // read that nothing on this side can interrupt, and its sender
@@ -39,29 +38,25 @@ where
     // stream-end path below).
     let (control_tx, control_rx) = mpsc::unbounded_channel::<ServerFrame>();
     let (event_tx, event_rx) = mpsc::unbounded_channel::<ServerFrame>();
-    let link = host.command_link();
-    let info = host.info().clone();
 
-    // The ack gate: the handshake ack is the transport's first
-    // obligation, and events can exist from spawn (startup degradation
-    // frames), so the forwarder waits until the reader has sent the
-    // ack. A rejected handshake drops the gate's sender — the forwarder
-    // ends without forwarding anything (the rejection is the only
-    // frame).
-    let (gate_tx, gate_rx) = tokio::sync::watch::channel(false);
+    // The self-report — this child's FIRST line on the channel (owner
+    // ruling 2026-09-25, the report model: a spawned child can assume
+    // its spawner is there and pump, while the spawner can assume
+    // nothing until the child self-reports). It is queued onto the
+    // control feed before the forwarder task exists, and the writer's
+    // biased control-first poll writes it before any event — nothing
+    // can precede it. Protocol facts only; the spawner version-checks
+    // and kills an incompatible child, and every session fact arrives
+    // by event (the boot's `session_opened` first).
+    let _ = control_tx.send(ServerFrame::Control(ServerControlFrame::Report {
+        protocol_version: PROTOCOL_VERSION,
+    }));
 
-    // The reader blocks on lines; the writer is the single owner of
-    // stdout, and control frames win whenever both feeds are ready
-    // (the reader queues the ack BEFORE it opens the gate, and no
-    // event exists until the gate opens — the ack-first law survives
-    // the two-channel shape).
     let dispatch = {
         let link = host.command_link();
         std::sync::Arc::new(move |command: SessionCommand| link.send(command))
     };
-    let reader_task = tokio::task::spawn_blocking(move || {
-        read_loop(reader, link, dispatch, control_tx, &info, gate_tx)
-    });
+    let reader_task = tokio::task::spawn_blocking(move || read_loop(reader, dispatch, control_tx));
     let writer_task = tokio::spawn(write_loop(control_rx, event_rx, writer));
 
     // The live forwarder: host events reach stdout as they happen, for
@@ -73,7 +68,7 @@ where
     // joins first), so draining what remains and stopping is lossless.
     let events = host.take_events();
     let end = host.stream_end_signal();
-    let forwarder_task = tokio::spawn(forward_events(events, event_tx, gate_rx, end.clone()));
+    let forwarder_task = tokio::spawn(forward_events(events, event_tx, end.clone()));
 
     // A panicked reader thread is a broken edge: exit nonzero. The
     // stream's end is the other way out: when the host behind the
@@ -113,30 +108,11 @@ where
 async fn forward_events(
     stream: Option<mpsc::UnboundedReceiver<EventFrame>>,
     out: mpsc::UnboundedSender<ServerFrame>,
-    mut gate: tokio::sync::watch::Receiver<bool>,
     end: CancellationToken,
 ) {
     let Some(mut stream) = stream else {
         return;
     };
-    loop {
-        if *gate.borrow() {
-            break;
-        }
-        tokio::select! {
-            changed = gate.changed() => {
-                // A dropped gate means the handshake was rejected: the
-                // rejection is the only frame the client ever sees.
-                if changed.is_err() {
-                    return;
-                }
-            }
-            // The stream ended before the handshake resolved: nothing
-            // forwards — not even the backlog (the endpoint behind the
-            // edge is gone).
-            _ = end.cancelled() => return,
-        }
-    }
     loop {
         tokio::select! {
             frame = stream.recv() => {
@@ -159,22 +135,20 @@ async fn forward_events(
     }
 }
 
-/// Parse client lines and act on them until EOF (or a rejected
-/// handshake). Blocking, runs on its own thread. Opens `gate` once the
-/// ack has been sent, releasing the event forwarder.
+/// Parse client lines into commands and dispatch them until EOF.
+/// Blocking, runs on its own thread. Under the report model there is
+/// no handshake state: commands may flow from the spawner's very
+/// first line — before or after this child's report — and the pipe
+/// buffers whatever arrives early.
 fn read_loop<R: BufRead>(
     mut reader: R,
-    link: SessionCommandLink,
     dispatch: std::sync::Arc<dyn Fn(SessionCommand) + Send + Sync>,
     out: mpsc::UnboundedSender<ServerFrame>,
-    info: &SessionInfo,
-    gate: tokio::sync::watch::Sender<bool>,
 ) -> i32 {
     fn control(out: &mpsc::UnboundedSender<ServerFrame>, frame: ServerControlFrame) {
         let _ = out.send(ServerFrame::Control(frame));
     }
 
-    let mut initialized = false;
     let mut line = String::new();
     loop {
         line.clear();
@@ -187,60 +161,8 @@ fn read_loop<R: BufRead>(
         if frame.is_empty() {
             continue;
         }
-        match serde_json::from_str::<ClientFrame>(frame) {
-            Ok(ClientFrame::Initialize {
-                protocol_version,
-                replay,
-            }) if !initialized => {
-                if protocol_version == PROTOCOL_VERSION {
-                    control(
-                        &out,
-                        ServerControlFrame::InitializeAck {
-                            protocol_version: PROTOCOL_VERSION,
-                            session_id: info.session_id.clone(),
-                        },
-                    );
-                    // The ack is queued ahead of anything the forwarder
-                    // will send: events may flow from here on.
-                    let _ = gate.send(true);
-                    initialized = true;
-                    // The pass streams onto the host's event channel,
-                    // so it lands after the ack (the gate just opened)
-                    // and after the startup frames already queued on
-                    // the same sender.
-                    if replay {
-                        link.replay(&info.session_id);
-                    }
-                } else {
-                    control(
-                        &out,
-                        ServerControlFrame::InitializeRejected {
-                            reason: format!(
-                                "protocol version {PROTOCOL_VERSION} required, \
-                                 client sent {protocol_version}"
-                            ),
-                        },
-                    );
-                    return 1;
-                }
-            }
-            Ok(ClientFrame::Initialize { .. }) => {
-                control(
-                    &out,
-                    ServerControlFrame::ProtocolError {
-                        message: "already initialized".to_string(),
-                    },
-                );
-            }
-            Ok(ClientFrame::Command(command)) if initialized => dispatch(command),
-            Ok(ClientFrame::Command(_)) => {
-                control(
-                    &out,
-                    ServerControlFrame::ProtocolError {
-                        message: "command before initialize".to_string(),
-                    },
-                );
-            }
+        match serde_json::from_str::<SessionCommand>(frame) {
+            Ok(command) => dispatch(command),
             Err(error) => {
                 control(
                     &out,
@@ -558,22 +480,18 @@ id = "m"
         .expect("the bridge must produce the awaited line before timeout")
     }
 
-    /// The boot session id, read from the ack line — the honest client
-    /// shape v3 forces: commands name their session, and the id is
-    /// learnable only from the ack.
-    async fn ack_session_id(out: &SharedOut) -> String {
-        let ack = await_line(out, "initialize_ack").await;
-        match serde_json::from_str::<ServerFrame>(&ack).expect("ack parses") {
-            ServerFrame::Control(ServerControlFrame::InitializeAck { session_id, .. }) => {
-                session_id
-            }
-            other => panic!("expected initialize_ack, got {other:?}"),
+    /// The boot session id, read from the boot's `session_opened` —
+    /// the honest client shape the report model forces: commands name
+    /// their session, and the id is learnable only from the announce.
+    async fn boot_session_id(out: &SharedOut) -> String {
+        let opened = await_line(out, "session_opened").await;
+        match serde_json::from_str::<ServerFrame>(&opened).expect("announce parses") {
+            ServerFrame::Event(EventFrame {
+                event: crate::SessionEvent::SessionOpened { id, .. },
+                ..
+            }) => id,
+            other => panic!("expected session_opened, got {other:?}"),
         }
-    }
-
-    /// An `initialize` wire line carrying the live protocol version.
-    fn init_line() -> String {
-        format!(r#"{{"protocol_version":{}}}"#, crate::PROTOCOL_VERSION)
     }
 
     /// A `message` wire line for `session`.
@@ -604,8 +522,7 @@ id = "m"
             out.clone(),
         ));
 
-        tx_in.send(init_line()).unwrap();
-        let session_id = ack_session_id(&out).await;
+        let session_id = boot_session_id(&out).await;
         tx_in.send(message_line(&session_id, "hi")).unwrap();
 
         // Input stays open: the whole round trip must arrive anyway.
@@ -658,7 +575,6 @@ id = "m"
     /// want a completed run keep the input open until it finishes.
     async fn bridge_live(
         tag: &str,
-        init: &str,
         lines_from: impl Fn(&str) -> Vec<String>,
         turns: Vec<Vec<MockStreamEvent>>,
         until: impl Fn(&[String]) -> bool,
@@ -680,8 +596,7 @@ id = "m"
             },
             out.clone(),
         ));
-        tx_in.send(init.to_string()).unwrap();
-        let session_id = ack_session_id(&out).await;
+        let session_id = boot_session_id(&out).await;
         for line in lines_from(&session_id) {
             tx_in.send(line).unwrap();
         }
@@ -711,7 +626,6 @@ id = "m"
     async fn handshake_then_round_trip_over_memory_buffers() {
         let (code, lines) = bridge_live(
             "roundtrip",
-            &init_line(),
             |session| vec![message_line(session, "hi")],
             vec![script("hello")],
             |lines| lines.iter().any(|l| l.contains("run_finished")),
@@ -719,23 +633,21 @@ id = "m"
         .await;
         assert_eq!(code, 0);
         let frames = parse_frames(&lines);
-        // The ack comes first and carries protocol-level facts only —
-        // the session's facts arrive as the session_opened event.
+        // The report is the first line and carries protocol facts only
+        // — the session's facts arrive as the session_opened event.
         match &frames[0] {
-            ServerFrame::Control(ServerControlFrame::InitializeAck {
-                protocol_version,
-                session_id,
-            }) => {
+            ServerFrame::Control(ServerControlFrame::Report { protocol_version }) => {
                 assert_eq!(*protocol_version, crate::PROTOCOL_VERSION);
-                assert!(!session_id.is_empty());
             }
-            other => panic!("expected initialize_ack, got {other:?}"),
+            other => panic!("expected the report, got {other:?}"),
         }
-        let boot_id = match &frames[0] {
-            ServerFrame::Control(ServerControlFrame::InitializeAck { session_id, .. }) => {
-                session_id.clone()
-            }
-            _ => unreachable!("checked above"),
+        let boot_id = match &frames[1] {
+            ServerFrame::Event(EventFrame {
+                origin: None,
+                event: crate::SessionEvent::SessionOpened { id, .. },
+                ..
+            }) => id.clone(),
+            other => panic!("expected session_opened second, got {other:?}"),
         };
         let opened = frames.iter().find_map(|frame| match frame {
             ServerFrame::Event(EventFrame {
@@ -780,8 +692,7 @@ id = "m"
             },
             out.clone(),
         ));
-        tx_in.send(init_line()).unwrap();
-        let session_id = ack_session_id(&out).await;
+        let session_id = boot_session_id(&out).await;
         tx_in.send(message_line(&session_id, "hi")).unwrap();
         tokio::time::timeout(std::time::Duration::from_secs(5), async {
             loop {
@@ -798,15 +709,13 @@ id = "m"
         assert_eq!(code, 0);
 
         let frames = parse_frames(&read_lines(&out));
-        // The ack is the first frame; session_opened and the
+        // The report is the first line; session_opened and the
         // degradation follow it and precede every run event — the
-        // gate holds even though the worker emitted the note at
-        // spawn, before the handshake.
+        // control-first writer holds even though the worker emitted
+        // the note at spawn, before the edge served.
         assert!(matches!(
             frames.first(),
-            Some(ServerFrame::Control(
-                ServerControlFrame::InitializeAck { .. }
-            ))
+            Some(ServerFrame::Control(ServerControlFrame::Report { .. }))
         ));
         let degraded_at = frames
             .iter()
@@ -842,23 +751,11 @@ id = "m"
     }
 
     #[tokio::test]
-    async fn version_mismatch_rejects_the_connection_and_exits_nonzero() {
-        let (code, frames) =
-            bridge("mismatch", "{\"protocol_version\":99}\n", vec![script("x")]).await;
-        assert_eq!(code, 1);
-        assert_eq!(frames.len(), 1, "nothing follows a rejected handshake");
-        match &frames[0] {
-            ServerFrame::Control(ServerControlFrame::InitializeRejected { reason }) => {
-                assert!(reason.contains("required"), "{reason}");
-            }
-            other => panic!("expected initialize_rejected, got {other:?}"),
-        }
-    }
-
-    #[tokio::test]
-    async fn a_command_before_initialize_is_a_protocol_error_and_the_connection_survives() {
-        // Inline (not bridge_live): the protocol error must precede the
-        // handshake, and the command lines need the ack's session id.
+    async fn a_command_on_the_first_line_dispatches() {
+        // The report model: commands may flow from the spawner's very
+        // first line — before the child's own report is even written.
+        // The abort names an unknown session: its outcome is the
+        // uniform unstamped error, proving the dispatch ran.
         let session = test_session("preinit", vec![script("ok")]);
         let handle = SessionHost::spawn(
             session,
@@ -879,37 +776,13 @@ id = "m"
         tx_in
             .send(r#"{"type":"abort","session":"any"}"#.to_string())
             .unwrap();
-        await_line(&out, "protocol_error").await;
-        tx_in.send(init_line()).unwrap();
-        let session_id = ack_session_id(&out).await;
+        await_line(&out, "no session `any` on this node").await;
+        let session_id = boot_session_id(&out).await;
         tx_in.send(message_line(&session_id, "real")).unwrap();
-        tokio::time::timeout(std::time::Duration::from_secs(5), async {
-            loop {
-                if read_lines(&out).iter().any(|l| l.contains("run_finished")) {
-                    return;
-                }
-                tokio::time::sleep(std::time::Duration::from_millis(25)).await;
-            }
-        })
-        .await
-        .expect("the run must complete before timeout");
+        await_line(&out, "run_finished").await;
         drop(tx_in);
-        let code = serve_task.await.unwrap();
-        assert_eq!(code, 0);
-        let frames = parse_frames(&read_lines(&out));
-        match &frames[0] {
-            ServerFrame::Control(ServerControlFrame::ProtocolError { message }) => {
-                assert!(message.contains("before initialize"), "{message}");
-            }
-            other => panic!("expected protocol_error, got {other:?}"),
-        }
-        // The handshake still succeeds after the error, and the following
-        // command runs.
-        assert!(matches!(
-            &frames[1],
-            ServerFrame::Control(ServerControlFrame::InitializeAck { .. })
-        ));
-        assert_eq!(texts(&frames, "user"), vec!["real"]);
+        assert_eq!(serve_task.await.unwrap(), 0);
+        let _ = std::fs::remove_dir_all(test_dir("preinit"));
     }
 
     #[tokio::test]
@@ -945,8 +818,7 @@ id = "m"
             out.clone(),
         ));
 
-        tx_in.send(init_line()).unwrap();
-        let session_id = ack_session_id(&out).await;
+        let session_id = boot_session_id(&out).await;
         tx_in.send(message_line(&session_id, "slow one")).unwrap();
 
         // Close the input the moment the tool call is provably in
@@ -984,29 +856,23 @@ id = "m"
 
     #[tokio::test]
     async fn an_unparseable_line_is_reported_and_skipped() {
-        // A blank line between frames is skipped, and a second
-        // initialize is a protocol error, not a restart.
+        // A blank line between frames is skipped; every unparseable
+        // line is a protocol error, and the connection survives them.
         let (code, frames) = bridge(
             "garbage",
-            &format!("this is not json\n\n{}\n{}\n", init_line(), init_line()),
+            "this is not json\n\nalso not json\n",
             vec![script("x")],
         )
         .await;
         assert_eq!(code, 0);
-        match &frames[0] {
-            ServerFrame::Control(ServerControlFrame::ProtocolError { message }) => {
-                assert!(message.contains("unparseable"), "{message}");
-            }
-            other => panic!("expected protocol_error, got {other:?}"),
-        }
+        // The report is always first.
         assert!(matches!(
-            &frames[1],
-            ServerFrame::Control(ServerControlFrame::InitializeAck { .. })
+            &frames[0],
+            ServerFrame::Control(ServerControlFrame::Report { .. })
         ));
-        // Past the ack the ordering is genuinely concurrent: the
-        // reader's protocol_error for the second initialize races the
-        // host's session_opened through the forwarder. Assert the
-        // multiset, not positions.
+        // Past the report the ordering is genuinely concurrent: the
+        // reader's protocol_error races the host's session_opened
+        // through the forwarder. Assert the multiset, not positions.
         let protocol_errors: Vec<&str> = frames
             .iter()
             .filter_map(|frame| match frame {
@@ -1018,9 +884,7 @@ id = "m"
             .collect();
         assert_eq!(protocol_errors.len(), 2, "{frames:?}");
         assert!(
-            protocol_errors
-                .iter()
-                .any(|m| m.contains("already initialized")),
+            protocol_errors.iter().all(|m| m.contains("unparseable")),
             "{protocol_errors:?}"
         );
         assert!(
@@ -1116,12 +980,7 @@ id = "m"
             test_wiring(&test_dir("fail-writer")),
             test_data(unusable_create()),
         );
-        let code = serve(
-            handle,
-            Cursor::new(format!("{}\n", init_line()).into_bytes()),
-            FailingWriter,
-        )
-        .await;
+        let code = serve(handle, Cursor::new(Vec::new()), FailingWriter).await;
         assert_eq!(code, 0);
     }
     #[tokio::test]
@@ -1201,7 +1060,7 @@ id = "m"
                 crate::PROTOCOL_VERSION
             ))
             .unwrap();
-        let session_id = ack_session_id(&out).await;
+        let session_id = boot_session_id(&out).await;
         tx_in.send(message_line(&session_id, "again")).unwrap();
         tokio::time::timeout(std::time::Duration::from_secs(5), async {
             loop {
@@ -1219,9 +1078,7 @@ id = "m"
         let frames = parse_frames(&read_lines(&out));
         assert!(matches!(
             frames.first(),
-            Some(ServerFrame::Control(
-                ServerControlFrame::InitializeAck { .. }
-            ))
+            Some(ServerFrame::Control(ServerControlFrame::Report { .. }))
         ));
         // The v3 startup announcement: the boot's session_opened leads
         // (every session becoming visible is announced the same way),
@@ -1272,8 +1129,8 @@ id = "m"
             .iter()
             .filter_map(|frame| match frame {
                 ServerFrame::Event(event) => match &event.event {
-                    crate::SessionEvent::ReplayStarted { .. } => Some("replay_started"),
-                    crate::SessionEvent::ReplayDone => Some("replay_done"),
+                    crate::SessionEvent::ReplayBegin { .. } => Some("replay_begin"),
+                    crate::SessionEvent::ReplayEnd => Some("replay_end"),
                     crate::SessionEvent::ModelChanged { .. } => Some("model_changed"),
                     crate::SessionEvent::UserMessage { .. } => Some("user_message"),
                     crate::SessionEvent::TurnStarted { .. } => Some("turn_started"),
@@ -1297,13 +1154,13 @@ id = "m"
                 // pass itself carries no model_changed — state is
                 // announced live, never reconstructed from history).
                 "model_changed",
-                "replay_started",
+                "replay_begin",
                 "user_message",
                 "turn_started",
                 "text_delta",
                 "completion_call",
                 "turn_committed",
-                "replay_done",
+                "replay_end",
                 // The follow-up message runs after the pass, live.
                 "user_message",
                 "turn_started",
@@ -1329,19 +1186,22 @@ id = "m"
     }
 
     #[tokio::test]
-    async fn initialize_without_replay_gets_no_pass() {
-        let (code, frames) = bridge("no-replay", &init_line(), vec![script("hello")]).await;
+    async fn a_fresh_boot_replays_nothing() {
+        // Replay is default-on only for a RESUMED boot (owner ruling
+        // 2026-09-25); a fresh boot (or an absorbed `--continue` miss)
+        // has nothing to replay and emits no pass.
+        let (code, frames) = bridge("no-replay", "", vec![script("hello")]).await;
         assert_eq!(code, 0);
         assert!(
             !frames.iter().any(|frame| matches!(
                 frame,
                 ServerFrame::Event(EventFrame {
                     origin: None,
-                    event: crate::SessionEvent::ReplayStarted { .. },
+                    event: crate::SessionEvent::ReplayBegin { .. },
                     ..
                 })
             )),
-            "no replay request, no pass"
+            "a fresh boot replays nothing"
         );
     }
 
@@ -1434,8 +1294,7 @@ id = "m"
 
         // Handshake, then one live round trip so the boot session
         // materializes on disk (the catalog lists stored files only).
-        tx_in.send(init_line()).unwrap();
-        let boot = ack_session_id(&out).await;
+        let boot = boot_session_id(&out).await;
         tx_in.send(message_line(&boot, "hello")).unwrap();
         await_line(&out, "run_finished").await;
 
@@ -1494,8 +1353,8 @@ id = "m"
         tx_in
             .send(format!(r#"{{"type":"open_session","id":"{boot}"}}"#))
             .unwrap();
-        await_line(&out, "replay_done").await;
-        let replay_started = await_line(&out, "replay_started").await;
+        await_line(&out, "replay_end").await;
+        let replay_started = await_line(&out, "replay_begin").await;
         assert!(replay_started.contains(&format!(r#""stream":"{boot}""#)));
 
         drop(tx_in);
@@ -1580,8 +1439,7 @@ id = "m"
             },
             out.clone(),
         ));
-        tx_in.send(init_line()).unwrap();
-        let session_id = ack_session_id(&out).await;
+        let session_id = boot_session_id(&out).await;
         tx_in.send(message_line(&session_id, "hi")).unwrap();
         drop(tx_in);
 
@@ -1605,7 +1463,6 @@ id = "m"
     async fn a_message_for_an_unknown_session_is_a_session_error() {
         let (code, lines) = bridge_live(
             "unknown-session",
-            &init_line(),
             |session| {
                 vec![
                     message_line("no-such-session", "lost?"),
@@ -1658,8 +1515,7 @@ id = "m"
             out.clone(),
         ));
 
-        tx_in.send(init_line()).unwrap();
-        let session_id = ack_session_id(&out).await;
+        let session_id = boot_session_id(&out).await;
         tx_in.send(message_line(&session_id, "hi")).unwrap();
         await_line(&out, "run_finished").await;
 
@@ -1691,7 +1547,7 @@ id = "m"
             checked.contains(r#""base_id":null"#),
             "full re-render rides an explicit null: {checked}"
         );
-        await_line(&out, "replay_done").await;
+        await_line(&out, "replay_end").await;
 
         // The session is fully alive after the rewind: the next prompt
         // branches and runs.

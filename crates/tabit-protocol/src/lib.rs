@@ -43,7 +43,7 @@ pub use events::{
 pub use model::{Cost, ModelFacts, ModelSelection};
 pub use protocol::command_tags;
 pub use protocol::{
-    ClientFrame, EventFrame, PROTOCOL_VERSION, ServerControlFrame, ServerFrame, SessionCommand,
-    StreamId, to_wire_line,
+    EventFrame, PROTOCOL_VERSION, ServerControlFrame, ServerFrame, SessionCommand, StreamId,
+    to_wire_line,
 };
 pub use usage::Usage;

@@ -9,36 +9,6 @@ where
 }
 
 #[test]
-fn the_replay_flag_serializes_only_when_set() {
-    // `replay: false` is the default and stays off the wire; `true`
-    // round-trips, and an absent flag parses back as false.
-    let bare = serde_json::to_string(&ClientFrame::Initialize {
-        protocol_version: PROTOCOL_VERSION,
-        replay: false,
-    })
-    .expect("serialize");
-    assert!(!bare.contains("replay"), "false is omitted: {bare}");
-    let parsed: ClientFrame = serde_json::from_str(&bare).expect("parse");
-    assert_eq!(
-        parsed,
-        ClientFrame::Initialize {
-            protocol_version: PROTOCOL_VERSION,
-            replay: false,
-        }
-    );
-    assert_eq!(
-        round_trip(&ClientFrame::Initialize {
-            protocol_version: PROTOCOL_VERSION,
-            replay: true,
-        }),
-        ClientFrame::Initialize {
-            protocol_version: PROTOCOL_VERSION,
-            replay: true,
-        }
-    );
-}
-
-#[test]
 fn commands_round_trip_with_snake_case_tags() {
     let commands = vec![
         SessionCommand::Message {
@@ -356,56 +326,35 @@ fn sampled_event_variants_survive_the_frame_envelope() {
 }
 
 #[test]
-fn client_frames_parse_initialize_and_commands_from_one_line_shape() {
-    let init: ClientFrame = serde_json::from_str(r#"{"protocol_version":1}"#).expect("initialize");
-    assert_eq!(
-        init,
-        ClientFrame::Initialize {
-            protocol_version: 1,
-            replay: false,
-        }
-    );
-    let replaying: ClientFrame =
-        serde_json::from_str(r#"{"protocol_version":2,"replay":true}"#).expect("replaying");
-    assert_eq!(
-        replaying,
-        ClientFrame::Initialize {
-            protocol_version: 2,
-            replay: true,
-        }
-    );
-    let command: ClientFrame =
+fn client_lines_are_bare_commands() {
+    // v19: the handshake died with the report model — a client line
+    // IS a command, from the spawner's very first line onward.
+    let command: SessionCommand =
         serde_json::from_str(r#"{"type":"message","session":"s1","text":"hi"}"#).expect("command");
     assert_eq!(
         command,
-        ClientFrame::Command(SessionCommand::Message {
+        SessionCommand::Message {
             session: "s1".to_string(),
             text: "hi".to_string()
-        })
+        }
     );
-    let open: ClientFrame =
+    let open: SessionCommand =
         serde_json::from_str(r#"{"type":"open_session","id":"s2"}"#).expect("open");
     assert_eq!(
         open,
-        ClientFrame::Command(SessionCommand::OpenSession {
+        SessionCommand::OpenSession {
             id: "s2".to_string()
-        })
+        }
     );
-    assert!(serde_json::from_str::<ClientFrame>("not json at all").is_err());
+    assert!(serde_json::from_str::<SessionCommand>("not json at all").is_err());
 }
 
 #[test]
 fn server_control_frames_round_trip_and_stay_distinct_from_events() {
-    let ack = ServerControlFrame::InitializeAck {
+    let report = ServerControlFrame::Report {
         protocol_version: PROTOCOL_VERSION,
-        session_id: "s1".to_string(),
     };
-    assert_eq!(round_trip(&ack), ack);
-
-    let rejected = ServerControlFrame::InitializeRejected {
-        reason: "protocol version 1 required".to_string(),
-    };
-    assert_eq!(round_trip(&rejected), rejected);
+    assert_eq!(round_trip(&report), report);
 
     let error = ServerControlFrame::ProtocolError {
         message: "unparseable line".to_string(),

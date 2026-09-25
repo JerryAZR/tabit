@@ -105,7 +105,7 @@ Current workspace layout:
   child's lane at the handshake and intakes every stamped arrival
   through it, one mount for the bridge and the SDK's owned
   children) and
-  speaks the frontend protocol to it — the bounded handshake, the
+  speaks the frontend protocol to it — the bounded report wait, the
   frame pump, the reaper; `process.rs` (moved
   from tabit-ext) is the substrate every spawning site shares
   (tree-kill wrapping, the stderr ring, the grace reaper,
@@ -154,7 +154,8 @@ Current workspace layout:
   registry, no lockfile)
 - `crates/tabit-ext` — the extension host (ROADMAP item 9): manifest
   discovery (`tabit.json` under the extensions root), the frozen
-  JSONL extension pipe (initialize/ack, the tool lane, the flat
+  JSONL extension pipe (the extension's self-report first, the
+  host's facts after it, the tool lane, the flat
   grammar), the supervisor (launch over the
   disable-filtered scan, handshake, supervise,
   mark-dead-and-report — no mid-run respawn; the tool-call dispatch

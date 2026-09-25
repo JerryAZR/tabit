@@ -72,8 +72,8 @@ fn main() {
         }
     }
 
-    // The initialize crosses before anything else.
-    read_line();
+    // The report model: this guest speaks first — no initialize to
+    // consume.
 
     match behavior.as_str() {
         "mute" => loop {
@@ -85,7 +85,7 @@ fn main() {
         }
         "wrong-version" => {
             emit(json!({
-                "type": "ack", "protocol_version": 99,
+                "type": "report", "protocol_version": 99,
                 "tools": [], "hooks": [],
             }));
             drain();
@@ -98,7 +98,7 @@ fn main() {
         // lane — never crash.
         "svc-dupe" => {
             emit(json!({
-                "type": "ack", "protocol_version": 4,
+                "type": "report", "protocol_version": 5,
                 "tools": [], "hooks": [], "watch": [],
             }));
             for _ in 0..2 {
@@ -122,7 +122,7 @@ fn main() {
         }
         _ => {
             emit(json!({
-                "type": "ack", "protocol_version": 4,
+                "type": "report", "protocol_version": 5,
                 "tools": [], "hooks": [], "watch": [],
             }));
             if behavior == "die-post-ack" {
@@ -153,7 +153,7 @@ fn main() {
 /// prepared core takes them (routing by table, lifecycle by parking).
 fn serve_grammar() {
     emit(json!({
-        "type": "ack", "protocol_version": 4,
+        "type": "report", "protocol_version": 5,
         "tools": [], "hooks": [],
         "watch": ["session_opened", "interaction_settled"],
     }));
@@ -199,7 +199,7 @@ fn serve_grammar() {
 /// pipe is one lane, and this double keeps it honest.
 fn serve_tools(tools: Value) {
     emit(json!({
-        "type": "ack", "protocol_version": 4,
+        "type": "report", "protocol_version": 5,
         "tools": tools, "hooks": [], "watch": [],
     }));
     let behavior = std::env::args().nth(1).unwrap_or_default();
@@ -338,7 +338,7 @@ fn serve_tools(tools: Value) {
 /// sequentially. The behavior picks the decision path.
 fn serve_hooks(behavior: &str) {
     emit(json!({
-        "type": "ack", "protocol_version": 4,
+        "type": "report", "protocol_version": 5,
         "tools": [], "hooks": [{"event": "tool_call"}], "watch": [],
     }));
     loop {

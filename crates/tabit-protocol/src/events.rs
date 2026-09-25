@@ -232,13 +232,15 @@ pub enum SessionEvent {
     /// chain as finalized live events — the same shapes a live run
     /// produces, ids included verbatim, deltas whole. `total` is the
     /// number of events the pass will emit between this and
-    /// `replay_done`.
-    ReplayStarted {
+    /// `replay_end` (v19's name; the count is the progress
+    /// denominator — a frontend may track it, or ignore the pass
+    /// whole).
+    ReplayBegin {
         /// The pass's event count (the progress denominator).
         total: u64,
     },
     /// The replay pass ended: every event it announced has been emitted.
-    ReplayDone,
+    ReplayEnd,
     /// A `checkout` succeeded: the session's active chain now ends at
     /// `entry_id` (inclusive). Followed immediately by a full replay
     /// pass bracketing the rewound chain — the pass is the re-render
@@ -730,8 +732,8 @@ impl SessionEvent {
             SessionEvent::RunFinished { .. } => tags::RUN_FINISHED,
             SessionEvent::RunFailed { .. } => tags::RUN_FAILED,
             SessionEvent::Error { .. } => tags::ERROR,
-            SessionEvent::ReplayStarted { .. } => tags::REPLAY_STARTED,
-            SessionEvent::ReplayDone => tags::REPLAY_DONE,
+            SessionEvent::ReplayBegin { .. } => tags::REPLAY_BEGIN,
+            SessionEvent::ReplayEnd => tags::REPLAY_END,
             SessionEvent::CheckedOut { .. } => tags::CHECKED_OUT,
             SessionEvent::SessionsAvailable { .. } => tags::SESSIONS_AVAILABLE,
             SessionEvent::SkillsAvailable { .. } => tags::SKILLS_AVAILABLE,
@@ -776,8 +778,8 @@ pub mod tags {
     pub const RUN_FINISHED: &str = "run_finished";
     pub const RUN_FAILED: &str = "run_failed";
     pub const ERROR: &str = "error";
-    pub const REPLAY_STARTED: &str = "replay_started";
-    pub const REPLAY_DONE: &str = "replay_done";
+    pub const REPLAY_BEGIN: &str = "replay_begin";
+    pub const REPLAY_END: &str = "replay_end";
     pub const CHECKED_OUT: &str = "checked_out";
     pub const SESSIONS_AVAILABLE: &str = "sessions_available";
     pub const SKILLS_AVAILABLE: &str = "skills_available";
@@ -812,8 +814,8 @@ pub mod tags {
         RUN_FINISHED,
         RUN_FAILED,
         ERROR,
-        REPLAY_STARTED,
-        REPLAY_DONE,
+        REPLAY_BEGIN,
+        REPLAY_END,
         CHECKED_OUT,
         SESSIONS_AVAILABLE,
         SKILLS_AVAILABLE,

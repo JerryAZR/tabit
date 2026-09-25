@@ -117,8 +117,8 @@ pub use session::{
 pub use stats::{ModelStats, ModelUsage, SessionStats, UsageLedger};
 pub use store::{SessionStore, SessionSummary};
 pub use tabit_protocol::{
-    ClientFrame, EventFrame, ModelSelection, PROTOCOL_VERSION, ServerControlFrame, ServerFrame,
-    SessionCommand, SessionEvent, StreamId,
+    EventFrame, ModelSelection, PROTOCOL_VERSION, ServerControlFrame, ServerFrame, SessionCommand,
+    SessionEvent, StreamId,
 };
 pub use tabit_wire::node::{Channel, Node};
 pub use tree::{SessionTree, TreeFault};

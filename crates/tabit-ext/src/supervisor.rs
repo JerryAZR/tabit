@@ -42,8 +42,8 @@ use std::time::Duration;
 
 use crate::manifest::{self, Discovered, Manifest};
 use crate::protocol::{
-    Ack, EXTENSION_PROTOCOL_VERSION, ExtFrame, HookDecl, HookResult, HostFrame, KIND_HOOK_RESULT,
-    KIND_SERVICE_RESPONSE, KIND_TOOL_RESULT, ServiceVerb, ToolDecl, ToolWireResult,
+    EXTENSION_PROTOCOL_VERSION, ExtFrame, HookDecl, HookResult, HostFrame, KIND_HOOK_RESULT,
+    KIND_SERVICE_RESPONSE, KIND_TOOL_RESULT, Report, ServiceVerb, ToolDecl, ToolWireResult,
 };
 use rig_agent::tool::services::{HostServices, ModelPromptOk, ModelPromptRequest, ServiceUsage};
 use std::io::Write;
@@ -488,7 +488,7 @@ pub struct LaunchContext {
     /// The host's node — the same net the session host and the
     /// subprocess bridge ride.
     pub node: Arc<Node>,
-    /// The running backend's own executable path (`initialize`'s
+    /// The running backend's own executable path (`host_facts`'s
     /// `core_path` — the host IS the binary).
     pub core_path: String,
     /// The backend's working directory.
@@ -710,7 +710,7 @@ async fn supervise(
     lanes: Arc<Mutex<HashMap<String, CancellationToken>>>,
 ) {
     // A child of the supervisor's token: this extension's failure
-    // closes only its own pipe (fail_before_ack cancels this one),
+    // closes only its own pipe (fail_before_mount cancels this one),
     // while host shutdown cascades through the hierarchy to every
     // child. One shared token here was the fleet-kill bug — one
     // broken package's pre-ack failure tore down every healthy
@@ -737,7 +737,7 @@ async fn supervise(
     let stdin = match process.stdin().take() {
         Some(stdin) => stdin,
         None => {
-            fail_before_ack(
+            fail_before_mount(
                 &mut process,
                 &closing,
                 &state,
@@ -755,7 +755,7 @@ async fn supervise(
     let stdout = match process.stdout().take() {
         Some(stdout) => stdout,
         None => {
-            fail_before_ack(
+            fail_before_mount(
                 &mut process,
                 &closing,
                 &state,
@@ -773,7 +773,7 @@ async fn supervise(
     let stderr = match process.stderr().take() {
         Some(stderr) => stderr,
         None => {
-            fail_before_ack(
+            fail_before_mount(
                 &mut process,
                 &closing,
                 &state,
@@ -822,21 +822,21 @@ async fn supervise(
             let mut death_tx = Some(death_tx);
             while let Ok(Some(line)) = lines.next_line().await {
                 match serde_json::from_str::<ExtFrame>(&line) {
-                    Ok(ExtFrame::Ack {
+                    Ok(ExtFrame::Report {
                         protocol_version,
                         tools,
                         hooks,
                         watch,
                     }) => {
                         if let Some(tx) = handshake_tx.take() {
-                            let _ = tx.send(Handshake::Acked(Ack {
+                            let _ = tx.send(Handshake::Acked(Report {
                                 protocol_version,
                                 tools,
                                 hooks,
                                 watch,
                             }));
                         }
-                        // A re-ack after a good one: tolerated, ignored.
+                        // A re-report after a good one: tolerated, ignored.
                     }
                     Ok(ExtFrame::ToolResult(result)) => {
                         // The correlation-kind law: a tool result must
@@ -921,36 +921,27 @@ async fn supervise(
             let reason = "the extension process died mid-call".to_string();
             lane.die(&node, &reason);
             if let Some(tx) = handshake_tx.take() {
-                let _ = tx.send(Handshake::Failed("closed before the handshake".to_string()));
+                let _ = tx.send(Handshake::Failed("closed before the report".to_string()));
             } else if let Some(tx) = death_tx.take() {
                 let _ = tx.send("the extension process exited".to_string());
             }
         });
     }
 
-    // The handshake, bounded. Serialization here is pure data over a
-    // serde type — the impossible failure is the sanctioned crash,
-    // never a silent empty line (which the guest would only see as a
-    // broken contract).
-    #[allow(clippy::expect_used)] // sanctioned crash: pure-data serialization
-    let initialize = serde_json::to_string(&HostFrame::Initialize {
-        protocol_version: EXTENSION_PROTOCOL_VERSION,
-        core_path,
-        cwd,
-    })
-    .expect("HostFrame::Initialize always serializes");
-    let _ = lane.commands.send(initialize);
+    // The report, bounded (the report model: the extension speaks
+    // first; the host decides — an incompatible report is the kill
+    // below, and the host's facts cross only after the check).
     let outcome = tokio::select! {
         outcome = handshake_rx => {
-            outcome.unwrap_or(Handshake::Failed("closed before the handshake".to_string()))
+            outcome.unwrap_or(Handshake::Failed("closed before the report".to_string()))
         }
         _ = tokio::time::sleep(handshake_timeout) => {
-            Handshake::Failed(format!("no handshake within {handshake_timeout:?}"))
+            Handshake::Failed(format!("no report within {handshake_timeout:?}"))
         }
     };
-    let ack = match outcome {
+    let report = match outcome {
         Handshake::Failed(reason) => {
-            fail_before_ack(
+            fail_before_mount(
                 &mut process,
                 &closing,
                 &state,
@@ -964,10 +955,10 @@ async fn supervise(
             .await;
             return;
         }
-        Handshake::Acked(ack) => ack,
+        Handshake::Acked(report) => report,
     };
-    if let Err(reason) = validate(&ack) {
-        fail_before_ack(
+    if let Err(reason) = validate(&report) {
+        fail_before_mount(
             &mut process,
             &closing,
             &state,
@@ -982,13 +973,23 @@ async fn supervise(
         return;
     }
 
-    let Ack {
+    // The host's facts cross now — after the report cleared the
+    // version check. Serialization here is pure data over a serde
+    // type — the impossible failure is the sanctioned crash, never a
+    // silent empty line (which the guest would only see as a broken
+    // contract).
+    #[allow(clippy::expect_used)] // sanctioned crash: pure-data serialization
+    let facts = serde_json::to_string(&HostFrame::HostFacts { core_path, cwd })
+        .expect("HostFrame::HostFacts always serializes");
+    let _ = lane.commands.send(facts);
+
+    let Report {
         tools,
         hooks,
         watch,
         ..
-    } = ack;
-    // The ack's watch list subscribes the lane's channel on the
+    } = report;
+    // The report's watch list subscribes the lane's channel on the
     // node: each watched kind's frames reach the lane's event
     // delivery, which writes the wire line down its stdin. Death
     // retracts the lane's every registration (the node sweep).
@@ -1149,14 +1150,14 @@ fn hold_service(
     });
 }
 
-/// What the reader decided about the handshake.
+/// What the reader decided about the report.
 enum Handshake {
-    Acked(Ack),
+    Acked(Report),
     Failed(String),
 }
 
-/// One contract break spotted by the reader: before the ack it fails
-/// the handshake; after it, it is the death signal.
+/// One contract break spotted by the reader: before the report it
+/// fails the mount; after it, it is the death signal.
 fn refuse(
     handshake_tx: &mut Option<tokio::sync::oneshot::Sender<Handshake>>,
     death_tx: &mut Option<tokio::sync::oneshot::Sender<String>>,
@@ -1205,14 +1206,14 @@ fn resolve_entry(dir: &Path, entry: &Option<Vec<String>>) -> (PathBuf, Vec<Strin
 
 /// The handshake's load-time contract: the version must match
 /// exactly, the hook points must be the engine's.
-fn validate(ack: &Ack) -> Result<(), String> {
-    if ack.protocol_version != EXTENSION_PROTOCOL_VERSION {
+fn validate(report: &Report) -> Result<(), String> {
+    if report.protocol_version != EXTENSION_PROTOCOL_VERSION {
         return Err(format!(
             "speaks extension protocol version {} (this host speaks {EXTENSION_PROTOCOL_VERSION})",
-            ack.protocol_version
+            report.protocol_version
         ));
     }
-    for hook in &ack.hooks {
+    for hook in &report.hooks {
         if !tabit_protocol::points::LIST.contains(&hook.event.as_str()) {
             return Err(format!(
                 "subscribes to unknown hook point `{}` (known: {})",
@@ -1224,11 +1225,11 @@ fn validate(ack: &Ack) -> Result<(), String> {
     Ok(())
 }
 
-/// A pre-ack failure: nothing was proven, so the tree dies now (no
+/// A pre-report failure: nothing was proven, so the tree dies now (no
 /// grace — the pipe contract was never honored) and the dead report
 /// resolves.
 #[allow(clippy::too_many_arguments)] // the launch context is irreducible; the alternative is a struct of seven
-async fn fail_before_ack(
+async fn fail_before_mount(
     process: &mut Box<dyn ChildWrapper>,
     closing: &CancellationToken,
     state: &Arc<ChildState>,

@@ -19,14 +19,39 @@ software/hardware contract, not just the encodings):
 Every `PROTOCOL_VERSION` bump — and every additive change a frontend
 could observe — gets an entry here in the same commit.
 
+## v19 (current) — wire: the report model
+
+**The backend speaks first** (owner ruling 2026-09-25): its first
+line is `report { protocol_version }` — protocol facts only, no
+session id (the boot's `session_opened` carries it, and it claims
+the empty active view). `initialize`, `initialize_ack`, and
+`initialize_rejected` are **deleted**: commands flow from the
+frontend's first line onward, the frontend is the version check (a
+mismatched backend is yours to kill), and **startup failures** cross
+as the report plus one unstamped `error { kind: session }` event
+carrying the reason (the setup guide on config problems), then a
+nonzero exit — display the reason and respawn. **Replay is
+default-on for a resumed boot** (`--continue`/`--session`):
+`replay_begin { total }` … `replay_end` follows the startup
+announcements automatically; a fresh boot replays nothing; on
+request, `open_session` of an open session re-replays it. The
+brackets are renamed (`replay_started`/`replay_done` →
+`replay_begin`/`replay_end`).
+*Migration:* stop sending `initialize`; read the report first and
+version-check it yourself; take the boot session id from
+`session_opened`; drop your replay flag (the `--continue` spawn
+replays by itself); rename the bracket arms; treat report + error +
+nonzero-exit as the startup-failure shape.
+
 ## 2026-09-25 — expectation
 
 - **The "next frame after the ack is `session_opened`" guarantee is
-  withdrawn** (owner ruling): everything after the ack is the event
-  stream — other participants' origin-stamped frames may interleave
-  anywhere, and a future core may report initialization progress
-  ahead of `session_opened`. Build on the events' own identities
-  (stamps, kinds), never on their position after the ack.
+  withdrawn** (owner ruling): everything after the report is the
+  event stream — other participants' origin-stamped frames may
+  interleave anywhere, and a future core may report initialization
+  progress ahead of `session_opened`. Build on the events' own
+  identities (stamps, kinds), never on their position after the
+  report.
 
 ## 2026-09-25 — behavior
 

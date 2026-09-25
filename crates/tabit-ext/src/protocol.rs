@@ -39,7 +39,7 @@ use serde::{Deserialize, Serialize};
 /// The extension protocol this host speaks. An extension acking a
 /// different version is refused at the handshake — the pipe is a
 /// frozen contract, not a negotiated one.
-pub const EXTENSION_PROTOCOL_VERSION: u32 = 4;
+pub const EXTENSION_PROTOCOL_VERSION: u32 = 5;
 
 /// The correlation-kind tags of the dialect's round-trips — the tag
 /// of the response frame that answers each (the correlation-kind
@@ -69,17 +69,19 @@ pub struct HookDecl {
     pub event: String,
 }
 
-/// The capabilities one process serves, declared once at the
-/// handshake (the byte-stability law: no re-declaration, no drift).
-/// `watch` (v2) is not a capability — it is the subscription list:
-/// the event kinds (the frontend grammar's `type` tags) whose frames
-/// the extension wants mirrored onto its pipe. Fine-grained by ruling
-/// (one kind, one entry — no bundles), derived by an SDK from the
-/// callbacks its author registered. A kind the host does not emit
-/// matches nothing and harms nothing (tolerated, not refused: a typo
-/// watches silently, the load-time report is the diagnostic).
+/// The capabilities one process serves — its SELF-REPORT, the first
+/// line on the channel (owner ruling 2026-09-25: children report
+/// first), declared once (the byte-stability law: no re-declaration,
+/// no drift). `watch` (v2) is not a capability — it is the
+/// subscription list: the event kinds (the frontend grammar's `type`
+/// tags) whose frames the extension wants mirrored onto its pipe.
+/// Fine-grained by ruling (one kind, one entry — no bundles), derived
+/// by an SDK from the callbacks its author registered. A kind the
+/// host does not emit matches nothing and harms nothing (tolerated,
+/// not refused: a typo watches silently, the load-time report is the
+/// diagnostic).
 #[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct Ack {
+pub struct Report {
     pub protocol_version: u32,
     pub tools: Vec<ToolDecl>,
     pub hooks: Vec<HookDecl>,
@@ -91,15 +93,14 @@ pub struct Ack {
 #[derive(Debug, Serialize, Deserialize)]
 #[serde(tag = "type", rename_all = "snake_case")]
 pub enum HostFrame {
-    /// Open the pipe. First line the extension reads; everything
-    /// else follows only after its ack. The v2 host facts:
-    /// `core_path` is the running backend's own executable (the
-    /// thing to spawn for owned sessions — the host IS the binary,
-    /// so there is nothing to resolve), `cwd` the backend's working
-    /// directory (owned children default there unless the spawner
-    /// says otherwise).
-    Initialize {
-        protocol_version: u32,
+    /// The host's facts, sent after the extension's report cleared
+    /// the version check (the report model: the child speaks first,
+    /// the spawner decides). `core_path` is the running backend's
+    /// own executable (the thing to spawn for owned sessions — the
+    /// host IS the binary, so there is nothing to resolve), `cwd`
+    /// the backend's working directory (owned children default
+    /// there unless the spawner says otherwise).
+    HostFacts {
         #[serde(default)]
         core_path: String,
         #[serde(default)]
@@ -205,12 +206,12 @@ pub struct ToolWireResult {
 #[derive(Debug, Serialize, Deserialize)]
 #[serde(tag = "type", rename_all = "snake_case")]
 pub enum ExtFrame {
-    /// [`Ack`], on the wire.
-    Ack {
+    /// [`Report`], on the wire — the extension's first line.
+    Report {
         protocol_version: u32,
         tools: Vec<ToolDecl>,
         hooks: Vec<HookDecl>,
-        /// The subscription list ([`Ack::watch`]).
+        /// The subscription list ([`Report::watch`]).
         #[serde(default)]
         watch: Vec<String>,
     },
@@ -241,24 +242,18 @@ mod tests {
 
     #[test]
     fn host_frames_carry_the_type_tag() {
-        let line = serde_json::to_string(&HostFrame::Initialize {
-            protocol_version: EXTENSION_PROTOCOL_VERSION,
+        let line = serde_json::to_string(&HostFrame::HostFacts {
             core_path: "C:/bin/tabit-core.exe".to_string(),
             cwd: "C:/work/proj".to_string(),
         })
         .unwrap();
         assert_eq!(
             line,
-            r#"{"type":"initialize","protocol_version":4,"core_path":"C:/bin/tabit-core.exe","cwd":"C:/work/proj"}"#
+            r#"{"type":"host_facts","core_path":"C:/bin/tabit-core.exe","cwd":"C:/work/proj"}"#
         );
         let back: HostFrame = serde_json::from_str(&line).unwrap();
         match back {
-            HostFrame::Initialize {
-                protocol_version,
-                core_path,
-                cwd,
-            } => {
-                assert_eq!(protocol_version, EXTENSION_PROTOCOL_VERSION);
+            HostFrame::HostFacts { core_path, cwd } => {
                 assert_eq!(core_path, "C:/bin/tabit-core.exe");
                 assert_eq!(cwd, "C:/work/proj");
             }
@@ -266,14 +261,14 @@ mod tests {
             | HostFrame::ServiceResponse { .. }
             | HostFrame::Cancel { .. }
             | HostFrame::Hook { .. } => {
-                panic!("an initialize line parsed as another frame")
+                panic!("a host_facts line parsed as another frame")
             }
         }
     }
 
     #[test]
-    fn ack_round_trips_with_declarations() {
-        let frame = ExtFrame::Ack {
+    fn report_round_trips_with_declarations() {
+        let frame = ExtFrame::Report {
             protocol_version: 3,
             tools: vec![ToolDecl {
                 name: "echo".to_string(),
@@ -291,18 +286,18 @@ mod tests {
         let line = serde_json::to_string(&frame).unwrap();
         assert_eq!(
             line,
-            r#"{"type":"ack","protocol_version":3,"tools":[{"name":"echo","description":"says it back","schema":{"type":"object"}}],"hooks":[{"event":"tool_call"}],"watch":["session_opened","interaction_settled"]}"#
+            r#"{"type":"report","protocol_version":3,"tools":[{"name":"echo","description":"says it back","schema":{"type":"object"}}],"hooks":[{"event":"tool_call"}],"watch":["session_opened","interaction_settled"]}"#
         );
         let back: ExtFrame = serde_json::from_str(&line).unwrap();
         match back {
-            ExtFrame::Ack { tools, watch, .. } => {
+            ExtFrame::Report { tools, watch, .. } => {
                 assert_eq!(tools.len(), 1);
                 assert_eq!(watch, vec!["session_opened", "interaction_settled"]);
             }
             ExtFrame::ToolResult(..)
             | ExtFrame::ServiceRequest { .. }
             | ExtFrame::HookResult(_) => {
-                panic!("an ack line parsed as another frame")
+                panic!("a report line parsed as another frame")
             }
         }
     }

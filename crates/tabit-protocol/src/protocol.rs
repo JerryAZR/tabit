@@ -12,23 +12,32 @@
 use crate::events::SessionEvent;
 use serde::{Deserialize, Serialize};
 
-/// The protocol version this build speaks. Clients declare theirs in
-/// [`ClientFrame::Initialize`]; a mismatch rejects the connection at the
-/// handshake. v10: `session_created` deleted (the supersede ruling
-/// executed after five versions — `session_opened` with
-/// `resumed: false` is the one announcement); `run_failed` carries a
-/// typed `kind`; the turn brackets and run terminals carry Unix-ms
-/// timestamps. v9: extensions — the `extensions_available` startup
-/// announcement. v8: skills — the `skills_available` startup
-/// announcement. v7: compaction — the `compact` command and
-/// its event family (reshaped in v15 into the
+/// The protocol version this build speaks. The child's first line is
+/// its [`ServerControlFrame::Report`] carrying this version; the
+/// spawner reads it and kills an incompatible child (owner ruling
+/// 2026-09-25 — the report model: children report first, spawners
+/// decide). v19: the report model — `initialize`/`initialize_ack`/
+/// `initialize_rejected` are deleted (commands flow from the
+/// spawner's first line; startup failures are the report, an
+/// unstamped `error` event, and a nonzero exit), and the replay
+/// brackets are renamed `replay_begin { total }` / `replay_end`,
+/// with a resumed boot replaying automatically. v10:
+/// `session_created` deleted (the supersede ruling executed after
+/// five versions — `session_opened` with `resumed: false` is the one
+/// announcement); `run_failed` carries a typed `kind`; the turn
+/// brackets and run terminals carry Unix-ms timestamps. v9:
+/// extensions — the `extensions_available` startup announcement.
+/// v8: skills — the `skills_available` startup announcement. v7:
+/// compaction — the `compact` command and its event family (reshaped
+/// in v15 into the
 /// `compaction_begin`/`compaction_step`/`compaction_end` envelope).
-pub const PROTOCOL_VERSION: u32 = 18;
+pub const PROTOCOL_VERSION: u32 = 19;
 
 /// Which session produced an event. The stamp is the session id
 /// itself (v3: the `"main"` alias is retired — one name per session);
-/// the boot session's id arrives in `initialize_ack`, so a consumer
-/// knows every stream name before its first event frame.
+/// every session announces itself with a stamped `session_opened`, so
+/// a consumer learns each stream name from the announce, never from
+/// position after the report.
 #[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub struct StreamId(String);
 
@@ -79,11 +88,14 @@ pub struct EventFrame {
     pub event: SessionEvent,
 }
 
-/// A frontend command, fire-and-forget. Session-scoped commands name
-/// their session explicitly (v3, ruled: a deliberate wire break — no
-/// consumer keeps a silent default, so nothing can "forget to
-/// update"); the boot session's id arrives in `initialize_ack`, other
-/// ids from `sessions_available`/`session_opened`. The behavior is
+/// A frontend command, fire-and-forget — also the whole of the
+/// client's wire vocabulary (v19: with the handshake gone, a client
+/// line IS a command; commands may flow from the spawner's first
+/// line, before or after the child's report). Session-scoped
+/// commands name their session explicitly (v3, ruled: a deliberate
+/// wire break — no consumer keeps a silent default, so nothing can
+/// "forget to update"); session ids arrive from
+/// `sessions_available`/`session_opened`. The behavior is
 /// total over the two session states:
 ///
 /// | command               | idle                   | running                              |
@@ -219,26 +231,6 @@ pub enum SessionCommand {
     },
 }
 
-/// One line from the client. The first line must be
-/// [`ClientFrame::Initialize`]; everything after is commands.
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
-#[serde(untagged)]
-pub enum ClientFrame {
-    /// The connection handshake: the client's protocol version, and
-    /// whether it wants the session's active chain re-emitted as
-    /// finalized live events (the replay pass) right after the ack.
-    Initialize {
-        protocol_version: u32,
-        /// Request the replay pass (absent means no: a frontend that
-        /// keeps its own state, or a fresh connect with nothing to
-        /// replay).
-        #[serde(default, skip_serializing_if = "is_false")]
-        replay: bool,
-    },
-    /// A session command.
-    Command(SessionCommand),
-}
-
 /// The command tag constants — [`SessionCommand::tag`]'s values,
 /// pinned in one place for the routing layer's by-type tables (the
 /// command twin of the event [`tags`](crate::tags)).
@@ -268,35 +260,27 @@ impl SessionCommand {
     }
 }
 
-fn is_false(value: &bool) -> bool {
-    !*value
-}
-
 /// The server's non-event lines: handshake outcomes and transport-level
 /// errors (as opposed to run outcomes, which are events).
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(tag = "type", rename_all = "snake_case")]
 pub enum ServerControlFrame {
-    /// The handshake succeeded. Protocol-level facts only (2026-09
-    /// ruling): the boot session is announced by a `session_opened`
-    /// event like every other session becoming visible — the ack
-    /// carrying session facts made the boot a special case and
-    /// forked the frontend's session-init handling.
-    InitializeAck {
-        /// The version the server settled on.
+    /// The child's self-report — its first line on the channel, before
+    /// any event (owner ruling 2026-09-25, the report model: a spawned
+    /// child can assume its spawner is there and pump, while the
+    /// spawner can assume nothing until the child self-reports).
+    /// Protocol-level facts only: the version. Session facts arrive by
+    /// event — the boot announces itself with a stamped
+    /// `session_opened` like every other session. The spawner reads
+    /// the version and kills an incompatible child; a startup failure
+    /// is the report, an unstamped `error` event carrying the reason,
+    /// and a nonzero exit.
+    Report {
+        /// The protocol version this child speaks.
         protocol_version: u32,
-        /// The boot session's id — needed so the client can name the
-        /// session in commands that follow the ack (every other id
-        /// arrives by event).
-        session_id: String,
     },
-    /// The handshake failed (version mismatch); the connection closes.
-    InitializeRejected {
-        /// Why.
-        reason: String,
-    },
-    /// A line the edge could not turn into a frame (unparseable, or a
-    /// command sent before `initialize`). The connection stays open.
+    /// A line the edge could not turn into a command. The connection
+    /// stays open.
     ProtocolError {
         /// What went wrong.
         message: String,

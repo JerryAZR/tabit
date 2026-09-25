@@ -30,14 +30,17 @@ fn main() {
             if let Some(model) = args["model"].as_str() {
                 options = options.model(model);
             }
-            let child = Child::create(&ctx, options)
-                .await
-                .map_err(|error| format!("the child did not start: {error}"))?;
-            child.on(tags::SESSION_OPENED, |ctx, _event| async move {
+            // The options form (pre-spawn): the child's own
+            // `session_opened` crosses the lane during the spawn's
+            // wait, before `Child::on` could register.
+            options = options.on(tags::SESSION_OPENED, |ctx, _event| async move {
                 ctx.emit(SessionEvent::error_session(
                     "child-ext saw the child open its session",
                 ));
-            })?;
+            });
+            let child = Child::create(&ctx, options)
+                .await
+                .map_err(|error| format!("the child did not start: {error}"))?;
             match child.run(task).await? {
                 tabit_wire::client::Settlement::Completed { output, .. } => {
                     Ok(Output::from(if output.trim().is_empty() {

@@ -23,11 +23,13 @@ use tabit_protocol::{EventFrame, ModelSelection, SessionEvent, Usage};
 /// lifecycle fact (the child exited).
 #[derive(Debug, Clone, PartialEq)]
 pub enum InMsg {
-    /// `initialize_ack` — protocol-level facts only (2026-09: the
-    /// session's facts arrive as the `session_opened` event, like
-    /// every session becoming visible).
-    Ack { session_id: String },
-    /// `initialize_rejected` — the connection is over.
+    /// The backend's self-report (the report model, 2026-09-25): the
+    /// first line on the channel, version-checked by the spawner.
+    /// Session facts arrive as the `session_opened` event, like every
+    /// session becoming visible.
+    Report,
+    /// The spawner killed the connection (an incompatible backend);
+    /// the connection is over.
     Rejected(String),
     /// `protocol_error` — display-only; the connection stays.
     ProtocolError(String),
@@ -264,11 +266,12 @@ impl GuiState {
     /// Fold one backend message into the state.
     pub fn reduce(&mut self, msg: InMsg) {
         match msg {
-            InMsg::Ack { session_id } => {
-                // The boot session's stream is its id; the transcript
-                // renders it. Facts arrive with the session_opened
-                // event (one announcement shape for every session).
-                self.active = session_id;
+            InMsg::Report => {
+                // The backend reported and the version checked — live.
+                // The boot session's id arrives with its
+                // `session_opened` (one announcement shape for every
+                // session; the empty-active first announce claims the
+                // view).
                 self.phase = Phase::Live;
             }
             InMsg::Rejected(reason) => {
@@ -478,12 +481,12 @@ impl GuiState {
             // `user_message`s but no terminal — an unguarded fold
             // would mark the session running forever; the review
             // round's finding).
-            SessionEvent::ReplayStarted { .. } => {
+            SessionEvent::ReplayBegin { .. } => {
                 if !self.replaying.iter().any(|s| s == &stream) {
                     self.replaying.push(stream.clone());
                 }
             }
-            SessionEvent::ReplayDone => {
+            SessionEvent::ReplayEnd => {
                 self.replaying.retain(|s| s != &stream);
             }
             _ => {}
@@ -680,7 +683,7 @@ impl GuiState {
                 self.running = false;
                 self.push_notice(message, true);
             }
-            SessionEvent::ReplayStarted { .. } => {
+            SessionEvent::ReplayBegin { .. } => {
                 // The structural reset: the pass that follows rebuilds
                 // the transcript from committed history, so anything the
                 // view held (a switch's optimism included) goes. Cards
@@ -691,7 +694,7 @@ impl GuiState {
                 self.transcript.clear();
                 self.pending.clear();
             }
-            SessionEvent::ReplayDone => {
+            SessionEvent::ReplayEnd => {
                 // The pass ended; the transcript is whole (live traffic
                 // or quiescence follows).
             }

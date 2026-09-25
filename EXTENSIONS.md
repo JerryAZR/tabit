@@ -2,7 +2,7 @@
 
 The extension development record. **The substrate is ruled (2026-09,
 below) and implemented through checklist task 4 — `crates/tabit-ext`:
-discovery and the enablement gate, the initialize/ack handshake,
+discovery and the enablement gate, the report-first handshake,
 supervision, the death policy, the tool lane, the hook lane, the
 skills tables; `crates/tabit-ext-sdk`: the guest's functional layer
 over its node (the port, 2026-09 — the private dispatcher and
@@ -99,8 +99,8 @@ The manifest (`tabit.json`) carries install-time facts only — name
 entry command + args (OPTIONAL: absent means a static package that
 never spawns — the install entry below), one-line description, and
 `requires` (name-only dependencies). Capabilities are
-declared live at the handshake (initialize → ack: tools with
-name/description/schema, hook points) — the initialize/ack pattern
+declared live in the extension's self-report (tools with
+name/description/schema, hook points) — the report-first pattern
 every tabit edge already uses. What the process serves is what it
 declared; no schema file drifts. **The manifest is also the home for
 any future host-required metadata (ruled 2026-09): when the host
@@ -129,7 +129,7 @@ contract break — death with the snippet, the same as garbage. For
 that refusal to happen at the handshake rather than mid-stream,
 **additions the EXTENSION can emit (new extension→host frame types,
 new required fields) bump the protocol version** and older hosts
-refuse at the ack's exact match; additions only the HOST emits (new
+refuse at the report's exact match; additions only the HOST emits (new
 optional fields, new host→extension frames) need no bump. Altering
 existing shapes is of course the same boundary. Until external
 extensions exist, host and SDK version as one workspace — no skew is
@@ -143,7 +143,7 @@ Ruled over the SDK discussion: the extension pipe carries the
 **frontend protocol's vocabulary verbatim, as bare lines**, beside
 the extension's own lanes — no wrapper frames, no second grammar.
 Dispatch on the inbound side is a parse cascade: the extension lanes
-(`ack`, `tool_result`, `hook_result`, `service_request`) first, then
+(`report`, `tool_result`, `hook_result`, `service_request`) first, then
 any session command, then any session event; a line parseable as
 none of the three is the contract break it always was (death with
 the snippet). The two tag namespaces are disjoint and stay so.
@@ -151,7 +151,7 @@ the snippet). The two tag namespaces are disjoint and stay so.
 **Participants are peers, not subordinates** (owner ruling 2026-09,
 correcting the reactivity claim): any node may send anything a
 frontend can from its handshake onward — a co-frontend extension's
-`new_session` right after its ack, a subagent child's steer — with
+`new_session` right after its report, a subagent child's steer — with
 no supervisor action required and no reactivity constraint. The
 corresponding duty is the parent's: **be structurally prepared
 before the child can speak.** The core's boot is structure, then
@@ -171,20 +171,20 @@ that makes itself a session host (spawning co-frontend subprocesses
 of its own) may lawfully handle them inside; one that does not
 registers no handlers for them, and a lifecycle command sent to such
 a node is unanswered — the sender's business. There is
-no "next frame after the ack" contract at all (owner ruling 2026-09):
-everything after the ack is the event stream — the core's own
+no "next frame after the report" contract at all (owner ruling
+2026-09): everything after the report is the event stream — the core's own
 startup sequence is today's common order, not a guarantee; other
 participants' frames interleave in arrival order; a future core may
 report its own initialization progress ahead of `session_opened`.
 Frontends build on the events' own identities (stamps, kinds), never
-on their position after the ack.
+on their position after the report.
 
 The four directions, one sentence each:
 
 - **Commands out** (extension → host): any session command,
   session-addressed with the same scope a frontend has — no
   registration, no special cases. The extension learns session ids
-  from the events it watches (`session_opened`, the ack's boot id).
+  from the events it watches (`session_opened`).
   Effects arrive as events; collision semantics (a compact landing
   mid-compaction, abort racing a checkout) are whatever the doors
   and parked-intent machinery already do — a second commander adds

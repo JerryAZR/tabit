@@ -56,6 +56,12 @@ pub struct ChildOptions {
     session: Option<std::path::PathBuf>,
     max_turns: Option<usize>,
     forwarding: bool,
+    /// Pre-spawn `on` handlers: registered before the child exists,
+    /// so the child's own `session_opened` — which crosses the lane
+    /// DURING the spawn's wait (the client resolves after the first
+    /// stamped frame) — is heard. [`Child::on`] after create hears
+    /// only what crosses after the registration.
+    watches: Vec<(String, crate::ErasedWatch)>,
 }
 
 impl ChildOptions {
@@ -68,7 +74,23 @@ impl ChildOptions {
             session: None,
             max_turns: None,
             forwarding: false,
+            watches: Vec::new(),
         }
+    }
+
+    /// Watch one event kind from the child from its very first frame
+    /// — the registration exists before the spawn, so the child's
+    /// own `session_opened` is heard ([`Child::on`] registers after
+    /// the spawn has resolved, past that frame). The same handler
+    /// shape as [`Child::on`].
+    pub fn on<F, Fut>(mut self, kind: &str, body: F) -> Self
+    where
+        F: Fn(Ctx, SessionEvent) -> Fut + Send + Sync + 'static,
+        Fut: Future<Output = ()> + Send + 'static,
+    {
+        let body: crate::ErasedWatch = Arc::new(move |ctx, event| Box::pin(body(ctx, event)));
+        self.watches.push((kind.to_string(), body));
+        self
     }
 
     /// The child's model (`provider/model`; absent means the child
@@ -221,9 +243,10 @@ impl Child {
     /// Spawn one owned child. The binary is the host's own (the
     /// initialize's `core_path` — the host IS the binary); the spawn
     /// resolves the handshake before this call returns.
-    pub async fn create(ctx: &Ctx, options: ChildOptions) -> Result<Child, String> {
+    pub async fn create(ctx: &Ctx, mut options: ChildOptions) -> Result<Child, String> {
         let shared = ctx.shared_clone();
         let core_path = ctx.core_path()?;
+        let options_watches = std::mem::take(&mut options.watches);
         let mut spec = ChildSpec::new(std::path::PathBuf::from(core_path), options.cwd);
         if let Some(reference) = &options.model {
             let (provider, model) = reference
@@ -248,6 +271,19 @@ impl Child {
         // transit entry exists) and always-live — not only during
         // runs: a card crossing the child's pipe surfaces the moment
         // it arrives.
+        // The pre-spawn watches register now, before the child
+        // exists — the prepared-supervisor law at the SDK's own
+        // scale: the child's first frames (its `session_opened`
+        // among them) find the subscriptions already standing.
+        for (kind, body) in options_watches {
+            let node = shared.node.clone();
+            let watch_shared = shared.clone();
+            node.subscribe(&kind, "child-watch", move |frame| {
+                let event = frame.event.clone();
+                let (shared, body) = (watch_shared.clone(), body.clone());
+                crate::spawn_observation(shared, move |ctx| body(ctx, event));
+            });
+        }
         let asks = Arc::new(AskPolicy::shipped());
         let policy_asks = asks.clone();
         let policy_shared = shared.clone();
@@ -322,6 +358,9 @@ impl Child {
     /// all hear the fan — the node's one subscription surface, owned
     /// by the child's id (the death sweep's key: the mount's exit
     /// sweep retracts it with everything else the child holds).
+    /// Hears what crosses FROM the registration onward — the child's
+    /// own `session_opened` crosses during the spawn's wait, so
+    /// first-frame observation rides [`ChildOptions::on`].
     pub fn on<F, Fut>(&self, kind: &str, body: F) -> Result<(), String>
     where
         F: Fn(Ctx, SessionEvent) -> Fut + Send + Sync + 'static,

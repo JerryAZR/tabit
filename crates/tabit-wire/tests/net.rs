@@ -310,16 +310,20 @@ fn the_net_laws_hold_over_real_pipes() {
 /// The built `stub_child` example's path — a sibling of this test
 /// binary under the active target dir (robust to `--target-dir`
 /// overrides). `None` when the example was not built.
-fn stub_child_exe() -> Option<std::path::PathBuf> {
+fn stub_exe(example: &str) -> Option<std::path::PathBuf> {
     let exe = std::env::current_exe().ok()?;
     let name = if cfg!(windows) {
-        "stub_child.exe"
+        format!("{example}.exe")
     } else {
-        "stub_child"
+        example.to_string()
     };
     let examples = exe.parent()?.parent()?.join("examples");
     let stub = examples.join(name);
     stub.is_file().then_some(stub)
+}
+
+fn stub_child_exe() -> Option<std::path::PathBuf> {
+    stub_exe("stub_child")
 }
 
 /// The client's mount invariant, deterministically exposed: a child
@@ -385,5 +389,50 @@ fn the_childs_burst_frame_reaches_the_mounted_lane() {
     assert!(
         reached,
         "the burst frame reached the node's fan: {report:?}"
+    );
+}
+
+/// The report model's spawner-side check (owner ruling 2026-09-25):
+/// the child's first line is its report; a version the spawner does
+/// not speak is a kill — the error names both versions, and nothing
+/// of the child's (mismatched) traffic reaches the net.
+#[test]
+fn a_mismatched_report_is_a_kill() {
+    let Some(stub) = stub_exe("stub_mismatch") else {
+        eprintln!(
+            "mismatched-report test: no stub_mismatch example built - run the workspace suite to cover it"
+        );
+        return;
+    };
+    let parent: Arc<Node> = Arc::new(Node::new("parent"));
+    let saw: Arc<Mutex<Vec<String>>> = Arc::new(Mutex::new(Vec::new()));
+    let sink = saw.clone();
+    parent.subscribe_all("recorder", move |frame: &EventFrame| {
+        sink.lock()
+            .expect("test lock")
+            .push(frame.event.tag().to_string());
+    });
+    let spec = ChildSpec::new(stub, std::env::temp_dir()).on_node(parent.clone());
+    let runtime = tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()
+        .expect("the test runtime");
+    let error = runtime.block_on(async move {
+        match spec.spawn().await {
+            Ok(mut handle) => {
+                handle.close();
+                let _ = handle.wait_exit().await;
+                panic!("a mismatched child is a kill, not a live handle");
+            }
+            Err(error) => error,
+        }
+    });
+    assert!(
+        error.contains("reported protocol version"),
+        "the error names the version: {error}"
+    );
+    assert!(
+        saw.lock().expect("test lock").is_empty(),
+        "none of the mismatched child's traffic reached the net"
     );
 }
