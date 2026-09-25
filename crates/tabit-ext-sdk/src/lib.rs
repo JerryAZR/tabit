@@ -365,10 +365,7 @@ impl Ctx {
     /// The host's own executable path (the `host_facts` frame's
     /// `core_path`) — the thing owned children spawn.
     pub(crate) fn core_path(&self) -> Result<String, String> {
-        self.shared
-            .core_path
-            .lock()
-            .unwrap_or_else(|poison| poison.into_inner())
+        sdk_lock(&self.shared.core_path)
             .clone()
             .filter(|path| !path.is_empty())
             .ok_or_else(|| "the host named no core_path at the handshake".to_string())
@@ -734,10 +731,12 @@ pub fn serve(extension: Extension) -> ! {
 /// needs neither): ONE node-level registration covering every owned
 /// child (registration is router config, a single subscription
 /// spans multiple children; the frame's stamp attributes which),
-/// hearing the REMOTE door alone — the locality ruling makes the
-/// split structural: this extension's own asks are local speech and
-/// never surface here, a child's arriving card is remote and always
-/// does.
+/// hearing BOTH doors — the default, no exclusion justified. A
+/// child's arriving card is remote; this extension's OWN asks are
+/// local speech and DO reach the answerers, distinguishable by
+/// their absent stream stamp (an answerer may even answer its own
+/// extension's ask — races are the first-wins law, and the author
+/// controls both sides).
 ///
 /// - **The shipped lift** (no author answerers): the stdio
 ///   subscribes the card PAIR at the remote door — request and
@@ -1219,6 +1218,55 @@ pub(crate) mod tests {
             json!({"verdict": "skip", "message": "not tonight"}),
             "the verdict rode the wire as its own type"
         );
+    }
+
+    /// The Both default's documented consequence, pinned: this
+    /// extension's OWN asks are local speech and DO reach the
+    /// answerers — distinguishable by their absent stream stamp —
+    /// and an answerer may even answer one (first-wins; the author
+    /// controls both sides).
+    #[tokio::test]
+    async fn the_extensions_own_ask_reaches_the_answerers() {
+        use std::sync::atomic::{AtomicUsize, Ordering};
+
+        let shared = shared();
+        let node = &shared.node;
+        let (pipe_tx, mut pipe_rx) = tokio::sync::mpsc::unbounded_channel::<String>();
+        let pipe_writer = pipe_tx.clone();
+        let stdio = Channel::line("host", move |line: &str| write_line(&pipe_writer, line));
+        node.subscribe_channel_all(Locality::Local, &stdio);
+        let seen = Arc::new(AtomicUsize::new(0));
+        let poll = seen.clone();
+        let answerer: ErasedWatch = Arc::new(move |_ctx, frame| {
+            if matches!(frame.event, SessionEvent::InteractionRequest { .. })
+                && frame.stream.is_none()
+            {
+                poll.fetch_add(1, Ordering::SeqCst);
+            }
+            Box::pin(async {})
+        });
+        mount_card_surface(node, &shared, Arc::new(vec![answerer]));
+
+        // The own ask: session-less (no stream stamp), local speech.
+        let _promise = node.ask("call-9", None, "native:select_one", json!({}));
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
+        while seen.load(Ordering::SeqCst) < 1 {
+            assert!(
+                std::time::Instant::now() < deadline,
+                "the own ask never reached the answerers"
+            );
+            tokio::time::sleep(std::time::Duration::from_millis(5)).await;
+        }
+        // And it still crossed to the host exactly once (the wildcard
+        // owns the local door; the answerer is a callback, no
+        // double-carry).
+        let mut requests = 0;
+        while let Ok(line) = pipe_rx.try_recv() {
+            if line.contains("interaction_request") {
+                requests += 1;
+            }
+        }
+        assert_eq!(requests, 1, "the own ask crossed exactly once");
     }
 
     /// Review round 2's behavioral finding, pinned: the answerer

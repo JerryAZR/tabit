@@ -56,7 +56,7 @@
 
 use crate::interaction::InteractionHub;
 use crate::lock::lock;
-use crate::notice::{BackendSink, HostSink, NoticeSink, NoticeSlot};
+use crate::notice::{HostSink, NoticeSink, NoticeSlot};
 use crate::session::{AbortHandle, MailboxHandle, Session};
 use crate::stats::SessionStats;
 use crate::store::SessionStore;
@@ -340,10 +340,6 @@ pub struct SessionHost {
     events: Option<mpsc::UnboundedReceiver<EventFrame>>,
     node: Arc<Node>,
     host_channel: Channel,
-    /// The backend-level emission handle (origin-stamped, unstamped
-    /// by stream) — the routing generalization's entry for grammar
-    /// speakers that are not sessions.
-    backend_sink: BackendSink,
     /// The lifecycle registry — the workers by session id, for the
     /// doors that need the worker itself (open_session's already-open
     /// check, the replay request, the abort sweep). Routing is NOT
@@ -653,10 +649,6 @@ impl SessionHostMount {
         let boot_stream = StreamId::new(boot_id.clone());
         let node = wiring.node.clone();
 
-        // The backend sink rides the mount's host channel — one
-        // channel for the host participant, not a second identity.
-        let backend_sink = BackendSink::new(&node, &host_channel);
-
         // The boot worker first: the startup announcements emit from
         // its channel, which is what teaches the learning table where
         // the boot session lives (the worker itself emits nothing at
@@ -771,7 +763,6 @@ impl SessionHostMount {
             events: Some(event_rx),
             node,
             host_channel,
-            backend_sink,
             workers,
             closing_stats,
             worker_shutdown,
@@ -784,14 +775,6 @@ impl SessionHost {
     /// The boot session's facts, captured when the host took over.
     pub fn info(&self) -> &SessionInfo {
         &self.info
-    }
-
-    /// The backend-level emission handle: an origin-stamped,
-    /// stream-less event from a grammar speaker that is not a session
-    /// (the routing generalization — extensions emit into the shared
-    /// grammar, and the origin field is the attribution).
-    pub fn backend_sink(&self) -> BackendSink {
-        self.backend_sink.clone()
     }
 
     /// Submit a user message to a session: steers the run in flight or

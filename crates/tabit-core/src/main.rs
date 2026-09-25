@@ -516,9 +516,11 @@ fn print_event(event: &SessionEvent) {
         // Not a printable stream event: run() turns it into the process
         // error (stderr, exit 1) once the stream has ended.
         SessionEvent::RunFailed { .. } => {}
-        // Replay brackets, checkouts, and model changes never reach
-        // print mode (no one requests the pass and it has no checkout
-        // surface); the arms exist for exhaustiveness.
+        // Replay brackets DO arrive on resumed print boots (replay is
+        // default-on since v19) and render nothing — the terminal
+        // does not reconstruct history. Checkouts and model changes
+        // never reach print mode (no checkout surface, no picker);
+        // the arms exist for exhaustiveness.
         SessionEvent::ReplayBegin { .. }
         | SessionEvent::ReplayEnd
         | SessionEvent::CheckedOut { .. }

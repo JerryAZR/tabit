@@ -108,52 +108,8 @@ impl HostSink {
     }
 }
 
-/// The backend's origin-stamped handle, for emissions that are
-/// nobody's session: an extension speaking the shared grammar emits
-/// events origin-stamped and unstamped by stream (the routing
-/// generalization — routing is participant-blind, the origin field
-/// is the attribution).
-#[derive(Clone)]
-pub struct BackendSink {
-    node: Arc<Node>,
-    channel: Channel,
-}
-
-impl BackendSink {
-    /// The one construction site, over the host's channel.
-    pub(crate) fn new(node: &Arc<Node>, channel: &Channel) -> Self {
-        Self {
-            node: node.clone(),
-            channel: channel.clone(),
-        }
-    }
-
-    /// Forward a frame verbatim — the stream stamp survives, the
-    /// origin names the conduit (an owned child's traffic crossing
-    /// its owner's pipe; forward-don't-re-stamp, the bridge's rule).
-    pub fn forward(&self, origin: &str, frame: EventFrame) {
-        self.node.emit(
-            &self.channel,
-            EventFrame {
-                stream: frame.stream,
-                origin: Some(origin.to_string()),
-                ttl: frame.ttl,
-                event: frame.event,
-            },
-        );
-    }
-
-    /// Emit an extension's event, origin-stamped and backend-level
-    /// (no stream).
-    pub fn emit(&self, origin: &str, event: SessionEvent) {
-        self.node.emit(
-            &self.channel,
-            EventFrame {
-                stream: None,
-                origin: Some(origin.to_string()),
-                ttl: None,
-                event,
-            },
-        );
-    }
-}
+// BackendSink is gone (review round 3): attribution of unstamped
+// grammar speech moved into the node's intake (the origin field is
+// set from the arrival channel's owner there), and nothing ever
+// emitted through this handle — the regime change removed its
+// reason, and the machinery outlived it by several commits.

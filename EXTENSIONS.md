@@ -569,17 +569,14 @@ extensions *serve* verbs (cross-extension calls routed by the host,
 a provider/type/opaque-payload namespace) would be a different class
 — well-formed requests to a real provider, with only true unknowns
 failing — and joins additively with its consumer; v1 builds none of
-it. **The interaction ask is verb zero** (ruled 2026-09, restored):
-at the extension pipe the ask IS a backend capability — how the
-backend services it (a card routed to the frontend, anything else)
-is invisible to the extension, and the frontend-backend protocol is
-untouched by the fold. Its dual-id shape — the request id, plus the
-correlation to the in-flight call that routes the request to its
-session — is **the** attribution pattern every envelope verb rides
-(`model_prompt` bills to the session the same way). The ask's open
-template payload (`ui_type` + opaque JSON) sits inside the typed
-frame as a field; the open namespace is the frontend-template
-family's, unchanged.
+it. The ask verb was **deleted** (extension protocol v3): an
+extension that can ask emits an `interaction_request` into the
+shared grammar (the SDK's `Ctx::ask`) and awaits the routed
+response by id — no envelope wrapper (a wrapper nobody needs
+goes, not windows). The dual-id attribution pattern every envelope
+verb rides — the request id, plus the correlation to the in-flight
+call that routes the request to its session — survives in
+`model_prompt`, which bills to the session the same way.
 
 Verb one: **`model_prompt`** — prompt content + a model ref (or the
 session's), capped `max_tokens`, complete-only (no streaming over the
@@ -589,8 +586,7 @@ this verb is what makes the attribution story real).
 
 **Shipped (2026-09)**: the envelope is `service_request { request_id,
 call_id, verb, …payload }` in / `service_response { request_id,
-result?, error? }` out; the ask rides it as verb zero (`ui_type` +
-payload fields; a dismissal is the bare response). The capability —
+result?, error? }` out; `model_prompt` is its one verb. The capability —
 `HostServices`, in rig-agent beside `UserInteraction` (the contexts
 are the carriers) — is snapshotted per run into the tool context;
 `model_prompt` is a BARE completion (no preamble, no tools, no
