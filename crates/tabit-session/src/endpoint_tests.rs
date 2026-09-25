@@ -157,47 +157,60 @@ async fn startup_degradations_are_the_workers_first_frames() {
 }
 
 #[tokio::test]
-async fn the_skills_catalog_follows_the_session_catalog() {
+async fn the_skills_catalog_is_the_sessions_stamped() {
+    // The session-level catalog ruling (2026-09, landed): each
+    // session's `skills_available` is stamped with its stream and
+    // lands right after its `session_opened`, ahead of the
+    // backend-level session catalog — the session's own fact, not
+    // the process's.
     let store = temp_store("endpoint-skills");
-    let session = Factory::new(vec![text_turn("hi")])
-        .into_builder(store.clone())
-        .create("C:/w")
-        .expect("session");
-    let wiring = plain_wiring(&store);
-    let mut data = plain_data();
-    data.skills = vec![tabit_protocol::AvailableSkill {
+    // One registered entry is what `available()` snapshots (the
+    // discovery pass itself is the binary's business).
+    let mut catalog = crate::skills::Skills::default();
+    assert!(catalog.register(crate::skills::SkillEntry {
         name: "lint".to_string(),
         description: "Lint".to_string(),
-        location: "C:/w/.tabit/skills/lint/SKILL.md".to_string(),
-        level: "workspace".to_string(),
-    }];
-    let mut handle = SessionHost::spawn(session, Vec::new(), wiring, data);
+        base_dir: "C:/w/.tabit/skills/lint".into(),
+        skill_file: "C:/w/.tabit/skills/lint/SKILL.md".into(),
+        level: crate::skills::SkillLevel::Workspace,
+    }));
+    let session = Factory::new(vec![text_turn("hi")])
+        .into_builder(store.clone())
+        .skills(std::sync::Arc::new(catalog))
+        .create("C:/w")
+        .expect("session");
+    let mut handle = SessionHost::spawn(session, Vec::new(), plain_wiring(&store), plain_data());
     let id = boot_id(&handle);
     handle.message(&id, "go");
     let frames = drain(&mut handle).await;
-    // The skill announcement is backend-level (unstamped) and lands
-    // right after the session catalog, before any run event.
     let positions: Vec<(usize, &str)> = frames
         .iter()
         .enumerate()
         .filter_map(|(index, frame)| match &frame.event {
-            SessionEvent::SessionsAvailable { .. } => Some((index, "sessions")),
+            SessionEvent::SessionOpened { .. } => Some((index, "opened")),
             SessionEvent::SkillsAvailable { skills, .. } => {
                 assert_eq!(skills.len(), 1);
-                assert!(frame.stream.is_none(), "backend-level, unstamped");
+                assert_eq!(skills[0].name, "lint");
+                assert_eq!(
+                    frame.stream.as_ref().map(|s| s.as_str()),
+                    Some(id.as_str()),
+                    "stamped with the session's stream"
+                );
                 Some((index, "skills"))
             }
+            SessionEvent::SessionsAvailable { .. } => Some((index, "sessions")),
             _ => None,
         })
         .collect();
     assert_eq!(
         positions,
-        vec![(1, "sessions"), (2, "skills")],
+        vec![(0, "opened"), (1, "skills"), (2, "sessions")],
         "{positions:?}"
     );
     std::fs::remove_dir_all(store.dir()).ok();
 
-    // Empty discovery announces nothing — no empty frames.
+    // Empty discovery announces nothing — no empty frames, and with
+    // per-stream folding the absence is unambiguous.
     let store = temp_store("endpoint-skills-empty");
     let session = Factory::new(vec![text_turn("hi")])
         .into_builder(store.clone())
@@ -213,7 +226,6 @@ async fn the_skills_catalog_follows_the_session_catalog() {
             .any(|f| matches!(f.event, SessionEvent::SkillsAvailable { .. })),
         "no empty announcement"
     );
-    std::fs::remove_dir_all(store.dir()).ok();
 }
 
 #[tokio::test]
@@ -594,6 +606,71 @@ async fn until_event(handle: &mut SessionHost, want: impl Fn(&SessionEvent) -> b
 }
 
 #[tokio::test]
+async fn every_session_becoming_visible_announces_its_own_skills() {
+    // The session-level catalog ruling, door arms: `new_session`
+    // and `open_session` announce the created/resumed session's
+    // skills, stamped with ITS stream — never the boot's, never
+    // backend-level.
+    let store = temp_store("endpoint-skills-door");
+    let session = Factory::new(vec![text_turn("boot")])
+        .into_builder(store.clone())
+        .create("C:/w")
+        .expect("session");
+    let mut catalog = crate::skills::Skills::default();
+    assert!(catalog.register(crate::skills::SkillEntry {
+        name: "sub-lint".to_string(),
+        description: "Sub lint".to_string(),
+        base_dir: "C:/other/.tabit/skills/sub-lint".into(),
+        skill_file: "C:/other/.tabit/skills/sub-lint/SKILL.md".into(),
+        level: crate::skills::SkillLevel::Workspace,
+    }));
+    let created = std::sync::Arc::new(catalog);
+    let create_store = store.clone();
+    let wiring = SessionHostWiring {
+        node: std::sync::Arc::new(crate::Node::new("test")),
+        boot_parent: None,
+        boot_parent_call: None,
+        store: store.clone(),
+    };
+    let data = SessionHostData {
+        create: std::sync::Arc::new(move || {
+            Factory::new(vec![text_turn("new")])
+                .into_builder(create_store.clone())
+                .skills(created.clone())
+                .create("C:/other")
+                .map(|session| (session, Vec::new()))
+                .map_err(|error| error.to_string())
+        }),
+        open: std::sync::Arc::new(|_| Err("not driven".to_string())),
+        extensions: Default::default(),
+    };
+    let mut handle = SessionHost::spawn(session, Vec::new(), wiring, data);
+    let boot = boot_id(&handle);
+    let link = handle.command_link();
+    link.send(SessionCommand::NewSession);
+    let frame = until_event(&mut handle, |event| {
+        matches!(event, SessionEvent::SkillsAvailable { .. })
+    })
+    .await;
+    let (stream, announced) = match frame {
+        tabit_protocol::EventFrame {
+            stream,
+            event: SessionEvent::SkillsAvailable { skills, .. },
+            ..
+        } => (stream, skills),
+        _ => unreachable!("until_event pinned the kind"),
+    };
+    assert_eq!(announced.len(), 1);
+    assert_eq!(announced[0].name, "sub-lint");
+    assert_ne!(
+        stream.as_ref().map(|s| s.as_str()),
+        Some(boot.as_str()),
+        "the created session's catalog is stamped with its own stream"
+    );
+    std::fs::remove_dir_all(store.dir()).ok();
+}
+
+#[tokio::test]
 async fn new_session_runs_a_second_stream_and_both_route_by_id() {
     let store = temp_store("endpoint-multi");
     let session = Factory::new(vec![text_turn("boot answer")])
@@ -616,7 +693,6 @@ async fn new_session_runs_a_second_stream_and_both_route_by_id() {
                 .map_err(|error| error.to_string())
         }),
         open: std::sync::Arc::new(|_| Err("not driven".to_string())),
-        skills: Vec::new(),
         extensions: Default::default(),
     };
     let mut handle = SessionHost::spawn(session, Vec::new(), wiring, data);
@@ -727,7 +803,6 @@ async fn open_session_loads_a_stored_session_and_replays_it() {
                 .map(|(session, _)| (session, Vec::new()))
                 .map_err(|error| error.to_string())
         }),
-        skills: Vec::new(),
         extensions: Default::default(),
     };
     let mut handle = SessionHost::spawn(boot_session, Vec::new(), wiring, data);
@@ -884,7 +959,6 @@ async fn open_session_emits_its_model_notes_ahead_of_the_replay() {
                 })
                 .map_err(|error| error.to_string())
         }),
-        skills: Vec::new(),
         extensions: Default::default(),
     };
     let mut handle = SessionHost::spawn(boot_session, Vec::new(), wiring, data);
@@ -1055,7 +1129,6 @@ async fn a_catalog_failure_is_the_carrier_in_place_of_the_announcement() {
         SessionHostData {
             create: std::sync::Arc::new(|| Err("not driven".to_string())),
             open: std::sync::Arc::new(|_| Err("not driven".to_string())),
-            skills: Vec::new(),
             extensions: Default::default(),
         },
     );
@@ -1103,7 +1176,6 @@ async fn lifecycle_failures_and_notes_ride_the_carrier() {
                 Err("any model to run with (providers.toml defines no models)".to_string())
             }),
             open: std::sync::Arc::new(|id: &str| Err(format!("no stored session with id `{id}`"))),
-            skills: Vec::new(),
             extensions: Default::default(),
         },
     );
@@ -1172,7 +1244,6 @@ async fn a_created_sessions_selection_notes_follow_its_stream() {
                     .map_err(|error| error.to_string())
             }),
             open: std::sync::Arc::new(|_| Err("not driven".to_string())),
-            skills: Vec::new(),
             extensions: Default::default(),
         },
     );
@@ -1240,7 +1311,6 @@ async fn new_session_is_never_blocked_by_a_running_session() {
                 .map_err(|error| error.to_string())
         }),
         open: std::sync::Arc::new(|_| Err("not driven".to_string())),
-        skills: Vec::new(),
         extensions: Default::default(),
     };
     let mut handle = SessionHost::spawn(session, Vec::new(), wiring, data);
@@ -1406,7 +1476,6 @@ async fn frontend_death_aborts_every_sessions_run() {
                 .map_err(|error| error.to_string())
         }),
         open: std::sync::Arc::new(|_| Err("not driven".to_string())),
-        skills: Vec::new(),
         extensions: Default::default(),
     };
     let mut handle = SessionHost::spawn(session, Vec::new(), wiring, data);

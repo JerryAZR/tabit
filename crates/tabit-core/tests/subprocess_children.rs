@@ -187,7 +187,6 @@ fn host(store: &SessionStore, node: Arc<Node>, session: Session) -> SessionHost 
     let data = tabit_session::SessionHostData {
         create: Arc::new(|| Err("not driven".to_string())),
         open: Arc::new(|_| Err("not driven".to_string())),
-        skills: Vec::new(),
         extensions: Default::default(),
     };
     SessionHost::spawn(session, Vec::new(), wiring, data)

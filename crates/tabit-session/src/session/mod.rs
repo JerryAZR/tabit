@@ -156,9 +156,12 @@ pub struct Session {
     /// per-run capability is minted at run open.
     subagent_parts: Option<Arc<crate::subagent::SubagentParts>>,
     /// The skills catalog, when the assembly mounted it
-    /// ([`SessionBuilder::skills`]): one discovery per process,
-    /// inserted as typed tool context at run open for the `skill`
-    /// tool.
+    /// ([`SessionBuilder::skills`]): ONE DISCOVERY PER SESSION (the
+    /// session-level catalog ruling, 2026-09 — the ladder runs over
+    /// the session's own cwd at build, the extension contribution
+    /// folded in process-level), inserted as typed tool context at
+    /// run open for the `skill` tool and announced as the session
+    /// becomes visible.
     skills: Option<Arc<crate::skills::Skills>>,
     /// The frontend channel's weak, pre-stamped handle for module-level
     /// emissions — anything a session subsystem emits outside a run's
@@ -228,6 +231,18 @@ impl Session {
     /// The path as the wire carries it — the empty string for an
     /// ephemeral session (a frontend treats empty as "no file"; the
     /// v5 changelog states it).
+    /// The session's skills catalog as its wire snapshot (empty
+    /// when the assembly mounted none) — the session-level catalog
+    /// ruling: each session's `skills_available` carries its own
+    /// stamp and its own discovery, announced as the session becomes
+    /// visible.
+    pub(crate) fn skills_available(&self) -> Vec<tabit_protocol::AvailableSkill> {
+        self.skills
+            .as_ref()
+            .map(|s| s.available())
+            .unwrap_or_default()
+    }
+
     pub(crate) fn wire_path(&self) -> String {
         self.path
             .as_ref()

@@ -31,7 +31,7 @@ use serde::{Deserialize, Serialize};
 /// compaction — the `compact` command and its event family (reshaped
 /// in v15 into the
 /// `compaction_begin`/`compaction_step`/`compaction_end` envelope).
-pub const PROTOCOL_VERSION: u32 = 19;
+pub const PROTOCOL_VERSION: u32 = 20;
 
 /// Which session produced an event. The stamp is the session id
 /// itself (v3: the `"main"` alias is retired — one name per session);

@@ -1267,7 +1267,6 @@ id = "m"
             SessionHostData {
                 create,
                 open,
-                skills: Vec::new(),
                 extensions: Default::default(),
             },
         );

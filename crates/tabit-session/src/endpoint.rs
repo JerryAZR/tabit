@@ -135,9 +135,6 @@ pub struct SessionHostData {
     pub create: SessionSource,
     /// Load a stored session by id (`open_session`).
     pub open: OpenSessionSource,
-    /// The skills catalog's wire snapshot, announced once at startup
-    /// after the session catalog (empty = no announcement)
-    pub skills: Vec<tabit_protocol::AvailableSkill>,
     /// The extension catalog's wire snapshot, announced once at
     /// startup after the skills catalog (empty = no announcement) —
     /// the binary's boot-time assembly verdict: provenance, standing,
@@ -664,6 +661,7 @@ impl SessionHostMount {
         // its channel, which is what teaches the learning table where
         // the boot session lives (the worker itself emits nothing at
         // spawn — it waits).
+        let boot_skills = boot.skills_available();
         let (boot_worker, boot_channel, boot_join) =
             spawn_worker(boot, &node, worker_shutdown.clone(), closing_stats.clone());
         lock(&workers).insert(boot_id.clone(), boot_worker.clone());
@@ -690,6 +688,16 @@ impl SessionHostMount {
         });
         for note in startup_notes {
             boot_sink.emit(SessionEvent::error_model(note));
+        }
+        // The boot session's skills — session-level (owner ruling
+        // 2026-09, landed): stamped with the session's stream, one
+        // catalog per session build. Only when discovery found
+        // something — with per-stream folding, absence is
+        // unambiguous.
+        if !boot_skills.is_empty() {
+            boot_sink.emit(SessionEvent::SkillsAvailable {
+                skills: boot_skills,
+            });
         }
         match wiring.store.list() {
             Ok(summaries) => {
@@ -728,19 +736,7 @@ impl SessionHostMount {
                 );
             }
         }
-        // The skills catalog rides right after the session catalog —
-        // backend-level for the same reason (one process, one cwd,
-        // one skill set). Only when discovery found something: an
-        // empty announcement is noise with no state to clear.
-        if !data.skills.is_empty() {
-            sink.emit(
-                None,
-                SessionEvent::SkillsAvailable {
-                    skills: data.skills.clone(),
-                },
-            );
-        }
-        // The extension catalog rides right after the skills catalog —
+        // The extension catalog rides right after the session catalog —
         // same backend-level reasons (one process, one extension
         // host), and the conflict reports are load-time facts: they
         // belong to the boot that produced them.
@@ -1070,6 +1066,7 @@ impl Lifecycle {
             session.selection(),
             session.resumed(),
         );
+        let skills = session.skills_available();
         let (worker, channel, join) = spawn_worker(
             session,
             &self.node,
@@ -1096,6 +1093,12 @@ impl Lifecycle {
         });
         for note in notes {
             opened.emit(SessionEvent::error_model(note));
+        }
+        // The session's skills, stamped with its stream (the
+        // session-level catalog ruling) — every session becoming
+        // visible announces its own catalog.
+        if !skills.is_empty() {
+            opened.emit(SessionEvent::SkillsAvailable { skills });
         }
         lock(&self.workers).insert(id, worker);
         lock(&self.joins).push(join);
@@ -1128,6 +1131,7 @@ impl Lifecycle {
             session.selection(),
             session.resumed(),
         );
+        let skills = session.skills_available();
         let (worker, channel, join) = spawn_worker(
             session,
             &self.node,
@@ -1146,6 +1150,12 @@ impl Lifecycle {
         });
         for note in notes {
             opened.emit(SessionEvent::error_model(note));
+        }
+        // The resumed session's skills, stamped with its stream
+        // — a session opened from another directory announces ITS
+        // catalog (the reason the catalog is session-level).
+        if !skills.is_empty() {
+            opened.emit(SessionEvent::SkillsAvailable { skills });
         }
         lock(&self.workers).insert(id.to_string(), worker.clone());
         lock(&self.joins).push(join);

@@ -591,41 +591,30 @@ fn host_node() -> std::sync::Arc<tabit_session::Node> {
     .clone()
 }
 
-static SKILLS_CATALOG: std::sync::OnceLock<std::sync::Arc<tabit_session::skills::Skills>> =
+static EXTENSION_SKILLS: std::sync::OnceLock<tabit_session::skills::Skills> =
     std::sync::OnceLock::new();
 
-/// The process-wide skills catalog — one catalog per process, the
-/// consistency guarantee between the prompt's listing, the `skill`
-/// tool's lookup, and the wire snapshot (two discoveries could race a
-/// directory edit and disagree; one cannot). Built against the
-/// process cwd (the backend never chdirs — the same fact the session
-/// store roots at). The JSON boot seeds it with the extension
-/// walker's contribution folded under the ladder BEFORE any assembly
-/// reads it; unseeded, the plain ladder discovery is the catalog
-/// (print mode, extension-less hosts).
-fn skills_catalog() -> std::sync::Arc<tabit_session::skills::Skills> {
-    SKILLS_CATALOG
-        .get_or_init(|| {
-            // A failed `current_dir` assembles nothing anyway (the loud
-            // gate lives in `assemble_session`); here it degrades to a
-            // discovery that finds nothing.
-            let cwd = std::env::current_dir().unwrap_or_default();
-            std::sync::Arc::new(tabit_session::skills::discover(&cwd))
-        })
-        .clone()
+/// The extension host's skills contribution — the one process-level
+/// piece of the catalog (one host per backend; children boot their
+/// own hosts against the parent's root, the 2026-09 ruling). The
+/// LADDER half is per-session now (the session-level catalog ruling,
+/// 2026-09: each session build discovers over its own cwd, so a
+/// subagent in another directory announces and runs ITS skills);
+/// within a session the consistency triple — the prompt's listing,
+/// the `skill` tool's lookup, the wire snapshot — still reads one
+/// catalog object, built once at the session's build.
+fn extension_skills_part() -> tabit_session::skills::Skills {
+    EXTENSION_SKILLS.get().cloned().unwrap_or_default()
 }
 
-/// Seed the process's catalog (the JSON boot): the ladder discovery
-/// with the extension entries folded under it. Seeding after the
-/// catalog's first reader is an ordering bug, not a condition to
-/// absorb — the boot runs before any assembly by construction.
+/// Seed the extension contribution (the JSON boot). Seeding after a
+/// reader is an ordering bug, not a condition to absorb — the boot
+/// runs before any assembly by construction.
 #[allow(clippy::panic)] // the sanctioned crash below (AGENTS.md doctrine)
-fn seed_skills_catalog(extension_skills: tabit_session::skills::Skills) {
-    let cwd = std::env::current_dir().unwrap_or_default();
-    let seeded = tabit_session::skills::discover(&cwd).with_extension_defaults(extension_skills);
-    if SKILLS_CATALOG.set(std::sync::Arc::new(seeded)).is_err() {
+fn seed_extension_skills(extension_skills: tabit_session::skills::Skills) {
+    if EXTENSION_SKILLS.set(extension_skills).is_err() {
         panic!(
-            "internal invariant violated: the skills catalog was read before the boot seeded it"
+            "internal invariant violated: a session assembled before the boot seeded the extension skills"
         );
     }
 }
@@ -707,11 +696,16 @@ fn assemble_session(
 ) -> Result<Session, String> {
     let cwd = std::env::current_dir()
         .map_err(|e| format!("cannot determine the working directory: {e}"))?;
-    // Built once per process: the prompt must stay byte-stable for the
-    // provider's prompt cache (see the prompt module docs). The skills
-    // catalog is the same once-per-process fact — one discovery feeds
-    // the prompt's listing, the tool's lookup, and the wire snapshot.
-    let skills = skills_catalog();
+    // The session's skills catalog — ONE DISCOVERY PER SESSION
+    // (the session-level catalog ruling): the ladder over this
+    // session's cwd with the process-level extension contribution
+    // folded in. The prompt stays byte-stable per session for the
+    // provider's prompt cache, and the consistency triple — the
+    // prompt's listing, the `skill` tool's lookup, the wire snapshot
+    // — reads this one object.
+    let skills = std::sync::Arc::new(
+        tabit_session::skills::discover(&cwd).with_extension_defaults(extension_skills_part()),
+    );
     // `--preamble` replaces the default preamble — the identity and
     // standing body — while the environment block, AGENTS.md files,
     // and skills catalog append as usual (ruled 2026-09: the spawner
@@ -1036,7 +1030,7 @@ fn run() -> Result<i32, String> {
             // seeded before any assembly reads it (the prompt build
             // is the first reader). No filesystem writes: the
             // entries' locations ARE the packages' paths.
-            seed_skills_catalog(extension_skills_catalog(&launchable.packages));
+            seed_extension_skills(extension_skills_catalog(&launchable.packages));
             let registry = ModelRegistry::new(Arc::new(merged), auth);
             let runtime = tokio::runtime::Builder::new_current_thread()
                 .enable_all()
@@ -1521,7 +1515,6 @@ fn host_data(
     let open_store = store.clone();
     let open_extensions = extensions.clone();
     tabit_session::SessionHostData {
-        skills: skills_catalog().available(),
         extensions: extensions.catalog.clone(),
         create: Arc::new(move || {
             assemble(
