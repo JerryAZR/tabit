@@ -103,7 +103,6 @@ fn stub_node_role() {
     let answer_upstream = to_parent.clone();
     node.subscribe(
         "interaction_request",
-        "stub",
         Locality::Both,
         move |frame: &EventFrame| {
             let SessionEvent::InteractionRequest { id, .. } = &frame.event else {
@@ -163,7 +162,7 @@ fn spawn_stub() -> PipeNet {
 
     // The recorder: everything the parent hears, as its wire line.
     let sink = saw.clone();
-    parent.subscribe_all("recorder", Locality::Both, move |frame: &EventFrame| {
+    parent.subscribe_all(Locality::Both, move |frame: &EventFrame| {
         sink.lock()
             .expect("test lock")
             .push(tabit_protocol::to_wire_line(frame));
@@ -352,7 +351,7 @@ fn the_childs_burst_frame_reaches_the_mounted_lane() {
     let parent: Arc<Node> = Arc::new(Node::new("parent"));
     let saw: Arc<Mutex<Vec<String>>> = Arc::new(Mutex::new(Vec::new()));
     let sink = saw.clone();
-    parent.subscribe_all("recorder", Locality::Both, move |frame: &EventFrame| {
+    parent.subscribe_all(Locality::Both, move |frame: &EventFrame| {
         sink.lock().expect("test lock").push(format!(
             "{}@{}",
             frame.event.tag(),
@@ -413,7 +412,7 @@ fn a_mismatched_report_is_a_kill() {
     let parent: Arc<Node> = Arc::new(Node::new("parent"));
     let saw: Arc<Mutex<Vec<String>>> = Arc::new(Mutex::new(Vec::new()));
     let sink = saw.clone();
-    parent.subscribe_all("recorder", Locality::Both, move |frame: &EventFrame| {
+    parent.subscribe_all(Locality::Both, move |frame: &EventFrame| {
         sink.lock()
             .expect("test lock")
             .push(frame.event.tag().to_string());

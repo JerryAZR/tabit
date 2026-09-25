@@ -134,13 +134,16 @@ impl Locality {
     }
 }
 
-/// One subscriber: an owner (for retraction sweeps), the channel it
-/// delivers to (`None` for a plain callback — the ingress skip never
-/// applies to callbacks, only to a channel that would bounce a frame
-/// back out the pipe it arrived on), and the callback the router
-/// calls with each matching frame.
+/// One subscriber: the channel it delivers to (`None` for a plain
+/// callback — the ingress skip never applies to callbacks, only to
+/// a channel that would bounce a frame back out the pipe it arrived
+/// on), the callback the router calls with each matching frame, and
+/// — for CHANNEL registrations only — the participant identity the
+/// death sweep keys on (owner ruling 2026-09-25: identity is the
+/// channel's property, never a reason string; a plain callback is
+/// code, not a participant, and nothing dies with it).
 struct Subscriber<T> {
-    owner: String,
+    owner: Option<String>,
     channel: Option<u64>,
     locality: Locality,
     callback: Arc<dyn Fn(&T) + Send + Sync>,
@@ -175,16 +178,17 @@ impl<T> Default for Router<T> {
 }
 
 impl<T: Routed> Router<T> {
-    /// Subscribe to one kind. Many subscribers may hold one kind; all
-    /// run. One owner holds a kind once: a re-registration of an
-    /// interest it already declared is a duplicate delivery in the
-    /// making (a watch list naming a kind twice), so it is a no-op.
+    /// Subscribe to one kind — the plain callback: code that wants a
+    /// kind, nothing more. Many may hold one kind; all run. Every
+    /// registration stands (no dedup — there is no identity to key
+    /// one on, and a silent no-op here once ate a live registration);
+    /// a surface registering one kind twice double-delivers, loudly.
     /// The locality says which door the frames must come through.
-    pub fn register<F>(&self, kind: &str, owner: &str, locality: Locality, callback: F)
+    pub fn register<F>(&self, kind: &str, locality: Locality, callback: F)
     where
         F: Fn(&T) + Send + Sync + 'static,
     {
-        self.register_channel(kind, owner, None, locality, callback)
+        self.register_channel(kind, None, None, locality, callback)
     }
 
     /// [`Self::register`] as a channel subscription: the subscriber
@@ -193,11 +197,14 @@ impl<T: Routed> Router<T> {
     /// **channel identity** — never to plain callbacks (a callback is
     /// code, not a pipe: it cannot bounce, and skipping it is
     /// collateral damage; the 2026-09 identity ruling, replacing
-    /// skip-by-owner-string).
+    /// skip-by-owner-string). `owner` is the participant identity the
+    /// death sweep keys on — one participant holds a kind once (its
+    /// re-registration is a duplicate delivery in the making, so it
+    /// is a no-op).
     pub fn register_channel<F>(
         &self,
         kind: &str,
-        owner: &str,
+        owner: Option<&str>,
         channel: Option<u64>,
         locality: Locality,
         callback: F,
@@ -206,11 +213,18 @@ impl<T: Routed> Router<T> {
     {
         let mut held = lock(&self.by_kind);
         let subscribers = held.entry(kind.to_string()).or_default();
-        if subscribers.iter().any(|s| s.owner == owner) {
+        // The dedup is the CHANNEL flavor's law (one participant, one
+        // kind); plain registrations have no identity and every one
+        // stands.
+        if owner.is_some_and(|owner| {
+            subscribers
+                .iter()
+                .any(|s| s.owner.as_deref() == Some(owner))
+        }) {
             return;
         }
         subscribers.push(Subscriber {
-            owner: owner.to_string(),
+            owner: owner.map(str::to_string),
             channel,
             locality,
             callback: Arc::new(callback),
@@ -219,23 +233,23 @@ impl<T: Routed> Router<T> {
 
     /// Subscribe to every kind (relays and taps — the
     /// forward-everything policies, and the functional layer's
-    /// catch-all when it prefers one intake). One owner holds the
-    /// wildcard once (the same no-op-on-repeat law as
-    /// [`Self::register`]). The locality bounds the catch-all: a
-    /// wildcard is not "everything" — it is "every kind," from the
-    /// declared doors.
-    pub fn register_all<F>(&self, owner: &str, locality: Locality, callback: F)
+    /// catch-all when it prefers one intake). The locality bounds the
+    /// catch-all: a wildcard is not "everything" — it is "every
+    /// kind," from the declared doors. Every plain registration
+    /// stands, as [`Self::register`] documents.
+    pub fn register_all<F>(&self, locality: Locality, callback: F)
     where
         F: Fn(&T) + Send + Sync + 'static,
     {
-        self.register_all_channel(owner, None, locality, callback)
+        self.register_all_channel(None, None, locality, callback)
     }
 
     /// [`Self::register_all`] as a channel subscription (the
-    /// identity-skip twin of [`Self::register_channel`]).
+    /// identity-skip twin of [`Self::register_channel`]; the owner is
+    /// the death-sweep key and the dedup, as there).
     pub fn register_all_channel<F>(
         &self,
-        owner: &str,
+        owner: Option<&str>,
         channel: Option<u64>,
         locality: Locality,
         callback: F,
@@ -243,11 +257,11 @@ impl<T: Routed> Router<T> {
         F: Fn(&T) + Send + Sync + 'static,
     {
         let mut wildcards = lock(&self.wildcard);
-        if wildcards.iter().any(|s| s.owner == owner) {
+        if owner.is_some_and(|owner| wildcards.iter().any(|s| s.owner.as_deref() == Some(owner))) {
             return;
         }
         wildcards.push(Subscriber {
-            owner: owner.to_string(),
+            owner: owner.map(str::to_string),
             channel,
             locality,
             callback: Arc::new(callback),
@@ -299,10 +313,10 @@ impl<T: Routed> Router<T> {
     /// death sweep). Idempotent.
     pub fn retract_owner(&self, owner: &str) {
         lock(&self.by_kind).retain(|_, subscribers| {
-            subscribers.retain(|subscriber| subscriber.owner != owner);
+            subscribers.retain(|subscriber| subscriber.owner.as_deref() != Some(owner));
             !subscribers.is_empty()
         });
-        lock(&self.wildcard).retain(|subscriber| subscriber.owner != owner);
+        lock(&self.wildcard).retain(|subscriber| subscriber.owner.as_deref() != Some(owner));
     }
 }
 
@@ -329,15 +343,13 @@ mod tests {
         let s1 = seen1.clone();
         let s2 = seen2.clone();
         let s3 = seen3.clone();
-        router.register("run_finished", "watcher-a", Locality::Both, move |_| {
+        router.register("run_finished", Locality::Both, move |_| {
             s1.lock().unwrap().push("a")
         });
-        router.register("run_finished", "watcher-b", Locality::Both, move |_| {
+        router.register("run_finished", Locality::Both, move |_| {
             s2.lock().unwrap().push("b")
         });
-        router.register_all("relay", Locality::Both, move |_| {
-            s3.lock().unwrap().push("relay")
-        });
+        router.register_all(Locality::Both, move |_| s3.lock().unwrap().push("relay"));
 
         let begun = frame(SessionEvent::CompactionBegin);
         router.dispatch(&begun, Locality::Local);
@@ -371,13 +383,13 @@ mod tests {
         let remote = std::sync::Arc::new(std::sync::Mutex::new(0u32));
         let both = std::sync::Arc::new(std::sync::Mutex::new(0u32));
         let (l, r, b) = (local.clone(), remote.clone(), both.clone());
-        router.register("run_finished", "local", Locality::Local, move |_| {
+        router.register("run_finished", Locality::Local, move |_| {
             *l.lock().unwrap() += 1
         });
-        router.register("run_finished", "remote", Locality::Remote, move |_| {
+        router.register("run_finished", Locality::Remote, move |_| {
             *r.lock().unwrap() += 1
         });
-        router.register("run_finished", "both", Locality::Both, move |_| {
+        router.register("run_finished", Locality::Both, move |_| {
             *b.lock().unwrap() += 1
         });
 
@@ -400,12 +412,19 @@ mod tests {
 
     #[test]
     fn retraction_sweeps_one_owner_everywhere() {
+        // The sweep is the CHANNEL flavor's law: identity is the
+        // participant's, and its death takes its registrations. A
+        // plain registration has no identity and is never swept.
         let router = Router::default();
         let seen = std::sync::Arc::new(std::sync::Mutex::new(0u32));
         let s = seen.clone();
-        router.register("run_finished", "lane", Locality::Both, move |_| {
-            *s.lock().unwrap() += 1
-        });
+        router.register_channel(
+            "run_finished",
+            Some("lane"),
+            None,
+            Locality::Both,
+            move |_| *s.lock().unwrap() += 1,
+        );
         router.retract_owner("lane");
         router.dispatch(
             &frame(SessionEvent::RunFinished {
@@ -426,7 +445,7 @@ mod tests {
         let handlers: Router<SessionCommand> = Router::default();
         let seen = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
         let s = seen.clone();
-        handlers.register("new_session", "core", Locality::Both, move |command| {
+        handlers.register("new_session", Locality::Both, move |command| {
             s.lock().unwrap().push(command.tag())
         });
 

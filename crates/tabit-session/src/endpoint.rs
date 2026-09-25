@@ -544,13 +544,13 @@ impl SessionHost {
         });
         {
             let created = door.clone();
-            node.handle("new_session", "host", move |command: &SessionCommand| {
+            node.handle("new_session", move |command: &SessionCommand| {
                 if matches!(command, SessionCommand::NewSession) {
                     created.new_session();
                 }
             });
             let opened = door.clone();
-            node.handle("open_session", "host", move |command: &SessionCommand| {
+            node.handle("open_session", move |command: &SessionCommand| {
                 if let SessionCommand::OpenSession { id } = command {
                     opened.open_session(id);
                 }

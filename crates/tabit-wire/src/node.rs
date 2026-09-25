@@ -348,13 +348,15 @@ impl<C: Routed> Node<C> {
     /// there is no default; every registration states it. A surface
     /// that must also hear the card's close subscribes the settle
     /// kind itself — the wire stays fine-grained, the pairing is the
-    /// caller's declaration.
-    pub fn subscribe<F>(&self, kind: &str, owner: &str, locality: Locality, callback: F)
+    /// caller's declaration. Identity is not taken: a plain callback
+    /// is code, not a participant — nothing dies with it (owner
+    /// ruling 2026-09-25).
+    pub fn subscribe<F>(&self, kind: &str, locality: Locality, callback: F)
     where
         F: Fn(&EventFrame) + Send + Sync + 'static,
     {
         self.events
-            .register(kind, owner, locality, move |frame| callback(frame));
+            .register(kind, locality, move |frame| callback(frame));
     }
 
     /// Subscribe a channel to one event kind — the common wiring (a
@@ -366,7 +368,7 @@ impl<C: Routed> Node<C> {
         let id = channel.id();
         let channel = channel.clone();
         self.events
-            .register_channel(kind, &owner, Some(id), locality, move |frame| {
+            .register_channel(kind, Some(&owner), Some(id), locality, move |frame| {
                 channel.send_event(frame);
             });
     }
@@ -374,11 +376,11 @@ impl<C: Routed> Node<C> {
     /// Subscribe to every event kind (the relays, taps, and
     /// forward-everything policies) — every kind, from the declared
     /// doors.
-    pub fn subscribe_all<F>(&self, owner: &str, locality: Locality, callback: F)
+    pub fn subscribe_all<F>(&self, locality: Locality, callback: F)
     where
         F: Fn(&EventFrame) + Send + Sync + 'static,
     {
-        self.events.register_all(owner, locality, callback);
+        self.events.register_all(locality, callback);
     }
 
     /// Subscribe a channel to every event kind from the declared
@@ -389,7 +391,7 @@ impl<C: Routed> Node<C> {
         let id = channel.id();
         let channel = channel.clone();
         self.events
-            .register_all_channel(&owner, Some(id), locality, move |frame| {
+            .register_all_channel(Some(&owner), Some(id), locality, move |frame| {
                 channel.send_event(frame);
             });
     }
@@ -402,22 +404,21 @@ impl<C: Routed> Node<C> {
     /// receiving node), never through this table — so the
     /// registration is remote-hearing by construction, stated once
     /// here rather than vacuously at every caller.
-    pub fn handle<F>(&self, tag: &str, owner: &str, handler: F)
+    pub fn handle<F>(&self, tag: &str, handler: F)
     where
         F: Fn(&C) + Send + Sync + 'static,
     {
-        self.commands
-            .register(tag, owner, Locality::Remote, handler);
+        self.commands.register(tag, Locality::Remote, handler);
     }
 
     /// Handle every command type (the one-intake functional layers —
     /// a session host that prefers its own dispatch). Remote-hearing
     /// by construction, as [`Self::handle`] documents.
-    pub fn handle_all<F>(&self, owner: &str, handler: F)
+    pub fn handle_all<F>(&self, handler: F)
     where
         F: Fn(&C) + Send + Sync + 'static,
     {
-        self.commands.register_all(owner, Locality::Remote, handler);
+        self.commands.register_all(Locality::Remote, handler);
     }
 
     // --- The routing layer's acts ---

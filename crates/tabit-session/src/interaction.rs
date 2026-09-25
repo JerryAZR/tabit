@@ -115,7 +115,7 @@ mod tests {
         let seen: std::sync::Arc<std::sync::Mutex<Vec<String>>> =
             std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
         let sink = seen.clone();
-        node.subscribe_all("recorder", Locality::Both, move |frame: &EventFrame| {
+        node.subscribe_all(Locality::Both, move |frame: &EventFrame| {
             let note = match &frame.event {
                 SessionEvent::InteractionRequest { id, ui_type, .. } => {
                     format!("request:{id}:{ui_type}")

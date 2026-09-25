@@ -700,11 +700,18 @@ pub fn serve(extension: Extension) -> ! {
         // every child this extension ever spawns, the frame's stamp
         // carrying the attribution. Each handler runs on its own
         // task — observation never blocks the loop.
+        // One registration per kind (a duplicated watch in the builder
+        // is a config artifact; plain registrations no longer dedup,
+        // so the surface states its once-ness here).
+        let mut seen_kinds = std::collections::HashSet::new();
         for watch in watches.iter() {
+            if !seen_kinds.insert(watch.kind.clone()) {
+                continue;
+            }
             let kind = watch.kind.clone();
             let body = watch.body.clone();
             let watch_shared = shared.clone();
-            node.subscribe(&kind, "watch", Locality::Both, move |frame: &EventFrame| {
+            node.subscribe(&kind, Locality::Both, move |frame: &EventFrame| {
                 let shared = watch_shared.clone();
                 let body = body.clone();
                 let frame = frame.clone();
@@ -779,18 +786,8 @@ fn mount_card_surface(node: &Node, shared: &Arc<Shared>, asks: Arc<Vec<ErasedWat
             spawn_observation(shared, move |ctx| body(ctx, frame));
         }
     };
-    node.subscribe(
-        tags::INTERACTION_REQUEST,
-        "card-surface",
-        Locality::Remote,
-        card_surface,
-    );
-    node.subscribe(
-        tags::INTERACTION_SETTLED,
-        "card-surface",
-        Locality::Remote,
-        settled_surface,
-    );
+    node.subscribe(tags::INTERACTION_REQUEST, Locality::Remote, card_surface);
+    node.subscribe(tags::INTERACTION_SETTLED, Locality::Remote, settled_surface);
 }
 
 /// One invocation on its own task with a fresh watch context — the

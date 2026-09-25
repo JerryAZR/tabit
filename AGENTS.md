@@ -97,7 +97,11 @@ Current workspace layout:
   machinery alone — the forwarding law: a callback forwarding an
   ask re-stamps it (the arriving ask consumed at this node, a new
   ask minted, the linkage held in the callback, never on the wire);
-  `router.rs` is THE
+  identity is the CHANNEL's property, never a subscription
+  parameter (owner ruling 2026-09-25: a plain callback is code, not
+  a participant — nothing dies with it, no dedup keys on it; the
+  death sweep and the one-participant-one-kind dedup are the channel
+  flavor's, keyed on the channel's owner); `router.rs` is THE
   event router (register by kind or wildcard, dispatch, retract by
   owner — each callback owns its own dispatch); `asks.rs`
   is THE pending-question registry (one entry per round-trip: an

@@ -136,11 +136,11 @@ fn events_fan_by_type_and_compose() {
 
     let seen: Arc<Mutex<Vec<&'static str>>> = Arc::new(Mutex::new(Vec::new()));
     let kind_sink = seen.clone();
-    node.subscribe(tags::ERROR, "watcher", Locality::Both, move |_| {
+    node.subscribe(tags::ERROR, Locality::Both, move |_| {
         kind_sink.lock().expect("test lock").push("kind")
     });
     let relay_sink = seen.clone();
-    node.subscribe_all("relay", Locality::Both, move |_| {
+    node.subscribe_all(Locality::Both, move |_| {
         relay_sink.lock().expect("test lock").push("wildcard")
     });
 
@@ -392,7 +392,7 @@ fn non_session_commands_dispatch_by_type() {
     let node = Arc::new(Node::new("core"));
     let handled: Arc<Mutex<Vec<String>>> = Arc::new(Mutex::new(Vec::new()));
     let sink = handled.clone();
-    node.handle("new_session", "core", move |command: &SessionCommand| {
+    node.handle("new_session", move |command: &SessionCommand| {
         sink.lock()
             .expect("test lock")
             .push(command.tag().to_string());
@@ -421,7 +421,7 @@ fn a_one_intake_layer_handles_every_command_type() {
     let node: Arc<Node> = Arc::new(Node::new("core"));
     let seen: Arc<Mutex<Vec<String>>> = Arc::new(Mutex::new(Vec::new()));
     let sink = seen.clone();
-    node.handle_all("layer", move |command: &SessionCommand| {
+    node.handle_all(move |command: &SessionCommand| {
         sink.lock()
             .expect("test lock")
             .push(command.tag().to_string());
@@ -453,7 +453,7 @@ fn unstamped_arrivals_are_attributed_and_stamped_cross_verbatim() {
 
     let seen: Arc<Mutex<Vec<String>>> = Arc::new(Mutex::new(Vec::new()));
     let sink = seen.clone();
-    parent.subscribe_all("recorder", Locality::Both, move |frame| {
+    parent.subscribe_all(Locality::Both, move |frame| {
         let origin = frame.origin.clone().unwrap_or_else(|| "-".to_string());
         sink.lock()
             .expect("test lock")
@@ -725,7 +725,7 @@ fn the_ttl_tripwire_kills_cross_node_loops() {
     });
 
     let counter = laps.clone();
-    a.subscribe_all("recorder", Locality::Both, move |_| {
+    a.subscribe_all(Locality::Both, move |_| {
         *counter.lock().expect("test lock") += 1;
     });
     a.subscribe_channel_all(Locality::Both, &a_fwd);
@@ -768,7 +768,7 @@ fn a_subscriber_may_emit_from_inside_dispatch() {
     let seen: Arc<Mutex<Vec<String>>> = Arc::new(Mutex::new(Vec::new()));
 
     let sink = seen.clone();
-    node.subscribe(tags::ERROR, "watcher", Locality::Both, move |frame| {
+    node.subscribe(tags::ERROR, Locality::Both, move |frame| {
         sink.lock()
             .expect("test lock")
             .push(frame.event.tag().to_string());
@@ -778,7 +778,7 @@ fn a_subscriber_may_emit_from_inside_dispatch() {
     {
         let emitter = node.clone();
         let layer = layer.clone();
-        node.subscribe_all("deriver", Locality::Both, move |frame| {
+        node.subscribe_all(Locality::Both, move |frame| {
             // Hear an error, derive a run_finished — an emit while
             // dispatch holds the wildcard iteration.
             if matches!(frame.event, SessionEvent::Error { .. }) {
@@ -877,40 +877,25 @@ fn the_card_pair_is_the_callers_declaration_not_a_bundle() {
     let node = Arc::new(Node::new("core"));
     let requests_only: Arc<Mutex<Vec<String>>> = Arc::new(Mutex::new(Vec::new()));
     let sink = requests_only.clone();
-    node.subscribe(
-        "interaction_request",
-        "requests-only",
-        Locality::Both,
-        move |frame| {
-            sink.lock()
-                .expect("test lock")
-                .push(frame.event.tag().to_string());
-        },
-    );
+    node.subscribe("interaction_request", Locality::Both, move |frame| {
+        sink.lock()
+            .expect("test lock")
+            .push(frame.event.tag().to_string());
+    });
     let both_kinds: Arc<Mutex<Vec<String>>> = Arc::new(Mutex::new(Vec::new()));
     let sink = both_kinds.clone();
     let paired = sink.clone();
-    node.subscribe(
-        "interaction_request",
-        "paired",
-        Locality::Both,
-        move |frame| {
-            sink.lock()
-                .expect("test lock")
-                .push(frame.event.tag().to_string());
-        },
-    );
-    node.subscribe(
-        "interaction_settled",
-        "paired",
-        Locality::Both,
-        move |frame| {
-            paired
-                .lock()
-                .expect("test lock")
-                .push(frame.event.tag().to_string());
-        },
-    );
+    node.subscribe("interaction_request", Locality::Both, move |frame| {
+        sink.lock()
+            .expect("test lock")
+            .push(frame.event.tag().to_string());
+    });
+    node.subscribe("interaction_settled", Locality::Both, move |frame| {
+        paired
+            .lock()
+            .expect("test lock")
+            .push(frame.event.tag().to_string());
+    });
 
     let (layer, saw) = stub_layer(&node, "layer");
     let awaiter = node.ask(
@@ -1188,7 +1173,7 @@ fn a_local_subscribed_pipe_hears_local_speech_only() {
 
     let both_heard = Arc::new(Mutex::new(0u32));
     let sink = both_heard.clone();
-    node.subscribe_all("recorder", Locality::Both, move |_| {
+    node.subscribe_all(Locality::Both, move |_| {
         *sink.lock().expect("test lock") += 1
     });
 
@@ -1236,7 +1221,7 @@ fn the_ingress_skip_matches_identity_not_owner_strings() {
     // same owner string — the ingress skip must not touch it (the
     // string-based skip once ate exactly this shape).
     let sink = heard.clone();
-    node.subscribe(tags::RUN_FINISHED, "child-1", Locality::Both, move |_| {
+    node.subscribe(tags::RUN_FINISHED, Locality::Both, move |_| {
         sink.lock().expect("test lock").push("callback".to_string());
     });
 
@@ -1280,18 +1265,13 @@ fn an_extension_shaped_node_speaks_but_does_not_relay() {
     // The layer captures message-shaped events (its opt-in watch).
     let captured: Arc<Mutex<Vec<String>>> = Arc::new(Mutex::new(Vec::new()));
     let sink = captured.clone();
-    node.subscribe(
-        "text_delta",
-        "capture",
-        Locality::Both,
-        move |frame: &EventFrame| {
-            let note = match &frame.event {
-                SessionEvent::TextDelta { text, .. } => text.clone(),
-                event => event.tag().to_string(),
-            };
-            sink.lock().expect("test lock").push(note);
-        },
-    );
+    node.subscribe("text_delta", Locality::Both, move |frame: &EventFrame| {
+        let note = match &frame.event {
+            SessionEvent::TextDelta { text, .. } => text.clone(),
+            event => event.tag().to_string(),
+        };
+        sink.lock().expect("test lock").push(note);
+    });
 
     // A child's frame arrives from its lane: the capture hears it,
     // the stdio (local-hearing) does not carry it up.
@@ -1701,7 +1681,6 @@ async fn a_callback_forwarding_an_ask_re_stamps_it() {
     let surface_node = node.clone();
     node.subscribe(
         tags::INTERACTION_REQUEST,
-        "intercept",
         Locality::Remote,
         move |frame: &EventFrame| {
             let SessionEvent::InteractionRequest {

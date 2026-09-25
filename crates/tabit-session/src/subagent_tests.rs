@@ -223,7 +223,6 @@ async fn a_childs_first_frames_reach_the_node_fan() {
         std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
     let sink = seen.clone();
     node.subscribe_all(
-        "recorder",
         tabit_wire::node::Locality::Both,
         move |frame: &tabit_protocol::EventFrame| {
             let note = format!(

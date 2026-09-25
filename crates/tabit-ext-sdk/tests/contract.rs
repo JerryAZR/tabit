@@ -44,7 +44,6 @@ impl Recorded {
         let events = self.events.clone();
         let node = std::sync::Arc::new(tabit_wire::node::Node::new("test"));
         node.subscribe_all(
-            "recorder",
             tabit_wire::node::Locality::Both,
             move |frame: &tabit_protocol::EventFrame| {
                 let origin = frame.origin.clone().unwrap_or_else(|| "-".to_string());
