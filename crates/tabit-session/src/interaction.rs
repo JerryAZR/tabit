@@ -99,9 +99,9 @@ impl UserInteraction for InteractionHub {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use tabit_wire::node::Locality;
     use serde_json::json;
     use tabit_protocol::{EventFrame, SessionCommand, SessionEvent};
+    use tabit_wire::node::Locality;
 
     /// The hub over a bare node: one recorder subscription is the
     /// "frontend" — the test drives the card lifecycle the way the

@@ -95,7 +95,7 @@ Current workspace layout:
   additional-receiver override this replaces was the workaround the
   origin-blind fan forced); `router.rs` is THE
   event router (register by kind or wildcard, dispatch, retract by
-  owner or by kind — each callback owns its own dispatch); `asks.rs`
+  owner — each callback owns its own dispatch); `asks.rs`
   is THE pending-question registry (one entry per round-trip: an
   owner key plus a delivery closure over answered-or-orphaned —
   answers are races, the first wins; an entry owing no settle
@@ -174,15 +174,14 @@ Current workspace layout:
   answered through it, watches are subscriptions, the author's
   ask/emit/command ride the node's ask, emission fan, and outbound
   command; owned children are lanes — the transit entry is the
-  relay, the card surface (the shipped lift's forward default, the
-  author answerers) is ONE node-level registration pair covering
-  every child at the REMOTE door (the locality ruling makes the
-  split structural: the extension's own asks are local speech and
-  never surface, a child's arriving card always does), death sweeps
-  the child's everything; the stdio's crossing policy is two
-  subscriptions — every kind from the local door plus the settle
-  kind from either, so own speech crosses and the close vocabulary
-  crosses from anywhere) — so the author
+  relay, the card surface is one declared policy per mode (owner
+  ruling, second round: the lift and its settle are one unit —
+  the shipped lift subscribes the stdio to the card PAIR at the
+  remote door, the ingress law keeping a host-mirrored card from
+  bouncing back and tripping the mint law; the answerer mode hears
+  the pair and crosses nothing), death sweeps
+  the child's everything; the stdio subscribes every kind from the
+  local door — own speech crosses, arrivals do not) — so the author
   surface stays
   purely functional: one context per handler (command, emit, ask,
   complete, the cancelled poll). The SDK is async (owner ruling

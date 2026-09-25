@@ -1490,7 +1490,7 @@ fn the_mint_decision_is_atomic_with_the_registration() {
 fn an_owner_holds_a_kind_once() {
     let node = Arc::new(Node::new("core"));
     // The watch list names BOTH card kinds; the lane channel is
-    // subscribed to each (the ack loop's verbatim shape).
+    // subscribed to each (one owner holds a kind once).
     let lines: Arc<Mutex<Vec<String>>> = Arc::new(Mutex::new(Vec::new()));
     let writer = lines.clone();
     let lane = Channel::line("watcher", move |line: &str| {

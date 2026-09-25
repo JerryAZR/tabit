@@ -620,10 +620,11 @@ impl<C: Routed> Node<C> {
     /// (an extension's own card — the answer routes by id, not
     /// stream).
     ///
-    /// The settle law this side (owner ruling 2026-09, a doc law):
-    /// **when you stop waiting on the thing requested (answer
-    /// received, or no longer needed), send a settled event — to the
-    /// same channel the request was sent to.** This method is the
+    /// The settle law this side (owner ruling 2026-09, a doc law,
+    /// re-phrased for the locality ruling): **when you stop waiting
+    /// on the thing requested (answer received, or no longer
+    /// needed), announce the settled event by the same local fan
+    /// that carried the request.** This method is the
     /// law's one correct implementation for an origin (both the
     /// request and the announce cross by the same local fan, whatever
     /// resolves or sweeps the promise); a hand-rolled lift that

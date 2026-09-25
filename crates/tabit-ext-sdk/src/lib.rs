@@ -39,9 +39,9 @@
 //! and answered through it; an extension's own ask and its emissions
 //! cross the stdio by that pipe's crossing policy — the locality
 //! ruling (2026-09-25): the stdio subscribes every kind from the
-//! LOCAL door plus the settle kind from either door, so own speech
-//! crosses, the close vocabulary crosses from anywhere, and nothing
-//! else does. The SDK shares the host's wire types (the 2026-09
+//! LOCAL door, so own speech crosses and arrivals do not (a
+//! child's cards cross only by the card surface's declared mode).
+//! The SDK shares the host's wire types (the 2026-09
 //! sharing ruling: one wire, one set of shapes — the docs stay the
 //! contract for other languages, the conformance tests keep crate
 //! and docs honest).
@@ -570,12 +570,11 @@ struct Shared {
     /// children's registrations ride it; emissions leave by its fan.
     node: Arc<Node>,
     /// The pipe's shared-grammar face — the host's channel. Arriving
-    /// frames enter through it (the loop's intake); the extension's
-    /// own speech names it as an additional receiver.
+    /// frames enter through it (the loop's intake); this extension's
+    /// own speech crosses it by its local-door subscription.
     stdio: Channel,
     /// The functional layer's own face — the emission anchor (the
-    /// unstamped emissions' `from`; the re-stamped-forward
-    /// interception surface, when that preset exists).
+    /// unstamped emissions' `from`).
     layer: Channel,
     /// The pipe's one writer: every outbound line — the dialect's
     /// frames (the ack, results, envelope requests) and the shared
@@ -651,17 +650,13 @@ pub fn serve(extension: Extension) -> ! {
         let pipe_writer = pipe_tx.clone();
         let stdio = Channel::line("host", move |line: &str| write_line(&pipe_writer, line));
         let layer = Channel::local("sdk", |_| {}, |_| {});
-        // The pipe's crossing policy, stated as two subscriptions
-        // (the locality ruling, 2026-09-25): every kind from the
-        // LOCAL door — this extension's own speech (its emissions,
-        // its asks, their settle announces) crosses — plus the
-        // settle kind from EITHER door, so no channel anywhere holds
-        // a card that can never close. Arrivals cross nothing: a
-        // child's or grandchild's card reaches only the card surface,
-        // and a settle arriving from the host never bounces back
-        // (the ingress law).
+        // The pipe's crossing policy (the locality ruling, 2026-09-25):
+        // every kind from the LOCAL door alone — this extension's own
+        // speech (its emissions, its asks, their settle announces)
+        // crosses, and nothing else does. Arrivals cross only by the
+        // card surface's declared mode (the shipped lift subscribes
+        // the pair; see [`mount_card_surface`]).
         node.subscribe_channel_all(Locality::Local, &stdio);
-        node.subscribe_channel(tags::INTERACTION_SETTLED, Locality::Remote, &stdio);
         let shared = Arc::new(Shared {
             node: node.clone(),
             stdio: stdio.clone(),
@@ -736,33 +731,41 @@ pub fn serve(extension: Extension) -> ! {
     })
 }
 
-/// The card surface: ONE node-level registration pair covering every
-/// owned child (owner ruling 2026-09-25 — registration is router
-/// config, a single subscription spans multiple children; the
-/// frame's stamp attributes which), hearing the REMOTE door alone —
-/// the locality ruling makes the split structural: this extension's
-/// own asks are local speech and never surface here, a child's
-/// arriving card is remote and always does. With no author
-/// answerers the card crosses verbatim (the shipped lift: the
-/// host's frontend surfaces it, its settle crossing back by the
-/// stdio's remote settle subscription); the first author answerer
-/// retires that default (a custom beside it would double-surface
-/// the card), and answerers then stack — any may answer
-/// ([`Ctx::answer`]), the child's hub takes the first arrival, a
-/// late answer a tolerated no-op. Settles reach the answerers too
-/// (the declared pair — whoever surfaces a card hears it close) but
-/// never cross here: the stdio's own settle subscription carries
-/// them.
+/// The card surface, one declared policy per mode (owner ruling
+/// 2026-09-25, second round — the lift and its settle are ONE unit:
+/// a forwarded ask needs its forwarded settle, an intercepted one
+/// needs neither): ONE node-level registration covering every owned
+/// child (registration is router config, a single subscription
+/// spans multiple children; the frame's stamp attributes which),
+/// hearing the REMOTE door alone — the locality ruling makes the
+/// split structural: this extension's own asks are local speech and
+/// never surface here, a child's arriving card is remote and always
+/// does.
+///
+/// - **The shipped lift** (no author answerers): the stdio
+///   subscribes the card PAIR at the remote door — request and
+///   settle cross verbatim together, the host's frontend surfacing
+///   the card and hearing it close. Riding the CHANNEL subscription
+///   is what the ingress law protects: a card or settle arriving
+///   FROM the host (a watch lane's mirror) is identity-skipped and
+///   never bounces back — a callback lift would echo it, and the
+///   echo re-registers a live ask id at the host, killing this
+///   extension through the mint law.
+/// - **The answerer mode** (the first `on_ask` registration): the
+///   pair is heard by the answerers (whoever surfaces a card hears
+///   it close), and NOTHING crosses — the host never saw the card,
+///   so its settle has nothing to close there. Answerers stack —
+///   any may answer ([`Ctx::answer`]), the child's hub takes the
+///   first arrival, a late answer a tolerated no-op.
 fn mount_card_surface(node: &Node, shared: &Arc<Shared>, asks: Arc<Vec<ErasedWatch>>) {
+    if asks.is_empty() {
+        node.subscribe_channel(tags::INTERACTION_REQUEST, Locality::Remote, &shared.stdio);
+        node.subscribe_channel(tags::INTERACTION_SETTLED, Locality::Remote, &shared.stdio);
+        return;
+    }
     let surface_asks = asks.clone();
     let surface_shared = shared.clone();
     let card_surface = move |frame: &EventFrame| {
-        if surface_asks.is_empty() {
-            // The shipped lift: the verbatim crossing — the write
-            // alone; the intake already fanned and taught.
-            surface_shared.stdio.send_event(frame);
-            return;
-        }
         for body in surface_asks.iter() {
             let (shared, frame, body) = (surface_shared.clone(), frame.clone(), body.clone());
             spawn_observation(shared, move |ctx| body(ctx, frame));
@@ -1172,13 +1175,14 @@ pub(crate) mod tests {
     /// The review round's latent break, pinned: a child's card
     /// arrives exactly as it crosses the wire — stamped with the
     /// child's session, origin carrying the CHILD's own asker (its
-    /// node's ask stamped it before the card left) — and the card
-    /// surface lifts it anyway. The origin-discriminating surface
-    /// once dropped exactly this shape; the locality split makes
-    /// the lift structural (remote arrivals surface, local speech
-    /// does not).
+    /// node's ask stamped it before the card left) — and the lift
+    /// carries it anyway. The origin-discriminating surface once
+    /// dropped exactly this shape; the locality split makes the
+    /// lift structural (remote arrivals cross, local speech does
+    /// not). The settle crosses with it — the lift forwards the
+    /// PAIR, never the request alone.
     #[test]
-    fn a_childs_card_surfaces_through_the_card_surface() {
+    fn a_childs_card_and_its_settle_surface_through_the_lift() {
         use tabit_protocol::StreamId;
         use tabit_wire::node::Inbound;
 
@@ -1188,7 +1192,6 @@ pub(crate) mod tests {
         let stdio = Channel::line("host", move |line: &str| write_line(&pipe_writer, line));
         let layer = Channel::local("sdk", |_| {}, |_| {});
         node.subscribe_channel_all(Locality::Local, &stdio);
-        node.subscribe_channel(tags::INTERACTION_SETTLED, Locality::Remote, &stdio);
         let shared = Arc::new(Shared {
             node: node.clone(),
             stdio: stdio.clone(),
@@ -1201,19 +1204,17 @@ pub(crate) mod tests {
         mount_card_surface(&node, &shared, Arc::new(Vec::new()));
 
         let lane = Channel::line("lane-1", |_| {});
-        node.intake(
-            &lane,
-            Inbound::Event(EventFrame {
-                stream: Some(StreamId::new("child-sess")),
-                origin: Some("child-asker".to_string()),
-                ttl: None,
-                event: SessionEvent::InteractionRequest {
-                    id: "card-1".to_string(),
-                    ui_type: "native:select_one".to_string(),
-                    payload: json!({}),
-                },
-            }),
-        );
+        let card = EventFrame {
+            stream: Some(StreamId::new("child-sess")),
+            origin: Some("child-asker".to_string()),
+            ttl: None,
+            event: SessionEvent::InteractionRequest {
+                id: "card-1".to_string(),
+                ui_type: "native:select_one".to_string(),
+                payload: json!({}),
+            },
+        };
+        node.intake(&lane, Inbound::Event(card));
         let line = pipe_rx
             .blocking_recv()
             .expect("the child's card lifted to the host");
@@ -1226,9 +1227,28 @@ pub(crate) mod tests {
             "the stamp crossed verbatim: {line}"
         );
 
+        // The child settles its ask: the close crosses by the same
+        // declared pair — whoever carried the card carries its close.
+        let settled = EventFrame {
+            stream: Some(StreamId::new("child-sess")),
+            origin: None,
+            ttl: None,
+            event: SessionEvent::InteractionSettled {
+                id: "card-1".to_string(),
+            },
+        };
+        node.intake(&lane, Inbound::Event(settled));
+        let line = pipe_rx
+            .blocking_recv()
+            .expect("the child's settle lifted to the host");
+        assert!(
+            line.contains("interaction_settled"),
+            "the close crossed: {line}"
+        );
+
         // This extension's OWN ask (local speech) crosses by the
         // local subscription alone — never double-crossed by the
-        // surface.
+        // lift.
         let _promise = node.ask("call-1", None, "native:select_one", json!({}));
         let mut requests = 0;
         while let Ok(line) = pipe_rx.try_recv() {
@@ -1237,5 +1257,148 @@ pub(crate) mod tests {
             }
         }
         assert_eq!(requests, 1, "the own ask crossed exactly once");
+    }
+
+    /// The fresh-eye review's kill path, pinned: a card the HOST
+    /// mirrored down (an extension watching the ask kind) arrives ON
+    /// the stdio — the ingress law skips the arrival channel, so
+    /// nothing bounces back. A callback lift would echo it, and the
+    /// echo re-registers a live ask id at the host: the mint law
+    /// killing an extension that did nothing but watch a kind.
+    #[test]
+    fn a_host_mirrored_card_never_bounces_back() {
+        use tabit_protocol::StreamId;
+        use tabit_wire::node::Inbound;
+
+        let node = Arc::new(Node::new("test"));
+        let (pipe_tx, mut pipe_rx) = tokio::sync::mpsc::unbounded_channel::<String>();
+        let pipe_writer = pipe_tx.clone();
+        let stdio = Channel::line("host", move |line: &str| write_line(&pipe_writer, line));
+        let layer = Channel::local("sdk", |_| {}, |_| {});
+        node.subscribe_channel_all(Locality::Local, &stdio);
+        let shared = Arc::new(Shared {
+            node: node.clone(),
+            stdio: stdio.clone(),
+            layer,
+            pipe: pipe_tx,
+            cancelled: Mutex::new(std::collections::HashSet::new()),
+            cancel_notify: tokio::sync::Notify::new(),
+            core_path: Mutex::new(None),
+        });
+        mount_card_surface(&node, &shared, Arc::new(Vec::new()));
+
+        // The mirror: the host's own card, arriving on the stdio.
+        let mirrored = EventFrame {
+            stream: Some(StreamId::new("host-sess")),
+            origin: None,
+            ttl: None,
+            event: SessionEvent::InteractionRequest {
+                id: "card-9".to_string(),
+                ui_type: "native:select_one".to_string(),
+                payload: json!({}),
+            },
+        };
+        node.intake(&stdio, Inbound::Event(mirrored));
+        assert!(
+            pipe_rx.try_recv().is_err(),
+            "the mirrored card did not bounce back to the host"
+        );
+
+        // A settle mirrored the same way stays put too.
+        let settled = EventFrame {
+            stream: Some(StreamId::new("host-sess")),
+            origin: None,
+            ttl: None,
+            event: SessionEvent::InteractionSettled {
+                id: "card-9".to_string(),
+            },
+        };
+        node.intake(&stdio, Inbound::Event(settled));
+        assert!(
+            pipe_rx.try_recv().is_err(),
+            "the mirrored settle did not bounce back to the host"
+        );
+    }
+
+    /// The answerer mode crosses NOTHING (the owner's pairing rule:
+    /// no forwarded ask, no forwarded settle — the host never saw
+    /// the card, so its settle has nothing to close there). The
+    /// answerers hear the pair.
+    #[tokio::test]
+    async fn answerer_mode_hears_the_pair_and_crosses_nothing() {
+        use std::sync::atomic::{AtomicUsize, Ordering};
+        use tabit_protocol::StreamId;
+        use tabit_wire::node::Inbound;
+
+        let node = Arc::new(Node::new("test"));
+        let (pipe_tx, mut pipe_rx) = tokio::sync::mpsc::unbounded_channel::<String>();
+        let pipe_writer = pipe_tx.clone();
+        let stdio = Channel::line("host", move |line: &str| write_line(&pipe_writer, line));
+        let layer = Channel::local("sdk", |_| {}, |_| {});
+        node.subscribe_channel_all(Locality::Local, &stdio);
+        let shared = Arc::new(Shared {
+            node: node.clone(),
+            stdio: stdio.clone(),
+            layer,
+            pipe: pipe_tx,
+            cancelled: Mutex::new(std::collections::HashSet::new()),
+            cancel_notify: tokio::sync::Notify::new(),
+            core_path: Mutex::new(None),
+        });
+        let heard = Arc::new(AtomicUsize::new(0));
+        let poll = heard.clone();
+        let answerer: ErasedWatch = Arc::new(move |_ctx, _frame| {
+            let sink = heard.clone();
+            Box::pin(async move {
+                sink.fetch_add(1, Ordering::SeqCst);
+            })
+        });
+        mount_card_surface(&node, &shared, Arc::new(vec![answerer]));
+
+        let lane = Channel::line("lane-1", |_| {});
+        node.intake(
+            &lane,
+            Inbound::Event(EventFrame {
+                stream: Some(StreamId::new("child-sess")),
+                origin: None,
+                ttl: None,
+                event: SessionEvent::InteractionRequest {
+                    id: "card-2".to_string(),
+                    ui_type: "native:select_one".to_string(),
+                    payload: json!({}),
+                },
+            }),
+        );
+        node.intake(
+            &lane,
+            Inbound::Event(EventFrame {
+                stream: Some(StreamId::new("child-sess")),
+                origin: None,
+                ttl: None,
+                event: SessionEvent::InteractionSettled {
+                    id: "card-2".to_string(),
+                },
+            }),
+        );
+        // Both dispatches ran synchronously inside intake; the pipe's
+        // state is final — nothing crossed in either direction.
+        assert!(
+            pipe_rx.try_recv().is_err(),
+            "the answerer mode crossed nothing to the host"
+        );
+        // The answerers heard the pair (their tasks run on this
+        // test's reactor; poll briefly for both).
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
+        while poll.load(Ordering::SeqCst) < 2 {
+            assert!(
+                std::time::Instant::now() < deadline,
+                "the answerers never heard the pair"
+            );
+            tokio::time::sleep(std::time::Duration::from_millis(5)).await;
+        }
+        assert!(
+            pipe_rx.try_recv().is_err(),
+            "still nothing crossed after the answerers ran"
+        );
     }
 }

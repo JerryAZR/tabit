@@ -993,8 +993,8 @@ async fn supervise(
     // node: each watched kind's frames reach the lane's event
     // delivery, which writes the wire line down its stdin. Both
     // doors — the host's own sessions and whatever arrives from
-    // elsewhere — match the origin-blind watch the wire has always
-    // promised. Death retracts the lane's every registration (the
+    // elsewhere — are the watch, stated as its locality. Death
+    // retracts the lane's every registration (the
     // node sweep).
     for kind in &watch {
         node.subscribe_channel(kind, Locality::Both, &lane.channel);
