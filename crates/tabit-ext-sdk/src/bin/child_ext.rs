@@ -2,8 +2,8 @@
 //! tabit-core child of its own (the host's binary, from the
 //! host-facts' `core_path`), runs a task to the terminal through the
 //! shared settle fold, and reports the settlement. The child's
-//! events stay silent (the forwarding boolean is off); its asks
-//! surface through the ask slot's forward-and-relay default. The
+//! arrivals cross nothing (the stdio's local-door policy; a
+//! child's cards cross only by the card surface's mode). The
 //! optional `model` argument exercises the child-shaping knob. The
 //! observation demo rides the NODE-level watch declared below —
 //! registration is router config, never child-shaped (owner ruling

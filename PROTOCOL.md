@@ -504,7 +504,7 @@ histories).
   a resumed session's model that no longer resolves is a preference —
   warn and fall back (pi's behavior; explicit `--model` stays loud);
   and the backend ships as a sibling binary (`tabit-core` next to the
-  frontend; `TABIT_CORE_BIN` overrides for development), so
+  frontend), so
   backend-binary resolution is never a failure mode.
 - **Death classification is pinned** (ruled 2026-08, after the first
   GUI review): every way the backend can end is classified by cause,

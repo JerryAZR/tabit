@@ -37,7 +37,7 @@
 
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
-use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
@@ -183,7 +183,6 @@ struct Lane {
     /// `model_prompt` routes through the asking session). Kept in
     /// step with the ask table at every departure site.
     contexts: Mutex<HashMap<String, Arc<dyn HostServices>>>,
-    next_call_id: AtomicU64,
     /// Set at the pipe's end (EOF or garbage), before the node sweep
     /// — a call registering after death fails fast instead of
     /// awaiting a result that can never come.
@@ -203,7 +202,6 @@ impl Lane {
             commands,
             channel,
             contexts: Mutex::new(HashMap::new()),
-            next_call_id: AtomicU64::new(1),
             dead: AtomicBool::new(false),
         })
     }
@@ -268,11 +266,11 @@ impl ExtensionHandle {
         services: Option<Arc<dyn HostServices>>,
         cancel: tokio_util::sync::CancellationToken,
     ) -> Result<ToolWireResult, String> {
-        let call_id = format!(
-            "{}-{}",
-            self.lane.name,
-            self.lane.next_call_id.fetch_add(1, Ordering::Relaxed)
-        );
+        // The ruled id mint (2026-09): a UUIDv7 — the id crosses
+        // the pipe and registers on the guest's ask table, so
+        // collision-freedom rests on construction, never on a
+        // name grammar.
+        let call_id = uuid::Uuid::now_v7().to_string();
         let (tx, rx) = tokio::sync::oneshot::channel();
         let failure_id = call_id.clone();
         self.node.hold(
@@ -371,11 +369,7 @@ impl ExtensionHandle {
         services: Option<Arc<dyn HostServices>>,
         cancel: tokio_util::sync::CancellationToken,
     ) -> Result<P::Answer, String> {
-        let hook_id = format!(
-            "{}-h{}",
-            self.lane.name,
-            self.lane.next_call_id.fetch_add(1, Ordering::Relaxed)
-        );
+        let hook_id = uuid::Uuid::now_v7().to_string();
         let (tx, rx) = tokio::sync::oneshot::channel();
         self.node.hold(
             &self.lane.name,

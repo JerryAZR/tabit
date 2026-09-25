@@ -64,8 +64,8 @@ use std::sync::{Arc, Mutex};
 use serde::Serialize;
 use serde_json::{Value, json};
 use tabit_ext::protocol::{
-    ExtFrame, HookResult, HostFrame, KIND_HOOK_RESULT, KIND_SERVICE_RESPONSE, KIND_TOOL_RESULT,
-    ServiceVerb, ToolWireResult,
+    EXTENSION_PROTOCOL_VERSION, ExtFrame, HookResult, HostFrame, KIND_HOOK_RESULT,
+    KIND_SERVICE_RESPONSE, KIND_TOOL_RESULT, ServiceVerb, ToolWireResult,
 };
 use tabit_protocol::points::HookPoint;
 use tabit_protocol::{EventFrame, SessionCommand, SessionEvent, tags};
@@ -74,10 +74,6 @@ use tabit_wire::client::ChildSpec;
 use tabit_wire::node::{Channel, KIND_INTERACTION, Locality, Node, parse_shared};
 use tokio::io::AsyncBufReadExt;
 use tokio_util::sync::CancellationToken;
-
-/// The extension protocol this SDK speaks — must match the host's
-/// exactly (the pipe is a frozen contract, not a negotiated one).
-const PROTOCOL_VERSION: u32 = 5;
 
 pub mod children;
 
@@ -494,7 +490,7 @@ impl Ctx {
                     .to_string(),
             );
         };
-        let id = next_request_id(call_id, "svc");
+        let id = uuid::Uuid::now_v7().to_string();
         let mut verb = ServiceVerb::ModelPrompt {
             prompt: prompt.to_string(),
             model: None,
@@ -555,16 +551,6 @@ pub struct ModelPrompt {
     pub input_tokens: u64,
     pub output_tokens: u64,
     pub total_tokens: u64,
-}
-
-/// The id mint (2026-09 ruling): a UUIDv7 — collision-freedom by
-/// construction, never naming conventions (ids cross the pipe and
-/// register on the host's one table; a name-grammar collision would
-/// be a mint-law violation that kills the wrong lane). The family
-/// parameter stays for diagnostics.
-fn next_request_id(family_root: &str, family: &str) -> String {
-    let _ = (family_root, family);
-    uuid::Uuid::now_v7().to_string()
 }
 
 /// Everything the pipe and the invocation tasks share: the guest's
@@ -679,7 +665,7 @@ pub fn serve(extension: Extension) -> ! {
         // the core's own executable is the owned-children spawner's
         // path, and it lands in `core_path` then.
         let report = ExtFrame::Report {
-            protocol_version: PROTOCOL_VERSION,
+            protocol_version: EXTENSION_PROTOCOL_VERSION,
             tools: tools
                 .iter()
                 .map(|tool| tabit_ext::protocol::ToolDecl {
@@ -763,11 +749,16 @@ pub fn serve(extension: Extension) -> ! {
 ///   echo re-registers a live ask id at the host, killing this
 ///   extension through the mint law.
 /// - **The answerer mode** (the first `on_ask` registration): the
-///   pair is heard by the answerers (whoever surfaces a card hears
-///   it close), and NOTHING crosses — the host never saw the card,
-///   so its settle has nothing to close there. Answerers stack —
-///   any may answer ([`Ctx::answer`]), the child's hub takes the
-///   first arrival, a late answer a tolerated no-op.
+///   request is heard from the remote door, the close from EITHER
+///   door — a card's settle may be the origin's own announce
+///   (local) or a death's sweep (local; the node mints sweep
+///   settles as local speech), and whoever surfaces a card hears it
+///   close wherever it was produced. NOTHING crosses for the card
+///   itself — the host never saw it — though the sweep's settle
+///   rides the stdio's local wildcard like every local settle and
+///   lands at the host as the tolerated unknown-id drop. Answerers
+///   stack — any may answer ([`Ctx::answer`]), the child's hub
+///   takes the first arrival, a late answer a tolerated no-op.
 fn mount_card_surface(node: &Node, shared: &Arc<Shared>, asks: Arc<Vec<ErasedWatch>>) {
     if asks.is_empty() {
         node.subscribe_channel(tags::INTERACTION_REQUEST, Locality::Remote, &shared.stdio);
@@ -791,7 +782,9 @@ fn mount_card_surface(node: &Node, shared: &Arc<Shared>, asks: Arc<Vec<ErasedWat
         }
     };
     node.subscribe(tags::INTERACTION_REQUEST, Locality::Remote, card_surface);
-    node.subscribe(tags::INTERACTION_SETTLED, Locality::Remote, settled_surface);
+    // The close hears BOTH doors: the origin's announce and a death's
+    // sweep are local speech, an arriving close is remote.
+    node.subscribe(tags::INTERACTION_SETTLED, Locality::Both, settled_surface);
 }
 
 /// One invocation on its own task with a fresh watch context — the
@@ -929,7 +922,6 @@ async fn run_call(
 ) {
     let owner = call_id.clone();
     let token = CancellationToken::new();
-    sdk_lock(&shared.tokens).insert(call_id.clone(), token.clone());
     let writer = shared.clone();
     let held = shared.node.try_hold(
         shared.stdio.owner(),
@@ -947,6 +939,9 @@ async fn run_call(
         // frame dies with it.
         return;
     }
+    // Registered only once the hold succeeded — a refused hold never
+    // leaks a token entry.
+    sdk_lock(&shared.tokens).insert(owner.clone(), token.clone());
     let ctx = Ctx {
         correlation: Some(call_id.clone()),
         token,
@@ -1017,7 +1012,6 @@ async fn run_consult(
 ) {
     let owner = hook_id.clone();
     let token = CancellationToken::new();
-    sdk_lock(&shared.tokens).insert(hook_id.clone(), token.clone());
     let writer = shared.clone();
     let held = shared.node.try_hold(
         shared.stdio.owner(),
@@ -1033,6 +1027,9 @@ async fn run_consult(
     if !held {
         return;
     }
+    // Registered only once the hold succeeded — a refused hold never
+    // leaks a token entry.
+    sdk_lock(&shared.tokens).insert(owner.clone(), token.clone());
     let ctx = Ctx {
         correlation: Some(hook_id.clone()),
         token,
@@ -1085,12 +1082,10 @@ fn die(reason: &str) -> ! {
     std::process::exit(1);
 }
 
-/// The lock helper — same shape as the workspace's `tabit_log::lock`
-/// claim (poison-recovering).
-pub(crate) fn sdk_lock<T: ?Sized>(mutex: &Mutex<T>) -> std::sync::MutexGuard<'_, T> {
-    mutex.lock().unwrap_or_else(|poison| poison.into_inner())
-}
-
+// The lock claim is the workspace's one home (`tabit_log::lock`,
+// re-exported): every claim rides the trace/timeout diagnosis
+// machinery.
+use tabit_log::lock::lock as sdk_lock;
 #[cfg(test)]
 pub(crate) mod tests {
     use super::*;
@@ -1223,6 +1218,79 @@ pub(crate) mod tests {
             json!({"verdict": "skip", "message": "not tonight"}),
             "the verdict rode the wire as its own type"
         );
+    }
+
+    /// Review round 2's behavioral finding, pinned: the answerer
+    /// hears the card's close from EITHER door — the death path's
+    /// settle (the node's sweep minting it as local speech) must
+    /// reach whoever surfaced the card, or an `on_ask` handler's UI
+    /// holds a dead card open forever.
+    #[tokio::test]
+    async fn answerers_hear_the_swept_close() {
+        use std::sync::atomic::{AtomicUsize, Ordering};
+        use tabit_protocol::StreamId;
+        use tabit_wire::node::Inbound;
+
+        let node = Arc::new(Node::new("test"));
+        let (pipe_tx, mut pipe_rx) = tokio::sync::mpsc::unbounded_channel::<String>();
+        let pipe_writer = pipe_tx.clone();
+        let stdio = Channel::line("host", move |line: &str| write_line(&pipe_writer, line));
+        let layer = Channel::local("sdk", |_| {}, |_| {});
+        node.subscribe_channel_all(Locality::Local, &stdio);
+        let shared = Arc::new(Shared {
+            node: node.clone(),
+            stdio: stdio.clone(),
+            layer,
+            pipe: pipe_tx,
+            tokens: Mutex::new(std::collections::HashMap::new()),
+            core_path: Mutex::new(None),
+        });
+        let heard = Arc::new(AtomicUsize::new(0));
+        let poll = heard.clone();
+        let answerer: ErasedWatch = Arc::new(move |_ctx, frame| {
+            if matches!(frame.event, SessionEvent::InteractionSettled { .. }) {
+                poll.fetch_add(1, Ordering::SeqCst);
+            }
+            Box::pin(async {})
+        });
+        mount_card_surface(&node, &shared, Arc::new(vec![answerer]));
+
+        // The child's card arrives on its lane, then the lane dies:
+        // the sweep announces the settle as LOCAL speech, and the
+        // answerer (Both on the close) hears it.
+        let lane = Channel::local("lane-1", |_| {}, |_| {});
+        node.intake(
+            &lane,
+            Inbound::Event(EventFrame {
+                stream: Some(StreamId::new("child-sess")),
+                origin: None,
+                ttl: None,
+                event: SessionEvent::InteractionRequest {
+                    id: "card-3".to_string(),
+                    ui_type: "native:select_one".to_string(),
+                    payload: json!({}),
+                },
+            }),
+        );
+        node.retract("lane-1", "the child died");
+
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
+        while heard.load(Ordering::SeqCst) < 1 {
+            assert!(
+                std::time::Instant::now() < deadline,
+                "the answerer never heard the swept close"
+            );
+            tokio::time::sleep(std::time::Duration::from_millis(5)).await;
+        }
+        // The card itself never crossed to the host (the sweep's
+        // settle rides the local wildcard and lands as the host's
+        // tolerated unknown-id drop).
+        while let Ok(line) = pipe_rx.try_recv() {
+            assert!(
+                !line.contains("card-3") || line.contains("interaction_settled"),
+                "no card crossed: {line}"
+            );
+        }
     }
 
     /// The review round's latent break, pinned: a child's card

@@ -1187,7 +1187,7 @@ fn print_mode(args: &Args, registry: &ModelRegistry) -> Result<i32, String> {
     // One stdin reader owns both duties (line-buffered stdin in print
     // mode: press Esc then Enter to abort; any other line answers the
     // open interaction card — its number for buttons, free text
-    // otherwise). Real key handling arrives with the GUI.
+    // otherwise).
     let armed: ArmedSlot = std::sync::Arc::default();
 
     // The message goes through the session host — the same path JSON

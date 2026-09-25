@@ -51,6 +51,7 @@ serde = { workspace = true }
 # await their promises natively, and the shared client's settle folds
 # ride the same runtime.
 tabit-wire = { path = "../tabit-wire", version = "0.41.0" }
+tabit-log = { path = "../tabit-log", version = "0.41.0" }
 uuid = { workspace = true, features = ["v7"] }
 tokio = { workspace = true, features = ["rt-multi-thread", "macros", "io-util", "io-std", "sync", "time"] }
 tokio-util = { version = "0.7", default-features = false }

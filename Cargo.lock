@@ -3033,6 +3033,7 @@ dependencies = [
  "thiserror",
  "tokio",
  "tokio-util",
+ "uuid",
 ]
 
 [[package]]
@@ -3058,6 +3059,7 @@ dependencies = [
  "serde",
  "serde_json",
  "tabit-ext",
+ "tabit-log",
  "tabit-protocol",
  "tabit-wire",
  "tiny_http",

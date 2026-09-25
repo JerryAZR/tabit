@@ -36,8 +36,8 @@
 
 use serde::{Deserialize, Serialize};
 
-/// The extension protocol this host speaks. An extension acking a
-/// different version is refused at the handshake — the pipe is a
+/// The extension protocol this host speaks. A guest reporting a
+/// different version is killed at the report — the pipe is a
 /// frozen contract, not a negotiated one.
 pub const EXTENSION_PROTOCOL_VERSION: u32 = 5;
 
@@ -139,7 +139,9 @@ pub enum HostFrame {
     /// fail closed, exactly as the run's own retraction behaves).
     /// The cancellation CONTRACT mirrors the core tools' (ENGINE.md,
     /// token-and-detach): the host owns WHEN, the guest owns HOW —
-    /// long-running bodies poll their SDK's `is_cancelled`; a guest
+    /// the guest SDK fires the invocation's CancellationToken (the
+    /// wire's own leash primitive) and long-running bodies poll
+    /// `Ctx::cancelled()`; a guest
     /// that never checks simply finishes into the void, same as a
     /// core body that ignores its token.
     Cancel { call_id: String },

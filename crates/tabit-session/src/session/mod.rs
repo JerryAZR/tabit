@@ -228,9 +228,6 @@ impl Session {
         self.path.as_deref()
     }
 
-    /// The path as the wire carries it — the empty string for an
-    /// ephemeral session (a frontend treats empty as "no file"; the
-    /// v5 changelog states it).
     /// The session's skills catalog as its wire snapshot (empty
     /// when the assembly mounted none) — the session-level catalog
     /// ruling: each session's `skills_available` carries its own
@@ -243,6 +240,9 @@ impl Session {
             .unwrap_or_default()
     }
 
+    /// The path as the wire carries it — the empty string for an
+    /// ephemeral session (a frontend treats empty as "no file"; the
+    /// v5 changelog states it).
     pub(crate) fn wire_path(&self) -> String {
         self.path
             .as_ref()

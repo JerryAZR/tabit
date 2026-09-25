@@ -31,6 +31,7 @@ tabit-protocol = { path = "../tabit-protocol", version = "0.41.0" }
 # The child-process substrate (moved to tabit-wire; the supervisor's
 # spawn/reap plumbing rides it).
 tabit-wire = { path = "../tabit-wire", version = "0.41.0" }
+uuid = { workspace = true, features = ["v7"] }
 thiserror = { workspace = true }
 tokio = { workspace = true, features = [
     "io-util",

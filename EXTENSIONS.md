@@ -225,8 +225,10 @@ The four directions, one sentence each:
 Report-model contract (extension protocol **v5**): the guest speaks
 first — its `report` (protocol version, tool/hook/watch
 declarations) is its first line on the pipe. The host version-checks
-it and kills a mismatched guest at the report, before any line it
-could emit reaches the core; only then does the host send
+it and kills a mismatched guest within the boot bound — the check
+runs the moment the report is read, and the kill owns the race with
+anything the guest emitted before it lands (a mismatched guest's
+earlier lines are the loser's noise); only then does the host send
 `host_facts`, carrying `core_path` (the running backend's own
 executable — the host IS the binary, so an owned-session spawner
 never resolves anything) and `cwd`. No ack exists: the report IS the
@@ -285,8 +287,10 @@ the author-facing surface (tools, consultations, watches, children,
 the four directions on `Ctx`) never grew a router concept. The SDK is
 **async** (owner ruling 2026-09): bodies are futures, an ask awaits
 its promise natively, cancellation is a wake not a poll. What
-remains SDK-local is policy, not routing: the cancelled set, the
-frozen dialect's report and result frames, the pipe's one line
+remains SDK-local is policy, not routing: the per-invocation
+token table (the host's `cancel` frame fires the wire's
+CancellationToken; `Ctx::cancelled()` polls it), the frozen
+dialect's report and result frames, the pipe's one line
 pump, and the card surface — the remote-door pair at the node (one
 declared mode: the shipped lift or the author answerers; see the
 card surface below). One behavior the unification
@@ -754,7 +758,7 @@ them: the proxy carries the run's token, and firing it sends
 `cancel { call_id }` down the pipe, removes the pending entry, and
 fails the call (a hook resolves fail-open — the neutral decision —
 by the absence ruling). **The guest owns how**: long-running bodies
-poll the SDK's `is_cancelled()` between units of work and stop —
+poll `Ctx::cancelled()` between units of work and stop —
 kill the sandbox, close the stream, stop billing; a body that never
 checks finishes into the void, exactly as a core body that ignores
 its token. Racing results are unknown ids (tolerated, dropped);
@@ -771,7 +775,7 @@ second mechanism).
 result-delta lane and no post-cancel delivery — firing the token
 removes the pending entry and fails the call, so whatever the body
 returns after a cancel is a racing result the host drops. The honest
-long-running recipe is final-report-only: poll `is_cancelled()`
+long-running recipe is final-report-only: poll `Ctx::cancelled()`
 between units of work; on a flip, stop the work (kill the sandbox,
 close the stream, stop billing) and return — the model sees the
 cancellation failure, not a partial report. What already completed
