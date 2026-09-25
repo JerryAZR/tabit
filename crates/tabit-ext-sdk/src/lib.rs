@@ -8,9 +8,13 @@
 //! authors never meet the router or the channel concepts.
 //!
 //! The SDK is async (owner ruling 2026-09): bodies are futures, an
-//! ask awaits its promise natively, cancellation is a wake not a
-//! poll — honest about how the core works. Every invocation runs on
-//! its own task, so tools and hooks execute concurrently and a
+//! ask awaits its promise natively, and cancellation is a
+//! `CancellationToken` — the wire's own leash primitive, the same
+//! type the session's tools and the shared child recipe ride (owner
+//! ruling, the root fix: no per-guest cancellation vocabulary of its
+//! own). [`Ctx::cancelled`] is the cooperative poll over it; an
+//! owned child takes it as its abort leash. Every invocation runs
+//! on its own task, so tools and hooks execute concurrently and a
 //! blocked body cannot stall the pipe.
 //!
 //! The registries are disjoint by vocabulary (the category error is
@@ -69,6 +73,7 @@ use tabit_wire::asks::Outcome;
 use tabit_wire::client::ChildSpec;
 use tabit_wire::node::{Channel, KIND_INTERACTION, Locality, Node, parse_shared};
 use tokio::io::AsyncBufReadExt;
+use tokio_util::sync::CancellationToken;
 
 /// The extension protocol this SDK speaks — must match the host's
 /// exactly (the pipe is a frozen contract, not a negotiated one).
@@ -333,18 +338,28 @@ macro_rules! schema_for {
 #[derive(Clone)]
 pub struct Ctx {
     correlation: Option<String>,
+    token: CancellationToken,
     shared: Arc<Shared>,
 }
 
 impl Ctx {
     /// A watch-shaped context: no correlation (nothing owed, nothing
-    /// cancelled). The dispatcher builds these for observation and
-    /// child-event handlers.
+    /// cancelled — the token never fires). The dispatcher builds
+    /// these for observation and child-event handlers.
     pub(crate) fn watch_context(shared: Arc<Shared>) -> Self {
         Self {
             correlation: None,
+            token: CancellationToken::new(),
             shared,
         }
+    }
+
+    /// This invocation's cancellation token — the wire's leash
+    /// primitive, the same type the shared child recipe takes (an
+    /// owned child rides it as its abort leash; there is nothing to
+    /// bridge).
+    pub(crate) fn cancellation(&self) -> CancellationToken {
+        self.token.clone()
     }
 
     pub(crate) fn shared_clone(&self) -> Arc<Shared> {
@@ -365,32 +380,23 @@ impl Ctx {
 }
 
 impl Ctx {
-    /// Whether the host cancelled this invocation's run (the run
-    /// aborted under it). THE contract for long-running bodies: poll
-    /// between units of work — kill the process, close the stream,
-    /// stop — and return whatever partial result is honest. A body
-    /// that never checks simply finishes into the void. Watches have
-    /// no cancellation (nothing is owed); their flag never flips.
-    /// An awaited [`Ctx::ask`] resolves `None` on the same wake —
+    /// Whether the host cancelled this invocation (its token
+    /// fired). THE contract for long-running bodies: poll between
+    /// units of work — kill the process, close the stream, stop —
+    /// and return whatever partial result is honest. A body that
+    /// never checks simply finishes into the void. Watches have no
+    /// cancellation (nothing is owed); their token never fires. An
+    /// awaited [`Ctx::ask`] resolves `None` on the same token —
     /// polling is for the body's own phases.
     pub fn cancelled(&self) -> bool {
-        match &self.correlation {
-            Some(id) => sdk_lock(&self.shared.cancelled).contains(id),
-            None => false,
-        }
+        self.token.is_cancelled()
     }
 
     /// Await this invocation's cancellation, if it ever comes — the
     /// ask's resolve-or-cancel race and any body that prefers
     /// `await` over poll.
     async fn cancelled_wake(&self) {
-        loop {
-            let notified = self.shared.cancel_notify.notified();
-            if self.cancelled() {
-                return;
-            }
-            notified.await;
-        }
+        self.token.cancelled().await;
     }
 
     /// Issue any session command — the frontend grammar verbatim,
@@ -582,12 +588,11 @@ struct Shared {
     /// exclusively. No invocation ever blocks on the pipe; a dead
     /// pipe is the loop's EOF, the process's end.
     pipe: tokio::sync::mpsc::UnboundedSender<String>,
-    /// Correlation ids (calls, consultations) the host cancelled —
-    /// long-running handlers poll [`Ctx::cancelled`] and stop: kill
-    /// the sandbox, drop the wedge, stop billing. The notify wakes
-    /// every waiter the cancel arm can find.
-    cancelled: Mutex<std::collections::HashSet<String>>,
-    cancel_notify: tokio::sync::Notify,
+    /// The live invocations' cancellation tokens by correlation id —
+    /// the host's `Cancel` frame fires the token (the wire's leash
+    /// primitive; [`Ctx::cancelled`] polls it, owned children ride
+    /// it), and the invocation's exit removes its entry.
+    tokens: Mutex<std::collections::HashMap<String, CancellationToken>>,
     /// The host's own executable (the `host_facts` frame's
     /// `core_path`) — owned children spawn it.
     core_path: Mutex<Option<String>>,
@@ -662,8 +667,7 @@ pub fn serve(extension: Extension) -> ! {
             stdio: stdio.clone(),
             layer,
             pipe: pipe_tx,
-            cancelled: Mutex::new(std::collections::HashSet::new()),
-            cancel_notify: tokio::sync::Notify::new(),
+            tokens: Mutex::new(std::collections::HashMap::new()),
             core_path: Mutex::new(None),
         });
 
@@ -862,8 +866,11 @@ fn dispatch_line(
                 });
             }
             HostFrame::Cancel { call_id } => {
-                sdk_lock(&shared.cancelled).insert(call_id);
-                shared.cancel_notify.notify_waiters();
+                // Fire the invocation's token (a late or unknown id is
+                // the tolerated no-op — the race's loser).
+                if let Some(token) = sdk_lock(&shared.tokens).get(&call_id) {
+                    token.cancel();
+                }
             }
             HostFrame::ServiceResponse {
                 request_id,
@@ -921,6 +928,8 @@ async fn run_call(
     tools: &[ToolDef],
 ) {
     let owner = call_id.clone();
+    let token = CancellationToken::new();
+    sdk_lock(&shared.tokens).insert(call_id.clone(), token.clone());
     let writer = shared.clone();
     let held = shared.node.try_hold(
         shared.stdio.owner(),
@@ -940,12 +949,14 @@ async fn run_call(
     }
     let ctx = Ctx {
         correlation: Some(call_id.clone()),
+        token,
         shared: shared.clone(),
     };
     // The body runs as its own task: a panic becomes the error result
     // (the pipe never hangs on a broken body).
     let body = match tools.iter().find(|tool| tool.name == name) {
         None => {
+            sdk_lock(&shared.tokens).remove(&owner);
             let _ = shared.node.answer(
                 &owner,
                 KIND_TOOL_RESULT,
@@ -987,6 +998,7 @@ async fn run_call(
     let _ = shared
         .node
         .answer(&owner, KIND_TOOL_RESULT, Box::new(result));
+    sdk_lock(&shared.tokens).remove(&owner);
     shared.node.retract_asks(&owner, "the call completed");
 }
 
@@ -1004,6 +1016,8 @@ async fn run_consult(
     payload: Value,
 ) {
     let owner = hook_id.clone();
+    let token = CancellationToken::new();
+    sdk_lock(&shared.tokens).insert(hook_id.clone(), token.clone());
     let writer = shared.clone();
     let held = shared.node.try_hold(
         shared.stdio.owner(),
@@ -1021,6 +1035,7 @@ async fn run_consult(
     }
     let ctx = Ctx {
         correlation: Some(hook_id.clone()),
+        token,
         shared: shared.clone(),
     };
     let answer = consult_answer(event, consults, ctx, payload).await;
@@ -1029,6 +1044,7 @@ async fn run_consult(
         KIND_HOOK_RESULT,
         Box::new(HookResult { hook_id, answer }),
     );
+    sdk_lock(&shared.tokens).remove(&owner);
     shared
         .node
         .retract_asks(&owner, "the consultation completed");
@@ -1093,10 +1109,50 @@ pub(crate) mod tests {
             stdio,
             layer,
             pipe: pipe_tx,
-            cancelled: Mutex::new(std::collections::HashSet::new()),
-            cancel_notify: tokio::sync::Notify::new(),
+            tokens: Mutex::new(std::collections::HashMap::new()),
             core_path: Mutex::new(None),
         })
+    }
+
+    /// The token wiring (owner ruling: cancellation IS the wire's
+    /// CancellationToken): a registered invocation's token fires on
+    /// the host's Cancel frame, the cooperative poll reads it, and a
+    /// child built from that Ctx would ride it as its abort leash —
+    /// the same primitive the session's tools pass, nothing bridged.
+    #[test]
+    fn the_cancel_frame_fires_the_invocations_token() {
+        let shared = shared();
+        let token = tokio_util::sync::CancellationToken::new();
+        sdk_lock(&shared.tokens).insert("call-7".to_string(), token.clone());
+
+        let ctx = Ctx {
+            correlation: Some("call-7".to_string()),
+            token: token.clone(),
+            shared: shared.clone(),
+        };
+        assert!(!ctx.cancelled(), "nothing fired yet");
+
+        dispatch_line(
+            &shared,
+            &serde_json::to_string(&tabit_ext::protocol::HostFrame::Cancel {
+                call_id: "call-7".to_string(),
+            })
+            .expect("the cancel line serializes"),
+            &Arc::new(Vec::new()),
+            &Arc::new(Vec::new()),
+        );
+        assert!(ctx.cancelled(), "the token fired and the poll reads it");
+
+        // An unknown id is the tolerated no-op — the race's loser.
+        dispatch_line(
+            &shared,
+            &serde_json::to_string(&tabit_ext::protocol::HostFrame::Cancel {
+                call_id: "gone".to_string(),
+            })
+            .expect("the cancel line serializes"),
+            &Arc::new(Vec::new()),
+            &Arc::new(Vec::new()),
+        );
     }
 
     #[tokio::test]
@@ -1194,8 +1250,7 @@ pub(crate) mod tests {
             stdio: stdio.clone(),
             layer,
             pipe: pipe_tx,
-            cancelled: Mutex::new(std::collections::HashSet::new()),
-            cancel_notify: tokio::sync::Notify::new(),
+            tokens: Mutex::new(std::collections::HashMap::new()),
             core_path: Mutex::new(None),
         });
         mount_card_surface(&node, &shared, Arc::new(Vec::new()));
@@ -1278,8 +1333,7 @@ pub(crate) mod tests {
             stdio: stdio.clone(),
             layer,
             pipe: pipe_tx,
-            cancelled: Mutex::new(std::collections::HashSet::new()),
-            cancel_notify: tokio::sync::Notify::new(),
+            tokens: Mutex::new(std::collections::HashMap::new()),
             core_path: Mutex::new(None),
         });
         mount_card_surface(&node, &shared, Arc::new(Vec::new()));
@@ -1338,8 +1392,7 @@ pub(crate) mod tests {
             stdio: stdio.clone(),
             layer,
             pipe: pipe_tx,
-            cancelled: Mutex::new(std::collections::HashSet::new()),
-            cancel_notify: tokio::sync::Notify::new(),
+            tokens: Mutex::new(std::collections::HashMap::new()),
             core_path: Mutex::new(None),
         });
         let heard = Arc::new(AtomicUsize::new(0));

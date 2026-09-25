@@ -24,6 +24,11 @@ use crate::Ctx;
 /// through the shared settle fold, kill at the owner's hand.
 pub struct Child {
     handle: tabit_wire::client::ChildHandle,
+    /// The invoking call's cancellation token — the child's abort
+    /// leash (the same primitive the session's subagent tool rides;
+    /// there is nothing to bridge). The host cancelling the call
+    /// aborts the child through the shared recipe's courtesy.
+    token: tokio_util::sync::CancellationToken,
 }
 
 impl Child {
@@ -33,7 +38,9 @@ impl Child {
     /// cwd — and this mount adds the lane on the guest's node. The
     /// spawn resolves after the child's self-report and first
     /// announce; the child's frames are already fanning on their own
-    /// stamps, cards included (the card surface answers them).
+    /// stamps, cards included (the card surface answers them). The
+    /// child's leash is this invocation's cancellation token,
+    /// captured here.
     pub async fn create(ctx: &Ctx, spec: ChildSpec) -> Result<Child, String> {
         let shared = ctx.shared_clone();
         let handle = spec
@@ -41,7 +48,10 @@ impl Child {
             .spawn()
             .await
             .map_err(|error| format!("the child did not start: {error}"))?;
-        Ok(Child { handle })
+        Ok(Child {
+            handle,
+            token: ctx.cancellation(),
+        })
     }
 
     /// The child session's id — its stream stamp.
@@ -51,10 +61,14 @@ impl Child {
 
     /// Run one task to the child's terminal — the shared drive
     /// recipe (`ChildHandle::run`, the same one the session's
-    /// subagent tool rides). The child's cards answer through the
-    /// card surface while the run is in flight.
+    /// subagent tool rides), under the invocation's abort leash:
+    /// the host cancelling the call forwards `abort` to the child,
+    /// closes stdin (the death contract), and resolves `Aborted`
+    /// immediately — the child never outlives a cancelled call. The
+    /// child's cards answer through the card surface while the run
+    /// is in flight.
     pub async fn run(&mut self, task: String) -> Settlement {
-        self.handle.run(task, None).await
+        self.handle.run(task, Some(self.token.clone())).await
     }
 
     /// Kill the child now (idempotent): stdin closes, the reaper's

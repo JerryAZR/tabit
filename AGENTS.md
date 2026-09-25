@@ -196,8 +196,12 @@ Current workspace layout:
   purely functional: one context per handler (command, emit, ask,
   complete, the cancelled poll). The SDK is async (owner ruling
   2026-09): bodies are futures, asks await their promises natively,
-  cancellation is a wake not a poll, every invocation is its own
-  task, and the pipe's one writer is the wire's line pump. Shares
+  cancellation is the wire's own CancellationToken — the shared
+  recipe's leash primitive (the host's Cancel frame fires the
+  invocation's token, `Ctx::cancelled` polls it, owned children
+  ride it as their abort leash — the same type the session's tools
+  pass, nothing bridged), every invocation is its own task, and the
+  pipe's one writer is the wire's line pump. Shares
   the host's wire types (the 2026-09 sharing ruling: one wire, one
   set of shapes; EXTENSIONS.md stays the contract for other
   languages, the conformance tests keep crate and docs honest).
