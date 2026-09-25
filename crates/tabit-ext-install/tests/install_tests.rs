@@ -338,6 +338,43 @@ fn list_reports_statics_and_broken_packages() {
 }
 
 #[test]
+fn a_manifestless_package_refuses_at_validate() {
+    // The front door of the never-leaves-a-half-package contract: a
+    // source with no tabit.json at its root refuses before anything
+    // lands, and the root stays clean.
+    let dir = test_dir("validate-miss");
+    let source = dir.join("source");
+    std::fs::create_dir_all(&source).expect("dirs");
+    std::fs::write(source.join("loose.txt"), "not a package").expect("loose file");
+    let root = dir.join("extensions");
+    let error = Installer::new(&root, "http://127.0.0.1:1")
+        .install(&Source::Path { dir: source })
+        .expect_err("a manifestless dir is not a package");
+    assert!(
+        error.contains("no tabit.json at its root"),
+        "the refusal names the missing manifest: {error}"
+    );
+    assert!(
+        !root.join("loose.txt").is_file(),
+        "nothing of the failed install landed"
+    );
+}
+
+#[test]
+fn uninstalling_a_name_that_was_never_installed_names_it() {
+    let dir = test_dir("uninstall-miss");
+    let root = dir.join("extensions");
+    std::fs::create_dir_all(&root).expect("dirs");
+    let error = Installer::new(&root, "http://127.0.0.1:1")
+        .uninstall("ghost")
+        .expect_err("nothing is installed under that name");
+    assert!(
+        error.contains("no package named `ghost` is installed"),
+        "{error}"
+    );
+}
+
+#[test]
 fn uninstall_refuses_while_direct_dependents_remain() {
     let dir = test_dir("uninstall-refusal");
     let root = dir.join("extensions");

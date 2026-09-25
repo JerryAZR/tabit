@@ -1077,6 +1077,61 @@ mod tests {
         }
     }
 
+    /// Move a value to its drop site — the test's detach point
+    /// (neither `drop` (a non-Drop pin) nor `let _` (a future) reads
+    /// as intent to the lints; this does).
+    fn detach<T>(_: T) {}
+
+    #[tokio::test]
+    async fn dropping_a_dispatch_future_detaches_the_body_cleanly() {
+        use crate::test_utils::MockControlledTool;
+
+        // Token-and-detach's detach half: dropping an in-flight
+        // dispatch must not join the sidecar body (a parked body
+        // would deadlock the drop), the released body's result lands
+        // nowhere, and a later dispatch still works.
+        let started = std::sync::Arc::new(tokio::sync::Notify::new());
+        let allow_finish = std::sync::Arc::new(tokio::sync::Notify::new());
+        let mut set = crate::tool::ToolSet::default();
+        set.add_tool(MockControlledTool::new(
+            started.clone(),
+            allow_finish.clone(),
+        ));
+
+        let mut first_context = crate::tool::ToolContext::new();
+        let mut dispatch = std::pin::pin!(set.execute("controlled", "{}", &mut first_context,));
+        tokio::select! {
+            result = &mut dispatch => {
+                panic!("the body parks — the dispatch cannot complete first: {result:?}")
+            }
+            _ = started.notified() => {}
+        }
+        // Detach mid-body: the drop returns promptly (no join), the
+        // body finishes into the void (the permit releases the parked
+        // first body; nothing observes its result).
+        detach(dispatch);
+        allow_finish.notify_one();
+
+        // A dispatch after a detach still works: park the second body
+        // the same way, then release it.
+        let mut second_context = crate::tool::ToolContext::new();
+        let mut second = std::pin::pin!(set.execute("controlled", "{}", &mut second_context));
+        tokio::select! {
+            result = &mut second => {
+                panic!("the second body parks too — it cannot complete first: {result:?}")
+            }
+            _ = started.notified() => {}
+        }
+        allow_finish.notify_one();
+        let second = tokio::time::timeout(std::time::Duration::from_secs(5), &mut second)
+            .await
+            .expect("a dispatch after a detach still works");
+        assert!(
+            !second.is_error_kind(crate::tool::ToolErrorKind::Other),
+            "the second dispatch completed: {second:?}"
+        );
+    }
+
     #[tokio::test]
     async fn panicking_tools_surface_as_model_visible_error_results() {
         let mut set = ToolSet::default();

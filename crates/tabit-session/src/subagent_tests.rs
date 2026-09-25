@@ -132,7 +132,30 @@ fn a_failed_child_without_a_recorded_reason_says_unknown() {
 }
 
 #[test]
-fn a_completed_child_without_a_final_answer_says_so() {
+fn a_completed_child_carries_its_output_verbatim_and_the_pairing_cargo() {
+    let output = super::summary_result(
+        summary(
+            crate::session::RunOutcome::Completed,
+            "the child's final answer",
+        ),
+        "child-1",
+    )
+    .expect("completed is a result");
+    assert!(
+        output.render().contains("the child's final answer"),
+        "the report is the child's output verbatim: {}",
+        output.render()
+    );
+    let details = output.details().expect("the details cargo").clone();
+    assert_eq!(
+        details,
+        serde_json::json!({"child_id": "child-1", "outcome": "completed"}),
+        "the cargo is the pairing fact the docs call load-bearing"
+    );
+}
+
+#[tokio::test]
+async fn a_completed_child_without_a_final_answer_says_so() {
     let output = super::summary_result(
         summary(crate::session::RunOutcome::Completed, "   "),
         "child-1",
@@ -286,4 +309,103 @@ async fn a_childs_first_frames_reach_the_node_fan() {
         "the child's session_opened never reached the node's fan: {:?}",
         seen.lock().expect("test lock")
     );
+}
+
+/// The failing-child mapping, over a REAL child: a prompt driven
+/// under an unreachable provider fails in the child, the drive folds
+/// the terminal into `FailedWith`, and the bridge maps it to the
+/// Failed outcome with the child's own reason extractable downstream
+/// (the hand-built-summary twins pin the extraction; this one pins
+/// the real settlement path end to end).
+#[tokio::test]
+async fn a_failing_child_drives_to_the_failed_outcome_with_its_terminal() {
+    let core = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+        .join("..")
+        .join("..")
+        .join("target")
+        .join("debug")
+        .join("tabit-core.exe");
+    if !core.is_file() {
+        eprintln!(
+            "bridge e2e: no tabit-core.exe at {} —              run the workspace suite (scripts/test.sh) to cover it",
+            core.display()
+        );
+        return;
+    }
+    let dir = std::env::temp_dir().join(format!("tabit-bridge-fail-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(dir.join("cwd")).expect("cwd dir");
+    std::fs::create_dir_all(dir.join("ext")).expect("ext dir");
+    std::fs::write(
+        dir.join("providers.toml"),
+        "[providers.offline]
+base_url = \"http://127.0.0.1:9/v1\"
+         api = \"openai-completions\"
+keyless = true
+
+         [[providers.offline.models]]
+id = \"dead\"
+",
+    )
+    .expect("the offline provider fragment");
+    unsafe { std::env::set_var("TABIT_CONFIG", dir.join("providers.toml")) };
+
+    let node = std::sync::Arc::new(tabit_wire::node::Node::new("test"));
+    let parts = std::sync::Arc::new(super::SubagentParts {
+        node,
+        exe: core,
+        tools: Vec::new(),
+        max_turns: 1,
+        extensions: dir.join("ext"),
+    });
+    let offline = tabit_protocol::ModelSelection::new("offline", "dead");
+    let ctx = super::SpawnContext::new(
+        parts,
+        "parent-session".to_string(),
+        offline.clone(),
+        dir.join("cwd"),
+    );
+    let mut child = ctx
+        .spawn_subprocess()
+        .cwd(dir.join("cwd"))
+        .model(offline)
+        .ephemeral(true)
+        .spawn()
+        .await
+        .expect("the child spawned and handshook");
+    unsafe { std::env::remove_var("TABIT_CONFIG") };
+
+    let summary = tokio::time::timeout(
+        std::time::Duration::from_secs(60),
+        ctx.drive_subprocess(
+            &mut child,
+            rig_agent::completion::Message::user("do the thing"),
+            None,
+        ),
+    )
+    .await
+    .expect("the drive reaches a terminal");
+    assert!(
+        matches!(summary.outcome, crate::session::RunOutcome::Failed),
+        "an unreachable provider fails the child: {:?}",
+        summary.outcome
+    );
+    assert!(summary.output.is_empty(), "nothing ran to report");
+    assert!(
+        summary
+            .events
+            .iter()
+            .any(|event| matches!(event, tabit_protocol::SessionEvent::RunFailed { .. })),
+        "the child's own terminal rode the settlement"
+    );
+    // The reason extraction reads the child's terminal, not the
+    // unknown-failure fallback.
+    let error =
+        super::summary_result(summary, child.id()).expect_err("a failed child is an error result");
+    let message = error.to_string();
+    assert!(
+        !message.contains("unknown failure"),
+        "the child's own reason surfaced: {message}"
+    );
+    let _ = std::fs::remove_dir_all(&dir);
 }

@@ -443,6 +443,89 @@ mod tests {
         assert_eq!(*seen.lock().unwrap(), 0, "the lane's subscription is gone");
     }
 
+    /// The channel flavor's dedup: one participant holds a kind once
+    /// — the first registration stands, a re-subscribe is a refuse,
+    /// never a replace — and the wildcard once, under the same law
+    /// (the death-sweep key is also the dedup key).
+    #[test]
+    fn a_participant_holds_each_kind_once_and_the_wildcard_once() {
+        let router = Router::default();
+        let seen = std::sync::Arc::new(std::sync::Mutex::new(Vec::<&'static str>::new()));
+        let first = seen.clone();
+        let second = seen.clone();
+        router.register_channel(
+            "run_finished",
+            Some("lane"),
+            None,
+            Locality::Both,
+            move |_| first.lock().unwrap().push("first"),
+        );
+        router.register_channel(
+            "run_finished",
+            Some("lane"),
+            None,
+            Locality::Both,
+            move |_| second.lock().unwrap().push("second"),
+        );
+        router.dispatch(
+            &frame(SessionEvent::RunFinished {
+                output: String::new(),
+                started_at_ms: 0,
+                completed_at_ms: 0,
+                durable: false,
+            }),
+            Locality::Local,
+        );
+        assert_eq!(
+            *seen.lock().unwrap(),
+            vec!["first"],
+            "the same owner re-subscribing its kind is a refuse, not a replace"
+        );
+
+        seen.lock().unwrap().clear();
+        let wild_first = seen.clone();
+        let wild_second = seen.clone();
+        router.register_all_channel(Some("lane"), None, Locality::Both, move |_| {
+            wild_first.lock().unwrap().push("wild-first")
+        });
+        router.register_all_channel(Some("lane"), None, Locality::Both, move |_| {
+            wild_second.lock().unwrap().push("wild-second")
+        });
+        router.dispatch(
+            &frame(SessionEvent::RunFinished {
+                output: String::new(),
+                started_at_ms: 0,
+                completed_at_ms: 0,
+                durable: false,
+            }),
+            Locality::Remote,
+        );
+        assert_eq!(
+            *seen.lock().unwrap(),
+            vec!["first", "wild-first"],
+            "the kind table keeps its first registration and the wildcard table its own: the lane relays once"
+        );
+
+        // The death sweep takes the wildcard registration too — a
+        // dead relay stops relaying everything, not just its kinds.
+        seen.lock().unwrap().clear();
+        router.retract_owner("lane");
+        router.dispatch(
+            &frame(SessionEvent::RunFinished {
+                output: String::new(),
+                started_at_ms: 0,
+                completed_at_ms: 0,
+                durable: false,
+            }),
+            Locality::Local,
+        );
+        assert_eq!(
+            *seen.lock().unwrap(),
+            Vec::<&'static str>::new(),
+            "the sweep retracts the wildcard table with the kind table"
+        );
+    }
+
     /// The command twin: the same mechanism routes commands by their
     /// tag — the by-type handler table, no sibling implementation.
     #[test]

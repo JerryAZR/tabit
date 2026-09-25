@@ -58,7 +58,24 @@ conformance harness when that grows its event-level scenarios.
 - The whole suite runs offline (cassette replay + test doubles). Doctests
   are NOT included in these numbers (`llvm-cov` was run without
   `--doctests`); they are gated by the same CI run.
-- Current state: **90.58% lines** (4,389 of 46,568; the clean
+- Current state: **93.1% lines** (3,184 of 46,126; the coverage
+  round's re-collection — the two-leg pass: the llvm-cov
+  re-triage plus a four-reviewer functional sweep whose verified
+  finds filled ~45 scenario gaps and surfaced one unwired port
+  (pi-sanity's tmp-rewrite, wired into the gate this round —
+  see the round's section below). Per crate: the rig crates hold
+  97.9/96.9/98.2; tabit-session 96.5%, tabit-tools 96.3%,
+  tabit-wire 93.6% (client.rs 85.8, router 94.5, node ~99),
+  tabit-config 96.8%, tabit-log 92.9%, tabit-protocol 99.3%,
+  tabit-gate 85.7% (the corpus arms — config.rs's loader contract
+  included — are the port plan's first target),
+  tabit-ext-install 89.2%, tabit-ext 68.2% and tabit-ext-sdk
+  53.8% (the 0% example/test bins dominate: ext-double 289,
+  lmstudio 106, echo/child-ext/autotitle/clash/shadow — the
+  class-6 spawned-child attribution family), tabit-core 64.8%
+  (main.rs 61.2% and extensions.rs 52% — the standing child-role
+  and binary-assembly classes). Before this round:
+  **90.58% lines** (4,389 of 46,568; the clean
   re-collection after the node-runtime increment — the first
   measurement of the extension arc, which grew the base 41,334 →
   46,568: tabit-ext/-sdk/-install/-gate, the GUI's growth,
@@ -229,10 +246,17 @@ one-huge-line notice). Remaining residue, classified:
   PATH/registry sandbox or a test seam the design deliberately does
   not have (resolution is process-global by OnceLock, once).
 - `lib.rs` (bash core) — the spawn-failure arm (`cannot start`), the
-  cancellation-mid-run arm (races a fast scheduler; the pre-cancelled
-  door IS tested), the wait-error arm, pipe-missing arms (a
+  wait-error arm, pipe-missing arms (a
   process-wrap internal failure), the spill-write failure arm. All
   need filesystem/process fault injection the suite does not have.
+  — Revised 2026-09 (the coverage round): the cancellation-mid-run
+  arm was justified here as a scheduler race, which does not hold —
+  `sleep 30` plus a 150 ms thread cancel is deterministic, and
+  `a_cancel_during_a_run_interrupts_the_command` now pins the abort
+  door (kill + the interrupted report) alongside the pre-cancelled
+  and timeout doors. The stderr join (`--- stderr ---`) gained its
+  first assertion the same round
+  (`stderr_joins_the_report_behind_its_marker`).
 - `file_io.rs` — the fault arms: `create_dir_all` failure, parent
   metadata error, plain-write failure, temp-stage/write/persist
   failures. Same fault-injection class.
@@ -600,6 +624,122 @@ increment 2's client generalization revisits the file wholesale.
   this round (previous region figures came from llvm-cov's own
   summary output).
 
+## The coverage round (2026-09): re-collection + the functional review
+
+The two-leg pass the maintenance rule calls for: a fresh llvm-cov
+collection with every gap re-triaged (fill / justify / defer), and a
+functional review — four fresh-eye reviewers built scenario-vs-test
+matrices over the tabit crates, and every claimed gap was
+grep-verified before action (one contract test's very name promised
+a failing body while asserting the clash pair's success — verified,
+and now truly pinned). Result: **93.1% lines**, ~45 new scenario
+tests, one unwired port completed, three standing justifications
+revised where their stated reasons did not hold.
+
+**The round's biggest find — an unwired port, not a missing test.**
+`tabit-gate/src/tmp_rewrite.rs` measured 0%: pi-sanity's tmp-rewrite
+ported as pure functions with ZERO callers. The module's own doc
+("the integration rewrites /tmp paths BEFORE running permission
+checks") and the gate hook's comment ("post-rewrite") described a
+contract nothing delivered. On Windows a `write /tmp/x` passed the
+check through the `/tmp/**` allow override while the tool would
+actually write `C:\tmp\x` (drive-root junk), and bash (MSYS maps
+/tmp to %TEMP%) would never see the file — the check and the
+execution disagreed, exactly the divergence the port existed to
+prevent. Fixed at the root: the gate hook rewrites configured
+file-tool params to the real temp dir before checking and returns
+the rewritten map as the effective arguments
+(`ToolCallAction::rewrite` — the engine's existing chain, so later
+hooks and execution see the checked paths), pinned red-green by
+`a_posix_tmp_path_is_rewritten_to_the_real_dir_before_the_check`
+plus nine pure-function tests (`tests/tmp_rewrite.rs`, including
+the `createEmptyConfig` empty-shape pin).
+
+**Filled (the functional review's verified finds):**
+
+- **The gate card matrix** (`tabit-core/src/gate.rs` tests, over a
+  new `rig_agent::test_utils::hook_context` seam — hosts drive
+  mounted hooks directly over the same capability lookup the engine
+  uses): the whole decision table plus the card shape.
+- **tabit-wire**: the child-role CLI mapping (`ChildSpec::
+  command_line`, extracted pure from `spawn` — the argv contract
+  had zero tests anywhere); the router's same-owner dedup refuse
+  (kind table and wildcard) and the wildcard-table death sweep;
+  `asks`' terminal-sweep obligation arm and the lock-free
+  re-entrant delivery (a delivery closure may re-enter the
+  registry); the node's route re-teach (a stream re-heard on a new
+  channel re-routes — last heard on wins) and the mint-violating
+  frame never reaching local subscribers.
+- **tabit-session**: the `open_session` door's skills announcement
+  (the third copy of the per-session ruling — unpinned before);
+  the compact slot's collapse-to-one and abort-drop (the checkout
+  twins' laws, staged on a provably-busy beat via the blocking
+  tool); the replay flag's collapse; the edge's end-path drain
+  asserted on content (not exit code alone), CRLF input tolerance,
+  and a REAL cold open over the wire (the multi-session test
+  re-opened its resident boot session — the `open` closure never
+  ran; it now opens a pre-seeded stored session first); skills'
+  empty-rel-path default, rel-path file read, and not-found arms;
+  the subagent Completed cargo (`child_id` — the pairing fact the
+  docs call load-bearing, asserted for the first time) and a
+  failing-child e2e over the real binary (the offline provider
+  drives `FailedWith` through the bridge to the Failed mapping,
+  the child's own reason surfacing); the services' valid
+  model-override arm (billed at the override's own row).
+- **tabit-ext / -sdk**: the envelope's `model: Some` field
+  round-trips (declared wire vocabulary, never exercised); the
+  SDK's undeclared-tool error (and clean token sweep), body-Err and
+  body-panic results (`run_call`'s arms — the misnamed contract
+  test's claim is finally backed by a real pin); the answerer
+  mode's ANSWERING half (`an_on_ask_body_answers_the_card_and_the_
+  response_rides_home` — zero coverage at any level before; the
+  close vocabulary correctly stays the origin's, asserted).
+- **tabit-tools**: the bash abort door (see the revised
+  justification above), the stderr join, read's limit-0 page.
+- **tabit-config**: a broken settings layer fails loudly through
+  `load_default` — the door users actually hit (only the direct
+  load was fed before).
+- **tabit-ext-install**: the manifestless-package validate refusal
+  (the never-leaves-a-half-package contract's front door; the root
+  stays clean) and uninstall of a never-installed name.
+- **rig-agent**: detach-on-drop — the token-and-detach ruling's
+  detach half had no pin (a parked body, the dispatch future
+  dropped without joining, a later dispatch works; drives the
+  `MockControlledTool` pair that existed unused for it).
+
+**Justified (re-derived against this round's lcov):** the corpus
+deferral for tabit-gate's remaining policy arms (config.rs 69.8% —
+the loader's backwards rules parse, catch-all override, and warning
+sinks lead the port plan); the example/test bins at 0% (ext-double
+289 lines, lmstudio 106, echo/child-ext/autotitle/clash/shadow —
+spawned children, class-6 attribution; the SDK's own lib rose to
+67% through its in-crate suite); tabit-core's child-role arms and
+binary assembly (main.rs 61.2%, extensions.rs 52%); the standing
+write-fault, platform-absence, and lock-timeout classes
+(`tabit-log` writer/lock arms unchanged).
+
+**Deferred (explicit — each names what a test would need):** the
+supervisor's wrong-kind correlation refusals and the SDK's mirror
+`WrongKind` death (an ext-double mode answering a call id with the
+wrong kind); the SDK's strict-frame process exits (unknown watch
+kind, unparseable line — `die` exits, needs a process-level
+harness) and `serve`'s seen-kinds dedup (drives only inside the
+bins); the owned-child cancel leash e2e (`Settlement::Aborted` —
+needs a slow-child scenario that outlives its cancelled call);
+`extensions.rs`'s hook forwarding through the real `mount()` and
+the pre-send dead-lane fail-open (an e2e installing a
+hook-declaring package); the wire client's boot-timeout,
+stdout-closed-before-boot, and first-frame-not-Report stubs
+(`BOOT_TIMEOUT` is a const — needs a seam or stub variants); the
+lane's exit sweep through the real client; `crash_report` and the
+stderr ring; the SpawnContext per-run snapshot under a mid-run
+model switch; the interaction hub's promise-death `Dismissed` arm;
+print-mode `--rewind` execution and the json-mode startup-failure
+shape (both are `CARGO_BIN_EXE_tabit-core` e2e shapes — a staged
+store / a corrupt `TABIT_CONFIG`); the npm version-pin and
+tarball-escape install scenarios (fake-registry variants);
+autotitle's once-per-session second-hook dedup.
+
 ## Justified residue
 
 The remaining uncovered lines fall into these categories. Where a file is
@@ -660,9 +800,11 @@ named, the classification applies to its current lcov-uncovered ranges.
      create: append/write to an unlinked-open handle *succeeds* on Windows
      (verified empirically — the persist-failure test documents it), and
      disk-full / uuid-collision / `create_new` races cannot be staged.
-   - Poisoned-`Mutex` arms in `recorder.rs` — reachable only after a panic
-     inside the lock, which the workspace lint policy forbids in shipped
-     code. `rewind_to`'s failure leg rides the same
+   - Poisoned-`Mutex` arms in the durable layer — the former
+     `recorder.rs` died with the format-v3 refactor; the class
+     (reachable only after a panic inside the lock, which the
+     workspace lint policy forbids in shipped code) applies to
+     `tabit-log`'s writer arms as classified in the round sections. `rewind_to`'s failure leg rides the same
      record-then-`observe` path as `record`'s (both covered by the
      blocked-store bootstrap test: the lost-record contract, one
      degrade announcement, `pending: 0`); staging a write fault that
@@ -783,9 +925,15 @@ kept as the record of what they were)
   the built-in `tabit-gate` crate (pi-sanity's policy; its own test
   corpus is the port plan). The two gate-ext e2e vehicle tests (the
   SDK contract's session-memory walk and the backend wire test's
-  card-denial round-trip) were deleted with the package — **deferred
-  gap**: the extension SDK's reference consumer restores both when it
-  is developed.
+  card-denial round-trip) were deleted with the package — **closed
+  2026-09, the coverage round**: the built-in gate is in-process and
+  directly pinned — the full card matrix drives `PermissionGate::
+  on_tool_call` through the new `rig_agent::test_utils::
+  hook_context` seam (allow, deny-with-reason, ask-answered-allow,
+  block with and without custom text, dismissed, malformed-answer
+  fails closed, no-UI fails closed, and the native:select_one card
+  shape), plus the e2e pair (`the_builtin_gate_asks_on_a_risky_bash_
+  and_a_block_skips`, `a_disabled_gate_mounts_nowhere`).
 - `tabit/bin print-mode stdin reader` (`main.rs` watcher thread,
   card rendering incl. the FIFO card queue) — **JUSTIFIED**: owns real
   stdin; `parse_answer` is unit-covered (numbered buttons + reason,

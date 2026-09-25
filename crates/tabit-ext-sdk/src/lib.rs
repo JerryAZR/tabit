@@ -1570,4 +1570,198 @@ pub(crate) mod tests {
             "still nothing crossed after the answerers ran"
         );
     }
+
+    /// The shared surface over an OPEN pipe — the tool-lane tests
+    /// read what crossed instead of dropping it.
+    fn shared_with_pipe() -> (Arc<Shared>, tokio::sync::mpsc::UnboundedReceiver<String>) {
+        let node = Arc::new(Node::new("test"));
+        let (pipe_tx, pipe_rx) = tokio::sync::mpsc::unbounded_channel::<String>();
+        let pipe_writer = pipe_tx.clone();
+        let stdio = Channel::line("host", move |line: &str| write_line(&pipe_writer, line));
+        let layer = Channel::local("sdk", |_| {}, |_| {});
+        (
+            Arc::new(Shared {
+                node,
+                stdio,
+                layer,
+                pipe: pipe_tx,
+                tokens: Mutex::new(std::collections::HashMap::new()),
+                core_path: Mutex::new(None),
+            }),
+            pipe_rx,
+        )
+    }
+
+    async fn next_pipe_line(rx: &mut tokio::sync::mpsc::UnboundedReceiver<String>) -> String {
+        tokio::time::timeout(std::time::Duration::from_secs(5), rx.recv())
+            .await
+            .expect("a line crossed the pipe")
+            .expect("the pipe lives")
+    }
+
+    /// A call for an undeclared tool answers its error over the pipe
+    /// and leaves no token behind — the host/extension drift shape a
+    /// plain name typo reaches.
+    #[tokio::test]
+    async fn an_undeclared_tool_answers_its_error_and_sweeps_clean() {
+        let (shared, mut pipe_rx) = shared_with_pipe();
+        run_call(
+            &shared,
+            "call-1".to_string(),
+            "missing".to_string(),
+            json!({}),
+            &[],
+        )
+        .await;
+        let line = next_pipe_line(&mut pipe_rx).await;
+        assert!(
+            line.contains("this extension serves no tool `missing`"),
+            "the error names the drift: {line}"
+        );
+        assert!(
+            sdk_lock(&shared.tokens).is_empty(),
+            "the refused call leaked no token entry"
+        );
+    }
+
+    /// A body returning Err is the error result (the misnamed clash
+    /// contract test pins the two-process handshake, not this arm).
+    #[tokio::test]
+    async fn a_failing_body_is_an_error_result_not_a_hang() {
+        let (shared, mut pipe_rx) = shared_with_pipe();
+        let tools = [tool("boom", "explodes", json!({}), |_args, _ctx| async {
+            Err::<Output, _>("the body refused".to_string())
+        })];
+        run_call(
+            &shared,
+            "call-2".to_string(),
+            "boom".to_string(),
+            json!({}),
+            &tools,
+        )
+        .await;
+        let line = next_pipe_line(&mut pipe_rx).await;
+        assert!(
+            line.contains("the body refused") && line.contains("error"),
+            "the body's error rode the result: {line}"
+        );
+        assert!(
+            line.contains(r#""report":""#),
+            "a failed body reports nothing: {line}"
+        );
+    }
+
+    /// A panicking body is the error result — the pipe never hangs on
+    /// a broken body (the crash-isolation ruling's call arm).
+    #[tokio::test]
+    async fn a_panicking_body_is_an_error_result_not_a_hang() {
+        let (shared, mut pipe_rx) = shared_with_pipe();
+        async fn exploding(_args: Value, _ctx: Ctx) -> Result<Output, String> {
+            panic!("kaboom");
+        }
+        let tools = [tool("explode", "panics", json!({}), exploding)];
+        run_call(
+            &shared,
+            "call-3".to_string(),
+            "explode".to_string(),
+            json!({}),
+            &tools,
+        )
+        .await;
+        let line = next_pipe_line(&mut pipe_rx).await;
+        assert!(
+            line.contains("the tool body panicked") && line.contains("kaboom"),
+            "the panic note rode the error result: {line}"
+        );
+    }
+
+    /// The answerer mode's ANSWERING half: an `on_ask` body answers a
+    /// child's card by id, the response rides the transit entry home
+    /// down the asking child's lane, and the answering node announces
+    /// the settle it resolved (the node primitive is pinned in
+    /// tabit-wire; this is the SDK surface over it).
+    #[tokio::test]
+    async fn an_on_ask_body_answers_the_card_and_the_response_rides_home() {
+        use std::sync::atomic::{AtomicUsize, Ordering};
+        use tabit_protocol::StreamId;
+        use tabit_wire::node::Inbound;
+
+        let node = Arc::new(Node::new("test"));
+        let (pipe_tx, mut pipe_rx) = tokio::sync::mpsc::unbounded_channel::<String>();
+        let pipe_writer = pipe_tx.clone();
+        let stdio = Channel::line("host", move |line: &str| write_line(&pipe_writer, line));
+        let layer = Channel::local("sdk", |_| {}, |_| {});
+        node.subscribe_channel_all(Locality::Local, &stdio);
+        let shared = Arc::new(Shared {
+            node: node.clone(),
+            stdio: stdio.clone(),
+            layer,
+            pipe: pipe_tx,
+            tokens: Mutex::new(std::collections::HashMap::new()),
+            core_path: Mutex::new(None),
+        });
+        let answered = Arc::new(AtomicUsize::new(0));
+        let poll = answered.clone();
+        let answerer: ErasedWatch = Arc::new(move |ctx, frame| {
+            let sink = poll.clone();
+            Box::pin(async move {
+                if let SessionEvent::InteractionRequest { id, .. } = &frame.event {
+                    sink.fetch_add(1, Ordering::SeqCst);
+                    ctx.answer(id, json!({"selected": ["Allow"]}));
+                }
+            })
+        });
+        mount_card_surface(&node, &shared, Arc::new(vec![answerer]));
+
+        // The child's lane: its write callback IS the child's stdin.
+        let home: Arc<Mutex<Vec<String>>> = Arc::new(Mutex::new(Vec::new()));
+        let sink = home.clone();
+        let lane = Channel::line("lane-9", move |line: &str| {
+            sink.lock().expect("test lock").push(line.to_string());
+        });
+        node.intake(
+            &lane,
+            Inbound::Event(EventFrame {
+                stream: Some(StreamId::new("child-sess")),
+                origin: None,
+                ttl: None,
+                event: SessionEvent::InteractionRequest {
+                    id: "card-9".to_string(),
+                    ui_type: "native:select_one".to_string(),
+                    payload: json!({"title": "proceed?"}),
+                },
+            }),
+        );
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
+        loop {
+            let lines = home.lock().expect("test lock").clone();
+            if lines.iter().any(|l| l.contains("card-9")) {
+                break;
+            }
+            assert!(
+                std::time::Instant::now() < deadline,
+                "the answer never rode the child's lane: {lines:?}"
+            );
+            tokio::time::sleep(std::time::Duration::from_millis(5)).await;
+        }
+        let home = home.lock().expect("test lock").clone();
+        let response = home
+            .iter()
+            .find(|l| l.contains("card-9"))
+            .expect("the response line");
+        assert!(
+            response.contains("Allow"),
+            "the answerer's payload rode verbatim: {response}"
+        );
+        assert_eq!(answered.load(Ordering::SeqCst), 1, "one ask, one answer");
+        // No settle announces here, by the card-pair ruling: the
+        // ORIGIN (the asking child) announces the close when the
+        // answer reaches it — the answerer claims the table, never
+        // the card's close vocabulary. The settle surfacing is the
+        // lift tests' pin.
+        assert!(
+            pipe_rx.try_recv().is_err(),
+            "the answer crossed nothing else to the host"
+        );
+    }
 }

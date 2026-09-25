@@ -201,65 +201,64 @@ impl ChildSpec {
         self
     }
 
+    /// The child-role command line this spec spawns: `--json` plus
+    /// every knob that is set (a `--session` suppresses the
+    /// `--ephemeral` default — a named file wins). Pure — the argv is
+    /// the child-role CLI contract, pinned by test.
+    fn command_line(&self) -> Vec<String> {
+        let mut args: Vec<String> = vec!["--json".to_string()];
+        if let Some(id) = &self.parent {
+            args.push("--parent".to_string());
+            args.push(id.clone());
+        }
+        if let Some(id) = &self.parent_call {
+            args.push("--parent-call".to_string());
+            args.push(id.clone());
+        }
+        if let Some(selection) = &self.model {
+            args.push("--model".to_string());
+            args.push(format!("{}/{}", selection.provider, selection.model));
+        }
+        if let Some(max_turns) = self.max_turns {
+            args.push("--max-turns".to_string());
+            args.push(max_turns.to_string());
+        }
+        if let Some(tools) = &self.tools {
+            args.push("--tools".to_string());
+            args.push(tools.join(","));
+        }
+        if let Some(without) = &self.without {
+            args.push("--without".to_string());
+            args.push(without.join(","));
+        }
+        if let Some(text) = &self.preamble {
+            args.push("--preamble".to_string());
+            args.push(text.clone());
+        }
+        if let Some(path) = &self.extensions {
+            args.push("--extensions".to_string());
+            args.push(path.display().to_string());
+        }
+        if let Some(path) = &self.session {
+            args.push("--session".to_string());
+            args.push(path.display().to_string());
+        } else if self.ephemeral {
+            args.push("--ephemeral".to_string());
+        }
+        args
+    }
+
     /// Run the child: spawn, handshake, reaper. Errors are display
     /// strings — the caller (a tool body, an SDK wrapper) turns them
     /// into its failure report.
     pub async fn spawn(self) -> Result<ChildHandle, String> {
+        let args = self.command_line();
         let Self {
             exe,
             cwd,
-            parent,
-            parent_call,
-            model,
-            tools,
-            without,
-            ephemeral,
-            session,
-            extensions,
-            max_turns,
-            preamble,
             node: mount,
+            ..
         } = self;
-
-        let mut args: Vec<String> = vec!["--json".to_string()];
-        if let Some(id) = &parent {
-            args.push("--parent".to_string());
-            args.push(id.clone());
-        }
-        if let Some(id) = &parent_call {
-            args.push("--parent-call".to_string());
-            args.push(id.clone());
-        }
-        if let Some(selection) = &model {
-            args.push("--model".to_string());
-            args.push(format!("{}/{}", selection.provider, selection.model));
-        }
-        if let Some(max_turns) = max_turns {
-            args.push("--max-turns".to_string());
-            args.push(max_turns.to_string());
-        }
-        if let Some(tools) = &tools {
-            args.push("--tools".to_string());
-            args.push(tools.join(","));
-        }
-        if let Some(without) = &without {
-            args.push("--without".to_string());
-            args.push(without.join(","));
-        }
-        if let Some(text) = &preamble {
-            args.push("--preamble".to_string());
-            args.push(text.clone());
-        }
-        if let Some(path) = &extensions {
-            args.push("--extensions".to_string());
-            args.push(path.display().to_string());
-        }
-        if let Some(path) = &session {
-            args.push("--session".to_string());
-            args.push(path.display().to_string());
-        } else if ephemeral {
-            args.push("--ephemeral".to_string());
-        }
 
         let mut process = wrap_command(&exe, &args, &cwd)
             .spawn()
@@ -698,5 +697,55 @@ impl Drop for ChildHandle {
         // arms the reaper either way. Nothing async here — the reaper
         // owns the wait.
         self.close();
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn the_command_line_is_the_child_role_cli() {
+        let base = ChildSpec::new(PathBuf::from("core.exe"), PathBuf::from("C:/w"));
+        // Ephemeral is the default: a bare child is unnamed.
+        assert_eq!(base.command_line(), vec!["--json", "--ephemeral"]);
+        assert_eq!(base.ephemeral(false).command_line(), vec!["--json"]);
+
+        let full = ChildSpec::new(PathBuf::from("core.exe"), PathBuf::from("C:/w"))
+            .parent("parent-id".to_string())
+            .parent_call("call-7".to_string())
+            .model(ModelSelection::new("p", "m"))
+            .max_turns(4)
+            .tools(vec!["read".to_string(), "bash".to_string()])
+            .without(vec!["edit".to_string()])
+            .preamble("be brief".to_string())
+            .extensions(PathBuf::from("C:/ext"))
+            // A named session suppresses the ephemeral flag even when
+            // it is left on.
+            .session(PathBuf::from("C:/s.jsonl"));
+        assert_eq!(
+            full.command_line(),
+            vec![
+                "--json",
+                "--parent",
+                "parent-id",
+                "--parent-call",
+                "call-7",
+                "--model",
+                "p/m",
+                "--max-turns",
+                "4",
+                "--tools",
+                "read,bash",
+                "--without",
+                "edit",
+                "--preamble",
+                "be brief",
+                "--extensions",
+                "C:/ext",
+                "--session",
+                "C:/s.jsonl",
+            ]
+        );
     }
 }

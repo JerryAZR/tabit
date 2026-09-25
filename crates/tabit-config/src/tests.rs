@@ -1019,6 +1019,31 @@ disabled = [\"lmstudio\"]
 }
 
 #[test]
+fn a_broken_layer_fails_loudly_through_load_default_too() {
+    // The door users actually hit: a corrupt settings.toml reached
+    // through the layering (load_default), not the direct load — the
+    // loud error must propagate through the absorb chain, never be
+    // quietly skipped.
+    let dir = std::env::temp_dir().join(format!("tabit-settings-default-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(dir.join("user/.tabit")).expect("dirs");
+    std::fs::write(dir.join("user/.tabit/settings.toml"), "not toml").expect("broken");
+    unsafe {
+        std::env::set_var("TABIT_SETTINGS", dir.join("user/.tabit/settings.toml"));
+    }
+    let error =
+        crate::SettingsConfig::load_default().expect_err("the broken layer fails the whole load");
+    assert!(
+        matches!(error, crate::ConfigError::Parse { .. }),
+        "{error:?}"
+    );
+    unsafe {
+        std::env::remove_var("TABIT_SETTINGS");
+    }
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+#[test]
 fn a_user_override_wins_silently_and_a_fragment_lands() {
     // The user's own provider id: the fragment's same-id entry drops
     // without a word — an override winning is what the user expects.

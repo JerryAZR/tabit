@@ -3,6 +3,16 @@
 mod model_conformance;
 mod tools;
 
+/// A [`HookContext`](crate::agent::HookContext) over a caller-built
+/// capability map — the host-side seam for driving mounted hooks
+/// directly. The engine builds its own context per run; a host
+/// testing the policy hooks it mounts (a permission gate, an
+/// auditor) drives them the same way, over the same capability
+/// lookup.
+pub fn hook_context(capabilities: crate::tool::ToolContext) -> crate::agent::HookContext {
+    crate::agent::HookContext::new(capabilities)
+}
+
 pub use model_conformance::{
     ConformanceToolError, ScenarioError, ScenarioReport, buffered_streaming_text_parity,
     cancellation_and_max_turns, complex_tool_arguments, decode_structured_output, hook_rewrites,

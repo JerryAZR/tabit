@@ -497,4 +497,62 @@ mod tests {
             PendingAnswer::Missed
         ));
     }
+
+    /// The terminal sweep runs an answered-but-unsettled obligation
+    /// too — `retract_all` owes the window's close the same close an
+    /// owner's death does (the sibling test pins `retract_owner`'s
+    /// arm; this one the terminal's).
+    #[test]
+    fn a_terminal_sweep_runs_the_answered_obligation_too() {
+        let asks = PendingAsks::default();
+        let announced = Arc::new(std::sync::Mutex::new(false));
+        let sink = announced.clone();
+        asks.register(
+            "req-1".to_string(),
+            "a",
+            "interaction",
+            recording().1,
+            Some(Box::new(move || {
+                *sink.lock().expect("test lock") = true;
+            })),
+        );
+        assert!(matches!(
+            asks.answer("req-1", "interaction", Box::new(1u32)),
+            PendingAnswer::Answered
+        ));
+        asks.retract_all("the run ended");
+        assert!(
+            *announced.lock().expect("test lock"),
+            "the terminal sweep announced the settle the dead origin owed"
+        );
+    }
+
+    /// The delivery runs with no lock held: a delivery closure that
+    /// re-enters the registry (an answer arm announcing through the
+    /// events router, one hop away) must never meet the table's lock
+    /// — the claim contract has no re-entrancy, and a held lock here
+    /// would trip it.
+    #[test]
+    fn a_delivery_may_re_enter_the_registry() {
+        let asks = Arc::new(PendingAsks::default());
+        let (seen_b, deliver_b) = recording();
+        let asks_in_delivery = asks.clone();
+        let deliver_a = move |_outcome: Outcome| {
+            assert!(
+                asks_in_delivery.held("req-b"),
+                "the re-entrant claim sees the sibling entry"
+            );
+        };
+        asks.insert("req-a".to_string(), "a", "interaction", deliver_a);
+        asks.insert("req-b".to_string(), "b", "interaction", deliver_b);
+        assert!(matches!(
+            asks.answer("req-a", "interaction", Box::new(1u32)),
+            PendingAnswer::Answered
+        ));
+        assert_eq!(
+            *seen_b.lock().expect("test lock"),
+            Vec::<String>::new(),
+            "the sibling is untouched by the re-entrant read"
+        );
+    }
 }

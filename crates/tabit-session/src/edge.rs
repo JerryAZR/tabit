@@ -1203,6 +1203,20 @@ id = "m"
         let (tx_in, rx_in) = std::sync::mpsc::channel::<String>();
         let dir = test_dir("multi");
         let _ = std::fs::remove_dir_all(&dir);
+        // A stored-but-never-opened session: the cold-open door's
+        // target. Seeded by a prompt before the host exists, so the
+        // file holds history no worker in this connection owns.
+        let cold_id = {
+            let mut cold = build_session(&dir, vec![script("cold seeded answer")]);
+            cold.prompt("seed the history").await;
+            SessionStore::new(&dir)
+                .list()
+                .expect("store lists the seeded file")
+                .into_iter()
+                .map(|summary| summary.id)
+                .next()
+                .expect("one stored file before the boot runs")
+        };
         let session = build_session(&dir, vec![script("boot answer")]);
         let created_dir = dir.clone();
         let create: SessionSource = Arc::new(move || {
@@ -1336,17 +1350,90 @@ id = "m"
         assert!(answer_line.contains(&format!(r#""stream":"{created}""#)));
         await_line(&out, "run_finished").await;
 
+        // open_session of the COLD session first: the open source
+        // runs (a store lookup + resume), its seeded history replays
+        // stamped with ITS stream — not the boot's, not resident.
+        tx_in
+            .send(format!(r#"{{"type":"open_session","id":"{cold_id}"}}"#))
+            .unwrap();
+        let cold_line = await_line(&out, "cold seeded answer").await;
+        assert!(
+            cold_line.contains(&format!(r#""stream":"{cold_id}""#)),
+            "the cold history replays on the opened session's own stream: {cold_line}"
+        );
+
         // open_session of the boot session: an idempotent re-replay of
         // its (now stored) chain, stamped with the boot id.
         tx_in
             .send(format!(r#"{{"type":"open_session","id":"{boot}"}}"#))
             .unwrap();
+        // Two passes have now run (the cold open's and the boot's
+        // re-replay); the LAST replay_begin is the boot's own.
+        let deadline = tokio::time::Instant::now() + std::time::Duration::from_secs(5);
+        let boot_replay = loop {
+            let begins: Vec<String> = read_lines(&out)
+                .into_iter()
+                .filter(|line| line.contains("replay_begin"))
+                .collect();
+            if begins.len() >= 2 {
+                break begins[begins.len() - 1].clone();
+            }
+            assert!(
+                tokio::time::Instant::now() < deadline,
+                "the boot's re-replay must begin before timeout"
+            );
+            tokio::time::sleep(std::time::Duration::from_millis(25)).await;
+        };
+        assert!(boot_replay.contains(&format!(r#""stream":"{boot}""#)));
         await_line(&out, "replay_end").await;
-        let replay_started = await_line(&out, "replay_begin").await;
-        assert!(replay_started.contains(&format!(r#""stream":"{boot}""#)));
 
         drop(tx_in);
         assert_eq!(serve_task.await.unwrap(), 0);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[tokio::test]
+    async fn crlf_input_lines_parse_the_same_as_lf() {
+        // A Windows pipe client sends "
+        // A Windows pipe client sends CRLF line endings; the trim
+        // takes both, so every command shape parses unchanged (a
+        // regression to LF-only trimming makes each line an
+        // unparseable-line error).
+        let (tx_in, rx_in) = std::sync::mpsc::channel::<String>();
+        let dir = test_dir("crlf");
+        let _ = std::fs::remove_dir_all(&dir);
+        let session = build_session(&dir, vec![script("crlf-pong")]);
+        let handle = SessionHost::spawn(
+            session,
+            Vec::new(),
+            test_wiring(&dir),
+            test_data(unusable_create()),
+        );
+        let out = SharedOut::default();
+        let serve_task = tokio::spawn(serve(
+            handle,
+            ChannelIn {
+                lines: rx_in,
+                buf: Vec::new(),
+            },
+            out.clone(),
+        ));
+        let boot = boot_session_id(&out).await;
+        tx_in
+            .send(format!("{}\r\n", message_line(&boot, "hello")))
+            .unwrap();
+        let answer = await_line(&out, "crlf-pong").await;
+        assert!(answer.contains("crlf-pong"), "{answer}");
+        await_line(&out, "run_finished").await;
+        drop(tx_in);
+        assert_eq!(serve_task.await.unwrap(), 0);
+        // No protocol errors: the CRLF line parsed as a command.
+        assert!(
+            !read_lines(&out)
+                .iter()
+                .any(|line| line.contains("unparseable line")),
+            "CRLF is not an error"
+        );
         let _ = std::fs::remove_dir_all(&dir);
     }
 
@@ -1384,6 +1471,16 @@ id = "m"
         .await
         .expect("the stream's end resolves the edge without EOF");
         assert_eq!(code, 0);
+        // The end path is lossless: frames that landed in the feed
+        // despite the fired end token still reach the wire (the
+        // exit code alone cannot show a dropped transcript).
+        assert!(
+            read_lines(&out)
+                .iter()
+                .any(|line| line.contains("session_opened")),
+            "the announce written across the end token survived: {:?}",
+            read_lines(&out)
+        );
         // The client never closed — the input sender is still held
         // here, so the resolution came from the stream's end, not an
         // EOF read.

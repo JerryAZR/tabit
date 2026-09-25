@@ -439,6 +439,40 @@ mod tests {
     }
 
     #[test]
+    fn a_model_reference_round_trips_through_the_envelope() {
+        // The override field is declared wire vocabulary — an
+        // explicit provider/model reference must survive the line
+        // (the None default is the sibling test's shape).
+        let prompt = ExtFrame::ServiceRequest {
+            request_id: "svc-2".to_string(),
+            call_id: "call-4".to_string(),
+            verb: ServiceVerb::ModelPrompt {
+                prompt: "with a reference".to_string(),
+                model: Some("p/other".to_string()),
+                max_tokens: None,
+            },
+        };
+        let line = serde_json::to_string(&prompt).unwrap();
+        assert!(
+            line.contains(r#""model":"p/other""#),
+            "the reference serializes: {line}"
+        );
+        match serde_json::from_str::<ExtFrame>(&line).unwrap() {
+            ExtFrame::ServiceRequest {
+                verb:
+                    ServiceVerb::ModelPrompt {
+                        model, max_tokens, ..
+                    },
+                ..
+            } => {
+                assert_eq!(model.as_deref(), Some("p/other"));
+                assert_eq!(max_tokens, None);
+            }
+            _ => panic!("the envelope round-trips"),
+        }
+    }
+
+    #[test]
     fn the_service_envelope_round_trips() {
         // v3: the ask verb is gone — an ask frame no longer parses
         // (the grammar's interaction_request carries asks now).

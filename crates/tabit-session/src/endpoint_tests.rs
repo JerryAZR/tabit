@@ -3641,3 +3641,215 @@ async fn an_early_new_session_parks_until_the_boot_attaches() {
     assert_ne!(opened[1], boot, "the parked session follows behind it");
     std::fs::remove_dir_all(store.dir()).ok();
 }
+
+#[tokio::test]
+async fn an_opened_session_announces_its_own_skills() {
+    // The session-level catalog ruling's open arm: a resumed-via-
+    // command session with a mounted catalog announces
+    // SkillsAvailable stamped with ITS stream — the third door the
+    // new-session twin pins, exercised here through `open_session`.
+    let store = temp_store("endpoint-skills-open");
+    let session = Factory::new(vec![text_turn("boot")])
+        .into_builder(store.clone())
+        .create("C:/w")
+        .expect("session");
+    let mut catalog = crate::skills::Skills::default();
+    assert!(catalog.register(crate::skills::SkillEntry {
+        name: "resumed-lint".to_string(),
+        description: "Resumed lint".to_string(),
+        base_dir: "C:/resumed/.tabit/skills/resumed-lint".into(),
+        skill_file: "C:/resumed/.tabit/skills/resumed-lint/SKILL.md".into(),
+        level: crate::skills::SkillLevel::Workspace,
+    }));
+    let resumed = std::sync::Arc::new(catalog);
+    let open_store = store.clone();
+    let data = SessionHostData {
+        create: std::sync::Arc::new(|| Err("not driven".to_string())),
+        open: std::sync::Arc::new(move |_id| {
+            Factory::new(vec![text_turn("re")])
+                .into_builder(open_store.clone())
+                .skills(resumed.clone())
+                .create("C:/resumed")
+                .map(|session| (session, Vec::new()))
+                .map_err(|error| error.to_string())
+        }),
+        extensions: Default::default(),
+    };
+    let mut handle = SessionHost::spawn(session, Vec::new(), plain_wiring(&store), data);
+    let boot = boot_id(&handle);
+    handle.command_link().send(SessionCommand::OpenSession {
+        id: "any-stored-id".to_string(),
+    });
+    let frame = until_event(&mut handle, |event| {
+        matches!(event, SessionEvent::SkillsAvailable { .. })
+    })
+    .await;
+    let (stream, skills) = match frame {
+        tabit_protocol::EventFrame {
+            stream,
+            event: SessionEvent::SkillsAvailable { skills, .. },
+            ..
+        } => (stream, skills),
+        _ => unreachable!("until_event pinned the kind"),
+    };
+    assert_ne!(
+        stream.as_ref().map(|id| id.as_str()),
+        Some(boot.as_str()),
+        "the announcement is the opened session's own stream"
+    );
+    assert!(
+        stream.is_some(),
+        "the announcement is stamped, never backend-level"
+    );
+    assert_eq!(skills.len(), 1);
+    assert_eq!(skills[0].name, "resumed-lint");
+    std::fs::remove_dir_all(store.dir()).ok();
+}
+
+#[tokio::test]
+async fn parked_compacts_collapse_to_one_invocation() {
+    // The compact slot is a slot, not a queue: two commands parked
+    // while the beat is provably busy (the second run's blocking
+    // tool) are one intent — one invocation, one bracket pair (the
+    // checkout twin's law, at the compact door). The history mirrors
+    // the manual-door test's (two 20k/50k turns) so the box has a
+    // feasible cut.
+    let store = temp_store("endpoint-compact-collapse");
+    let big = "x".repeat(80_000);
+    let session = Factory::new(vec![
+        tool_turn("t1", "blocking"),
+        text_turn_reported(&big, 20_000, 10_000),
+        tool_turn("t1", "blocking"),
+        text_turn_reported(&big, 50_000, 10_000),
+        text_turn_reported(
+            "## Goal
+- the collapsed summary",
+            100,
+            20,
+        ),
+    ])
+    .into_builder_with_config(
+        store.clone(),
+        windowed_config(100_000_000),
+        ModelSelection::new("p", "m"),
+    )
+    .dynamic_tool(blocking_tool())
+    .create("C:/w")
+    .expect("session");
+    let mut handle = SessionHost::spawn(session, Vec::new(), plain_wiring(&store), plain_data());
+    let id = boot_id(&handle);
+    handle.message(&id, "go");
+    let mut frames = Vec::new();
+    collect_until(&mut handle, &mut frames, terminal).await;
+    handle.message(&id, "more");
+    // Park both compacts while the SECOND run's body is mid-block —
+    // the beat cannot serve them until this run's terminal.
+    until_event(&mut handle, |event| {
+        matches!(event, SessionEvent::ToolCall { .. })
+    })
+    .await;
+    let link = handle.command_link();
+    link.send(SessionCommand::Compact {
+        session: id.clone(),
+        directives: None,
+    });
+    link.send(SessionCommand::Compact {
+        session: id.clone(),
+        directives: None,
+    });
+    collect_until(&mut handle, &mut frames, |event| {
+        matches!(event, SessionEvent::CompactionEnd { .. })
+    })
+    .await;
+    let begins = frames
+        .iter()
+        .filter(|frame| matches!(frame.event, SessionEvent::CompactionBegin))
+        .count();
+    assert_eq!(begins, 1, "two parked compacts are one invocation");
+    std::fs::remove_dir_all(store.dir()).ok();
+}
+
+#[tokio::test]
+async fn an_abort_drops_a_parked_compact() {
+    // Drop-all-pending-intent at the compact door: a parked compact
+    // cleared by an abort never runs — the beat would have served it
+    // ahead of any later batch, so a surviving slot would bracket
+    // before the next run's terminal.
+    let store = temp_store("endpoint-compact-abort");
+    let big = "x".repeat(80_000);
+    let session = Factory::new(vec![
+        text_turn_reported(&big, 20_000, 10_000),
+        text_turn_reported(&big, 50_000, 10_000),
+        text_turn_reported(
+            "## Goal
+- the dropped summary",
+            100,
+            20,
+        ),
+        text_turn("still runs"),
+    ])
+    .into_builder_with_config(
+        store.clone(),
+        windowed_config(100_000_000),
+        ModelSelection::new("p", "m"),
+    )
+    .create("C:/w")
+    .expect("session");
+    let mut handle = SessionHost::spawn(session, Vec::new(), plain_wiring(&store), plain_data());
+    let id = boot_id(&handle);
+    handle.message(&id, "go");
+    let mut frames = Vec::new();
+    collect_until(&mut handle, &mut frames, terminal).await;
+
+    let link = handle.command_link();
+    link.send(SessionCommand::Compact {
+        session: id.clone(),
+        directives: None,
+    });
+    link.send(SessionCommand::Abort {
+        session: id.clone(),
+    });
+    handle.message(&id, "after");
+    collect_until(&mut handle, &mut frames, terminal).await;
+    let begins = frames
+        .iter()
+        .filter(|frame| matches!(frame.event, SessionEvent::CompactionBegin))
+        .count();
+    assert_eq!(begins, 0, "the aborted compact never ran");
+    std::fs::remove_dir_all(store.dir()).ok();
+}
+
+#[tokio::test]
+async fn replay_requests_collapse_to_one_pass() {
+    // The replay flag is a flag, not a counter: two requests before
+    // the beat serve one pass (one bracket pair).
+    let store = temp_store("endpoint-replay-collapse");
+    let path = {
+        let mut session = Factory::new(vec![text_turn("first answer")])
+            .into_builder(store.clone())
+            .create("C:/w")
+            .expect("session");
+        session.prompt("hello").await;
+        session.path().expect("file-backed").to_path_buf()
+    };
+    let session = Factory::new(vec![text_turn("second answer")])
+        .into_builder(store.clone())
+        .resume(&path)
+        .expect("resume")
+        .0;
+    let mut handle = SessionHost::spawn(session, Vec::new(), plain_wiring(&store), plain_data());
+    let id = boot_id(&handle);
+    handle.replay(&id);
+    handle.replay(&id);
+    let mut frames = Vec::new();
+    collect_until(&mut handle, &mut frames, |event| {
+        matches!(event, SessionEvent::ReplayEnd)
+    })
+    .await;
+    let begins = frames
+        .iter()
+        .filter(|frame| matches!(frame.event, SessionEvent::ReplayBegin { .. }))
+        .count();
+    assert_eq!(begins, 1, "two replay requests are one pass");
+    std::fs::remove_dir_all(store.dir()).ok();
+}

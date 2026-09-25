@@ -1772,3 +1772,81 @@ async fn a_callback_forwarding_an_ask_re_stamps_it() {
         lane_lines.lock().expect("test lock")
     );
 }
+
+/// Law 2's freshness: a stream re-heard on a new channel re-teaches
+/// the route — last heard on wins, so a session whose traffic moved
+/// never keeps its commands pinned to a stale channel.
+#[test]
+fn a_stream_reheard_on_a_new_channel_reroutes_to_it() {
+    let parent = Arc::new(Node::new("parent"));
+    let first = Arc::new(Node::new("first"));
+    let second = Arc::new(Node::new("second"));
+    let _first_at_parent = wire(&parent, &first, "first");
+    let _second_at_parent = wire(&parent, &second, "second");
+
+    let (first_layer, first_saw) = stub_layer(&first, "first-layer");
+    let (second_layer, second_saw) = stub_layer(&second, "second-layer");
+
+    // The same stream, heard first from one child then the other.
+    first.emit(&first_layer, stamped("sess-moved"));
+    second.emit(&second_layer, stamped("sess-moved"));
+
+    let (parent_layer, _) = stub_layer(&parent, "parent-layer");
+    parent.intake(
+        &parent_layer,
+        Inbound::Command(SessionCommand::Message {
+            session: "sess-moved".to_string(),
+            text: "follow the move".to_string(),
+        }),
+    );
+    assert_eq!(
+        first_saw.commands(),
+        Vec::<&'static str>::new(),
+        "the stale channel no longer routes the stream"
+    );
+    assert_eq!(
+        second_saw.commands(),
+        vec!["message"],
+        "the last-heard channel owns the route"
+    );
+}
+
+/// The violating frame never fans: a duplicate ask id at intake is
+/// contained BEFORE dispatch — local subscribers never see the
+/// duplicate card.
+#[test]
+fn the_mint_violating_frame_never_reaches_local_subscribers() {
+    let node: Arc<Node> = Arc::new(Node::new("core"));
+    // Contained (the registered policy), so the test observes the
+    // dispatch decision rather than the default crash.
+    node.on_mint_violation(|_owner, _id| {});
+    let fanned: Arc<Mutex<Vec<String>>> = Arc::new(Mutex::new(Vec::new()));
+    let sink = fanned.clone();
+    node.subscribe_all(Locality::Both, move |frame: &EventFrame| {
+        sink.lock()
+            .expect("test lock")
+            .push(frame.event.tag().to_string());
+    });
+
+    let ask = EventFrame {
+        stream: None,
+        origin: None,
+        ttl: None,
+        event: SessionEvent::InteractionRequest {
+            id: "lane-a-ask-1".to_string(),
+            ui_type: "native:select_any".to_string(),
+            payload: json!({}),
+        },
+    };
+    node.intake(
+        &Channel::line("lane-a", |_| {}),
+        Inbound::Event(ask.clone()),
+    );
+    node.intake(&Channel::line("lane-b", |_| {}), Inbound::Event(ask));
+
+    assert_eq!(
+        fanned.lock().expect("test lock").clone(),
+        vec!["interaction_request"],
+        "the first arrival fanned once; the violating duplicate never did"
+    );
+}

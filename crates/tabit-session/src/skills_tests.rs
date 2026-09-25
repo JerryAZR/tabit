@@ -272,6 +272,80 @@ async fn the_tool_returns_the_body_with_the_base_dir_footer() {
 }
 
 #[tokio::test]
+async fn an_empty_rel_path_reads_the_skill_md() {
+    // `Some("")` is the same default as `None`: the skill's own
+    // SKILL.md.
+    let cwd = temp_dir("tool-empty-rel");
+    skill_dir(
+        &cwd.join(".tabit/skills"),
+        "lint",
+        "description: lint
+",
+        "# the skill body",
+    );
+    let skills = discover_with_home(None, &cwd);
+    let mut context = context_for(&skills);
+    let output = skill(&mut context, "lint".to_string(), Some(String::new()))
+        .await
+        .expect("runs");
+    let text = output.render().to_string();
+    assert!(text.contains("# the skill body"), "{text}");
+    assert!(text.contains("[Skill base directory: "), "{text}");
+}
+
+#[tokio::test]
+async fn a_rel_path_file_is_read_with_the_same_footer() {
+    let cwd = temp_dir("tool-rel-file");
+    let dir = skill_dir(
+        &cwd.join(".tabit/skills"),
+        "pack",
+        "description: pack
+",
+        "body",
+    );
+    write(&dir.join("scripts/run.py"), "print('hi')");
+    let skills = discover_with_home(None, &cwd);
+    let mut context = context_for(&skills);
+    let output = skill(
+        &mut context,
+        "pack".to_string(),
+        Some("scripts/run.py".to_string()),
+    )
+    .await
+    .expect("runs");
+    let text = output.render().to_string();
+    assert!(text.contains("print('hi')"), "{text}");
+    assert!(text.contains("[Skill base directory: "), "{text}");
+}
+
+#[tokio::test]
+async fn a_rel_path_resolving_to_nothing_is_a_named_error() {
+    let cwd = temp_dir("tool-rel-miss");
+    let dir = skill_dir(
+        &cwd.join(".tabit/skills"),
+        "pack",
+        "description: pack
+",
+        "body",
+    );
+    write(&dir.join("scripts/run.py"), "print('hi')");
+    let skills = discover_with_home(None, &cwd);
+    let mut context = context_for(&skills);
+    let error = skill(
+        &mut context,
+        "pack".to_string(),
+        Some("scripts/missing.py".to_string()),
+    )
+    .await
+    .expect_err("nothing is at that path");
+    let text = error.to_string();
+    assert!(
+        text.contains("path not found in skill `pack`: scripts/missing.py"),
+        "{text}"
+    );
+}
+
+#[tokio::test]
 async fn the_tool_lists_a_directory_rel_path() {
     let cwd = temp_dir("tool-list");
     let dir = skill_dir(

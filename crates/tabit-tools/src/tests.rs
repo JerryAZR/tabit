@@ -593,6 +593,101 @@ async fn powershell_overflow_keeps_both_ends_and_spills_the_full_output() {
 }
 
 #[tokio::test]
+async fn a_cancel_during_a_run_interrupts_the_command() {
+    // The abort door the contract doc promises: a token cancelled
+    // AFTER spawn must kill the tree and report the interrupted
+    // shape. Deterministically stageable — sleep 30 cannot finish
+    // before the 150 ms cancel, and the poll loop's cadence notices
+    // it well inside seconds.
+    if !bash_dialect_available() {
+        eprintln!("skipped: no verified Git Bash on this machine");
+        return;
+    }
+    let token = tokio_util::sync::CancellationToken::new();
+    let mut context = rig_agent::tool::ToolContext::new();
+    context.insert(token.clone());
+    let fire = token.clone();
+    std::thread::spawn(move || {
+        std::thread::sleep(std::time::Duration::from_millis(150));
+        fire.cancel();
+    });
+    let started = std::time::Instant::now();
+    let error = bash(&mut context, "sleep 30".to_string(), None)
+        .await
+        .unwrap_err();
+    let message = error.to_string();
+    assert!(
+        message.contains("interrupted before completing"),
+        "the abort door's report: {message}"
+    );
+    assert!(
+        started.elapsed() < std::time::Duration::from_secs(10),
+        "the poll loop noticed the cancel promptly ({:?})",
+        started.elapsed()
+    );
+}
+
+#[tokio::test]
+async fn stderr_joins_the_report_behind_its_marker() {
+    // The combined-output contract: stdout, the separator, stderr —
+    // deleting the stderr branch would otherwise leave every test
+    // green.
+    if !bash_dialect_available() {
+        eprintln!("skipped: no verified Git Bash on this machine");
+        return;
+    }
+    let mut context = rig_agent::tool::ToolContext::new();
+    let output = bash(
+        &mut context,
+        "echo the-out-line; echo the-err-line 1>&2".to_string(),
+        None,
+    )
+    .await
+    .expect("the command runs");
+    let text = output.render().to_string();
+    assert!(text.contains("the-out-line"), "{text}");
+    let marker = text
+        .find("--- stderr ---")
+        .unwrap_or_else(|| panic!("the separator rides the combined report: {text}"));
+    let stderr_part = &text[marker..];
+    assert!(
+        stderr_part.contains("the-err-line"),
+        "stderr follows its marker: {text}"
+    );
+    assert!(
+        marker > text.find("the-out-line").unwrap_or(0),
+        "stdout precedes the marker: {text}"
+    );
+}
+
+#[tokio::test]
+async fn a_zero_limit_page_is_empty_with_a_continuation_notice() {
+    // The one paging boundary with its own observable shape: limit 0
+    // selects nothing and the continuation notice says what remains.
+    let dir = temp_dir("read-zero-limit");
+    std::fs::create_dir_all(&dir).expect("dir");
+    let file = dir.join("three.txt");
+    std::fs::write(
+        &file,
+        "one
+two
+three
+",
+    )
+    .expect("file");
+    let mut context = rig_agent::tool::ToolContext::new();
+    context.insert(rig_agent::tool::SessionCwd(dir.clone()));
+    let output = read(&mut context, file.display().to_string(), Some(1), Some(0))
+        .await
+        .expect("a zero limit is a page, not an error");
+    let text = output.render().to_string();
+    assert!(
+        text.contains("[3 more lines in") && text.contains("Use offset=1"),
+        "the empty page carries its continuation: {text}"
+    );
+}
+
+#[tokio::test]
 async fn pre_cancelled_bash_never_runs() {
     if !bash_dialect_available() {
         eprintln!("skipped: no verified Git Bash on this machine");
