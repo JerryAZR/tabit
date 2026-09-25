@@ -27,7 +27,6 @@
 
 use crate::session::RunSummary;
 use rig_agent::completion::Message;
-use tabit_protocol::SessionEvent;
 use tokio_util::sync::CancellationToken;
 
 /// Drive one spawned child to its terminal and map the settlement to
@@ -53,12 +52,17 @@ pub(crate) async fn drive_child(
             output,
             events,
         },
-        tabit_wire::client::Settlement::FailedWith { message, events } => {
-            RunFailed::synthesized(message, events)
-        }
-        tabit_wire::client::Settlement::Crashed { events } => {
-            RunFailed::synthesized("the subagent process died unexpectedly".to_string(), events)
-        }
+        // The failing shapes' events already carry the run-failed
+        // terminal — the child's own for `FailedWith` (the fold
+        // pushes the terminal before returning), the crash report
+        // synthesized as the head for `Crashed` — so the mapping is
+        // the outcome rename and nothing else.
+        tabit_wire::client::Settlement::FailedWith { events, .. }
+        | tabit_wire::client::Settlement::Crashed { events } => RunSummary {
+            outcome: crate::session::RunOutcome::Failed,
+            output: String::new(),
+            events,
+        },
     }
 }
 
@@ -66,47 +70,4 @@ pub(crate) async fn drive_child(
 /// message carries no text parts; the child treats it as the task).
 fn message_text(message: &Message) -> String {
     crate::session::wire::user_text(message)
-}
-
-/// A failed settlement as a [`RunSummary`] — the failure's event
-/// heads the collected events, so the tool's message-mining arm
-/// (`summary_result`) reads it exactly as it read the child's own
-/// run-failed terminal.
-struct RunFailed;
-
-impl RunFailed {
-    fn synthesized(message: String, mut events: Vec<SessionEvent>) -> RunSummary {
-        let completed_at_ms = events
-            .iter()
-            .rev()
-            .find_map(|event| match event {
-                SessionEvent::RunFailed {
-                    completed_at_ms, ..
-                } => Some(*completed_at_ms),
-                _ => None,
-            })
-            .unwrap_or_default();
-        let started_at_ms = events
-            .iter()
-            .rev()
-            .find_map(|event| match event {
-                SessionEvent::RunFailed { started_at_ms, .. } => Some(*started_at_ms),
-                _ => None,
-            })
-            .unwrap_or(completed_at_ms);
-        events.insert(
-            0,
-            SessionEvent::RunFailed {
-                message,
-                kind: tabit_protocol::RunFailedKind::ENGINE.to_string(),
-                started_at_ms,
-                completed_at_ms,
-            },
-        );
-        RunSummary {
-            outcome: crate::session::RunOutcome::Failed,
-            output: String::new(),
-            events,
-        }
-    }
 }

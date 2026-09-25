@@ -59,7 +59,7 @@ use tokio_util::sync::CancellationToken;
 /// healthy children answer in milliseconds. Lives in
 /// [`tabit_wire::process`] with the rest of the shared pipe plumbing;
 /// re-exported here for the existing call sites.
-pub use tabit_wire::process::HANDSHAKE_TIMEOUT;
+pub use tabit_wire::process::BOOT_TIMEOUT;
 use tabit_wire::process::{REAP_GRACE, crash_tail, reap_with_grace, spawn_line_writer};
 
 /// One extension's standing, as the host sees it.

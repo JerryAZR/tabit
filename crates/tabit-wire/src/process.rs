@@ -37,11 +37,11 @@ pub const STDERR_RING: usize = 200;
 /// local to it.
 pub const REAP_GRACE: Duration = Duration::from_secs(5);
 
-/// How long a spawned child gets to complete its handshake before
-/// the host kills it. Extensions ack their initialize; subagent
-/// children run the frontend initialize — one bound for both,
-/// absorbing cold starts on a loaded machine.
-pub const HANDSHAKE_TIMEOUT: Duration = Duration::from_secs(30);
+/// How long a spawned child gets to boot before the spawner kills
+/// it — the report, then the first stamped announce (extensions and
+/// subagent children alike): one bound, absorbing cold starts on a
+/// loaded machine.
+pub const BOOT_TIMEOUT: Duration = Duration::from_secs(30);
 
 /// A crash-report tail buffer: the last [`STDERR_RING`] stderr lines
 /// of a spawned child.

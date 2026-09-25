@@ -27,19 +27,18 @@
 //! - **The runtime** ([`ChildSpec::spawn`]): wrap-and-spawn with the
 //!   process cwd (the OS enforces the scope), the command writer
 //!   whose close is the stdin drop, the stderr ring, the bounded
-//!   `Initialize` handshake, and the frame pump — control frames
-//!   resolve the handshake and die as diagnostics after it; stamped
-//!   frames cross to the caller **as-is** (forward, don't re-stamp)
-//!   and, when a tap is set, reach it in pump order.
+//!   boot (the child's report, then its first stamped announce),
+//!   and the frame pump — control frames resolve the boot and die
+//!   as diagnostics after it; stamped frames cross to the caller
+//!   **as-is** (forward, don't re-stamp).
 //! - **The handle** ([`ChildHandle`]): commands out, frames in, the
 //!   closing token, the exit machinery. The drive fold — mapping a
 //!   child's run to the driver's own terminal vocabulary — is the
 //!   consumer's policy and stays with it.
 //!
-//! Session machinery is deliberately absent: the router taps
-//! ([`ChildSpec::on_stamped_frame`], [`ChildSpec::on_exit`]) are the
-//! seams the bridge hangs its table-keeping on; a driver with no
-//! routing (the SDK's owned children) sets neither.
+//! Session machinery is deliberately absent: the lane mount
+//! ([`ChildSpec::on_node`]) is the one seam a driver hangs anything
+//! on — the bridge and the SDK's owned children both ride it alone.
 
 use std::collections::VecDeque;
 use std::path::PathBuf;
@@ -55,17 +54,9 @@ use tokio_util::sync::CancellationToken;
 
 use crate::node::{Channel, Inbound, Node};
 use crate::process::{
-    HANDSHAKE_TIMEOUT, crash_tail, kill_now, reap_with_grace, spawn_line_writer, spawn_stderr_ring,
+    BOOT_TIMEOUT, crash_tail, kill_now, reap_with_grace, spawn_line_writer, spawn_stderr_ring,
     wrap_command,
 };
-
-/// Sees one stamped frame in pump order, with the speaking child's
-/// id (the bridge's forward-and-learn seam).
-pub type StampedFrameTap = Arc<dyn Fn(&str, &EventFrame) + Send + Sync>;
-
-/// Learns the child's exit, after reclamation (the router's
-/// unregister seam).
-pub type ExitTap = Arc<dyn Fn(&str) + Send + Sync>;
 
 /// Shape one subprocess child before the spawn: the child-role CLI
 /// knobs as builder methods. Everything omitted inherits the default
@@ -86,8 +77,6 @@ pub struct ChildSpec {
     /// the environment block, AGENTS.md files, and skills catalog
     /// append as usual. The child's preamble belongs to its spawner.
     preamble: Option<String>,
-    on_stamped_frame: Option<StampedFrameTap>,
-    on_exit: Option<ExitTap>,
     /// The node mount (see [`ChildSpec::on_node`]) — the lane, the
     /// stamped-arrival intake, and the exit sweep, all owned by the
     /// pump so no caller can race them.
@@ -112,8 +101,6 @@ impl ChildSpec {
             extensions: None,
             max_turns: None,
             preamble: None,
-            on_stamped_frame: None,
-            on_exit: None,
             node: None,
         }
     }
@@ -200,23 +187,6 @@ impl ChildSpec {
         self
     }
 
-    /// The pump-order tap for stamped frames — the per-frame policy
-    /// seam, fired AFTER the node mount's intake (a policy may answer
-    /// a card the moment its transit entry exists). Frames cross to
-    /// the handle's channel either way; the tap is the extra, ordered
-    /// look.
-    pub fn on_stamped_frame(mut self, tap: StampedFrameTap) -> Self {
-        self.on_stamped_frame = Some(tap);
-        self
-    }
-
-    /// The exit tap (the router's unregister seam), invoked after the
-    /// reaper finished with the process.
-    pub fn on_exit(mut self, tap: ExitTap) -> Self {
-        self.on_exit = Some(tap);
-        self
-    }
-
     /// Mount the child on a node — THE lane mount, one home for every
     /// driver (the bridge, the SDK's owned children): the child's
     /// lane (a channel over its own writer, owned by the handshake's
@@ -250,8 +220,6 @@ impl ChildSpec {
             extensions,
             max_turns,
             preamble,
-            on_stamped_frame,
-            on_exit,
             node: mount,
         } = self;
 
@@ -328,26 +296,25 @@ impl ChildSpec {
         // The stderr ring — the crash report's tail.
         let ring = spawn_stderr_ring(stderr);
 
-        // The frame pump: handshake frames resolve here, stamped
-        // frames cross as-is (their stream stamps are already their
-        // session ids) and reach the mount's intake and the tap in
-        // pump order, everything mirrored to the frames channel.
-        // The mount's lane is constructed at the handshake's
-        // resolution — the same pump iteration that saw the ack — so
-        // no later frame can beat it, whatever pipe read it arrived
-        // in.
+        // The frame pump, a report-first machine (the report model:
+        // the child's first line IS its report). AWAITING-REPORT
+        // resolves on the report — mounting the lane in the pump's
+        // own order, before any event frame is read; REPORTED
+        // resolves the boot at the first stamped frame, whose stream
+        // names the boot session; STREAMING intakes every stamped
+        // arrival through the lane and mirrors everything to the
+        // drive fold's channel. One resolution, one consumer: the
+        // spawn's bounded wait.
         let (frame_tx, frame_rx) = tokio::sync::mpsc::unbounded_channel::<EventFrame>();
-        let (handshake_tx, handshake_rx) = tokio::sync::oneshot::channel::<Handshake>();
-        let (id_tx, id_rx) = tokio::sync::oneshot::channel::<String>();
+        let (boot_tx, boot_rx) = tokio::sync::oneshot::channel::<Result<String, String>>();
         let lane_name = next_lane_name();
         let lane_for_pump = lane_name.clone();
         let lane_writer = command_tx.clone();
         let pump_mount = mount.clone();
         tokio::spawn(async move {
             let mut lines = BufReader::new(stdout).lines();
-            let mut child_id: Option<String> = None;
-            let mut handshake_tx = Some(handshake_tx);
-            let mut id_tx = Some(id_tx);
+            let mut boot_tx = Some(boot_tx);
+            let mut reported: Option<u32> = None;
             let mut lane: Option<Channel> = None;
             while let Ok(Some(line)) = lines.next_line().await {
                 let Ok(frame) = serde_json::from_str::<ServerFrame>(&line) else {
@@ -355,14 +322,14 @@ impl ChildSpec {
                 };
                 match frame {
                     ServerFrame::Control(control) => {
-                        if let Some(tx) = handshake_tx.take() {
-                            let outcome = match control {
+                        if reported.is_none() {
+                            match control {
                                 ServerControlFrame::Report { protocol_version } => {
                                     // The lane mount: armed here, in
                                     // the pump's own order — at the
-                                    // report's resolution, before any
-                                    // Event frame is read. The name is
-                                    // the spawner's mint (the child's
+                                    // report, before any event frame
+                                    // is read. The name is the
+                                    // spawner's mint (the child's
                                     // session id is not learnable yet).
                                     if pump_mount.is_some() {
                                         let writer = lane_writer.clone();
@@ -373,38 +340,46 @@ impl ChildSpec {
                                             },
                                         ));
                                     }
-                                    Handshake::Reported(protocol_version)
+                                    // The spawner is the version
+                                    // check (owner ruling 2026-09-25)
+                                    // and the check fires the moment
+                                    // the fact exists — at the report,
+                                    // never held for the announce.
+                                    if protocol_version != PROTOCOL_VERSION
+                                        && let Some(tx) = boot_tx.take()
+                                    {
+                                        let _ = tx.send(Err(format!(
+                                            "the child process reported protocol version \
+                                             {protocol_version} — this build speaks \
+                                             {PROTOCOL_VERSION}"
+                                        )));
+                                    }
+                                    reported = Some(protocol_version);
                                 }
-                                other => Handshake::Broken(format!(
-                                    "the child's first control frame was `{other:?}` — \
-                                     expected its report"
-                                )),
-                            };
-                            let _ = tx.send(outcome);
+                                other => {
+                                    if let Some(tx) = boot_tx.take() {
+                                        let _ = tx.send(Err(format!(
+                                            "the child's first control frame was `{other:?}` — \
+                                             expected its report"
+                                        )));
+                                    }
+                                }
+                            }
                         }
                         // Post-report control frames from a child (its
                         // protocol errors) are its own diagnostics —
                         // consumed here, never forwarded.
                     }
                     ServerFrame::Event(frame) => {
-                        // The child's session id: the first stamped
-                        // frame's stream (the boot's `session_opened`)
-                        // — learned before the tap so the first frame
-                        // taps with its id too.
-                        if child_id.is_none()
+                        // The boot resolves at the first stamped
+                        // frame: its stream names the boot session
+                        // (the boot's `session_opened`).
+                        if reported.is_some()
                             && let Some(stream) = &frame.stream
+                            && let Some(tx) = boot_tx.take()
                         {
-                            let id = stream.as_str().to_string();
-                            if let Some(tx) = id_tx.take() {
-                                let _ = tx.send(id.clone());
-                            }
-                            child_id = Some(id);
+                            let _ = tx.send(Ok(stream.as_str().to_string()));
                         }
-                        // The mount's intake first (the transit cards
-                        // register, the observation fans — a policy
-                        // tap may answer the moment the entry
-                        // exists); the policy tap after, in pump
-                        // order; the fold's mirror either way.
                         // Only stamped frames cross into the
                         // node (owner ruling 2026-09-25): the
                         // child's unstamped emissions — its
@@ -415,9 +390,6 @@ impl ChildSpec {
                             && frame.stream.is_some()
                         {
                             node.intake(lane, Inbound::Event(frame.clone()));
-                        }
-                        if let (Some(tap), Some(id)) = (&on_stamped_frame, &child_id) {
-                            tap(id, &frame);
                         }
                         let _ = frame_tx.send(frame);
                     }
@@ -433,47 +405,30 @@ impl ChildSpec {
             }
         });
 
-        // The report model (owner ruling 2026-09-25): the child speaks
-        // first — its report is its first line. The spawner
-        // version-checks and kills an incompatible child; then it
-        // awaits the child's first stamped frame, whose stream names
-        // the boot session (the id every command and the drive fold
-        // address).
-        let handshake = tokio::select! {
-            outcome = handshake_rx => {
-                outcome.map_err(|_| "the child process closed before its report".to_string())?
-            }
-            _ = tokio::time::sleep(HANDSHAKE_TIMEOUT) => {
-                kill_now(&mut process, &closing).await;
-                return Err(
-                    "the child process did not report in time".to_string()
-                );
-            }
-        };
-        match handshake {
-            Handshake::Reported(version) if version == PROTOCOL_VERSION => {}
-            Handshake::Reported(version) => {
-                kill_now(&mut process, &closing).await;
-                return Err(format!(
-                    "the child process reported protocol version {version} — \
-                     this build speaks {PROTOCOL_VERSION}"
-                ));
-            }
-            Handshake::Broken(detail) => {
-                kill_now(&mut process, &closing).await;
-                return Err(detail);
-            }
-        }
+        // The boot (owner ruling 2026-09-25, the report model): the
+        // child speaks first — its report, then its first stamped
+        // announce naming the boot session — under ONE bound. The
+        // version check fires at the report (the pump's own arm, the
+        // moment the fact exists); every session fact arrives by
+        // event (the boot's `session_opened` first).
         let child_id = tokio::select! {
-            id = id_rx => {
-                id.map_err(|_| {
-                    "the child process closed before announcing a session".to_string()
-                })?
-            }
-            _ = tokio::time::sleep(HANDSHAKE_TIMEOUT) => {
+            boot = boot_rx => match boot {
+                Ok(Ok(id)) => id,
+                Ok(Err(reason)) => {
+                    kill_now(&mut process, &closing).await;
+                    return Err(reason);
+                }
+                Err(_) => {
+                    kill_now(&mut process, &closing).await;
+                    return Err(
+                        "the child process closed before its boot".to_string()
+                    );
+                }
+            },
+            _ = tokio::time::sleep(BOOT_TIMEOUT) => {
                 kill_now(&mut process, &closing).await;
                 return Err(
-                    "the child process did not announce a session in time".to_string()
+                    "the child process did not report and announce in time".to_string()
                 );
             }
         };
@@ -481,7 +436,6 @@ impl ChildSpec {
         // The reaper that bounds the child's lifetime (Drop of the
         // handle closes it): a natural exit reaps itself; the close
         // path gets the grace-then-tree-kill.
-        let child_id_for_exit = child_id.clone();
         let closing_for_reaper = closing.clone();
         let exit = Arc::new(Mutex::new(None::<String>));
         let exit_for_reaper = exit.clone();
@@ -506,9 +460,6 @@ impl ChildSpec {
             if let Some(node) = &sweep_mount {
                 node.retract(&sweep_lane, "the child exited");
             }
-            if let Some(tap) = &on_exit {
-                tap(&child_id_for_exit);
-            }
         });
 
         Ok(ChildHandle {
@@ -522,14 +473,6 @@ impl ChildSpec {
             stderr_ring: ring,
         })
     }
-}
-
-/// What the child's first line said.
-enum Handshake {
-    /// The self-report: the protocol version the child speaks.
-    Reported(u32),
-    /// The first control line was not the report — a broken child.
-    Broken(String),
 }
 
 /// The lane's identity, minted by the spawner: the lane arms at the
@@ -572,19 +515,8 @@ impl ChildHandle {
     }
 
     /// One wire line out (a serialized command).
-    pub fn send_line(&self, line: String) {
+    fn send_line(&self, line: String) {
         let _ = self.commands.send(line);
-    }
-
-    /// The command sender (a router's delivery lane — the bridge's
-    /// table keeps one per registered child).
-    pub fn commands(&self) -> tokio::sync::mpsc::UnboundedSender<String> {
-        self.commands.clone()
-    }
-
-    /// The frames channel — the drive fold consumes here.
-    pub fn frames(&mut self) -> &mut tokio::sync::mpsc::UnboundedReceiver<EventFrame> {
-        &mut self.frames
     }
 
     /// Begin the child's shutdown (idempotent): stdin closes, the
@@ -641,9 +573,7 @@ impl ChildHandle {
     /// (grandchildren's frames skip — their owners forward them),
     /// the crash synthesis, and the abort courtesy-with-deadline all
     /// live here; mapping the settlement to the driver's own
-    /// vocabulary is the caller's policy. (The frame *policy* seam
-    /// is the spec's [`ChildSpec::on_stamped_frame`] — fired in pump
-    /// order beside this fold's own consumption, never racing it.)
+    /// vocabulary is the caller's policy.
     pub async fn settle(&mut self, token: Option<CancellationToken>) -> Settlement {
         let mut events: Vec<SessionEvent> = Vec::new();
         let started_at_ms = unix_ms();

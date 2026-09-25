@@ -21,7 +21,7 @@ use std::time::Duration;
 
 use futures::future::BoxFuture;
 use rig_agent::tool::services::{HostServices, ModelPromptOk, ModelPromptRequest, ServiceUsage};
-use tabit_ext::supervisor::{self, ExtensionEvent, HANDSHAKE_TIMEOUT, Status};
+use tabit_ext::supervisor::{self, BOOT_TIMEOUT, ExtensionEvent, Status};
 
 /// Generous bound for real-process roundtrips (spawn + handshake on a
 /// loaded CI box stays well under; the bound catches hangs, not
@@ -128,7 +128,7 @@ fn dead_reason(status: &Status) -> &str {
 async fn a_healthy_extension_handshakes_alive() {
     let root = test_dir("alive");
     install(&root, "hello", "hello");
-    let (supervisor, mut events) = supervisor::launch_root(&root, HANDSHAKE_TIMEOUT, test_host());
+    let (supervisor, mut events) = supervisor::launch_root(&root, BOOT_TIMEOUT, test_host());
     let event = await_status(&mut events, "hello", |s| matches!(s, Status::Alive)).await;
     assert_eq!(event.name, "hello");
     let reports = supervisor.reports();
@@ -146,7 +146,7 @@ async fn a_healthy_extension_handshakes_alive() {
 async fn an_exit_before_the_ack_is_dead() {
     let root = test_dir("pre-ack");
     install(&root, "early", "die-pre-ack");
-    let (supervisor, mut events) = supervisor::launch_root(&root, HANDSHAKE_TIMEOUT, test_host());
+    let (supervisor, mut events) = supervisor::launch_root(&root, BOOT_TIMEOUT, test_host());
     let event = await_status(&mut events, "early", |s| matches!(s, Status::Dead { .. })).await;
     assert!(dead_reason(&event.status).contains("before the report"));
     supervisor.shutdown().await;
@@ -156,7 +156,7 @@ async fn an_exit_before_the_ack_is_dead() {
 async fn an_exit_after_the_ack_marks_dead() {
     let root = test_dir("post-ack");
     install(&root, "ghost", "die-post-ack");
-    let (supervisor, mut events) = supervisor::launch_root(&root, HANDSHAKE_TIMEOUT, test_host());
+    let (supervisor, mut events) = supervisor::launch_root(&root, BOOT_TIMEOUT, test_host());
     await_status(&mut events, "ghost", |s| matches!(s, Status::Alive)).await;
     let event = await_status(&mut events, "ghost", |s| matches!(s, Status::Dead { .. })).await;
     let reason = dead_reason(&event.status);
@@ -180,7 +180,7 @@ async fn a_silent_handshake_times_out() {
 async fn garbage_in_the_ack_is_refused() {
     let root = test_dir("bad-ack");
     install(&root, "bad", "bad-ack");
-    let (supervisor, mut events) = supervisor::launch_root(&root, HANDSHAKE_TIMEOUT, test_host());
+    let (supervisor, mut events) = supervisor::launch_root(&root, BOOT_TIMEOUT, test_host());
     let event = await_status(&mut events, "bad", |s| matches!(s, Status::Dead { .. })).await;
     assert!(dead_reason(&event.status).contains("unparseable"));
     supervisor.shutdown().await;
@@ -190,7 +190,7 @@ async fn garbage_in_the_ack_is_refused() {
 async fn a_version_mismatch_is_refused() {
     let root = test_dir("version");
     install(&root, "future", "wrong-version");
-    let (supervisor, mut events) = supervisor::launch_root(&root, HANDSHAKE_TIMEOUT, test_host());
+    let (supervisor, mut events) = supervisor::launch_root(&root, BOOT_TIMEOUT, test_host());
     let event = await_status(&mut events, "future", |s| matches!(s, Status::Dead { .. })).await;
     assert!(
         dead_reason(&event.status).contains("speaks extension protocol version 99"),
@@ -204,7 +204,7 @@ async fn a_version_mismatch_is_refused() {
 async fn garbage_after_the_ack_kills() {
     let root = test_dir("late");
     install(&root, "late", "late-garbage");
-    let (supervisor, mut events) = supervisor::launch_root(&root, HANDSHAKE_TIMEOUT, test_host());
+    let (supervisor, mut events) = supervisor::launch_root(&root, BOOT_TIMEOUT, test_host());
     await_status(&mut events, "late", |s| matches!(s, Status::Alive)).await;
     let event = await_status(&mut events, "late", |s| matches!(s, Status::Dead { .. })).await;
     assert!(dead_reason(&event.status).contains("unparseable"));
@@ -220,7 +220,7 @@ async fn a_well_formed_unknown_frame_type_is_the_same_death() {
     // that extension.
     let root = test_dir("late-unknown");
     install(&root, "future", "late-unknown");
-    let (supervisor, mut events) = supervisor::launch_root(&root, HANDSHAKE_TIMEOUT, test_host());
+    let (supervisor, mut events) = supervisor::launch_root(&root, BOOT_TIMEOUT, test_host());
     await_status(&mut events, "future", |s| matches!(s, Status::Alive)).await;
     let event = await_status(&mut events, "future", |s| matches!(s, Status::Dead { .. })).await;
     let reason = dead_reason(&event.status);
@@ -249,7 +249,7 @@ async fn scan_refusals_report_without_spawning() {
     .expect("manifest");
     std::fs::create_dir_all(root.join("plain")).expect("dir");
 
-    let (supervisor, mut events) = supervisor::launch_root(&root, HANDSHAKE_TIMEOUT, test_host());
+    let (supervisor, mut events) = supervisor::launch_root(&root, BOOT_TIMEOUT, test_host());
     let mut reported = Vec::new();
     for _ in 0..2 {
         let event = next_event(&mut events).await;
@@ -272,7 +272,7 @@ async fn scan_refusals_report_without_spawning() {
 #[tokio::test]
 async fn a_missing_root_is_an_empty_install() {
     let root = test_dir("absent").join("never-created");
-    let (supervisor, mut events) = supervisor::launch_root(&root, HANDSHAKE_TIMEOUT, test_host());
+    let (supervisor, mut events) = supervisor::launch_root(&root, BOOT_TIMEOUT, test_host());
     assert!(supervisor.reports().is_empty());
     assert!(events.try_recv().is_err());
     supervisor.shutdown().await;
@@ -356,7 +356,7 @@ async fn shutdown_reclaims_the_extension_tree() {
     unsafe {
         std::env::set_var("EXT_DOUBLE_MARKER", &marker);
     }
-    let (supervisor, mut events) = supervisor::launch_root(&root, HANDSHAKE_TIMEOUT, test_host());
+    let (supervisor, mut events) = supervisor::launch_root(&root, BOOT_TIMEOUT, test_host());
     await_status(&mut events, "hello", |s| matches!(s, Status::Alive)).await;
     supervisor.shutdown().await;
     assert!(
@@ -405,7 +405,7 @@ impl HostServices for FakeServices {
 async fn a_tool_call_round_trips_over_the_pipe() {
     let root = test_dir("call");
     install(&root, "echoer", "tools-echo");
-    let (supervisor, mut events) = supervisor::launch_root(&root, HANDSHAKE_TIMEOUT, test_host());
+    let (supervisor, mut events) = supervisor::launch_root(&root, BOOT_TIMEOUT, test_host());
     await_status(&mut events, "echoer", |s| matches!(s, Status::Alive)).await;
     let handle = supervisor.extension("echoer").expect("installed");
     let result = handle
@@ -422,7 +422,7 @@ async fn a_tool_call_round_trips_over_the_pipe() {
 async fn a_failing_tool_carries_its_error() {
     let root = test_dir("fail");
     install(&root, "boomer", "tools-fail");
-    let (supervisor, mut events) = supervisor::launch_root(&root, HANDSHAKE_TIMEOUT, test_host());
+    let (supervisor, mut events) = supervisor::launch_root(&root, BOOT_TIMEOUT, test_host());
     await_status(&mut events, "boomer", |s| matches!(s, Status::Alive)).await;
     let handle = supervisor.extension("boomer").expect("installed");
     let result = handle
@@ -442,8 +442,7 @@ async fn an_ask_routes_through_the_backend_registry() {
     let root = test_dir("ask");
     install(&root, "asker", "tools-ask");
     let recorded = Recorded::default();
-    let (supervisor, mut events) =
-        supervisor::launch_root(&root, HANDSHAKE_TIMEOUT, recorded.host());
+    let (supervisor, mut events) = supervisor::launch_root(&root, BOOT_TIMEOUT, recorded.host());
     await_status(&mut events, "asker", |s| matches!(s, Status::Alive)).await;
     let handle = supervisor.extension("asker").expect("installed");
 
@@ -497,8 +496,7 @@ async fn an_ask_abandoned_by_cancellation_reports_dismissed() {
     let root = test_dir("no-ask");
     install(&root, "asker", "tools-ask");
     let recorded = Recorded::default();
-    let (supervisor, mut events) =
-        supervisor::launch_root(&root, HANDSHAKE_TIMEOUT, recorded.host());
+    let (supervisor, mut events) = supervisor::launch_root(&root, BOOT_TIMEOUT, recorded.host());
     await_status(&mut events, "asker", |s| matches!(s, Status::Alive)).await;
     let handle = supervisor.extension("asker").expect("installed");
 
@@ -546,7 +544,7 @@ async fn an_ask_abandoned_by_cancellation_reports_dismissed() {
 async fn a_model_prompt_dispatches_through_the_envelope() {
     let root = test_dir("model");
     install(&root, "modeler", "tools-model");
-    let (supervisor, mut events) = supervisor::launch_root(&root, HANDSHAKE_TIMEOUT, test_host());
+    let (supervisor, mut events) = supervisor::launch_root(&root, BOOT_TIMEOUT, test_host());
     await_status(&mut events, "modeler", |s| matches!(s, Status::Alive)).await;
     let handle = supervisor.extension("modeler").expect("installed");
     let seen_prompt = Arc::new(Mutex::new(Vec::new()));
@@ -585,7 +583,7 @@ async fn a_model_prompt_dispatches_through_the_envelope() {
 async fn a_model_prompt_without_services_fails_with_the_verb_error() {
     let root = test_dir("model-bare");
     install(&root, "modeler", "tools-model");
-    let (supervisor, mut events) = supervisor::launch_root(&root, HANDSHAKE_TIMEOUT, test_host());
+    let (supervisor, mut events) = supervisor::launch_root(&root, BOOT_TIMEOUT, test_host());
     await_status(&mut events, "modeler", |s| matches!(s, Status::Alive)).await;
     let handle = supervisor.extension("modeler").expect("installed");
     let result = handle
@@ -606,7 +604,7 @@ async fn a_model_prompt_without_services_fails_with_the_verb_error() {
 async fn a_call_after_death_fails_fast() {
     let root = test_dir("late-call");
     install(&root, "echoer", "tools-echo");
-    let (supervisor, mut events) = supervisor::launch_root(&root, HANDSHAKE_TIMEOUT, test_host());
+    let (supervisor, mut events) = supervisor::launch_root(&root, BOOT_TIMEOUT, test_host());
     await_status(&mut events, "echoer", |s| matches!(s, Status::Alive)).await;
     let handle = supervisor.extension("echoer").expect("installed");
     // One healthy call, then the host closes (the supervisor drops:
@@ -672,7 +670,7 @@ async fn await_resolved_joins_every_handshake() {
 async fn a_hook_round_trips_its_decision() {
     let root = test_dir("hook-allow");
     install(&root, "allower", "hooks-allow");
-    let (supervisor, mut events) = supervisor::launch_root(&root, HANDSHAKE_TIMEOUT, test_host());
+    let (supervisor, mut events) = supervisor::launch_root(&root, BOOT_TIMEOUT, test_host());
     await_status(&mut events, "allower", |s| matches!(s, Status::Alive)).await;
     let handle = supervisor.extension("allower").expect("installed");
     let decision = handle
@@ -691,7 +689,7 @@ async fn a_hook_round_trips_its_decision() {
 async fn a_hook_skip_carries_its_message() {
     let root = test_dir("hook-skip");
     install(&root, "denier", "hooks-skip");
-    let (supervisor, mut events) = supervisor::launch_root(&root, HANDSHAKE_TIMEOUT, test_host());
+    let (supervisor, mut events) = supervisor::launch_root(&root, BOOT_TIMEOUT, test_host());
     await_status(&mut events, "denier", |s| matches!(s, Status::Alive)).await;
     let handle = supervisor.extension("denier").expect("installed");
     let decision = handle
@@ -716,8 +714,7 @@ async fn a_hook_ask_decides_through_the_backend_registry() {
     let root = test_dir("hook-ask");
     install(&root, "asker", "hooks-ask");
     let recorded = Recorded::default();
-    let (supervisor, mut events) =
-        supervisor::launch_root(&root, HANDSHAKE_TIMEOUT, recorded.host());
+    let (supervisor, mut events) = supervisor::launch_root(&root, BOOT_TIMEOUT, recorded.host());
     await_status(&mut events, "asker", |s| matches!(s, Status::Alive)).await;
     let handle = supervisor.extension("asker").expect("installed");
 
@@ -798,7 +795,7 @@ async fn a_hook_ask_decides_through_the_backend_registry() {
 async fn a_death_answers_pending_policy_with_the_fail_open_fallback() {
     let root = test_dir("hook-hang");
     install(&root, "wedge", "hooks-hang");
-    let (supervisor, mut events) = supervisor::launch_root(&root, HANDSHAKE_TIMEOUT, test_host());
+    let (supervisor, mut events) = supervisor::launch_root(&root, BOOT_TIMEOUT, test_host());
     await_status(&mut events, "wedge", |s| matches!(s, Status::Alive)).await;
     let handle = supervisor.extension("wedge").expect("installed");
     let pending = {
@@ -835,7 +832,7 @@ async fn a_death_answers_pending_policy_with_the_fail_open_fallback() {
 async fn cancelling_the_run_token_cancels_the_call_across_the_pipe() {
     let root = test_dir("cancel");
     install(&root, "hanger", "tools-cancel");
-    let (supervisor, mut events) = supervisor::launch_root(&root, HANDSHAKE_TIMEOUT, test_host());
+    let (supervisor, mut events) = supervisor::launch_root(&root, BOOT_TIMEOUT, test_host());
     await_status(&mut events, "hanger", |s| matches!(s, Status::Alive)).await;
     let handle = supervisor.extension("hanger").expect("installed");
 
@@ -919,8 +916,7 @@ async fn the_shared_grammar_flows_both_directions_over_the_pipe() {
     let root = test_dir("grammar");
     install(&root, "grammar-ext", "grammar");
     let recorded = Recorded::default();
-    let (supervisor, mut events) =
-        supervisor::launch_root(&root, HANDSHAKE_TIMEOUT, recorded.host());
+    let (supervisor, mut events) = supervisor::launch_root(&root, BOOT_TIMEOUT, recorded.host());
     await_status(&mut events, "grammar-ext", |s| matches!(s, Status::Alive)).await;
 
     // The double's command crossed and ENTERED THE NET: no session
@@ -1066,7 +1062,7 @@ async fn wait_for_short(check: impl Fn() -> bool) -> bool {
 async fn a_duplicate_service_request_id_kills_the_lane_not_the_host() {
     let root = test_dir("svc-dupe");
     install(&root, "dupe", "svc-dupe");
-    let (supervisor, mut events) = supervisor::launch_root(&root, HANDSHAKE_TIMEOUT, test_host());
+    let (supervisor, mut events) = supervisor::launch_root(&root, BOOT_TIMEOUT, test_host());
     await_status(&mut events, "dupe", |s| matches!(s, Status::Alive)).await;
     let dead = await_status(&mut events, "dupe", |s| matches!(s, Status::Dead { .. })).await;
     let reason = dead_reason(&dead.status);

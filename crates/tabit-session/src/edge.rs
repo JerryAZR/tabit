@@ -3,7 +3,7 @@
 //! lines are bare [`SessionCommand`]s (the report model: no
 //! handshake — commands may flow from the spawner's first line), the
 //! server's lines are its self-report, stamped [`EventFrame`]s, plus
-//! handshake/transport-error control frames. Only protocol bytes reach
+//! transport-error control frames. Only protocol bytes reach
 //! stdout; human banners stay on stderr.
 //!
 //! This is the wire's server half living with the host it drives (the
@@ -23,41 +23,44 @@ use crate::endpoint::SessionHost;
 /// Serve the backend over `reader`/`writer` until the client closes its
 /// input (or the stream behind the edge ends). Returns the process
 /// exit code: 0 normally, 1 on a broken reader.
-pub async fn serve<R, W>(mut host: SessionHost, reader: R, writer: W) -> i32
+pub async fn serve<R, W>(mut host: SessionHost, reader: R, mut writer: W) -> i32
 where
     R: BufRead + Send + 'static,
     W: Write + Send + 'static,
 {
-    // Two feeds into one writer: the control frames (the report, the
-    // reader's protocol errors) and the forwarder's events, each on
-    // its own channel. The writer ends when the FORWARDER's channel
-    // closes — the forwarder is the stream's producer, and its end is
-    // the deterministic one (the reader thread parks in a blocking
-    // read that nothing on this side can interrupt, and its sender
-    // clone would otherwise hold the writer open forever on the
-    // stream-end path below).
-    let (control_tx, control_rx) = mpsc::unbounded_channel::<ServerFrame>();
-    let (event_tx, event_rx) = mpsc::unbounded_channel::<ServerFrame>();
-
     // The self-report — this child's FIRST line on the channel (owner
     // ruling 2026-09-25, the report model: a spawned child can assume
     // its spawner is there and pump, while the spawner can assume
-    // nothing until the child self-reports). It is queued onto the
-    // control feed before the forwarder task exists, and the writer's
-    // biased control-first poll writes it before any event — nothing
-    // can precede it. Protocol facts only; the spawner version-checks
-    // and kills an incompatible child, and every session fact arrives
-    // by event (the boot's `session_opened` first).
-    let _ = control_tx.send(ServerFrame::Control(ServerControlFrame::Report {
+    // nothing until the child self-reports) — is written HERE,
+    // synchronously, before any task exists: nothing can precede it
+    // because nothing else has started. Protocol facts only; the
+    // spawner version-checks and kills an incompatible child, and
+    // every session fact arrives by event (the boot's
+    // `session_opened` first). A failing write is the client already
+    // gone — the wind-down below is the same either way.
+    let report = ServerFrame::Control(ServerControlFrame::Report {
         protocol_version: PROTOCOL_VERSION,
-    }));
+    });
+    let _ = writeln!(writer, "{}", tabit_protocol::to_wire_line(&report));
+    let _ = writer.flush();
+
+    // One feed into the writer — the reader's protocol errors and the
+    // forwarder's events, in send order. The writer ends on the
+    // stream's end signal with a drain, never on the feed's close:
+    // the reader thread parks in a blocking read that nothing on this
+    // side can interrupt, and its sender clone would hold the feed
+    // open forever on the stream-end path (the constraint that once
+    // forced a second, prioritized feed and a closed-arm latch — the
+    // end token retires both).
+    let (feed_tx, feed_rx) = mpsc::unbounded_channel::<ServerFrame>();
 
     let dispatch = {
         let link = host.command_link();
         std::sync::Arc::new(move |command: SessionCommand| link.send(command))
     };
-    let reader_task = tokio::task::spawn_blocking(move || read_loop(reader, dispatch, control_tx));
-    let writer_task = tokio::spawn(write_loop(control_rx, event_rx, writer));
+    let reader_feed = feed_tx.clone();
+    let reader_task = tokio::task::spawn_blocking(move || read_loop(reader, dispatch, reader_feed));
+    let writer_task = tokio::spawn(write_loop(feed_rx, writer, host.stream_end_signal()));
 
     // The live forwarder: host events reach stdout as they happen, for
     // the whole connection — not only at wind-down. (v1 bug: events
@@ -68,7 +71,7 @@ where
     // joins first), so draining what remains and stopping is lossless.
     let events = host.take_events();
     let end = host.stream_end_signal();
-    let forwarder_task = tokio::spawn(forward_events(events, event_tx, end.clone()));
+    let forwarder_task = tokio::spawn(forward_events(events, feed_tx, end.clone()));
 
     // A panicked reader thread is a broken edge: exit nonzero. The
     // stream's end is the other way out: when the host behind the
@@ -101,10 +104,9 @@ where
     exit
 }
 
-/// Pump the actor's event stream into the writer channel until the
-/// stream ends — gated on the handshake: nothing forwards before the
-/// ack has been sent, and nothing follows the host's wind-down
-/// signal (fired only after every worker's last event landed).
+/// Pump the actor's event stream into the writer feed until the
+/// stream ends — nothing follows the host's wind-down signal (fired
+/// only after every worker's last event landed).
 async fn forward_events(
     stream: Option<mpsc::UnboundedReceiver<EventFrame>>,
     out: mpsc::UnboundedSender<ServerFrame>,
@@ -175,45 +177,36 @@ fn read_loop<R: BufRead>(
     }
 }
 
-/// Serialize frames one per line. A failing writer means the client is
-/// gone: stop writing, the shutdown path ends everything else.
-/// The single owner of stdout, draining two feeds. Control frames
-/// (the reader's ack, its protocol errors) win whenever both are
-/// ready — the reader queues the ack before opening the gate, and no
-/// event exists until the gate opens, so the ack is always written
-/// first. The loop ends when the EVENT feed closes (the forwarder
-/// returned: the stream is drained); the control feed's sender lives
-/// inside the reader thread, which parks in an uninterruptible read
-/// and must not hold the writer hostage on the stream-end path. A
-/// closed control channel resolves `None` on every poll — the arm
-/// latches off (a biased poll would otherwise spin on it and starve
-/// the runtime).
+/// Serialize frames one per line — the single owner of stdout,
+/// draining the one feed until the stream's end. The end signal
+/// fires after every worker's last event has landed (the wind-down
+/// awaits the joins first), so the drain that follows it is
+/// lossless; the loop never WAITS on the feed's close, for the
+/// reader thread's parked read holds its sender clone (the
+/// stream-end path's constraint). A failing write means the client
+/// is gone: stop, the shutdown path ends everything else.
 async fn write_loop<W: Write>(
-    mut control: mpsc::UnboundedReceiver<ServerFrame>,
-    mut events: mpsc::UnboundedReceiver<ServerFrame>,
+    mut feed: mpsc::UnboundedReceiver<ServerFrame>,
     mut writer: W,
+    end: CancellationToken,
 ) {
-    let mut control_open = true;
     loop {
         tokio::select! {
-            biased;
-            frame = control.recv(), if control_open => {
-                match frame {
-                    Some(frame) => {
-                        let line = tabit_protocol::to_wire_line(&frame);
-                        if writeln!(writer, "{line}").is_err() {
-                            break;
-                        }
-                    }
-                    None => control_open = false,
-                }
-            }
-            frame = events.recv() => {
+            frame = feed.recv() => {
                 let Some(frame) = frame else { break };
                 let line = tabit_protocol::to_wire_line(&frame);
                 if writeln!(writer, "{line}").is_err() {
                     break;
                 }
+            }
+            _ = end.cancelled() => {
+                while let Ok(frame) = feed.try_recv() {
+                    let line = tabit_protocol::to_wire_line(&frame);
+                    if writeln!(writer, "{line}").is_err() {
+                        return;
+                    }
+                }
+                break;
             }
         }
     }
@@ -395,7 +388,7 @@ id = "m"
 
     /// Run the bridge over a fixed input script; returns the exit code
     /// and the parsed server lines. For scripts that never send a
-    /// command (the session id is only knowable after the ack).
+    /// command (the session id is only knowable after the announce).
     async fn bridge(
         tag: &str,
         input: &str,
@@ -568,7 +561,7 @@ id = "m"
     }
 
     /// Drive the bridge over a live input (a channel the test holds
-    /// open): handshake, learn the boot session id from the ack, send
+    /// open): learn the boot session id from the announce, send
     /// the lines `lines_from` builds for it, drive until `until(output)`
     /// holds, then close — the client shape under the death ruling:
     /// input closing while a run is in flight aborts it, so tests that
@@ -674,7 +667,7 @@ id = "m"
     }
 
     #[tokio::test]
-    async fn startup_degradations_follow_the_ack_and_never_precede_it() {
+    async fn startup_degradations_follow_the_report_and_never_precede_it() {
         let session = test_session("degraded-startup", vec![script("hello")]);
         let handle = SessionHost::spawn(
             session,
@@ -711,8 +704,8 @@ id = "m"
         let frames = parse_frames(&read_lines(&out));
         // The report is the first line; session_opened and the
         // degradation follow it and precede every run event — the
-        // control-first writer holds even though the worker emitted
-        // the note at spawn, before the edge served.
+        // synchronous report write holds even though the worker
+        // emitted the note at spawn, before the edge served.
         assert!(matches!(
             frames.first(),
             Some(ServerFrame::Control(ServerControlFrame::Report { .. }))
@@ -984,11 +977,13 @@ id = "m"
         assert_eq!(code, 0);
     }
     #[tokio::test]
-    async fn initialize_with_replay_receives_the_pass_right_after_the_ack() {
+    async fn a_resumed_boot_replays_automatically() {
         // A session with history (run once, then resumed through the
-        // same store): the handshake's `replay: true` streams the pass
-        // after the ack, whole-text, bracketed — and a message
-        // afterwards runs normally.
+        // same store): the boot replays by default (owner ruling
+        // 2026-09-25) — the pass streams whole-text, bracketed, right
+        // after the startup announcements — and a message afterwards
+        // runs normally. No request needed; a fresh boot replays
+        // nothing (its own test below).
         let dir = std::env::temp_dir()
             .join("tabit-json-tests")
             .join(format!("replay-{}", std::process::id()));
@@ -1054,12 +1049,6 @@ id = "m"
             },
             out.clone(),
         ));
-        tx_in
-            .send(format!(
-                r#"{{"protocol_version":{},"replay":true}}"#,
-                crate::PROTOCOL_VERSION
-            ))
-            .unwrap();
         let session_id = boot_session_id(&out).await;
         tx_in.send(message_line(&session_id, "again")).unwrap();
         tokio::time::timeout(std::time::Duration::from_secs(5), async {
@@ -1426,10 +1415,10 @@ id = "m"
             test_data(unusable_create()),
         );
         let out = SharedOut::default();
-        // The piped-burst shape (initialize + message + immediate EOF)
-        // needs the session id, which is only knowable after the ack —
-        // so drive it live: handshake, learn the id, send the message,
-        // and close input immediately.
+        // The piped-burst shape (message + immediate EOF) needs the
+        // session id, which is only knowable after the announce — so
+        // drive it live: learn the id, send the message, and close
+        // input immediately.
         let (tx_in, rx_in) = std::sync::mpsc::channel::<String>();
         let serve_task = tokio::spawn(serve(
             handle,

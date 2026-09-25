@@ -105,11 +105,12 @@ Current workspace layout:
   answers are races, the first wins; an entry owing no settle
   obligation closes on its answer — the answer is its settle);
   `client.rs` spawns a tabit-core child
-  in `--json` role (the child-role CLI knobs as one builder;
-  `on_node` is THE lane mount — the client's own pump arms the
-  child's lane at the handshake and intakes every stamped arrival
-  through it, one mount for the bridge and the SDK's owned
-  children) and
+  in `--json` role (the child-role CLI knobs as one builder; the
+  bounded boot — the report's version check at the report, the
+  first stamped announce under one bound; `on_node` is THE lane
+  mount — the client's own pump arms the child's lane at the
+  report and intakes every stamped arrival through it, one mount
+  for the bridge and the SDK's owned children) and
   speaks the frontend protocol to it — the bounded report wait, the
   frame pump, the reaper; `process.rs` (moved
   from tabit-ext) is the substrate every spawning site shares
@@ -129,8 +130,9 @@ Current workspace layout:
   serve side of the frozen wire as a functional layer on the node
   (`src/endpoint.rs`: the session host — workers route by the node's
   learning table, lifecycle by type, interaction cards by the ask
-  table; `src/edge.rs`: the json stdio edge — handshake serving,
-  the gated forwarder), the
+  table; `src/edge.rs`: the json stdio edge — the report written
+  synchronously before any task starts, one feed, the writer ending
+  on the stream's end token), the
   subagent framework (`subagent.rs`: `SpawnContext` — spawn/drive a
   subprocess child, the one substrate; `subprocess.rs`: the bridge —
   the session adapter over `tabit-wire`'s client (the child's lane

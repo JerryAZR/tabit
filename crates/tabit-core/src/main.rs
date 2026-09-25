@@ -1582,7 +1582,7 @@ fn boot_extensions(
 ) -> std::sync::Arc<tabit_ext::supervisor::Supervisor> {
     // Reports land on stderr (stdout is protocol).
     let (supervisor, mut events) =
-        tabit_ext::supervisor::launch(found, tabit_ext::supervisor::HANDSHAKE_TIMEOUT, host);
+        tabit_ext::supervisor::launch(found, tabit_ext::supervisor::BOOT_TIMEOUT, host);
     tokio::spawn(async move {
         while let Some(event) = events.recv().await {
             match &event.status {
