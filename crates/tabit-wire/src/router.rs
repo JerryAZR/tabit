@@ -24,9 +24,14 @@
 //!   is a fact of the dispatch site, never a frame field — the node
 //!   knows which door a frame came through, and that is the whole of
 //!   it. There is no default: every registration says what it wants
-//!   to hear, which is how a pipe subscribes to "own speech crosses,
-//!   the close vocabulary crosses from anywhere" without any
-//!   destination-aware machinery beside the fan.
+//!   to hear. **The usual choice is Both** (owner ruling, second
+//!   round): excluding a door owes a justification, and "it usually
+//!   arrives from that door" is not one — a frame's producer
+//!   decides its door, and producers change (a sweep mints locally
+//!   what an origin announced remotely). The sound exclusions are
+//!   structural: a pipe whose local door is owned by another
+//!   subscription (a partition against double-carrying), or a leaf
+//!   participant that does not relay arrivals at all.
 
 use std::collections::HashMap;
 use std::sync::{Arc, Mutex};

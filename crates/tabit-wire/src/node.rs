@@ -493,10 +493,10 @@ impl<C: Routed> Node<C> {
                 // its settle crossed still closes the card (the
                 // open → answered → settled lifecycle).
                 if let Some((id, _)) = frame.ask() {
-                    let asker = from.clone();
                     let ask_id = id.to_string();
                     let settled = self.settle_frame(&ask_id, frame.stream.clone());
                     let swept_settled = self.settle_frame(&ask_id, frame.stream.clone());
+                    let asker = from.clone();
                     let events = self.events.clone();
                     let obligation_events = self.events.clone();
                     let registered = self.asks.register(
@@ -512,6 +512,13 @@ impl<C: Routed> Node<C> {
                             Outcome::Orphaned(_) => {
                                 // The sweep is the single producer
                                 // for this ask: the origin is gone.
+                                // Local speech like every emission
+                                // from this node — no per-kind
+                                // routing law (owner ruling: a
+                                // subscriber that must hear closes
+                                // subscribes Both; "it usually
+                                // arrives from remote" is no
+                                // justification to exclude a door).
                                 events.dispatch(&settled, Locality::Local);
                             }
                         },

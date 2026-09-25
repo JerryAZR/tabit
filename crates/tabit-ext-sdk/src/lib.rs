@@ -747,16 +747,19 @@ pub fn serve(extension: Extension) -> ! {
 ///   FROM the host (a watch lane's mirror) is identity-skipped and
 ///   never bounces back — a callback lift would echo it, and the
 ///   echo re-registers a live ask id at the host, killing this
-///   extension through the mint law.
+///   extension through the mint law. The remote-only exclusion is
+///   the partition justification: the pipe's LOCAL door is owned by
+///   the wildcard (own speech crosses), so Both would double-carry
+///   every local frame — the two subscriptions partition the doors.
 /// - **The answerer mode** (the first `on_ask` registration): the
-///   request is heard from the remote door, the close from EITHER
-///   door — a card's settle may be the origin's own announce
-///   (local) or a death's sweep (local; the node mints sweep
-///   settles as local speech), and whoever surfaces a card hears it
-///   close wherever it was produced. NOTHING crosses for the card
-///   itself — the host never saw it — though the sweep's settle
+///   PAIR is heard from BOTH doors — the default, no exclusion
+///   justified: a card's close may be the origin's own announce,
+///   this node's death sweep, or an arriving frame, and a subscriber
+///   cannot and should not care which (the swept-close bug was
+///   exactly an unjustified remote-only exclusion). Nothing crosses
+///   for the card itself — the host never saw it (a swept close
 ///   rides the stdio's local wildcard like every local settle and
-///   lands at the host as the tolerated unknown-id drop. Answerers
+///   lands at the host as the tolerated unknown-id drop). Answerers
 ///   stack — any may answer ([`Ctx::answer`]), the child's hub
 ///   takes the first arrival, a late answer a tolerated no-op.
 fn mount_card_surface(node: &Node, shared: &Arc<Shared>, asks: Arc<Vec<ErasedWatch>>) {
@@ -781,9 +784,7 @@ fn mount_card_surface(node: &Node, shared: &Arc<Shared>, asks: Arc<Vec<ErasedWat
             spawn_observation(shared, move |ctx| body(ctx, frame));
         }
     };
-    node.subscribe(tags::INTERACTION_REQUEST, Locality::Remote, card_surface);
-    // The close hears BOTH doors: the origin's announce and a death's
-    // sweep are local speech, an arriving close is remote.
+    node.subscribe(tags::INTERACTION_REQUEST, Locality::Both, card_surface);
     node.subscribe(tags::INTERACTION_SETTLED, Locality::Both, settled_surface);
 }
 
@@ -1282,12 +1283,14 @@ pub(crate) mod tests {
             );
             tokio::time::sleep(std::time::Duration::from_millis(5)).await;
         }
-        // The card itself never crossed to the host (the sweep's
-        // settle rides the local wildcard and lands as the host's
-        // tolerated unknown-id drop).
+        // No CARD crossed to the host. (The swept close rides the
+        // stdio's local wildcard like every local settle and lands
+        // at the host as the tolerated unknown-id drop — the
+        // answerer heard it through Both, which is the assertion
+        // above.)
         while let Ok(line) = pipe_rx.try_recv() {
             assert!(
-                !line.contains("card-3") || line.contains("interaction_settled"),
+                !line.contains("interaction_request"),
                 "no card crossed: {line}"
             );
         }

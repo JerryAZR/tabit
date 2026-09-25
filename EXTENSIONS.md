@@ -307,14 +307,21 @@ needs neither.**
 
 - **The shipped lift** (no author answerers): the stdio subscribes
   the card PAIR — `interaction_request` and `interaction_settled`
-  — from the REMOTE door. Cards and settles cross verbatim together;
+  — from the REMOTE door (the exclusion is the partition
+  justification: the pipe's local door is owned by the wildcard
+  own-speech subscription, so Both would double-carry local frames).
+  Cards and settles cross verbatim together;
   riding the channel subscription is what the ingress law protects:
   a card the host mirrored down (a watched ask kind) arrives on the
   stdio and is identity-skipped, so it can never bounce back and
   re-register a live id.
 - **The answerer mode** (the first `on_ask` registration): the pair
-  is heard by the answerers, and nothing crosses — the host never
-  saw the card, so its settle has nothing to close there.
+  is heard from BOTH doors — the default, no exclusion justified:
+  a card's close may be the origin's announce, this node's death
+  sweep, or an arriving frame, and a subscriber cannot and should
+  not care which. Nothing crosses for the card itself — the host
+  never saw it (a swept close rides the local wildcard and lands at
+  the host as the tolerated unknown-id drop).
 
 The settle law, stated from the requestor side (owner ruling
 2026-09, a doc law — no semantic-layer enforcement exists):
