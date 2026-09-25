@@ -161,7 +161,16 @@ anywhere), then the session host's command surface (the by-type
 lifecycle handlers) goes live, then the extensions gather, then the
 session builds. What the structure cannot answer yet — a lifecycle
 command whose builders are the boot's still-gathering data — parks,
-and serves in arrival order behind the boot's announcements. There is
+and serves in arrival order behind the boot's announcements.
+
+**What `new_session`/`open_session` mean is a functional-layer
+concern, not routing or management** (owner ruling 2026-09): in
+principle only session nodes handle them — the net's by-type
+dispatch delivers them and each host's layer answers. An extension
+that makes itself a session host (spawning co-frontend subprocesses
+of its own) may lawfully handle them inside; one that does not
+registers no handlers for them, and a lifecycle command sent to such
+a node is unanswered — the sender's business. There is
 no "next frame after the ack" contract at all (owner ruling 2026-09):
 everything after the ack is the event stream — the core's own
 startup sequence is today's common order, not a guarantee; other
