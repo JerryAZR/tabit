@@ -28,21 +28,6 @@ could observe — gets an entry here in the same commit.
   ahead of `session_opened`. Build on the events' own identities
   (stamps, kinds), never on their position after the ack.
 
-## 2026-09-25 — behavior
-
-- **The backend is now a host plus a served session child** (owner
-  ruling 2026-09): `tabit-core --json` spawns the boot session as a
-  `--served` child process and relays. **The frame contract is
-  unchanged** — same sequence, same shapes, the ack still carries the
-  boot session's id, the child's rejection reasons cross verbatim.
-  Observable differences: the process tree is one deeper (the
-  backend's crash diagnostics are the session child's stderr, teed
-  through), and the handshake's first answer takes one process spawn
-  longer. **A backend-internal death now ends the connection** (stdout
-  EOF) instead of leaving it open-and-silent: when the session child
-  dies, the host drains what landed and closes — treat EOF as the
-  disconnect it always meant to be. No `PROTOCOL_VERSION` bump.
-
 ## v18 (current)
 
 ### wire: event frames carry `ttl` — the node net's hop budget, verbatim (2026-09)

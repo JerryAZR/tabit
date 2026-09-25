@@ -49,19 +49,12 @@ pub type StderrRing = Mutex<VecDeque<String>>;
 
 /// Drain a child's stderr into a bounded ring on the current tokio
 /// runtime. The task ends at the pipe's EOF (the process is gone).
-/// `forward` mirrors every line onto this process's stderr as well —
-/// the served-main-child shape, where the child's diagnostics (the
-/// session banner, the extension supervisor's reports) are the
-/// human's terminal output of THIS process.
-pub fn spawn_stderr_ring(stderr: tokio::process::ChildStderr, forward: bool) -> Arc<StderrRing> {
+pub fn spawn_stderr_ring(stderr: tokio::process::ChildStderr) -> Arc<StderrRing> {
     let ring = Arc::new(StderrRing::default());
     let sink = ring.clone();
     tokio::spawn(async move {
         let mut lines = BufReader::new(stderr).lines();
         while let Ok(Some(line)) = lines.next_line().await {
-            if forward {
-                eprintln!("{line}");
-            }
             let mut sink = tabit_log::lock::lock(&sink);
             if sink.len() == STDERR_RING {
                 sink.pop_front();

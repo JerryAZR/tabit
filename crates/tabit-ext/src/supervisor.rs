@@ -788,7 +788,7 @@ async fn supervise(
             return;
         }
     };
-    let ring = process::spawn_stderr_ring(stderr, false);
+    let ring = process::spawn_stderr_ring(stderr);
 
     // The command writer: lines in, stdin out (the shared pipe
     // contract — the closing token IS the pipe close).

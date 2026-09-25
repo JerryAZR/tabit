@@ -5031,7 +5031,6 @@ dependencies = [
  "tabit-protocol",
  "tabit-session",
  "tabit-tools",
- "tabit-wire",
  "tokio",
  "tokio-util",
 ]
