@@ -206,11 +206,19 @@ Current workspace layout:
 - `crates/tabit-core` — the backend binary (`tabit-core`): headless,
   no UI and no frontend references — frontends spawn it, never the
   other way. Print mode (`-p <PROMPT>`, `--rewind <n>`) and JSON
-  mode (`--json` — the stdio protocol edge) over the session host
-  (create / `--continue` / `--session <path>` / `--list`). The
-  `tabit` name is reserved for the frontend that ships primary
-  (2026-09: the TUI candidates outpace the GUI; no in-repo binary
-  carries it yet)
+  mode (`--json` — the stdio protocol edge). JSON mode is **host
+  mode** (owner ruling 2026-09): the entry runs no session itself —
+  it spawns the argv boot as a `--served` child (session mode: the
+  boot serves in its own process; `--parent` implies it) and routes:
+  the child's frames fan to this frontend, session commands route
+  onto the child's pipe, lifecycle commands forward to the child's
+  door, the child's stderr tees through — the frontend sees one
+  node, same frames, same order. Print mode stays session mode
+  in-process (a one-shot run; the switching motivation is JSON's).
+  The entry still handles create / `--continue` /
+  `--session <path>` / `--list`. The `tabit` name is reserved for
+  the frontend that ships primary (2026-09: the TUI candidates
+  outpace the GUI; no in-repo binary carries it yet)
 
 ## Design rules
 

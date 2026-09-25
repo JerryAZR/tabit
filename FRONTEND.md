@@ -185,7 +185,13 @@ value, switch on `type` when recognized) and log the rest.
    reasons come in two flavors: config/auth problems carry the
    first-run setup guide (written for the user — display it);
    everything else (session unreadable, model unbuildable) carries a
-   plain reason — do not treat it as a config problem.
+   plain reason — do not treat it as a config problem. (The backend
+   you speak to is a host that runs the boot session in a served
+   child process and relays — owner ruling 2026-09; the contract is
+   unchanged: the ack waits for the child's handshake, the child's
+   rejection reason crosses verbatim, and its stderr diagnostics are
+   the backend process's stderr. One process or two, you see one
+   node.)
 2. A command before `initialize`, an unparseable line, or an
    empty/whitespace-only `message` text gets `protocol_error
    { message }`; **the connection stays open**. `message` texts are

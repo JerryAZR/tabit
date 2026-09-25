@@ -76,16 +76,27 @@ pub struct ChildSpec {
     parent: Option<String>,
     parent_call: Option<String>,
     model: Option<ModelSelection>,
+    model_ref: Option<String>,
     tools: Option<Vec<String>>,
     without: Option<Vec<String>>,
     ephemeral: bool,
     session: Option<PathBuf>,
+    continue_newest: bool,
     extensions: Option<PathBuf>,
     max_turns: Option<usize>,
     /// The child's preamble — replaces the default base text while
     /// the environment block, AGENTS.md files, and skills catalog
     /// append as usual. The child's preamble belongs to its spawner.
     preamble: Option<String>,
+    /// Mirror the child's stderr onto this process's stderr — the
+    /// human's diagnostics (the session banner, the extension
+    /// supervisor's reports) belong to whoever the human spawned;
+    /// background children stay ring-only (their stderr is crash
+    /// material, not terminal output).
+    forward_stderr: bool,
+    /// Intake the child's backend-level (unstamped) frames through
+    /// the lane as well — see [`ChildSpec::carry_backend_frames`].
+    carry_backend_frames: bool,
     on_stamped_frame: Option<StampedFrameTap>,
     on_exit: Option<ExitTap>,
     /// The node mount (see [`ChildSpec::on_node`]) — the lane, the
@@ -105,13 +116,17 @@ impl ChildSpec {
             parent: None,
             parent_call: None,
             model: None,
+            model_ref: None,
             tools: None,
             without: None,
             ephemeral: true,
             session: None,
+            continue_newest: false,
             extensions: None,
             max_turns: None,
             preamble: None,
+            forward_stderr: false,
+            carry_backend_frames: false,
             on_stamped_frame: None,
             on_exit: None,
             node: None,
@@ -148,6 +163,15 @@ impl ChildSpec {
         self
     }
 
+    /// The `--model` ref, verbatim — for spawners that have not
+    /// loaded config (a relaying host): the string crosses as-is and
+    /// the child resolves it against the child's own config. A set
+    /// [`ChildSpec::model`] wins.
+    pub fn model_ref(mut self, model_ref: String) -> Self {
+        self.model_ref = Some(model_ref);
+        self
+    }
+
     /// Restrict the child's toolset to these names; an unknown name
     /// fails the child loudly at startup.
     pub fn tools(mut self, names: Vec<String>) -> Self {
@@ -179,6 +203,14 @@ impl ChildSpec {
         self
     }
 
+    /// Resume the newest stored session under the child's cwd —
+    /// `--continue` (implies persisted; `--session` wins when both
+    /// are set, matching the entry point's own precedence).
+    pub fn continue_newest(mut self) -> Self {
+        self.continue_newest = true;
+        self
+    }
+
     /// The child's extension root, crossing as `--extensions` — the
     /// child boots its own host against it.
     pub fn extensions(mut self, path: PathBuf) -> Self {
@@ -197,6 +229,27 @@ impl ChildSpec {
     /// owns the child's voice; tabit still owns the truthful context.
     pub fn preamble(mut self, text: String) -> Self {
         self.preamble = Some(text);
+        self
+    }
+
+    /// Mirror the child's stderr onto this process's stderr (see the
+    /// field's doc) — the served-main-child shape: the human watching
+    /// this process sees the session's own diagnostics as if it ran
+    /// here.
+    pub fn forward_stderr(mut self, forward: bool) -> Self {
+        self.forward_stderr = forward;
+        self
+    }
+
+    /// The child's backend-level frames (`stream: None` — its startup
+    /// catalogs) cross the lane too, not only its stamped session
+    /// frames — the served-main-child shape: the frontend's contract
+    /// includes the catalogs, and the child is the process that owns
+    /// them. Background children leave this off: their backend-level
+    /// frames are their own business (a subagent's catalog is not the
+    /// frontend's).
+    pub fn carry_backend_frames(mut self, carry: bool) -> Self {
+        self.carry_backend_frames = carry;
         self
     }
 
@@ -236,26 +289,34 @@ impl ChildSpec {
     /// Run the child: spawn, handshake, reaper. Errors are display
     /// strings — the caller (a tool body, an SDK wrapper) turns them
     /// into its failure report.
-    pub async fn spawn(self) -> Result<ChildHandle, String> {
+    pub async fn spawn(self) -> Result<ChildHandle, SpawnError> {
         let Self {
             exe,
             cwd,
             parent,
             parent_call,
             model,
+            model_ref,
             tools,
             without,
             ephemeral,
             session,
+            continue_newest,
             extensions,
             max_turns,
             preamble,
+            forward_stderr,
+            carry_backend_frames,
             on_stamped_frame,
             on_exit,
             node: mount,
         } = self;
 
-        let mut args: Vec<String> = vec!["--json".to_string()];
+        // Every wire child serves its boot in its own process
+        // (`--served`: session mode) — the parent-facing `--json`
+        // entry spawns a child for its boot instead (host mode), and
+        // the flag is what tells the two apart.
+        let mut args: Vec<String> = vec!["--json".to_string(), "--served".to_string()];
         if let Some(id) = &parent {
             args.push("--parent".to_string());
             args.push(id.clone());
@@ -267,6 +328,9 @@ impl ChildSpec {
         if let Some(selection) = &model {
             args.push("--model".to_string());
             args.push(format!("{}/{}", selection.provider, selection.model));
+        } else if let Some(model_ref) = &model_ref {
+            args.push("--model".to_string());
+            args.push(model_ref.clone());
         }
         if let Some(max_turns) = max_turns {
             args.push("--max-turns".to_string());
@@ -291,25 +355,30 @@ impl ChildSpec {
         if let Some(path) = &session {
             args.push("--session".to_string());
             args.push(path.display().to_string());
+        } else if continue_newest {
+            args.push("--continue".to_string());
         } else if ephemeral {
             args.push("--ephemeral".to_string());
         }
 
-        let mut process = wrap_command(&exe, &args, &cwd)
-            .spawn()
-            .map_err(|error| format!("cannot spawn the child `{}`: {error}", exe.display()))?;
+        let mut process = wrap_command(&exe, &args, &cwd).spawn().map_err(|error| {
+            SpawnError::Failed(format!(
+                "cannot spawn the child `{}`: {error}",
+                exe.display()
+            ))
+        })?;
         let stdin = process
             .stdin()
             .take()
-            .ok_or("the child process opened no stdin")?;
+            .ok_or_else(|| SpawnError::Failed("the child process opened no stdin".to_string()))?;
         let stdout = process
             .stdout()
             .take()
-            .ok_or("the child process opened no stdout")?;
+            .ok_or_else(|| SpawnError::Failed("the child process opened no stdout".to_string()))?;
         let stderr = process
             .stderr()
             .take()
-            .ok_or("the child process opened no stderr")?;
+            .ok_or_else(|| SpawnError::Failed("the child process opened no stderr".to_string()))?;
 
         // The closing token: the child's shutdown signal, shared by the
         // stdin writer (the pipe drop) and the reaper (the grace
@@ -325,8 +394,9 @@ impl ChildSpec {
         let (command_tx, command_rx) = tokio::sync::mpsc::unbounded_channel::<String>();
         spawn_line_writer(stdin, command_rx, Some(closing.clone()));
 
-        // The stderr ring — the crash report's tail.
-        let ring = spawn_stderr_ring(stderr);
+        // The stderr ring — the crash report's tail (mirrored to our
+        // own stderr when the spawner asked for the human's copy).
+        let ring = spawn_stderr_ring(stderr, forward_stderr);
 
         // The frame pump: handshake frames resolve here, stamped
         // frames cross as-is (their stream stamps are already their
@@ -385,9 +455,15 @@ impl ChildSpec {
                         // register, the observation fans — a policy
                         // tap may answer the moment the entry
                         // exists); the policy tap after, in pump
-                        // order; the fold's mirror either way.
+                        // order; the fold's mirror either way. The
+                        // lane carries every STAMPED frame (its law:
+                        // the stream stamp is the routing key); the
+                        // backend-level (unstamped) frames cross only
+                        // for children that opted in — the served
+                        // main child, whose catalogs are the
+                        // frontend's contract.
                         if let (Some(node), Some(lane)) = (&pump_mount, &lane)
-                            && frame.stream.is_some()
+                            && (frame.stream.is_some() || carry_backend_frames)
                         {
                             node.intake(lane, Inbound::Event(frame.clone()));
                         }
@@ -415,20 +491,22 @@ impl ChildSpec {
         }));
         let handshake = tokio::select! {
             outcome = handshake_rx => {
-                outcome.map_err(|_| "the child process closed before the handshake".to_string())?
+                outcome.map_err(|_| SpawnError::Failed(
+                    "the child process closed before the handshake".to_string(),
+                ))?
             }
             _ = tokio::time::sleep(HANDSHAKE_TIMEOUT) => {
                 kill_now(&mut process, &closing).await;
-                return Err("the child process did not answer the handshake".to_string());
+                return Err(SpawnError::Failed(
+                    "the child process did not answer the handshake".to_string(),
+                ));
             }
         };
         let child_id = match handshake {
             Handshake::Acked(id) => id,
             Handshake::Rejected(reason) => {
                 kill_now(&mut process, &closing).await;
-                return Err(format!(
-                    "the child process rejected the handshake: {reason}"
-                ));
+                return Err(SpawnError::Rejected(reason));
             }
         };
 
@@ -481,6 +559,37 @@ impl ChildSpec {
 enum Handshake {
     Acked(String),
     Rejected(String),
+}
+
+/// Why a spawn failed. [`SpawnError::Rejected`] carries the child's
+/// own rejection reason **verbatim** — a served child that rejected
+/// its handshake (a config problem, an unreadable session) already
+/// wrote the user-facing text; a relaying host must pass it through
+/// unchanged, not re-wrap it.
+pub enum SpawnError {
+    /// The child answered `initialize_rejected` — the reason is the
+    /// child's, byte-for-byte.
+    Rejected(String),
+    /// Everything else: the process would not start, closed early, or
+    /// stayed silent past the handshake bound.
+    Failed(String),
+}
+
+impl std::fmt::Debug for SpawnError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        std::fmt::Display::fmt(self, f)
+    }
+}
+
+impl std::fmt::Display for SpawnError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            SpawnError::Rejected(reason) => {
+                write!(f, "the child process rejected the handshake: {reason}")
+            }
+            SpawnError::Failed(detail) => write!(f, "{detail}"),
+        }
+    }
 }
 
 /// One live subprocess child: the driver's surface. Commands go out
@@ -560,6 +669,13 @@ impl ChildHandle {
             session: self.id.clone(),
             text: task,
         }));
+    }
+
+    /// Submit one session command to the child (lifecycle forwarding,
+    /// steers, model switches): the line crosses the pipe and routes
+    /// at the child's node — the sender never routes it locally.
+    pub fn send_command(&self, command: &SessionCommand) {
+        self.send_line(tabit_protocol::to_wire_line(command));
     }
 
     /// Drive the child to its run terminal under the abort leash —

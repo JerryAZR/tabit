@@ -383,27 +383,18 @@ impl Drop for SessionHost {
 pub struct SessionCommandLink {
     node: Arc<Node>,
     host_channel: Channel,
-    workers: Arc<Mutex<HashMap<String, Arc<Worker>>>>,
 }
 
 impl SessionCommandLink {
     /// Submit a command. Fire-and-forget: outcomes arrive as events
-    /// (routing by the node's laws — session-addressed by the
-    /// learning table, lifecycle by type, responses by ask-table
-    /// claim).
+    /// (routing by the node's laws — session-addressed by the learning
+    /// table, lifecycle by type, responses by ask-table claim). The
+    /// edge's replay request rides this too — `open_session` of an
+    /// already-open session re-replays it (the door's idempotent
+    /// path).
     pub fn send(&self, command: SessionCommand) {
         self.node
             .intake(&self.host_channel, Inbound::Command(command));
-    }
-
-    /// Request a session's replay pass — the transport edge's way in
-    /// (the bridge asks right after the handshake, when the
-    /// `initialize` frame said `replay: true`). Not a wire command:
-    /// the intent parks on the worker directly.
-    pub fn replay(&self, session: &str) {
-        if let Some(worker) = lock(&self.workers).get(session).cloned() {
-            worker.deliver_replay();
-        }
     }
 }
 
@@ -428,6 +419,21 @@ pub struct FrontendStream {
     /// Fires when the stream's receiver drops — the frontend-death
     /// signal; the host (whenever it spawns) owns the door it opens.
     gone: CancellationToken,
+}
+
+impl FrontendStream {
+    /// Take the stream for an external edge consumer (a relaying
+    /// host): the receiver and the end token — cancel the token when
+    /// the stream's producer is gone (the served child died); the
+    /// struct's sender clone drops with the call.
+    pub fn into_parts(self) -> (mpsc::UnboundedReceiver<EventFrame>, CancellationToken) {
+        let FrontendStream {
+            events,
+            events_tx: _,
+            gone,
+        } = self;
+        (events, gone)
+    }
 }
 
 /// Mount the frontend stream on the node: the facade channel
@@ -878,7 +884,6 @@ impl SessionHost {
         SessionCommandLink {
             node: self.node.clone(),
             host_channel: self.host_channel.clone(),
-            workers: self.workers.clone(),
         }
     }
 

@@ -70,6 +70,13 @@ struct Args {
     /// delegate tool so children cannot recurse through it.
     without: Option<String>,
     ephemeral: bool,
+    /// `--served`: this process is a wire child whose stdio is its
+    /// supervisor's pipe — the argv boot session serves HERE, in this
+    /// process (session mode). The default `--json` entry is host
+    /// mode instead: it spawns a served child for the boot and routes
+    /// (owner ruling 2026-09). Implied by `--parent` (a parent-named
+    /// child is a served child).
+    served: bool,
     /// System prompt override — replaces the default preamble
     /// (identity + standing body); the environment block, AGENTS.md
     /// files, and skills catalog append as usual. The subagent
@@ -95,11 +102,19 @@ usage: tabit-core -p <PROMPT>            print mode: one prompt, one run
                                          rewind n user messages, then exit;
                                          add -p <PROMPT> to branch with it
        tabit-core --json [session flags]
-                                         JSON protocol on stdio (scriptable)
-                                         child role adds: --parent <id> (the
-                                         spawning session), --parent-call <id>
-                                         (its tool call), --tools <a,b,..>
-                                         (an allow-list), --without <a,b,..>
+                                         JSON protocol on stdio (scriptable);
+                                         host mode: the entry spawns a
+                                         served child for the boot
+                                         session and routes (owner
+                                         ruling 2026-09) — the
+                                         frontend sees one node either
+                                         way. child role adds:
+                                         --served (serve the argv boot
+                                         in this process), --parent
+                                         <id> (the spawning session),
+                                         --parent-call <id> (its tool
+                                         call), --tools <a,b,..> (an
+                                         allow-list), --without <a,b,..>
                                          (a deny list — removed from the
                                          child's core AND extension
                                          tools), --ephemeral (no
@@ -217,6 +232,7 @@ fn validate_mode(args: &Args) -> Result<Mode, String> {
         args.tools.is_some().then_some("--tools"),
         args.without.is_some().then_some("--without"),
         args.ephemeral.then_some("--ephemeral"),
+        args.served.then_some("--served"),
         args.preamble.is_some().then_some("--preamble"),
         args.extensions.is_some().then_some("--extensions"),
     ]
@@ -236,6 +252,7 @@ fn validate_mode(args: &Args) -> Result<Mode, String> {
             "--tools",
             "--without",
             "--ephemeral",
+            "--served",
             "--preamble",
             "--extensions",
         ],
@@ -285,6 +302,7 @@ where
         tools: None,
         without: None,
         ephemeral: false,
+        served: false,
         preamble: None,
         extensions: None,
         install: None,
@@ -356,6 +374,7 @@ where
                 parsed.without = Some(value);
             }
             "--ephemeral" => parsed.ephemeral = true,
+            "--served" => parsed.served = true,
             "--preamble" => {
                 let value = it
                     .next()
@@ -905,10 +924,18 @@ fn json_reject(reason: String) -> Result<i32, String> {
     Ok(1)
 }
 
+/// The relay shape: the rejection frame to stdout, no stderr echo —
+/// the served child that rejected already echoed on its own stderr,
+/// and the host tees that through; a second echo would double every
+/// line on the human's terminal.
+fn json_reject_relayed(reason: String) -> Result<i32, String> {
+    let frame = tabit_protocol::ServerControlFrame::InitializeRejected { reason };
+    println!("{}", tabit_protocol::to_wire_line(&frame));
+    Ok(1)
+}
+
 fn run() -> Result<i32, String> {
     let args = parse_args()?;
-    let config = TabitConfig::load_default().map_err(|e| e.to_string());
-    let auth = AuthConfig::load_default().map_err(|e| e.to_string());
 
     // Sanctioned crash (AGENTS.md doctrine): parse rejects modeless
     // invocations, so the match always has a mode here.
@@ -979,12 +1006,19 @@ fn run() -> Result<i32, String> {
             println!("uninstalled {name}");
             Ok(0)
         }
-        Mode::Json => {
+        // Session mode (owner ruling 2026-09): a served child — the
+        // host-mode entry's spawn, or the subagent bridge's `--parent`
+        // children — serves the argv boot IN THIS PROCESS. The full
+        // session boot: config, extensions, skills, assembly.
+        Mode::Json if args.served || args.parent.is_some() => {
             // A fresh install has no providers.toml — perfectly
             // normal, and the most common first run. Fail gracefully:
             // reject the handshake with a setup guide instead of
             // dying stderr-only (the owner's first-run ruling).
-            let (config, auth) = match (config, auth) {
+            let (config, auth) = match (
+                TabitConfig::load_default().map_err(|e| e.to_string()),
+                AuthConfig::load_default().map_err(|e| e.to_string()),
+            ) {
                 (Ok(config), Ok(auth)) => (Arc::new(config), Arc::new(auth)),
                 (Err(detail), _) | (_, Err(detail)) => return json_setup_failure(&detail),
             };
@@ -1111,22 +1145,213 @@ fn run() -> Result<i32, String> {
             };
             print_banner(&session);
             let data = host_data(&args, &registry, &store, &mounted);
-            Ok(runtime.block_on(async {
+            runtime.block_on(async {
                 let handle = structure.attach(session, startup_notes, data);
-                tabit_session::edge::serve(
+                let code = tabit_session::edge::serve(
                     handle,
                     std::io::BufReader::new(std::io::stdin()),
                     std::io::stdout(),
                 )
-                .await
-            }))
+                .await;
+                // The edge's contract is the process boundary (the
+                // reader thread parks uninterruptibly on the
+                // stream-end path; a runtime drop would wait on it).
+                std::process::exit(code);
+            })
         }
+        // Host mode (owner ruling 2026-09): the frontend-facing entry
+        // runs no session itself — it spawns the argv boot as a served
+        // child and routes.
+        Mode::Json => host_mode(&args),
         Mode::Print => {
-            let config = Arc::new(config.map_err(|e| setup_guide(&e))?);
-            let auth = Arc::new(auth.map_err(|e| e.to_string())?);
+            let config =
+                Arc::new(TabitConfig::load_default().map_err(|e| setup_guide(&e.to_string()))?);
+            let auth = Arc::new(AuthConfig::load_default().map_err(|e| e.to_string())?);
             print_mode(&args, &ModelRegistry::new(config, auth))
         }
     }
+}
+
+/// What the host's supervisor asks of the served child: a forwarded
+/// command, or the close (the frontend is gone — the child's own edge
+/// then runs its death act, one process deeper).
+enum HostAct {
+    Command(SessionCommand),
+    Close,
+}
+
+/// Host mode (owner ruling 2026-09): the frontend-facing entry runs
+/// NO session itself — it spawns the argv boot as a served child (a
+/// `--served` process running the session-mode boot) and routes. The
+/// child's frames arrive on the lane and fan to this frontend exactly
+/// as an in-process session's would; the frontend's session-addressed
+/// commands route by the learning table onto the child's pipe;
+/// lifecycle commands (`new_session`, `open_session`) forward across
+/// the same pipe to the child's own door (lifecycle is the serving
+/// process's functional layer). The frontend sees one node: same
+/// frames, same order, one process underneath.
+///
+/// What deliberately does NOT live here: config, extensions, skills,
+/// tools — the session's whole data life belongs to the process that
+/// runs it. A broken config rejects from the child, with the child's
+/// own user-facing text; this process is routing and child management
+/// only.
+fn host_mode(args: &Args) -> Result<i32, String> {
+    let runtime = tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()
+        .map_err(|e| e.to_string())?;
+    let node = host_node();
+    // The stream exists before the child boots: every frame the child
+    // emits from its first post-ack line crosses in arrival order (the
+    // structure-first mount — same law as the session boot).
+    let (frontend_events, end) = tabit_session::mount_frontend(&node).into_parts();
+    let cwd = std::env::current_dir()
+        .map_err(|e| format!("cannot determine the working directory: {e}"))?;
+    let mut spec = tabit_wire::client::ChildSpec::new(tabit_exe()?, cwd)
+        .on_node(node.clone())
+        // The human spawned THIS process: the session's stderr (the
+        // banner, the extension supervisor's reports) is this
+        // process's terminal output — it rides through.
+        .forward_stderr(true)
+        // The frontend's startup contract includes the backend-level
+        // catalogs, and the child is the process that owns them.
+        .carry_backend_frames(true);
+    if let Some(path) = &args.session {
+        spec = spec.session(path.clone());
+    } else if args.continue_newest {
+        spec = spec.continue_newest();
+    } else {
+        spec = spec.ephemeral(args.ephemeral);
+    }
+    if let Some(model) = &args.model {
+        spec = spec.model_ref(model.clone());
+    }
+    if let Some(max_turns) = args.max_turns {
+        spec = spec.max_turns(max_turns);
+    }
+    if let Some(tools) = &args.tools {
+        spec = spec.tools(tools.split(',').map(str::to_string).collect());
+    }
+    if let Some(without) = &args.without {
+        spec = spec.without(without.split(',').map(str::to_string).collect());
+    }
+    if let Some(text) = &args.preamble {
+        spec = spec.preamble(text.clone());
+    }
+    if let Some(path) = &args.extensions {
+        spec = spec.extensions(path.clone());
+    }
+    // The stream's end, fired from either side: the frontend went
+    // (the death act below), or the child died (the exit tap — the
+    // reaper's natural-exit path fires it promptly; a close-driven
+    // reaping needs no signal, this process is already leaving).
+    {
+        let end_for_exit = end.clone();
+        spec = spec.on_exit(Arc::new(move |_| end_for_exit.cancel()));
+    }
+
+    runtime.block_on(async {
+        let mut handle = match spec.spawn().await {
+            Ok(handle) => handle,
+            Err(tabit_wire::client::SpawnError::Rejected(reason)) => {
+                // The child rejected its handshake — its reason is the
+                // user-facing text (the setup guide when config broke,
+                // a plain detail otherwise), written at the source of
+                // the failure; relay it verbatim (the child's stderr
+                // echo already crossed through the tee).
+                return json_reject_relayed(reason);
+            }
+            Err(tabit_wire::client::SpawnError::Failed(detail)) => {
+                return json_startup_failure(&detail);
+            }
+        };
+        // Pre-warm the route: the child's first post-ack frame is its
+        // `session_opened`, and the pump intakes it — teaching the
+        // learning table where the boot session lives — BEFORE
+        // mirroring it, so once this resolves, the fastest possible
+        // message from the frontend routes. `None` means the child
+        // died between its ack and its announcement.
+        if handle.frames().recv().await.is_none() {
+            return json_startup_failure(
+                "the session process closed before announcing its session",
+            );
+        }
+        // The ack's protocol-level fact, taken before the supervisor
+        // task takes the handle.
+        let boot_id = handle.id().to_string();
+        // The forward door — the host's only lifecycle policy: the
+        // commands cross the pipe, the child's door serves them. The
+        // handlers exist before the edge reads its first line (the
+        // prepared-supervisor law, by control flow).
+        let (act_tx, mut act_rx) = tokio::sync::mpsc::unbounded_channel::<HostAct>();
+        let forward_new = {
+            let tx = act_tx.clone();
+            move |_: &SessionCommand| {
+                let _ = tx.send(HostAct::Command(SessionCommand::NewSession));
+            }
+        };
+        let forward_open = {
+            let tx = act_tx.clone();
+            move |command: &SessionCommand| {
+                let _ = tx.send(HostAct::Command(command.clone()));
+            }
+        };
+        node.handle("new_session", "host", forward_new);
+        node.handle("open_session", "host", forward_open);
+        // The child's supervisor: the one owner of the handle — the
+        // door's commands go out through it, and either end (the
+        // frontend's close, the child's death) closes the child and
+        // awaits its reclamation (the graceful window buys the child's
+        // write-behind flush, never this process's latency budget).
+        let supervisor_end = end.clone();
+        let supervisor = tokio::spawn(async move {
+            loop {
+                tokio::select! {
+                    act = act_rx.recv() => match act {
+                        Some(HostAct::Command(command)) => handle.send_command(&command),
+                        Some(HostAct::Close) | None => break,
+                    },
+                    _ = supervisor_end.cancelled() => break,
+                }
+            }
+            handle.close();
+            handle.wait_exit().await;
+        });
+        // Commands enter the node from the host's channel — the same
+        // intake shape the session host's link uses: session-addressed
+        // commands route by the learning table (the lane the child's
+        // announcements taught), lifecycle by type into the door
+        // above, responses by ask id onto the lane.
+        let host_channel = tabit_wire::node::Channel::local("host", |_| {}, |_| {});
+        let dispatch_node = node.clone();
+        let dispatch = Arc::new(move |command: SessionCommand| {
+            dispatch_node.intake(&host_channel, tabit_wire::node::Inbound::Command(command));
+        });
+        let death_end = end.clone();
+        let serving = tabit_session::edge::EdgeServing {
+            session_id: boot_id,
+            events: Some(frontend_events),
+            dispatch,
+            end,
+            on_frontend_death: Box::new(move || {
+                death_end.cancel();
+                let _ = act_tx.send(HostAct::Close);
+            }),
+        };
+        let code = tabit_session::edge::serve_edge(
+            serving,
+            std::io::BufReader::new(std::io::stdin()),
+            std::io::stdout(),
+        )
+        .await;
+        let _ = supervisor.await;
+        // The edge's contract is the process boundary: exit here,
+        // never through the runtime drop (the reader thread parks in
+        // an uninterruptible read on the stream-end path, and a
+        // runtime drop would wait on it forever).
+        std::process::exit(code);
+    })
 }
 
 /// Print mode: assemble (rewinding first when asked), banner, one
@@ -1811,6 +2036,7 @@ mod tests {
             tools: None,
             without: None,
             ephemeral: false,
+            served: false,
             preamble: None,
             extensions: None,
             install: None,
@@ -2036,6 +2262,27 @@ mod tests {
 
         // Child flags outside JSON mode are foreign flags.
         let foreign = args(&["--parent", "p1", "-p", "hi"]).expect_err("parent × print");
+        assert!(foreign.contains("do not combine"), "{foreign}");
+    }
+
+    #[test]
+    fn served_parses_only_in_json_mode_and_marks_session_mode() {
+        // The session-mode marker: --served with the argv boot.
+        let parsed = args(&["--json", "--served", "--ephemeral"]).expect("served parses");
+        assert!(parsed.served);
+        assert!(parsed.ephemeral);
+
+        // The host-mode default: plain --json carries no session mode.
+        let host = args(&["--json"]).expect("plain json parses");
+        assert!(!host.served && host.parent.is_none());
+
+        // --parent is a served child too (a parent-named process is a
+        // served process); --served adds nothing but is not a conflict.
+        let both = args(&["--json", "--served", "--parent", "p1"]).expect("served × parent");
+        assert!(both.served && both.parent.is_some());
+
+        // Session mode is json-only: served × print is a foreign flag.
+        let foreign = args(&["--served", "-p", "hi"]).expect_err("served × print");
         assert!(foreign.contains("do not combine"), "{foreign}");
     }
 

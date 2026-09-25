@@ -19,7 +19,30 @@ use tabit_protocol::{
 use tokio::sync::mpsc;
 use tokio_util::sync::CancellationToken;
 
-use crate::endpoint::{SessionCommandLink, SessionHost, SessionInfo};
+use crate::endpoint::SessionHost;
+
+/// What one endpoint needs to serve its edge — the four facts every
+/// stdio server shares, split from the session host so a relaying
+/// host (the host-mode entry: no session of its own, a served child
+/// instead) serves the same edge without a [`SessionHost`]. The
+/// death act is the one policy difference: session mode aborts every
+/// in-flight run and drops the host; host mode closes the served
+/// child (whose own edge then does the same, one process deeper).
+pub struct EdgeServing {
+    /// The boot session's id — the ack's protocol-level fact.
+    pub session_id: String,
+    /// The event stream (already taken from whoever owned it).
+    pub events: Option<mpsc::UnboundedReceiver<EventFrame>>,
+    /// Where commands go (the node's intake, or a pipe forward).
+    pub dispatch: std::sync::Arc<dyn Fn(SessionCommand) + Send + Sync>,
+    /// The stream's end signal (the wind-down fired it, or the served
+    /// child died).
+    pub end: CancellationToken,
+    /// The frontend-death act: run once the reader ends (EOF, broken
+    /// pipe, or a panicked reader thread — at a stdio edge that IS
+    /// frontend death, ruled 2026-08).
+    pub on_frontend_death: Box<dyn FnOnce() + Send>,
+}
 
 /// Serve the backend over `reader`/`writer` until the client closes its
 /// input. Returns the process exit code: 0 normally, 1 on a handshake
@@ -29,9 +52,56 @@ where
     R: BufRead + Send + 'static,
     W: Write + Send + 'static,
 {
-    let (writer_tx, writer_rx) = mpsc::unbounded_channel::<ServerFrame>();
-    let link = host.command_link();
-    let info = host.info().clone();
+    let dispatch = {
+        let link = host.command_link();
+        std::sync::Arc::new(move |command: SessionCommand| link.send(command))
+    };
+    let serving = EdgeServing {
+        session_id: host.info().session_id.clone(),
+        events: host.take_events(),
+        dispatch,
+        end: host.stream_end_signal(),
+        // The door is dropping the host, NOT the polite close:
+        // `close_commands` is not a barrier and would route anything
+        // still queued on the command channel — starting fresh,
+        // unattended runs for a client that is gone (the review
+        // round's finding). Dropping the host closes the command
+        // channel: the host task sees it empty, and the unrouted
+        // commands die unrouted. Interrupted results synthesize on
+        // the next open, exactly like a crash.
+        on_frontend_death: Box::new(move || {
+            host.abort_all();
+            drop(host);
+        }),
+    };
+    serve_edge(serving, reader, writer).await
+}
+
+/// The edge over the shared facts — one body, two constructors: the
+/// session host's own edge ([`serve`]) and the relaying host's (the
+/// host-mode entry).
+pub async fn serve_edge<R, W>(serving: EdgeServing, reader: R, writer: W) -> i32
+where
+    R: BufRead + Send + 'static,
+    W: Write + Send + 'static,
+{
+    let EdgeServing {
+        session_id,
+        events,
+        dispatch,
+        end,
+        on_frontend_death,
+    } = serving;
+    // Two feeds into one writer: the reader's control frames (the
+    // ack, protocol errors) and the forwarder's events, each on its
+    // own channel. The writer ends when the FORWARDER's channel
+    // closes — the forwarder is the stream's producer, and its end is
+    // the deterministic one (the reader thread parks in a blocking
+    // read that nothing on this side can interrupt, and its sender
+    // clone would otherwise hold the writer open forever on the
+    // stream-end path).
+    let (control_tx, control_rx) = mpsc::unbounded_channel::<ServerFrame>();
+    let (event_tx, event_rx) = mpsc::unbounded_channel::<ServerFrame>();
 
     // The ack gate: the handshake ack is the transport's first
     // obligation, and events can exist from spawn (startup degradation
@@ -41,18 +111,10 @@ where
     // frame).
     let (gate_tx, gate_rx) = tokio::sync::watch::channel(false);
 
-    // The reader blocks on lines; the writer is the single owner of
-    // stdout, draining one ordered channel so the handshake ack can
-    // never land behind an event.
-    let reader_tx = writer_tx.clone();
-    let dispatch = {
-        let link = host.command_link();
-        std::sync::Arc::new(move |command: SessionCommand| link.send(command))
-    };
     let reader_task = tokio::task::spawn_blocking(move || {
-        read_loop(reader, link, dispatch, reader_tx, &info, gate_tx)
+        read_loop(reader, dispatch, control_tx, &session_id, gate_tx)
     });
-    let writer_task = tokio::spawn(write_loop(writer_rx, writer));
+    let writer_task = tokio::spawn(write_loop(control_rx, event_rx, writer));
 
     // The live forwarder: host events reach stdout as they happen, for
     // the whole connection — not only at wind-down. (v1 bug: events
@@ -61,31 +123,28 @@ where
     // already streaming.) The stream's end signal fires after every
     // worker's last event has landed (the host's wind-down awaits the
     // joins first), so draining what remains and stopping is lossless.
-    let forwarder_task = tokio::spawn(forward_events(
-        host.take_events(),
-        writer_tx.clone(),
-        gate_rx,
-        host.stream_end_signal(),
-    ));
+    let forwarder_task = tokio::spawn(forward_events(events, event_tx, gate_rx, end.clone()));
 
-    // A panicked reader thread is a broken edge: exit nonzero.
-    let exit = reader_task.await.unwrap_or(1);
-    // The client is gone (EOF, broken pipe, or a dead reader thread):
-    // at a stdio edge that IS frontend death — abort every in-flight
-    // run, discard every queue, and wind down (ruled 2026-08: the core
-    // dies with the frontend, regardless of state). The door is
-    // dropping the host, NOT the polite close: `close_commands` is
-    // not a barrier and would route anything still queued on the
-    // command channel — starting fresh, unattended runs for a client
-    // that is gone (the review round's finding). Dropping the host
-    // closes the command channel: the host task sees it empty, and
-    // the unrouted commands die unrouted. Interrupted results
-    // synthesize on the next open, exactly like a crash.
-    host.abort_all();
-    drop(host);
-    // The forwarder ends when the worker drops the event sender at
-    // wind-down; the writer ends when every writer_tx clone is gone.
-    drop(writer_tx);
+    // A panicked reader thread is a broken edge: exit nonzero. The
+    // stream's end is the other way out: when the endpoint behind the
+    // edge is done (the host's wind-down fired it, or a relaying
+    // host's served child died), waiting on a client that may never
+    // close stdin would hang the connection open-and-quiet — the end
+    // resolves the edge instead, after the forwarder's own end arm
+    // drained what landed.
+    let exit = tokio::select! {
+        biased;
+        code = reader_task => code.unwrap_or(1),
+        _ = end.cancelled() => 0,
+    };
+    // The client is gone (EOF, broken pipe, a dead reader thread, or
+    // the stream ended first): the endpoint's death act runs (see
+    // [`EdgeServing`]).
+    on_frontend_death();
+    // The control sender that stayed here is gone with this scope;
+    // the reader's clone lives and dies with its thread.
+    // The forwarder drops the event sender as it returns; the writer
+    // follows it out after writing everything it was fed.
     let _ = forwarder_task.await;
     let _ = writer_task.await;
     exit
@@ -108,10 +167,18 @@ async fn forward_events(
         if *gate.borrow() {
             break;
         }
-        // A dropped gate means the handshake was rejected: the
-        // rejection is the only frame the client ever sees.
-        if gate.changed().await.is_err() {
-            return;
+        tokio::select! {
+            changed = gate.changed() => {
+                // A dropped gate means the handshake was rejected: the
+                // rejection is the only frame the client ever sees.
+                if changed.is_err() {
+                    return;
+                }
+            }
+            // The stream ended before the handshake resolved: nothing
+            // forwards — not even the backlog (the endpoint behind the
+            // edge is gone).
+            _ = end.cancelled() => return,
         }
     }
     loop {
@@ -141,10 +208,9 @@ async fn forward_events(
 /// ack has been sent, releasing the event forwarder.
 fn read_loop<R: BufRead>(
     mut reader: R,
-    link: SessionCommandLink,
     dispatch: std::sync::Arc<dyn Fn(SessionCommand) + Send + Sync>,
     out: mpsc::UnboundedSender<ServerFrame>,
-    info: &SessionInfo,
+    boot_id: &str,
     gate: tokio::sync::watch::Sender<bool>,
 ) -> i32 {
     fn control(out: &mpsc::UnboundedSender<ServerFrame>, frame: ServerControlFrame) {
@@ -174,19 +240,24 @@ fn read_loop<R: BufRead>(
                         &out,
                         ServerControlFrame::InitializeAck {
                             protocol_version: PROTOCOL_VERSION,
-                            session_id: info.session_id.clone(),
+                            session_id: boot_id.to_string(),
                         },
                     );
                     // The ack is queued ahead of anything the forwarder
                     // will send: events may flow from here on.
                     let _ = gate.send(true);
                     initialized = true;
-                    // The pass streams onto the host's event channel,
-                    // so it lands after the ack (the gate just opened)
-                    // and after the startup frames already queued on
-                    // the same sender.
+                    // The requested pass rides the door's idempotent
+                    // path: `open_session` of an already-open session
+                    // re-replays it. Same frames, same order (after the
+                    // ack, after the startup frames already queued) —
+                    // and the same act works one process deeper, where
+                    // a relaying host forwards the command to the
+                    // session's own process.
                     if replay {
-                        link.replay(&info.session_id);
+                        dispatch(SessionCommand::OpenSession {
+                            id: boot_id.to_string(),
+                        });
                     }
                 } else {
                     control(
@@ -232,11 +303,45 @@ fn read_loop<R: BufRead>(
 
 /// Serialize frames one per line. A failing writer means the client is
 /// gone: stop writing, the shutdown path ends everything else.
-async fn write_loop<W: Write>(mut rx: mpsc::UnboundedReceiver<ServerFrame>, mut writer: W) {
-    while let Some(frame) = rx.recv().await {
-        let line = tabit_protocol::to_wire_line(&frame);
-        if writeln!(writer, "{line}").is_err() {
-            break;
+/// The single owner of stdout. Control frames win whenever both feeds
+/// are ready (biased, control first): the reader queues the ack
+/// BEFORE it opens the gate, and no event exists until the gate opens,
+/// so the ack is always written first — the law survives the
+/// two-channel shape. The loop ends when the event feed closes (the
+/// forwarder returned): the control feed's sender lives inside the
+/// reader thread, which parks in an uninterruptible read and must not
+/// hold the writer hostage.
+async fn write_loop<W: Write>(
+    mut control: mpsc::UnboundedReceiver<ServerFrame>,
+    mut events: mpsc::UnboundedReceiver<ServerFrame>,
+    mut writer: W,
+) {
+    // A closed control channel resolves `None` on EVERY poll — the
+    // arm must latch off (the biased poll would otherwise spin on it
+    // and starve the runtime). The loop ends when the event feed
+    // closes: the forwarder returned, the stream is drained.
+    let mut control_open = true;
+    loop {
+        tokio::select! {
+            biased;
+            frame = control.recv(), if control_open => {
+                match frame {
+                    Some(frame) => {
+                        let line = tabit_protocol::to_wire_line(&frame);
+                        if writeln!(writer, "{line}").is_err() {
+                            break;
+                        }
+                    }
+                    None => control_open = false,
+                }
+            }
+            frame = events.recv() => {
+                let Some(frame) = frame else { break };
+                let line = tabit_protocol::to_wire_line(&frame);
+                if writeln!(writer, "{line}").is_err() {
+                    break;
+                }
+            }
         }
     }
     let _ = writer.flush();

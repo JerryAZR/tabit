@@ -148,7 +148,12 @@ impl SubprocessBuilder {
     /// announced). Errors are display strings — the caller (a tool
     /// body) turns them into its failure report.
     pub async fn spawn(self) -> Result<SubprocessChild, String> {
-        let handle = self.spec.on_node(self.node).spawn().await?;
+        let handle = self
+            .spec
+            .on_node(self.node)
+            .spawn()
+            .await
+            .map_err(|e| e.to_string())?;
         Ok(SubprocessChild { handle })
     }
 }

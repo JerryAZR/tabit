@@ -280,7 +280,7 @@ impl Child {
             let mut handle = match spec.spawn().await {
                 Ok(handle) => handle,
                 Err(error) => {
-                    let _ = spawn_tx.send(Err(error));
+                    let _ = spawn_tx.send(Err(error.to_string()));
                     return;
                 }
             };
