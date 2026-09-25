@@ -402,11 +402,15 @@ consistency, never design fit (see the gate bullet below).
 ## Open items for the owner
 
 - **`skills_available` is session-level, not app-level** (owner
-  ruling 2026-09-25, deferred): the catalog should be stamped with
-  its session's stream and routed like any session event (skills
-  belong to the session's process — its cwd, its home), not emitted
-  backend-level by whatever process hosts the frontend. Fix when a
-  consumer makes it load-bearing; folding it needs the frontend's
-  skills state keyed per stream, and stamped catalogs from background
-  children (subagents in another cwd) must not clobber the
-  frontend's list.
+  ruling 2026-09-25, deferred): skills belong to the session's
+  process — a subagent working in another directory has a different
+  set (its own cwd and home) — while the wire carries one
+  backend-level catalog that silently presents whichever process
+  emitted it. The fix: stamp the catalog with its session's stream
+  and route it like any session event. Deferred by scheduling, not
+  by demand — a missing-or-wrong event cannot grow a consumer (the
+  chicken-or-egg problem), so nothing will ever ask for it. When it
+  lands: the frontend's skills state keys per stream, and a
+  background child's stamped catalog must not clobber the
+  frontend's list. Extension listings vary per directory the same
+  way but are display-only, so they stay backend-level.
