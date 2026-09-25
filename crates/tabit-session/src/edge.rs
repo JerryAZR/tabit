@@ -29,7 +29,16 @@ where
     R: BufRead + Send + 'static,
     W: Write + Send + 'static,
 {
-    let (writer_tx, writer_rx) = mpsc::unbounded_channel::<ServerFrame>();
+    // Two feeds into one writer: the reader's control frames (the
+    // ack, protocol errors) and the forwarder's events, each on its
+    // own channel. The writer ends when the FORWARDER's channel
+    // closes — the forwarder is the stream's producer, and its end is
+    // the deterministic one (the reader thread parks in a blocking
+    // read that nothing on this side can interrupt, and its sender
+    // clone would otherwise hold the writer open forever on the
+    // stream-end path below).
+    let (control_tx, control_rx) = mpsc::unbounded_channel::<ServerFrame>();
+    let (event_tx, event_rx) = mpsc::unbounded_channel::<ServerFrame>();
     let link = host.command_link();
     let info = host.info().clone();
 
@@ -42,17 +51,18 @@ where
     let (gate_tx, gate_rx) = tokio::sync::watch::channel(false);
 
     // The reader blocks on lines; the writer is the single owner of
-    // stdout, draining one ordered channel so the handshake ack can
-    // never land behind an event.
-    let reader_tx = writer_tx.clone();
+    // stdout, and control frames win whenever both feeds are ready
+    // (the reader queues the ack BEFORE it opens the gate, and no
+    // event exists until the gate opens — the ack-first law survives
+    // the two-channel shape).
     let dispatch = {
         let link = host.command_link();
         std::sync::Arc::new(move |command: SessionCommand| link.send(command))
     };
     let reader_task = tokio::task::spawn_blocking(move || {
-        read_loop(reader, link, dispatch, reader_tx, &info, gate_tx)
+        read_loop(reader, link, dispatch, control_tx, &info, gate_tx)
     });
-    let writer_task = tokio::spawn(write_loop(writer_rx, writer));
+    let writer_task = tokio::spawn(write_loop(control_rx, event_rx, writer));
 
     // The live forwarder: host events reach stdout as they happen, for
     // the whole connection — not only at wind-down. (v1 bug: events
@@ -61,15 +71,21 @@ where
     // already streaming.) The stream's end signal fires after every
     // worker's last event has landed (the host's wind-down awaits the
     // joins first), so draining what remains and stopping is lossless.
-    let forwarder_task = tokio::spawn(forward_events(
-        host.take_events(),
-        writer_tx.clone(),
-        gate_rx,
-        host.stream_end_signal(),
-    ));
+    let events = host.take_events();
+    let end = host.stream_end_signal();
+    let forwarder_task = tokio::spawn(forward_events(events, event_tx, gate_rx, end.clone()));
 
-    // A panicked reader thread is a broken edge: exit nonzero.
-    let exit = reader_task.await.unwrap_or(1);
+    // A panicked reader thread is a broken edge: exit nonzero. The
+    // stream's end is the other way out: when the host behind the
+    // edge is done (its wind-down fired), waiting on a client that
+    // may never close stdin would hang the connection open-and-quiet
+    // forever — the end resolves the edge instead, after the
+    // forwarder's own end arm drained what landed.
+    let exit = tokio::select! {
+        biased;
+        code = reader_task => code.unwrap_or(1),
+        _ = end.cancelled() => 0,
+    };
     // The client is gone (EOF, broken pipe, or a dead reader thread):
     // at a stdio edge that IS frontend death — abort every in-flight
     // run, discard every queue, and wind down (ruled 2026-08: the core
@@ -83,9 +99,8 @@ where
     // synthesize on the next open, exactly like a crash.
     host.abort_all();
     drop(host);
-    // The forwarder ends when the worker drops the event sender at
-    // wind-down; the writer ends when every writer_tx clone is gone.
-    drop(writer_tx);
+    // The forwarder ends when the stream ends; the writer follows it
+    // out after writing everything it was fed.
     let _ = forwarder_task.await;
     let _ = writer_task.await;
     exit
@@ -108,10 +123,18 @@ async fn forward_events(
         if *gate.borrow() {
             break;
         }
-        // A dropped gate means the handshake was rejected: the
-        // rejection is the only frame the client ever sees.
-        if gate.changed().await.is_err() {
-            return;
+        tokio::select! {
+            changed = gate.changed() => {
+                // A dropped gate means the handshake was rejected: the
+                // rejection is the only frame the client ever sees.
+                if changed.is_err() {
+                    return;
+                }
+            }
+            // The stream ended before the handshake resolved: nothing
+            // forwards — not even the backlog (the endpoint behind the
+            // edge is gone).
+            _ = end.cancelled() => return,
         }
     }
     loop {
@@ -232,11 +255,44 @@ fn read_loop<R: BufRead>(
 
 /// Serialize frames one per line. A failing writer means the client is
 /// gone: stop writing, the shutdown path ends everything else.
-async fn write_loop<W: Write>(mut rx: mpsc::UnboundedReceiver<ServerFrame>, mut writer: W) {
-    while let Some(frame) = rx.recv().await {
-        let line = tabit_protocol::to_wire_line(&frame);
-        if writeln!(writer, "{line}").is_err() {
-            break;
+/// The single owner of stdout, draining two feeds. Control frames
+/// (the reader's ack, its protocol errors) win whenever both are
+/// ready — the reader queues the ack before opening the gate, and no
+/// event exists until the gate opens, so the ack is always written
+/// first. The loop ends when the EVENT feed closes (the forwarder
+/// returned: the stream is drained); the control feed's sender lives
+/// inside the reader thread, which parks in an uninterruptible read
+/// and must not hold the writer hostage on the stream-end path. A
+/// closed control channel resolves `None` on every poll — the arm
+/// latches off (a biased poll would otherwise spin on it and starve
+/// the runtime).
+async fn write_loop<W: Write>(
+    mut control: mpsc::UnboundedReceiver<ServerFrame>,
+    mut events: mpsc::UnboundedReceiver<ServerFrame>,
+    mut writer: W,
+) {
+    let mut control_open = true;
+    loop {
+        tokio::select! {
+            biased;
+            frame = control.recv(), if control_open => {
+                match frame {
+                    Some(frame) => {
+                        let line = tabit_protocol::to_wire_line(&frame);
+                        if writeln!(writer, "{line}").is_err() {
+                            break;
+                        }
+                    }
+                    None => control_open = false,
+                }
+            }
+            frame = events.recv() => {
+                let Some(frame) = frame else { break };
+                let line = tabit_protocol::to_wire_line(&frame);
+                if writeln!(writer, "{line}").is_err() {
+                    break;
+                }
+            }
         }
     }
     let _ = writer.flush();
@@ -1445,6 +1501,47 @@ id = "m"
         drop(tx_in);
         assert_eq!(serve_task.await.unwrap(), 0);
         let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[tokio::test]
+    async fn the_stream_end_resolves_the_edge_without_client_eof() {
+        // The open-and-quiet bug: when the host behind the edge wound
+        // down while the client's input stayed open, serve parked on
+        // the reader forever — the connection hung silent with nothing
+        // left behind it. The stream's end must resolve the edge
+        // instead (the forwarder drains what landed first, then the
+        // writer follows it out). The wind-down here rides the polite
+        // door (close_commands) — the same token a worker-death
+        // wind-down would fire.
+        let (tx_in, rx_in) = std::sync::mpsc::channel::<String>();
+        let session = test_session("stream-end", vec![script("pong")]);
+        let mut handle = SessionHost::spawn(
+            session,
+            Vec::new(),
+            test_wiring(&test_dir("stream-end")),
+            test_data(unusable_create()),
+        );
+        handle.close_commands();
+        let out = SharedOut::default();
+        let code = tokio::time::timeout(
+            std::time::Duration::from_secs(5),
+            serve(
+                handle,
+                ChannelIn {
+                    lines: rx_in,
+                    buf: Vec::new(),
+                },
+                out.clone(),
+            ),
+        )
+        .await
+        .expect("the stream's end resolves the edge without EOF");
+        assert_eq!(code, 0);
+        // The client never closed — the input sender is still held
+        // here, so the resolution came from the stream's end, not an
+        // EOF read.
+        drop(tx_in);
+        let _ = std::fs::remove_dir_all(test_dir("stream-end"));
     }
 
     #[tokio::test]

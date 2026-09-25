@@ -28,6 +28,16 @@ could observe — gets an entry here in the same commit.
   ahead of `session_opened`. Build on the events' own identities
   (stamps, kinds), never on their position after the ack.
 
+## 2026-09-25 — behavior
+
+- **A backend-internal wind-down now ends the connection** (stdout
+  EOF, exit) instead of leaving it open-and-silent forever: when the
+  session host behind the edge winds down while the frontend's input
+  is still open, the edge resolves — the stream drains, then the
+  connection closes. Previously the backend sat quiet with the pipe
+  open and a frontend could hang on a dead connection. Treat EOF as
+  the disconnect it always meant to be. No `PROTOCOL_VERSION` bump.
+
 ## v18 (current)
 
 ### wire: event frames carry `ttl` — the node net's hop budget, verbatim (2026-09)

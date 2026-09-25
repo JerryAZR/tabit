@@ -1113,12 +1113,18 @@ fn run() -> Result<i32, String> {
             let data = host_data(&args, &registry, &store, &mounted);
             Ok(runtime.block_on(async {
                 let handle = structure.attach(session, startup_notes, data);
-                tabit_session::edge::serve(
+                let code = tabit_session::edge::serve(
                     handle,
                     std::io::BufReader::new(std::io::stdin()),
                     std::io::stdout(),
                 )
-                .await
+                .await;
+                // The edge's contract is the process boundary: exit
+                // here, never through the runtime drop (the reader
+                // thread parks in an uninterruptible read on the
+                // stream-end path, and a runtime drop would wait on it
+                // forever).
+                std::process::exit(code);
             }))
         }
         Mode::Print => {
