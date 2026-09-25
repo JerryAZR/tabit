@@ -173,10 +173,10 @@ Current workspace layout:
   answered through it, watches are subscriptions, the author's
   ask/emit/command ride the node's override-path ask, emission fan,
   and outbound command; owned children are lanes — the transit entry
-  is the relay, the ask surface (the shipped lift mode's
-  forward-and-relay default, the author answerers) lives at the
-  client's pump-order seam where the per-child scope is truth, death
-  sweeps the child's everything; the stdio carries exactly one
+  is the relay, the card surface (the shipped lift's forward default,
+  the author answerers) is ONE node-level registration covering every
+  child (the frame's origin separating the extension's own asks from
+  a child's arriving cards), death sweeps the child's everything; the stdio carries exactly one
   default subscription, the settle kind — the card law's close
   vocabulary always crosses) — so the author
   surface stays

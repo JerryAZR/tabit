@@ -65,7 +65,8 @@ use tabit_ext::protocol::{
 use tabit_protocol::points::HookPoint;
 use tabit_protocol::{EventFrame, SessionCommand, SessionEvent, tags};
 use tabit_wire::asks::Outcome;
-use tabit_wire::node::{Channel, Node, parse_shared};
+use tabit_wire::client::ChildSpec;
+use tabit_wire::node::{Channel, KIND_INTERACTION, Node, parse_shared};
 use tokio::io::AsyncBufReadExt;
 
 /// The extension protocol this SDK speaks — must match the host's
@@ -74,7 +75,7 @@ const PROTOCOL_VERSION: u32 = 5;
 
 pub mod children;
 
-pub use children::{Child, ChildOptions};
+pub use children::Child;
 
 /// The SDK's one runtime (multi-thread): the pipe loop, every
 /// invocation task, the ask promise bridges, and the owned
@@ -98,6 +99,7 @@ pub struct Extension {
     tools: Vec<ToolDef>,
     consults: Vec<ConsultDef>,
     watches: Vec<WatchDef>,
+    asks: Vec<ErasedWatch>,
 }
 
 impl Default for Extension {
@@ -113,6 +115,7 @@ impl Extension {
             tools: Vec::new(),
             consults: Vec::new(),
             watches: Vec::new(),
+            asks: Vec::new(),
         }
     }
 
@@ -131,6 +134,27 @@ impl Extension {
     /// Register one consultation (see [`consult`]).
     pub fn consult(mut self, consult: ConsultDef) -> Self {
         self.consults.push(consult);
+        self
+    }
+
+    /// Register one ask answerer for arriving cards — the card
+    /// surface's author arm. Cards reach this extension's node from
+    /// every owned child at once (one registration covers them all —
+    /// the frame's stamp attributes the child); the first
+    /// registration also retires the shipped default, which crosses
+    /// cards verbatim to the host (a custom beside the default would
+    /// double-surface the card). Answerers stack — any may answer
+    /// ([`Ctx::answer`]); the child's hub takes the first arrival,
+    /// and a late answer is a tolerated no-op. Answerers hear the
+    /// card and its settle (the pair — whoever surfaces a card hears
+    /// it close).
+    pub fn on_ask<F, Fut>(mut self, body: F) -> Self
+    where
+        F: Fn(Ctx, EventFrame) -> Fut + Send + Sync + 'static,
+        Fut: Future<Output = ()> + Send + 'static,
+    {
+        let body: ErasedWatch = Arc::new(move |ctx, frame| Box::pin(body(ctx, frame)));
+        self.asks.push(body);
         self
     }
 
@@ -251,10 +275,12 @@ where
     }
 }
 
-/// A watch handler after erasure: a cloned context plus the typed
-/// event, observing (nothing owed, nothing cancelled).
+/// A watch handler after erasure: a cloned context plus the whole
+/// frame — the stamp is the attribution (which session, which child),
+/// and stripping it at the boundary would lose exactly that
+/// (owner ruling 2026-09-25).
 type ErasedWatch =
-    Arc<dyn Fn(Ctx, SessionEvent) -> Pin<Box<dyn Future<Output = ()> + Send>> + Send + Sync>;
+    Arc<dyn Fn(Ctx, EventFrame) -> Pin<Box<dyn Future<Output = ()> + Send>> + Send + Sync>;
 
 /// One declared watch. The kind must name a real event kind (a
 /// wire tag, [`tabit_protocol::tags`]) — a typo'd kind watches
@@ -264,10 +290,12 @@ pub struct WatchDef {
     body: ErasedWatch,
 }
 
-/// Declare a watch on one event kind: an async observer.
+/// Declare a watch on one event kind: an async observer over the
+/// whole frame (the stamp is the attribution — which session, which
+/// child).
 pub fn watch<F, Fut>(kind: &str, body: F) -> WatchDef
 where
-    F: Fn(Ctx, SessionEvent) -> Fut + Send + Sync + 'static,
+    F: Fn(Ctx, EventFrame) -> Fut + Send + Sync + 'static,
     Fut: Future<Output = ()> + Send + 'static,
 {
     if !SessionEvent::is_known_tag(kind) {
@@ -401,6 +429,30 @@ impl Ctx {
     /// open; the call's completion sweeps it with its settle
     /// announced, so the card closes everywhere), and on the pipe's
     /// death (`None` too — fail closed).
+    /// Begin an owned child over the shared spec — the spawner's
+    /// preset: the host's own executable (the host IS the binary) in
+    /// the given cwd. Chain the child-role knobs (model, toolset,
+    /// budget, persistence) and hand the spec to
+    /// [`Child::create`](crate::Child::create).
+    pub fn child(&self, cwd: std::path::PathBuf) -> Result<ChildSpec, String> {
+        Ok(ChildSpec::new(
+            std::path::PathBuf::from(self.core_path()?),
+            cwd,
+        ))
+    }
+
+    /// Answer one arriving card by id — the ask table's claim: the
+    /// transit entry's delivery writes the response line down the
+    /// asking child's stdin. Races are the co-frontend law: the
+    /// child takes the first answer to land; one that arrives after
+    /// another (or after the question died) is a tolerated no-op.
+    pub fn answer(&self, id: &str, payload: Value) {
+        let _ = self
+            .shared
+            .node
+            .answer(id, KIND_INTERACTION, Box::new(payload));
+    }
+
     pub async fn ask(&self, ui_type: &str, payload: Value) -> Option<Value> {
         let owner = self
             .correlation
@@ -578,8 +630,14 @@ pub fn serve(extension: Extension) -> ! {
         tools,
         consults,
         watches,
+        asks,
     } = extension;
-    let (tools, consults, watches) = (Arc::new(tools), Arc::new(consults), Arc::new(watches));
+    let (tools, consults, watches, asks) = (
+        Arc::new(tools),
+        Arc::new(consults),
+        Arc::new(watches),
+        Arc::new(asks),
+    );
     runtime().block_on(async move {
         let node = Arc::new(Node::new(&format!("ext-{}", std::process::id())));
         // The mint-law policy for a guest: the only sender that can
@@ -644,10 +702,11 @@ pub fn serve(extension: Extension) -> ! {
         shared.write_frame(&report);
 
         // The watch surface: one subscription per watched kind on the
-        // guest's node (the host mirrors the ack's kinds across the
-        // pipe; the arrivals fan here). Each handler runs on its own
-        // task — observation never blocks the loop. A card-kind watch
-        // carries its settle co-subscription (the node's card law).
+        // guest's node (the host mirrors the report's kinds across
+        // the pipe; the arrivals fan here) — one registration covers
+        // every child this extension ever spawns, the frame's stamp
+        // carrying the attribution. Each handler runs on its own
+        // task — observation never blocks the loop.
         for watch in watches.iter() {
             let kind = watch.kind.clone();
             let body = watch.body.clone();
@@ -655,9 +714,62 @@ pub fn serve(extension: Extension) -> ! {
             node.subscribe(&kind, "watch", move |frame: &EventFrame| {
                 let shared = watch_shared.clone();
                 let body = body.clone();
-                let event = frame.event.clone();
-                spawn_observation(shared, move |ctx| body(ctx, event));
+                let frame = frame.clone();
+                spawn_observation(shared, move |ctx| body(ctx, frame));
             });
+        }
+
+        // The card surface: ONE node-level subscription pair covering
+        // every owned child (owner ruling 2026-09-25 — registration is
+        // router config, a single subscription spans multiple
+        // children; the frame's stamp attributes which). A card
+        // arriving with no author answerers crosses verbatim (the
+        // shipped lift: the host's frontend surfaces it, its settle
+        // crosses back by the stdio's settle subscription); the first
+        // author answerer retires that default (a custom beside it
+        // would double-surface the card), and answerers then stack —
+        // any may answer (`Ctx::answer`), the child's hub takes the
+        // first arrival, a late answer a tolerated no-op. Settles
+        // reach the answerers too (the pair — whoever surfaces a card
+        // hears it close) but never cross here: the stdio's own
+        // settle subscription carries them.
+        {
+            let surface_asks = asks.clone();
+            let surface_shared = shared.clone();
+            let card_surface = move |frame: &EventFrame| {
+                // Origin-stamped requests are this extension's own
+                // speech (its `ask`s — already crossing by the named
+                // receiver); only a child's arriving card, unstamped
+                // by origin, lifts to the host here.
+                if frame.origin.is_some() {
+                    return;
+                }
+                if surface_asks.is_empty() {
+                    if frame.event.tag() == tags::INTERACTION_REQUEST {
+                        // The shipped lift: the verbatim crossing —
+                        // the write alone; the intake already fanned
+                        // and taught.
+                        surface_shared.stdio.send_event(&frame.clone());
+                    }
+                    return;
+                }
+                for body in surface_asks.iter() {
+                    let (shared, frame, body) =
+                        (surface_shared.clone(), frame.clone(), body.clone());
+                    spawn_observation(shared, move |ctx| body(ctx, frame));
+                }
+            };
+            let asks_for_settled = asks.clone();
+            let settled_shared = shared.clone();
+            let settled_surface = move |frame: &EventFrame| {
+                for body in asks_for_settled.iter() {
+                    let (shared, frame, body) =
+                        (settled_shared.clone(), frame.clone(), body.clone());
+                    spawn_observation(shared, move |ctx| body(ctx, frame));
+                }
+            };
+            node.subscribe(tags::INTERACTION_REQUEST, "card-surface", card_surface);
+            node.subscribe(tags::INTERACTION_SETTLED, "card-surface", settled_surface);
         }
 
         // The loop: the frozen dialect's lanes first (the pipe's own

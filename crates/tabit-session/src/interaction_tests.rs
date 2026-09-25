@@ -433,7 +433,9 @@ async fn frontend_death_with_a_card_open_winds_the_worker_down() {
         if matches!(
             frame,
             Some(tabit_protocol::EventFrame {
-                origin: None,
+                // The hub's own asks are origin-stamped (the asking
+                // participant's speech) — the kind is what identifies
+                // the card.
                 event: SessionEvent::InteractionRequest { .. },
                 ..
             })

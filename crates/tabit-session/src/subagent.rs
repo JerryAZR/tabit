@@ -109,13 +109,18 @@ impl SpawnContext {
         &self.parent_cwd
     }
 
-    /// Begin a subprocess child: the bridge builder. The OS enforces
-    /// the cwd, the child builds its own truthful preamble in that
-    /// cwd, and a persisted child is just a session file under its
-    /// own cwd. The child announces itself (`--parent` speaks at the
-    /// source of truth); routing registers at spawn.
-    pub fn spawn_subprocess(&self) -> crate::subprocess::SubprocessBuilder {
-        crate::subprocess::SubprocessBuilder::new(self)
+    /// Begin a subprocess child: the spawner's preset over the shared
+    /// spec — the exe, this parent's identity (`--parent` speaks at
+    /// the source of truth), the extensions root, and the lane mount
+    /// on the assembly's node. The caller chains the child-role knobs
+    /// (cwd, model, toolset, budget, persistence) and spawns; the
+    /// child announces itself and routing registers at spawn.
+    pub fn spawn_subprocess(&self) -> tabit_wire::client::ChildSpec {
+        let parts = self.parts();
+        tabit_wire::client::ChildSpec::new(parts.exe.clone(), self.parent_cwd().to_path_buf())
+            .parent(self.parent_id().to_string())
+            .extensions(parts.extensions.clone())
+            .on_node(parts.node.clone())
     }
 
     /// Drive a subprocess child under the abort leash: the task
@@ -128,11 +133,11 @@ impl SpawnContext {
     /// [`RunSummary`] to a tool result is the caller's policy.
     pub async fn drive_subprocess(
         &self,
-        child: &mut crate::subprocess::SubprocessChild,
+        child: &mut tabit_wire::client::ChildHandle,
         task: Message,
         token: Option<CancellationToken>,
     ) -> RunSummary {
-        child.drive(task, token).await
+        crate::subprocess::drive_child(child, task, token).await
     }
 }
 
@@ -175,7 +180,7 @@ pub async fn subagent(
     // in its own cwd (truthful by construction); the task crosses as
     // the first message. The call's correlation id crosses too: the
     // child's announce pairs its session with this very tool call.
-    let mut builder = ctx
+    let mut spec = ctx
         .spawn_subprocess()
         .cwd(
             cwd.map(PathBuf::from)
@@ -185,9 +190,9 @@ pub async fn subagent(
         .max_turns(parts.max_turns)
         .ephemeral(true);
     if let Some(id) = context.get::<InternalCallId>() {
-        builder = builder.parent_call(id.0.clone());
+        spec = spec.parent_call(id.0.clone());
     }
-    let mut child = builder.spawn().await.map_err(ToolExecutionError::other)?;
+    let mut child = spec.spawn().await.map_err(ToolExecutionError::other)?;
     let summary = ctx
         .drive_subprocess(&mut child, Message::user(task), token)
         .await;

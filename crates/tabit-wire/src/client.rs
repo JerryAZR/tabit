@@ -606,6 +606,18 @@ impl ChildHandle {
         let _ = (&mut self.reaper).await;
     }
 
+    /// Run one task to the child's terminal — THE drive recipe every
+    /// driver shares (the session's subagent tool, the extension
+    /// SDK's owned children): the task crosses as the first message,
+    /// the shared settle fold drives to the terminal under the abort
+    /// leash, and the frames are already fanning on their own
+    /// stamps. Mapping the settlement to the driver's vocabulary is
+    /// the caller's policy.
+    pub async fn run(&mut self, task: String, token: Option<CancellationToken>) -> Settlement {
+        self.prompt(task);
+        self.settle(token).await
+    }
+
     /// Submit the child's task (one user message) — the first half of
     /// [`Self::settle`]'s recipe, split so a driver can steer between
     /// them.

@@ -54,10 +54,10 @@ fn main() {
                     )))
                 },
             ))
-            .watch(watch(tags::INTERACTION_SETTLED, |ctx, event| async move {
+            .watch(watch(tags::INTERACTION_SETTLED, |ctx, frame| async move {
                 // The watch lane's demo: observe a settled card and emit
                 // a notice into the grammar (surfaced origin-stamped).
-                let SessionEvent::InteractionSettled { id } = event else {
+                let SessionEvent::InteractionSettled { id } = frame.event else {
                     return;
                 };
                 ctx.emit(SessionEvent::error_session(format!(

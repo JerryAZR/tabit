@@ -16,7 +16,7 @@
 // author-facing API stays `args["field"]`.
 #![allow(clippy::indexing_slicing)]
 
-use tabit_ext_sdk::{Child, ChildOptions, Extension, Output, schema_for, tool, watch};
+use tabit_ext_sdk::{Child, Extension, Output, schema_for, tool, watch};
 use tabit_protocol::SessionEvent;
 
 fn main() {
@@ -24,7 +24,7 @@ fn main() {
         Extension::new()
             .watch(watch(
                 tabit_protocol::tags::SESSION_OPENED,
-                |ctx, _event| async move {
+                |ctx, _frame| async move {
                     ctx.emit(SessionEvent::error_session(
                         "child-ext saw the child open its session",
                     ));
@@ -37,11 +37,14 @@ fn main() {
                 |args, ctx| async move {
                     let task = args["task"].as_str().unwrap_or_default().to_string();
                     let cwd = std::env::current_dir().unwrap_or_else(|_| ".".into());
-                    let mut options = ChildOptions::new(cwd);
+                    let mut spec = ctx.child(cwd)?;
                     if let Some(model) = args["model"].as_str() {
-                        options = options.model(model);
+                        let (provider, id) = model
+                            .split_once('/')
+                            .ok_or("the model reference must be `provider/model`")?;
+                        spec = spec.model(tabit_protocol::ModelSelection::new(provider, id));
                     }
-                    let mut child = Child::create(&ctx, options)
+                    let mut child = Child::create(&ctx, spec)
                         .await
                         .map_err(|error| format!("the child did not start: {error}"))?;
                     match child.run(task).await {

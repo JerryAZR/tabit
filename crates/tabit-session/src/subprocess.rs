@@ -1,215 +1,64 @@
-//! The subprocess bridge: the second execution substrate's parent
-//! half (ROADMAP item 5 — a first-class substrate, not a fallback),
-//! now the session-side adapter over the shared frontend-role client
-//! ([`tabit_wire::client`] — the extraction the SDK round builds on).
+//! The subprocess bridge: the session-side policy over the shared
+//! frontend-role client ([`tabit_wire::client`] — one upper layer,
+//! both drivers). A subprocess child is the tabit binary itself in
+//! `--json` child role, spawned with the child's cwd as the
+//! **process** cwd; the shared client owns the whole child
+//! management (the spec's knobs, the spawn, the lane mount inside
+//! the pump, the `run` drive recipe, the reaper).
 //!
-//! A subprocess child is the tabit binary itself in `--json` child
-//! role, spawned with the child's cwd as the **process** cwd. The
-//! shared client owns the wire (handshake, pump, reaper); this
-//! adapter owns the session machinery hung on its seams:
+//! What lives here is the session's POLICY only:
 //!
-//! - **the child's lane on the node** ([`ChildSpec::on_node`] — the
-//!   client's own mount): the pump arms the lane at the handshake's
-//!   resolution and intakes every stamped frame through it — one
-//!   act, three laws served. The frame fans to whoever subscribes
-//!   (the frontend's forwarder — forward, don't re-stamp: the
-//!   child's stamps are already its session ids); its stamp teaches
-//!   the learning table which child subtree owns the id, so a
-//!   command addressed to a grandchild walks hop by hop; and an ask
-//!   minted in the child's subtree registers its answer route home
-//!   through the same lane. The child's backend-level frames (the
-//!   handshake, its catalog, its unstamped errors) are consumed in
-//!   the client — they would collide with the parent's
-//!   connection-level fold. The exit sweeps the lane — learned
-//!   routes and in-flight transit asks go with it (the death's
-//!   settles announce, law 5).
-//! - **the drive fold**: one task to a terminal under the abort
-//!   leash, mapped to the session's [`RunSummary`].
+//! - **the spawner's preset**: [`SpawnContext::spawn_subprocess`]
+//!   hands back a [`ChildSpec`] with this parent's identity applied
+//!   (the exe, the parent id, the extensions root, the shared node's
+//!   lane mount) — the caller chains the child-role knobs and
+//!   spawns. An extension building the same tool applies its own
+//!   preset (its host's exe, its node) over the same spec type.
+//! - **the drive fold's session mapping**: one task to a terminal
+//!   under the abort leash ([`ChildHandle::run`] — the shared
+//!   recipe), mapped to the session's [`RunSummary`].
 //! - **abort is a courtesy with a deadline** (owner ruling 2026-09):
-//!   on the leash's cancel the bridge forwards `abort`, closes stdin
-//!   (the death contract — the child aborts, flushes, and exits on
-//!   its own), and returns `Aborted` immediately; a reaper bounds the
-//!   child's exit with the tree kill. The graceful path buys the
-//!   write-behind flush for persisted children; it never buys the
-//!   parent's latency.
+//!   on the leash's cancel the shared fold forwards `abort`, closes
+//!   stdin (the death contract — the child aborts, flushes, and
+//!   exits on its own), and returns `Aborted` immediately; a reaper
+//!   bounds the child's exit with the tree kill. The graceful path
+//!   buys the write-behind flush for persisted children; it never
+//!   buys the parent's latency.
 
 use crate::session::RunSummary;
-use crate::subagent::SpawnContext;
 use rig_agent::completion::Message;
-use std::sync::Arc;
-use tabit_protocol::{ModelSelection, SessionEvent};
-use tabit_wire::client::ChildSpec;
-use tabit_wire::node::Node;
-
+use tabit_protocol::SessionEvent;
 use tokio_util::sync::CancellationToken;
 
-/// Shapes one subprocess child before the spawn: the child-role flags
-/// as builder knobs over the shared [`ChildSpec`]. Everything omitted
-/// inherits the default (ephemeral, the parent's cwd).
-pub struct SubprocessBuilder {
-    spec: ChildSpec,
-    node: Arc<Node>,
-}
-
-impl SubprocessBuilder {
-    /// Begin from a spawner's context — the exe, the parent identity,
-    /// the shared node, and the child's flags all come from the
-    /// assembly's parts.
-    pub fn new(ctx: &SpawnContext) -> Self {
-        let parts = ctx.parts();
-        let spec = ChildSpec::new(parts.exe.clone(), ctx.parent_cwd().to_path_buf())
-            .parent(ctx.parent_id().to_string())
-            .extensions(parts.extensions.clone());
-        Self {
-            spec,
-            node: parts.node.clone(),
+/// Drive one spawned child to its terminal and map the settlement to
+/// the session's vocabulary — [`SpawnContext::drive_subprocess`]'s
+/// body. The shared fold runs the wire recipe (the terminal scan,
+/// the abort courtesy, the crash synthesis); the child announced
+/// itself at spawn (`--parent` spoke at the source), and its frames
+/// are already on the frontend's channel.
+pub(crate) async fn drive_child(
+    handle: &mut tabit_wire::client::ChildHandle,
+    task: Message,
+    token: Option<CancellationToken>,
+) -> RunSummary {
+    let settlement = handle.run(message_text(&task), token).await;
+    match settlement {
+        tabit_wire::client::Settlement::Completed { output, events } => RunSummary {
+            outcome: crate::session::RunOutcome::Completed,
+            output,
+            events,
+        },
+        tabit_wire::client::Settlement::Aborted { output, events } => RunSummary {
+            outcome: crate::session::RunOutcome::Aborted,
+            output,
+            events,
+        },
+        tabit_wire::client::Settlement::FailedWith { message, events } => {
+            RunFailed::synthesized(message, events)
         }
-    }
-
-    /// The child's working directory — the process cwd; every tool
-    /// and path inside resolves against it by OS fact.
-    pub fn cwd(mut self, cwd: std::path::PathBuf) -> Self {
-        self.spec = self.spec.cwd(cwd);
-        self
-    }
-
-    /// The child's model selection (`provider/model` crosses as the
-    /// `--model` ref; the thinking level is the child config's).
-    pub fn model(mut self, selection: ModelSelection) -> Self {
-        self.spec = self.spec.model(selection);
-        self
-    }
-
-    /// Restrict the child's toolset to these names (the child's own
-    /// default toolset already excludes the subagent tool — recursion
-    /// by omission); an unknown name fails the child loudly at
-    /// startup.
-    pub fn tools(mut self, names: Vec<String>) -> Self {
-        self.spec = self.spec.tools(names);
-        self
-    }
-
-    /// Tools the child must NOT run — the deny twin of
-    /// [`SubprocessBuilder::tools`], crossing as `--without`. Applied
-    /// child-side over the full toolset (core and extension proxies
-    /// alike): a spawner offering a read-write agent denies its own
-    /// delegate tool, so the child cannot recurse through it.
-    pub fn without(mut self, names: Vec<String>) -> Self {
-        self.spec = self.spec.without(names);
-        self
-    }
-
-    /// A persisted child: an ordinary session file under the child's
-    /// cwd, resumable through `open_session` like any other. The
-    /// default (and this flag's opposite) is ephemeral.
-    pub fn ephemeral(mut self, ephemeral: bool) -> Self {
-        self.spec = self.spec.ephemeral(ephemeral);
-        self
-    }
-
-    /// Resume the stored session at `path` instead of starting fresh.
-    pub fn session(mut self, path: std::path::PathBuf) -> Self {
-        self.spec = self.spec.session(path);
-        self
-    }
-
-    /// The per-child model-call budget.
-    pub fn max_turns(mut self, max_turns: usize) -> Self {
-        self.spec = self.spec.max_turns(max_turns);
-        self
-    }
-
-    /// The child's preamble — crosses as `--preamble` and replaces
-    /// the default base (identity and standing body). The environment
-    /// block, AGENTS.md files, and skills catalog append as usual.
-    /// The spawner owns the child's voice; tabit still owns the
-    /// truthful context. Absent, the child builds its own default
-    /// preamble in its cwd.
-    pub fn preamble(mut self, text: String) -> Self {
-        self.spec = self.spec.preamble(text);
-        self
-    }
-
-    /// The spawning tool call's correlation id — crosses as
-    /// `--parent-call` so the child's `session_opened` announce pairs
-    /// with the `ToolCall` event the frontend already holds (exact
-    /// under concurrent subagent calls). Absent for spawners outside
-    /// a model turn.
-    pub fn parent_call(mut self, id: String) -> Self {
-        self.spec = self.spec.parent_call(id);
-        self
-    }
-
-    /// Run the child: spawn, handshake, mount the lane. The mount is
-    /// the client's ([`ChildSpec::on_node`]): the lane arms inside
-    /// the frame pump at the handshake's resolution — no frame can
-    /// beat it — every stamped arrival intakes through it, and the
-    /// child's exit sweeps it (routes, transit asks, settles
-    /// announced). Errors are display strings — the caller (a tool
-    /// body) turns them into its failure report.
-    pub async fn spawn(self) -> Result<SubprocessChild, String> {
-        let handle = self.spec.on_node(self.node).spawn().await?;
-        Ok(SubprocessChild { handle })
-    }
-}
-
-/// One live subprocess child: the drive surface over the shared
-/// handle. Dropping it closes the child (stdin EOF, bounded by the
-/// reaper's tree kill).
-pub struct SubprocessChild {
-    handle: tabit_wire::client::ChildHandle,
-}
-
-impl SubprocessChild {
-    /// The child session's id — its stream stamp and routing address.
-    pub fn id(&self) -> &str {
-        self.handle.id()
-    }
-
-    /// Send the task and drive to the child's terminal under the
-    /// leash — [`SpawnContext::drive_subprocess`]'s body: the
-    /// shared fold runs the wire recipe (the terminal scan, the
-    /// abort courtesy, the crash synthesis); this adapter maps the
-    /// settlement to the session's [`RunSummary`]. The child
-    /// announces itself (its `--parent` flag spoke at the source);
-    /// its frames are already on the frontend's channel.
-    pub(crate) async fn drive(
-        &mut self,
-        task: Message,
-        token: Option<CancellationToken>,
-    ) -> crate::session::RunSummary {
-        self.handle.prompt(message_text(&task));
-        let settlement = self.handle.settle(token).await;
-        match settlement {
-            tabit_wire::client::Settlement::Completed { output, events } => RunSummary {
-                outcome: crate::session::RunOutcome::Completed,
-                output,
-                events,
-            },
-            tabit_wire::client::Settlement::Aborted { output, events } => RunSummary {
-                outcome: crate::session::RunOutcome::Aborted,
-                output,
-                events,
-            },
-            tabit_wire::client::Settlement::FailedWith { message, events } => {
-                RunFailed::synthesized(message, events)
-            }
-            tabit_wire::client::Settlement::Crashed { events } => {
-                RunFailed::synthesized("the subagent process died unexpectedly".to_string(), events)
-            }
+        tabit_wire::client::Settlement::Crashed { events } => {
+            RunFailed::synthesized("the subagent process died unexpectedly".to_string(), events)
         }
-    }
-
-    /// Wait for the reaper to finish (tests and callers that want the
-    /// process fully reclaimed).
-    pub async fn wait_exit(&mut self) {
-        self.handle.wait_exit().await;
-    }
-
-    /// Begin the child's shutdown (idempotent): stdin closes, the
-    /// reaper's grace bounds the exit with the tree kill.
-    pub fn close(&self) {
-        self.handle.close();
     }
 }
 

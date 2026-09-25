@@ -689,9 +689,15 @@ impl<C: Routed> Node<C> {
                 // awaiter reads dismissal.
                 events.dispatch_with_extra(&settled, &announce_to);
             });
+        // The request is the asking participant's own speech, and it
+        // says so: origin carries the attribution (the routing
+        // generalization's law), which also lets a fan-side card
+        // surface tell it from a child's arriving card (unstamped —
+        // the child session emitted it) and never double-cross its
+        // own node's asks.
         let request = EventFrame {
             stream: stream.cloned(),
-            origin: None,
+            origin: Some(owner.to_string()),
             ttl: Some(HOP_BUDGET),
             event: SessionEvent::InteractionRequest {
                 id,
