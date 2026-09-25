@@ -10,7 +10,7 @@ use std::time::Duration;
 use serde_json::{Value, json};
 use tabit_protocol::{EventFrame, SessionCommand, SessionEvent, StreamId, tags, to_wire_line};
 
-use crate::node::{Channel, Inbound, Node, parse_shared};
+use crate::node::{Channel, Inbound, Locality, Node, parse_shared};
 
 /// What one stub functional layer saw: the events its all-kinds
 /// subscription heard, and the commands its learned mailbox received.
@@ -63,7 +63,7 @@ fn stub_layer(node: &Node, name: &str) -> (Channel, Saw) {
                 .push(command.tag().to_string())
         },
     );
-    node.subscribe_channel_all(&channel);
+    node.subscribe_channel_all(Locality::Both, &channel);
     (channel, saw)
 }
 
@@ -113,7 +113,7 @@ fn wire(parent: &Arc<Node>, child: &Arc<Node>, name: &str) -> Channel {
     let _ = upstream.set(parent_at_child.clone());
 
     // The child's policy: relay everything upstream.
-    child.subscribe_channel_all(&parent_at_child);
+    child.subscribe_channel_all(Locality::Both, &parent_at_child);
     child_at_parent
 }
 
@@ -136,11 +136,11 @@ fn events_fan_by_type_and_compose() {
 
     let seen: Arc<Mutex<Vec<&'static str>>> = Arc::new(Mutex::new(Vec::new()));
     let kind_sink = seen.clone();
-    node.subscribe(tags::ERROR, "watcher", move |_| {
+    node.subscribe(tags::ERROR, "watcher", Locality::Both, move |_| {
         kind_sink.lock().expect("test lock").push("kind")
     });
     let relay_sink = seen.clone();
-    node.subscribe_all("relay", move |_| {
+    node.subscribe_all("relay", Locality::Both, move |_| {
         relay_sink.lock().expect("test lock").push("wildcard")
     });
 
@@ -247,7 +247,7 @@ fn a_local_ask_awaits_its_promise_and_the_late_answer_drops() {
 
     let awaiter = node.ask(
         "layer",
-        &StreamId::new("s-1"),
+        Some(&StreamId::new("s-1")),
         "native:select_one",
         json!({"body": "allow this call?"}),
     );
@@ -309,7 +309,7 @@ fn an_arriving_ask_routes_its_answer_home() {
 
     let awaiter = child.ask(
         "child-layer",
-        &StreamId::new("sess-child"),
+        Some(&StreamId::new("sess-child")),
         "native:select_any",
         json!({"body": "from the child"}),
     );
@@ -358,7 +358,7 @@ fn a_death_sweeps_routes_subscriptions_and_asks() {
     child.emit(&child_layer, stamped("sess-child"));
     let _open = child.ask(
         "child-layer",
-        &StreamId::new("sess-child"),
+        Some(&StreamId::new("sess-child")),
         "native:select_any",
         json!({}),
     );
@@ -453,7 +453,7 @@ fn unstamped_arrivals_are_attributed_and_stamped_cross_verbatim() {
 
     let seen: Arc<Mutex<Vec<String>>> = Arc::new(Mutex::new(Vec::new()));
     let sink = seen.clone();
-    parent.subscribe_all("recorder", move |frame| {
+    parent.subscribe_all("recorder", Locality::Both, move |frame| {
         let origin = frame.origin.clone().unwrap_or_else(|| "-".to_string());
         sink.lock()
             .expect("test lock")
@@ -579,13 +579,13 @@ fn the_ingress_law_breaks_mirror_relay_loops() {
 
     // The pathological wiring the net test found: the parent mirrors
     // the ask kind down, the child relays everything up.
-    parent.subscribe_channel("interaction_request", &child_at_parent);
+    parent.subscribe_channel("interaction_request", Locality::Both, &child_at_parent);
 
     let (_parent_layer, parent_saw) = stub_layer(&parent, "parent-layer");
     let (_child_layer, _child_saw) = stub_layer(&child, "child-layer");
     drop(child.ask(
         "child-layer",
-        &StreamId::new("sess-child"),
+        Some(&StreamId::new("sess-child")),
         "native:select_any",
         json!({"body": "asked"}),
     ));
@@ -618,7 +618,7 @@ fn a_run_death_retracts_asks_but_keeps_routes() {
 
     let awaiter = node.ask(
         "run-1",
-        &StreamId::new("sess-1"),
+        Some(&StreamId::new("sess-1")),
         "native:select_any",
         json!({}),
     );
@@ -665,7 +665,7 @@ fn a_routing_settle_clears_entries_on_arrival() {
     // clearing its routed entry.
     drop(child.ask(
         "child-layer",
-        &StreamId::new("sess-child"),
+        Some(&StreamId::new("sess-child")),
         "native:select_any",
         json!({"body": "cleared en route"}),
     ));
@@ -725,11 +725,11 @@ fn the_ttl_tripwire_kills_cross_node_loops() {
     });
 
     let counter = laps.clone();
-    a.subscribe_all("recorder", move |_| {
+    a.subscribe_all("recorder", Locality::Both, move |_| {
         *counter.lock().expect("test lock") += 1;
     });
-    a.subscribe_channel_all(&a_fwd);
-    b.subscribe_channel_all(&b_fwd);
+    a.subscribe_channel_all(Locality::Both, &a_fwd);
+    b.subscribe_channel_all(Locality::Both, &b_fwd);
 
     // A local emission enters the cycle; the budget bounds it.
     let (a_layer, _a_saw) = stub_layer(&a, "a-layer");
@@ -768,7 +768,7 @@ fn a_subscriber_may_emit_from_inside_dispatch() {
     let seen: Arc<Mutex<Vec<String>>> = Arc::new(Mutex::new(Vec::new()));
 
     let sink = seen.clone();
-    node.subscribe(tags::ERROR, "watcher", move |frame| {
+    node.subscribe(tags::ERROR, "watcher", Locality::Both, move |frame| {
         sink.lock()
             .expect("test lock")
             .push(frame.event.tag().to_string());
@@ -778,7 +778,7 @@ fn a_subscriber_may_emit_from_inside_dispatch() {
     {
         let emitter = node.clone();
         let layer = layer.clone();
-        node.subscribe_all("deriver", move |frame| {
+        node.subscribe_all("deriver", Locality::Both, move |frame| {
             // Hear an error, derive a run_finished — an emit while
             // dispatch holds the wildcard iteration.
             if matches!(frame.event, SessionEvent::Error { .. }) {
@@ -838,7 +838,7 @@ fn a_death_sweep_settles_cards_not_held_round_trips() {
     // A card beside it, for contrast.
     drop(node.ask(
         "lane",
-        &StreamId::new("s-1"),
+        Some(&StreamId::new("s-1")),
         "native:select_any",
         json!({}),
     ));
@@ -867,23 +867,55 @@ fn a_death_sweep_settles_cards_not_held_round_trips() {
     let _ = layer;
 }
 
-/// The co-subscription rule: subscribing the request kind also
-/// subscribes the settle — the card lifecycle is one interest.
+/// The fine-grained wire (owner ruling 2026-09-25, with locality):
+/// subscribing the request kind hears requests ALONE — the card
+/// lifecycle's pairing is the caller's declaration, never a bundle
+/// the node enforces. A surface that must hear the close subscribes
+/// the settle kind itself.
 #[test]
-fn subscribing_requests_hears_the_settles() {
+fn the_card_pair_is_the_callers_declaration_not_a_bundle() {
     let node = Arc::new(Node::new("core"));
-    let seen: Arc<Mutex<Vec<String>>> = Arc::new(Mutex::new(Vec::new()));
-    let sink = seen.clone();
-    node.subscribe("interaction_request", "cards", move |frame| {
-        sink.lock()
-            .expect("test lock")
-            .push(frame.event.tag().to_string());
-    });
+    let requests_only: Arc<Mutex<Vec<String>>> = Arc::new(Mutex::new(Vec::new()));
+    let sink = requests_only.clone();
+    node.subscribe(
+        "interaction_request",
+        "requests-only",
+        Locality::Both,
+        move |frame| {
+            sink.lock()
+                .expect("test lock")
+                .push(frame.event.tag().to_string());
+        },
+    );
+    let both_kinds: Arc<Mutex<Vec<String>>> = Arc::new(Mutex::new(Vec::new()));
+    let sink = both_kinds.clone();
+    let paired = sink.clone();
+    node.subscribe(
+        "interaction_request",
+        "paired",
+        Locality::Both,
+        move |frame| {
+            sink.lock()
+                .expect("test lock")
+                .push(frame.event.tag().to_string());
+        },
+    );
+    node.subscribe(
+        "interaction_settled",
+        "paired",
+        Locality::Both,
+        move |frame| {
+            paired
+                .lock()
+                .expect("test lock")
+                .push(frame.event.tag().to_string());
+        },
+    );
 
     let (layer, saw) = stub_layer(&node, "layer");
     let awaiter = node.ask(
         "layer",
-        &StreamId::new("s-1"),
+        Some(&StreamId::new("s-1")),
         "native:select_any",
         json!({}),
     );
@@ -897,15 +929,20 @@ fn subscribing_requests_hears_the_settles() {
     );
     drop(awaiter.blocking_recv());
 
-    let seen = seen.lock().expect("test lock").clone();
     assert_eq!(
-        seen,
+        requests_only.lock().expect("test lock").clone(),
+        vec!["interaction_request".to_string()],
+        "the request-only subscription heard no settle"
+    );
+    assert_eq!(
+        both_kinds.lock().expect("test lock").clone(),
         vec![
             "interaction_request".to_string(),
             "interaction_settled".to_string()
         ],
-        "the one interest heard the card open and close"
+        "the declared pair heard the card open and close"
     );
+    let _ = layer;
 }
 
 /// The mint law, containment option (2026-09 ruling): a sender that
@@ -983,7 +1020,7 @@ fn an_arriving_settle_dismisses_the_origin_without_reannouncing() {
 
     let awaiter = node.ask(
         "run-1",
-        &StreamId::new("s-1"),
+        Some(&StreamId::new("s-1")),
         "native:select_any",
         json!({}),
     );
@@ -1090,26 +1127,25 @@ fn a_hand_emitted_ask_on_a_local_channel_has_no_answer_home() {
     );
 }
 
-/// The override path (2026-09 ruling): a local emission may name
-/// additional receivers — delivered directly, beside the subscriber
-/// fan, so a node whose stdio subscribes to nothing still speaks
-/// across it.
+/// The locality ruling's emission half: a pipe whose channel
+/// subscribes `Local` hears the node's own speech by subscription
+/// alone — the workaround's need ("a stdio that subscribes to
+/// nothing still speaks") is now the subscription itself.
 #[test]
-fn an_emission_can_name_additional_receivers() {
+fn a_local_emission_crosses_a_local_subscribed_pipe() {
     let node = Arc::new(Node::new("ext"));
     let (layer, saw) = stub_layer(&node, "layer");
 
-    // The stdio: a line channel subscribed to NOTHING (the opt-in
-    // ruling — hearing only).
+    // The stdio: a line channel subscribed to LOCAL speech alone.
     let up_the_pipe: Arc<Mutex<Vec<String>>> = Arc::new(Mutex::new(Vec::new()));
     let sink = up_the_pipe.clone();
     let stdio = Channel::line("stdio", move |line: &str| {
         sink.lock().expect("test lock").push(line.to_string());
     });
+    node.subscribe_channel_all(Locality::Local, &stdio);
 
-    node.emit_to(
+    node.emit(
         &layer,
-        &[stdio],
         EventFrame {
             stream: None,
             origin: None,
@@ -1118,26 +1154,29 @@ fn an_emission_can_name_additional_receivers() {
         },
     );
 
-    // It crossed the pipe AND the fan reached the subscriber.
+    // It crossed the pipe AND the fan reached the other subscriber —
+    // once each, no dedup machinery anywhere.
     assert_eq!(up_the_pipe.lock().expect("test lock").len(), 1);
     assert!(
         saw.has("error:session@-"),
-        "the fan is untouched by the override: {:?}",
+        "the fan is untouched by the crossing: {:?}",
         saw.events()
     );
 }
 
-/// The dedup: a channel that would also hear via subscription —
-/// because it is one — receives exactly once.
+/// The locality ruling's no-default-forward half: a Local-subscribed
+/// pipe hears local speech and NOT arrivals — a child's traffic
+/// never auto-crosses it — while a Both subscriber hears either
+/// door. One subscription states the whole policy.
 #[test]
-fn additional_receivers_dedupe_against_subscriptions() {
-    let node = Arc::new(Node::new("core"));
+fn a_local_subscribed_pipe_hears_local_speech_only() {
+    let node: Arc<Node> = Arc::new(Node::new("core"));
     let (layer, _saw) = stub_layer(&node, "layer");
 
-    let heard: Arc<Mutex<Vec<String>>> = Arc::new(Mutex::new(Vec::new()));
-    let sink = heard.clone();
-    let both = Channel::local(
-        "both",
+    let local_heard: Arc<Mutex<Vec<String>>> = Arc::new(Mutex::new(Vec::new()));
+    let sink = local_heard.clone();
+    let local_pipe = Channel::local(
+        "local-pipe",
         move |frame: &EventFrame| {
             sink.lock()
                 .expect("test lock")
@@ -1145,24 +1184,40 @@ fn additional_receivers_dedupe_against_subscriptions() {
         },
         |_| {},
     );
-    // The channel is subscribed AND will be named additional: it
-    // must see the frame once (dedup by identity).
-    node.subscribe_channel(tags::ERROR, &both);
+    node.subscribe_channel_all(Locality::Local, &local_pipe);
 
-    node.emit_to(
-        &layer,
-        &[both],
-        EventFrame {
-            stream: None,
-            origin: None,
-            ttl: None,
-            event: SessionEvent::error_session("once".to_string()),
-        },
+    let both_heard = Arc::new(Mutex::new(0u32));
+    let sink = both_heard.clone();
+    node.subscribe_all("recorder", Locality::Both, move |_| {
+        *sink.lock().expect("test lock") += 1
+    });
+
+    let frame = EventFrame {
+        stream: None,
+        origin: None,
+        ttl: None,
+        event: SessionEvent::error_session("once".to_string()),
+    };
+    // Local speech: the pipe hears it.
+    node.emit(&layer, frame.clone());
+    assert_eq!(
+        local_heard.lock().expect("test lock").as_slice(),
+        ["channel:error".to_string()].as_slice(),
+        "own speech crossed the local-subscribed pipe"
+    );
+    // An arrival: the pipe does not carry it up (the old override
+    // path's opt-in crossing is now the absence of a subscription).
+    let lane = Channel::line("child", |_| {});
+    node.intake(&lane, Inbound::Event(frame));
+    assert_eq!(
+        local_heard.lock().expect("test lock").len(),
+        1,
+        "a child's arrival never auto-crosses the local-subscribed pipe"
     );
     assert_eq!(
-        heard.lock().expect("test lock").as_slice(),
-        ["channel:error".to_string()].as_slice(),
-        "a channel that hears via subscription AND is named additional sees the frame once"
+        *both_heard.lock().expect("test lock"),
+        2,
+        "the Both subscriber heard either door"
     );
 }
 
@@ -1181,7 +1236,7 @@ fn the_ingress_skip_matches_identity_not_owner_strings() {
     // same owner string — the ingress skip must not touch it (the
     // string-based skip once ate exactly this shape).
     let sink = heard.clone();
-    node.subscribe(tags::RUN_FINISHED, "child-1", move |_| {
+    node.subscribe(tags::RUN_FINISHED, "child-1", Locality::Both, move |_| {
         sink.lock().expect("test lock").push("callback".to_string());
     });
 
@@ -1207,9 +1262,10 @@ fn the_ingress_skip_matches_identity_not_owner_strings() {
 }
 
 /// The ruling's whole scenario at an extension-shaped node: the
-/// stdio subscribes to nothing, so a child's arrivals do not
-/// auto-cross it — while the layer's own speech (and its manual
-/// forward of a captured frame) leaves by naming it.
+/// stdio subscribes to local speech alone, so a child's arrivals do
+/// not auto-cross it — while the layer's own speech crosses by the
+/// subscription, and a manual forward of a captured frame is the
+/// verbatim write.
 #[test]
 fn an_extension_shaped_node_speaks_but_does_not_relay() {
     let node: Arc<Node> = Arc::new(Node::new("ext"));
@@ -1219,21 +1275,26 @@ fn an_extension_shaped_node_speaks_but_does_not_relay() {
     let stdio = Channel::line("stdio", move |line: &str| {
         sink.lock().expect("test lock").push(line.to_string());
     });
+    node.subscribe_channel_all(Locality::Local, &stdio);
 
-    // The layer captures message-shaped events (its opt-in watch) and
-    // holds the stdio for its own speech.
+    // The layer captures message-shaped events (its opt-in watch).
     let captured: Arc<Mutex<Vec<String>>> = Arc::new(Mutex::new(Vec::new()));
     let sink = captured.clone();
-    node.subscribe("text_delta", "capture", move |frame: &EventFrame| {
-        let note = match &frame.event {
-            SessionEvent::TextDelta { text, .. } => text.clone(),
-            event => event.tag().to_string(),
-        };
-        sink.lock().expect("test lock").push(note);
-    });
+    node.subscribe(
+        "text_delta",
+        "capture",
+        Locality::Both,
+        move |frame: &EventFrame| {
+            let note = match &frame.event {
+                SessionEvent::TextDelta { text, .. } => text.clone(),
+                event => event.tag().to_string(),
+            };
+            sink.lock().expect("test lock").push(note);
+        },
+    );
 
     // A child's frame arrives from its lane: the capture hears it,
-    // the stdio (subscribed to nothing) does not carry it up.
+    // the stdio (local-hearing) does not carry it up.
     let child_lane = Channel::line("child", |_| {});
     node.intake(
         &child_lane,
@@ -1257,23 +1318,19 @@ fn an_extension_shaped_node_speaks_but_does_not_relay() {
         "nothing auto-crosses the stdio"
     );
 
-    // The layer's manual forward of the captured frame: re-emitted
-    // with the stdio as an additional receiver, FROM the lane the
-    // frame arrived on (re-teaching the lane is idempotent; teaching
-    // the stdio would hijack the child's route).
-    node.emit_to(
-        &child_lane,
-        &[stdio],
-        EventFrame {
-            stream: Some(StreamId::new("child-sess")),
-            origin: None,
-            ttl: None,
-            event: SessionEvent::TextDelta {
-                turn_id: "t".to_string(),
-                text: "the child streams".to_string(),
-            },
+    // The layer's manual forward of the captured frame: the verbatim
+    // write — the intake already taught the route and fanned the
+    // subscribers, so this is the pipe-crossing alone, never a second
+    // delivery.
+    stdio.send_event(&EventFrame {
+        stream: Some(StreamId::new("child-sess")),
+        origin: None,
+        ttl: None,
+        event: SessionEvent::TextDelta {
+            turn_id: "t".to_string(),
+            text: "the child streams".to_string(),
         },
-    );
+    });
     assert_eq!(
         up_the_pipe.lock().expect("test lock").len(),
         1,
@@ -1291,13 +1348,14 @@ fn manual_forwards_are_verbatim_from_the_lane_or_re_stamped_from_the_layer() {
     let node: Arc<Node> = Arc::new(Node::new("ext"));
     let (layer, saw) = stub_layer(&node, "layer");
 
-    // The ext's stdio up to its host: subscribed to nothing, a pure
-    // writer (what crosses is what the layer sends it).
+    // The ext's stdio up to its host: subscribed to local speech
+    // alone — the layer's emissions cross by it, arrivals do not.
     let up: Arc<Mutex<Vec<String>>> = Arc::new(Mutex::new(Vec::new()));
     let sink = up.clone();
     let stdio = Channel::line("stdio", move |line: &str| {
         sink.lock().expect("test lock").push(line.to_string());
     });
+    node.subscribe_channel_all(Locality::Local, &stdio);
 
     // The child's lane: its writer records routed commands (the
     // "child received this" proof).
@@ -1321,7 +1379,7 @@ fn manual_forwards_are_verbatim_from_the_lane_or_re_stamped_from_the_layer() {
         up.lock().expect("test lock").is_empty(),
         "the arrival did not auto-cross"
     );
-    node.emit_to(&child_lane, std::slice::from_ref(&stdio), child_frame);
+    stdio.send_event(&child_frame);
     assert_eq!(
         up.lock().expect("test lock").len(),
         1,
@@ -1348,9 +1406,8 @@ fn manual_forwards_are_verbatim_from_the_lane_or_re_stamped_from_the_layer() {
     // Re-stamped: the ext speaks as itself, from its layer — upstream
     // learns the ext, and its id routes to the layer (the
     // interception surface), never to the child.
-    node.emit_to(
+    node.emit(
         &layer,
-        std::slice::from_ref(&stdio),
         EventFrame {
             stream: Some(StreamId::new("ext")),
             origin: None,
@@ -1439,13 +1496,13 @@ fn an_owner_holds_a_kind_once() {
     let lane = Channel::line("watcher", move |line: &str| {
         writer.lock().expect("test lock").push(line.to_string());
     });
-    node.subscribe_channel(tags::INTERACTION_REQUEST, &lane);
-    node.subscribe_channel(tags::INTERACTION_SETTLED, &lane);
+    node.subscribe_channel(tags::INTERACTION_REQUEST, Locality::Both, &lane);
+    node.subscribe_channel(tags::INTERACTION_SETTLED, Locality::Both, &lane);
 
     let (layer, saw) = stub_layer(&node, "layer");
     let awaiter = node.ask(
         "layer",
-        &StreamId::new("s-1"),
+        Some(&StreamId::new("s-1")),
         "native:select_any",
         json!({}),
     );
@@ -1548,13 +1605,13 @@ fn a_guest_origin_dying_after_the_answer_still_closes_the_card() {
     );
 }
 
-/// The override-path ask (the SDK's own card): the request AND the
-/// settle announce cross to the additional receivers — a pipe that
-/// subscribes to nothing still hears both — the local fan hears the
-/// frame once (the dedup), and the card carries no stream stamp (a
+/// The extension's own ask over a local-subscribed pipe: the request
+/// AND the settle announce cross by the subscription (whoever carries
+/// the card by local speech carries its close), the local fan hears
+/// the frame once, and the card carries no stream stamp (a
 /// session-less asker; the answer routes by id).
 #[test]
-fn ask_on_crosses_the_request_and_the_settle_to_the_additionals() {
+fn an_ask_crosses_the_request_and_the_settle_to_a_local_subscribed_pipe() {
     let node = Arc::new(Node::new("ext"));
     let (_layer, saw) = stub_layer(&node, "watches");
 
@@ -1563,10 +1620,10 @@ fn ask_on_crosses_the_request_and_the_settle_to_the_additionals() {
     let pipe = Channel::line("host", move |line: &str| {
         sink.lock().expect("test lock").push(line.to_string());
     });
+    node.subscribe_channel_all(Locality::Local, &pipe);
 
-    let awaiter = node.ask_on(
+    let awaiter = node.ask(
         "call-1",
-        &[pipe],
         None,
         "native:select_any",
         json!({"body": "the extension asks"}),
@@ -1592,7 +1649,8 @@ fn ask_on_crosses_the_request_and_the_settle_to_the_additionals() {
     );
 
     // The answer walks home by id; the settle announce crosses the
-    // same pipe — whoever heard the card by that fan hears it close.
+    // same pipe — whoever carried the card by local speech carries
+    // its close.
     node.intake(
         &Channel::local("host", |_| {}, |_| {}),
         Inbound::Command(SessionCommand::InteractionResponse {

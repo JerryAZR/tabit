@@ -73,7 +73,7 @@ impl InteractionHub {
     async fn ask_once(&self, ui_type: &str, payload: serde_json::Value) -> InteractionOutcome {
         let awaiter = self.inner.node.ask(
             self.inner.stream.as_str(),
-            &self.inner.stream,
+            Some(&self.inner.stream),
             ui_type,
             payload,
         );
@@ -99,6 +99,7 @@ impl UserInteraction for InteractionHub {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use tabit_wire::node::Locality;
     use serde_json::json;
     use tabit_protocol::{EventFrame, SessionCommand, SessionEvent};
 
@@ -114,7 +115,7 @@ mod tests {
         let seen: std::sync::Arc<std::sync::Mutex<Vec<String>>> =
             std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
         let sink = seen.clone();
-        node.subscribe_all("recorder", move |frame: &EventFrame| {
+        node.subscribe_all("recorder", Locality::Both, move |frame: &EventFrame| {
             let note = match &frame.event {
                 SessionEvent::InteractionRequest { id, ui_type, .. } => {
                     format!("request:{id}:{ui_type}")

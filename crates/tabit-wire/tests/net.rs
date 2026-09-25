@@ -27,6 +27,7 @@ use std::time::{Duration, Instant};
 use serde_json::{Value, json};
 use tabit_protocol::{EventFrame, SessionCommand, SessionEvent, StreamId};
 use tabit_wire::client::ChildSpec;
+use tabit_wire::node::Locality;
 use tabit_wire::node::{Channel, Inbound, Node, parse_shared};
 
 fn stub_mode() -> bool {
@@ -67,7 +68,7 @@ fn stub_node_role() {
             let _ = handle.flush();
         }
     });
-    node.subscribe_channel_all(&to_parent);
+    node.subscribe_channel_all(Locality::Both, &to_parent);
 
     // The layer: its mailbox is the learned route for the stub's own
     // session (the startup emission teaches it), and a received
@@ -100,19 +101,24 @@ fn stub_node_role() {
     // The auto-answer: every arriving ask is answered.
     let answer_node = node.clone();
     let answer_upstream = to_parent.clone();
-    node.subscribe("interaction_request", "stub", move |frame: &EventFrame| {
-        let SessionEvent::InteractionRequest { id, .. } = &frame.event else {
-            return;
-        };
-        answer_node.intake(
-            &answer_upstream,
-            Inbound::Command(SessionCommand::InteractionResponse {
-                session: None,
-                id: id.clone(),
-                payload: json!({"text": "from the stub"}),
-            }),
-        );
-    });
+    node.subscribe(
+        "interaction_request",
+        "stub",
+        Locality::Both,
+        move |frame: &EventFrame| {
+            let SessionEvent::InteractionRequest { id, .. } = &frame.event else {
+                return;
+            };
+            answer_node.intake(
+                &answer_upstream,
+                Inbound::Command(SessionCommand::InteractionResponse {
+                    session: None,
+                    id: id.clone(),
+                    payload: json!({"text": "from the stub"}),
+                }),
+            );
+        },
+    );
 
     // Startup announcement: the parent learns the stub's session.
     node.emit(
@@ -157,7 +163,7 @@ fn spawn_stub() -> PipeNet {
 
     // The recorder: everything the parent hears, as its wire line.
     let sink = saw.clone();
-    parent.subscribe_all("recorder", move |frame: &EventFrame| {
+    parent.subscribe_all("recorder", Locality::Both, move |frame: &EventFrame| {
         sink.lock()
             .expect("test lock")
             .push(tabit_protocol::to_wire_line(frame));
@@ -187,7 +193,7 @@ fn spawn_stub() -> PipeNet {
             let _ = handle.flush();
         })
     };
-    parent.subscribe_channel("interaction_request", &stub_at_parent);
+    parent.subscribe_channel("interaction_request", Locality::Both, &stub_at_parent);
 
     // The reader: the stub's stdout lines arrive through the intake.
     let reader_node = parent.clone();
@@ -256,7 +262,7 @@ fn the_net_laws_hold_over_real_pipes() {
     // promise resolves; the settle announces.
     let awaiter = net.parent.ask(
         "frontend",
-        &StreamId::new("stub-sess"),
+        Some(&StreamId::new("stub-sess")),
         "native:select_any",
         json!({"body": "asked over a pipe"}),
     );
@@ -346,7 +352,7 @@ fn the_childs_burst_frame_reaches_the_mounted_lane() {
     let parent: Arc<Node> = Arc::new(Node::new("parent"));
     let saw: Arc<Mutex<Vec<String>>> = Arc::new(Mutex::new(Vec::new()));
     let sink = saw.clone();
-    parent.subscribe_all("recorder", move |frame: &EventFrame| {
+    parent.subscribe_all("recorder", Locality::Both, move |frame: &EventFrame| {
         sink.lock().expect("test lock").push(format!(
             "{}@{}",
             frame.event.tag(),
@@ -407,7 +413,7 @@ fn a_mismatched_report_is_a_kill() {
     let parent: Arc<Node> = Arc::new(Node::new("parent"));
     let saw: Arc<Mutex<Vec<String>>> = Arc::new(Mutex::new(Vec::new()));
     let sink = saw.clone();
-    parent.subscribe_all("recorder", move |frame: &EventFrame| {
+    parent.subscribe_all("recorder", Locality::Both, move |frame: &EventFrame| {
         sink.lock()
             .expect("test lock")
             .push(frame.event.tag().to_string());

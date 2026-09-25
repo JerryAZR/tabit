@@ -880,13 +880,17 @@ impl Recorded {
     fn host(&self) -> tabit_ext::LaunchContext {
         let events = self.events.clone();
         let node = std::sync::Arc::new(tabit_wire::node::Node::new("test"));
-        node.subscribe_all("recorder", move |frame: &tabit_protocol::EventFrame| {
-            let origin = frame.origin.clone().unwrap_or_else(|| "-".to_string());
-            events.lock().unwrap().push(format!(
-                "{origin}|{}",
-                serde_json::to_string(&frame.event).unwrap()
-            ));
-        });
+        node.subscribe_all(
+            "recorder",
+            tabit_wire::node::Locality::Both,
+            move |frame: &tabit_protocol::EventFrame| {
+                let origin = frame.origin.clone().unwrap_or_else(|| "-".to_string());
+                events.lock().unwrap().push(format!(
+                    "{origin}|{}",
+                    serde_json::to_string(&frame.event).unwrap()
+                ));
+            },
+        );
         self.node.get_or_init(|| node.clone());
         tabit_ext::LaunchContext {
             node,

@@ -8,22 +8,23 @@
 //!
 //! The net's dataflow law, once each:
 //!
-//! 1. **Events route by type** to subscribers (they compose), every
-//!    stamped arrival **teaches the learning table** the stream's
-//!    channel — including the in-process functional layer's own
-//!    emissions — and **never return to the channel they arrived
-//!    on** (the Ethernet ingress law; local loopback — the layer
-//!    hearing its own emissions — is untouched, for the skip applies
-//!    to arrivals only). Node-originated frames carry a **hop
+//! 1. **Events route by kind and locality** to subscribers (they
+//!    compose), every stamped arrival **teaches the learning table**
+//!    the stream's channel — including the in-process functional
+//!    layer's own emissions — and **never return to the channel they
+//!    arrived on** (the Ethernet ingress law; local loopback — the
+//!    layer hearing its own emissions — is untouched, for the skip
+//!    applies to arrivals only). Node-originated frames carry a **hop
 //!    budget** (the TTL tripwire): each crossing decrements, expiry
 //!    drops the frame loudly — a misconfigured routing loop,
-//!    normally never fired. A **local emission may name additional
-//!    receivers** (the 2026-09 override-path ruling): channels the
-//!    frame is delivered to directly, beside the fan, deduplicated
-//!    against subscription — the way a node whose stdio subscribes
-//!    to nothing still speaks across it (subscription is
-//!    hearing-only; the additional-receiver fact never crosses the
-//!    wire).
+//!    normally never fired. **Every subscription states its
+//!    locality** (owner ruling 2026-09-25, replacing the origin-blind
+//!    fan and the additional-receiver override it forced): a
+//!    subscriber hears this node's own emissions (`Local`), traffic
+//!    that arrived on a channel (`Remote`), or both. Locality is a
+//!    fact of the dispatch site — the node's two doors, `emit` and
+//!    `intake` — never a frame field, so a pipe's crossing policy is
+//!    plain subscription config with no machinery beside the fan.
 //! 2. **Session-addressed commands route by the learning table** —
 //!    one lookup, no separate worker map; a miss is the uniform
 //!    unstamped `error { kind: session }` (the failure belongs to no
@@ -73,7 +74,7 @@ use std::sync::{Arc, Mutex};
 
 use serde_json::Value;
 use tabit_log::lock::lock;
-use tabit_protocol::{EventFrame, SessionCommand, SessionEvent, StreamId, tags, to_wire_line};
+use tabit_protocol::{EventFrame, SessionCommand, SessionEvent, StreamId, to_wire_line};
 
 use crate::asks::{Outcome, PendingAsks, unanswer};
 use crate::router::{Routed, Router};
@@ -81,6 +82,8 @@ use crate::router::{Routed, Router};
 #[cfg(test)]
 #[path = "node_tests.rs"]
 mod tests;
+
+pub use crate::router::Locality;
 
 /// The interaction ask's kind: the tag of the response that answers
 /// it (the correlation-kind law, law 5). Public for the guest-side
@@ -199,18 +202,11 @@ impl Channel {
     }
 
     /// Hand one event to this channel directly, with no fan and no
-    /// teaching — the arrival lane's own crossing (a verbatim
-    /// forward): the intake already taught the route and fanned the
-    /// local subscribers, so this is the write alone, never a second
-    /// delivery. The in-crate twin of the additional-receiver fan's
-    /// direct leg ([`Router::dispatch_with_extra`]).
+    /// teaching — a verbatim crossing: the arrival lane's forward
+    /// (the intake already taught the route and fanned the local
+    /// subscribers, so this is the write alone, never a second
+    /// delivery), or a policy surface lifting a card onto a pipe.
     pub fn send_event(&self, frame: &EventFrame) {
-        (self.event)(frame);
-    }
-
-    /// Hand one event to this channel directly — the additional-
-    /// receiver fan's primitive ([`Router::dispatch_with_extra`]).
-    pub(crate) fn deliver_event(&self, frame: &EventFrame) {
         (self.event)(frame);
     }
 
@@ -336,84 +332,80 @@ impl<C: Routed> Node<C> {
     // --- The functional layer's mounts ---
 
     /// Subscribe to one event kind (many may hold a kind; all run).
-    /// The card lifecycle is one interest: subscribing
-    /// `interaction_request` also subscribes
-    /// `interaction_settled` — whoever displays a card also hears it
-    /// close (the co-subscription rule, node-enforced so the wire
-    /// stays fine-grained — no bundles).
-    pub fn subscribe<F>(&self, kind: &str, owner: &str, callback: F)
+    /// The locality says which door the frames must come through —
+    /// there is no default; every registration states it. A surface
+    /// that must also hear the card's close subscribes the settle
+    /// kind itself — the wire stays fine-grained, the pairing is the
+    /// caller's declaration.
+    pub fn subscribe<F>(&self, kind: &str, owner: &str, locality: Locality, callback: F)
     where
         F: Fn(&EventFrame) + Send + Sync + 'static,
     {
-        let callback = Arc::new(callback);
-        let paired = callback.clone();
         self.events
-            .register(kind, owner, move |frame| callback(frame));
-        if kind == tags::INTERACTION_REQUEST {
-            self.events
-                .register(tags::INTERACTION_SETTLED, owner, move |frame| paired(frame));
-        }
+            .register(kind, owner, locality, move |frame| callback(frame));
     }
 
     /// Subscribe a channel to one event kind — the common wiring (a
     /// watched kind mirrored down a pipe; a local layer hearing a
-    /// kind). The channel's owner is the sweep key.
-    pub fn subscribe_channel(&self, kind: &str, channel: &Channel) {
+    /// kind). The channel's owner is the sweep key; the locality is
+    /// the pipe's crossing policy.
+    pub fn subscribe_channel(&self, kind: &str, locality: Locality, channel: &Channel) {
         let owner = channel.owner().to_string();
         let id = channel.id();
         let channel = channel.clone();
-        let paired = channel.clone();
         self.events
-            .register_channel(kind, &owner, Some(id), move |frame| {
-                channel.deliver_event(frame);
+            .register_channel(kind, &owner, Some(id), locality, move |frame| {
+                channel.send_event(frame);
             });
-        if kind == tags::INTERACTION_REQUEST {
-            self.events.register_channel(
-                tags::INTERACTION_SETTLED,
-                &owner,
-                Some(id),
-                move |frame| {
-                    paired.deliver_event(frame);
-                },
-            );
-        }
     }
 
     /// Subscribe to every event kind (the relays, taps, and
-    /// forward-everything policies).
-    pub fn subscribe_all<F>(&self, owner: &str, callback: F)
+    /// forward-everything policies) — every kind, from the declared
+    /// doors.
+    pub fn subscribe_all<F>(&self, owner: &str, locality: Locality, callback: F)
     where
         F: Fn(&EventFrame) + Send + Sync + 'static,
     {
-        self.events.register_all(owner, callback);
+        self.events.register_all(owner, locality, callback);
     }
 
-    /// Subscribe a channel to every event kind — the upstream relay
-    /// (a child forwarding all its traffic to its parent's pipe).
-    pub fn subscribe_channel_all(&self, channel: &Channel) {
+    /// Subscribe a channel to every event kind from the declared
+    /// doors — the frontend stream (both doors) or a pipe's own-
+    /// speech crossing (local alone).
+    pub fn subscribe_channel_all(&self, locality: Locality, channel: &Channel) {
         let owner = channel.owner().to_string();
         let id = channel.id();
         let channel = channel.clone();
         self.events
-            .register_all_channel(&owner, Some(id), move |frame| channel.deliver_event(frame));
+            .register_all_channel(&owner, Some(id), locality, move |frame| {
+                channel.send_event(frame);
+            });
     }
 
     /// Handle one command type on this node (the functional layer's
     /// registrations — `new_session`, a dialect's tool lanes, ...).
+    /// Commands have ONE door: they arrive on a channel and route by
+    /// type here — a local layer ISSUES commands by
+    /// [`Channel::send_command`] (crossing the wire, routing at the
+    /// receiving node), never through this table — so the
+    /// registration is remote-hearing by construction, stated once
+    /// here rather than vacuously at every caller.
     pub fn handle<F>(&self, tag: &str, owner: &str, handler: F)
     where
         F: Fn(&C) + Send + Sync + 'static,
     {
-        self.commands.register(tag, owner, handler);
+        self.commands
+            .register(tag, owner, Locality::Remote, handler);
     }
 
     /// Handle every command type (the one-intake functional layers —
-    /// a session host that prefers its own dispatch).
+    /// a session host that prefers its own dispatch). Remote-hearing
+    /// by construction, as [`Self::handle`] documents.
     pub fn handle_all<F>(&self, owner: &str, handler: F)
     where
         F: Fn(&C) + Send + Sync + 'static,
     {
-        self.commands.register_all(owner, handler);
+        self.commands.register_all(owner, Locality::Remote, handler);
     }
 
     // --- The routing layer's acts ---
@@ -507,14 +499,14 @@ impl<C: Routed> Node<C> {
                             Outcome::Orphaned(_) => {
                                 // The sweep is the single producer
                                 // for this ask: the origin is gone.
-                                events.dispatch(&settled);
+                                events.dispatch(&settled, Locality::Local);
                             }
                         },
                         Some(Box::new(move || {
                             // The answered-but-unsettled sweep: the
                             // origin died between the answer and its
                             // announce — the settle is ours to make.
-                            obligation_events.dispatch(&swept_settled);
+                            obligation_events.dispatch(&swept_settled, Locality::Local);
                         })),
                     );
                     if !registered {
@@ -531,43 +523,33 @@ impl<C: Routed> Node<C> {
                         return;
                     }
                 }
-                self.events.dispatch_skipping(&frame, &[from.id()]);
+                self.events
+                    .dispatch_skipping(&frame, &[from.id()], Locality::Remote);
             }
             Inbound::Command(command) => self.route_command(command),
         }
     }
 
-    /// The local functional layer emits: teach the learning table the
-    /// emitting channel (law 1 includes the in-process layer), stamp
-    /// the hop budget, then fan to every subscriber — a
-    /// locally-originated frame floods all ports (the ingress law
-    /// applies to arrivals only; local loopback — the layer hearing
-    /// its own emissions — is untouched by it). Ask minting is NOT
-    /// this path: local askers hold promises from [`Node::ask`],
-    /// silent round-trips hold through [`Node::hold`].
+    /// The local functional layer emits — the node's LOCAL door: teach
+    /// the learning table the emitting channel (law 1 includes the
+    /// in-process layer), stamp the hop budget, then fan to every
+    /// subscriber whose declared locality hears local speech. Which
+    /// pipes a local emission crosses is the subscription's to say
+    /// — a pipe whose channel subscribes `Local` hears it; one that
+    /// does not, does not (the 2026-09-25 locality ruling, replacing
+    /// the additional-receiver override that worked around the
+    /// origin-blind fan). Ask minting is NOT this path: local askers
+    /// hold promises from [`Node::ask`], silent round-trips hold
+    /// through [`Node::hold`].
     pub fn emit(&self, from: &Channel, frame: EventFrame) {
-        self.emit_to(from, &[], frame);
-    }
-
-    /// [`Node::emit`] with the override path (2026-09 ruling): a
-    /// local emission may name **additional receivers** — channels
-    /// the frame is delivered to directly, beside the subscriber fan.
-    /// This is how a node whose stdio subscribes to nothing still
-    /// speaks across it (an extension's own asks and events leave by
-    /// naming the stdio; its children's arrivals do not auto-cross —
-    /// subscription stays hearing-only). Deduplicated by channel
-    /// identity: a channel that would also hear via subscription is
-    /// skipped there, so no receiver sees the frame twice. The
-    /// additional-receiver fact is a parameter of the emission, never
-    /// a frame field — it does not exist on the wire.
-    pub fn emit_to(&self, from: &Channel, additional: &[Channel], mut frame: EventFrame) {
+        let mut frame = frame;
         if frame.ttl.is_none() {
             frame.ttl = Some(HOP_BUDGET);
         }
         if let Some(stream) = frame.stream.as_ref().map(StreamId::as_str) {
             lock(&self.learned).insert(stream.to_string(), from.clone());
         }
-        self.events.dispatch_with_extra(&frame, additional);
+        self.events.dispatch(&frame, Locality::Local);
     }
 
     /// A command crossing this node: response-type claims the ask
@@ -580,16 +562,19 @@ impl<C: Routed> Node<C> {
                     // A wrong-kind answer is consumed loudly, never
                     // delivered to a closure expecting another shape
                     // — an external contract break stays external.
-                    self.events.dispatch(&EventFrame {
-                        stream: None,
-                        origin: None,
-                        ttl: Some(HOP_BUDGET),
-                        event: SessionEvent::error_session(format!(
-                            "a `{}` answered a `{}` question (`{id}`) — a contract break, dropped",
-                            command.route_key(),
-                            kind,
-                        )),
-                    });
+                    self.events.dispatch(
+                        &EventFrame {
+                            stream: None,
+                            origin: None,
+                            ttl: Some(HOP_BUDGET),
+                            event: SessionEvent::error_session(format!(
+                                "a `{}` answered a `{}` question (`{id}`) — a contract break, dropped",
+                                command.route_key(),
+                                kind,
+                            )),
+                        },
+                        Locality::Local,
+                    );
                 }
                 AnswerOutcome::Delivered | AnswerOutcome::Missed => {}
             }
@@ -605,63 +590,47 @@ impl<C: Routed> Node<C> {
                     // The uniform miss: every node says the same
                     // thing — unstamped, for the failure belongs to
                     // no session (FRONTEND.md's stamp law).
-                    self.events.dispatch(&EventFrame {
-                        stream: None,
-                        origin: None,
-                        ttl: Some(HOP_BUDGET),
-                        event: SessionEvent::error_session(format!(
-                            "no session `{session}` on this node"
-                        )),
-                    });
+                    self.events.dispatch(
+                        &EventFrame {
+                            stream: None,
+                            origin: None,
+                            ttl: Some(HOP_BUDGET),
+                            event: SessionEvent::error_session(format!(
+                                "no session `{session}` on this node"
+                            )),
+                        },
+                        Locality::Local,
+                    );
                 }
             }
             return;
         }
-        self.commands.dispatch(&command);
+        // The by-type arm: commands arrive — their only door (see
+        // [`Self::handle`]).
+        self.commands.dispatch(&command, Locality::Remote);
     }
 
-    /// The local asker, the session's shape: [`Node::ask_on`] with
-    /// no additional receivers (the subscriber fan carries the card
-    /// — the frontend subscribes all) and the session's stream as
-    /// the card's stamp.
-    pub fn ask(
-        &self,
-        owner: &str,
-        stream: &StreamId,
-        ui_type: &str,
-        payload: Value,
-    ) -> tokio::sync::oneshot::Receiver<Value> {
-        self.ask_on(owner, &[], Some(stream), ui_type, payload)
-    }
-
-    /// The local asker, full form — parallel works unaffected (each
-    /// asker holds its own promise; the table carries the one write
-    /// that resolves it). The promise registers under `owner` (the
-    /// death/run sweep key); the request AND the settle announce
-    /// cross to the **additional receivers** beside the subscriber
-    /// fan (the override-path ruling: a node whose stdio subscribes
-    /// to nothing still asks across it — and whoever heard the card
-    /// by that fan hears it close by the same fan); `stream` is the
-    /// card's home stream or `None` for a session-less asker (an
-    /// extension's own card — the answer routes by id, not stream).
-    /// The asker dying retracts by owner; the promise reads as
-    /// dismissal.
+    /// The local asker, the session's and the extension's one shape:
+    /// mint the round-trip, emit the request through the node's LOCAL
+    /// door, and hold the promise. The request reaches whoever
+    /// subscribes the ask kind with `Local`/`Both` locality — a
+    /// session's card fans to its frontend; an extension's own card
+    /// crosses its stdio by that pipe's local subscription. `stream`
+    /// is the card's home stream or `None` for a session-less asker
+    /// (an extension's own card — the answer routes by id, not
+    /// stream).
     ///
     /// The settle law this side (owner ruling 2026-09, a doc law):
     /// **when you stop waiting on the thing requested (answer
     /// received, or no longer needed), send a settled event — to the
     /// same channel the request was sent to.** This method is the
     /// law's one correct implementation for an origin (both the
-    /// request and the announce cross by this fan, whatever resolves
-    /// or sweeps the promise); a hand-rolled lift that forwards a
-    /// card by other means owns its own settle emission, and
-    /// subscribing the ask kind carries the settle pair by
-    /// construction (the co-subscription rule) so the handler side
-    /// needs no separate act.
-    pub fn ask_on(
+    /// request and the announce cross by the same local fan, whatever
+    /// resolves or sweeps the promise); a hand-rolled lift that
+    /// forwards a card by other means owns its own settle emission.
+    pub fn ask(
         &self,
         owner: &str,
-        additional: &[Channel],
         stream: Option<&StreamId>,
         ui_type: &str,
         payload: Value,
@@ -674,7 +643,6 @@ impl<C: Routed> Node<C> {
         let (resolve, awaiter) = tokio::sync::oneshot::channel();
         let settled = self.settle_frame(&id, stream.cloned());
         let events = self.events.clone();
-        let announce_to: Vec<Channel> = additional.to_vec();
         self.asks
             .insert(id.clone(), owner, KIND_INTERACTION, move |outcome| {
                 // The origin is the settle's producer on resolution;
@@ -686,18 +654,14 @@ impl<C: Routed> Node<C> {
                     let _ = resolve.send(unanswer::<Value>(boxed));
                 }
                 // Orphaned: the sender drops with the closure, the
-                // awaiter reads dismissal.
-                events.dispatch_with_extra(&settled, &announce_to);
+                // awaiter reads dismissal. The announce is local
+                // speech — every pipe that carried the request by its
+                // local subscription carries the close by the same.
+                events.dispatch(&settled, Locality::Local);
             });
-        // The request is the asking participant's own speech, and it
-        // says so: origin carries the attribution (the routing
-        // generalization's law), which also lets a fan-side card
-        // surface tell it from a child's arriving card (unstamped —
-        // the child session emitted it) and never double-cross its
-        // own node's asks.
         let request = EventFrame {
             stream: stream.cloned(),
-            origin: Some(owner.to_string()),
+            origin: None,
             ttl: Some(HOP_BUDGET),
             event: SessionEvent::InteractionRequest {
                 id,
@@ -705,7 +669,7 @@ impl<C: Routed> Node<C> {
                 payload,
             },
         };
-        self.events.dispatch_with_extra(&request, additional);
+        self.events.dispatch(&request, Locality::Local);
         awaiter
     }
 

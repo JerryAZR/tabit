@@ -81,9 +81,12 @@ mod tests {
         let lane = Channel::local("child-1", |_| {}, |_| {});
         let heard = std::sync::Arc::new(std::sync::Mutex::new(0u32));
         let sink = heard.clone();
-        node.subscribe(tags::RUN_FINISHED, lane.owner(), move |_| {
-            *sink.lock().expect("test lock") += 1
-        });
+        node.subscribe(
+            tags::RUN_FINISHED,
+            lane.owner(),
+            tabit_wire::node::Locality::Both,
+            move |_| *sink.lock().expect("test lock") += 1,
+        );
         node.intake(
             &lane,
             Inbound::Event(EventFrame {

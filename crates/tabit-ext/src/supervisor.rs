@@ -47,7 +47,7 @@ use crate::protocol::{
 };
 use rig_agent::tool::services::{HostServices, ModelPromptOk, ModelPromptRequest, ServiceUsage};
 use std::io::Write;
-use tabit_wire::node::{AnswerOutcome, Channel, Node, parse_shared, violation_panic};
+use tabit_wire::node::{AnswerOutcome, Channel, Locality, Node, parse_shared, violation_panic};
 use tabit_wire::process::ChildWrapper;
 use tabit_wire::process::{self, wrap_command};
 use tokio::io::{AsyncBufReadExt, BufReader};
@@ -991,10 +991,13 @@ async fn supervise(
     } = report;
     // The report's watch list subscribes the lane's channel on the
     // node: each watched kind's frames reach the lane's event
-    // delivery, which writes the wire line down its stdin. Death
-    // retracts the lane's every registration (the node sweep).
+    // delivery, which writes the wire line down its stdin. Both
+    // doors — the host's own sessions and whatever arrives from
+    // elsewhere — match the origin-blind watch the wire has always
+    // promised. Death retracts the lane's every registration (the
+    // node sweep).
     for kind in &watch {
-        node.subscribe_channel(kind, &lane.channel);
+        node.subscribe_channel(kind, Locality::Both, &lane.channel);
     }
     let status = state.transition(Status::Alive, tools, hooks);
     let _ = events.send(ExtensionEvent {

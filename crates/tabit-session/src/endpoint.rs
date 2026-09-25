@@ -66,7 +66,7 @@ use std::sync::{Arc, Mutex};
 use tabit_protocol::{
     AvailableSession, EventFrame, ModelSelection, SessionCommand, SessionEvent, StreamId,
 };
-use tabit_wire::node::{Channel, Inbound, Node};
+use tabit_wire::node::{Channel, Inbound, Locality, Node};
 use tokio::sync::mpsc;
 use tokio::task::JoinHandle;
 use tokio_util::sync::CancellationToken;
@@ -435,7 +435,7 @@ pub fn mount_frontend(node: &Arc<Node>) -> FrontendStream {
         },
         |_| {},
     );
-    node.subscribe_channel_all(&frontend);
+    node.subscribe_channel_all(Locality::Both, &frontend);
     FrontendStream {
         events: event_rx,
         events_tx: event_tx,

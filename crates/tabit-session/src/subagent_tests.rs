@@ -222,18 +222,22 @@ async fn a_childs_first_frames_reach_the_node_fan() {
     let seen: std::sync::Arc<std::sync::Mutex<Vec<String>>> =
         std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
     let sink = seen.clone();
-    node.subscribe_all("recorder", move |frame: &tabit_protocol::EventFrame| {
-        let note = format!(
-            "{}@{}",
-            frame.event.tag(),
-            frame
-                .stream
-                .as_ref()
-                .map(|s| s.as_str().to_string())
-                .unwrap_or_default()
-        );
-        sink.lock().expect("test lock").push(note);
-    });
+    node.subscribe_all(
+        "recorder",
+        tabit_wire::node::Locality::Both,
+        move |frame: &tabit_protocol::EventFrame| {
+            let note = format!(
+                "{}@{}",
+                frame.event.tag(),
+                frame
+                    .stream
+                    .as_ref()
+                    .map(|s| s.as_str().to_string())
+                    .unwrap_or_default()
+            );
+            sink.lock().expect("test lock").push(note);
+        },
+    );
     let parts = std::sync::Arc::new(super::SubagentParts {
         node: node.clone(),
         exe: core,
