@@ -351,7 +351,7 @@ impl Ctx {
         self.shared.clone()
     }
 
-    /// The host's own executable path (the initialize's
+    /// The host's own executable path (the `host_facts` frame's
     /// `core_path`) — the thing owned children spawn.
     pub(crate) fn core_path(&self) -> Result<String, String> {
         self.shared
@@ -588,8 +588,8 @@ struct Shared {
     /// every waiter the cancel arm can find.
     cancelled: Mutex<std::collections::HashSet<String>>,
     cancel_notify: tokio::sync::Notify,
-    /// The host's own executable (the initialize's `core_path`) —
-    /// owned children spawn it.
+    /// The host's own executable (the `host_facts` frame's
+    /// `core_path`) — owned children spawn it.
     core_path: Mutex<Option<String>>,
 }
 
@@ -614,8 +614,8 @@ fn write_line(pipe: &tokio::sync::mpsc::UnboundedSender<String>, line: &str) {
     let _ = pipe.send(line.to_string());
 }
 
-/// The dispatcher: answer the initialize, ack (the registration
-/// derived), then serve the pipe until EOF. Never returns on success
+/// The dispatcher: speak the report (the registration derived),
+/// then serve the pipe until EOF. Never returns on success
 /// (the pipe's end is the end); a malformed handshake or an
 /// unencodable frame exits loud.
 pub fn serve(extension: Extension) -> ! {

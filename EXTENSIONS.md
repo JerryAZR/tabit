@@ -2,7 +2,7 @@
 
 The extension development record. **The substrate is ruled (2026-09,
 below) and implemented through checklist task 4 — `crates/tabit-ext`:
-discovery and the enablement gate, the report-first handshake,
+discovery and the enablement gate, the report-first contract,
 supervision, the death policy, the tool lane, the hook lane, the
 skills tables; `crates/tabit-ext-sdk`: the guest's functional layer
 over its node (the port, 2026-09 — the private dispatcher and
@@ -28,7 +28,7 @@ item-9 substrate ruling)
 Ruled: an extension is an opaque executable speaking a small frozen
 JSONL protocol over stdin/stdout — the subagent substrate,
 generalized. The host spawns the entry command at process start,
-handshakes, and from then on tool calls, hook events, interaction
+takes its report, and from then on tool calls, hook events, interaction
 frames, and host-service requests cross the pipe. **Every tabit
 process boots its own host — the frontend-attached backend and every
 subagent child alike (ruled 2026-09: children pick up extensions;
@@ -84,14 +84,14 @@ the `extensions_available` catalog, its `providers.toml` fragment
 does not merge, and its skills do not join the tables — absent
 everywhere, and *silent* (the user's setting is not a failure;
 `tabit-core extensions list`, task 6, is where disabled packages become
-visible). A REFUSED package (bad manifest, failed handshake) still
+visible). A REFUSED package (bad manifest, failed report) still
 reports as dead whatever the settings say — a broken package is
 loud; a disabled one is quiet. Children (subagent processes) re-derive
 the disable list from their inherited inputs — the same env, the same
 workspace cwd, the same one code path the parent booted through —
 never a forked child rule.
 
-## Declaration: manifest for install facts, handshake for
+## Declaration: manifest for install facts, report for
 capabilities (2026-09)
 
 The manifest (`tabit.json`) carries install-time facts only — name
@@ -119,14 +119,14 @@ that future is.**
 the version bump (2026-09 review-round ruling)
 
 A **newer host keeps an older extension working**: the host sends
-only what the extension declared at its handshake, and the extension
+only what the extension declared in its report, and the extension
 side is told to ignore frames it does not know. The reverse is
 refused, not endured: **an extension speaking vocabulary its host
 lacks might not work properly** (vocabulary it depends on is
 missing), so an unparseable line, a well-formed line of an unknown
 frame type, or a result answering the wrong kind of correlation is a
 contract break — death with the snippet, the same as garbage. For
-that refusal to happen at the handshake rather than mid-stream,
+that refusal to happen at the report rather than mid-stream,
 **additions the EXTENSION can emit (new extension→host frame types,
 new required fields) bump the protocol version** and older hosts
 refuse at the report's exact match; additions only the HOST emits (new
@@ -150,7 +150,7 @@ the snippet). The two tag namespaces are disjoint and stay so.
 
 **Participants are peers, not subordinates** (owner ruling 2026-09,
 correcting the reactivity claim): any node may send anything a
-frontend can from its handshake onward — a co-frontend extension's
+frontend can from its report onward — a co-frontend extension's
 `new_session` right after its report, a subagent child's steer — with
 no supervisor action required and no reactivity constraint. The
 corresponding duty is the parent's: **be structurally prepared
@@ -196,7 +196,7 @@ The four directions, one sentence each:
   `interaction_request` additionally registers its ask in the
   backend registry below.
 - **Events in** (host → extension): the stamped event stream,
-  mirrored per the **watch list** — the ack declares the event kinds
+  mirrored per the **watch list** — the report declares the event kinds
   (`watch`, the wire `type` tags) whose frames the extension wants.
   Fine-grained by ruling: one kind, one entry, no bundles; an
   unknown kind matches nothing (tolerated, not refused). The primary
@@ -222,12 +222,15 @@ The four directions, one sentence each:
   its answer: the answer IS its settle, and lingering would only
   leak. Unknown ids are the race's tolerated drop.
 
-Handshake additions (extension protocol **v2**): `initialize`
-carries `core_path` (the running backend's own executable — the host
-IS the binary, so an owned-session spawner never resolves anything)
-and `cwd`; `ack` carries the watch list. Versioning unchanged: each
-edge enforces at its own handshake — a mismatched extension dies at
-the ack before any line it could emit reaches the core.
+Report-model contract (extension protocol **v5**): the guest speaks
+first — its `report` (protocol version, tool/hook/watch
+declarations) is its first line on the pipe. The host version-checks
+it and kills a mismatched guest at the report, before any line it
+could emit reaches the core; only then does the host send
+`host_facts`, carrying `core_path` (the running backend's own
+executable — the host IS the binary, so an owned-session spawner
+never resolves anything) and `cwd`. No ack exists: the report IS the
+registration.
 
 The service envelope's ask (verb zero) is **deleted** (extension
 protocol v3): an extension that can emit an `interaction_request`
@@ -245,29 +248,28 @@ layer is its tools and hooks. What crosses an extension's stdio is
 decided entirely by registrations — the node is mode-agnostic, and
 the operating model is a registration set:
 
-**Default — no stdio subscription (the leaf participant).** Nothing
-auto-crosses: a child session's cards and deltas arrive from the
-child's lane and fan only to the extension's opted-in captures. The
-extension's own speech — its asks, its derived events, its forwards
-— leaves by naming the stdio as an **additional receiver** of the
-emission (the override path; the fact is an emission parameter,
-never on the wire). One exception the card law forces: **the settle
-kind always crosses** (the shipped SDK subscribes the stdio to
-`interaction_settled` and nothing else) — a settle is the close
-vocabulary of a card, and no channel may hold a card that can never
-be answered, so every settle announce (an origin's, a death sweep's,
-a grandchild's) reaches the pipe by subscription rather than by
-policy.
+**Default — local-door stdio (the leaf participant).** The stdio
+subscribes every kind from the LOCAL door alone: the extension's own
+speech — its emissions, its asks, their settle announces — crosses
+the pipe, and nothing else does. A child session's cards and deltas
+arrive from the child's lane and fan only to the extension's
+opted-in captures (remote-hearing subscriptions); the card pair
+crosses only by the card surface's declared mode (below). Locality
+is a fact of the dispatch site — the node's two doors, `emit` and
+`intake` — never a frame field (owner ruling 2026-09-25), so the
+crossing policy is plain subscription config with no machinery
+beside the fan.
 
 **Opt-in — session-equivalent routing (the preset).** The extension
-registers its stdio for the session event vocabulary and becomes,
-deliberately, what a session host is: forwarding is effectively
-automatic (arrivals fan across verbatim; the learning table was
-taught by the arrival, so routes stay correct with no re-emission),
-and its children are directly addressable through the chain. The
-preset is one named registration helper over the same fine-grained
-surface — bundles live in the SDK, never in the router. Per-kind
-opt-ins between the two ends are just shorter registration sets.
+subscribes its stdio to the session event vocabulary from BOTH doors
+and becomes, deliberately, what a session host is: arrivals cross
+verbatim (the ingress law keeps a frame from re-crossing the door it
+arrived on; the learning table was taught by the arrival, so routes
+stay correct with no re-emission), and its children are directly
+addressable through the chain. The preset is one named registration
+helper over the same fine-grained surface — bundles live in the SDK,
+never in the router. Per-kind opt-ins between the two ends are just
+shorter registration sets.
 
 The SDK is expected to stay (owner ruling 2026-09): its reason to
 exist is the abstraction — extension authors focus on functionality
@@ -278,54 +280,62 @@ the pipe's shared-grammar face (the loop is the dialect's parse
 cascade into `Node::intake`), every arriving call and hook is held on
 the ask table and answered through it, the watch surface is
 subscriptions, an author's `ask`/`emit`/`command` are the node's
-ask-with-additional-receivers, emission, and outbound command — while
+ask, emission fan, and outbound command — while
 the author-facing surface (tools, consultations, watches, children,
 the four directions on `Ctx`) never grew a router concept. The SDK is
 **async** (owner ruling 2026-09): bodies are futures, an ask awaits
 its promise natively, cancellation is a wake not a poll. What
 remains SDK-local is policy, not routing: the cancelled set, the
-frozen dialect's handshake and result frames, the pipe's one line
-pump, and the children's ask policy — the card surface at the
-arrival lane (the client's pump-order seam: the node's fan is
-arrival-lane-blind, so the shipped forward-and-relay default and the
-author answerer list live there, crossing cards verbatim and
-retiring on the first registration). One behavior the unification
+frozen dialect's report and result frames, the pipe's one line
+pump, and the card surface — the remote-door pair at the node (one
+declared mode: the shipped lift or the author answerers; see the
+card surface below). One behavior the unification
 buys, recorded: the extension's watches now hear its own emissions
 and its own cards' settles (the local loopback), not only the host's
 mirrors.
 
-**The lift mode.** Relaying someone's card — lifting a child's or
-grandchild's ask to your own host — is the one flow with a settle
-obligation at every step, and the SDK ships it correct by default so
-most authors plug-and-play: the shipped forward-and-relay default
-crosses the card verbatim (the arrival lane's own write), the stdio's
-one subscription to the settle kind carries every settle announce
-back (an origin's, a sweep's, a grandchild's), and `Ctx::ask` closes
-its own loop (the request and its settle announce cross by the same
-fan). The law the mode implements, stated from the requestor side
-(owner ruling 2026-09, a doc law — no semantic-layer enforcement
-exists): **when you stop waiting on the thing requested (answer
-received, or no longer needed), send a settled event — to the same
-channel the request was sent to.** Subscribing an ask-type kind
-carries its settle pair by construction (the node's co-subscription
-rule), so a watcher already implements the handler; the obligation is
-the *emission*.
+**The card surface: one declared mode** (owner rulings 2026-09-25,
+second and third rounds). Relaying someone's card — lifting a
+child's or grandchild's ask to your own host — is the one flow with
+a settle obligation at every step, and the pairing rule is the law:
+**a forwarded ask needs its forwarded settle; an intercepted one
+needs neither.**
 
-**Manual forwarding re-stamps by default.** A forwarded frame
-carrying the child's stamp teaches every receiver the child's
-address — the router working as intended, and exactly the leak an
-intermediary does not want (upstream would learn the child and send
-commands directly to it, through the chain, past the extension's
-mediation). So the SDK's forward helper re-stamps the frame with the
-extension's own id by default, emitting **from the layer channel**:
-upstream learns the extension, commands arrive addressed to it, and
-the layer — the channel the id now routes to — is the interception
-surface. The verbatim forward (advanced, opt-out) emits from the
-arrival lane instead, keeping the child's stamp and its direct
-addressability; teaching is idempotent either way, and a re-stamped
-forward emitted from the wrong channel (the arrival lane) would
-teach the extension's id to the child's lane — the silent
-mis-route this default exists to prevent.
+- **The shipped lift** (no author answerers): the stdio subscribes
+  the card PAIR — `interaction_request` and `interaction_settled`
+  — from the REMOTE door. Cards and settles cross verbatim together;
+  riding the channel subscription is what the ingress law protects:
+  a card the host mirrored down (a watched ask kind) arrives on the
+  stdio and is identity-skipped, so it can never bounce back and
+  re-register a live id.
+- **The answerer mode** (the first `on_ask` registration): the pair
+  is heard by the answerers, and nothing crosses — the host never
+  saw the card, so its settle has nothing to close there.
+
+The settle law, stated from the requestor side (owner ruling
+2026-09, a doc law — no semantic-layer enforcement exists):
+**when you stop waiting on the thing requested (answer received, or
+no longer needed), announce the settled event by the same local fan
+that carried the request.** Subscribing the settle kind is the
+caller's declaration — the wire stays fine-grained, no
+node-enforced bundles.
+
+**Manual forwarding: callbacks re-stamp, channels cross verbatim**
+(owner ruling 2026-09-25, third round). A verbatim crossing is
+CHANNEL machinery alone — the frame moves along its own route (a
+lane's subscription fan, the hop's own write), and the ingress law
+is what keeps the loop closed. A CALLBACK that wants to forward an
+ask re-stamps: the arriving ask is consumed at the extension's node
+(its transit entry is the answer route home), the callback mints its
+own ask, and the linkage between the two ids lives in the callback's
+closure — invisible on the wire. Re-emitting a foreign ask frame
+verbatim from a callback is an implementation error, not a method:
+it duplicates a live id downstream and the mint law kills an
+innocent. The re-stamp also hides the child's address — upstream
+learns the extension, commands arrive addressed to it, and the
+extension becomes the interception surface; the verbatim crossing
+keeps the child directly addressable through the chain. Teaching is
+idempotent either way.
 
 Ask round-trips are unaffected by re-stamping: correlation is by
 ask id, not stream, so a re-stamped card's answer walks home hop by
@@ -347,7 +357,7 @@ re-announcement joins when a consumer exists (the GUI redesign is
 the natural trigger).
 
 **One name, one tool, resolved at host assembly.** The host builds
-the model-facing toolset as a name→tool map after all handshakes and
+the model-facing toolset as a name→tool map after all reports and
 hands the engine a conflict-free set by construction — the engine's
 duplicate-name shadowing never engages. **Handshakes run
 concurrently; registration is ordered (ruled 2026-09): the assembly
@@ -365,7 +375,7 @@ policy (pi's rule):
   the incumbent. No silent peer precedence — the user resolves by
   disabling one.
 - **Only a LIVE declaration holds a name** (2026-09 review-round
-  ruling): a package that died — at the handshake or since — lists
+  ruling): a package that died — at the report or since — lists
   what it would have served in the catalog but neither replaces a
   core tool nor refuses a live peer. And when an extension that
   shadowed a built-in tool dies (its process; the core keeps
@@ -461,7 +471,7 @@ settled 2026-09, shipped as `crates/tabit-ext-install`)
   policy's business; requirements never reorder anything — nothing
   links). Version ranges wait for the post-release versioning topic.
 - **`entry` is optional — a static package.** Absent: no process, no
-  handshake; the package's contributions are exactly the scan-driven
+  report; the package's contributions are exactly the scan-driven
   ones (skills tables, providers fragment, `requires` for install)
   and it announces nothing (its skills attribute by location; a
   static package runs no code, ever — its contributions are data

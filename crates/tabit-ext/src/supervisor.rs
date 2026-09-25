@@ -1,6 +1,7 @@
 //! The extension supervisor: launch every installed package,
-//! handshake each, watch for death. One supervisor per backend
-//! process; the binary owns it (extensions are backend machinery —
+//! take each one's report, watch for death. One supervisor per
+//! backend process; the binary owns it (extensions are backend
+//! machinery —
 //! their contributions reach sessions through the binary's assembly,
 //! never through tabit-session).
 //!
@@ -30,9 +31,9 @@
 //! ask lifts after), and the pipe's mechanics — the command writer,
 //! the grace reaper, the immediate kill, the crash tail — live in
 //! [`tabit_wire::process`], shared with every spawning site. Local to here: the
-//! typed-frame reader and the lane machinery; a pre-ack failure
-//! kills the tree immediately (nothing was proven), a post-ack death
-//! gets the grace-bounded reclaim.
+//! typed-frame reader and the lane machinery; a pre-report
+//! failure kills the tree immediately (nothing was proven), a
+//! post-report death gets the grace-bounded reclaim.
 
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
@@ -67,7 +68,8 @@ use tabit_wire::process::{REAP_GRACE, crash_tail, reap_with_grace, spawn_line_wr
 pub enum Status {
     /// Spawned, handshaking still in flight.
     Starting,
-    /// Acked; capabilities are its declared set for the host's life.
+    /// Reported and validated; capabilities are its declared set
+    /// for the host's life.
     Alive,
     /// Out of the game — refused at the scan, refused at the
     /// handshake, or dead since. The reason is the whole report.
@@ -713,7 +715,7 @@ async fn supervise(
     // closes only its own pipe (fail_before_mount cancels this one),
     // while host shutdown cascades through the hierarchy to every
     // child. One shared token here was the fleet-kill bug — one
-    // broken package's pre-ack failure tore down every healthy
+    // broken package's pre-report failure tore down every healthy
     // sibling, silently (the review round's top finding). `killed`
     // is the containment door: the mint-law policy cancels it.
     let closing = supervisor_closing.child_token();
@@ -829,7 +831,7 @@ async fn supervise(
                         watch,
                     }) => {
                         if let Some(tx) = handshake_tx.take() {
-                            let _ = tx.send(Handshake::Acked(Report {
+                            let _ = tx.send(Handshake::Reported(Report {
                                 protocol_version,
                                 tools,
                                 hooks,
@@ -913,8 +915,8 @@ async fn supervise(
                     }
                 }
             }
-            // EOF: the pipe is closed — before the ack it is a failed
-            // handshake, after it the process is gone. Either way the
+            // EOF: the pipe is closed — before the report it is a
+            // failed boot, after it the process is gone. Either way the
             // lane dies first (the node sweep settles its open
             // round-trips and retracts its registrations), then the
             // verdict crosses.
@@ -955,7 +957,7 @@ async fn supervise(
             .await;
             return;
         }
-        Handshake::Acked(report) => report,
+        Handshake::Reported(report) => report,
     };
     if let Err(reason) = validate(&report) {
         fail_before_mount(
@@ -1155,7 +1157,7 @@ fn hold_service(
 
 /// What the reader decided about the report.
 enum Handshake {
-    Acked(Report),
+    Reported(Report),
     Failed(String),
 }
 
