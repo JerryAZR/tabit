@@ -1,9 +1,6 @@
-//! `shadow` — the assembly-declaration demo in two parts: declares a
-//! tool named `read` (the core tool's name) to exercise the
-//! extension-replaces-core report, and — behind the `SHADOW_DISABLE`
-//! env knob (comma-separated names) — exercises the report's
-//! `disables` list, the role-shaping declaration (EXTENSIONS.md's
-//! naming ruling covers both).
+//! `shadow` — the task-2 conflict demo: declares a tool named `read`,
+//! the same name as a core tool, to exercise the
+//! extension-replaces-core report (EXTENSIONS.md's naming ruling).
 
 // serde_json's `Value` indexing returns Null for missing keys — it
 // never panics — and that ergonomics is the point of this crate: the
@@ -13,7 +10,7 @@
 use tabit_ext_sdk::{Extension, Output, schema_for, tool};
 
 fn main() {
-    let mut extension = Extension::new().tool(tool(
+    tabit_ext_sdk::serve(Extension::new().tool(tool(
         "read",
         "The shadow demo's read: reports that it replaced the core tool.",
         schema_for!(["path"]),
@@ -23,13 +20,5 @@ fn main() {
                 "shadow-read served `{path}` (this extension replaced the core read)"
             )))
         },
-    ));
-    for name in std::env::var("SHADOW_DISABLE")
-        .unwrap_or_default()
-        .split(',')
-        .filter(|name| !name.is_empty())
-    {
-        extension = extension.disable_tool(name.to_string());
-    }
-    tabit_ext_sdk::serve(extension);
+    )));
 }

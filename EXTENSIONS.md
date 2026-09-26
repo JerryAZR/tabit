@@ -97,8 +97,12 @@ capabilities (2026-09)
 The manifest (`tabit.json`) carries install-time facts only — name
 (the path relative to the root, so scoped names nest), version, the
 entry command + args (OPTIONAL: absent means a static package that
-never spawns — the install entry below), one-line description, and
-`requires` (name-only dependencies). Capabilities are
+never spawns — the install entry below), one-line description,
+`requires` (name-only dependencies), and `disables` (core tool names
+the package removes from the host's assembly — the role-shaping
+declaration; like `requires`, package metadata about the host rather
+than a served capability, per the manifest-field ruling below).
+Capabilities are
 declared live in the extension's self-report (tools with
 name/description/schema, hook points) — the report-first pattern
 every tabit edge already uses. What the process serves is what it
@@ -222,10 +226,9 @@ The four directions, one sentence each:
   its answer: the answer IS its settle, and lingering would only
   leak. Unknown ids are the race's tolerated drop.
 
-Report-model contract (extension protocol **v6**): the guest speaks
+Report-model contract (extension protocol **v5**): the guest speaks
 first — its `report` (protocol version, tool/hook/watch
-declarations, and v6's `disables` list) is its first line on the
-pipe. The host version-checks
+declarations) is its first line on the pipe. The host version-checks
 it and kills a mismatched guest within the boot bound — the check
 runs the moment the report is read, and the kill owns the race with
 anything the guest emitted before it lands (a mismatched guest's
@@ -386,27 +389,25 @@ policy (pi's rule):
 - Extension vs. extension, same name: the newcomer is refused, naming
   the incumbent. No silent peer precedence — the user resolves by
   disabling one.
-- **The disables list (v6): the role-shaping declaration.** An
-  extension may name core tools to REMOVE from the assembly — the
-  role-based-subagent extension disables the built-in `subagent` so
-  the model's vocabulary holds only its role shapes. The assembly
-  runs disables ahead of the name rules (a working-set pass: a
-  disabled core name has nothing left to replace or collide with —
-  a later declaration of the same name is then just a tool). Only a
-  LIVE package's disables take effect (the declarations' liveness
-  gate: a dead package must not silently remove a tool; a mid-run
-  death restores the core tool with the same slice that restores a
-  dead shadow's). A name this host does not offer is reported
-  (`disables_unknown`) and ignored — external input fails
-  gracefully and clearly; the package still mounts. The union of
-  all packages' disables is the effect; the conflict entries are
-  the per-package attribution (`disables_core`, one per package per
-  name). Disabling a TOOL is not removing the machinery: the spawn
-  substrate, capabilities, and the child-role flags all stay — only
-  the model's vocabulary shrinks. Each process resolves its own
-  mount: a parent's disables do not propagate to children (a child
-  naming a disabled tool in `--tools` fails loudly as an unknown
-  name, like any absent tool).
+- **The manifest's `disables` list: the role-shaping declaration.**
+  A package may name core tools to REMOVE from the assembly — the
+  role-based-subagent package disables the built-in `subagent` so
+  the model's vocabulary holds only its role shapes. It is the same
+  deny semantics as the child-role `--without`, collected from
+  package manifests instead of argv, and like `--without` it is
+  silent on the wire. The assembly runs disables ahead of the name
+  rules (a working-set pass: a disabled core name has nothing left
+  to replace or collide with — a declaration of the same name is
+  then just a tool). Only a LIVE package's disables take effect
+  (the declarations' liveness gate: a dead package must not
+  silently remove a tool; a mid-run death restores it with the same
+  slice that restores a dead shadow's replacement). A name this host
+  does not offer is ignored. Disabling a TOOL is not removing the
+  machinery: the spawn substrate, capabilities, and child-role flags
+  stay — only the model's vocabulary shrinks. Each process resolves
+  its own mount: a parent's disables do not propagate to children
+  (a child naming a disabled tool in `--tools` fails loudly as an
+  unknown name, like any absent tool).
 - **Only a LIVE declaration holds a name** (2026-09 review-round
   ruling): a package that died — at the report or since — lists
   what it would have served in the catalog but neither replaces a

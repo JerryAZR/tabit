@@ -164,7 +164,10 @@ Current workspace layout:
   stage-validate-place installs, name-only `requires` pulls, list,
   and the refusal uninstall — the directory is the single truth (no
   registry, no lockfile)
-- `crates/tabit-ext` — the extension host: manifest
+- `crates/tabit-ext` — the extension host (the manifest's
+  `disables` list is the role-shaping declaration — core tools a
+  package removes from the assembly, the manifest-side twin of
+  `--without`): manifest
   discovery (`tabit.json` under the extensions root), the frozen
   JSONL extension pipe (the extension's self-report first, the
   host's facts after it, the tool lane, the flat
@@ -177,10 +180,8 @@ Current workspace layout:
   engine hook events over the same pipe (policy fails open on a dead
   extension)
 - `crates/tabit-ext-sdk` — the extension SDK, the guest side of the
-  same pipe: authors register tools, consultations, watched event
-  kinds, and core-tool disables (the role-shaping declaration — the
-  report's `disables` list, ext protocol v6); the SDK is the guest's
-  functional layer over its node (the
+  same pipe: authors register tools, consultations, and watched event
+  kinds; the SDK is the guest's functional layer over its node (the
   2026-09 port: the private dispatcher and local ask registries are
   gone — the loop is the dialect's parse cascade into the node's
   intake, arriving calls and hooks are held on the ask table and
@@ -425,7 +426,4 @@ protocol v20: one discovery per session build, `skills_available`
 stamped with the session's stream and announced as each session
 becomes visible, frontends folding per stream; children are full
 session hosts, so a subagent in another directory announces and runs
-its own catalog; extension listings stay backend-level, display-only.
-The extension `disables` list landed 2026-09 with frontend protocol
-v21: the catalog's conflict list carries `disables_core` and
-`disables_unknown`)
+its own catalog; extension listings stay backend-level, display-only)

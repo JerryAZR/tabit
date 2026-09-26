@@ -174,6 +174,34 @@ fn scoped_names_nest_under_their_scope_directory() {
 }
 
 #[test]
+fn the_disables_list_parses_and_defaults_empty() {
+    let root = test_dir("disables");
+    write_package(
+        &root,
+        "shaper",
+        r#"{"name":"shaper","version":"1","entry":["x"],"disables":["subagent"]}"#,
+    );
+    match &manifest::scan(&root).remove(0) {
+        Discovered::Package { manifest, .. } => {
+            assert_eq!(manifest.disables, vec!["subagent".to_string()]);
+        }
+        Discovered::Refused { reason, .. } => panic!("the shaper scans in: {reason}"),
+    }
+    // Absent = empty: an ordinary manifest carries no declaration.
+    write_package(
+        &root,
+        "plain",
+        r#"{"name":"plain","version":"1","entry":["x"]}"#,
+    );
+    match &manifest::scan(&root).remove(0) {
+        Discovered::Package { manifest, .. } => {
+            assert!(manifest.disables.is_empty());
+        }
+        Discovered::Refused { reason, .. } => panic!("the plain package scans in: {reason}"),
+    }
+}
+
+#[test]
 fn an_absent_entry_is_a_static_package() {
     let root = test_dir("static");
     write_package(

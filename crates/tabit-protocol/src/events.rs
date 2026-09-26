@@ -547,15 +547,6 @@ pub enum ExtensionConflictKind {
     /// holds the name. The newcomer is named; the user resolves by
     /// disabling one.
     RefusedPeer,
-    /// The extension's declared disable took effect: the named core
-    /// tool is unmounted from this assembly (the report's `disables`
-    /// list — an extension shaping a role removes the tools the role
-    /// must not see).
-    DisablesCore,
-    /// The extension named a tool to disable that this assembly does
-    /// not offer — the disable is ignored and reported (external
-    /// input fails gracefully and clearly; the package still mounts).
-    DisablesUnknown,
 }
 
 /// The whole announcement payload — the snapshot a backend carries

@@ -2065,6 +2065,7 @@ mod tests {
                     entry: Some(vec!["bin".to_string()]),
                     description: None,
                     requires: Vec::new(),
+                    disables: Vec::new(),
                 },
             }
         }
@@ -2077,6 +2078,7 @@ mod tests {
                     entry: None,
                     description: None,
                     requires: requires.iter().map(|r| r.to_string()).collect(),
+                    disables: Vec::new(),
                 },
             }
         }

@@ -340,33 +340,6 @@ async fn the_ask_example_abandoned_by_cancellation_fails_the_call() {
 }
 
 #[tokio::test]
-async fn the_shadow_example_can_disable_a_core_tool() {
-    // The SDK surface's end-to-end proof: `.disable_tool` rides the
-    // real serve path into the report, and the host's resolved
-    // report carries it beside the declared tool.
-    let root = test_dir("shadow-disable");
-    install(&root, "shadow", env!("CARGO_BIN_EXE_shadow-ext"));
-    // SAFETY: process-global state; shadow is the only package this
-    // test installs and the only bin reading the variable.
-    unsafe { std::env::set_var("SHADOW_DISABLE", "subagent") };
-    let (host, mut events) = supervisor::launch_root(&root, BOOT_TIMEOUT, host_ctx());
-    await_alive(&mut events, "shadow").await;
-    unsafe { std::env::remove_var("SHADOW_DISABLE") };
-
-    let reports = host.reports();
-    let shadow = reports
-        .iter()
-        .find(|report| report.name == "shadow")
-        .expect("the shadow package installed");
-    assert_eq!(shadow.disables, vec!["subagent".to_string()]);
-    assert!(
-        shadow.tools.iter().any(|decl| decl.name == "read"),
-        "the declaration rides beside the disable"
-    );
-    host.shutdown().await;
-}
-
-#[tokio::test]
 async fn a_failing_body_is_an_error_not_a_hang() {
     let root = test_dir("clash");
     // Both clash examples install together; the pair's conflict is

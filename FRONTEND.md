@@ -117,7 +117,7 @@ arrive as events. Input tolerance: blank lines are skipped, a trailing
 size limit** — tool output can be large; buffer accordingly.
 
 ```
-← {"type":"report","protocol_version":21}
+← {"type":"report","protocol_version":20}
 ← {"type":"session_opened","stream":"019…","id":"019…","path":"…",
    "model":{"provider":"…","model":"…","thinking_level":null},"resumed":true}
 ← {"type":"sessions_available","sessions":[
@@ -701,12 +701,6 @@ v19 rode the deleted GUI's CHANGELOG.md — git history holds it.)
   replay is default-on for resumed boots (`replay_begin { total }`
   … `replay_end`), on request via `open_session` of an open
   session.
-- **v21 (2026-09)** - the extensions catalog's conflict list carries
-  two new kinds: `disables_core` (an extension's declared disable
-  took effect - the named core tool is unmounted from this backend's
-  assembly; present the tool as removed, attributed to the
-  extension) and `disables_unknown` (a disable naming a tool this
-  backend does not offer - ignored, reported for visibility).
 - **v20 (2026-09)** — `skills_available` is session-level: stamped
   with the session's stream, announced per session as it becomes
   visible (was: one unstamped backend-level catalog at startup).

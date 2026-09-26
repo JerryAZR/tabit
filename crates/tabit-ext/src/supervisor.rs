@@ -94,9 +94,9 @@ pub struct ExtensionReport {
     pub status: Status,
     pub tools: Vec<ToolDecl>,
     pub hooks: Vec<HookDecl>,
-    /// Core tool names the package asked the host's assembly to
-    /// remove (the report's `disables`, v6) — inert until the
-    /// assembly's plan validates them against its own core set.
+    /// Core tool names the package's manifest asked the host's
+    /// assembly to remove (`tabit.json`'s `disables` — package
+    /// metadata, not a served capability).
     pub disables: Vec<String>,
 }
 
@@ -115,10 +115,28 @@ struct ChildFields {
     status: Option<Status>,
     tools: Vec<ToolDecl>,
     hooks: Vec<HookDecl>,
+    // Manifest-sourced (not report-served): the package's
+    // role-shaping declaration, seeded at construction and inert
+    // until the assembly's plan validates it against its own core
+    // set — a live gate the plan applies.
     disables: Vec<String>,
 }
 
 impl ChildState {
+    /// A child whose manifest declared core tools to disable — the
+    /// declaration is package metadata seeded at construction (the
+    /// report never carries it) and gated by liveness at the
+    /// assembly.
+    fn with_disables(disables: Vec<String>) -> Self {
+        Self {
+            inner: Mutex::new(ChildFields {
+                disables,
+                ..ChildFields::default()
+            }),
+            resolved: tokio::sync::Notify::new(),
+        }
+    }
+
     /// Record one lifecycle edge: Starting → Alive, Starting → Dead,
     /// or Alive → Dead (death after life still reports — the edge a
     /// once-ever door would have swallowed). The supervision task is
@@ -129,13 +147,7 @@ impl ChildState {
     /// ([`Supervisor::reports`]); the notify wakes the boot join.
     /// Returns the standing now recorded.
     #[allow(clippy::panic)] // the sanctioned crash below (AGENTS.md doctrine)
-    fn transition(
-        &self,
-        to: Status,
-        tools: Vec<ToolDecl>,
-        hooks: Vec<HookDecl>,
-        disables: Vec<String>,
-    ) -> Status {
+    fn transition(&self, to: Status, tools: Vec<ToolDecl>, hooks: Vec<HookDecl>) -> Status {
         let mut fields = tabit_log::lock::lock(&self.inner);
         let from = fields.status.clone().unwrap_or(Status::Starting);
         let valid = matches!(
@@ -151,7 +163,6 @@ impl ChildState {
         fields.status = Some(to.clone());
         fields.tools = tools;
         fields.hooks = hooks;
-        fields.disables = disables;
         drop(fields);
         self.resolved.notify_waiters();
         to
@@ -550,7 +561,7 @@ pub fn launch(
                 let name = manifest.name.clone();
                 let version = manifest.version.clone();
                 let description = manifest.description.clone();
-                let state = Arc::new(ChildState::default());
+                let state = Arc::new(ChildState::with_disables(manifest.disables.clone()));
                 // The lane exists before the spawn so the reader can
                 // route from its first line; `commands` is the same
                 // channel the writer owns.
@@ -595,8 +606,7 @@ pub fn launch(
                 drop(dead_reader); // sends on a dead lane fail, never queue
                 let lane = Lane::new(name.clone(), dead_commands);
                 lane.die(&node, &reason);
-                let status =
-                    state.transition(Status::Dead { reason }, Vec::new(), Vec::new(), Vec::new());
+                let status = state.transition(Status::Dead { reason }, Vec::new(), Vec::new());
                 let _ = events_tx.send(ExtensionEvent {
                     name: name.clone(),
                     status,
@@ -837,7 +847,6 @@ async fn supervise(
                         tools,
                         hooks,
                         watch,
-                        disables,
                     }) => {
                         if let Some(tx) = handshake_tx.take() {
                             let _ = tx.send(Boot::Reported(Report {
@@ -845,7 +854,6 @@ async fn supervise(
                                 tools,
                                 hooks,
                                 watch,
-                                disables,
                             }));
                         }
                         // A re-report after a good one: tolerated, ignored.
@@ -996,11 +1004,10 @@ async fn supervise(
     let _ = lane.commands.send(facts);
 
     let Report {
-        protocol_version: _,
         tools,
         hooks,
         watch,
-        disables,
+        ..
     } = report;
     // The report's watch list subscribes the lane's channel on the
     // node: each watched kind's frames reach the lane's event
@@ -1012,7 +1019,7 @@ async fn supervise(
     for kind in &watch {
         node.subscribe_channel(kind, Locality::Both, &lane.channel);
     }
-    let status = state.transition(Status::Alive, tools, hooks, disables);
+    let status = state.transition(Status::Alive, tools, hooks);
     let _ = events.send(ExtensionEvent {
         name: manifest.name.clone(),
         status,
@@ -1281,12 +1288,11 @@ fn resolve_dead(
     // The declared capabilities survive the death — the catalog's
     // "what it would have served" report. (Pre-ack deaths never
     // recorded any; post-ack deaths keep their ack's declarations.)
-    let (tools, hooks, disables) = {
+    let (tools, hooks) = {
         let fields = tabit_log::lock::lock(&state.inner);
-        (fields.tools.clone(), fields.hooks.clone(), fields.disables.clone())
+        (fields.tools.clone(), fields.hooks.clone())
     };
-    let status = state
-        .transition(Status::Dead { reason }, tools, hooks, disables);
+    let status = state.transition(Status::Dead { reason }, tools, hooks);
     let _ = events.send(ExtensionEvent {
         name: name.to_string(),
         status,
