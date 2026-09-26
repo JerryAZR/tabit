@@ -8,7 +8,7 @@ skills tables; `crates/tabit-ext-sdk`: the guest's functional layer
 over its node (the port, 2026-09 — the private dispatcher and
 registries died onto the routing layer) and the example packages.**
 Host-service frames (task 5) and install (task 6)
-land with their checklist tasks (ROADMAP item 9). Every entry names
+landed with their checklist tasks (all complete). Every entry names
 the decision, where it is recorded, and what it implies for extension
 authors. Entries record **existing design decisions**; nothing about
 how a particular extension is written leaks in — the contract is the
@@ -397,7 +397,7 @@ policy (pi's rule):
   slice the death event feeds.
 
 Sibling domains carry their own rules: skills merge last-wins-with-
-warn per the discovery ladder (ROADMAP item 3); providers are
+warn per the discovery ladder; providers are
 user-config-wins (below).
 
 ## Extension-shipped skills ride in-memory tables (2026-09, task 4)

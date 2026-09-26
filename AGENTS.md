@@ -15,8 +15,9 @@ Positioning (owner ruling 2026-09): tabit is a **study/research project in
 agent architecture, not a pi competitor**. pi is the feature reference and
 survey source, never the target — don't chase parity for its own sake, and
 don't add machinery because pi has it. The reasons to exist: the native Rust
-stack, the egui GUI as a first-class frontend, planned in-process subagents,
-and a design we fully own.
+stack, the frozen-wire node model every tabit process shares (frontends,
+subagents, and extensions are all nodes over one substrate), the TUI-first
+frontend track, and a design we fully own.
 
 ## The node model (2026-09 ruling)
 
@@ -144,7 +145,7 @@ Current workspace layout:
   the grandchild learning, and the ask route home; the exit
   retracts the lane), the drive fold, the ruled abort shape; the
   `subagent` tool is the
-  opinionated example shape extensions override — ROADMAP item 5)
+  opinionated example shape extensions override)
 - `crates/tabit-tools` — coding tools (`read`, `write`, `edit`, `bash`
   — chosen at registration: verified Git Bash, else PowerShell on
   Windows) as
@@ -158,12 +159,12 @@ Current workspace layout:
   member, the `native:select_one` ask, and the settings.toml
   `[gate] enabled = false` opt-out assemble in the `tabit-core`
   binary — `tabit-session` stays a mechanism with no policy
-- `crates/tabit-ext-install` — extension installation (ROADMAP item
-  9, task 6): npm (plain registry HTTP)/git/path sources,
+- `crates/tabit-ext-install` — extension installation (EXTENSIONS.md
+  is the record): npm (plain registry HTTP)/git/path sources,
   stage-validate-place installs, name-only `requires` pulls, list,
   and the refusal uninstall — the directory is the single truth (no
   registry, no lockfile)
-- `crates/tabit-ext` — the extension host (ROADMAP item 9): manifest
+- `crates/tabit-ext` — the extension host: manifest
   discovery (`tabit.json` under the extensions root), the frozen
   JSONL extension pipe (the extension's self-report first, the
   host's facts after it, the tool lane, the flat
@@ -281,7 +282,7 @@ Current workspace layout:
    work" with a dirty hack. Stop, then summarize for the user: the goal,
    the problem, and why it is hard — and ask for a design discussion first.
 10. **All-MIT.** The GPL split existed only to admit the claurst TUI
-    harvest; that frontend is dead (see ROADMAP item 7), so nothing in the
+    harvest; that frontend is dead (ROADMAP's not-planned), so nothing in the
     workspace is GPL and nothing will be. Frontends stay leaf consumers of
     the protocol (dependencies run frontend → backend only) — architecture
     hygiene, not license law.
@@ -397,8 +398,8 @@ consistency, never design fit (see the gate bullet below).
 
 - The egui GUI: **deleted** (2026-09, owner ruling) — the paused
   frontend's sync twin kept surfacing as the exception on every
-  review, so the tree is gone. The TUI candidates lead (ROADMAP
-  item 7); a future frontend that runs no tokio extracts a sync
+  review, so the tree is gone. The TUI candidates lead (ROADMAP's
+  frontend item); a future frontend that runs no tokio extracts a sync
   core into `tabit-wire`'s client rather than growing a twin.
 
 - WebSocket streaming: **removed** — HTTP SSE only.

@@ -1,1479 +1,272 @@
 # ROADMAP
 
-What we have, and what to build. tabit is a **study/research project in
-clean, solid, flexible agent architecture — not a "better pi"** (owner
-ruling 2026-09, after re-surveying pi). pi (`~/Projects/agents/pi`;
-also opencode, crush, codex, yaca) stays the feature reference and
-survey source, not the target.
+What tabit is building next. Everything shipped lives with the code
+and the doc that owns it — AGENTS.md (the workspace layout and law),
+ENGINE.md (the run loop), EXTENSIONS.md (the extension contract),
+FRONTEND.md + PROTOCOL.md (the wire), TOOLS.md (the tool contracts),
+COVERAGE.md (the test ledger) — and **git history is the archive of
+how each decision got made**: this file records the destination, not
+the journey, so a closed area appears here only as a pointer or (for
+compaction, whose policy record two docs cite) one final-form record
+with no amendment history. Older commits and sibling docs reference
+ten numbered items; the mapping note at the bottom says where each
+went.
 
-The founding premise — pi's core too minimal, extending it to real
-needs hard — was true when the project was planned (mid-2026, writing
-pi extensions hit the friction) but expired fast: pi's extension API,
-CBOR wire protocol + headless server/client, session-repo backends,
-harness v2, and skills all landed 2026-06 → 2026-08, right around the
-founding. What remains tabit's own, and the reasons to keep building:
-the native Rust stack (single binary, no Node), the egui GUI as a
-first-class frontend over a frozen protocol, native subagents
-(subprocess children over the frozen stdio protocol — the ONE
-substrate, item 5), and full ownership of the design — its pace, its
-discipline, its failure modes.
+## What this is
+
+`tabit` is a **study/research project in clean, solid, flexible agent
+architecture — not a "better pi"** (owner ruling 2026-09). pi stays
+the feature reference and survey source, never the target. The
+reasons to keep building: the native Rust stack (single binary, no
+Node), the frozen-wire node model every tabit process shares
+(frontends, subagents, and extensions are all nodes — one substrate,
+one set of mechanisms), the TUI-first frontend track, and full
+ownership of the design — its pace, its discipline, its failure
+modes.
 
 ## Where we are
 
-The foundation is complete and hardened — this is the transport/runtime layer
-that pi's `pi-ai` provides, at or above its robustness:
+The foundation is shipped and hardened. In build order, all closed:
 
-- **rig-core**: anthropic + openai (Responses API) providers over a shared
-  openai-compatible engine; pi-policy retry (408/409/429/5xx + x-should-retry,
-  retry-after honored, 60s server-delay cap, jittered 0.5s·2ⁿ→8s backoff,
-  default 2 retries), connect timeouts, stall warnings (a stalled stream or
-  body warns every 120s and keeps waiting — never killed; owner ruling: a
-  slow local server must be able to think in silence, only the user aborts),
-  typed transport errors,
-  per-index content-block routing with loud interleave guards, orphan
-  tool-result validation, cache-usage reporting, refusal surfacing.
-- **rig-agent**: the driving loop (one coroutine, ENGINE.md), the tool-phase
-  hook pair, tool-panic containment, `#[rig_tool]` + `PortableTool` as the
-  canonical tool surface, strict tool-arg parsing.
-- Coverage per the COVERAGE.md ledger, zero warnings, wasm-clean, offline
-  cassette tests, docs/policies in AGENTS.md / VENDOR.md.
-- `examples/local_probe.rs` — verified live probe against LM Studio
-  (OpenAI completions, OpenAI Responses, Anthropic wire formats).
+- **Transport/runtime** (rig-core/rig-agent): anthropic + openai
+  (Responses API) over the shared openai-compatible engine, pi-policy
+  retry, stall warnings, typed errors; the engine loop per ENGINE.md,
+  the hook surface, tool-panic containment, token-and-detach
+  cancellation.
+- **Config** (`tabit-config`): providers/auth/settings layers, env
+  replaces-not-unions, `extra_body` as the one compat escape hatch —
+  no model catalog, ever.
+- **Session layer** (`tabit-session`, `tabit-log`): the durable
+  tree-format session log (format v5), write-behind persistence,
+  rewind/branch, model registry + keyless providers, session-level
+  skills (protocol v20), the system-prompt builder, compaction +
+  overflow recovery (the record below).
+- **Coding tools** (`tabit-tools`): read/write/edit/bash per the
+  rulings in TOOLS.md; the built-in permission gate (`tabit-gate`,
+  pi-sanity's policy — wired end to end incl. the /tmp rewrite).
+- **Subagents**: subprocess children are the ONE substrate — children
+  are full session hosts over the frozen wire (`SpawnContext`,
+  `tabit-wire`'s client); the `subagent` tool is the opinionated
+  example.
+- **Extensions** (`tabit-ext`, `tabit-ext-sdk`, `tabit-ext-install`):
+  the host, the SDK, install/management — the checklist is complete;
+  EXTENSIONS.md is the contract and the record.
+- **The wire** (`tabit-protocol`, `tabit-wire`, the session edge):
+  protocol v20, the node runtime (locality routing, asks, the report
+  model), the json stdio edge.
+- **Prompt caching** (shipped 2026-08): all-1h Anthropic, session-id
+  cache keys for OpenAI Responses, subagents keyed separately — the
+  policy lives in `ModelRegistry::build`.
+- **The backend binary** (`tabit-core`): headless print + json modes.
+  The `tabit` name is reserved for the frontend that ships primary.
 
-Subagents ride the same substrate as pi (subprocess children; item 5
-records the two rounds that got there — the in-process deviation was
-built, then removed whole). Everything else follows pi's minimal path.
+## What's next
 
-## What to build (in order)
+### The frontend (the active item)
 
-### 1. Config crate (`tabit-config`)
+**TUI: the Node route (ruled 2026-09; survey on branch `tui/research`).**
+The claurst ratatui harvest stays dead (GPL) and a Rust-native TUI
+stays deferred. The terminal frontend rides the JS ecosystem: **the
+omp fork of pi-tui (`@oh-my-pi/pi-tui`, MIT — Mario Zechner's own
+next-gen line) under Bun**, spawning `tabit-core --json` as a child
+(zero backend changes — the stdio edge the json mode already rides),
+distributed via npm as per-platform optional packages (esbuild
+pattern; no postinstall) carrying a Bun-compiled standalone TUI exe
+plus the cargo-built core. Single repo, single tag, single version:
+the lockstepped pair is the strict protocol handshake made atomic.
+Fallback ladder: stock pi-tui on plain Node, then opentui (its
+Node ≥ 26.4 engines floor breaks the one-line install today). Next
+step: the walking-slice spike on Windows Terminal before product
+commitment; the TUI enters the monorepo (`tui/`) when it graduates.
 
-Provider/model configuration schema, loaded from user config files.
-**Shipped as `crates/tabit-config`** (TOML; loud parse/validation;
-`extra_body` as the sole compat escape hatch — no compat-flag taxonomy, no
-model catalog). Decisions:
+The GUI is **not planned** — the egui tree was deleted 2026-09 (the
+paused frontend's sync twin kept surfacing as the exception on every
+review; AGENTS.md carries the ruling). A future frontend that runs no
+tokio extracts a sync core into `tabit-wire`'s client rather than
+growing a twin.
 
-- File split, all under `~/.tabit/`: `providers.toml` (providers + models —
-  secret-free by construction, safe to share and edit with agent help),
-  `auth.toml` (provider id -> api key; user-created, tabit never writes it),
-  and `settings.toml` later (item 9). Debug overrides: `$TABIT_CONFIG`
-  (providers file) and `$TABIT_AUTH` (auth file); a future CLI flag will
-  outrank both.
-- Provider entries: `base_url`, `api` (closed enum: anthropic-messages /
-  openai-responses / openai-completions), `api_key_env` (env var *name*),
-  `headers`, shared `extra_body` (merged into every request body). No
-  inline keys in the provider file.
-- Key resolution: `auth.toml` entry wins, else the env var named by
-  `api_key_env`, else none (local endpoints run keyless; requiring a key is
-  the consumer's loud decision). Command-backed auth (keychain) is a
-  deferred future source.
-- Per-model settings: id, display name, `reasoning`, `input` modalities,
-  `context_window`, `max_tokens`, `sampling_params`, `cost` (4 required
-  $/M-token rates), ordered `thinking_levels` (each a named `extra_body`
-  merge — array shape so a UI can cycle), per-model `headers`/`extra_body`.
-- **Request-parameter application shipped (2026-08, pure-forwarding
-  ruling):** `max_tokens` and `temperature` ride the agent builder's
-  dedicated knobs; `top_p`/`top_k` and the `extra_body` chain
-  (provider → model → active thinking level, later wins) merge into one
-  flattened `additional_params` map where `extra_body` keeps the last word
-  (it is the escape hatch); provider-level `headers` ride the constructed
-  client. Re-resolved on every model/thinking-level switch (the agent
-  rebuild). Deliberately unwired: per-model `headers` (needs a
-  client-caching decision), `context_window` (compaction — item 6,
-  design ruled 2026-09; wires with implementation),
-  `reasoning`/`input`/display names (model-picker UI, item 7 v2).
-- `default_model` is the preferred-model slot: a bare model id (must be
-  unambiguous), optional `provider` qualifier for conflicts, optional
-  `thinking_level` — both wire shapes accepted (bare string or
-  table). Ruled a **preference, not a hard reference**: a stale,
-  ambiguous, or malformed entry never blocks startup — the registry
-  warns and falls back to the first configured model
-  (explicit `--model` requests and resumed-session models still fail
-  loudly). The warning is stderr today; v2 moves it onto the event
-  channel (`error { kind: model }` — the external-errors ruling in
-  PROTOCOL.md). Reference resolution
-  (`TabitConfig::resolve_model_ref`) is an exact-match lookup over an
-  index registering every model under two keys — its bare id and its
-  qualified `provider/model` id (model ids may contain `/`); a key with
-  one registration resolves, several is an ambiguity error listing the
-  candidates.
-- Reference survey behind the compat decision: pi ships an explicit compat
-  schema (11 thinking formats etc.); opencode absorbs quirks in per-provider
-  packages/hardcoded transforms; codex ships zero compat flags and only
-  speaks the Responses API. Tabit sides with codex on strictness but keeps
-  `extra_body` as the generic escape hatch.
-- Dynamic model listing (fetch from endpoint and merge with local config) —
-  planned; design deferred until the CLI exists. The wire clients are kept
-  and cassette-covered (both providers); the call is backend-only by
-  construction (credentials + the front/back split), and the trigger shape
-  (on-demand command vs startup push) is decided against the GUI picker
-  when it asks.
+### Extension follow-ups
 
-### 2. Session layer
+- The **mid-run restoration slice** — ruled, unimplemented: a dead
+  shadow restores the core tool at the next run open (the seam is
+  named in EXTENSIONS.md).
+- The **run-end hook point** (an ENGINE.md amendment; autotitle
+  upgrades from `tool_result` to it when it lands).
+- **Prompt contributions** — not a v1 capability; joins with the
+  build-phase decision and a consumer.
+- **Extension-served host verbs** — a future additive class (host
+  verbs are core-served by definition, the open-vs-closed ruling).
+- Install: the npm:/git: end-to-end example (every example rode
+  `path:`); transitive teardown + `autoremove` on uninstall.
+- Recorded v1 gap: `extension_usage` is not persisted.
 
-The application-level conversation layer pi builds over its agent loop:
+### Subagent follow-ups
 
-- Session state: message history, tool call/result records, usage accounting,
-  per-session model selection from config.
-- Persistence: session log format (JSONL event log first — replayable,
-  diff-friendly; sqlite backend later if needed).
-- Session listing/resume across runs.
-- **Rewind/branch shipped (format v3: the resident-state ruling)**:
-  the JSONL log is a parent-linked tree of conversation nodes plus
-  parentless side records; a checkout moves the in-memory head to an
-  existing node (git-style — the pointer moves, nothing is copied)
-  and records a `checkout` side record (durable even with no follow-up
-  append), so the next prompt branches. Library level branches from
-  any node (`Session::rewind_to_entry`) with the dangling repair
-  covering mid-batch points; the user surface (`Session::rewind(n)`,
-  CLI `--rewind <n>`) targets user-message boundaries (prompts and
-  steers alike). The resident tree, head, and incrementally folded
-  context are the in-session truth — nothing re-reads the file
-  mid-session; projection and stats follow the active branch. Model
-  selection is a session preference — the file's last `model_change`
-  side record in append order (the register ruling, PROTOCOL.md v3) —
-  so a checkout never moves it. Interactive branch browsing is a GUI
-  feature. The CLI is print-shaped: `-p <PROMPT>` selects print mode,
-  `--rewind` too, bare `tabit` errors loudly until the GUI exists.
-- **Model registry shipped** (`tabit-session::ModelRegistry`): the single
-  construction site for models — cached provider HTTP clients (switching
-  models reuses the connection pool) and the default-selection chain:
-  explicit choice > the resumed session's last model > `default_model` >
-  the first configured model. A resumed reference that no longer resolves
-  fails loudly. Reload and dynamic model listing merge into the registry
-  when a consumer exists; per-model `sampling_params`/`thinking_levels`/
-  `extra_body` application happens in the registry's build path (with
-  item 6).
-- **Keyless flag shipped** (2026-09): a provider declares
-  `keyless = true` when it needs no API key (LM Studio and other local
-  servers). A provider with neither a key nor the declaration is **not
-  a usable model provider**: preference resolution (resumed,
-  `default_model`, last-resort pick) skips it with notes, and explicit
-  selection fails loudly at build naming both fixes. The wire request
-  path is unchanged — keyless providers ride the stubbed empty
-  credential through the same builders (no request-path split).
-- **Provider model auto-discovery: deferred** (2026-09, owner). The
-  OpenAI-compatible `/v1/models` returns ids only — no context
-  windows, no thinking levels — so a discovered model is an id with
-  pure pass-through defaults, not useful enough to ship. Recorded
-  direction: the provider catalog (curated per-model metadata) could
-  ship as an **extension** instead of core machinery. rig-core's
-  `ModelLister` already covers Anthropic and OpenAI; the internal
-  completions engine lacks a lister (the only gap, ~a thin adapter —
-  the wire shape is identical to OpenAI's). **Reload note**: when
-  reload lands, discovery/catalog merge must be a single callable
-  step over `(config, auth)`, not a re-run of the whole
-  initialization flow; if the current init flow obstructs that, the
-  refactor is its own roadmap item at that point.
+- **Background children**: routing and commands are already
+  substrate-independent of active tools — the gap is one knob (handle
+  detachment) plus the wait/cancel/list collection surface (opencode's
+  shape).
+- **Persisted children's lineage**: the dormant `parent_session`
+  header + catalog grouping; resume addressing is by friendly name
+  resolved against lineage (ruled — the id is never the model's
+  addressing path).
+- **The result-cap budget**: `turns`/`truncated` wait on it (the
+  shipped cargo is `{child_id, outcome}` only).
+- **A per-child dials selector** (`$TABIT_DIALS` / a spawn flag) —
+  the shape that makes compaction rules per-consumer as data; the
+  dials stay clustered consts until that consumer exists.
 
-### 3. System prompt builder + skills & AGENTS.md discovery
+### Compaction follow-ups
 
-- **v1 shipped** (`tabit-session::build_system_prompt`): identity +
-  the ruled opinionated body (2026-09: disagree when wrong, never
-  pick silently, root-cause debugging, evidence-bearing research) +
-  `<environment_context>` (cwd, platform, UTC date) + discovered
-  instruction files wrapped in `<project_context>`. Built once per
-  process, never rebuilt mid-session: byte-stability keeps provider
-  prompt caches valid, and date-level staleness is accepted (people
-  work overnight). The opinions sit before the instruction files —
-  user AGENTS.md keeps the last word by construction.
-- Discovery policy (decided): **AGENTS.md only** (no CLAUDE.md or other
-  vendor files); **no directory walking** — the home level
-  (`~/.tabit/AGENTS.md`, falling back to `~/.agents/AGENTS.md`) plus the
-  cwd file, cwd last so closest wins; **no size cap**; subdirectories
-  are the model's job (the base prompt tells it to check for AGENTS.md
-  as it descends). This replaces the CLI's stopgap `PREAMBLE`.
-- Skills discovery: **SHIPPED (2026-09)** — `SKILL.md` files with
-  frontmatter (name, description), discovered from user-level and
-  workspace-level directories, exposed as an on-demand listing
-  (load-on-trigger, not always-inlined) in the same prompt module.
-  **Discovery ruled (2026-09): four sources, merge with override on
-  name collision** — precedence lowest → highest: `~/.agents/skills/`,
-  `~/.tabit/skills/`, `<cwd>/.agents/skills/`, `<cwd>/.tabit/skills/`
-  (workspace beats home, and within a level `.tabit` beats `.agents`).
-  Unlike AGENTS.md's single-file fallback, all four dirs merge — a
-  shared skill survives the existence of a tabit-specific one.
-  Per-directory shape follows the references (pi/yaca): recursive, a
-  directory containing SKILL.md is a leaf, dotdirs skipped, loose
-  root-level `.md` files are not skills, malformed skills skip + warn.
-  **Model-side surface ruled (2026-09, the yaca shape — the owner's
-  own prior design): the confined `skill` tool.** It abstracts away
-  that skills are host files; the model expresses intent by name.
-  The catalog (name, description) rides the system prompt;
-  the body enters context only on invocation: `{name, rel_path?}`,
-  `rel_path` confined to the skill's directory (lexically, then
-  symlink-resolved at read time — no escape), a directory `rel_path`
-  lists direct entries (progressive disclosure of resources), and
-  every result carries the skill's absolute base dir so bash/grep
-  stay available. One discovery per process (the OnceLock pattern)
-  feeds the prompt listing, the tool lookup, and the wire snapshot —
-  the consistency guarantee. **Protocol v8**: `skills_available`
-  (unstamped, backend-level, after `sessions_available`, only when
-  discovery found something) carries the same facts for a frontend's
-  own listing; invocation needs no wire shape (an ordinary
-  `tool_call`/`tool_result` pair). The survey record: pi and codex
-  read-direct (catalog + paths in the prompt, body via the read
-  tool); opencode and Claude Code inject (name-only catalog + a
-  dedicated tool); yaca's surveyed variant — chosen — confines
-  `{name, relPath}` with a dir-listing mode and treats the tool call
-  as the invocation event.
-- Prompt contributions from extensions (item 9) mount at session
-  build under the same byte-stability rule — changing the prompt is
-  the user's explicit reload decision, never a silent mid-run event
-  (EXTENSIONS.md). This is where mid-conversation system messages
-  would tempt us — they are unsupported by design; everything hoists
-  into the preamble (AGENTS.md).
+- **The agentic-cut option**: cuts currently stay after text-only
+  assistants and compaction nodes — a single long agentic run has no
+  usable cut and the Overflow door fails loud rather than repair; the
+  recorded future option is score-based selection (prefer a slightly
+  overshooting clean post-text cut over a tool-result cut, unless the
+  clean cut forces a super-long tail).
+- Revisit `MAX_PASSES` at 2M models (16 today; a 2M → 128K switch
+  would need ~21 — bump to 32 then).
+- Residual edge on record: a cut landing immediately after a
+  zero-usage turn lets that spanning delta absorb some cut-side
+  content (needs a provider that skips usage *and* a cut in that
+  exact window; bounded by one turn's content).
 
-### 4. Coding tools
+### Config / registry follow-ups
 
-The standard toolset as `#[rig_tool]` implementations, via the
-PortableTool→DynamicTool erasure. **Toolset ruled to pi's four — read,
-write, edit, bash** (2026-09): no glob/grep/ls — the model reaches those
-through bash (`ls` deleted with the ruling). **All four shipped**
-(2026-09) — `read` (paging + truncation module), `write` (overwrite
-flag, parent creation, atomic store), `edit` (exact-match, partial
-application, tests-first), `bash` (registration-time Git-for-Windows
-detection, tail-truncate + spill). `ask_user` rode along as frontend
-interaction-test scaffolding and was **removed 2026-09** per its
-ruling (it existed to exercise the interaction capability, not as a
-product tool; the interaction capability's e2e exercises live in the
-extension contract tests). Permission/approval is the built-in
-`tabit-gate` crate (2026-09: pi-sanity's policy as an in-process
-hook, assembled by the binary — `gate-ext`, the first-party
-extension that carried it between rulings, was deleted).
+- **Dynamic model listing — deferred** (2026-09): `/v1/models`
+  returns ids only, not useful enough to ship. Recorded direction:
+  the provider catalog (curated per-model metadata) could ship as an
+  extension instead of core machinery. When reload lands,
+  discovery/catalog merge must be one callable step over
+  `(config, auth)`, not a re-run of the initialization flow.
+- Per-model `headers` stay unwired (needs a client-caching decision);
+  `context_window` is wired (compaction); display names /
+  `reasoning` wait on a model-picker UI (with the frontend).
+- Frontend-dependent model deferrals: the models-list command and the
+  real picker, the global implicit preference (a `~/.tabit/`
+  last-selected file — a registry rung below `default_model`), and
+  the "selection didn't land" picker signal.
 
-**Write rulings (2026-09):** `write(path, content, overwrite?)` —
-creates freely; overwrites only with `overwrite: true` (the model
-expresses intent, never inferred). A missing path always writes
-(overwrite governs existing paths only — a false overwrite must not
-veto a create); an existing path without the flag fails with the
-file's size and both ways forward. Results name the branch (`Created`
-vs `Overwrote (N bytes, was M bytes)`) plus `created K parent dirs`.
-No read-before-write enforcement (Claude-Code-only quirk; pi has none).
-Mutations serialize through `file_io`: a process-wide per-path lock
-registry (the engine's tool phase is concurrency-bounded by design —
-ENGINE.md — so same-path calls can interleave; the session wires
-`TOOL_CONCURRENCY = 4`, rig's library default of 1 never applies to
-tabit) and an atomic
-store (temp-file + `tempfile::NamedTempFile::persist` for overwrites;
-readers never lock — the atomic store is what makes a torn read
-impossible). Read-before-*edit* likewise stays prompt-level.
+### ACP
 
-**Edit rulings (2026-09, built tests-first):** `edit(path, edits[])`
-with pi's multi-edit shape — every edit matched against the file's
-current bytes in LF space (the one sanctioned normalization; LLMs read
-bytes, not visuals — a miss means a stale view), dominant line ending
-and BOM preserved on store, no other fuzzy matching. Edits apply
-**independently**: matched ones land, failures are reported by index
-(empty / not found / N occurrences / conflict) so the model resends
-only the failures — pi's all-or-nothing rejected. No `replace_all`
-(the duplicate count is the guidance; intentional global renames go
-through write or bash). Overlapping edits: identical replacements are
-agreement (both apply, the change lands once); anything else
-conflicts and rejects both as a named pair — equality is the check,
-order-simulation can agree while scrambling spans. All-fail calls are
-an error naming every failure; nothing is written.
-
-**Read + truncation rulings (2026-09, after surveying pi; amended
-2026-09 to a single size cap):** one shared truncation module — 50
-KiB, whole lines only; no line cap ("lines" mean nothing to a model —
-a newline is just another byte). Two mechanisms, one per tool family:
-**read pages** — the head plus continuation notices carrying the next
-offset (the file is already on disk; never spilled); **bash keeps both
-ends** — first and last lines with the middle omitted — **and spills
-the full output** to a never-deleted `%TMP%\tabit-bash-*.log` (notice
-points at it), because the dropped middle is unrecoverable without
-re-running a command that may be slow or side-effecting. The spill
-lives in the tool, not a result hook (the policy is dialect-specific;
-a generic engine-level backstop cap becomes justified only when
-third-party extension tools exist — noted at item 9). Read's other rulings: directories list inline
-(header + sorted names, `/` on dirs — no size/mtime columns); UTF-16/32
-BOMs are named in the error (Windows tooling writes them), binaries
-rejected loudly (pi silently lossy-decodes — not copied); UTF-8 BOM
-stripped (what read shows is what edit will match); empty files say so;
-paths stay verbatim. **The caps are a dial, not doctrine**: 50 KiB ≈
-12k tokens is the per-call budget today; 64/128 KiB is sanctioned
-growth as contexts grow. **Image reads shipped (2026-09)** (owner:
-real coding need — frontend/GUI work wants vision): PNG/JPEG/GIF/WebP
-by magic bytes, whole-file image content parts (base64; both
-providers' tool-result wires carry them, and the session log persists
-the parts — replay reconstructs exactly what the model saw), capped
-at 3 MiB raw (the ~5 MiB base64 provider ceiling; over-cap is a loud
-rejection with guidance). No resize/conversion in v1 — that needs an
-image-processing dependency, deferred until a consumer asks.
-Video and other media when models support them.
-
-**Shell ruling (2026-09, correctness over coverage):** the shell tool is
-decided once per process at registration — `bash` only where a
-Git-for-Windows install is *positively identified*: the `git.exe` on PATH
-in Git-for-Windows placements (`<root>\cmd\git.exe`,
-`<root>\mingw64\bin\git.exe`), the installer's
-`SOFTWARE\GitForWindows` registry declaration (HKCU before HKLM — the
-authoritative system-vs-user answer), or the installer's default
-directories; the surviving candidate is spawn-probed (`bash -c "exit 0"`,
-2s cap) before acceptance. Every miss registers the `powershell` tool
-instead — a wrong bash (WSL's `System32\bash.exe` launcher, a
-Cygwin/MSYS2 root with different path mapping) is worse than no bash, so
-there is deliberately no bare-`bash.exe`-on-PATH source. Each tool's
-description names the dialect the model is writing in; the old
-per-invocation `where bash` first-hit often spawned WSL bash while the
-tool described itself as bash.
-
-### 5. Native subagents
-
-Subprocess children are the ONE substrate (ruled 2026-09, two rounds —
-"Substrate closed" below); the initial in-process plan was removed
-whole, and with it this section's old framing as "the known deviation
-from pi's subprocess model" — tabit's subagents ride the same
-substrate as pi's, over the frozen stdio protocol. The rulings below
-carry the actual shape:
-
-**Design rulings (2026-09, the session-surface review):**
-
-- **Subagents are sessions** — the `SessionBuilder` surface (selection,
-  preamble, toolset vec, max_turns, hooks, model factory) already carries
-  every per-child knob; nothing touches the engine or ENGINE.md. Toolset
-  restriction is a shorter vec; recursion depth is enforced by omitting
-  the subagent tool from children.
-- **Two persistence modes, one builder.** Ephemeral children (reference-
-  project style: in-memory only) ride `NullBuffer` — the disk-unplugged
-  contract already exists; the gap is a builder entrance and id/path
-  semantics. Persisted children are ordinary session files — inspectable,
-  replayable via `open_session`, lineage through the dormant
-  `parent_session` header field.
-- **Per-session cwd** via a per-run capability (the pattern the run token
-  and interaction hub already use): `read`/`write`/`edit` become
-  contextual tools resolving relative paths against the session cwd;
-  `bash` sets `.current_dir`. Scoping, not sandboxing — absolute paths
-  and `cd /` still go anywhere (v1 accepts this, like every reference).
-- **Child events reach the frontend through an event-tap capability** —
-  the InteractionHub's weak-sender pattern again: the tool body's
-  `prompt_with` callback stamps child events with the child's `StreamId`.
-  Ruled: children announce via **`session_opened` + an optional `parent`
-  field** (one announcement truth — a subagent *is* a session; a second
-  announcement event was rejected). Wire change → protocol v5 with the
-  GUI changelog entry; the reducer must learn the parent branch (its
-  `session_opened` handler currently sets Facts unconditionally).
-- **The announce pairs with the spawning tool call** (ruled 2026-09,
-  v7 additive, no bump): `session_opened.parent_call` carries the
-  call's `internal_call_id` — crossed at boot as `--parent-call`,
-  sourced from the tool body's `InternalCallId` context (typed
-  context the runner inserts per model-turn dispatch; absent for
-  executions outside a model turn). Exact pairing under concurrent
-  subagent calls, where arrival order cannot disambiguate; the
-  result-time pairing (`details.child_id`) stays as the completed
-  arm's facts. The frontend contract split landed with it (same
-  ruling): TOOLS.md owns the per-tool `details` shapes and
-  interaction templates, FRONTEND.md the mechanics.
-- **Resume addressing is by friendly name, not raw id** (ruled
-  2026-09): a model writing a UUIDv7 into a tool call pays ~10
-  tokens per reference, and a random-looking string invites
-  mistranscription; a 3–5 word natural phrase is cheap and reliably
-  reproduced. The future resume tool's parameter is a name the
-  backend resolves against lineage (the persisted child's
-  `parent_session` header) — the id stays what frontends pair on,
-  never the model's addressing path.
-- **Interaction default: parent-proxy** (ruled). The child's tool
-  context receives the parent's `Arc<dyn UserInteraction>` — cards pop
-  on the parent's stream and answers route through the existing rails,
-  zero endpoint changes. Deny-all remains a policy option.
-- **The result is a capped tool result** — child output truncated (or
-  spilled, bash-style) at a subagent budget; abort never looks like
-  success; usage/audit ride `tool_result.details`
-  (`{child_id, outcome, turns, usage, truncated}`) — the same
-  presentation-cargo channel edit and bash already use. (Amended
-  2026-09, v12: the shipped cargo is `{child_id, outcome}` only — the
-  pairing fact, TOOLS.md's shape. The `usage` leg is dead under the
-  per-turn ruling: usage rides the child's own `completion_call`
-  events and sums are the frontend's, so a details figure would be a
-  second, drifting copy. `turns`/`truncated` wait on the capping
-  budget, still unshipped.)
-- **Abort linkage is required plumbing**: the body selects on the child
-  pump vs the parent run token (abort detaches the sidecar task; an
-  unlinked child would keep spending tokens). `bash` is the reference
-  body shape.
-- **Memory is generic, not permission-shaped** (ruled 2026-09): the
-  permission gate is a built-in extension, not a core concept, and its
-  "Always allow" state is generic session-scoped extension memory —
-  such a thing exists, any tool/extension can register one, and a
-  subagent session can share the parent's by handle. The exact shape
-  is **deferred to item 9** (it is the extension registration surface);
-  until then `PermissionMemory` stays as the gate's private state and
-  subagent v1 is unblocked — parent-proxy covers correctness, and an
-  interim child simply mounts its own gate.
-
-**Framework-first (ruled 2026-09):** the delivery is the FRAMEWORK —
-session spawning made easy — and the `subagent` tool is one
-opinionated model-facing shape extensions are expected to override.
-The split (shipped): the standard `SessionBuilder` flow IS the child
-API (per-agent preamble — the caller builds it for the child's own
-cwd; toolset as whatever Vec the caller builds — allow-lists,
-deny-lists, empty; model, budget, hooks all per-child), plus exactly
-two new mechanics a worker normally provides: `SpawnContext::announce`
-(the parent-carrying session_opened) and `SpawnContext::drive` (event
-forwarding under the abort leash — the one recipe extensions must not
-hand-roll). The example tool adds: `cwd` (scoped: its tools AND its
-prompt follow) and recursion by omission — the model and toolset are
-**inherited** (ruled 2026-09: no model/tools knobs; children run the
-parent's model and the default child toolset, budget is the main
-session's default).
-**Substrate closed (2026-09, two rounds — PROTOCOL.md flag 33):**
-subprocess children are the ONE substrate. Round one shipped
-in-process v1 then built subprocess beside it; the routing work
-exposed the cost — child-specific consumption code existed only
-because an in-process child is a session without a worker — and the
-owner's correction removed in-process entirely ("maintaining
-something we don't need; worse, complicating the design for what's
-useless"). **Shipped:** `SessionCwd` (contextual tools), the
-builder's `ephemeral` entrance (plain session machinery the child's
-`--ephemeral` rides), the child-role flags (`--parent`; `--tools` /
-`--without` — the per-invocation allow/deny pair, applied once over
-the child's FULL toolset, core and extension proxies alike (ruled
-2026-09: a subagent extension shapes a read-only agent by whitelist
-and a read-write agent by denying its own delegate tool);
-`--ephemeral`; `--preamble` — the spawner owns the child's preamble
-(ruled 2026-09, semantics amended same day): the default base text
-(identity + standing body) is replaced while the environment block,
-AGENTS.md files, and skills catalog append as usual; ordinary
-`--session`/`--continue`/`--model`/
-`--max-turns` for persisted children), the bridge (`subprocess.rs`:
-self-spawn under a Job Object/process group with the child cwd as
-the process cwd, frames forwarded as-is, the ruled abort shape),
-the router (`routing.rs`: route-all line forwarding, learned tables
-for deep trees — no abort machinery; propagation is the tool's job,
-the run-token leash, per the codex/opencode survey), and the
-example tool spawning subprocess children (`task`/`model`/`cwd`/
-`tools`; extensions override via `SpawnContext`'s spawn/drive pair).
-Every session command works on a child structurally — the child is
-a full session host. Protocol v5/v6 (`session_opened.parent`, empty
-path = ephemeral; the interaction tag realigned). Deferred:
-persisted children's lineage (`parent_session` header + catalog
-grouping), the result-cap refinement, nested-transcript GUI
-rendering, and background children — deferred to the **background
-tool execution** discussion (owner note 2026-09: routing and
-commands are already substrate-independent of active tools — the
-registry, forwarding, and the child's mailbox all key to the child
-process's lifetime, not to a tool call — so the gap is one knob,
-handle detachment, plus the wait/cancel/list collection surface in
-opencode's shape). No extension-substrate
-assumptions (item 9 owns that).
-
-### 6. Compaction + overflow recovery
-
-**SHIPPED (2026-09, the rulings below implemented whole):** the box
-(`tabit-session/src/compaction/`), the dials file, the three doors
-(pre-request leaf, the beat doors, the `compact` command), the
-overflow intercept (session-side; the wall teaches the window), the
-`compaction` tree node (session format v4 — v3 files still load),
-the insertion fold (walkers stop at the compaction, included), typed
-overflow classification at the rig-core transport layer, and protocol
-v7 (the bracket events + the command). The flow facts live in
-ENGINE.md's compaction amendment.
-
-**Amended 2026-09 — the trigger measures, it does not estimate
-(owner: "cache hit + input + output is the history size in context —
-if the data exists, there's no need to estimate").** The data existed
-in the schema all along (`assistant_message.usage`) but the write
-sites deferred it (the 2026-08 usage-deferral); the ruling paid that
-debt: every assistant commit — the FINAL fold and the roundtrip fold
-— carries the turn's provider-reported usage onto the entry. The
-trigger input is the branch walk-back: the newest reported
-`total_tokens` plus chars/4 estimates for only the tail appended
-after it. `total_tokens` is the provider-correct partition of
-everything that request processed (Anthropic sums input + both cache
-counters + output; OpenAI's prompt figure already includes cached —
-summing components per-side would double-count one of them). A
-compaction entry ends the walk (every earlier measurement measured a
-history the summary replaced); zeros mean "not reported" (the type's
-sentinel) and the walk passes them by to the last real measurement; a
-branch nothing measured falls to the full estimate. A compaction
-**tainted older measurements** (found by the coverage round's
-overflow-intercept e2e): a request that ran before the insertion
-counted the old prefix — its total is an overcount now, and trusting
-it kept condition B fired until the cannot-shrink guard failed a
-successful pass. The walk honored a compaction horizon compared by
-entry id (UUIDv7 millisecond order). *(Historical: the id-horizon is
-deleted — superseded by the delta amendment below, which makes the
-stale read structurally unreachable instead of filtered.)* The box's
-`last_usage` session state is deleted with its justification — the
-entry IS the measurement, so it survives reload by construction, and
-reloaded stats count the same numbers the live ledger does. The
-chars/4 heuristic remained only where no server number existed: the
-unmeasured tail and cut-selection arithmetic. *(Superseded — the
-delta amendment below deletes estimation from the decision path
-entirely.)* Complexity (same
-ruling): O(history) is fine — binary search would need a tree
-re-shape for a size the context window bounds anyway, and the beat's
-common case is a walk-back with no serialization at all.
-
-**Amended again 2026-09 — the Outcome carries two facts (owner:
-"should it mean 'compaction happened', or 'you are good to
-continue'?"), and the pass cap is 16.** The wall argument for "8
-rounds can't exist" was wrong — the wall bounds growth *within one
-regime*; switching a nearly-full 1M context down to a 128K model
-imports a history needing ~10–11 legitimate passes (one prefix-cap of
-the *current* window per pass). `MAX_PASSES` is 16 (revisit at 2M
-models — a 2M → 128K switch would need ~21; bump to 32 then). The
-`Outcome` variants now state both facts: `Compacted` (happened ∧
-fits), `NothingToCompact` (didn't happen, good to continue as-is —
-the manual door's short-history decline is benign, not a failure),
-`Oversized { reason, passes, tokens_after }` (happened, **not** good
-to continue — the guard, the pass cap, or the unreachable
-no-further-cut arm), `Failed` (a pass errored; earlier commits
-stand), `Cancelled`. The intercept parks a retry only on `Compacted`
-— an `Oversized` retry would re-hit the wall (the old cap-exits-
-`Compacted` shape would have ping-ponged: retry → overflow → 16 more
-passes → …).
-
-**Amended again 2026-09 — the support envelope is declared, not
-adaptive (owner: "state what we support"; "neither option optimizes
-for 40K").** Windows below **64K** (rounded up from the 57,344
-contradiction line — reserve + kept tail + summary cap — to leave
-room for real work) skip loudly at the door, the unknown-window
-skip's sibling; the dials stay absolute constants targeting real
-windows (256K–1M). This correction also retires an earlier wrong
-statement in this record ("the guard, not the pass cap, is the
-multi-pass exit") — an artifact of testing below the envelope, where
-condition B is unsatisfiable by construction. The corrected taxonomy:
-on supported windows, one pass brings the context under B in
-essentially every case; a history far over the window multi-passes
-with strict shrink (a 100k history on a 70k window: pass 1 takes a
-prefix-cap's worth, pass 2 cuts to the floor-pinned tail, exit
-`Compacted {2}`); the cannot-shrink guard fires only exceptionally —
-a single huge entry no feasible cut can move into the prefix, or a
-misreported window. The multi-pass test exposed a real bug of the
-same raw-array-vs-folded-context class as the taint: cut selection's
-prefix sums now restart at a compaction node (pass N+1's cap was
-throttled by dead entries the fold had removed, so later passes could
-never cut deeper than pass N).
-
-**Amended again 2026-09 — deltas are committed facts; nothing is
-estimated (the rulings that closed the design, after the four-reference
-survey in `reports/`).** Every assistant commit stamps
-`delta_tokens = total[k] − total[k−1]` — the predecessor is the
-previous measured assistant in the same regime, the leading
-compaction node's `tokens_after`, or 0 at session start (the system
-prompt folds into each regime's first delta, measured; a regime
-counts it once, regimes never overlap). Client-added text — tool
-results, user messages, steers — rides the following assistant's
-delta: one class, never estimated. A compaction node appends as a
-**leaf at the head** (session format v5: no re-parenting, the tree
-stays honest) carrying `tokens_after = retained tail + the summary's
-own output tokens`, computed once at insert and persisted — a
-measurement-bearing node: the context read in the post-compaction gap
-is exactly this number, and the first post-compaction turn's delta
-telescopes against it (any tier-1 undercount inside it lands in that
-delta as overcount — the chain self-heals at the next measurement;
-boundary errors are one-shot, never compounding). Reads: current
-context = the total of the nearest measurement-bearing node
-at-or-before the head, walking the **raw branch** (the leaf-append
-geometry meets the live compaction before any tail entry, so a stale
-old-regime total is structurally unreachable — the taint bug is
-unrepresentable); cut selection = one suffix-delta pass (`tail(i)` =
-the boundary's suffix sum of deltas, summarization size =
-`head_total − tail(i)`); zero-usage turns commit no delta and the
-next measured delta telescopes over them; a total below its
-predecessor (mid-regime model switch, misreport) is uncounted and the
-chain re-anchors at it. The design assumes every valid provider
-reports usage (owner ruling 2026-09): a **live** turn committing
-with the zero sentinel warns at the commit, early at the source —
-compaction (which measures, never estimates) is off for such a
-context, overflow repair included. Unmeasured stretches are
-**uncounted, never estimated** — the error budget (owner): one-or-a-bounded-few entries
-off by a few K per compaction is fine; one entry per compaction off
-by half a context window is not; every entry off by a few percent is
-not (chars/4 is deleted from the decision path — it breaks on CJK,
-which is not even percent-level). An unmeasured context (no turn ever
-reported usage) skips loudly — the unknown-window skip's sibling.
-The walked surface is the **history view** — the raw branch with the
-newest compaction spliced at its cut (`[newest summary, tail, newer
-entries]`), one backward walk stopping after the live compaction's
-`cut_child`; consumers never walk tree links (owner: "construct the
-history array first, then walk that" — the raw parent walk cannot
-reconstruct a multi-compaction history). Residual edge on record: a
-cut landing immediately after a zero-usage turn makes that spanning
-delta absorb some cut-side content (needs a provider that skips
-usage *and* a cut in that exact window; bounded by one turn's
-content). Deferred with the agentic-cut ruling: cuts stay after
-text-only assistants and compaction nodes — a single long agentic run
-(one prompt, many roundtrips) has no usable cut and the Overflow door
-fails loud rather than repair; the future option is score-based
-selection — prefer a slightly-overshooting clean post-text cut over a
-tool-result cut, unless the clean cut forces a super-long tail —
-which would reinstate the out-only correction for the first tail
-assistant.
-
-- Context compaction: summarize old turns when approaching the context
-  window (pi: replace history with a summary + recent tail).
-- Overflow detection and recovery: detect context-overflow errors from
-  the provider, repair and retry rather than fail the session —
-  detection is **typed classification at the transport layer** (ruled
-  2026-09 with the cut-selection loop below — we own the
-  anthropic/openai wire clients, so no regex port; the old
-  pi-`overflow.ts` port deferral, and the COVERAGE.md note it pointed
-  at, are dead).
-- **Ruled 2026-08: compaction gets a real design discussion before any
-  code.** No coding agent (pi included) ships a genuinely robust compaction
-  pass — treat pi's as a reference, not a target. The design must also cover
-  the history/session-tree interaction: what a compaction entry *is* in the
-  append-only tree, how checkout interacts with a compacted chain, and what
-  replay reconstructs. All three questions are answered by the 2026-09
-  rulings below (the record, the insertion, the flow).
-  `context_window` config wires with the implementation. **Deferred (2026-09, subagent-extension ruling): a
-  per-child dials file selector** (`$TABIT_DIALS` / a spawn flag) —
-  the shape that makes compaction rules per-consumer (different
-  thresholds, different summarizer prompts, as data); the dials stay
-  clustered consts until that consumer exists, and the selector is
-  additive to them.
-- **Reference survey (2026-09, the design discussion's evidence base):**
-  all five references (pi, codex, opencode, crush, yaca) roll their own but
-  converge on one skeleton — threshold from real provider usage minus a
-  reserve, a cut with a retained recent tail, a structured handoff summary,
-  an overflow-error backstop. The check runs between model calls everywhere
-  (the tool-roundtrip seam — the only point with fresh usage numbers),
-  never after individual tool calls; codex compacts mid-turn at the seam,
-  pi/yaca compact at the run boundary, crush stops the run to summarize.
-  Two payload camps: **codex appends the summarization prompt to the REAL
-  conversation** (same system prompt, empty toolset — the request prefix
-  `compact.rs:282-286` — so it rides the prompt cache and the history goes
-  verbatim); **pi/opencode/yaca send standalone requests** with the
-  conversation lossily serialized to text (tool results truncated ~2k
-  chars; a cache hit is impossible by construction, and pi explicitly
-  disables cache writes). Post-compaction, both camps pay a full cache
-  re-write — the replacement context is a new prefix. The only
-  standard-shaped thing is OpenAI's server-side Responses compaction
-  (codex negotiates it as a provider capability); nobody has our
-  rewind/branch tree, so the tree interaction is ours to design.
-- **Ruled 2026-09 — two seams, two thresholds (owner):** the trigger is
-  checked at two seams with different jobs. The **pre-request seam**
-  (the point you are about to send a request to the model — between
-  model calls, mid-run; defined precisely in the own-system ruling
-  below) carries the high threshold — "compact now, or the next few
-  calls will exceed the context window and fail" (safety; fires
-  mid-task only when genuinely close). The **outer-loop idle seam**
-  (after run end, back at idle) carries the lower threshold —
-  "summarize at a natural pause point, make room for the next task"
-  (compacting at 75% when the model has finished its work beats
-  waiting for the urgent bound mid-task; the numbers are finalized in
-  the trigger-formula ruling below).
-- **Ruled 2026-09 — in-conversation summarization (codex-style, owner):**
-  the compaction request is appended to the real conversation — same
-  preamble, **no tools**, the instruction riding in the user message
-  (swapping in a summarizer system prompt is what breaks the prefix
-  cache; the user prompt does all the work). The request prefix-rides
-  the existing prompt cache and the history goes verbatim — no
-  serialize-to-text loss. Reason on record: input-cost savings ("a penny
-  is a penny" — cache-read dominates real coding sessions, so the saving
-  is admittedly small). The reconstructed-request style stays the
-  recorded alternative: the request shape is one construction site, and
-  the cut/projection machinery is shared by both styles, so switching
-  later is contained.
-- **Ruled 2026-09 — trigger numbers and queue conditions (owner):** the
-  idle seam fires at **75%** of the window, and only when the steer
-  queue is empty — a waiting message means not actually idle, and the
-  user never waits behind a summary. Messages arriving *during*
-  compaction queue normally and run after it (always-queue gives this
-  structurally). The seam compaction ignores queued messages entirely:
-  they stay queued; compaction lands before request prep, and the
-  queue drains at request prep as it always does — ordering only, no
-  explicit coordination (ruled 2026-09). The seam reserve is bounded by the **two-turn budget**
-  (owner correction of the one-turn derivation): the check fires
-  discretely one seam *after* the crossing turn, so the worst case at
-  fire time is threshold + one full turn of growth, and the compaction
-  call must still fit its prompt and summary output in the window —
-  reserve ≥ one turn's growth + summary room ≈ two turns. Reference
-  reserves for calibration: pi/yaca 16,384 absolute; opencode
-  min(20k, max output tokens); crush 20k absolute above a 200k window,
-  20% of the window below it; codex 90% soft / 95% hard — plus a
-  runtime escape hatch (on overflow *during* compaction, trim the
-  oldest item and retry), evidence the fixed reserves under-provision
-  the compaction call and get patched at runtime instead.
-- **Ruled 2026-09 — the final trigger formula (owner):** two conditions
-  over the configured window `max` — **A**: `context > 75%·max ∧
-  mailbox empty`; **B**: `context > max − 32K`. Idle compaction checks
-  both (A ∨ B); seam compaction checks only B. The disjunction makes
-  the idle bound never exceed the seam bound at every window size by
-  construction: at 128k the two coincide; below it idle rides the
-  urgent bound (75% would leave too little room); above it idle gets
-  the gentle window. B carries no mailbox gate — urgent is urgent (a
-  queued message behind an over-window context waits for the
-  compaction; the alternative is running it into the wall). The 32K
-  reserve is the two-turn budget at ~16k/turn.
-- **Ruled 2026-09 — compaction state rejects all tool calls (owner):**
-  the compaction request keeps the exact same preamble and toolset —
-  prefix-cache identity, since any toolset change (emptying it, or
-  trimming to a subset like `read`) diverges the cached prefix at the
-  tools position — forbids calls in the instruction, and **rejects
-  every tool call** made in compaction state. Entry and query are
-  settled by the own-system ruling below (the two doors). The
-  rejection's response shape, settled 2026-09 (owner: "not allowing
-  tool calls doesn't mean ignore tool calls" — discard-and-retry
-  preferred over synthesizing an in-band error result): a violating
-  response is **thrown away and the request resent**, bounded by
-  `VIOLATION_RETRY_CAP`; each discard closes its bracket as
-  `compaction_failed` so the frontend drops that attempt's deltas.
-- **Ruled 2026-09 — the cut-selection loop (owner, high-level; agenda
-  items 2+5 merged into it):** one procedure, three points.
-  (1) **Initial cut:** keep at least `KEEP_TAIL` (an internal
-  configurable dial — tokens or percentage) of recent history as the
-  retained tail, while ensuring the history **sent** for compaction is
-  < 75% of the window. The request is the conversation **prefix up to
-  the cut** plus the summarization instruction — never the full
-  conversation: prefix caching covers whatever prefix is sent (the hit
-  is on the longest common prefix, so dropping the tail does not
-  forfeit the cache), and the <75% bound forward-guarantees the
-  request fits by construction even when compaction fires over-window
-  — the forward-looking cut, not codex's backwards trim-and-retry.
-  Both hard constraints push the cut the **same direction** — up the
-  history, a shorter prefix: sent < 75% caps how late the cut can sit,
-  and tail ≥ `KEEP_TAIL` caps it too (a later cut means a shorter
-  tail). The **longest-prefix** objective is the soft pull in the
-  *opposite* direction — compaction efficiency: summarize as much as
-  one request can carry. Selection = the latest valid boundary
-  satisfying both. The session-start cut satisfies both vacuously, so
-  infeasibility reduces to a history shorter than `KEEP_TAIL` itself —
-  skip compaction, reachable only on MANUAL requests (the auto
-  triggers imply a context far past `KEEP_TAIL`). Tail overshoot
-  beyond `KEEP_TAIL` is **normal, not granularity-only**: when
-  history ≫ window (3M history, 1M window) the cut sits at the 75%
-  cap and the 2.25M remainder stays as tail — the post-check rerun
-  then makes several passes, each summarizing another ≤75%-of-window
-  chunk until the context fits.
-  (2) **Rejection and length-cap alike:** on a server rejection of the
-  cut point — any non-transient, engine-visible error (the typed
-  classification; the transient family already rides the pi-policy
-  retry) — or a length-capped summary (protocol-complete but
-  information-incomplete: the summary could not fit what the prefix
-  contained), move the cut one block up the history (a shorter
-  request) and try again. Blocks are the valid cut boundaries
-  (no-tool-call outputs).
-  (3) **Post-check loop:** after compaction, immediately re-check the
-  trigger against the new context (preamble + summary + retained
-  tail); still too big → rerun the loop — pass N+1 is **just another
-  regular compaction**: the walked history already carries pass N's
-  summary as its first item, so there is no previous-summary
-  machinery (ruled 2026-09; pi's update pattern is not adopted).
-  Sub-decisions left to the dig: the retry loops' termination — the
-  rejection/length-cap loop has a natural floor (the empty prefix,
-  past which the pass fails loud), the post-check rerun needs the
-  cannot-shrink guard (yaca's rule) — and the rerun threshold
-  (leaning: condition B again).
-- **Ruled 2026-09 — the compaction record, file and tree (owner):**
-  the session file gets ONE compaction entry per pass, append-only —
-  the kept tail is already in the file, so the entry carries the cut
-  identity: **the id of the message immediately after the cut point**
-  (the first tail entry), its own parent being the node before the
-  cut, plus the summary payload. The runtime tree performs a real
-  **insertion**: the compaction node becomes the parent of the
-  cut-point child and the child of the original cut-point parent, and
-  history walkers **stop at the compaction, included** — the walked
-  context is [summary] + retained tail; everything before the
-  insertion stays in the file and the tree, un-walked. In file terms
-  the insertion is *derived*: the tail entry's record keeps its
-  original parent, and the loader re-parents it through the
-  compaction entry on replay (append-only preserved; the derivation
-  lives in the one fold the parser and the resident context share; a
-  record whose parent ≠ its cut child's file parent is a loud parse
-  error). Consequences: the **head does not move** at compaction —
-  later appends attach to the unchanged head and their effective
-  chain routes through the insertion; **checkout/rewind to
-  pre-compaction nodes yields the full-history branch** (the
-  compaction is not on that path — "compaction never deletes"
-  realized as tree topology, no projection machinery; rewind-to-X
-  itself is degenerate but consistent, and the user surface never
-  lands there); **multi-pass composes as successive insertions**
-  (each pass's entry parents the node before its own cut and names
-  its own cut child — no entry is rewritten); a **torn compaction
-  entry loses only the pass** — reload yields the full history, the
-  write-behind contract's accepted loss. Still open (implementation-
-  time): the entry's exact payload fields (tokens-before, usage, pass sequence,
-  the instruction for audit), how the summary enters the
-  model-facing context (leaning: a user-role wrapper message, the
-  references' pattern), and the session-format version bump.
-- **Ruled 2026-09 — compaction is its own system (owner):** a
-  dedicated procedure in tabit-session beside `run_one` — a focused
-  black box to the rest of the system. The box owns the trigger
-  evaluation (the A/B formulas), cut selection, the request assembly
-  (prefix-truncated, same preamble and toolset), the shorten-retry
-  and multi-pass loops, and the compaction entry write; no flags in
-  the engine, no compaction knowledge anywhere else. Its interface is
-  **two doors** — the caller names the seam, the box picks the
-  formula: (1) the **pre-request point** — the point you are about to
-  send a request to the model, every request in a run, the first
-  included (a resumed over-window session is caught at run start);
-  the pre-flight overflow case is this same check, not a separate
-  path — condition B; (2) **idle** — between runs in the session
-  actor, condition A ∨ B. Out of the box: its own events, the
-  compaction entry, and the compacted context the run or the next
-  prompt continues from. The ruled queue behaviors are structural
-  (the pump isn't running, so the mailbox waits; the summary turn
-  records as one entry, never a message pair). Whether the
-  pre-request seam rides the existing tool-phase hook pair or a new
-  pre-request edge is the ENGINE.md amendment's first decision —
-  which precedes code (rule 11).
-- **Ruled 2026-09 — pre-implementation clearances (owner):**
-  (1) **Events:** compaction start/end events, with the summary
-  streaming as text deltas on the session's stream (the frontend is
-  already a streaming consumer; a silent multi-second call is the bad
-  UX). The events, the `compact` command, and the protocol version
-  bump land together, with FRONTEND.md and the GUI changelog.
-  (2) **Abort:** compaction is a long async operation — the main flow
-  stays responsive while it runs. An abort does the usual mailbox
-  discard plus terminating the compaction stream; a cancelled or
-  failed pass persists nothing.
-  (3) **Manual compaction:** a third door — a `compact` command type
-  carrying the session id and optional compaction directives; the
-  frontend's presentation of it is its own business. The
-  short-history skip is its guard.
-  (4) **Unknown `context_window` — the wall teaches the window:**
-  every designed constraint needs a known window, and the overflow
-  error carries it — Anthropic: `prompt is too long: X tokens > Y
-  tokens maximum`; OpenAI: `maximum context length is N tokens … you
-  requested M tokens (… in the messages, … in the completion)` — and
-  the typed transport error preserves `{status}` and `{message}`, so
-  the numbers are reachable. An unknown window therefore skips the
-  threshold triggers (with a warning) while overflow recovery still
-  functions, learning the real window from the error; the learned
-  window serves the rest of the session.
-  (5) **Dials are data:** the instruction prompt text and every
-  threshold (75%, 32K, `KEEP_TAIL`, the summary output cap) are data
-  fields clustered in one or a few files — review and polish happen
-  in one place.
-  (6) **Multi-pass is just another regular compaction** (amended into
-  the cut-selection ruling above — no previous-summary machinery).
-  (7) **Ordering, not coordination** (amended into the trigger
-  ruling above — compaction lands before request prep; the queue
-  drains at request prep as always).
-- **Open agenda (quick thoughts recorded 2026-09, owner — each gets a
-  deep dive; leanings marked):** (1) trigger conditions — **settled**
-  (formula above); the token-counting input stays a leaning (last-turn
-  provider usage, pi's four-component sum, plus chars/4 of trailing
-  messages). (2) **cut points — merged into the cut-selection loop
-  ruling above** (valid boundaries are after model outputs without
-  tool calls; queued steers cluster before the first user message;
-  flexible tail budget via `KEEP_TAIL`). (3) **settled** — compaction
-  state rejects all tool calls (ruling above). (4) **flow fit —
-  three separate designs, not to be mixed**: the session file
-  **settled** (the compaction record ruling above), the runtime
-  session tree & state **settled** (the insertion ruling above), and
-  the execution flow **settled** (the own-system ruling above, a
-  black box with two doors; the ENGINE.md amendment precedes code). (5) **overflow recovery — merged into the cut-selection
-  loop ruling above** (pre-flight fit by construction + rejection
-  shortening + the post-check loop).
-
-### 7. CLI / interface layer
-
-- **Print mode shipped** (`crates/tabit-core`): one prompt in, live events out,
-  project-local sessions, `-p <PROMPT>` / `--continue` /
-  `--session <path>` / `--list` / `--rewind <n>`, `--model provider/model`
-  or `default_model` in providers.toml. (The GUI-as-default clause was
-  superseded 2026-09 by the backend rename: `tabit-core` is headless,
-  the frontend is a separate binary, and the launcher mode is gone.)
-- The protocol's design record — locked decisions plus every open
-  flag with options — lives in PROTOCOL.md; flags are resolved in
-  discussion order there.
-- **Frontend architecture (decided, v1 shipped): frontend-through-protocol.**
-  One typed vocabulary. Commands are fire-and-forget with total
-  semantics — `message { text }` (steers the run in flight, or starts
-  one) and `abort` (aborts + discards the queue) — nothing can be
-  rejected, so there are no ids and no request/response; outcomes are
-  events. Every event is stamped with a `StreamId` ("main" today;
-  subagents mint siblings). Typed serde enums over in-process channels
-  (`SessionHandle` actor in tabit-session), serialized only at a
-  transport edge (LF-JSONL on stdio). Tagged frames, not JSON-RPC 2.0;
-  versioned `initialize` handshake at the stdio edge. Informed by codex
-  (single-table protocol crates, thread stamps), pi (ids optional,
-  clients run on events), claurst (the channel seam across three
-  frontends), and the protocol-design discussions that eliminated
-  acks/rejections as cases that cannot fire.
-- **JSON mode shipped** (`--json`): the first protocol consumer and its
-  test harness — `initialize`/`message`/`abort` in, stamped events out
-  on stdout, human banners on stderr, stay-alive between runs. The
-  always-queue refactor underneath: a run-agnostic `Mailbox` replaces
-  the run-scoped steer slot (messages can never be lost — the only
-  discard is abort), `pump`/`run_one` extracted from `prompt_with`,
-  `RunFailed` joins the event vocabulary, and print mode drives the same
-  `SessionHandle` path.
-- **Rulings folded in** (post-JSON-mode pass): every drain point takes
-  the whole queue at that instant (idle entry batches all pending
-  messages into one run's opening input; the engine drains the rest as
-  steers at turn boundaries); `prompt`/`prompt_with` are thin wrappers
-  over `submit` + `pump` — failures are events and
-  `RunOutcome::Failed`, no `Err` return (one drive path, one contract);
-  session files materialize at the first user message (a session that
-  never runs leaves nothing on disk — no header-only orphans, and
-  `--list` reads a missing sessions directory as empty);
-  `StreamingChat::stream_chat` takes a full conversation — the final
-  message is the turn being sent, callers add messages to history
-  before the call, and retries resend the same list verbatim;
-  malformed tool-call arguments are a model-side defect — the turn is
-  discarded (never entering history on any provider) and the request
-  retried once, exhaustion fails the run with history clean (PROTOCOL.md
-  flag 21, recorded with the outer-loop diagram).
-- **Model command shipped** (stage 3, 2026-08): `model { session,
-  provider, model, thinking_level? }` switches a session's selection —
-  the register write under the session-preference ruling, and **a
-  state write, not conversation intent**: the whole command happens
-  at receive. Validate against config (the `ModelProbe` handle —
-  immediate `error { kind: model }` for a bad ref), then one shared
-  register write (`ModelRegister`: the `model_change` entry and the
-  live selection cell, atomically, from any thread — the recorder's
-  append is internally locked, and the planned write-behind log turns
-  it into a queue enqueue with a flush attempt per write), then
-  `model_changed` (one construction site shared with the replay
-  passes). The worker is uninvolved — no park, no wake, no beat
-  ordering, and abort has nothing to say about it: the next run open
-  derives the agent, every pass announces the cell. The GUI grows a
-  minimal test field (`provider/model` free text); the real picker
-  waits for a models-list command (deferred with the redesign).
-  Deferred with it: the global implicit preference (`~/.tabit/`
-  last-selected file + registry rung below `default_model`) and the
-  "selection didn't land" picker signal (open note in PROTOCOL.md).
-- **GUI: egui — DELETED (2026-09, owner ruling: the paused
-  frontend's sync twin kept surfacing as an exception on every
-  review; the tree is gone and the TUI candidates lead — the
-  redesign worktree's branch notwithstanding). The rest of this
-  item is the design record.** The TUI milestone
-  (the claurst harvest, ~19K LOC) is dead — GPL, ruled out; the
-  terminal frontend found its own non-ratatui track (the TUI ruling
-  below). The GUI is an egui app (eframe shell, egui style theming)
-  speaking the item-7 protocol over the existing stdio edge: it spawns
-  one `tabit-core --json` child process — the multi-session host (PROTOCOL.md
-  v3): sessions are created, opened, and switched by channel commands,
-  never by process tricks (the GUI-respawn interim is deleted). Process
-  separation is the point, twice over: internal errors panic by doctrine,
-  and the GUI must survive a backend crash (restart the session, keep UI
-  state); and it is exactly the vscode-remote shape — SSH remote is the
-  same child spawned on the far side of `ssh`, stdio forwarded, no new
-  transport (this likely retires item 8's named-pipe/local-socket plan).
-  Widget ecosystem (surveyed 2026-08): markdown via `egui_commonmark`
-  (actively maintained, GitHub-flavored extensions); syntax highlighting
-  via `syntect` (egui's own code-editor demo is the pattern); diffs over
-  the `similar` crate with a hand-rolled viewer. An embedded terminal
-  (interactive bash) has no battle-tested egui widget — `egui_term` /
-  `egui_tty` (Ghostty's VT engine) are candidates; defer until an
-  interactive PTY is a real requirement. Transcript list, input editor,
-  and overlays are ours on egui layout primitives.
-  **Build order** (the GUI is the owner's feedback instrument, so it
-  starts before the v2 backend completes): `tabit-protocol` extraction
-  → walking-skeleton GUI on the shipped v1 wire (spawn `tabit-core --json`,
-  transcript, input, steer, abort, crash handling) → v2 backend slices
-  land behind it, the GUI growing each slice (ids → turn anchors,
-  replay → restart-safe transcript, checkout → rewind buttons, model
-  command → picker, write-behind → degraded banner).
-  **Redesign at the polish phase (ruled 2026-08, owner, after the v3
-  review round).** The walking skeleton served its purpose; its
-  reducer's state model — single-session globals with multi-session
-  semantics bolted on as conditionals — cracked repeatedly
-  (session_created dropped by the stream check, replay passes poisoning
-  liveness, cards dying at view switches), the same seam each time.
-  The **trigger**: after checkout, `model`, and write-behind's
-  per-session seq land — the remaining events that touch reducer
-  surface; the trigger has since fired (checkout, model, and
-  write-behind's per-session seq all landed) and the redesign is in
-  progress on the `tabit-gui-work` worktree (branch `gui/redesign`,
-  kicked off 2026-09) — until it lands, master-side GUI changes are
-  minimal interim patches with the
-  seams marked, not investments in the doomed shape. The **scope**:
-  the state model and view layer are redesigned; `backend.rs`
-  (process/pipes/handshake, bug-free through v3) and the InMsg
-  vocabulary carry over. The new state model is dictated by the
-  protocol: a per-session projection (`session_id → {transcript,
-  running, pending, cards}`) plus a thin connection layer (phase,
-  facts, catalog), with attribution-by-stamp as the fold's primary
-  dimension and the learned event classes as its dispatch table
-  (connection-level vs stream-scoped vs bracket-suppressed vs
-  liveness). **Preconditions**: a short design record for the state
-  model precedes code (the GUI's ENGINE.md equivalent), tests derive
-  from it, and fixtures build frames through shared `tabit-protocol`
-  builders so a fiction shape (a frame the backend cannot produce)
-  cannot compile. Known stage-1 behaviors deferred to the redesign
-  (2026-08, live testing + review): switching back to a mid-run
-  session shows an empty transcript until that run's terminal (the
-  optimistic clear waits for the replay pass, which correctly parks
-  behind the run — the parked-replay ruling), and `Facts` follows
-  only `session_created` — a switcher switch leaves the status strip
-  naming the previous session's model until the opened session's
-  register announcement arrives with its pass (deterministic since
-  the register ruling; for an in-flight session the pass still parks
-  behind the run's terminal — the same window as the transcript).
-  Both die with the per-session projection.
-- **TUI: back on, the Node route (ruled 2026-09 after the research
-  round; full survey in TUI-RESEARCH.md, branch `tui/research`).**
-  The claurst ratatui harvest stays dead (GPL) and a Rust-native
-  TUI stays deferred (a later claurst-ideas rewrite remains open);
-  the terminal frontend rides the JS ecosystem instead: **the omp
-  fork of pi-tui (`@oh-my-pi/pi-tui`, MIT — Mario Zechner's own
-  next-gen line, not a third-party fork) under Bun**, spawning
-  `tabit-core --json` as a child process (the stdio edge GUI, print, and
-  JSON mode already ride — zero backend changes), distributed via
-  the npm registry as per-platform optional packages (esbuild
-  pattern; no postinstall) carrying a Bun-compiled standalone TUI
-  exe plus the cargo-built core — the installer is whatever the
-  user has (`npm i -g` / `bun i -g`), no JS runtime at run time.
-  Single repo, single tag, single version: the lockstepped pair is
-  the strict protocol handshake made atomic. Fallback ladder: stock
-  pi-tui on plain Node, then opentui (its Node ≥ 26.4 engines floor
-  breaks the one-line install today). Next: the §7 walking-slice
-  spike on Windows Terminal before product commitment; the TUI
-  enters the monorepo (`tui/`) when it graduates.
-- **Framework: egui (ruled 2026-08, after evaluation).** Runner-up
-  iced (its Elm architecture matches our reducer split natively) loses
-  on ecosystem for our exact surfaces — no markdown widget, no list
-  virtualization, no terminal story, thinner agent-training corpus.
-  Webview stacks (Tauri) rejected on the opencode lesson: system
-  WebKit rendering skew drove them to bundling Chromium; a browser
-  bundle or a JS boundary both cost more than egui's ceiling costs us.
-  Slint (license complexity), Xilem (not ready), gtk4-rs (Windows
-  story), Flutter (language boundary) dismissed. Revisit triggers: an
-  interactive terminal becomes core (xterm.js is unmatched), or egui's
-  text ceiling proves too low for the transcript quality wanted. The
-  reducer stays framework-free and pure, so a future switch rewrites
-  only the view layer.
-- **Entry-point architecture (ruled; superseded 2026-09 by the
-  backend rename): `tabit` is a launcher, the GUI spawns the core.**
-  `tabit [path]` spawns `tabit-gui <path>`
-  detached — own process group on Unix, detach flags on Windows, the
-  vscode survive-the-terminal trick — and exits immediately; `-p` /
-  `--json` keep their foreground modes; bare `tabit` stops erroring
-  and opens the GUI. Per window the GUI owns one `tabit-core --json` child
-  per session: crash isolation follows the panic doctrine, and local
-  and ssh spawning are the same shape. Singleton handoff (vscode's
-  running-instance IPC) deliberately deferred — each launch is an
-  independent window. (The 2026-09 amendment: the backend is
-  `tabit-core`, carries no launcher and no frontend references —
-  spawning runs frontend → backend only, matching the crate
-  dependency rule. The detach story waits for the GUI's revival; the
-  `tabit` name is reserved for the frontend that ships primary — the
-  TUI candidates lead.)
-- **GUI design contract (ruled for the polish pass).** Reducer/view
-  separation is strict: the reducer is pure, framework-free, and
-  unit-tested; the egui pass is a projection containing no business
-  logic. Theming via crates over egui's data-driven style
-  (egui-elegance-class tools), never hand-rolled color tweaks at call
-  sites. Rich rendering behind single-function seams (plain text now;
-  egui_commonmark / syntect swap in later). View-only state lives in
-  its own churnable display struct, never in the reducer. The
-  transcript renders through ScrollArea's viewport pattern from day
-  one. **Ecosystem-first rule: before hand-rolling anything
-  non-trivial in tabit-gui — theming, markdown, terminal emulation,
-  docks, toasts — pause and research existing crates, or ask the
-  owner to search.**
-- **License (decided): all-MIT.** The GPL split existed only to admit the
-  claurst harvest; with the TUI dead there is no GPL dependency and no
-  reason to go GPL (enforcement isn't free either). AGENTS.md rule 10
-  updated to match. Frontends stay leaf consumers of the protocol —
-  dependency direction remains one-way by architecture, not license.
-
-### 8. Client/server + protocol
-
-- The protocol is the item-7 vocabulary, defined once and shared by every
-  transport: in-process channels first, stdio JSONL with the JSON mode,
-  named pipe / local socket only when a remote client exists. The
-  vocabulary lives in **`crates/tabit-protocol`** (extracted from
-  tabit-session; flag 13) — engine-free, protocol-owned shapes, so
-  frontends (the egui GUI included) share the serde types without
-  touching persistence internals.
-- **ACP (Agent Client Protocol) ruled adapter-only (2026-09; survey in
-  PROTOCOL.md flag 32):** the native vocabulary stays the one contract —
-  ACP is too little where tabit is deliberately rich (steering, the
-  checkout tree, subagent streams, custom widget UI, durability
-  signals), too much where tabit is deliberately lean (the JSON-RPC
-  envelope, capability negotiation, auth/MCP/plan/slash-command
-  machinery), and the wrong shape for the in-process GUI consumer. The
-  reach play is an optional `tabit-acp` adapter crate — a leaf frontend
-  projecting stamped events onto `session/update`, the pi/pi-acp
-  pattern — deferred **at least until ACP v2 ships and stabilizes
-  through a few patch rounds**; that is the re-evaluation trigger.
-
-### 9. Extensions
-
-**DESIGN SETTLED (2026-09, the discussion record lives in
-EXTENSIONS.md); implementation under way — tasks 1–6 shipped — the checklist is complete (the
-`crates/tabit-ext` host: discovery and the disable-list gate, the frozen
-pipe, supervision, the death policy, the tool lane, the hook lane,
-the skills tables; the engine-side
-`on::tool_result` + `HookStack::merge`; `crates/tabit-ext-sdk`: the
-guest dispatcher and the example packages —
-the permission gate lived there as `gate-ext` between the 2026-09
-move-out ruling and its supersession the same month (the gate is the
-built-in `tabit-gate` crate now; the package was deleted),
-`lmstudio-ext` (the native-API provider relay) and
-`autotitle-ext` (the model_prompt
-attribution demo) with them; the host-service envelope
-(`service_request`/`service_response`, the ask folded in as verb
-zero; `model_prompt` billed per extension) in `rig-agent`'s
-`HostServices` + tabit-session's capability; proxy+hook assembly and the
-`extensions_available` catalog in the `tabit-core --json` backend).** The
-shape:
-
-- **The substrate: subprocess executables over a frozen JSONL
-  extension protocol** — the subagent substrate generalized. One
-  dependency law for everything external: frontends, subagents, and
-  extensions are leaf consumers across process boundaries. Not
-  in-process runtimes (contradicts the single binary); not WASM for
-  v1 (the alternative with a felt-need trigger: real containment or
-  hot hooks). The trust model is user consent, full stop — native
-  code, full OS rights, no sandbox, no trust state: placing the
-  package is the consent (ruled 2026-09; the load-time prompt
-  concept was removed with that ruling).
-- **Declaration**: `tabit.json` for install facts; capabilities
-  declared live at the handshake (initialize/ack — tools, hooks).
-  **Prompt contributions are not a v1 capability** (ruled 2026-09):
-  nothing consumes them and the build phase may be refactored — they
-  join when that decision lands with a consumer.
-- **Naming**: model-facing names are flat (the declared name, no
-  prefix); identity is the (extension, tool) pair — the key for
-  accounting, the load-time conflict report, and the wire catalog
-  `extensions_available` (the skills_available family, with
-  provenance). One name, one tool, resolved at host assembly;
-  extension-replaces-core must be reported by the backend (how
-  loudly is the frontend's call); extension-vs-extension collisions
-  refuse the newcomer, naming the incumbent.
-- **Install**: `tabit-core install npm:<pkg> | git:<repo> | path:<dir>` —
-  npm as plain registry HTTP (no npm CLI, no embedded runtime, no
-  registry of our own), git via `git`, pickup at next backend start
-  (byte-stability law). No language list: the protocol is the
-  contract, the package declares its entry command.
-- **Provider contributions are catalog fragments**: a local relay
-  speaking a known wire format plus a `providers.toml` fragment
-  merged at config load (user config wins; uninstall = remove dir).
-  The credential line is attribution, not protection.
-- **Host services**: request-response verbs on the same pipe (the
-  interaction hub is service zero); verb one is `model_prompt` —
-  capped, complete-only, usage billed to the session tagged with the
-  extension identity (the auto-title shape).
-- **Frontends stay leaf consumers**: extension packages may carry
-  `frontend/<target>/` parts, but loading them is the named
-  frontend's business (the TUI can load JS plugins; the GUI stays
-  declarative — generic renderers over tagged `details` cargo; every
-  extension degrades to `content` rendering everywhere).
-- Settings surface: layered config (user > workspace > flags)
-  already partly from item 1; extensions register tools and hooks
-  through the surfaces above.
-- **Session-scoped extension memory — dissolved by the substrate
-  (2026-09).** Extension state lives in the extension's own process;
-  durable state is tool results (the interaction-state ruling);
-  cross-process sharing is files or env vars, the extension's own
-  business. What survives of the old design question: the permission
-  gate's durability split ("always allow" session-only vs user
-  config) lands with the gate's move out of core.
-- **The permission gate moves out of the core into an extension
-  package when extensions land (ruled 2026-09).** Until then it stays
-  in core as the interaction prompts' consumer; its mount
-  (`crates/tabit/src/main.rs`, the hook surface) is the door it
-  leaves through — see EXTENSIONS.md.
-- **Engine-side work the extension host will need** (from the
-  2026-09 architecture review): the closure hook surface lacks an
-  `on::tool_result` registration and a stack-merge/composition
-  surface (the priority law is per-stack) — both land with the host,
-  which is the consumer that arrives with both needs. The review's
-  capability-carriage question is dissolved by the substrate
-  (extension tools are proxies; their state never enters
-  `ToolContext`).
-
-**Implementation checklist (2026-09; in build order):**
-
-1. **Handshake + host plumbing** — *shipped* — the extension
-   protocol frames, initialize/ack, spawn/supervise (the subprocess.rs
-   patterns — tree-kill wrapping and the stderr ring moved to
-   `tabit-ext` and are shared with the subagent bridge), the
-   dead-extension policy (mark dead + report via the supervisor's
-   event channel; no mid-run respawn; the mounted contributions stay
-   by construction — proxy tools answer "not running", skills tables
-   and provider fragments are scan-driven and survive),
-   `crates/tabit-ext` +
-   the `--json` boot (`--extensions <dir>` overrides the root; every
-   process boots its own host — the leaf law refined 2026-09 to
-   outlaw loading into a parent's process, not a child hosting its
-   own set). The death paths' test vehicle is the in-crate `ext-double`
-   behavior double. Development rides `path:` installs throughout.
-2. **Tool registration & execution** — *shipped* — proxy tools,
-   conflict-free name→tool assembly at the host
-   (extension-replaces-core reported by the backend; ext-vs-ext
-   refuses the newcomer — registration order is the scan's, so the
-   newcomer is deterministic), the `extensions_available` catalog
-   with provenance and conflict reports (protocol v9), interaction
-   forwarding as the capability lift (`interaction_request`/
-   `interaction_response` over the pipe, mirroring the engine's
-   ui_type + payload verbatim; no capability answers dismissed —
-   fail closed). Boot ordering: every handshake resolves before the
-   session assembly (tools exist at build; a broken package costs
-   one boot, loudly, never a healthy sibling's delay). E2E-proven
-   across three processes (backend → mock provider → extension
-   double: the model's `tool_call` runs the extension's tool and the
-   result feeds the next turn). **The developer surface (ruled
-   2026-09): a small Rust SDK** (`tabit-ext-sdk` — the dispatcher owning the pipe
-   loop: ack, tool-call dispatch to bodies, result serialization,
-   hook-event delivery; sync and boring by design, no lifecycle
-   machinery). The SDK **hand-rolls its frames, sharing no code with
-   the host** — it is the protocol doc's reference consumer (if it
-   can be written from the doc, any language qualifies; shared serde
-   types would prove nothing the frozen wire doesn't already). The
-   task-2 examples (`echo`, `shadow`, the clash pair) build on it —
-   they demo the developer experience, and the host's tests spawning
-   SDK-built examples make both protocol sides validate each other;
-   `ext-double` stays hand-rolled forever (the any-language proof).
-   Rust SDK first because it is ownable and in-workspace testable;
-   a JS/TS SDK joins with the npm channel (task 6). The extension
-   **template** (fork → develop → build → publish: `tabit.json`,
-   skeleton `main.rs`, release workflow, README) is `echo`
-   generalized — in-workspace until task 6, then its own repo.
-3. **Hook registration & execution** — *shipped* — pipe-forwarded
-   hook events (`hook`/`hook_result`, v1 decisions run/skip/keep;
-   the payload carries the session identity, tool, args) plus the
-   engine-side work (`on::tool_result` closure registration,
-   `HookStack::merge` — one priority law; `SessionTag` gives the
-   process-level forwarders their per-session key). **The permission
-   gate moved out of the core** (the ruling executed):
-   `permission.rs` deleted, `gate-ext` was the same policy over the
-   same seam, session-keyed "Always allow" memory. (Superseded
-   2026-09: the default gate is the built-in `tabit-gate` in-process
-   hook — a default must not fail open on a dead extension.) Ruled with it
-   (sharpened 2026-09): a failing hook is treated as absence — dead
-   or broken alike, the neutral decision for its point — while a
-   failed tool call is the model-visible failure; and children boot
-   their own extension hosts (proven e2e: a subagent child serves an
-   extension tool from its own mount).
-4. **Scanning** — *shipped* — enablement over the config layers
-   (`settings.toml`'s `[extensions] disabled` list; packages mount by
-   default — install was the consent — user + workspace layers union,
-   `$TABIT_SETTINGS` the debug override; refusals report as dead
-   whatever the settings say); extension-shipped skills as in-memory
-   tables (the walker produces each package's `skills/` entries at
-   their original paths; they fold into the one skills catalog at the
-   ladder's base — anything the user has overrides them; no
-   filesystem writes, provenance by location, disabling drops the
-   package's entries); `providers.toml` fragment merge at config load
-   (the user's own id wins silently, a fragment colliding with an
-   earlier fragment warns, a broken fragment refuses the fragment and
-   never the package, a fragment cannot set `default_model`).
-   One boot scan feeds launch, the merge, and the tables. Children
-   re-derive the disable list from inherited inputs — the same boot
-   path, not a child rule.
-5. **Host APIs** — *shipped* — the request/response envelope
-   (`service_request`/`service_response`; the interaction ask folded
-   in as verb zero — at the extension pipe the ask IS a backend
-   capability, its dual-id correlation the attribution pattern every
-   verb rides); `model_prompt` (bare, hard-capped at 4096 output
-   tokens, complete-only; the `HostServices` capability lives in
-   rig-agent beside `UserInteraction`, snapshotted per run into the
-   tool context); usage billed to the session tagged with the calling
-   extension (`extension_usage` in the stats; not persisted — the
-   recorded v1 gap). The verbs are fixed and typed per protocol
-   version (the open-vs-closed ruling: host verbs are core-served by
-   definition; extension-SERVED verbs are a future additive class).
-   Deferred slice: the run-end hook point (`ENGINE.md` amendment,
-   pause points are design events) — autotitle rides `tool_result`
-   until it lands.
-6. **Install & management** — *shipped* — `tabit-core install
-   npm:/git:/path:` in `crates/tabit-ext-install` (npm as plain
-   registry HTTP against `$TABIT_NPM_REGISTRY`, offline e2e against
-   a fake registry serving real tarball fixtures; git `clone --depth
-   1` with the repository metadata lifted out; path copies).
-   Scoped names install nested (`@scope/pkg` ↔
-   `<root>/@scope/pkg/`; name = path relative to root); stage-
-   validate-place installs never leave a half package; name-only
-   `requires` pull by npm name with cycle refusal, and unmet
-   requirements refuse at the scan (presence, not liveness);
-   `entry`-less static packages contribute scan facts only (the
-   skillship idle process died with the ruling); `list` marks
-   static/disabled/broken; `uninstall` refuses while direct
-   dependents remain (the transitive teardown and `autoremove`
-   defer). No trust machinery (ruled: placing the package is the
-   consent); no registry or lockfile — the directory is the truth.
-
-**Example extensions accompany the tasks (ruled 2026-09) — each demo
-is also the offline test vehicle.** The roster, mapped to the
-checklist:
-
-1. *shipped* — `hello` declares nothing; the spawn/handshake/alive
-   smoke. The death paths (exit before the ack, exit after it,
-   handshake silence, garbage) ride the in-crate `ext-double`
-   behavior double.
-2. *shipped* — `echo` (a trivial tool plus an asking tool — proxy
-   execution and interaction forwarding), `shadow` (declares `read` —
-   the replaces-core report, e2e-asserted on the channel), and the
-   clash pair (same name — the newcomer refused, the incumbent
-   named), all SDK-built in `crates/tabit-ext-sdk/src/bin/`.
-3. *shipped, then superseded 2026-09* — `gate`: the permission gate
-   moved out of core (`permission.rs` deleted — the demo was the
-   deletion), lived as the `gate-ext` package, and now returns as the
-   built-in `tabit-gate` in-process hook (pi-sanity's policy); the
-   package and its two e2e vehicle tests were deleted — the SDK's
-   reference consumer restores that coverage.
-4. *shipped* — `lmstudio` (`lmstudio-ext`): the provider relay
-   speaking LM Studio's **native** REST API (deliberately not the
-   OpenAI-compat endpoint LM Studio also serves) behind a
-   `providers.toml` fragment — e2e across four processes (backend →
-   relay → scripted native mock), the fragment the merged config's
-   only provider, the model call relayed and translated; plus
-   the static skills package — entry-less, no process, its `skills/`
-   joining the catalog in-memory at the original path.
-5. *shipped* — `autotitle` (`autotitle-ext`): a `tool_result` hook →
-   one `model_prompt` per session → usage tagged with the extension
-   identity (contract-proven with a fake host, the capability
-   mock-proven, the envelope e2e-proven four-process through the
-   `tools-model` double). Upgrades to the run-end hook when that
-   slice lands.
-6. The npm:/git: end-to-end; every earlier example rode `path:`.
-
-Examples live as real packages (path:-installable) or in-crate test
-doubles wherever the demonstration needs.
-
-Not in v1: prompt contributions (ruled above); the custom-prompt
-config knob and any richer build model (deferred with the
-build-phase decision); WASM (the alternative with a felt-need
-trigger).
-
-### 10. Prompt caching (required before release)
-
-- **Shipped (2026-08) — all-1h, one policy site** (owner ruling: keep it
-  simple now; a modeled policy is a contained edit later). The full
-  policy lives in `ModelRegistry::build` (`tabit-session/registry.rs`),
-  nothing else needs touching to change it:
-  - Anthropic: `with_automatic_caching_1h()` — the API owns breakpoint
-    placement and moves it forward every turn (rig-core's automatic mode
-    was already vendored; the 0.41 code carried per-breakpoint TTL, so
-    the old note about upstream `4be867de` is moot). 1h over 5m: the 2x
-    write premium buys survival across interactive gaps and >5m tool
-    turns; reads are 0.1x and refresh free under either TTL.
-  - OpenAI Responses: caching is server-side automatic; we only pin
-    routing — `prompt_cache_key` = the session's stable id (the
-    codex/pi/opencode pattern). **Subagents get their own keys**
-    (ruled 2026-09): a child's context shares only the base prompt
-    with its parent, so a shared key buys little without an inherit
-    mode while concentrating every child's divergent suffix on one
-    cache route; if an inherit-conversation mode ever lands, key
-    sharing is its design question, priced then.
-    Per-model `with_cache_key` in rig-core, clamped to 64 code points,
-    explicit request-level `additional_params` wins.
-  - Chat-completions gateway: no key (third parties vary in what they
-    accept).
-- Deferred until a felt need: a modeled breakpoint/TTL policy (mixed
-  1h-prefix/5m-tail only protects the static prefix — after a 5m lapse
-  the whole message history re-writes), the completions-gateway key,
-  OpenAI's `prompt_cache_retention` (Responses-only, unused by codex/
-  opencode/pi). Usage-side parsing (cache read/creation tokens, TTL
-  breakdown) already ships in rig-core.
-- Falls out of the v2 backend slices (write-behind log + prompt barrier)
-  where the static prefix becomes an explicit unit.
+**Ruled adapter-only (2026-09):** the native vocabulary stays the one
+contract; the reach play is an optional `tabit-acp` leaf adapter
+crate projecting stamped events onto `session/update` (the pi/
+pi-acp pattern) — deferred at least until ACP v2 ships and stabilizes
+through a few patch rounds. That is the re-evaluation trigger.
 
 ## Explicitly not planned
 
 (kept in sync with AGENTS.md)
 
-- WebSocket streaming (removed).
-- SSE resumption / reconnect.
-- rmcp integration (kept, feature-gated, off by default — decide later
-  whether tabit ships an MCP client; low priority).
+- The egui GUI (deleted 2026-09) and in-process subagents (removed
+  whole — subprocess children are the ONE substrate).
+- WebSocket streaming; SSE resumption/reconnect.
 - Mid-conversation system messages.
 - Model catalog / name-keyed behavior.
-- Vendor instruction files (CLAUDE.md etc.) — AGENTS.md only.
-- Instruction-file directory walking — home (`~/.tabit` → `~/.agents`
-  fallback) and cwd only.
+- Vendor instruction files (CLAUDE.md etc.) — AGENTS.md only;
+  instruction-file walking beyond home + cwd.
+- A GPL anything (the claurst harvest is dead; all-MIT).
 
-## Deferred until a consumer exists (phase 4 leftovers)
+## Deferred until a consumer exists
 
-- Orphan-result repair utility.
-- Typed `provider_status` on `CompletionError`.
-- Eval harness (pi has one; build when there are sessions + tools to eval).
-- MCP client support — verify pi's current story before committing.
-- OAuth device-flow auth for providers (optional, late).
+- Eval harness (build when there are sessions + tools to eval).
+- MCP client support / the rmcp stance (rig-agent's `rmcp` stays
+  feature-gated, off by default; verify pi's current story before
+  committing).
+- OAuth device-flow auth for providers.
+- Orphan-result repair utility; typed `provider_status` on
+  `CompletionError`.
+- A modeled breakpoint/TTL caching policy (all-1h today; a contained
+  edit when a felt need exists) and the completions-gateway cache key.
 
-## Deferred round: post-review architecture remediation (2026-08)
+## Design record: compaction (final form)
 
-Recorded from the five-reviewer fresh-eyes pass; ruled to wait until the
-top findings (rmcp stance, stop semantics, entry-id ownership, the
-dual-fold clarification) are settled:
+The one closed-area record kept here — ENGINE.md cites it for the
+policy while carrying the flow facts, and PROTOCOL.md's wire flags
+resolve against it. Amendment history: git.
 
-- **Split `tabit-session/src/session.rs`** (~1,850 lines, ten concerns:
-  mailbox, abort, steers, the Session core, SharedConversation,
-  ModelRegister, EventSink, DriveOutcome, the item→event translation,
-  assembly helpers) into own modules — done (2026-08): `session.rs`
-  became a `session/` directory (`mod.rs` core + `mailbox`, `builder`,
-  `run`, `rewind`, `selection`, `persist`, `assemble`, `wire`), a pure
-  code move with `pub(super)` as the exact pre-split visibility and
-  `ModelStats`/`SessionStats` joining the usage ledger in `stats.rs`.
-- **A named notice-channel abstraction** for the ~10 copy-pasted
-  weak-sender `EventFrame` emission sites (one documented home for the
-  termination discipline) — done (2026-08): `notice.rs`'s `NoticeSink`
-  (channel + stream stamp as one value) and `NoticeSlot` (the
-  attach-once cell). The mailbox's two-`OnceLock` attach invariant and
-  its `expect` are unrepresentable now, and persist's `Mutex<Option>`
-  died with the verification that no re-attach exists (attach happens
-  exactly once, at worker spawn). The hub's ask keeps its dismissal
-  semantics through `emit`'s liveness return.
-- **One home for the call/result pairing walk** — the same
-  every-call-answered-exactly-once verification exists in
-  `tabit-log/fold.rs`, `tabit-session/parser.rs`, and
-  `ContextManager::fold_all_entry` — resolved (2026-08) the other way:
-  the unified commit made closedness a *local* property, so the walks
-  died instead of merging. `fold_all_entry` keeps the one full
-  validation (the commit batch); every other site checks only a tail —
-  `tail_is_closed` walks back one batch's span, serving the live
-  checkout door and the parser's torn-tail check. The parser runs one
-  streaming pass under a documented threat model: torn tail, bad JSON,
-  dangling parents, and unknown checkout targets are detected;
-  mid-file corruption that stays valid-JSON-with-valid-parentage is
-  trusted away (one-blob commits make it unproducible by the app, and
-  below-app damage severe enough breaks JSON or parentage first).
-  `path_is_closed`, `validate_node_order`, the side-record interleave
-  check, and the parser's per-checkout and final-head walks are all
-  deleted.
-- **The dual-fold unification** — done (2026-08, commits `188ed17` +
-  `a9e7cf0`): one durable `ContextManager` behind the session's cell,
-  the engine's folds are the durable commits, the session
-  emission-only. The mid-run readability constraint held (brief
-  write holds; the checkout probe reads between folds).
-- **rig-core vendored-mass policy** — resolved (2026-08, rulings in
-  VENDOR.md "RAG mass removal"): embeddings + vector stores + retrieval
-  plumbing deleted (no consumer, none planned); model listing kept
-  (cassette-covered, the planned registry consumer); telemetry trimmed
-  to bare identity spans (the GenAI conventions module and the
-  content-recording opt-in are gone).
+- **The box** (`tabit-session/src/compaction/`): its own system, a
+  black box with three doors — **pre-request** (every model call in a
+  run, the first included; condition B), **idle** (the beat, A ∨ B,
+  mailbox empty), and the **manual `compact` command** (parked at
+  receive, served at the beat ahead of any queued batch; a slot, not
+  a queue — a newer parks-replaces, abort clears it). No engine flags,
+  no compaction knowledge outside the box.
+- **Trigger**: **A** `context > 75%·max ∧ mailbox empty`; **B**
+  `context > max − 32K` (the two-turn reserve; no mailbox gate —
+  urgent is urgent). Idle checks A ∨ B; the seam checks only B. The
+  disjunction makes idle ≤ seam at every window by construction.
+- **Measurement, never estimation (the delta regime)**: every
+  assistant commit stamps `delta_tokens = total[k] − total[k−1]`
+  (predecessor: the previous measured assistant in the regime, the
+  leading compaction's `tokens_after`, or 0 at start). Client-added
+  text rides the following assistant's delta. A compaction appends
+  as a **leaf at the head** carrying `tokens_after` (retained tail +
+  the summary's output tokens), persisted — a measurement-bearing
+  node. Reads: current context = the nearest measurement at-or-before
+  the head over the raw branch; cut selection = one suffix-delta
+  pass. Zero-usage turns commit no delta; a below-predecessor total
+  re-anchors. Chars/4 is deleted from the decision path. An
+  unmeasured context (no turn ever reported) skips loudly, the
+  unknown-window skip's sibling.
+- **The request**: appended to the real conversation — same preamble,
+  same toolset (prefix-cache identity), no tools offered, the
+  instruction riding in the user message; **rejects every tool call**
+  — a violating response is discarded and the request resent, bounded
+  by the retry cap, each discard closing as `compaction_failed`.
+- **Cut selection**: the latest valid boundary satisfying sent-prefix
+  < 75% of the window ∧ tail ≥ `KEEP_TAIL`; blocks are post-text
+  boundaries (after assistants without tool calls). Rejection or a
+  length-capped summary moves the cut one block up and retries.
+  Multi-pass is just another regular compaction (pass N+1's history
+  already carries pass N's summary); tail overshoot is normal when
+  history ≫ window.
+- **Outcome**: `Compacted` (happened ∧ fits), `NothingToCompact`
+  (benign), `Oversized { reason, passes, tokens_after }` (not good to
+  continue — the guard, the pass cap, or infeasibility), `Failed`,
+  `Cancelled`. The intercept parks a retry only on `Compacted`.
+- **The envelope**: windows below **64K** skip loudly; unknown windows
+  skip the thresholds while overflow recovery still works — the wall
+  teaches the window from the typed transport error, learned for the
+  session.
+- **The record in the file**: one entry per pass, append-only,
+  carrying the cut identity (the first tail entry's id) + the summary
+  + `tokens_after`; the loader re-parents through it on replay.
+  Rewind to pre-compaction nodes yields the full-history branch —
+  compaction never deletes, realized as tree topology.
+- **Dials are data**: every threshold and prompt text lives in the
+  dials file — review and polish happen in one place.
 
-## Deferred round 2: engine surface trims + test review (2026-08)
+## Where the old items went
 
-Recorded from the public-API discussion after the conversation
-unification; ruled to wait until the discussion series concludes:
+The pre-2026-09-26 roadmap carried ten numbered build items plus
+done-marked remediation rounds; sibling docs and COVERAGE.md's
+history still cite the numbers. The mapping:
 
-- **Batch the steer announcement into one yield** — done (2026-08,
-  `ee58a93`): one `Steer { batch }` item per drain, the fold and the
-  yield sharing one uninterrupted poll; ENGINE.md carries the rule
-  (**a suspension never sits between a commit and its announcement**)
-  and the channel split (stream = progress; the mailbox's notice
-  channel = ledger).
-- **Delete `ConversationMemory` wholesale** — done (2026-08,
-  `06ccb0b`): the module, the knobs, the load/append pair, the
-  `memory_handle` threading, the error variant, the facade re-export,
-  and the memory test families. `build_run` lost its only-for-memory
-  `history_override` parameter.
-- **Drop `PromptResponse.messages` and the `entry_len` window** — done
-  (2026-08, `e24d2b9`): outcomes only; the conversation is the
-  transcript. Error paths lost their embedded history copies the same
-  day. Callers migrated to the cell door (conformance harness, parity
-  tests — now comparing the durable conversations both surfaces fold —
-  cassette suites, `Chat::chat`'s mirror).
-- **Parity-test review** (owner lens: "if you need two things to work
-  identically, first consider whether there should be two at all") —
-  reviewed 2026-08. Findings: the loop is ONE implementation
-  (`drive_agent`); blocking/streaming differ only in `TurnSource`, so
-  the parity family guards the adapter seam, not a duplicated loop —
-  no collapse available there. The lens does catch two things:
-  1. **The blocking surface has zero tabit consumers** — resolved the
-     deletion way (2026-08): the `Prompt` trait, `PromptRequest`
-     typestate, `AgentRunner::run`, `UnaryTurnSource` + the blocking
-     `follows_from` chain, and the facade re-exports are deleted; the
-     streaming surface is the one execution surface (`fold_stream` is
-     the outcome fold for in-crate consumers; `MockTurn::
-     into_stream_events` bridges unary-scripted mock scenarios onto
-     it). `PromptError` stays — it is the streaming error payload the
-     session wraps. Cassette suites followed the same split: blocking
-     twins deleted with their recordings (the cassette-safety check
-     enumerated every orphan); single-turn wire-mapping smokes now
-     drive the unary provider path directly (same cassettes, same
-     request bodies).
-  2. The ~8 ad-hoc blocking/streaming builder pairs in
-     `runner_tests.rs` — moot: the pairs and their parity family died
-     with the blocking surface.
+1. **Config** → shipped (`tabit-config`; AGENTS.md's bullet). The
+   unwired/deferred edges live in "Config / registry follow-ups".
+2. **Session layer** → shipped (`session/`, `tabit-log`, format v5).
+3. **Prompt builder + skills + AGENTS.md discovery** → shipped
+   (session-level skills, protocol v20; the ladder ruling lives in
+   AGENTS.md's tabit-session bullet and skills.rs).
+4. **Coding tools** → shipped (`tabit-tools`; the rulings live in
+   TOOLS.md) + the gate (`tabit-gate`).
+5. **Native subagents** → shipped (the subprocess substrate, closed
+   two rounds 2026-09); open edges in "Subagent follow-ups".
+6. **Compaction + overflow recovery** → shipped; this file's design
+   record above is the final form.
+7. **CLI / interface** → shipped (`tabit-core` print + json; the
+   protocol's design record is PROTOCOL.md, the contract
+   FRONTEND.md). The GUI deletion ruling is in AGENTS.md; the TUI is
+   this file's active item.
+8. **Client/server + protocol** → shipped (`tabit-protocol`,
+   `tabit-wire`); ACP's adapter-only ruling above.
+9. **Extensions** → shipped, checklist complete; EXTENSIONS.md is
+   the contract and the record; open edges above.
+10. **Prompt caching** → shipped (the policy site is
+    `ModelRegistry::build`).
+
+The two "deferred round" remediation sections (2026-08) executed
+completely — their record is git history and COVERAGE.md's round
+sections.

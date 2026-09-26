@@ -159,8 +159,9 @@ command path that serves this (owner-ruled through design review):
 Reads never hold writes: messages keep flowing while a pass is
 parked.
 
-**The compaction doors (ruled 2026-09; the policy record is ROADMAP
-item 6 — this section records only the flow facts).** Compaction is
+**The compaction doors (ruled 2026-09; the policy record is ROADMAP's
+design record: compaction — final form — and this section records only the
+flow facts).** Compaction is
 its own system, a black box in tabit-session with three doors; the
 engine has zero compaction knowledge.
 

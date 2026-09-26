@@ -1,6 +1,6 @@
 # PROTOCOL.md
 
-The design record for the frontend protocol (ROADMAP item 7/8): what is
+The design record for the frontend protocol: what is
 locked, and every open flag with its analysis and options, so nothing
 gets re-derived. Flags are resolved by discussion in list order; a
 resolved flag records its decision and stays as history.
