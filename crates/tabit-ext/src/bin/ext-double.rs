@@ -44,6 +44,9 @@
 //!   echo, proving the lane survives a cancel
 //! - `tools-shadow` — tool `read`: echoes (the name is the point —
 //!   the replaces-core conflict demo)
+//! - `tools-disable` — tool `read`, plus the report's `disables`
+//!   list from `$EXT_DOUBLE_DISABLE` (comma-separated core tool
+//!   names — the role-shaping declaration's wire proof)
 //!
 //! When `EXT_DOUBLE_MARKER` is set, a clean EOF exit touches that
 //! path — the tests' proof the host actually closed the pipe.
@@ -64,7 +67,7 @@ fn main() {
         | "late-unknown" => {}
         "die-pre-ack" => std::process::exit(1),
         "tools-echo" | "tools-fail" | "tools-ask" | "tools-shadow" | "tools-model"
-        | "tools-cancel" | "grammar" | "svc-dupe" => {}
+        | "tools-cancel" | "grammar" | "svc-dupe" | "tools-disable" => {}
         "hooks-allow" | "hooks-skip" | "hooks-ask" | "hooks-hang" => {}
         other => {
             eprintln!("ext-double: unknown behavior `{other}`");
@@ -90,7 +93,7 @@ fn main() {
             }));
             drain();
         }
-        "tools-echo" => serve_tools(json!([tool_decl("echo")])),
+        "tools-echo" => serve_tools(json!([tool_decl("echo")]), Vec::new()),
         "grammar" => serve_grammar(),
         // The mint-law violation over the real pipe: the same
         // service-request id sent twice (a plain retry bug in a
@@ -98,7 +101,7 @@ fn main() {
         // lane — never crash.
         "svc-dupe" => {
             emit(json!({
-                "type": "report", "protocol_version": 5,
+                "type": "report", "protocol_version": 6,
                 "tools": [], "hooks": [], "watch": [],
             }));
             for _ in 0..2 {
@@ -112,17 +115,26 @@ fn main() {
             }
             drain();
         }
-        "tools-fail" => serve_tools(json!([tool_decl("boom")])),
-        "tools-ask" => serve_tools(json!([tool_decl("ask")])),
-        "tools-shadow" => serve_tools(json!([tool_decl("read")])),
-        "tools-model" => serve_tools(json!([tool_decl("summarize")])),
-        "tools-cancel" => serve_tools(json!([tool_decl("hang")])),
+        "tools-fail" => serve_tools(json!([tool_decl("boom")]), Vec::new()),
+        "tools-ask" => serve_tools(json!([tool_decl("ask")]), Vec::new()),
+        "tools-shadow" => serve_tools(json!([tool_decl("read")]), Vec::new()),
+        "tools-model" => serve_tools(json!([tool_decl("summarize")]), Vec::new()),
+        "tools-cancel" => serve_tools(json!([tool_decl("hang")]), Vec::new()),
+        "tools-disable" => serve_tools(
+            json!([tool_decl("read")]),
+            std::env::var("EXT_DOUBLE_DISABLE")
+                .unwrap_or_default()
+                .split(',')
+                .filter(|name| !name.is_empty())
+                .map(str::to_string)
+                .collect(),
+        ),
         behavior @ ("hooks-allow" | "hooks-skip" | "hooks-ask" | "hooks-hang") => {
             serve_hooks(behavior)
         }
         _ => {
             emit(json!({
-                "type": "report", "protocol_version": 5,
+                "type": "report", "protocol_version": 6,
                 "tools": [], "hooks": [], "watch": [],
             }));
             if behavior == "die-post-ack" {
@@ -153,7 +165,7 @@ fn main() {
 /// prepared core takes them (routing by table, lifecycle by parking).
 fn serve_grammar() {
     emit(json!({
-        "type": "report", "protocol_version": 5,
+        "type": "report", "protocol_version": 6,
         "tools": [], "hooks": [],
         "watch": ["session_opened", "interaction_settled"],
     }));
@@ -197,10 +209,11 @@ fn serve_grammar() {
 
 /// The tool-lane loop: one declared tool served sequentially — the
 /// pipe is one lane, and this double keeps it honest.
-fn serve_tools(tools: Value) {
+fn serve_tools(tools: Value, disables: Vec<String>) {
     emit(json!({
-        "type": "report", "protocol_version": 5,
+        "type": "report", "protocol_version": 6,
         "tools": tools, "hooks": [], "watch": [],
+        "disables": disables,
     }));
     let behavior = std::env::args().nth(1).unwrap_or_default();
     loop {
@@ -338,7 +351,7 @@ fn serve_tools(tools: Value) {
 /// sequentially. The behavior picks the decision path.
 fn serve_hooks(behavior: &str) {
     emit(json!({
-        "type": "report", "protocol_version": 5,
+        "type": "report", "protocol_version": 6,
         "tools": [], "hooks": [{"event": "tool_call"}], "watch": [],
     }));
     loop {

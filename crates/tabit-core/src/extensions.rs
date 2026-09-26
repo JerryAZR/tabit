@@ -13,6 +13,20 @@
 //! one. The engine receives a conflict-free set by construction; its
 //! duplicate-name shadowing never engages.
 //!
+//! The report's `disables` list (v6) is the role-shaping declaration:
+//! core tool names the package removes from this assembly — an
+//! extension serving role-based subagents disables the built-in
+//! `subagent` so the model's vocabulary holds only the role shapes.
+//! Disables run ahead of the name assembly (a working-set pass): the
+//! disabled core name has nothing left to replace or collide with, a
+//! declaration of the same name is then just a tool, and only an
+//! ALIVE package's disables take effect (the declarations' liveness
+//! gate — a dead package must not silently remove a tool). A name
+//! this assembly does not offer is reported and ignored, never fatal
+//! (external input, graceful and clear — the package still mounts).
+//! Disabling the tool is not removing the machinery: the substrate
+//! and capabilities stay, only the model's vocabulary shrinks.
+//!
 //! The proxy tools are thin: the call crosses the pipe, the result
 //! maps to the engine's two-part shape (`content_parts`), the
 //! session's interaction capability rides along as the ask lane.
@@ -132,14 +146,20 @@ impl Mounted {
         self.hooks.clone()
     }
 
-    /// The names of the core tools this mount replaced — the assembly
-    /// unmounts them. Each process (backend or child) resolves its
+    /// The names of the core tools this mount unmounts — replaced
+    /// (an extension tool took the name) or disabled (the report's
+    /// `disables` list). Each process (backend or child) resolves its
     /// own mount against its own core set.
-    pub fn replaced_core(&self) -> Vec<String> {
+    pub fn unmounted_core(&self) -> Vec<String> {
         self.catalog
             .conflicts
             .iter()
-            .filter(|conflict| conflict.kind == ExtensionConflictKind::ReplacesCore)
+            .filter(|conflict| {
+                matches!(
+                    conflict.kind,
+                    ExtensionConflictKind::ReplacesCore | ExtensionConflictKind::DisablesCore
+                )
+            })
             .map(|conflict| conflict.tool.clone())
             .collect()
     }
@@ -159,6 +179,45 @@ fn plan(reports: &[ExtensionReport], core_names: &[&str]) -> (Vec<Planned>, Exte
     let mut planned = Vec::new();
     let mut held: Vec<(String, String)> = Vec::new(); // (tool name, extension)
     let mut conflicts = Vec::new();
+    // The working-set pass: every ALIVE package's disables remove
+    // core names ahead of the name assembly — a disabled core tool
+    // has nothing left to replace or collide with. The union is the
+    // effect; the conflict entries are the per-package attribution.
+    let mut working: Vec<&str> = core_names.to_vec();
+    for report in reports {
+        if !matches!(report.status, Status::Alive) {
+            continue;
+        }
+        let mut seen = std::collections::HashSet::new();
+        for name in &report.disables {
+            if !seen.insert(name.as_str()) {
+                continue;
+            }
+            // Membership is judged against the ORIGINAL core set (a
+            // second package disabling the same core tool is still
+            // DisablesCore — the union removes it once); removal
+            // happens from the working set.
+            if core_names.contains(&name.as_str()) {
+                if let Some(index) = working.iter().position(|core| *core == name.as_str()) {
+                    working.swap_remove(index);
+                }
+                conflicts.push(ExtensionConflict {
+                    kind: ExtensionConflictKind::DisablesCore,
+                    extension: report.name.clone(),
+                    tool: name.clone(),
+                    incumbent: None,
+                });
+            } else {
+                conflicts.push(ExtensionConflict {
+                    kind: ExtensionConflictKind::DisablesUnknown,
+                    extension: report.name.clone(),
+                    tool: name.clone(),
+                    incumbent: None,
+                });
+            }
+        }
+    }
+    let core_names = working.as_slice();
     for report in reports {
         // Only a LIVE declaration holds a name (ruled 2026-09): a
         // package that died — at the handshake or since — lists what
@@ -354,6 +413,15 @@ mod tests {
     use tabit_ext::protocol::HookDecl;
 
     fn report(name: &str, tools: &[(&str, &str)], alive: bool) -> ExtensionReport {
+        report_full(name, tools, alive, &[])
+    }
+
+    fn report_full(
+        name: &str,
+        tools: &[(&str, &str)],
+        alive: bool,
+        disables: &[&str],
+    ) -> ExtensionReport {
         ExtensionReport {
             name: name.to_string(),
             dir: format!("C:/ext/{name}").into(),
@@ -377,6 +445,7 @@ mod tests {
             hooks: vec![HookDecl {
                 event: "tool_call".to_string(),
             }],
+            disables: disables.iter().map(|name| name.to_string()).collect(),
         }
     }
 
@@ -390,6 +459,81 @@ mod tests {
         assert_eq!(catalog.extensions[0].status, "alive");
         assert_eq!(catalog.extensions[0].tools.len(), 1);
         assert_eq!(catalog.extensions[0].hooks, vec!["tool_call".to_string()]);
+    }
+
+    #[test]
+    fn a_disable_removes_the_core_tool_from_the_assembly() {
+        // The role-shaping declaration: the named core tool leaves
+        // the working set ahead of the name assembly — nothing left
+        // to replace, so the same extension's own tool of that name
+        // mounts as just a tool (no ReplacesCore noise).
+        let reports =
+            vec![report_full("roles", &[("subagent", "the role spawner")], true, &["subagent"])];
+        let (planned, catalog) = plan(&reports, &["read", "bash", "subagent"]);
+        assert_eq!(planned.len(), 1, "the extension's own tool mounts");
+        assert_eq!(planned[0].decl.name, "subagent");
+        assert_eq!(catalog.conflicts.len(), 1);
+        assert_eq!(
+            catalog.conflicts[0].kind,
+            ExtensionConflictKind::DisablesCore
+        );
+        assert_eq!(catalog.conflicts[0].tool, "subagent");
+        assert_eq!(catalog.conflicts[0].extension, "roles");
+    }
+
+    #[test]
+    fn a_disable_of_an_unknown_name_is_reported_and_ignored() {
+        // External input: a name this assembly does not offer is the
+        // package's expectation meeting a different host — reported,
+        // ignored, the package still mounts (RefusedPeer's treatment).
+        let reports = vec![report_full(
+            "roles",
+            &[("explorer", "one role")],
+            true,
+            &["ghost", "ghost"],
+        )];
+        let (planned, catalog) = plan(&reports, &["read"]);
+        assert_eq!(planned.len(), 1, "the package still mounts");
+        assert_eq!(catalog.conflicts.len(), 1);
+        assert_eq!(
+            catalog.conflicts[0].kind,
+            ExtensionConflictKind::DisablesUnknown
+        );
+        assert_eq!(catalog.conflicts[0].tool, "ghost");
+    }
+
+    #[test]
+    fn a_dead_package_disables_nothing() {
+        // The declarations' liveness gate: a dead package must not
+        // silently remove a tool — its disable is inert (and its
+        // would-be disables carry no conflict entry, like its tools).
+        let reports = vec![report_full("roles", &[], false, &["subagent"])];
+        let (_planned, catalog) = plan(&reports, &["read", "subagent"]);
+        assert!(
+            catalog.conflicts.is_empty(),
+            "a dead package's disable is inert"
+        );
+    }
+
+    #[test]
+    fn disables_union_across_extensions() {
+        // Two packages disabling the same core tool: one unmount, two
+        // attributions (the conflict entries are per-package).
+        let reports = vec![
+            report_full("a-roles", &[], true, &["subagent"]),
+            report_full("b-roles", &[], true, &["subagent"]),
+        ];
+        let (planned, catalog) = plan(&reports, &["read", "subagent"]);
+        assert!(planned.is_empty());
+        let disabling: Vec<&str> = catalog
+            .conflicts
+            .iter()
+            .map(|conflict| conflict.extension.as_str())
+            .collect();
+        assert_eq!(disabling, vec!["a-roles", "b-roles"]);
+        assert!(catalog.conflicts.iter().all(|conflict| conflict.kind
+            == ExtensionConflictKind::DisablesCore
+            && conflict.tool == "subagent"));
     }
 
     #[test]

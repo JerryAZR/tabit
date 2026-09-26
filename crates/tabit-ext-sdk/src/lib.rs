@@ -102,6 +102,7 @@ pub struct Extension {
     consults: Vec<ConsultDef>,
     watches: Vec<WatchDef>,
     asks: Vec<ErasedWatch>,
+    disables: Vec<String>,
 }
 
 impl Default for Extension {
@@ -118,12 +119,26 @@ impl Extension {
             consults: Vec::new(),
             watches: Vec::new(),
             asks: Vec::new(),
+            disables: Vec::new(),
         }
     }
 
     /// Serve one tool (see [`tool`]).
     pub fn tool(mut self, tool: ToolDef) -> Self {
         self.tools.push(tool);
+        self
+    }
+
+    /// Remove one core tool from the host's assembly — the
+    /// role-shaping declaration (an extension serving role-based
+    /// subagents disables the built-in `subagent` so the model's
+    /// vocabulary holds only the role shapes). The host validates
+    /// the name against its own core set: a name it does not offer
+    /// is reported and ignored, never fatal. Disabling the tool is
+    /// not removing the machinery — the spawn substrate and
+    /// capabilities stay.
+    pub fn disable_tool(mut self, name: impl Into<String>) -> Self {
+        self.disables.push(name.into());
         self
     }
 
@@ -612,6 +627,7 @@ pub fn serve(extension: Extension) -> ! {
         consults,
         watches,
         asks,
+        disables,
     } = extension;
     let (tools, consults, watches, asks) = (
         Arc::new(tools),
@@ -678,6 +694,7 @@ pub fn serve(extension: Extension) -> ! {
                 })
                 .collect(),
             watch: watches.iter().map(|w| w.kind.clone()).collect(),
+            disables,
         };
         shared.write_frame(&report);
 

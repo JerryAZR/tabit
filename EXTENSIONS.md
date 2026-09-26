@@ -222,9 +222,10 @@ The four directions, one sentence each:
   its answer: the answer IS its settle, and lingering would only
   leak. Unknown ids are the race's tolerated drop.
 
-Report-model contract (extension protocol **v5**): the guest speaks
+Report-model contract (extension protocol **v6**): the guest speaks
 first — its `report` (protocol version, tool/hook/watch
-declarations) is its first line on the pipe. The host version-checks
+declarations, and v6's `disables` list) is its first line on the
+pipe. The host version-checks
 it and kills a mismatched guest within the boot bound — the check
 runs the moment the report is read, and the kill owns the race with
 anything the guest emitted before it lands (a mismatched guest's
@@ -385,6 +386,27 @@ policy (pi's rule):
 - Extension vs. extension, same name: the newcomer is refused, naming
   the incumbent. No silent peer precedence — the user resolves by
   disabling one.
+- **The disables list (v6): the role-shaping declaration.** An
+  extension may name core tools to REMOVE from the assembly — the
+  role-based-subagent extension disables the built-in `subagent` so
+  the model's vocabulary holds only its role shapes. The assembly
+  runs disables ahead of the name rules (a working-set pass: a
+  disabled core name has nothing left to replace or collide with —
+  a later declaration of the same name is then just a tool). Only a
+  LIVE package's disables take effect (the declarations' liveness
+  gate: a dead package must not silently remove a tool; a mid-run
+  death restores the core tool with the same slice that restores a
+  dead shadow's). A name this host does not offer is reported
+  (`disables_unknown`) and ignored — external input fails
+  gracefully and clearly; the package still mounts. The union of
+  all packages' disables is the effect; the conflict entries are
+  the per-package attribution (`disables_core`, one per package per
+  name). Disabling a TOOL is not removing the machinery: the spawn
+  substrate, capabilities, and the child-role flags all stay — only
+  the model's vocabulary shrinks. Each process resolves its own
+  mount: a parent's disables do not propagate to children (a child
+  naming a disabled tool in `--tools` fails loudly as an unknown
+  name, like any absent tool).
 - **Only a LIVE declaration holds a name** (2026-09 review-round
   ruling): a package that died — at the report or since — lists
   what it would have served in the catalog but neither replaces a

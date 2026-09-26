@@ -38,8 +38,10 @@ use serde::{Deserialize, Serialize};
 
 /// The extension protocol this host speaks. A guest reporting a
 /// different version is killed at the report — the pipe is a
-/// frozen contract, not a negotiated one.
-pub const EXTENSION_PROTOCOL_VERSION: u32 = 5;
+/// frozen contract, not a negotiated one. v6: the report's
+/// `disables` list (core tools the package removes from the
+/// assembly).
+pub const EXTENSION_PROTOCOL_VERSION: u32 = 6;
 
 /// The correlation-kind tags of the dialect's round-trips — the tag
 /// of the response frame that answers each (the correlation-kind
@@ -87,6 +89,16 @@ pub struct Report {
     pub hooks: Vec<HookDecl>,
     #[serde(default)]
     pub watch: Vec<String>,
+    /// Core tool names this package removes from the host's assembly
+    /// (v6) — the role-shaping declaration: an extension serving
+    /// role-based subagents disables the built-in `subagent` tool so
+    /// the model's vocabulary holds only the role shapes. Names are
+    /// validated against the host's core set at the assembly: a name
+    /// this host does not offer is reported (`disables_unknown`) and
+    /// ignored, never fatal. Disabling the TOOL is not removing the
+    /// machinery — the substrate (spawning, capabilities) stays.
+    #[serde(default)]
+    pub disables: Vec<String>,
 }
 
 /// Host → extension frames.
@@ -216,6 +228,10 @@ pub enum ExtFrame {
         /// The subscription list ([`Report::watch`]).
         #[serde(default)]
         watch: Vec<String>,
+        /// The core tools this package removes from the host's
+        /// assembly ([`Report::disables`], v6).
+        #[serde(default)]
+        disables: Vec<String>,
     },
     /// [`ToolWireResult`], on the wire.
     ToolResult(ToolWireResult),
@@ -280,6 +296,7 @@ mod tests {
             hooks: vec![HookDecl {
                 event: "tool_call".to_string(),
             }],
+            disables: vec!["subagent".to_string()],
             watch: vec![
                 "session_opened".to_string(),
                 "interaction_settled".to_string(),
@@ -288,13 +305,27 @@ mod tests {
         let line = serde_json::to_string(&frame).unwrap();
         assert_eq!(
             line,
-            r#"{"type":"report","protocol_version":3,"tools":[{"name":"echo","description":"says it back","schema":{"type":"object"}}],"hooks":[{"event":"tool_call"}],"watch":["session_opened","interaction_settled"]}"#
+            r#"{"type":"report","protocol_version":3,"tools":[{"name":"echo","description":"says it back","schema":{"type":"object"}}],"hooks":[{"event":"tool_call"}],"watch":["session_opened","interaction_settled"],"disables":["subagent"]}"#
         );
+        // The v6 field defaults when absent (a v5-shaped line still
+        // parses; the version check refuses it, the parser does not).
+        let v5_line = line.replace(
+            r#","disables":["subagent"]"#,
+            "",
+        );
+        let back: ExtFrame = serde_json::from_str(&v5_line).unwrap();
+        match &back {
+            ExtFrame::Report { disables, .. } => assert!(disables.is_empty()),
+            _ => panic!("a report line parsed as another frame"),
+        }
         let back: ExtFrame = serde_json::from_str(&line).unwrap();
         match back {
-            ExtFrame::Report { tools, watch, .. } => {
+            ExtFrame::Report {
+                tools, watch, disables, ..
+            } => {
                 assert_eq!(tools.len(), 1);
                 assert_eq!(watch, vec!["session_opened", "interaction_settled"]);
+                assert_eq!(disables, vec!["subagent".to_string()]);
             }
             ExtFrame::ToolResult(..)
             | ExtFrame::ServiceRequest { .. }

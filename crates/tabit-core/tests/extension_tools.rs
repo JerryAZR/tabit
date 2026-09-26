@@ -427,6 +427,63 @@ fn a_core_name_conflict_is_reported_on_the_channel() {
     assert_eq!(conflict.tool, "read");
 }
 
+/// The role-shaping declaration: `SHADOW_DISABLE=subagent` makes the
+/// report carry the disable, the catalog reports `disables_core`, and
+/// — the model-facing proof — the completion request's tool array
+/// carries no `subagent`: the mock below only matches requests that
+/// do NOT name the tool, so a request offering it would miss the mock
+/// and fail the run instead of finishing.
+#[test]
+fn a_disable_removes_the_core_tool_from_the_models_vocabulary() {
+    let stage = stage("disable", &[("roles", "tools-disable")]);
+    let mut backend = spawn_backend(
+        &stage,
+        &[("EXT_DOUBLE_DISABLE", "subagent".to_string())],
+    );
+    let (session, catalog, _skills) = handshake(&mut backend);
+    let conflict = catalog
+        .conflicts
+        .iter()
+        .find(|conflict| conflict.tool == "subagent")
+        .expect("the disable is reported");
+    assert!(
+        matches!(
+            conflict.kind,
+            tabit_protocol::ExtensionConflictKind::DisablesCore
+        ),
+        "{conflict:?}"
+    );
+    assert_eq!(conflict.extension, "roles");
+
+    stage.server.mock(|when, then| {
+        when.method(httpmock::Method::POST)
+            .path("/v1/chat/completions")
+            .body_excludes("name\":\"subagent".to_string());
+        then.status(200)
+            .header("Content-Type", "text/event-stream")
+            .body(sse_text("vocabulary checked"));
+    });
+    backend.send(&to_wire_line(&SessionCommand::Message {
+        session,
+        text: "describe what you can do".to_string(),
+    }));
+    loop {
+        match backend.next_frame() {
+            ServerFrame::Event(frame) => match frame.event {
+                SessionEvent::RunFinished { output, .. } => {
+                    assert_eq!(output, "vocabulary checked");
+                    return;
+                }
+                SessionEvent::RunFailed { message, .. } => {
+                    panic!("the run failed (a request naming the disabled tool would): {message}")
+                }
+                _ => {}
+            },
+            ServerFrame::Control(control) => panic!("unexpected control frame: {control:?}"),
+        }
+    }
+}
+
 // ── task 4: enablement, skills mounts, providers fragments ─────────
 
 /// A disabled package is the user's setting, not a failure: it boots

@@ -94,6 +94,10 @@ pub struct ExtensionReport {
     pub status: Status,
     pub tools: Vec<ToolDecl>,
     pub hooks: Vec<HookDecl>,
+    /// Core tool names the package asked the host's assembly to
+    /// remove (the report's `disables`, v6) — inert until the
+    /// assembly's plan validates them against its own core set.
+    pub disables: Vec<String>,
 }
 
 /// The live state one supervision task mutates through the
@@ -111,6 +115,7 @@ struct ChildFields {
     status: Option<Status>,
     tools: Vec<ToolDecl>,
     hooks: Vec<HookDecl>,
+    disables: Vec<String>,
 }
 
 impl ChildState {
@@ -124,7 +129,13 @@ impl ChildState {
     /// ([`Supervisor::reports`]); the notify wakes the boot join.
     /// Returns the standing now recorded.
     #[allow(clippy::panic)] // the sanctioned crash below (AGENTS.md doctrine)
-    fn transition(&self, to: Status, tools: Vec<ToolDecl>, hooks: Vec<HookDecl>) -> Status {
+    fn transition(
+        &self,
+        to: Status,
+        tools: Vec<ToolDecl>,
+        hooks: Vec<HookDecl>,
+        disables: Vec<String>,
+    ) -> Status {
         let mut fields = tabit_log::lock::lock(&self.inner);
         let from = fields.status.clone().unwrap_or(Status::Starting);
         let valid = matches!(
@@ -140,6 +151,7 @@ impl ChildState {
         fields.status = Some(to.clone());
         fields.tools = tools;
         fields.hooks = hooks;
+        fields.disables = disables;
         drop(fields);
         self.resolved.notify_waiters();
         to
@@ -583,7 +595,8 @@ pub fn launch(
                 drop(dead_reader); // sends on a dead lane fail, never queue
                 let lane = Lane::new(name.clone(), dead_commands);
                 lane.die(&node, &reason);
-                let status = state.transition(Status::Dead { reason }, Vec::new(), Vec::new());
+                let status =
+                    state.transition(Status::Dead { reason }, Vec::new(), Vec::new(), Vec::new());
                 let _ = events_tx.send(ExtensionEvent {
                     name: name.clone(),
                     status,
@@ -637,6 +650,7 @@ impl Supervisor {
                     status: fields.status.clone().unwrap_or(Status::Starting),
                     tools: fields.tools.clone(),
                     hooks: fields.hooks.clone(),
+                    disables: fields.disables.clone(),
                 }
             })
             .collect()
@@ -823,6 +837,7 @@ async fn supervise(
                         tools,
                         hooks,
                         watch,
+                        disables,
                     }) => {
                         if let Some(tx) = handshake_tx.take() {
                             let _ = tx.send(Boot::Reported(Report {
@@ -830,6 +845,7 @@ async fn supervise(
                                 tools,
                                 hooks,
                                 watch,
+                                disables,
                             }));
                         }
                         // A re-report after a good one: tolerated, ignored.
@@ -980,10 +996,11 @@ async fn supervise(
     let _ = lane.commands.send(facts);
 
     let Report {
+        protocol_version: _,
         tools,
         hooks,
         watch,
-        ..
+        disables,
     } = report;
     // The report's watch list subscribes the lane's channel on the
     // node: each watched kind's frames reach the lane's event
@@ -995,7 +1012,7 @@ async fn supervise(
     for kind in &watch {
         node.subscribe_channel(kind, Locality::Both, &lane.channel);
     }
-    let status = state.transition(Status::Alive, tools, hooks);
+    let status = state.transition(Status::Alive, tools, hooks, disables);
     let _ = events.send(ExtensionEvent {
         name: manifest.name.clone(),
         status,
@@ -1264,11 +1281,12 @@ fn resolve_dead(
     // The declared capabilities survive the death — the catalog's
     // "what it would have served" report. (Pre-ack deaths never
     // recorded any; post-ack deaths keep their ack's declarations.)
-    let (tools, hooks) = {
+    let (tools, hooks, disables) = {
         let fields = tabit_log::lock::lock(&state.inner);
-        (fields.tools.clone(), fields.hooks.clone())
+        (fields.tools.clone(), fields.hooks.clone(), fields.disables.clone())
     };
-    let status = state.transition(Status::Dead { reason }, tools, hooks);
+    let status = state
+        .transition(Status::Dead { reason }, tools, hooks, disables);
     let _ = events.send(ExtensionEvent {
         name: name.to_string(),
         status,

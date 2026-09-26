@@ -735,10 +735,10 @@ fn assemble_session(
     // hosts.
     let candidate: Vec<rig_agent::tool::DynamicTool> = match extensions {
         Some(mounted) => {
-            let replaced = mounted.replaced_core();
+            let unmounted = mounted.unmounted_core();
             parent_core
                 .into_iter()
-                .filter(|tool| !replaced.iter().any(|name| name == tool.name()))
+                .filter(|tool| !unmounted.iter().any(|name| name == tool.name()))
                 .chain(mounted.tools().iter().cloned())
                 .collect()
         }
