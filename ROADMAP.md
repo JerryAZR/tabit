@@ -47,7 +47,11 @@ The foundation is shipped and hardened. In build order, all closed:
 - **Subagents**: subprocess children are the ONE substrate — children
   are full session hosts over the frozen wire (`SpawnContext`,
   `tabit-wire`'s client); the `subagent` tool is the opinionated
-  example.
+  example. Live follow-ups shipped 2026-09-26: completed children
+  park in the session's pool (`subagent_pool.rs`) under petname ids,
+  the `followup` tool continues the same child session by id, and
+  the pool collects entries idle past five parent turns (the sweep
+  rides the session's turn starts — turns, never wall-clock).
 - **Extensions** (`tabit-ext`, `tabit-ext-sdk`, `tabit-ext-install`):
   the host, the SDK, install/management — the checklist is complete;
   EXTENSIONS.md is the contract and the record.
@@ -101,6 +105,9 @@ growing a twin.
 - Recorded v1 gap: `extension_usage` is not persisted.
 
 ### Subagent follow-ups
+
+(Live follow-ups — park, `followup` by id, the five-turn idle sweep —
+shipped 2026-09-26; the edges below are the remaining ones.)
 
 - **Background children**: routing and commands are already
   substrate-independent of active tools — the gap is one knob (handle

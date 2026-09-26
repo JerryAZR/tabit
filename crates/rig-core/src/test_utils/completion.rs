@@ -317,6 +317,15 @@ impl MockCompletionModel {
         }
     }
 
+    /// Extend the stream-turn script at runtime (clones share state):
+    /// for scripts whose later turns depend on earlier results — a
+    /// tool result carrying a runtime-minted id, say — written between
+    /// model calls instead of upfront.
+    pub fn push_stream_turn(&self, turn: impl IntoIterator<Item = MockStreamEvent>) {
+        self.stream_turns_guard()
+            .push_back(turn.into_iter().collect());
+    }
+
     /// Return cloned requests received by this model.
     pub fn requests(&self) -> Vec<CompletionRequest> {
         self.requests_guard().clone()

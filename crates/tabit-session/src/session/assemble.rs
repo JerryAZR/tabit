@@ -105,6 +105,11 @@ impl Session {
             resumed,
             interaction: None,
             subagent_parts: builder.subagent_parts,
+            // The session's kept-alive children — always minted (an
+            // empty pool is one map; the sweep is a no-op) so the
+            // run loop and the per-run capability never face a
+            // parts-without-pool invariant.
+            subagent_pool: std::sync::Arc::new(crate::subagent_pool::SubagentPool::new()),
             skills: builder.skills,
             event_tap: Arc::new(std::sync::OnceLock::new()),
             compaction: Arc::new(crate::compaction::Compaction::new()),

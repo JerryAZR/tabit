@@ -567,11 +567,33 @@ impl ChildHandle {
     /// THE fold every driver shares (core's subagent tool and the
     /// extension SDK's owned children alike; one implementation, the
     /// Nth-fold law). The terminal scan over this child's stream
-    /// (grandchildren's frames skip — their owners forward them),
-    /// the crash synthesis, and the abort courtesy-with-deadline all
-    /// live here; mapping the settlement to the driver's own
-    /// vocabulary is the caller's policy.
+    /// (grandchildren's frames skip — their owners forward them), the
+    /// crash synthesis, and the abort courtesy-with-deadline all live
+    /// here; mapping the settlement to the driver's own vocabulary is
+    /// the caller's policy. The completed terminal closes the child —
+    /// the one-shot disposition ([`Self::settle_open`] is the
+    /// keep-open one over the same fold).
     pub async fn settle(&mut self, token: Option<CancellationToken>) -> Settlement {
+        self.settle_inner(token, false).await
+    }
+
+    /// The keep-open disposition of the same fold, for drivers whose
+    /// child outlives the task (the session's subagent pool): the
+    /// completed terminal returns WITHOUT closing stdin — the child
+    /// keeps serving, ready for the next prompt. Abort and failure
+    /// close as usual (a kept child dies by its owner — the pool's
+    /// collection or drop — never mid-task).
+    pub async fn settle_open(&mut self, token: Option<CancellationToken>) -> Settlement {
+        self.settle_inner(token, true).await
+    }
+
+    /// The fold both dispositions share; `keep_open` skips the close
+    /// on the completed terminal alone.
+    async fn settle_inner(
+        &mut self,
+        token: Option<CancellationToken>,
+        keep_open: bool,
+    ) -> Settlement {
         let mut events: Vec<SessionEvent> = Vec::new();
         let started_at_ms = unix_ms();
         loop {
@@ -629,7 +651,9 @@ impl ChildHandle {
                     };
                     events.push(event);
                     if let Some((terminal, text)) = terminal {
-                        self.close();
+                        if !(keep_open && matches!(terminal, Terminal::Completed)) {
+                            self.close();
+                        }
                         return match terminal {
                             Terminal::Completed => Settlement::Completed {
                                 output: text,

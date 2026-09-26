@@ -83,6 +83,7 @@ pub mod skills;
 mod stats;
 mod store;
 pub mod subagent;
+pub mod subagent_pool;
 mod subprocess;
 
 // The durable-conversation layer, extracted to tabit-log (2026-08):

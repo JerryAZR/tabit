@@ -41,6 +41,13 @@ pub(crate) async fn drive_child(
     token: Option<CancellationToken>,
 ) -> RunSummary {
     let settlement = handle.run(message_text(&task), token).await;
+    map_settlement(settlement)
+}
+
+/// The settlement → [`RunSummary`] mapping every session driver folds
+/// through ([`drive_child`] and the subagent pool's keep-open drive
+/// alike — one implementation of the concern, the Nth-fold law).
+pub(crate) fn map_settlement(settlement: tabit_wire::client::Settlement) -> RunSummary {
     match settlement {
         tabit_wire::client::Settlement::Completed { output, events } => RunSummary {
             outcome: crate::session::RunOutcome::Completed,

@@ -145,7 +145,12 @@ Current workspace layout:
   the grandchild learning, and the ask route home; the exit
   retracts the lane), the drive fold, the ruled abort shape; the
   `subagent` tool is the
-  opinionated example shape extensions override)
+  opinionated example shape extensions override) plus the subagent
+  pool (`subagent_pool.rs`: completed children park under petname
+  ids, the `followup` tool addresses them by id over the same pipe —
+  one session's memory continues; the pool is session-scoped and
+  ages entries at the parent's turn boundary, five unused turns,
+  never wall-clock)
 - `crates/tabit-tools` — coding tools (`read`, `write`, `edit`, `bash`
   — chosen at registration: verified Git Bash, else PowerShell on
   Windows) as

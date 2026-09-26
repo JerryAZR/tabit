@@ -855,6 +855,9 @@ fn core_sets(
     let mut parent = children.clone();
     if args.parent.is_none() {
         parent.push(tabit_session::subagent::subagent_tool());
+        // The follow-up surface rides the same omission: a child role
+        // mounts neither the spawner nor the addressing tool.
+        parent.push(tabit_session::subagent::followup_tool());
     }
     Ok((children, parent))
 }

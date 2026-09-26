@@ -1562,3 +1562,27 @@ none of the async pieces (std flavor, no stdin, whole output is the
 product); its consolidation was the process-wrap version alignment
 (9/10 skew gone — one major in the lockfile), with `TreeKillGuard`
 still the documented hand-roll (v10's KillOnDrop is tokio-only).
+
+## Subagent follow-ups (2026-09-26, the pool round)
+
+The follow-up surface — `subagent_pool.rs` (park/follow/turn_passed/
+drop), the `followup` tool, the wire's `settle_open` disposition —
+landed with its behavior net in place, per the standing practice for
+freshly landed code (line re-measurement at the next llvm-cov pass):
+
+- `fresh_id`'s mint loop: unit-pinned inside `subagent_pool.rs`
+  (collision re-mint, `None` retry, exhausted-minter fail-loud).
+- Park, follow, the aging boundary, and the failure reap: the three
+  e2e tests over the real binary (`tabit-core`'s subprocess suite) —
+  same-session continuity (the follow-up request provably carries the
+  first task's marker in history), the exact five-turn boundary
+  (followable at the fifth subsequent turn, collected at the sixth's
+  start), and the failed follow-up's entry reap. The sweep's session
+  wiring (the `TurnStarted` arm) is exercised by the boundary test.
+- **Justified, not exercised**: `turn_passed`'s and `Drop`'s
+  busy-slot windows (`try_lock` failing — the entry is being driven
+  while swept/dropped). Both windows require a follow still in
+  flight at a turn boundary or session drop, which the roundtrip's
+  atomicity forbids on every path except the detached-abort window —
+  where the settle fold's own cancel arm closes the child; the
+  skipped close is the no-op its comment claims.

@@ -304,11 +304,13 @@ impl Session {
         ))
             as std::sync::Arc<dyn rig_agent::tool::services::HostServices>);
         // Subagent support, when mounted: the per-run capability is the
-        // parts plus THIS parent's identity, snapshot at open (a
-        // mid-run model switch reaches the next run's children).
+        // parts, the session's pool, plus THIS parent's identity,
+        // snapshot at open (a mid-run model switch reaches the next
+        // run's children).
         if let Some(parts) = &self.subagent_parts {
             tool_context.insert(std::sync::Arc::new(crate::subagent::SpawnContext::new(
                 parts.clone(),
+                self.subagent_pool.clone(),
                 self.id.clone(),
                 self.selection(),
                 self.cwd.clone(),
@@ -408,6 +410,14 @@ impl Session {
                         id,
                         started_at_ms: started,
                     });
+                    // The subagent pool ages here — the one turn
+                    // boundary the session owns (session bookkeeping at
+                    // an item arm, the ledger's CompletionCall billing
+                    // the precedent). The previous turn's tools have
+                    // all settled by now (the roundtrip boundary sits
+                    // between turns), so "used this turn" is settled
+                    // truth.
+                    self.subagent_pool.turn_passed();
                 }
                 Ok(MultiTurnStreamItem::TurnCommitted { id, .. }) => {
                     // The engine's own fold is the durable commit; this

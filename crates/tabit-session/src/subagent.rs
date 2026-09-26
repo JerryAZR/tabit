@@ -18,7 +18,11 @@
 //! child has no worker to provide: [`SpawnContext::spawn_subprocess`]
 //! (the bridge builder — model, cwd, toolset, budget) and
 //! [`SpawnContext::drive_subprocess`] (the pump under the abort
-//! leash — the one recipe extensions must not hand-roll).
+//! leash — the one recipe extensions must not hand-roll). The
+//! session's [`SubagentPool`](crate::subagent_pool) keeps completed
+//! children addressable by friendly id — the `subagent` tool parks,
+//! the `followup` tool sends more work to the same child session, and
+//! the pool collects the idle ones at the parent's turn boundary.
 
 use crate::session::RunSummary;
 use rig_agent::completion::Message;
@@ -59,11 +63,13 @@ pub struct SubagentParts {
 }
 
 /// The per-run spawn context: this parent's identity, snapshot at
-/// run open, over the process-wide [`SubagentParts`]. Mounted into
-/// each run's [`ToolContext`] when the assembly enables subagents;
-/// extension tools read the same capability.
+/// run open, over the process-wide [`SubagentParts`] and the
+/// session's [`SubagentPool`](crate::subagent_pool::SubagentPool).
+/// Mounted into each run's [`ToolContext`] when the assembly enables
+/// subagents; extension tools read the same capability.
 pub struct SpawnContext {
     parts: Arc<SubagentParts>,
+    pool: Arc<crate::subagent_pool::SubagentPool>,
     parent_id: String,
     parent_selection: ModelSelection,
     parent_cwd: PathBuf,
@@ -76,12 +82,14 @@ impl SpawnContext {
     /// every argument is public state.
     pub fn new(
         parts: Arc<SubagentParts>,
+        pool: Arc<crate::subagent_pool::SubagentPool>,
         parent_id: String,
         parent_selection: ModelSelection,
         parent_cwd: PathBuf,
     ) -> Self {
         Self {
             parts,
+            pool,
             parent_id,
             parent_selection,
             parent_cwd,
@@ -92,6 +100,13 @@ impl SpawnContext {
     /// default child toolset and budget).
     pub fn parts(&self) -> &SubagentParts {
         &self.parts
+    }
+
+    /// The session's kept-alive children — the `subagent` tool parks
+    /// its completed children here, the `followup` tool addresses
+    /// them by id.
+    pub fn pool(&self) -> &crate::subagent_pool::SubagentPool {
+        &self.pool
     }
 
     /// This parent's session id — the child's `parent` field.
@@ -151,7 +166,10 @@ impl SpawnContext {
                    and returns its final answer. It runs this session's model and \
                    toolset (minus this tool). Optional: cwd — scope the subagent to \
                    another directory; its tools and instructions follow it there. \
-                   Progress streams to the user on the subagent's own channel."
+                   Progress streams to the user on the subagent's own channel. \
+                   A completed subagent stays available: the result names its id, \
+                   and the followup tool can send it more work in the same \
+                   conversation."
 )]
 pub async fn subagent(
     #[rig(context)] context: &mut ToolContext,
@@ -192,33 +210,83 @@ pub async fn subagent(
     if let Some(id) = context.get::<InternalCallId>() {
         spec = spec.parent_call(id.0.clone());
     }
-    let mut child = spec.spawn().await.map_err(ToolExecutionError::other)?;
-    let summary = ctx
-        .drive_subprocess(&mut child, Message::user(task), token)
-        .await;
-    let id = child.id().to_string();
-    child.wait_exit().await;
-    summary_result(summary, &id)
+    let child = spec.spawn().await.map_err(ToolExecutionError::other)?;
+    // The pool's drive parks a completed child for follow-ups (its
+    // ids, its aging); every other terminal reaps it there.
+    let run = ctx.pool().start(child, task, token).await;
+    summary_result(run.summary, &run.child_id, run.id.as_deref())
+}
+
+/// Follow up with a subagent parked earlier — the same child process
+/// and session, so the earlier task's full context is still its
+/// memory. The id is the address the `subagent` tool's result named.
+#[rig_tool(
+    description = "Send a follow-up message to a subagent started earlier with the \
+                   subagent tool — the same agent process, with everything it did \
+                   for the earlier task still in its context. Pass the id the \
+                   subagent tool's result named. A subagent idles out after 5 \
+                   unused turns; an expired or unknown id means starting a fresh \
+                   subagent instead."
+)]
+pub async fn followup(
+    #[rig(context)] context: &mut ToolContext,
+    id: String,
+    message: String,
+) -> Result<ToolOutput, ToolExecutionError> {
+    let token = context.get::<CancellationToken>().cloned();
+    // The same structural pre-cancel refusal as the subagent tool's.
+    if token.as_ref().is_some_and(|t| t.is_cancelled()) {
+        return Err(ToolExecutionError::other(
+            "the follow-up was interrupted before starting — it did not run".to_string(),
+        ));
+    }
+    let ctx = context.get::<Arc<SpawnContext>>().cloned().ok_or_else(|| {
+        ToolExecutionError::other(
+            "subagents are not available in this session — the assembly did not mount them",
+        )
+    })?;
+    match ctx.pool().follow(&id, message, token).await {
+        Some(run) => summary_result(run.summary, &run.child_id, run.id.as_deref()),
+        None => Err(ToolExecutionError::other(format!(
+            "no live subagent \"{id}\" — it idled out after {} unused turns or never ran in this \
+             session; start a fresh one with the subagent tool",
+            crate::subagent_pool::MAX_IDLE_TURNS,
+        ))),
+    }
 }
 
 /// Map a run summary to the tool's result — the subprocess drive's
 /// terminal synthesized in the child's own event vocabulary. The
-/// cargo carries the pairing fact (`child_id`); the child's turns and
-/// token usage are bookkeeping the model has no use for.
-fn summary_result(summary: RunSummary, child_id: &str) -> Result<ToolOutput, ToolExecutionError> {
+/// cargo carries the pairing fact (`child_id`) and, when the child
+/// stayed parked, its friendly id (the `followup` address — spelled
+/// out in the report so the model cannot miss it); the child's turns
+/// and token usage are bookkeeping the model has no use for.
+fn summary_result(
+    summary: RunSummary,
+    child_id: &str,
+    id: Option<&str>,
+) -> Result<ToolOutput, ToolExecutionError> {
     use crate::session::RunOutcome;
     use tabit_protocol::SessionEvent;
 
     match summary.outcome {
         RunOutcome::Completed => {
-            let report = if summary.output.trim().is_empty() {
+            let mut report = if summary.output.trim().is_empty() {
                 "The subagent completed the task without a final answer.".to_string()
             } else {
                 summary.output
             };
+            if let Some(id) = id {
+                report.push_str(&format!(
+                    "\n\nThe subagent is still available: send follow-ups with the followup \
+                     tool, id \"{id}\" (it idles out after {} unused turns).",
+                    crate::subagent_pool::MAX_IDLE_TURNS
+                ));
+            }
             rig_core::tool::content_parts(
                 report,
                 Some(serde_json::json!({
+                    "id": id,
                     "child_id": child_id,
                     "outcome": "completed",
                 })),
@@ -251,6 +319,13 @@ fn summary_result(summary: RunSummary, child_id: &str) -> Result<ToolOutput, Too
 /// The subagent tool as a session-registerable [`DynamicTool`].
 pub fn subagent_tool() -> DynamicTool {
     rig_agent::tool::dynamic_contextual(Subagent)
+}
+
+/// The followup tool as a session-registerable [`DynamicTool`] —
+/// registered beside the subagent tool, omitted from child toolsets
+/// with it (recursion depth is enforced by omission).
+pub fn followup_tool() -> DynamicTool {
+    rig_agent::tool::dynamic_contextual(Followup)
 }
 
 #[cfg(test)]

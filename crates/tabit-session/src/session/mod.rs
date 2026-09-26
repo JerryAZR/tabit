@@ -155,6 +155,13 @@ pub struct Session {
     /// ([`SessionBuilder::subagents`]): the process-wide parts; the
     /// per-run capability is minted at run open.
     subagent_parts: Option<Arc<crate::subagent::SubagentParts>>,
+    /// The session's kept-alive subagent children (the `subagent`
+    /// tool parks its completed children, the `followup` tool
+    /// addresses them by id): always minted, aged at every parent
+    /// turn boundary — an empty pool costs nothing. Session-scoped,
+    /// never process-wide: one backend hosts many sessions and their
+    /// children must not mix.
+    subagent_pool: Arc<crate::subagent_pool::SubagentPool>,
     /// The skills catalog, when the assembly mounted it
     /// ([`SessionBuilder::skills`]): ONE DISCOVERY PER SESSION (the
     /// session-level catalog ruling, 2026-09 — the ladder runs over

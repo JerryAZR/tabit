@@ -75,8 +75,12 @@ fn summary(outcome: crate::session::RunOutcome, output: &str) -> crate::session:
 
 #[test]
 fn an_aborted_child_maps_to_the_interrupted_report() {
-    let error = super::summary_result(summary(crate::session::RunOutcome::Aborted, ""), "child-1")
-        .expect_err("aborted is an error");
+    let error = super::summary_result(
+        summary(crate::session::RunOutcome::Aborted, ""),
+        "child-1",
+        None,
+    )
+    .expect_err("aborted is an error");
     let message = error.to_string();
     assert!(
         message.contains("interrupted before completing"),
@@ -100,7 +104,7 @@ fn a_failed_child_carries_its_own_failure_reason() {
         id: "t1".to_string(),
         started_at_ms: 1_000,
     });
-    let error = super::summary_result(run, "child-1").expect_err("failed is an error");
+    let error = super::summary_result(run, "child-1", None).expect_err("failed is an error");
     let message = error.to_string();
     assert!(message.contains("provider unreachable"), "{message}");
 }
@@ -125,32 +129,41 @@ fn an_unknown_tool_in_the_allow_list_is_refused() {
 fn a_failed_child_without_a_recorded_reason_says_unknown() {
     // A crash-shaped failure leaves no RunFailed event; the report
     // names the absence instead of inventing a cause.
-    let error = super::summary_result(summary(crate::session::RunOutcome::Failed, ""), "child-1")
-        .expect_err("failed is an error");
+    let error = super::summary_result(
+        summary(crate::session::RunOutcome::Failed, ""),
+        "child-1",
+        None,
+    )
+    .expect_err("failed is an error");
     let message = error.to_string();
     assert!(message.contains("unknown failure"), "{message}");
 }
 
 #[test]
-fn a_completed_child_carries_its_output_verbatim_and_the_pairing_cargo() {
+fn a_completed_child_carries_its_output_verbatim_the_id_and_the_pairing_cargo() {
     let output = super::summary_result(
         summary(
             crate::session::RunOutcome::Completed,
             "the child's final answer",
         ),
         "child-1",
+        Some("swift-fox"),
     )
     .expect("completed is a result");
+    let text = output.render();
     assert!(
-        output.render().contains("the child's final answer"),
-        "the report is the child's output verbatim: {}",
-        output.render()
+        text.contains("the child's final answer"),
+        "the report is the child's output verbatim: {text}"
+    );
+    assert!(
+        text.contains("swift-fox") && text.contains("followup"),
+        "the parked result names the follow-up address: {text}"
     );
     let details = output.details().expect("the details cargo").clone();
     assert_eq!(
         details,
-        serde_json::json!({"child_id": "child-1", "outcome": "completed"}),
-        "the cargo is the pairing fact the docs call load-bearing"
+        serde_json::json!({"id": "swift-fox", "child_id": "child-1", "outcome": "completed"}),
+        "the cargo is the pairing fact plus the follow-up address"
     );
 }
 
@@ -159,6 +172,7 @@ async fn a_completed_child_without_a_final_answer_says_so() {
     let output = super::summary_result(
         summary(crate::session::RunOutcome::Completed, "   "),
         "child-1",
+        Some("swift-fox"),
     )
     .expect("completed is a result");
     let text = output.render();
@@ -181,6 +195,7 @@ async fn a_missing_executable_fails_the_spawn_with_the_exe_named() {
     });
     let ctx = super::SpawnContext::new(
         parts,
+        std::sync::Arc::new(crate::subagent_pool::SubagentPool::new()),
         "parent-session".to_string(),
         tabit_protocol::ModelSelection::new("p", "m"),
         std::path::PathBuf::from("."),
@@ -270,6 +285,7 @@ async fn a_childs_first_frames_reach_the_node_fan() {
     let offline = tabit_protocol::ModelSelection::new("offline", "dead");
     let ctx = super::SpawnContext::new(
         parts,
+        std::sync::Arc::new(crate::subagent_pool::SubagentPool::new()),
         "parent-session".to_string(),
         offline.clone(),
         dir.join("cwd"),
@@ -361,6 +377,7 @@ id = \"dead\"
     let offline = tabit_protocol::ModelSelection::new("offline", "dead");
     let ctx = super::SpawnContext::new(
         parts,
+        std::sync::Arc::new(crate::subagent_pool::SubagentPool::new()),
         "parent-session".to_string(),
         offline.clone(),
         dir.join("cwd"),
@@ -400,12 +417,45 @@ id = \"dead\"
     );
     // The reason extraction reads the child's terminal, not the
     // unknown-failure fallback.
-    let error =
-        super::summary_result(summary, child.id()).expect_err("a failed child is an error result");
+    let error = super::summary_result(summary, child.id(), None)
+        .expect_err("a failed child is an error result");
     let message = error.to_string();
     assert!(
         !message.contains("unknown failure"),
         "the child's own reason surfaced: {message}"
     );
     let _ = std::fs::remove_dir_all(&dir);
+}
+
+// ---------------------------------------------------------------------------
+// The follow-up surface: the tool's refusal twins. The pool's mint
+// loop and its live park/follow/collect paths ride real children in
+// `crates/tabit-core/tests/subprocess_children.rs` (the mint loop's
+// own units sit inside `subagent_pool.rs`).
+// ---------------------------------------------------------------------------
+
+#[tokio::test]
+async fn a_followup_refuses_when_the_capability_is_not_mounted() {
+    let mut context = rig_agent::tool::ToolContext::new();
+    let error = super::followup(&mut context, "swift-fox".to_string(), "again".to_string())
+        .await
+        .expect_err("no capability mounted");
+    let message = error.to_string();
+    assert!(message.contains("did not mount"), "{message}");
+}
+
+#[tokio::test]
+async fn a_pre_cancelled_token_refuses_the_followup_before_sending() {
+    // The structural "it never ran" refusal, shared with the subagent
+    // tool — ahead of the capability fetch, so a refused follow-up
+    // sends nothing to any child.
+    let mut context = rig_agent::tool::ToolContext::new();
+    let token = tokio_util::sync::CancellationToken::new();
+    token.cancel();
+    context.insert(token);
+    let error = super::followup(&mut context, "swift-fox".to_string(), "again".to_string())
+        .await
+        .expect_err("a pre-cancelled follow-up refuses");
+    let message = error.to_string();
+    assert!(message.contains("did not run"), "{message}");
 }

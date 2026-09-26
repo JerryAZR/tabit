@@ -77,6 +77,7 @@ indexmap = "2.14.0"
 mime = "0.3.17"
 mime_guess = "2.0.5"
 ordered-float = "5.0.0"
+petname = { version = "3.2", default-features = false, features = ["default-words", "default-rng"] }
 pin-project-lite = "0.2.16"
 proc-macro2 = "1.0.95"
 quote = "1.0.40"
