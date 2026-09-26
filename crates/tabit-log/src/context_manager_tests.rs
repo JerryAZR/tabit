@@ -437,21 +437,101 @@ fn checkout_unknown_target_is_a_graceful_error() {
 }
 
 #[test]
-#[should_panic(expected = "refused")]
-fn checkout_into_an_open_roundtrip_panics() {
+fn checkout_into_an_open_roundtrip_resolves_forward() {
     let tap = BufferTap::default();
     let mut manager = ContextManager::from_tree(sample_tree(), tap.shared(), super::uncosted());
     // a1 carries two calls; the branch ending at it is mid-roundtrip.
-    manager.checkout(Some("a1")).expect("unchecked");
+    // The ruling (2026-09-26): resolve forward to the batch's last
+    // tool result — the first closed position ahead.
+    let resolved = manager.checkout(Some("a1")).expect("resolves forward");
+    assert_eq!(
+        resolved.as_deref(),
+        Some("r2"),
+        "lands at the batch's last result"
+    );
+    assert_eq!(
+        manager.messages().len(),
+        3,
+        "u1, a1, the merged batch — the chain is roundtrip-closed"
+    );
 }
 
 #[test]
-#[should_panic(expected = "refused")]
-fn checkout_into_a_mid_batch_result_panics() {
+fn checkout_into_a_mid_batch_result_resolves_to_the_same_close() {
     let tap = BufferTap::default();
     let mut manager = ContextManager::from_tree(sample_tree(), tap.shared(), super::uncosted());
-    // r1 answers c1 but leaves c2 open — mid-batch.
-    manager.checkout(Some("r1")).expect("unchecked");
+    // r1 answers c1 but leaves c2 open — mid-batch; the close is r2.
+    let resolved = manager.checkout(Some("r1")).expect("resolves forward");
+    assert_eq!(resolved.as_deref(), Some("r2"));
+    assert_eq!(manager.messages().len(), 3, "closed at the batch's end");
+}
+
+#[test]
+fn an_open_target_on_a_dead_branch_resolves_along_that_branch() {
+    let tap = BufferTap::default();
+    let mut manager = ContextManager::from_tree(sample_tree(), tap.shared(), super::uncosted());
+    // Branch at u1 (a new user message grows from it); a1's completing
+    // results then live on the DEAD branch — the forward walk must
+    // follow them there, not the active chain.
+    manager.checkout(Some("u1")).expect("u1 is a closed target");
+    manager.fold(user("meanwhile"));
+    let resolved = manager.checkout(Some("a1")).expect("dead-branch resolve");
+    assert_eq!(resolved.as_deref(), Some("r2"));
+    assert_eq!(manager.messages().len(), 3, "u1, a1, the merged batch");
+}
+
+#[test]
+#[should_panic(expected = "no closed position ahead")]
+fn an_open_target_with_no_close_ahead_panics_loud() {
+    // Corruption only (atomic commits keep every open position
+    // completable): a1's batch never completed — r1 answers c1 and
+    // nothing answers c2 — so no closed position exists ahead.
+    let mut tree = SessionTree::empty();
+    let assistant = Message::Assistant {
+        id: None,
+        content: OneOrMany::many(vec![call("c1"), call("c2")]).expect("non-empty"),
+    };
+    let entries = vec![
+        SessionEntry::with_id(
+            "u1".to_string(),
+            None,
+            "t".to_string(),
+            EntryKind::UserMessage {
+                message: user("go"),
+            },
+        ),
+        SessionEntry::with_id(
+            "a1".to_string(),
+            Some("u1".to_string()),
+            "t".to_string(),
+            EntryKind::AssistantMessage {
+                message: assistant,
+                usage: Usage::new(),
+                delta_tokens: None,
+                cost: None,
+            },
+        ),
+        SessionEntry::with_id(
+            "r1".to_string(),
+            Some("a1".to_string()),
+            "t".to_string(),
+            EntryKind::ToolResult {
+                result: ToolResult {
+                    id: "c1".to_string(),
+                    call_id: None,
+                    details: None,
+                    content: OneOrMany::one(ToolResultContent::text("one")),
+                    status: None,
+                },
+            },
+        ),
+    ];
+    for entry in entries {
+        tree.load_append(entry).expect("the corrupt tree appends");
+    }
+    let tap = BufferTap::default();
+    let mut manager = ContextManager::from_tree(tree, tap.shared(), super::uncosted());
+    let _ = manager.checkout(Some("a1"));
 }
 
 #[test]

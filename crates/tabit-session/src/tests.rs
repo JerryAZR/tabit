@@ -55,17 +55,6 @@ pub(crate) fn load_records(path: &Path) -> Vec<crate::entry::FileRecord> {
         .collect()
 }
 
-/// The message a caught panic carries, whatever box it landed in.
-pub(crate) fn panic_message(payload: &Box<dyn std::any::Any + Send>) -> String {
-    if let Some(text) = payload.downcast_ref::<String>() {
-        return text.clone();
-    }
-    if let Some(text) = payload.downcast_ref::<&str>() {
-        return (*text).to_string();
-    }
-    String::new()
-}
-
 /// The file's records as kind tags (side records prefixed) — the shape
 /// most log-ordering assertions want.
 fn record_kinds(path: &Path) -> Vec<&'static str> {
@@ -2130,12 +2119,12 @@ async fn rewind_targets_steers_like_prompts() -> Result<(), SessionError> {
 }
 
 #[tokio::test]
-async fn rewinding_into_an_open_roundtrip_panics() -> Result<(), SessionError> {
+async fn rewinding_into_an_open_roundtrip_resolves_forward() -> Result<(), SessionError> {
     let store = temp_store("rewind-midbatch");
     // Hand-written log with a complete two-call roundtrip; rewinding to
     // the FIRST result entry targets a branch that ends mid-roundtrip —
-    // flag 23's resolution: unsupported, panics loud ("revisit later"),
-    // never repaired (the repair machinery is deleted).
+    // the 2026-09-26 ruling: resolve forward to the batch's last result
+    // (the landing is reported; the ask was mid-batch).
     let mut writer = store.create("C:/w");
     let user = write_node(
         &mut writer,
@@ -2180,7 +2169,7 @@ async fn rewinding_into_an_open_roundtrip_panics() -> Result<(), SessionError> {
             },
         },
     );
-    write_node(
+    let last_result = write_node(
         &mut writer,
         Some(&first_result.id),
         EntryKind::ToolResult {
@@ -2200,30 +2189,28 @@ async fn rewinding_into_an_open_roundtrip_panics() -> Result<(), SessionError> {
         .resume(&path)
         .expect("resume");
 
-    let outcome = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-        session.rewind_to_entry(&first_result.id)
-    }));
-    let fault = outcome.expect_err("a mid-roundtrip target panics loud");
-    let fault = panic_message(&fault);
-    assert!(
-        fault.contains("open tool roundtrip"),
-        "the panic names the ruled shape: {fault}"
+    let summary = session.rewind_to_entry(&first_result.id)?;
+    assert_eq!(
+        summary.to_entry, last_result.id,
+        "the head lands at the batch's last result, not the mid-batch ask"
     );
-    // Nothing moved and nothing was written by the failed checkout.
+    // The moved head is the same closed conversation it was; the
+    // checkout record lands (the rewind happened, unlike the old
+    // refusal that wrote nothing).
     assert_eq!(
         session.context().len(),
         3,
         "user, assistant, one merged batch"
     );
     assert!(
-        !load_records(&path).iter().any(|record| matches!(
+        load_records(&path).iter().any(|record| matches!(
             record,
             crate::entry::FileRecord::Side(crate::entry::SideRecord {
                 kind: crate::entry::SideKind::Checkout { .. },
                 ..
             })
         )),
-        "no checkout record landed"
+        "the checkout record landed"
     );
     std::fs::remove_dir_all(store.dir()).ok();
     Ok(())

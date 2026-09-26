@@ -97,7 +97,8 @@ pub fn calls_of(message: &Message) -> Vec<&ToolCall> {
 /// one-commit-door invariant (a roundtrip enters the tree whole or not
 /// at all) everything further back is closed by construction, so the
 /// check is a bounded lookback, never a branch walk. The live checkout
-/// door (a mid-roundtrip target refuses) and the parser's torn-tail
+/// door (a mid-roundtrip target resolves forward to the first
+/// closed position) and the parser's torn-tail
 /// check both route through here.
 #[allow(clippy::panic_in_result_fn)] // the crash inside is sanctioned (AGENTS.md doctrine), annotated below
 pub fn tail_is_closed(path: &[SessionEntry]) -> Result<(), String> {

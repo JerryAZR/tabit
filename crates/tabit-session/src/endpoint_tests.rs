@@ -3921,3 +3921,74 @@ async fn a_tagged_message_expands_at_the_door() {
     );
     let _ = std::fs::remove_dir_all(&cwd);
 }
+
+/// A mid-roundtrip checkout target resolves forward (the 2026-09-26
+/// ruling, replacing the old loud refusal): checking out to the tool
+/// turn's assistant entry — the announced turn id, mid-batch by
+/// construction — lands the head at the batch's last tool result, and
+/// `checked_out` reports the landing, not the ask.
+#[tokio::test]
+async fn a_midroundtrip_checkout_resolves_forward_to_the_batches_last_result() {
+    let store = temp_store("checkout-midroundtrip");
+    let session = Factory::new(vec![tool_turn("call-1", "echo"), text_turn("done")])
+        .into_builder(store.clone())
+        .dynamic_tool(echo_tool())
+        .create("C:/w")
+        .expect("session");
+    let mut handle = SessionHost::spawn(session, Vec::new(), plain_wiring(&store), plain_data());
+    let id = boot_id(&handle);
+
+    handle.message(&id, "go");
+    let mut frames = Vec::new();
+    collect_until(&mut handle, &mut frames, |event| {
+        matches!(event, SessionEvent::RunFinished { .. })
+    })
+    .await;
+
+    // The assistant-with-calls entry id is the announced turn id; the
+    // batch's last (only) result id rides the tool_result event.
+    let assistant_entry = frames
+        .iter()
+        .find_map(|frame| match &frame.event {
+            SessionEvent::TurnStarted { id, .. } => Some(id.clone()),
+            _ => None,
+        })
+        .expect("the tool turn announced");
+    let last_result = frames
+        .iter()
+        .find_map(|frame| match &frame.event {
+            SessionEvent::ToolResult { entry_id, .. } => Some(entry_id.clone()),
+            _ => None,
+        })
+        .expect("the batch's result announced");
+
+    handle.checkout(&id, &assistant_entry);
+    let mut checked = Vec::new();
+    collect_until(&mut handle, &mut checked, |event| {
+        matches!(event, SessionEvent::ReplayEnd)
+    })
+    .await;
+    let landed = checked
+        .iter()
+        .find_map(|frame| match &frame.event {
+            SessionEvent::CheckedOut { entry_id, .. } => Some(entry_id.clone()),
+            _ => None,
+        })
+        .expect("checked_out");
+    assert_eq!(
+        landed, last_result,
+        "the landing is the batch's last result, not the mid-batch ask"
+    );
+    // The pass re-rendered the NEW chain, which ends at the batch's
+    // result: the pass carries the tool result and no turn after it.
+    assert!(
+        checked.iter().any(|frame| matches!(&frame.event,
+            SessionEvent::ToolResult { entry_id, .. } if entry_id == &last_result)),
+        "the pass's chain ends with the batch's result"
+    );
+    let done_turns = checked
+        .iter()
+        .filter(|frame| matches!(&frame.event, SessionEvent::TurnCommitted { .. }))
+        .count();
+    assert_eq!(done_turns, 1, "only the tool turn precedes the landing");
+}

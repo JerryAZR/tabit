@@ -75,7 +75,10 @@ impl Session {
             let branch = crate::lock::read(&self.conversation).active_branch();
             tabit_log::user_message_boundaries(&branch).len()
         };
-        crate::lock::write(&self.conversation)
+        // The manager resolves a mid-roundtrip target forward to the
+        // first closed position; `to_entry` reports where the chain
+        // actually ends (the requested id when it was already valid).
+        let resolved = crate::lock::write(&self.conversation)
             .checkout(to)
             .map_err(
                 |crate::context_manager::CheckoutError(target)| SessionError::Config {
@@ -98,7 +101,7 @@ impl Session {
         };
         Ok(RewindSummary {
             dropped: before.saturating_sub(after),
-            to_entry: to.unwrap_or_default().to_string(),
+            to_entry: resolved.or(to.map(str::to_string)).unwrap_or_default(),
         })
     }
 }

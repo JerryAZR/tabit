@@ -1328,13 +1328,18 @@ async fn serve_parked(
 /// caught the common failure at receive; these are the environmental
 /// ones: persist trouble, the chain's model gone from config).
 fn execute_checkout(session: &mut Session, sink: &NoticeSink, entry_id: String) {
-    let res = session.rewind_to_entry(&entry_id);
-    if let Err(error) = res {
-        sink.emit(SessionEvent::error_checkout(error.to_string()));
-        return;
-    }
+    let summary = match session.rewind_to_entry(&entry_id) {
+        Ok(summary) => summary,
+        Err(error) => {
+            sink.emit(SessionEvent::error_checkout(error.to_string()));
+            return;
+        }
+    };
     sink.emit(SessionEvent::CheckedOut {
-        entry_id,
+        // The landing, not the ask: a mid-roundtrip target resolves
+        // forward to the batch's last tool result (FRONTEND.md §7), so
+        // the event names where the chain actually ends.
+        entry_id: summary.to_entry.clone(),
         // Full re-render (the suffix mode's reserved seam).
         base_id: None,
     });

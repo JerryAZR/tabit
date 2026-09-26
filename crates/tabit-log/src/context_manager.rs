@@ -412,41 +412,63 @@ impl ContextManager {
     }
 
     /// Move the head (a checkout / rewind). The branch ending at the
-    /// target must be roundtrip-closed: a target inside an open tool
-    /// batch names an unrepresentable conversation state and panics
-    /// loud. Under the one-commit-door invariant
-    /// only the path's tail can be open, so the check is a bounded
-    /// walk-back, never a branch walk. An unknown target is user input
-    /// — a graceful [`CheckoutError`]. The manager records nothing
-    /// here; the `checkout` side record is session business through
-    /// its own buffer handle.
+    /// target must be roundtrip-closed; a target inside an open tool
+    /// batch **resolves forward** to the first closed position — the
+    /// batch's last tool result, before the agent's next message or
+    /// the user's reply (owner ruling 2026-09-26; the old shape was a
+    /// loud refusal). The walk extends the target's path along its
+    /// forward continuation ([`SessionTree::forward_from`] — unique
+    /// children only, one batch's span at most under the atomic-commit
+    /// invariant), and the resolved id is returned (`None` = the head
+    /// landed exactly at the request) so the session's `checked_out`
+    /// reports where the chain ends. A target with no closed position
+    /// ahead cannot arise from a well-formed tree (roundtrips commit
+    /// whole) and panics loud — corruption, not user input. An unknown
+    /// target is user input — a graceful [`CheckoutError`]. The
+    /// manager records nothing here; the `checkout` side record is
+    /// session business through its own buffer handle.
     #[allow(clippy::panic, clippy::panic_in_result_fn)] // sanctioned crashes: corruption / contract violations, loud (AGENTS.md doctrine)
-    pub fn checkout(&mut self, target: Option<&str>) -> Result<(), CheckoutError> {
+    pub fn checkout(&mut self, target: Option<&str>) -> Result<Option<String>, CheckoutError> {
         if let Some(id) = target
             && !self.tree.contains(id)
         {
             return Err(CheckoutError(id.to_string()));
         }
-        // Validate before mutating anything: the walk and the
-        // closed-path rule are read-only over the tree.
-        let path = self
+        // Validate and resolve before mutating anything: the walk and
+        // the closed-path rule are read-only over the tree.
+        let mut path = self
             .tree
             .path_to(target)
             .unwrap_or_else(|TreeFault(fault)| {
                 panic!("ContextManager::checkout: {fault}");
             });
-        if let Err(reason) = tail_is_closed(&path) {
-            panic!(
-                "ContextManager::checkout to `{target:?}` refused: the target is inside an \
-                 open tool roundtrip ({reason}) — a mid-roundtrip checkout is unsupported"
-            );
+        let mut resolved = None;
+        if tail_is_closed(&path).is_err() {
+            let Some(id) = target else {
+                panic!("ContextManager::checkout: the root path is never open");
+            };
+            for entry in self.tree.forward_from(id) {
+                path.push(entry.clone());
+                if tail_is_closed(&path).is_ok() {
+                    resolved = Some(entry.id);
+                    break;
+                }
+            }
+            if resolved.is_none() {
+                panic!(
+                    "ContextManager::checkout to `{target:?}` found no closed position ahead — \
+                     the tree's atomic commits keep every open position completable, so this is \
+                     corruption"
+                );
+            }
         }
+        let landed = resolved.as_deref().or(target);
         self.tree
-            .move_head(target)
+            .move_head(landed)
             .unwrap_or_else(|TreeFault(fault)| {
                 panic!("ContextManager::checkout: target validated, then refused: {fault}");
             });
-        Ok(())
+        Ok(resolved)
     }
 
     /// Commit one compaction pass (v5): a **leaf-append at the head**
