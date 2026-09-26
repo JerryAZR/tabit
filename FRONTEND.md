@@ -297,9 +297,38 @@ state write that happens entirely at receive — no parking, no pause
 point — so send it any time and expect `model_changed` (or the error)
 back at once. A switch that validated but fails to construct in the
 environment surfaces as the next run's `run_failed` (the run's
-message names the provider) — the register keeps the choice; whether
-a picker needs a distinct "didn't take" signal is an open
+message names the provider) — the register keeps the choice; whether a
+picker needs a distinct "didn't take" signal is an open
 PROTOCOL.md note.
+
+**Skill invocation in message text (manual invocation, 2026-09):** a
+message may carry the invocation tag `<skill name="commit"/>` — the
+exact self-closing form, any number of them, anywhere in the text.
+The UX is yours (typical: the user types `/commit`, confirms against
+`skills_available`, and you format the tag — keeping the user's edit
+painless); the backend expands at the message door: the text passes
+verbatim with the tags in place as anchors, and each resolvable tag's
+skill body is **appended after the message** (never in-place — a
+hundred-line body mid-sentence is unreadable), frontmatter stripped,
+in the same format the `skill` tool returns:
+
+```
+<skill name="commit">
+…SKILL.md body…
+
+[Skill base directory: …]
+</skill>
+```
+
+Unresolvable tags — no such skill in *that session's* catalog, or an
+unreadable file — are left as-is: the message is never rejected
+("write to /tmp, redirect errors to /dev/null" contains no tag and is
+never a fetch attempt). The `user_message` event, the log, and the
+model's request all carry the expanded text — what the model saw is
+what replay shows. No arguments by design (pi's prompt-template is
+the future direction if that ever changes), and the bare leading
+`/name` shorthand is not recognized (deferred until the tag path is
+stable).
 
 ## 6. Events
 
@@ -365,7 +394,7 @@ consumes (its `details` cargo) is TOOLS.md's table of shapes.
 | `sessions_available` | `sessions: [{ id, created_at, entry_count, path, cwd }]` | once, after the boot session's announcements (notes, then its stamped `skills_available` when it has skills — §3.1's order): every stored session, newest first. **Unstamped, backend-level.** Minimal by ruling — a plain object, fields grow when
    needed (v16 added `path` and `cwd`: a frontend never lists the
    directory to learn either). A brand-new session has no file yet and is absent until it records. |
-| `skills_available` | `skills: [{ name, description, location, level }]` | **(v20) session-level**: stamped with the session's stream, announced right after each `session_opened` (boot, `new_session`, `open_session`) — every skill that session's own discovery merged (home `~/.agents`/`~/.tabit` + workspace `.agents`/`.tabit` skills dirs over the session's cwd, plus the process's extension contribution), the same facts that session's prompt catalog carries — `level` is `user` or `workspace` (which source won). Fold skills state **per stream** (v20): a subagent child is a full session host in its own cwd and announces its own stamped catalog, which must not clobber another session's list. Only announced when the session discovered at least one skill — with per-stream folding, absence is unambiguous. Skill *invocation* is no new wire shape: the model calls the `skill` tool, an ordinary `tool_call`/`tool_result` pair on the asking session's stream. |
+| `skills_available` | `skills: [{ name, description, location, level }]` | **(v20) session-level**: stamped with the session's stream, announced right after each `session_opened` (boot, `new_session`, `open_session`) — every skill that session's own discovery merged (home `~/.agents`/`~/.tabit` + workspace `.agents`/`.tabit` skills dirs over the session's cwd, plus the process's extension contribution), the same facts that session's prompt catalog carries — `level` is `user` or `workspace` (which source won). Fold skills state **per stream** (v20): a subagent child is a full session host in its own cwd and announces its own stamped catalog, which must not clobber another session's list. Only announced when the session discovered at least one skill — with per-stream folding, absence is unambiguous. Skill *invocation* is no new wire shape: the model calls the `skill` tool, an ordinary `tool_call`/`tool_result` pair on the asking session's stream; the user invokes one manually with the message-text tag (§5). |
 | `extensions_available` | `extensions: [{ name, version, description?, dir, status, reason?, tools: [{ name, description }], hooks: [string] }]`, `conflicts: [{ kind, extension, tool, incumbent? }]` | **(v9)** once, right after `skills_available`: every discovered extension with its provenance (`dir`) and standing — `status` is `alive` or `dead` (a refused handshake, a failed scan, or death since; `reason` carries why). **Unstamped, backend-level** (one process, one extension host); only announced when at least one extension was discovered — a refusal counts as discovered. **A boot-time snapshot** (2026-09 ruling): a mid-run extension death does not re-announce — stderr carries the report and the catalog stands until the next backend start. `conflicts` are the boot's name-assembly reports: `kind: "replaces_core"` (an extension tool replaced the core tool of the same name — the signal is mandatory; how loudly you present it is your call) and `kind: "refused_peer"` (the newcomer was refused, `incumbent` names the extension that holds the name). Extension tool *invocation* is no new wire shape: an ordinary `tool_call`/`tool_result` pair, attributed by the model-facing name. |
 | `session_opened` | `id`, `path`, `cwd`, `model`, `resumed`, `parent?`, `parent_call?` | a session became visible in this backend — the boot (at spawn, right after the report), a `new_session`, an `open_session`, **or a subagent child** (v5). `cwd` (v16) is the session's working
 directory — the boot's is the backend's cwd, a child's is its spawn
@@ -706,3 +735,11 @@ v19 rode the deleted GUI's CHANGELOG.md — git history holds it.)
   visible (was: one unstamped backend-level catalog at startup).
   Frontends fold skills state per stream; a child's catalog no
   longer touches another session's list.
+- **2026-09 (no bump — message-text semantics, no wire shape)** —
+  manual skill invocation: a message may carry the invocation tag
+  `<skill name="…"/>`; the backend expands at the message door,
+  appending each resolvable tag's skill body after the message (the
+  `skill` tool's result format, frontmatter stripped; tags stay in
+  place as anchors). Unresolvable tags pass through untouched —
+  messages are never rejected for them. No arguments; the bare
+  leading `/name` shorthand is not recognized. See §5.

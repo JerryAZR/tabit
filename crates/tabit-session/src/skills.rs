@@ -491,6 +491,99 @@ fn footer(entry: &SkillEntry) -> String {
     format!("\n\n[Skill base directory: {}]", entry.base_dir.display())
 }
 
+// ---------------------------------------------------------------------------
+// Receive-time invocation expansion (owner ruling 2026-09-26): a user
+// message may carry the invocation tag — `<skill name="commit"/>`,
+// the exact self-closing form, embedded by the frontend (FRONTEND.md:
+// the user types `/commit`, confirms, the frontend formats the tag).
+// The session expands at the message door: the tag stays in place as
+// the anchor, and each resolvable tag's skill body is APPENDED after
+// the message (never in-place — a hundred-line body mid-sentence is
+// unreadable), in the `skill` tool's result format. Unresolvable
+// tags (no such skill, unreadable file) are left as-is — external,
+// graceful: the message passes, never rejected. No arguments by
+// ruling (agentskills.io has none; pi's prompt-template is the
+// future direction if that changes).
+// ---------------------------------------------------------------------------
+
+/// The invocation tag's opening text (`<skill name="`).
+const TAG_OPEN: &str = r#"<skill name=""#;
+/// The invocation tag's closing text (`"/>`).
+const TAG_CLOSE: &str = r#""/>"#;
+
+/// Expand a message's invocation tags: the text verbatim, then one
+/// block per resolvable tag in order of appearance. A message without
+/// tags — or whose tags all pass through — returns unchanged.
+pub fn expand_invocations(text: &str, skills: &Skills) -> String {
+    if !text.contains(TAG_OPEN) {
+        return text.to_string();
+    }
+    let mut blocks: Vec<String> = Vec::new();
+    for name in scan_invocation_tags(text) {
+        let Some(entry) = skills.lookup(name) else {
+            tracing::warn!(skill = %name, "invocation tag names no discovered skill — left as-is");
+            continue;
+        };
+        match std::fs::read_to_string(&entry.skill_file) {
+            Ok(content) => blocks.push(format!(
+                "<skill name=\"{}\">{}{}\n</skill>",
+                entry.name,
+                body_after_frontmatter(&content),
+                footer(entry),
+            )),
+            Err(err) => tracing::warn!(
+                skill = %name,
+                error = %err,
+                "invoked skill unreadable at receive — left as-is"
+            ),
+        }
+    }
+    if blocks.is_empty() {
+        return text.to_string();
+    }
+    format!("{text}\n\n{}", blocks.join("\n\n"))
+}
+
+/// The tag names in order of appearance — everything between
+/// `<skill name="` and `"/>`. A dangling opening (no close) stops the
+/// scan; anything malformed is simply not a tag and passes through.
+fn scan_invocation_tags(text: &str) -> Vec<&str> {
+    let mut names = Vec::new();
+    let mut rest = text;
+    while let Some(start) = rest.find(TAG_OPEN) {
+        let after = &rest[start + TAG_OPEN.len()..];
+        let Some(end) = after.find(TAG_CLOSE) else {
+            break;
+        };
+        names.push(&after[..end]);
+        rest = &after[end + TAG_CLOSE.len()..];
+    }
+    names
+}
+
+/// The body after `---`-delimited frontmatter — the whole content
+/// when there is none, and the whole content when the block is
+/// unterminated (discovery would have skipped such a file; a file
+/// that changed under us degrades to its raw text, never an error).
+/// Mirrors [`parse_frontmatter`]'s tolerance (BOM, CRLF).
+fn body_after_frontmatter(content: &str) -> &str {
+    let content = content.strip_prefix('\u{feff}').unwrap_or(content);
+    let mut offset = 0usize;
+    let mut opened = false;
+    for line in content.split_inclusive('\n') {
+        if !opened {
+            if line.trim_end() != "---" {
+                return content;
+            }
+            opened = true;
+        } else if line.trim_end() == "---" {
+            return &content[offset + line.len()..];
+        }
+        offset += line.len();
+    }
+    content
+}
+
 /// Resolve `rel` inside the skill's base dir, confined: the lexical
 /// check first (absolute paths and `..` components never resolve),
 /// then canonicalize at read time so symlinks cannot escape. An

@@ -114,6 +114,12 @@ impl Session {
             event_tap: Arc::new(std::sync::OnceLock::new()),
             compaction: Arc::new(crate::compaction::Compaction::new()),
         };
+        // The mailbox's invocation expander rides the same catalog the
+        // prompt and the `skill` tool read — one discovery, one table
+        // (the skills-available ruling).
+        if let Some(skills) = &session.skills {
+            session.mailbox.attach_expander(skills.clone());
+        }
         Ok(session)
     }
 }

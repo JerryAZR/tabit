@@ -131,7 +131,10 @@ Current workspace layout:
   compaction box (`src/compaction/`: the pass machinery, the doors, the
   dials file — every threshold and prompt text as data), the
   skills module (`src/skills.rs`: four-source discovery, the prompt
-  catalog, the confined `skill` tool), plus the
+  catalog, the confined `skill` tool, plus manual invocation — the
+  `<skill name=.../>` tag in a user message appends the skill body at
+  the mailbox door, the one funnel every message enters; FRONTEND.md
+  is the contract), plus the
   serve side of the frozen wire as a functional layer on the node
   (`src/endpoint.rs`: the session host — workers route by the node's
   learning table, lifecycle by type, interaction cards by the ask

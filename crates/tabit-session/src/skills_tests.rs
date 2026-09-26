@@ -543,3 +543,128 @@ fn extension_registration_is_first_writer_wins() {
     assert_eq!(extension.entries.len(), 1);
     let _ = fs::remove_dir_all(&root);
 }
+
+// ---- receive-time invocation expansion (the tag, the append, the
+// pass-throughs)
+
+/// One catalog over a tempdir: `commit` with frontmatter + body, at
+/// the workspace skills level.
+fn expand_catalog(tag: &str) -> (PathBuf, Skills) {
+    let root = temp_dir(tag);
+    skill_dir(
+        &root.join(".tabit/skills"),
+        "commit",
+        "name: commit\ndescription: Make a commit.\n",
+        "Body line one.\nBody line two.\n",
+    );
+    (root.clone(), discover_with_home(None, &root))
+}
+
+#[test]
+fn a_tag_appends_the_body_after_the_message_in_the_tool_format() {
+    let (root, skills) = expand_catalog("append");
+    let text = r#"check this <skill name="commit"/> before you push"#;
+    let expanded = expand_invocations(text, &skills);
+    assert!(
+        expanded.starts_with(text),
+        "the message is verbatim and the tag stays as the anchor: {expanded}"
+    );
+    assert!(
+        expanded.contains(
+            "<skill name=\"commit\">Body line one.\nBody line two.\n\n\n[Skill base directory: "
+        ),
+        "the block is the verbatim body then the tool's footer: {expanded}"
+    );
+    assert!(
+        expanded.ends_with("\n</skill>"),
+        "the block closes: {expanded}"
+    );
+    assert!(
+        !expanded.contains("description: Make a commit"),
+        "frontmatter is stripped from the appended body"
+    );
+    let _ = fs::remove_dir_all(&root);
+}
+
+#[test]
+fn an_unknown_tag_is_left_as_is() {
+    let (root, skills) = expand_catalog("unknown");
+    let text = r#"run <skill name="nope"/> please"#;
+    assert_eq!(expand_invocations(text, &skills), text);
+    let _ = fs::remove_dir_all(&root);
+}
+
+#[test]
+fn an_unreadable_skill_is_left_as_is() {
+    // The file existed at discovery, is gone at invocation: external,
+    // graceful — the message passes whole, never rejected.
+    let (root, skills) = expand_catalog("gone");
+    fs::remove_file(root.join(".tabit/skills/commit/SKILL.md")).expect("remove the body");
+    let text = r#"<skill name="commit"/>"#;
+    assert_eq!(expand_invocations(text, &skills), text);
+    let _ = fs::remove_dir_all(&root);
+}
+
+#[test]
+fn plain_text_slash_paths_and_bare_names_are_untouched() {
+    // The ruling pin: "write to /tmp, redirect errors to /dev/null"
+    // never becomes a skill fetch, and the bare `/name` heuristic is
+    // deferred — a leading slash expands nothing.
+    let (root, skills) = expand_catalog("plain");
+    for text in [
+        "write to /tmp, redirect errors to /dev/null",
+        "/commit",
+        "plain question, no tags",
+    ] {
+        assert_eq!(expand_invocations(text, &skills), text, "untouched: {text}");
+    }
+    let _ = fs::remove_dir_all(&root);
+}
+
+#[test]
+fn multiple_tags_append_in_order_and_repeat() {
+    let root = temp_dir("multi");
+    let skills_root = root.join(".tabit/skills");
+    skill_dir(&skills_root, "a", "name: a\ndescription: A.\n", "A-BODY\n");
+    skill_dir(&skills_root, "b", "name: b\ndescription: B.\n", "B-BODY\n");
+    let skills = discover_with_home(None, &root);
+    let text = r#"<skill name="b"/> then <skill name="a"/>"#;
+    let expanded = expand_invocations(text, &skills);
+    let b = expanded.find("B-BODY").expect("b appended");
+    let a = expanded.find("A-BODY").expect("a appended");
+    assert!(b < a, "blocks append in tag order");
+    assert!(
+        expanded.rfind("then").unwrap() < b,
+        "blocks append after the message text"
+    );
+    let twice = expand_invocations(r#"<skill name="a"/> <skill name="a"/>"#, &skills);
+    assert_eq!(
+        twice.matches("A-BODY").count(),
+        2,
+        "each occurrence appends its own block"
+    );
+    let _ = fs::remove_dir_all(&root);
+}
+
+#[test]
+fn non_self_closing_forms_are_not_tags() {
+    let (root, skills) = expand_catalog("paired");
+    let text = r#"a <skill name="commit"> paired form is prose, not an invocation"#;
+    assert_eq!(expand_invocations(text, &skills), text);
+    let _ = fs::remove_dir_all(&root);
+}
+
+#[test]
+fn the_body_after_frontmatter_mirrors_the_parser() {
+    assert_eq!(body_after_frontmatter("---\nname: x\n---\nbody"), "body");
+    assert_eq!(body_after_frontmatter("no frontmatter"), "no frontmatter");
+    assert_eq!(
+        body_after_frontmatter("---\r\nname: x\r\n---\r\nbody\r\n"),
+        "body\r\n"
+    );
+    assert_eq!(
+        body_after_frontmatter("---\nnever closed"),
+        "---\nnever closed",
+        "an unterminated block degrades to raw text"
+    );
+}

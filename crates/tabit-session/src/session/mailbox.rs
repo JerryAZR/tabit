@@ -50,6 +50,12 @@ pub(crate) struct Mailbox {
     /// spawn (see [`crate::notice`] for the channel discipline). Absent
     /// for direct [`Session`] consumers: no frontend, no notices.
     notices: std::sync::Arc<NoticeSlot>,
+    /// The session's skills catalog, attached at assembly when skills
+    /// were discovered — the receive-time invocation expansion's
+    /// resolver (skills.rs: a message's `<skill name="..."/>` tags
+    /// append their bodies here, at the one door every user message
+    /// enters). Absent = no expansion, plain queuing.
+    expander: std::sync::Arc<std::sync::OnceLock<std::sync::Arc<crate::skills::Skills>>>,
     /// Wakes the resident worker when work arrives. One permit covers any
     /// number of pushes; the queue itself is the source of truth — the
     /// signal exists only so an empty queue can be waited on.
@@ -64,6 +70,12 @@ impl Mailbox {
         let _ = self.notices.set(sink);
     }
 
+    /// Attach the invocation expander's catalog (the assembly, when
+    /// the session discovered skills).
+    pub(crate) fn attach_expander(&self, skills: std::sync::Arc<crate::skills::Skills>) {
+        let _ = self.expander.set(skills);
+    }
+
     /// A pump began: submissions from here until [`Self::run_ended`] are
     /// acknowledged with `message_queued`.
     pub(crate) fn run_started(&self) {
@@ -76,6 +88,24 @@ impl Mailbox {
     }
 
     pub(crate) fn push(&self, message: Message) {
+        // Receive-time skill invocation (FRONTEND.md's tag): expand
+        // before the id is minted, so the queued acknowledgment, the
+        // steers, the events, and the log all carry the one expanded
+        // text — what the model actually sees is what replay shows.
+        // A message without resolvable tags passes through untouched
+        // (the expansion is the identity for it).
+        let message = match self.expander.get() {
+            Some(skills) => {
+                let text = user_text(&message);
+                let expanded = crate::skills::expand_invocations(&text, skills);
+                if expanded != text {
+                    Message::user(expanded)
+                } else {
+                    message
+                }
+            }
+            None => message,
+        };
         let queued = QueuedMessage {
             id: crate::ids::new_entry_id(),
             message,

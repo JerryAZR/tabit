@@ -3853,3 +3853,71 @@ async fn replay_requests_collapse_to_one_pass() {
     assert_eq!(begins, 1, "two replay requests are one pass");
     std::fs::remove_dir_all(store.dir()).ok();
 }
+
+/// Receive-time skill invocation (FRONTEND.md's tag), through the real
+/// door: a message carrying `<skill name="..."/>` expands at submit —
+/// the queued user_message event carries the appended body, the tag
+/// stays as the anchor, and the model's request carries both. An
+/// unresolvable tag passes through untouched (the ruling: "write to
+/// /tmp" never becomes a fetch).
+#[tokio::test]
+async fn a_tagged_message_expands_at_the_door() {
+    let store = temp_store("endpoint-skill-tag");
+    let cwd = std::env::temp_dir().join(format!("tabit-skill-door-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&cwd);
+    std::fs::create_dir_all(cwd.join(".tabit/skills/commit")).expect("skill dir");
+    std::fs::write(
+        cwd.join(".tabit/skills/commit/SKILL.md"),
+        "---\nname: commit\ndescription: Make a commit.\n---\nCOMMIT-BODY-MARKER\n",
+    )
+    .expect("SKILL.md");
+
+    let skills = std::sync::Arc::new(crate::skills::discover_with_home(None, &cwd));
+    let factory = Factory::new(vec![text_turn("done")]);
+    let session = factory
+        .clone()
+        .into_builder(store.clone())
+        .skills(skills)
+        .create(&cwd.display().to_string())
+        .expect("session");
+    let mut handle = SessionHost::spawn(session, Vec::new(), plain_wiring(&store), plain_data());
+    let id = boot_id(&handle);
+
+    handle.message(
+        &id,
+        "run the checks <skill name=\"commit\"/> before pushing",
+    );
+    let frames = drain(&mut handle).await;
+    assert_eq!(
+        finished_outputs(&frames),
+        vec!["done".to_string()],
+        "the run completed"
+    );
+    let texts = user_texts(&frames);
+    assert_eq!(texts.len(), 1, "one user message");
+    assert!(
+        texts[0].starts_with("run the checks <skill name=\"commit\"/> before pushing"),
+        "the message is verbatim, the tag the anchor: {}",
+        texts[0]
+    );
+    assert!(
+        texts[0].contains("COMMIT-BODY-MARKER") && texts[0].ends_with("</skill>"),
+        "the skill body appended after the message: {}",
+        texts[0]
+    );
+    assert!(
+        !texts[0].contains("description: Make a commit"),
+        "frontmatter stripped"
+    );
+
+    // The model's request carried the expansion (the door, not the
+    // engine, did it — the request body is the folded conversation).
+    let requests = factory.requests();
+    let request = requests.last().expect("one model call");
+    let serialized = serde_json::to_string(&request.chat_history).expect("serialize");
+    assert!(
+        serialized.contains("COMMIT-BODY-MARKER"),
+        "the skill body rode the model's request"
+    );
+    let _ = std::fs::remove_dir_all(&cwd);
+}
