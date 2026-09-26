@@ -426,6 +426,11 @@ consistency, never design fit (see the gate bullet below).
 - Vendor instruction files (CLAUDE.md etc.): **AGENTS.md only**.
 - Instruction-file directory walking: home (`~/.tabit/AGENTS.md` with a
   `~/.agents/AGENTS.md` fallback) and cwd only — no upward/child scans.
+- Dedicated search tools (grep/glob shapes): **not planned** — the
+  agent searches through `bash` with piping and filtering; no second
+  tool surface for what the shell already does (owner ruling, stated
+  multiple times, recorded here 2026-09-26 so it stops being
+  re-derived against reference agents' inventories).
 
 ## Open items for the owner
 

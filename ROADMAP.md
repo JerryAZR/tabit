@@ -173,6 +173,8 @@ through a few patch rounds. That is the re-evaluation trigger.
 - Model catalog / name-keyed behavior.
 - Vendor instruction files (CLAUDE.md etc.) — AGENTS.md only;
   instruction-file walking beyond home + cwd.
+- Dedicated search tools (grep/glob shapes) — `bash` with piping and
+  filtering is the search surface (owner ruling, recorded 2026-09-26).
 - A GPL anything (the claurst harvest is dead; all-MIT).
 
 ## Deferred until a consumer exists
