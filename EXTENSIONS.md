@@ -22,6 +22,16 @@ Rules of the ledger:
 - anything an extension author must not do (a boundary) is stated as
   a boundary, not a suggestion.
 
+Two protocols, two homes (owner ruling 2026-09-26): the frontend
+protocol — commands, stamped events, the ask pattern — is FRONTEND.md's
+contract. The extension protocol is that same wire plus the extension
+lanes (the report, the tool and hook lanes, host-service requests —
+"the wire" below), and **this document is its home**: the frame
+contract, the rulings that shape it, and the boundaries for authors.
+Frontend-protocol support is inherited, never re-specified here — the
+pipe carries the frontend grammar verbatim, and an extension speaks it
+as a peer.
+
 ## Extensions are subprocesses over a frozen pipe (2026-09, the
 item-9 substrate ruling)
 
@@ -617,7 +627,7 @@ Ruled: the ask-pattern hub — many producers, one outbound queue (the
 event channel), one inbound router (`interaction_response` by id to
 the awaiting asker) — is **the** model for user interaction from
 backend code. Recorded in ENGINE.md's tool-phase section and
-PROTOCOL.md/FRONTEND.md §8.
+FRONTEND.md §8.
 
 Implications:
 
@@ -853,8 +863,8 @@ is planned.
 Changing the prompt is a deliberate user action with a known cost:
 install/configure the extension, let the current task finish
 (compact if wanted), then reload — the GUI respawns the backend,
-which re-reads config, auth, and sessions (PROTOCOL.md's startup &
-recovery ruling), and replay restores the transcript with the same
+which re-reads config, auth, and sessions (FRONTEND.md §3's startup
+& recovery contract), and replay restores the transcript with the same
 ids. The cache miss lands where the user chose it.
 
 Implications:
@@ -869,8 +879,8 @@ Implications:
   today the respawn path. The reserved refinement is an in-process
   session reload (the backend rebuilds the chosen session's
   build-time inputs at the beat; history and transcript untouched):
-  explicitly deferred until respawns actually annoy (PROTOCOL.md's
-  startup & recovery ruling). Its command-path home already exists
+  explicitly deferred until respawns actually annoy (FRONTEND.md §3).
+  Its command-path home already exists
   — the checkout pattern (session-addressed command, parked intent,
   beat execution) minus the rewind, with an outcome event instead
   of a replay pass; the mid-run question (abort-compose like

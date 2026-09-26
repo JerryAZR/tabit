@@ -552,7 +552,7 @@ use rig_core::message::{AssistantContent, ToolCall as MessageToolCall, ToolFunct
 /// Records the kind of every hook event (and every tool-result payload) so a
 /// run() and a stream() of the same scenario can be compared. The kinds are
 /// labels, not `StepEventKind` — that hint machinery died with the
-/// observation hooks (PROTOCOL.md flag 31).
+/// observation hooks.
 #[derive(Clone, Default)]
 struct RecordingHook {
     events: Arc<Mutex<Vec<&'static str>>>,
@@ -1030,8 +1030,7 @@ mod structured_tool_results {
 
     // (2) A hook counts timeout failures in its own state and terminates
     // the run after a threshold — the motivating use case. (The count is
-    // hook-local: the run Scratchpad died with the observation hooks,
-    // PROTOCOL.md flag 31.)
+    // hook-local: the run Scratchpad died with the observation hooks.)
     #[tokio::test]
     async fn hook_terminates_after_repeated_timeouts() {
         #[derive(Clone, Default)]

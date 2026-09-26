@@ -1,7 +1,7 @@
 //! The frontend-facing projection of a session log: the active chain's
 //! entries re-emitted as finalized live events — the same shapes a live
 //! run produces, so a frontend renders replayed history and live turns
-//! with one set of arms (PROTOCOL.md v2).
+//! with one set of arms (FRONTEND.md §7).
 //!
 //! The sibling of [`crate::projection`]: that module projects entries
 //! into model context (`Vec<Message>`), this one into frontend events

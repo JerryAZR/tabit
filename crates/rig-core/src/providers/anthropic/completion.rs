@@ -2290,7 +2290,7 @@ impl TryFrom<AnthropicRequestParams<'_>> for AnthropicCompletionRequest {
             tool_choice: req.tool_choice.map(ToolChoice::try_from).transpose()?,
             tools,
             // Anthropic's structured-output wire field. The runtime has no
-            // structured-output feature (PROTOCOL.md flag 30); a user who
+            // structured-output feature; a user who
             // wants it sets `output_config` through `extra_body`, which
             // merges straight into the JSON body.
             output_config: None,

@@ -33,8 +33,7 @@ use rig_core::message::{AssistantContent, ToolResult, UserContent};
 
 /// A refused checkout: the target names no node the tree holds. User
 /// input — graceful. A target *inside* an open roundtrip is not this
-/// error: it panics (PROTOCOL.md flag 23 — not a representable
-/// conversation state).
+/// error: it panics — not a representable conversation state.
 #[derive(Debug, thiserror::Error)]
 #[error("checkout target `{0}` is not in this session")]
 pub struct CheckoutError(pub String);
@@ -415,7 +414,7 @@ impl ContextManager {
     /// Move the head (a checkout / rewind). The branch ending at the
     /// target must be roundtrip-closed: a target inside an open tool
     /// batch names an unrepresentable conversation state and panics
-    /// loud (PROTOCOL.md flag 23). Under the one-commit-door invariant
+    /// loud. Under the one-commit-door invariant
     /// only the path's tail can be open, so the check is a bounded
     /// walk-back, never a branch walk. An unknown target is user input
     /// — a graceful [`CheckoutError`]. The manager records nothing

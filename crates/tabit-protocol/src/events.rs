@@ -246,7 +246,7 @@ pub enum SessionEvent {
     /// pass bracketing the rewound chain — the pass is the re-render
     /// (`base_id: null` = the frontend drops everything it holds; the
     /// reserved suffix upgrade flips it to `Some` and shrinks the
-    /// pass behind the same bracket, PROTOCOL.md v3 stage 2).
+    /// pass behind the same bracket).
     CheckedOut {
         /// The entry the chain now ends at — the command's target.
         entry_id: String,

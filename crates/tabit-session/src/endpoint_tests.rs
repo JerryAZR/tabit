@@ -1565,7 +1565,7 @@ async fn frontend_death_aborts_every_sessions_run() {
 
 #[tokio::test]
 async fn a_replay_request_for_a_running_session_answers_after_its_terminal() {
-    // "The one wait in the design" (PROTOCOL.md v3): the pass for a
+    // "The one wait in the design" (FRONTEND.md §5, open_session): the pass for a
     // session whose own run is in flight waits for that run's
     // terminal — pinned as an ordering contract, not an accident: no
     // bracket interleaves the run's events.
@@ -1632,7 +1632,7 @@ async fn a_replay_request_for_a_running_session_answers_after_its_terminal() {
 }
 
 // ---------------------------------------------------------------------------
-// Checkout (PROTOCOL.md v3 stage 2): pause-point semantics, the
+// Checkout (FRONTEND.md §7): pause-point semantics, the
 // watermark discard rule, and the full-re-render pass.
 
 /// The entry id of a user message, by text, from frames collected so

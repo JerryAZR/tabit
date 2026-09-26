@@ -40,7 +40,7 @@ ordinary value semantics.
 
 ## Hooks
 
-The hook surface is the tool pair (PROTOCOL.md flag 31): `on_tool_call` gates
+The hook surface is the tool pair: `on_tool_call` gates
 each tool call — run as-is, rewrite the arguments, or skip with a reason the
 model sees in-band — and `on_tool_result` observes each settled result and may
 rewrite its presentation or stop the run after the batch. Hooks attached

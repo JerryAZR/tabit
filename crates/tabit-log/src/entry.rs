@@ -268,7 +268,7 @@ pub enum SideKind {
     Aborted,
     /// An attempt the engine discarded — a hook veto or a malformed
     /// tool-call defect retried. The tokens were spent, so the usage is
-    /// recorded here (PROTOCOL.md flag 22): stats count it, the log stays
+    /// recorded here: stats count it, the log stays
     /// the cost source of truth. Not part of model context.
     Discarded {
         /// The provider-reported usage of the discarded attempt.

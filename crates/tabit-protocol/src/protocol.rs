@@ -181,7 +181,7 @@ pub enum SessionCommand {
     /// command), `run_aborted` (only if a run was in flight), then
     /// `checked_out` and a full replay pass; an unknown entry emits
     /// `error { kind: checkout }` immediately and changes nothing
-    /// (PROTOCOL.md v3 stage 2).
+    /// (FRONTEND.md §5).
     Checkout {
         /// The target session id.
         session: String,
@@ -196,7 +196,7 @@ pub enum SessionCommand {
     /// `model_change` entry and the live selection, one shared-write
     /// operation) and `model_changed` follows immediately. A run in
     /// flight finishes untouched on the model it bound at run open;
-    /// the next run derives the new agent (PROTOCOL.md stage 3). Not
+    /// the next run derives the new agent. Not
     /// conversation intent: abort never touches it, and there is no
     /// pending state — what was announced is already durable.
     Model {

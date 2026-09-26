@@ -2,7 +2,7 @@
 //!
 //! [`AgentHook`] is one lifecycle method per tool-phase event; unsupported
 //! combinations are rejected by the compiler instead of being interpreted at
-//! runtime. The surface is the tool pair (PROTOCOL.md flag 31, ruled
+//! runtime. The surface is the tool pair (ruled
 //! 2026-08): everything else inherited from the rig 0.41.0 vendoring —
 //! model-selection routing, completion-call request patches, and every
 //! observation point — was deleted as surface without a consumer or a
@@ -138,8 +138,7 @@ impl Drop for ToolCallResolutionFrame<'_> {
 /// accessors (run id, turn counter, surface, agent name) are
 /// deliberately absent — those identities live where their consumers
 /// are (announced turn ids on events, run/agent names on spans), and
-/// unconsumed surface is deleted, not kept by inertia
-/// (PROTOCOL.md flag 31 and its follow-up).
+/// unconsumed surface is deleted, not kept by inertia.
 #[derive(Debug)]
 pub struct HookContext {
     /// The announced id of the turn in flight (ENGINE.md behavior delta

@@ -298,7 +298,7 @@ impl Session {
         stats
     }
 
-    /// The replay pass (PROTOCOL.md v2): the active branch (the
+    /// The replay pass: the active branch (the
     /// temporary path container, materialized on demand) projected into
     /// finalized live events — the same shapes a live run produces,
     /// ids verbatim from the tree, so a frontend renders history and

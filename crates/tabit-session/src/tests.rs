@@ -1603,7 +1603,7 @@ async fn messages_queued_before_pump_all_join_the_first_run() -> Result<(), Sess
         .collect();
     assert_eq!(user_texts, vec!["one", "two"]);
     // Born-early ids: each user_message event's entry_id is the id its
-    // entry keeps in the reloaded log (PROTOCOL.md v2).
+    // entry keeps in the reloaded log.
     let event_ids: Vec<&str> = run
         .events
         .iter()
@@ -2479,7 +2479,7 @@ async fn an_empty_truncated_stream_warns_and_completes() -> Result<(), SessionEr
 }
 
 /// Replay re-emits the chain as finalized live events with the ids the
-/// live run announced (PROTOCOL.md v2's payoff: a frontend that kept the
+/// live run announced (the replay payoff: a frontend that kept the
 /// live stream could have rendered the replay blind, and vice versa) —
 /// and with whole texts where live streamed deltas.
 #[tokio::test]

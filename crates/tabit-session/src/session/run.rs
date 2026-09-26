@@ -84,7 +84,7 @@ impl Session {
     /// drive loop for frontends ([`crate::SessionHost`]'s workers).
     pub async fn pump(&mut self, on_event: &mut (dyn FnMut(SessionEvent) + Send)) -> RunSummary {
         // A pump may drain at any instant from here to its end: submit
-        // acknowledgments switch to `message_queued` (PROTOCOL.md v2).
+        // acknowledgments switch to `message_queued` (FRONTEND.md §5).
         self.mailbox.run_started();
         let mut total = RunSummary {
             outcome: RunOutcome::Completed,

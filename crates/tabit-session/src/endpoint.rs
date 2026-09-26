@@ -324,7 +324,7 @@ impl Worker {
     /// queue batches them), and the beat serves the pass ahead of the
     /// next batch — the pass reflects the chain as of the beat, and a
     /// message that has not drained by then renders live after the
-    /// bracket (PROTOCOL.md v3 stage 2).
+    /// bracket (FRONTEND.md §7).
     fn deliver_replay(&self) {
         self.replay_due
             .store(true, std::sync::atomic::Ordering::Release);
@@ -667,8 +667,8 @@ impl SessionHostMount {
         // session gets — the boot is not a special case), then its
         // selection degradations, then the catalog. A listing failure
         // is the carrier in place of the announcement — no catalog
-        // follows (ruled: external errors ride the channel; PROTOCOL.md
-        // v3).
+        // follows (ruled: external errors ride the channel —
+        // FRONTEND.md §6).
         boot_sink.emit(SessionEvent::SessionOpened {
             id: info.session_id.clone(),
             path: info.session_path.clone(),
@@ -1341,7 +1341,7 @@ fn execute_checkout(session: &mut Session, sink: &NoticeSink, entry_id: String) 
     emit_replay(session, sink);
 }
 
-/// The replay pass (PROTOCOL.md v2): the resident chain projected
+/// The replay pass (FRONTEND.md §7): the resident chain projected
 /// into finalized live events, bracketed. One emission path for its
 /// askers — the transport's replay request, checkout's re-render, and
 /// the open_session boot pass — each led by the register announcement

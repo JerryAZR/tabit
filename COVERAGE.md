@@ -1125,8 +1125,8 @@ it changed:
   length (the collapse test's re-render).
 - Deferred, deliberately: the GUI's optimistic switch transient and
   `Facts` drift on switcher switches (ROADMAP item 7 — the per-session
-  transcript redesign); flag 11's panic arm (amended in PROTOCOL.md —
-  see the flag for the rationale).
+  transcript redesign); flag 11's panic arm (the amendment's
+  rationale is git history).
 
 ## Tool-gate seam (2026-08, the permission-leak review) — superseded
 
@@ -1225,15 +1225,15 @@ round:
   then_rewinds_at_the_beat`: discard at receive → `run_aborted` →
   `checked_out` at the beat → the pass; the branch prompt then runs
   on the rewound chain). The polite-parking ruling is superseded
-  (PROTOCOL.md stage 2); `pump_with_pause` and its session-level test
+  (the stage-2 checkout round — git history); `pump_with_pause` and its session-level test
   are deleted — the pump returns on an aborted outcome, so the beat
   serves the rewind before any later batch. The pre-close survivor
   test carries over unchanged (`a_checkout_parked_at_the_close_
   executes_before_wind_down`).
 - **The death×checkout window is now the abort transit** — a
   microscopic race between the beat serving the rewind and the death
-  door dropping it, both outcomes log-consistent (documented in
-  PROTOCOL.md's abort bullet). The dedicated death-door test from the
+  door dropping it, both outcomes log-consistent (the abort-discards-queued rule,
+  FRONTEND.md §5). The dedicated death-door test from the
   remediation round dissolved with the parking window it pinned; the
   death door itself stays pinned by the card-open and multi-run
   death tests.

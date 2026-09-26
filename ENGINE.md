@@ -1,7 +1,7 @@
 # ENGINE.md
 
 The design record for the agent engine — the backend counterpart to
-PROTOCOL.md's frontend contract. Two layers, kept strictly separate:
+FRONTEND.md's contract. Two layers, kept strictly separate:
 
 1. the **outer loop** — run lifecycle: when a run starts, what it is
    entered with, what it emits, how it is preempted — with the inner
@@ -16,7 +16,7 @@ this document; changes to the loop change this document.
 first and amend it before touching code. New flow behavior gets new
 phases (or new edges) — never conditionals grown inside existing
 phases, and never control flow outside the loop.
-(PROTOCOL.md keeps the frontend/event view of the same loop; the
+(FRONTEND.md keeps the frontend/event view of the same loop; the
 session actor implements the outer layer.)
 
 ## Layer 1 — the outer loop (the inner loop is a black box)
@@ -499,7 +499,7 @@ Recorded where the code had to pick; revisit on review:
   the steer opens the next run at the work signal (ruled 2026-08: one
   less thing to check, identical behavior).
 - **Empty finals fold nothing and record nothing** — one decision
-  site (the loop), which closes PROTOCOL.md flag 29 by deletion.
+  site (the loop).
 - **Usage facts ride the commits** (the 2026-08 deferral closed by the
   2026-09 usage discussion): every assistant commit — the FINAL fold
   and the roundtrip fold — carries the turn's provider-reported usage

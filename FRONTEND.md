@@ -3,7 +3,9 @@
 This is the contract for anyone building a UI on top of the tabit
 backend: what the backend provides, what it expects from you, and the
 invariants your UI can rely on. Read this document alone; you should
-not need the codebase to design a frontend.
+not need the codebase to design a frontend. It is also the frontend
+protocol's one home — contract and design record both (owner ruling
+2026-09-26; the extension protocol's superset lives in EXTENSIONS.md).
 
 The protocol's **changelog** lives at the bottom of this doc: every
 `PROTOCOL_VERSION` bump or frontend-observable change (wire or
@@ -298,8 +300,8 @@ point — so send it any time and expect `model_changed` (or the error)
 back at once. A switch that validated but fails to construct in the
 environment surfaces as the next run's `run_failed` (the run's
 message names the provider) — the register keeps the choice; whether a
-picker needs a distinct "didn't take" signal is an open
-PROTOCOL.md note.
+picker needs a distinct "didn't take" signal is an open question
+(§11).
 
 **Skill invocation in message text (manual invocation, 2026-09):** a
 message may carry the invocation tag `<skill name="commit"/>` — the
@@ -417,7 +419,7 @@ report (§3.5); you never mine it for user-facing meaning.
 | `persist_degraded` | `pending` | the write-behind log could not flush: `pending` entries are committed in memory but not on disk (disk full is the usual cause). Every later commit retries; nothing is lost unless the process is force-stopped while degraded (then the pending entries go — model output and register records; a stuck start's own messages come back as drafts when the run is refused). Nag about disk space. |
 | `persist_recovered` | — | the pending entries reached the disk. |
 
-**Write-behind persistence (shipped, PROTOCOL.md flag 8).** Commits are
+**Write-behind persistence (shipped).** Commits are
 memory-first: the resident state (tree, head, context) is the
 in-session truth and the file is its write-behind mirror — always a
 clean prefix of commit order. Entering a run, the buffer retries
@@ -578,8 +580,7 @@ wire marker.
 One generic ask, v4-shipped: any backend asker — a tool gate
 (permission), a tool body (ask-the-user tools), a hook — questions
 the user through one frame pair, routed by id, payloads opaque to the
-core (the core's interaction vocabulary is routing only; PROTOCOL.md's
-interaction-generalization ruling is the design record). Concurrent
+core (the core's interaction vocabulary is routing only). Concurrent
 chains may hold several open requests at once; answer them in any
 order.
 
@@ -705,6 +706,10 @@ answer or denial the model saw.
    responses are logged no-ops; requests never replay.
 3. **Subagent streams.** Sibling `stream` ids and their event subset —
    reserved, unspecified.
+4. **The picker's "didn't take" signal.** A `model` switch that
+   validated but failed to construct surfaces only as the next run's
+   `run_failed` (§5) — whether a picker needs a distinct signal is
+   unsettled.
 
 Settled since the review: bad-flag exits stay
 exit-1-with-stderr-no-frames while session/model startup failures
@@ -714,7 +719,7 @@ pin); cut points follow the roundtrip-unit rule
 non-terminal errors ride the generic `error { kind }` carrier (§6).
 Model discovery stays config-side (`--model` refs resolve at startup;
 no discovery command is shipped). The write-behind log with its prompt
-barrier shipped (§6; PROTOCOL.md flag 8).
+barrier shipped (§6).
 
 ## Changelog
 

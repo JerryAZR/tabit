@@ -3,7 +3,7 @@
 What tabit is building next. Everything shipped lives with the code
 and the doc that owns it — AGENTS.md (the workspace layout and law),
 ENGINE.md (the run loop), EXTENSIONS.md (the extension contract),
-FRONTEND.md + PROTOCOL.md (the wire), TOOLS.md (the tool contracts),
+FRONTEND.md (the wire), TOOLS.md (the tool contracts),
 COVERAGE.md (the test ledger) — and **git history is the archive of
 how each decision got made**: this file records the destination, not
 the journey, so a closed area appears here only as a pointer or (for
@@ -138,6 +138,18 @@ shipped 2026-09-26; the edges below are the remaining ones.)
   content (needs a provider that skips usage *and* a cut in that
   exact window; bounded by one turn's content).
 
+### Usage billing (parked 2026-08)
+
+Two cost-truth questions parked until the usage discussion returns:
+an abort mid-roundtrip discards the interrupted attempt's usage
+**unbilled** (the completion ran, the frontend saw the usage event,
+cumulative stats never count it — the recorder tests pin this as
+current behavior, never ruled), and the discard record's usage is the
+session's inference from per-turn completion tracking rather than the
+engine's own fact. When the discussion returns: rule abort's discard
+record (or `aborted { usage }`) versus unbilled-by-decision, and have
+the engine stamp the attempt's usage on the discard item directly.
+
 ### Config / registry follow-ups
 
 - **Dynamic model listing — deferred** (2026-09): `/v1/models`
@@ -192,8 +204,9 @@ through a few patch rounds. That is the re-evaluation trigger.
 ## Design record: compaction (final form)
 
 The one closed-area record kept here — ENGINE.md cites it for the
-policy while carrying the flow facts, and PROTOCOL.md's wire flags
-resolve against it. Amendment history: git.
+policy while carrying the flow facts; the wire shapes it produced
+live in FRONTEND.md §6's `compaction_*` events. Amendment history:
+git.
 
 - **The box** (`tabit-session/src/compaction/`): its own system, a
   black box with three doors — **pre-request** (every model call in a
@@ -266,8 +279,8 @@ history still cite the numbers. The mapping:
 6. **Compaction + overflow recovery** → shipped; this file's design
    record above is the final form.
 7. **CLI / interface** → shipped (`tabit-core` print + json; the
-   protocol's design record is PROTOCOL.md, the contract
-   FRONTEND.md). The GUI deletion ruling is in AGENTS.md; the TUI is
+   protocol's contract is FRONTEND.md). The GUI deletion ruling is in
+   AGENTS.md; the TUI is
    this file's active item.
 8. **Client/server + protocol** → shipped (`tabit-protocol`,
    `tabit-wire`); ACP's adapter-only ruling above.

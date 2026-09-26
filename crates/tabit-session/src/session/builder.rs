@@ -54,7 +54,7 @@ impl SessionBuilder {
     /// single-session callers. Hosts serving many sessions pass one
     /// shared factory ([`ModelRegistry::factory`]) instead: providers
     /// are user config, process-wide, and so are their connection
-    /// pools (owner ruling, PROTOCOL.md v3).
+    /// pools (owner ruling: providers are user config).
     pub fn new(
         store: SessionStore,
         config: Arc<TabitConfig>,

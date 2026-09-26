@@ -9,7 +9,7 @@ use rig_agent::completion::Message;
 use tabit_protocol::SessionEvent;
 use tokio_util::sync::CancellationToken;
 
-/// A queued user message with its born-early entry id (PROTOCOL.md v2):
+/// A queued user message with its born-early entry id:
 /// minted at accept, announced by `message_queued` when a run is live,
 /// carried into the log when the message drains, restated by
 /// `user_message { entry_id }` — and handed back by `messages_discarded`
@@ -253,7 +253,7 @@ pub struct AbortHandle {
 
 impl AbortHandle {
     /// Abort the current run, if any, and discard what was queued at
-    /// abort time — one semantic, one site (PROTOCOL.md flag 6): the
+    /// abort time — one semantic, one site: the
     /// discard notice is immediate, through the mailbox's notice
     /// channel; messages arriving after this queue normally and start
     /// the next run. Aborting while idle just discards the queue.

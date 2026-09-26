@@ -11,8 +11,7 @@
     )
 )]
 //! The tabit frontend protocol: the one vocabulary every frontend and
-//! transport shares (FRONTEND.md is the contract; PROTOCOL.md the
-//! design record).
+//! transport shares (FRONTEND.md is the contract).
 //!
 //! Commands are fire-and-forget with total semantics — outcomes arrive
 //! as events, never as responses. Events are stamped with the stream
