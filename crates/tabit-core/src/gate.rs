@@ -251,12 +251,16 @@ mod tests {
     #[tokio::test]
     async fn a_write_outside_every_override_is_denied_with_its_reason() {
         let (gate, _) = gate();
-        let action = gate
-            .on_tool_call(
-                &ctx(None),
-                call(r#"{"path": "C:/Windows/system32/gate-test.txt"}"#),
-            )
-            .await;
+        // A path outside home, cwd, and tmp on the checking platform —
+        // the drive-absolute form is not drive-absolute to POSIX
+        // (it would resolve under the cwd allow), so each platform
+        // names its own outside.
+        #[cfg(windows)]
+        let outside = "C:/Windows/system32/gate-test.txt";
+        #[cfg(not(windows))]
+        let outside = "/etc/gate-test.txt";
+        let args = serde_json::json!({ "path": outside }).to_string();
+        let action = gate.on_tool_call(&ctx(None), call(&args)).await;
         let ToolCallAction::Skip(feedback) = action else {
             panic!("the default write policy is deny: {action:?}")
         };
@@ -404,20 +408,30 @@ mod tests {
                 call(r#"{"path": "/tmp/gate-rewrite-test.txt"}"#),
             )
             .await;
-        // The rewritten path lands in {{TMPDIR}} (an allow override
-        // listed after home, so it wins), and the execution must see
-        // the rewritten path — a plain Run would write C:\tmp\… junk
-        // while the check blessed a temp file.
-        let ToolCallAction::Rewrite(args) = action else {
-            panic!("the /tmp rewrite must ride the action: {action:?}")
-        };
-        let rewritten = args["path"].as_str().expect("path arg");
-        assert_ne!(rewritten, "/tmp/gate-rewrite-test.txt");
-        assert!(
-            std::path::Path::new(rewritten).starts_with(std::env::temp_dir()),
-            "the rewrite lands in the real temp dir: {rewritten}"
-        );
-        assert!(rewritten.ends_with("gate-rewrite-test.txt"), "{rewritten}");
+        if cfg!(windows) {
+            // The rewritten path lands in {{TMPDIR}} (an allow override
+            // listed after home, so it wins), and the execution must
+            // see the rewritten path — a plain Run would write
+            // C:\tmp\… junk while the check blessed a temp file.
+            let ToolCallAction::Rewrite(args) = action else {
+                panic!("the /tmp rewrite must ride the action: {action:?}")
+            };
+            let rewritten = args["path"].as_str().expect("path arg");
+            assert_ne!(rewritten, "/tmp/gate-rewrite-test.txt");
+            assert!(
+                std::path::Path::new(rewritten).starts_with(std::env::temp_dir()),
+                "the rewrite lands in the real temp dir: {rewritten}"
+            );
+            assert!(rewritten.ends_with("gate-rewrite-test.txt"), "{rewritten}");
+        } else {
+            // POSIX /tmp IS the real temp dir: the rewrite is the
+            // identity there (by design — only win32 rewrites), and
+            // the {{TMPDIR}}/** allow matches the path directly.
+            assert!(
+                matches!(action, ToolCallAction::Run),
+                "no rewrite off win32, a plain allow: {action:?}"
+            );
+        }
         assert_eq!(
             paths.tmpdir,
             std::env::temp_dir().to_string_lossy(),
