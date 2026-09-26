@@ -305,8 +305,13 @@ async fn a_mute_sibling_does_not_delay_the_healthy() {
             Status::Starting => {}
         }
     }
+    // Maximal margin, same proof: a serialized handshake resolves
+    // only after the mute burns the whole timeout, so ANY elapsed
+    // under it proves concurrency — and the full gate's parallel
+    // load may lawfully eat seconds of wall clock first (the loose
+    // bound this comment always promised).
     assert!(
-        start.elapsed() < Duration::from_secs(4),
+        start.elapsed() < timeout,
         "the healthy extension must not wait for its mute sibling"
     );
     await_status(&mut events, "zzz-mute", |s| {
