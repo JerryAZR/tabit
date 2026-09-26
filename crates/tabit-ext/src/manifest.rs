@@ -1,10 +1,7 @@
 //! The manifest (`tabit.json`) and discovery: what is installed and
 //! how it starts. Install-time facts only — capabilities are declared
 //! live at the handshake (EXTENSIONS.md's declaration ruling), so no
-//! schema file can drift from what the process serves. One exception,
-//! by the same logic that admits `requires`: `disables` is package
-//! metadata about the HOST's assembly, not a served capability — it
-//! is exactly as static as a dependency declaration.
+//! schema file can drift from what the process serves.
 //!
 //! Identity (2026-09, the scoped-nesting ruling): **the manifest name
 //! equals the package's path relative to the root** — `pkg` lives at
@@ -49,12 +46,8 @@ pub struct Manifest {
     #[serde(default)]
     pub requires: Vec<String>,
     /// Core tool names this package removes from the host's assembly
-    /// (the role-shaping declaration): a role-based-subagent package
-    /// disables the built-in `subagent` tool so the model's
-    /// vocabulary holds only its role shapes. Validated against the
-    /// host's own core set at assembly — a name this host does not
-    /// offer is ignored. Takes effect only while the package is
-    /// alive (the declarations' liveness gate).
+    /// (the role-shaping declaration): the names join the same deny
+    /// list `--without` builds, applied once over the full toolset.
     #[serde(default)]
     pub disables: Vec<String>,
 }

@@ -99,9 +99,7 @@ The manifest (`tabit.json`) carries install-time facts only — name
 entry command + args (OPTIONAL: absent means a static package that
 never spawns — the install entry below), one-line description,
 `requires` (name-only dependencies), and `disables` (core tool names
-the package removes from the host's assembly — the role-shaping
-declaration; like `requires`, package metadata about the host rather
-than a served capability, per the manifest-field ruling below).
+the package removes from the assembly — see the naming rules).
 Capabilities are
 declared live in the extension's self-report (tools with
 name/description/schema, hook points) — the report-first pattern
@@ -389,25 +387,14 @@ policy (pi's rule):
 - Extension vs. extension, same name: the newcomer is refused, naming
   the incumbent. No silent peer precedence — the user resolves by
   disabling one.
-- **The manifest's `disables` list: the role-shaping declaration.**
-  A package may name core tools to REMOVE from the assembly — the
-  role-based-subagent package disables the built-in `subagent` so
-  the model's vocabulary holds only its role shapes. It is the same
-  deny semantics as the child-role `--without`, collected from
-  package manifests instead of argv, and like `--without` it is
-  silent on the wire. The assembly runs disables ahead of the name
-  rules (a working-set pass: a disabled core name has nothing left
-  to replace or collide with — a declaration of the same name is
-  then just a tool). Only a LIVE package's disables take effect
-  (the declarations' liveness gate: a dead package must not
-  silently remove a tool; a mid-run death restores it with the same
-  slice that restores a dead shadow's replacement). A name this host
-  does not offer is ignored. Disabling a TOOL is not removing the
-  machinery: the spawn substrate, capabilities, and child-role flags
-  stay — only the model's vocabulary shrinks. Each process resolves
-  its own mount: a parent's disables do not propagate to children
-  (a child naming a disabled tool in `--tools` fails loudly as an
-  unknown name, like any absent tool).
+- **The manifest's `disables` list** names core tools to remove —
+  the role-shaping declaration (a role-based-subagent package
+  disables the built-in `subagent`). The names join the deny list
+  `--without` builds, the same filter at the same point (after the
+  extension tools register, over the full toolset) — no separate
+  mechanism, silent like `--without`. To REPLACE a core tool's
+  behavior, declare a tool of the same name (the shadow above); the
+  two declarations are alternatives, not layers.
 - **Only a LIVE declaration holds a name** (2026-09 review-round
   ruling): a package that died — at the report or since — lists
   what it would have served in the catalog but neither replaces a

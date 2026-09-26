@@ -733,12 +733,14 @@ fn assemble_session(
     // name, one tool, resolved at this assembly). Children resolve
     // against their own core set (the child set): they boot their own
     // hosts.
+    let mut manifest_disables: Vec<String> = Vec::new();
     let candidate: Vec<rig_agent::tool::DynamicTool> = match extensions {
         Some(mounted) => {
-            let unmounted = mounted.unmounted_core();
+            manifest_disables = mounted.manifest_disables().to_vec();
+            let replaced = mounted.replaced_core();
             parent_core
                 .into_iter()
-                .filter(|tool| !unmounted.iter().any(|name| name == tool.name()))
+                .filter(|tool| !replaced.iter().any(|name| name == tool.name()))
                 .chain(mounted.tools().iter().cloned())
                 .collect()
         }
@@ -748,7 +750,11 @@ fn assemble_session(
     // candidate — `--tools`/`--without` shape extension proxies the
     // same as core tools (a whitelisted read-only agent gets no
     // extension write tools; a denied delegate tool cannot recurse).
-    let (allow, deny) = tool_filter(args, &candidate)?;
+    let (allow, mut deny) = tool_filter(args, &candidate)?;
+    // The scanned manifests' role-shaping declarations join the deny
+    // list — `--without`'s own storage, the same filter at the same
+    // point, no separate mechanism.
+    deny.extend(manifest_disables);
     let mounted = retain_filtered(candidate, &allow, &deny);
     let subagents = std::sync::Arc::new(tabit_session::subagent::SubagentParts {
         tools: retain_filtered(children, &allow, &deny),

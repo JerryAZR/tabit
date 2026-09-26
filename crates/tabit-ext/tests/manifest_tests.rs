@@ -187,16 +187,13 @@ fn the_disables_list_parses_and_defaults_empty() {
         }
         Discovered::Refused { reason, .. } => panic!("the shaper scans in: {reason}"),
     }
-    // Absent = empty: an ordinary manifest carries no declaration.
     write_package(
         &root,
         "plain",
         r#"{"name":"plain","version":"1","entry":["x"]}"#,
     );
     match &manifest::scan(&root).remove(0) {
-        Discovered::Package { manifest, .. } => {
-            assert!(manifest.disables.is_empty());
-        }
+        Discovered::Package { manifest, .. } => assert!(manifest.disables.is_empty()),
         Discovered::Refused { reason, .. } => panic!("the plain package scans in: {reason}"),
     }
 }

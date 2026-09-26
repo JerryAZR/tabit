@@ -94,10 +94,6 @@ pub struct ExtensionReport {
     pub status: Status,
     pub tools: Vec<ToolDecl>,
     pub hooks: Vec<HookDecl>,
-    /// Core tool names the package's manifest asked the host's
-    /// assembly to remove (`tabit.json`'s `disables` — package
-    /// metadata, not a served capability).
-    pub disables: Vec<String>,
 }
 
 /// The live state one supervision task mutates through the
@@ -115,28 +111,9 @@ struct ChildFields {
     status: Option<Status>,
     tools: Vec<ToolDecl>,
     hooks: Vec<HookDecl>,
-    // Manifest-sourced (not report-served): the package's
-    // role-shaping declaration, seeded at construction and inert
-    // until the assembly's plan validates it against its own core
-    // set — a live gate the plan applies.
-    disables: Vec<String>,
 }
 
 impl ChildState {
-    /// A child whose manifest declared core tools to disable — the
-    /// declaration is package metadata seeded at construction (the
-    /// report never carries it) and gated by liveness at the
-    /// assembly.
-    fn with_disables(disables: Vec<String>) -> Self {
-        Self {
-            inner: Mutex::new(ChildFields {
-                disables,
-                ..ChildFields::default()
-            }),
-            resolved: tokio::sync::Notify::new(),
-        }
-    }
-
     /// Record one lifecycle edge: Starting → Alive, Starting → Dead,
     /// or Alive → Dead (death after life still reports — the edge a
     /// once-ever door would have swallowed). The supervision task is
@@ -472,6 +449,10 @@ pub struct Supervisor {
     /// The process's node — every lane's face hangs on it, and the
     /// proxy handles hold it for their holds and answers.
     node: Arc<Node>,
+    /// Every scanned manifest's `disables` names, concatenated —
+    /// the role-shaping declarations, joined into the deny list the
+    /// binary's assembly builds (`--without`'s storage).
+    manifest_disables: Vec<String>,
 }
 
 struct Supervised {
@@ -555,13 +536,15 @@ pub fn launch(
     }
     let node = host.node.clone();
     let mut children = Vec::new();
+    let mut disables = Vec::new();
     for found in found {
         match found {
             Discovered::Package { dir, manifest } => {
                 let name = manifest.name.clone();
                 let version = manifest.version.clone();
                 let description = manifest.description.clone();
-                let state = Arc::new(ChildState::with_disables(manifest.disables.clone()));
+                disables.extend(manifest.disables.iter().cloned());
+                let state = Arc::new(ChildState::default());
                 // The lane exists before the spawn so the reader can
                 // route from its first line; `commands` is the same
                 // channel the writer owns.
@@ -628,6 +611,7 @@ pub fn launch(
             closing,
             children,
             node,
+            manifest_disables: disables,
         },
         events_rx,
     )
@@ -643,7 +627,16 @@ impl Supervisor {
             closing: CancellationToken::new(),
             children: Vec::new(),
             node,
+            manifest_disables: Vec::new(),
         }
+    }
+
+    /// Every scanned manifest's `disables` names — the binary's
+    /// assembly joins them into its deny list (`--without`'s
+    /// storage), so a package's role-shaping declaration is removed
+    /// by the same filter that already exists.
+    pub fn manifest_disables(&self) -> &[String] {
+        &self.manifest_disables
     }
 
     /// The standing of every extension, resolved so far and current.
@@ -660,7 +653,6 @@ impl Supervisor {
                     status: fields.status.clone().unwrap_or(Status::Starting),
                     tools: fields.tools.clone(),
                     hooks: fields.hooks.clone(),
-                    disables: fields.disables.clone(),
                 }
             })
             .collect()

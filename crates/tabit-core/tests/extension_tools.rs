@@ -427,18 +427,15 @@ fn a_core_name_conflict_is_reported_on_the_channel() {
     assert_eq!(conflict.tool, "read");
 }
 
-/// The role-shaping declaration from the MANIFEST: `disables:
-/// ["subagent"]` in `tabit.json` removes the built-in tool from the
-/// assembly — and the model-facing proof is behavioral: the
+/// The manifest's `disables` list joins the deny list
+/// (`--without`'s storage): `disables: ["subagent"]` removes the
+/// built-in tool. The model-facing proof is behavioral — the
 /// completion-request mock only matches bodies NOT naming
 /// `subagent`, so a request still offering the tool would miss the
 /// mock and fail the run instead of finishing.
 #[test]
 fn a_manifest_disable_removes_the_core_tool_from_the_models_vocabulary() {
     let stage = stage("disable", &[]);
-    // The package by hand: ext-double's echo behavior behind a
-    // manifest carrying the disable (install_double's fixed shape
-    // has no room for it).
     let package = stage.extensions.join("roles");
     std::fs::create_dir_all(&package).expect("package dir");
     let manifest = json!({

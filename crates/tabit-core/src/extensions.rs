@@ -11,20 +11,7 @@
 //! — registration order is the scan's (alphabetical), so which one is
 //! the newcomer is deterministic, and the user resolves by disabling
 //! one. The engine receives a conflict-free set by construction; its
-//! duplicate-name shadowing never engage.
-//!
-//! The manifest's `disables` list (the role-shaping declaration) is
-//! the same deny semantics as `--without`, collected from packages
-//! instead of argv: an extension serving role-based subagents
-//! disables the built-in `subagent` so the model's vocabulary holds
-//! only the role shapes. Disables run ahead of the name rules (a
-//! working-set pass — a disabled core name has nothing left to
-//! replace or collide with), only an ALIVE package's disables take
-//! effect (the declarations' liveness gate: a dead package must not
-//! silently remove a tool), and a name this assembly does not offer
-//! is ignored. Like `--without`, the removal is silent on the wire.
-//! Disabling the tool is not removing the machinery: the substrate
-//! and capabilities stay, only the model's vocabulary shrinks.
+//! duplicate-name shadowing never engages.
 //!
 //! The proxy tools are thin: the call crosses the pipe, the result
 //! maps to the engine's two-part shape (`content_parts`), the
@@ -63,9 +50,6 @@ pub struct Mounted {
     hooks: HookStack,
     /// The catalog the backend announces (`extensions_available`).
     pub catalog: ExtensionsCatalog,
-    /// The core tool names the manifests' `disables` lists removed
-    /// from this assembly (silent, like `--without`).
-    disabled: Vec<String>,
 }
 
 impl Mounted {
@@ -77,7 +61,6 @@ impl Mounted {
             tools: Vec::new(),
             hooks: HookStack::new(),
             catalog: ExtensionsCatalog::default(),
-            disabled: Vec::new(),
         }
     }
 
@@ -88,7 +71,7 @@ impl Mounted {
     pub fn mount(supervisor: Arc<Supervisor>, core: &[DynamicTool]) -> Mounted {
         let core_names: Vec<&str> = core.iter().map(|tool| tool.name()).collect();
         let reports = supervisor.reports();
-        let (planned, disabled, catalog) = plan(&reports, &core_names);
+        let (planned, catalog) = plan(&reports, &core_names);
         let tools = planned
             .into_iter()
             .filter_map(|planned| {
@@ -135,7 +118,6 @@ impl Mounted {
             tools,
             hooks,
             catalog,
-            disabled,
         }
     }
 
@@ -150,20 +132,24 @@ impl Mounted {
         self.hooks.clone()
     }
 
-    /// The names of the core tools this mount unmounts — replaced
-    /// (an extension tool took the name) or disabled (the manifest
-    /// `disables` list). Each process (backend or child) resolves
-    /// its own mount against its own core set.
-    pub fn unmounted_core(&self) -> Vec<String> {
-        let mut names: Vec<String> = self
-            .catalog
+    /// The scanned manifests' `disables` names — the assembly joins
+    /// them into its deny list (`--without`'s storage), so a
+    /// package's role-shaping declaration is removed by the filter
+    /// that already exists, at the same point.
+    pub fn manifest_disables(&self) -> &[String] {
+        self.supervisor.manifest_disables()
+    }
+
+    /// The names of the core tools this mount replaced — the assembly
+    /// unmounts them. Each process (backend or child) resolves its
+    /// own mount against its own core set.
+    pub fn replaced_core(&self) -> Vec<String> {
+        self.catalog
             .conflicts
             .iter()
             .filter(|conflict| conflict.kind == ExtensionConflictKind::ReplacesCore)
             .map(|conflict| conflict.tool.clone())
-            .collect();
-        names.extend(self.disabled.iter().cloned());
-        names
+            .collect()
     }
 }
 
@@ -177,31 +163,10 @@ struct Planned {
 /// are testable without a single process. Outputs the surviving
 /// (extension, declaration) pairs in registration order and the whole
 /// catalog.
-fn plan(
-    reports: &[ExtensionReport],
-    core_names: &[&str],
-) -> (Vec<Planned>, Vec<String>, ExtensionsCatalog) {
+fn plan(reports: &[ExtensionReport], core_names: &[&str]) -> (Vec<Planned>, ExtensionsCatalog) {
     let mut planned = Vec::new();
     let mut held: Vec<(String, String)> = Vec::new(); // (tool name, extension)
     let mut conflicts = Vec::new();
-    // The working-set pass: every ALIVE package's manifest disables
-    // remove core names ahead of the name assembly — a disabled core
-    // tool has nothing left to replace or collide with, a name this
-    // assembly does not offer is ignored (like `--without`, silent).
-    let mut working: Vec<&str> = core_names.to_vec();
-    let mut disabled_names: Vec<String> = Vec::new();
-    for report in reports {
-        if !matches!(report.status, Status::Alive) {
-            continue;
-        }
-        for name in &report.disables {
-            if let Some(index) = working.iter().position(|core| *core == name.as_str()) {
-                working.swap_remove(index);
-                disabled_names.push(name.clone());
-            }
-        }
-    }
-    let core_names = working.as_slice();
     for report in reports {
         // Only a LIVE declaration holds a name (ruled 2026-09): a
         // package that died — at the handshake or since — lists what
@@ -281,7 +246,6 @@ fn plan(
         .collect();
     (
         planned,
-        disabled_names,
         ExtensionsCatalog {
             extensions,
             conflicts,
@@ -398,15 +362,6 @@ mod tests {
     use tabit_ext::protocol::HookDecl;
 
     fn report(name: &str, tools: &[(&str, &str)], alive: bool) -> ExtensionReport {
-        report_full(name, tools, alive, &[])
-    }
-
-    fn report_full(
-        name: &str,
-        tools: &[(&str, &str)],
-        alive: bool,
-        disables: &[&str],
-    ) -> ExtensionReport {
         ExtensionReport {
             name: name.to_string(),
             dir: format!("C:/ext/{name}").into(),
@@ -430,14 +385,13 @@ mod tests {
             hooks: vec![HookDecl {
                 event: "tool_call".to_string(),
             }],
-            disables: disables.iter().map(|name| name.to_string()).collect(),
         }
     }
 
     #[test]
     fn a_flat_name_assembles_one_tool() {
         let reports = vec![report("echo", &[("echo", "says it back")], true)];
-        let (planned, _disabled, catalog) = plan(&reports, &["read", "bash"]);
+        let (planned, catalog) = plan(&reports, &["read", "bash"]);
         assert_eq!(planned.len(), 1);
         assert_eq!(planned[0].decl.name, "echo");
         assert!(catalog.conflicts.is_empty());
@@ -447,71 +401,9 @@ mod tests {
     }
 
     #[test]
-    fn a_disable_removes_the_core_tool_from_the_assembly() {
-        // The working-set pass: the named core tool leaves ahead of
-        // the name rules — nothing left to replace, so the same
-        // extension's own tool of that name mounts as just a tool
-        // (no ReplacesCore noise), and the removal is silent like
-        // `--without`.
-        let reports = vec![report_full(
-            "roles",
-            &[("subagent", "the role spawner")],
-            true,
-            &["subagent"],
-        )];
-        let (planned, disabled, catalog) = plan(&reports, &["read", "bash", "subagent"]);
-        assert_eq!(planned.len(), 1, "the extension's own tool mounts");
-        assert_eq!(planned[0].decl.name, "subagent");
-        assert_eq!(disabled, vec!["subagent".to_string()]);
-        assert!(
-            catalog.conflicts.is_empty(),
-            "the disable is silent on the wire"
-        );
-    }
-
-    #[test]
-    fn a_disable_of_an_unknown_name_is_ignored() {
-        let reports = vec![report_full(
-            "roles",
-            &[("explorer", "one role")],
-            true,
-            &["ghost", "ghost"],
-        )];
-        let (planned, disabled, _catalog) = plan(&reports, &["read"]);
-        assert_eq!(planned.len(), 1, "the package still mounts");
-        assert!(
-            disabled.is_empty(),
-            "a name this host does not offer is ignored"
-        );
-    }
-
-    #[test]
-    fn a_dead_package_disables_nothing() {
-        // The declarations' liveness gate: a dead package must not
-        // silently remove a tool.
-        let reports = vec![report_full("roles", &[], false, &["subagent"])];
-        let (_planned, disabled, _catalog) = plan(&reports, &["read", "subagent"]);
-        assert!(disabled.is_empty());
-    }
-
-    #[test]
-    fn disables_union_across_packages() {
-        let reports = vec![
-            report_full("a-roles", &[], true, &["subagent"]),
-            report_full("b-roles", &[], true, &["subagent"]),
-        ];
-        let (_planned, disabled, _catalog) = plan(&reports, &["read", "subagent"]);
-        assert_eq!(
-            disabled,
-            vec!["subagent".to_string()],
-            "the union removes once"
-        );
-    }
-
-    #[test]
     fn a_core_name_is_replaced_and_reported() {
         let reports = vec![report("shadow", &[("read", "the shadow read")], true)];
-        let (planned, _disabled, catalog) = plan(&reports, &["read", "bash"]);
+        let (planned, catalog) = plan(&reports, &["read", "bash"]);
         assert_eq!(planned.len(), 1, "the shadow mounts");
         assert_eq!(catalog.conflicts.len(), 1);
         assert_eq!(
@@ -529,7 +421,7 @@ mod tests {
             report("clash-a", &[("clashy", "the incumbent")], true),
             report("clash-b", &[("clashy", "the newcomer")], true),
         ];
-        let (planned, _disabled, catalog) = plan(&reports, &[]);
+        let (planned, catalog) = plan(&reports, &[]);
         assert_eq!(planned.len(), 1, "one name, one tool");
         assert_eq!(planned[0].extension, "clash-a");
         assert_eq!(catalog.conflicts.len(), 1);
@@ -542,7 +434,7 @@ mod tests {
     #[test]
     fn a_dead_extension_lists_but_mounts_nothing() {
         let reports = vec![report("gone", &[("tool", "declared once")], false)];
-        let (planned, _disabled, catalog) = plan(&reports, &[]);
+        let (planned, catalog) = plan(&reports, &[]);
         assert!(planned.is_empty());
         assert_eq!(catalog.extensions[0].status, "dead");
         assert_eq!(
@@ -561,7 +453,7 @@ mod tests {
         // it once declared — nothing would mount in its place and the
         // model silently loses the tool.
         let dead_shadow = vec![report("dead-shadow", &[("read", "the shadow read")], false)];
-        let (planned, _disabled, catalog) = plan(&dead_shadow, &["read", "bash"]);
+        let (planned, catalog) = plan(&dead_shadow, &["read", "bash"]);
         assert!(planned.is_empty());
         assert!(
             catalog.conflicts.is_empty(),
@@ -576,7 +468,7 @@ mod tests {
             report("aaa-dead", &[("clashy", "the dead incumbent")], false),
             report("bbb-live", &[("clashy", "the live newcomer")], true),
         ];
-        let (planned, _disabled, catalog) = plan(&reports, &[]);
+        let (planned, catalog) = plan(&reports, &[]);
         assert_eq!(planned.len(), 1, "the live newcomer mounts");
         assert_eq!(planned[0].extension, "bbb-live");
         assert!(

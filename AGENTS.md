@@ -165,9 +165,9 @@ Current workspace layout:
   and the refusal uninstall — the directory is the single truth (no
   registry, no lockfile)
 - `crates/tabit-ext` — the extension host (the manifest's
-  `disables` list is the role-shaping declaration — core tools a
-  package removes from the assembly, the manifest-side twin of
-  `--without`): manifest
+  `disables` list names core tools to remove — the names join the
+  `--without` deny list at the assembly, nothing separate):
+  manifest
   discovery (`tabit.json` under the extensions root), the frozen
   JSONL extension pipe (the extension's self-report first, the
   host's facts after it, the tool lane, the flat
