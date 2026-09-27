@@ -27,6 +27,7 @@ use std::time::{Duration, Instant};
 use serde_json::{Value, json};
 use tabit_protocol::{EventFrame, SessionCommand, SessionEvent, StreamId};
 use tabit_wire::client::ChildSpec;
+use tabit_wire::client::Settlement;
 use tabit_wire::node::Locality;
 use tabit_wire::node::{Channel, Inbound, Node, parse_shared};
 
@@ -439,5 +440,102 @@ fn a_mismatched_report_is_a_kill() {
     assert!(
         saw.lock().expect("test lock").is_empty(),
         "none of the mismatched child's traffic reached the net"
+    );
+}
+
+/// The settle fold's one-shot disposition, driven over a real pipe:
+/// the task crosses, the run's stamped events and terminal collect
+/// into the settlement, and the completed terminal CLOSES the child
+/// (the stub exits at the stdin EOF the close produces).
+#[test]
+fn the_settle_fold_collects_the_run_and_closes_at_completed() {
+    let Some(stub) = stub_exe("stub_settle") else {
+        eprintln!(
+            "settle fold test: no stub_settle example built - run the workspace suite to cover it"
+        );
+        return;
+    };
+    let runtime = tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()
+        .expect("the test runtime");
+    let (settlement, crash) = runtime.block_on(async move {
+        let mut handle = ChildSpec::new(stub, std::env::temp_dir())
+            .spawn()
+            .await
+            .expect("spawn");
+        let settlement = handle.run("the task".to_string(), None).await;
+        handle.wait_exit().await;
+        (settlement, handle.crash_report())
+    });
+    let Settlement::Completed { output, events } = settlement else {
+        panic!("the stub's run finishes: {settlement:?}");
+    };
+    assert!(output.contains("done: the task"), "output: {output}");
+    // The announce burst + two steps + the terminal itself.
+    assert_eq!(events.len(), 4, "the fold collected the run: {events:?}");
+    assert!(
+        matches!(events.last(), Some(SessionEvent::RunFinished { output, .. }) if output.contains("done: the task")),
+        "the terminal is the last collected event: {events:?}"
+    );
+    assert!(
+        crash.contains("exit code"),
+        "the completed terminal closed the child: {crash}"
+    );
+}
+
+/// The keep-open disposition (the subagent pool's): the completed
+/// terminal returns WITHOUT closing stdin — the same child serves a
+/// second task over the same pipe — while a failure terminal closes
+/// as usual, even under `settle_open`.
+#[test]
+fn settle_open_parks_a_completed_child_and_closes_a_failed_one() {
+    let Some(stub) = stub_exe("stub_settle") else {
+        eprintln!(
+            "settle_open test: no stub_settle example built - run the workspace suite to cover it"
+        );
+        return;
+    };
+    let bound = Duration::from_secs(5);
+    let runtime = tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()
+        .expect("the test runtime");
+    let (first, second, failed, crash) = runtime.block_on(async move {
+        let mut handle = ChildSpec::new(stub, std::env::temp_dir())
+            .spawn()
+            .await
+            .expect("spawn");
+        handle.prompt("one".to_string());
+        let first = tokio::time::timeout(bound, handle.settle_open(None))
+            .await
+            .expect("the first settle_open is bounded");
+        // The park proof: the SAME pipe serves the next task.
+        handle.prompt("two".to_string());
+        let second = tokio::time::timeout(bound, handle.settle_open(None))
+            .await
+            .expect("the second settle_open is bounded");
+        handle.prompt("fail".to_string());
+        let failed = tokio::time::timeout(bound, handle.settle_open(None))
+            .await
+            .expect("the failing settle_open is bounded");
+        handle.wait_exit().await;
+        (first, second, failed, handle.crash_report())
+    });
+    let Settlement::Completed { output, .. } = first else {
+        panic!("the first run completes: {first:?}");
+    };
+    assert!(output.contains("done: one"), "output: {output}");
+    let Settlement::Completed { output, .. } = second else {
+        panic!("the parked child served the second task over the same pipe: {second:?}");
+    };
+    assert!(output.contains("done: two"), "output: {output}");
+    let Settlement::FailedWith { message, .. } = failed else {
+        panic!("the failure terminal: {failed:?}");
+    };
+    assert!(message.contains("boom at: fail"), "message: {message}");
+    assert!(
+        crash.contains("exit code"),
+        "a failed run closes even under settle_open: {crash}"
     );
 }
