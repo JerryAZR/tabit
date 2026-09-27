@@ -64,7 +64,8 @@ use std::collections::HashMap;
 use std::path::Path;
 use std::sync::{Arc, Mutex};
 use tabit_protocol::{
-    AvailableSession, EventFrame, ModelSelection, SessionCommand, SessionEvent, StreamId,
+    AvailableSession, AvailableSkill, EventFrame, ModelSelection, SessionCommand, SessionEvent,
+    StreamId, command_tags,
 };
 use tabit_wire::node::{Channel, Inbound, Locality, Node};
 use tokio::sync::mpsc;
@@ -540,17 +541,23 @@ impl SessionHost {
         });
         {
             let created = door.clone();
-            node.handle("new_session", move |command: &SessionCommand| {
-                if matches!(command, SessionCommand::NewSession) {
-                    created.new_session();
-                }
-            });
+            node.handle(
+                command_tags::NEW_SESSION,
+                move |command: &SessionCommand| {
+                    if matches!(command, SessionCommand::NewSession) {
+                        created.new_session();
+                    }
+                },
+            );
             let opened = door.clone();
-            node.handle("open_session", move |command: &SessionCommand| {
-                if let SessionCommand::OpenSession { id } = command {
-                    opened.open_session(id);
-                }
-            });
+            node.handle(
+                command_tags::OPEN_SESSION,
+                move |command: &SessionCommand| {
+                    if let SessionCommand::OpenSession { id } = command {
+                        opened.open_session(id);
+                    }
+                },
+            );
         }
 
         // The wind-down task: once the shutdown token is pulled, await
@@ -669,28 +676,20 @@ impl SessionHostMount {
         // is the carrier in place of the announcement — no catalog
         // follows (ruled: external errors ride the channel —
         // FRONTEND.md §6).
-        boot_sink.emit(SessionEvent::SessionOpened {
-            id: info.session_id.clone(),
-            path: info.session_path.clone(),
-            cwd: info.session_cwd.clone(),
-            model: info.model.clone(),
-            resumed: info.resumed,
-            parent: wiring.boot_parent.clone(),
-            parent_call: wiring.boot_parent_call.clone(),
-        });
-        for note in startup_notes {
-            boot_sink.emit(SessionEvent::error_model(note));
-        }
-        // The boot session's skills — session-level (owner ruling
-        // 2026-09, landed): stamped with the session's stream, one
-        // catalog per session build. Only when discovery found
-        // something — with per-stream folding, absence is
-        // unambiguous.
-        if !boot_skills.is_empty() {
-            boot_sink.emit(SessionEvent::SkillsAvailable {
-                skills: boot_skills,
-            });
-        }
+        announce_session(
+            &boot_sink,
+            SessionEvent::SessionOpened {
+                id: info.session_id.clone(),
+                path: info.session_path.clone(),
+                cwd: info.session_cwd.clone(),
+                model: info.model.clone(),
+                resumed: info.resumed,
+                parent: wiring.boot_parent.clone(),
+                parent_call: wiring.boot_parent_call.clone(),
+            },
+            startup_notes,
+            boot_skills,
+        );
         match wiring.store.list() {
             Ok(summaries) => {
                 // Backend-level: no session produced this (the optional-
@@ -1060,29 +1059,23 @@ impl Lifecycle {
         // `session_opened` carries `resumed: false` for a fresh
         // session — the selection rides the frame because nothing
         // else on the wire will say so (the session is empty; no
-        // `model_changed` replays). Selection notes follow on the
-        // same stream, the same order `open_session` uses. The
-        // emission from the session's channel is what teaches the
-        // learning table its route.
+        // `model_changed` replays). The emission from the session's
+        // channel is what teaches the learning table its route.
         let opened = NoticeSink::new(&self.node, &channel, stream.clone());
-        opened.emit(SessionEvent::SessionOpened {
-            id: id.clone(),
-            path,
-            cwd,
-            model,
-            resumed,
-            parent: None,
-            parent_call: None,
-        });
-        for note in notes {
-            opened.emit(SessionEvent::error_model(note));
-        }
-        // The session's skills, stamped with its stream (the
-        // session-level catalog ruling) — every session becoming
-        // visible announces its own catalog.
-        if !skills.is_empty() {
-            opened.emit(SessionEvent::SkillsAvailable { skills });
-        }
+        announce_session(
+            &opened,
+            SessionEvent::SessionOpened {
+                id: id.clone(),
+                path,
+                cwd,
+                model,
+                resumed,
+                parent: None,
+                parent_call: None,
+            },
+            notes,
+            skills,
+        );
         lock(&self.workers).insert(id, worker);
         lock(&self.joins).push(join);
     }
@@ -1122,27 +1115,47 @@ impl Lifecycle {
             self.stats.clone(),
         );
         let opened = NoticeSink::new(&self.node, &channel, stream);
-        opened.emit(SessionEvent::SessionOpened {
-            id: id.to_string(),
-            path,
-            cwd,
-            model,
-            resumed,
-            parent: None,
-            parent_call: None,
-        });
-        for note in notes {
-            opened.emit(SessionEvent::error_model(note));
-        }
-        // The resumed session's skills, stamped with its stream
-        // — a session opened from another directory announces ITS
-        // catalog (the reason the catalog is session-level).
-        if !skills.is_empty() {
-            opened.emit(SessionEvent::SkillsAvailable { skills });
-        }
+        announce_session(
+            &opened,
+            SessionEvent::SessionOpened {
+                id: id.to_string(),
+                path,
+                cwd,
+                model,
+                resumed,
+                parent: None,
+                parent_call: None,
+            },
+            notes,
+            skills,
+        );
         lock(&self.workers).insert(id.to_string(), worker.clone());
         lock(&self.joins).push(join);
         worker.deliver_replay();
+    }
+}
+
+/// The "session became visible" announcement every path emits in
+/// one shape and order (the boot attach, `new_session`,
+/// `open_session`): the stamped `session_opened`, then the
+/// selection's startup notes as `error_model`s, then the session's
+/// own skills catalog — only when discovery found something
+/// (session-level ruling: stamped with the session's stream, so a
+/// session opened from another directory announces its own catalog,
+/// and absence is unambiguous under per-stream folding). One home,
+/// so a fourth path cannot drift.
+fn announce_session(
+    sink: &NoticeSink,
+    opened: SessionEvent,
+    notes: impl IntoIterator<Item = String>,
+    skills: Vec<AvailableSkill>,
+) {
+    sink.emit(opened);
+    for note in notes {
+        sink.emit(SessionEvent::error_model(note));
+    }
+    if !skills.is_empty() {
+        sink.emit(SessionEvent::SkillsAvailable { skills });
     }
 }
 

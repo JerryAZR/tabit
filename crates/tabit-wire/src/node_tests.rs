@@ -392,11 +392,14 @@ fn non_session_commands_dispatch_by_type() {
     let node = Arc::new(Node::new("core"));
     let handled: Arc<Mutex<Vec<String>>> = Arc::new(Mutex::new(Vec::new()));
     let sink = handled.clone();
-    node.handle("new_session", move |command: &SessionCommand| {
-        sink.lock()
-            .expect("test lock")
-            .push(command.tag().to_string());
-    });
+    node.handle(
+        tabit_protocol::command_tags::NEW_SESSION,
+        move |command: &SessionCommand| {
+            sink.lock()
+                .expect("test lock")
+                .push(command.tag().to_string());
+        },
+    );
     let edge = Channel::local("edge", |_| {}, |_| {});
 
     node.intake(&edge, Inbound::Command(SessionCommand::NewSession));

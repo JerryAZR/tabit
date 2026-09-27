@@ -233,10 +233,29 @@ pub enum SessionCommand {
 
 /// The command tag constants — [`SessionCommand::tag`]'s values,
 /// pinned in one place for the routing layer's by-type tables (the
-/// command twin of the event [`tags`](crate::tags)).
+/// command twin of the event [`tags`](crate::tags)). Registration
+/// sites pass these, never hand-written strings: the router keys on
+/// plain strings, so a typo'd literal would compile and silently
+/// never fire.
 pub mod command_tags {
     /// The answer to an ask: the interaction ask's kind tag.
     pub const INTERACTION_RESPONSE: &str = "interaction_response";
+    /// One user message into a session.
+    pub const MESSAGE: &str = "message";
+    /// Abort a session's active run.
+    pub const ABORT: &str = "abort";
+    /// Continue a session (the frontend's go-ahead).
+    pub const CONTINUE: &str = "continue";
+    /// Create a fresh session.
+    pub const NEW_SESSION: &str = "new_session";
+    /// Load and attach a stored session.
+    pub const OPEN_SESSION: &str = "open_session";
+    /// Move a session's head to an entry.
+    pub const CHECKOUT: &str = "checkout";
+    /// Change a session's model selection.
+    pub const MODEL: &str = "model";
+    /// Run a compaction pass.
+    pub const COMPACT: &str = "compact";
 }
 
 impl SessionCommand {
@@ -247,15 +266,15 @@ impl SessionCommand {
     #[must_use]
     pub const fn tag(&self) -> &'static str {
         match self {
-            SessionCommand::Message { .. } => "message",
-            SessionCommand::Abort { .. } => "abort",
-            SessionCommand::Continue { .. } => "continue",
-            SessionCommand::InteractionResponse { .. } => "interaction_response",
-            SessionCommand::NewSession => "new_session",
-            SessionCommand::OpenSession { .. } => "open_session",
-            SessionCommand::Checkout { .. } => "checkout",
-            SessionCommand::Model { .. } => "model",
-            SessionCommand::Compact { .. } => "compact",
+            SessionCommand::Message { .. } => command_tags::MESSAGE,
+            SessionCommand::Abort { .. } => command_tags::ABORT,
+            SessionCommand::Continue { .. } => command_tags::CONTINUE,
+            SessionCommand::InteractionResponse { .. } => command_tags::INTERACTION_RESPONSE,
+            SessionCommand::NewSession => command_tags::NEW_SESSION,
+            SessionCommand::OpenSession { .. } => command_tags::OPEN_SESSION,
+            SessionCommand::Checkout { .. } => command_tags::CHECKOUT,
+            SessionCommand::Model { .. } => command_tags::MODEL,
+            SessionCommand::Compact { .. } => command_tags::COMPACT,
         }
     }
 }
