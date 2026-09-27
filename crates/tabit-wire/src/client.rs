@@ -315,6 +315,15 @@ impl ChildSpec {
             let mut lane: Option<Channel> = None;
             while let Ok(Some(line)) = lines.next_line().await {
                 let Ok(frame) = serde_json::from_str::<ServerFrame>(&line) else {
+                    // The child's stdout is the protocol pipe; a
+                    // non-frame line is misbehavior, named — never
+                    // silently eaten. (Head only: the line may be
+                    // debug junk of any size.)
+                    let head: String = line.chars().take(200).collect();
+                    tracing::warn!(
+                        line = %head,
+                        "the child wrote a non-frame line to its stdout; dropped"
+                    );
                     continue;
                 };
                 match frame {
@@ -322,29 +331,33 @@ impl ChildSpec {
                         if reported.is_none() {
                             match control {
                                 ServerControlFrame::Report { protocol_version } => {
-                                    // The lane mount: armed here, in
-                                    // the pump's own order — at the
-                                    // report, before any event frame
-                                    // is read. The name is the
-                                    // spawner's mint (the child's
-                                    // session id is not learnable yet).
-                                    if pump_mount.is_some() {
-                                        let writer = lane_writer.clone();
-                                        lane = Some(Channel::line(
-                                            &lane_for_pump,
-                                            move |line: &str| {
-                                                let _ = writer.send(line.to_string());
-                                            },
-                                        ));
-                                    }
                                     // The spawner is the version
                                     // check (owner ruling 2026-09-25)
                                     // and the check fires the moment
                                     // the fact exists — at the report,
-                                    // never held for the announce.
-                                    if protocol_version != PROTOCOL_VERSION
-                                        && let Some(tx) = boot_tx.take()
-                                    {
+                                    // never held for the announce. A
+                                    // mismatched child's frames never
+                                    // cross the net: the lane arms
+                                    // only on a match, so the window
+                                    // between the Err and the kill
+                                    // drains instead of intakes.
+                                    if protocol_version == PROTOCOL_VERSION {
+                                        // The lane mount: armed here, in
+                                        // the pump's own order — at the
+                                        // report, before any event frame
+                                        // is read. The name is the
+                                        // spawner's mint (the child's
+                                        // session id is not learnable yet).
+                                        if pump_mount.is_some() {
+                                            let writer = lane_writer.clone();
+                                            lane = Some(Channel::line(
+                                                &lane_for_pump,
+                                                move |line: &str| {
+                                                    let _ = writer.send(line.to_string());
+                                                },
+                                            ));
+                                        }
+                                    } else if let Some(tx) = boot_tx.take() {
                                         let _ = tx.send(Err(format!(
                                             "the child process reported protocol version \
                                              {protocol_version} — this build speaks \
@@ -362,10 +375,16 @@ impl ChildSpec {
                                     }
                                 }
                             }
+                        } else {
+                            // Post-report control frames from a child (its
+                            // protocol errors) are its own diagnostics —
+                            // consumed here, never forwarded, but named.
+                            tracing::warn!(
+                                frame = ?control,
+                                "a post-report control frame from the child was consumed, \
+                                 not forwarded"
+                            );
                         }
-                        // Post-report control frames from a child (its
-                        // protocol errors) are its own diagnostics —
-                        // consumed here, never forwarded.
                     }
                     ServerFrame::Event(frame) => {
                         // The boot resolves at the first stamped
