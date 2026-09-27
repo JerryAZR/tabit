@@ -604,6 +604,7 @@ mod tests {
     use super::*;
     use crate::cli::{bare_args, parse_args_from, test_config};
     use tabit_config::AuthConfig;
+    use tabit_session::{SessionHost, SessionHostWiring};
 
     fn args(list: &[&str]) -> Result<Args, String> {
         parse_args_from(list.iter().map(|s| s.to_string()))
@@ -929,6 +930,125 @@ id = "m"
         .expect("json mode starts fresh");
         assert!(!session.resumed(), "the fresh start is reported");
         assert!(notes.is_empty(), "a clean config degrades nothing");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn core_sets_mount_the_spawner_only_in_the_parent_role() {
+        let names = |tools: &[rig_agent::tool::DynamicTool]| {
+            tools
+                .iter()
+                .map(|tool| tool.name().to_string())
+                .collect::<Vec<_>>()
+        };
+        let (children, parent) = core_sets(&bare_args()).expect("the parent role derives");
+        assert!(
+            names(&parent).contains(&"subagent".to_string())
+                && names(&parent).contains(&"followup".to_string()),
+            "the parent role mounts the spawner and its addressing tool"
+        );
+        assert!(
+            !names(&children).contains(&"subagent".to_string())
+                && !names(&children).contains(&"followup".to_string()),
+            "the child set omits both — recursion is enforced by omission"
+        );
+
+        // A child-role process (spawned with --parent) mounts the
+        // child set even as its "parent" set.
+        let child_role = Args {
+            parent: Some("p1".to_string()),
+            ..bare_args()
+        };
+        let (children2, parent2) = core_sets(&child_role).expect("the child role derives");
+        assert_eq!(
+            names(&parent2),
+            names(&children2),
+            "the child role never mounts the spawner"
+        );
+    }
+
+    #[test]
+    fn host_data_creates_and_opens_through_the_assembly() {
+        let dir = std::env::temp_dir().join(format!("tabit-hostdata-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        let store = SessionStore::new(&dir);
+        let registry = ModelRegistry::new(Arc::new(test_config()), Arc::new(AuthConfig::default()));
+        let mounted = Arc::new(extensions::Mounted::none());
+        let data = host_data(&bare_args(), &registry, &store, &mounted);
+
+        let (created, notes) = (data.create)().expect("the create closure builds");
+        assert!(!created.resumed(), "a create is always fresh");
+        assert!(notes.is_empty(), "a clean config degrades nothing");
+
+        // A never-used session leaves no file (deferred creation — the
+        // catalog's law), so the open closure cannot see it yet.
+        // Materialize the file the real way: one run over the
+        // dead-port provider — the user message commits at acceptance,
+        // the run fails, the file exists.
+        let id = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .expect("test runtime")
+            .block_on(async {
+                let wiring = SessionHostWiring {
+                    node: host_node(),
+                    store: store.clone(),
+                    boot_parent: None,
+                    boot_parent_call: None,
+                };
+                let mut handle = SessionHost::spawn(created, Vec::new(), wiring, data.clone());
+                let id = handle.info().session_id.clone();
+                handle.message(&id, "seed the file");
+                handle.close_commands();
+                while let Some(frame) = handle.next_event().await {
+                    if matches!(frame.event, tabit_session::SessionEvent::RunFailed { .. }) {
+                        break;
+                    }
+                }
+                id
+            });
+
+        // The open closure resolves by the stored id and resumes the
+        // same session.
+        let (reopened, _) = (data.open)(&id).expect("the open closure resumes");
+        assert!(reopened.resumed(), "an open resumes the stored file");
+        assert_eq!(reopened.id(), id, "resume keeps the id");
+
+        // An unknown id is the loud, named error.
+        let error = match (data.open)("no-such-id") {
+            Err(error) => error,
+            Ok(_) => panic!("an unknown id is a loud error"),
+        };
+        assert!(
+            error.contains("no stored session with id `no-such-id`"),
+            "{error}"
+        );
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn an_ephemeral_assembly_boots_in_memory() {
+        let dir = std::env::temp_dir().join(format!("tabit-ephemeral-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        let store = SessionStore::new(&dir);
+        let registry = ModelRegistry::new(Arc::new(test_config()), Arc::new(AuthConfig::default()));
+        let child_role = Args {
+            ephemeral: true,
+            ..bare_args()
+        };
+        let (session, _) = assemble(
+            &child_role,
+            &registry,
+            &store,
+            ContinueMiss::StartFresh,
+            None,
+        )
+        .expect("the ephemeral boot assembles");
+        assert!(
+            session.path().is_none(),
+            "the in-memory boot leaves no file"
+        );
+        assert!(!session.resumed());
         let _ = std::fs::remove_dir_all(&dir);
     }
 }

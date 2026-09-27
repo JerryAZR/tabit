@@ -734,11 +734,74 @@ stdout-closed-before-boot, and first-frame-not-Report stubs
 lane's exit sweep through the real client; `crash_report` and the
 stderr ring; the SpawnContext per-run snapshot under a mid-run
 model switch; the interaction hub's promise-death `Dismissed` arm;
-print-mode `--rewind` execution and the json-mode startup-failure
-shape (both are `CARGO_BIN_EXE_tabit-core` e2e shapes — a staged
-store / a corrupt `TABIT_CONFIG`); the npm version-pin and
-tarball-escape install scenarios (fake-registry variants);
-autotitle's once-per-session second-hook dedup.
+the npm version-pin and tarball-escape install scenarios
+(fake-registry variants); autotitle's once-per-session
+second-hook dedup. (Print-mode `--rewind` and the json-mode
+startup-failure shapes left this list 2026-09 — the tabit-core
+split round filled them, below.)
+
+## The tabit-core split round (2026-09): fill, justify, or delete
+
+The 2,373-line main.rs decomposed (cli / assemble / print + a thin
+entry); this round triaged the split modules' gaps against the
+policy. Scoped measurement: `cargo llvm-cov -p tabit-core --lcov
+--ignore-run-fail` (the scope cannot build the SDK's example
+binaries, so extension_tools/subprocess_children fail under the
+coverage target dir — their subject is spawned processes either way,
+class 6 both ways). Unit-attributed per file: assemble.rs 92.0%,
+cli.rs 96.9%, gate.rs 98.2%, extensions.rs 60.4%, print.rs 20.1%,
+main.rs 0% — 70.8% of 2,082 instrumented lines.
+
+**Filled (attributed, unit — `assemble.rs` tests):** `core_sets`'
+parent/child role derivation (the spawner and its addressing tool
+mount only in the parent role — recursion by omission, both sides);
+`host_data`'s closures end to end (create is always fresh; open
+resolves the stored id and resumes it — the open path needs a
+file-backed session, staged the real way: one run over the
+dead-port provider commits the user message, the run fails, the
+file exists — deferred creation is the catalog's law; the unknown
+id is the loud named error); the ephemeral in-memory boot
+(`path().is_none()`).
+
+**Filled (behavioral, class-6 e2e — `tests/modes.rs`, the real
+binary over an httpmock SSE provider with per-child env):** print
+mode's happy path (exit 0; the answer on stdout; the banner AND
+footer on stderr — stdout stays the answer channel; the footer's
+usage matches the chunk's `3 in / 2 out`; exactly one session file
+left behind); the promptless `--rewind` (the dropped-count marker,
+no run) then the branch from before the dropped message in the
+SAME file (rewind branches, it does not fork) — a standing
+deferral, closed; `--list` over an empty and a staged store; and
+the json startup-failure pair — a broken `TABIT_CONFIG` carries
+the first-run guide (report line first, the error event, the
+stderr echo, exit 1) while an unreadable `--session` carries the
+plain `could not start the session` reason and NOT the guide —
+the other standing deferral, closed.
+
+**Justified (standing classes, renumbered to the split):** main.rs
+0% attributed — `run`/`main`/the failure reporters execute only in
+spawned processes, asserted by the modes and crash e2e (class 6);
+print.rs 20.1% — the stdin watcher and the FIFO card queue own
+real stdin (the standing justification, relocated from the
+pre-split main.rs entry), and `print_mode`/`print_event`/
+`print_banner`/`list_sessions` are the spawned-mode bodies
+(behaviorally pinned above, unattributed); extensions.rs 60.4% —
+the binary-assembly/child-role standing class (the mount machinery
+runs inside the extension e2e's spawned backends).
+
+**Deleted: nothing this round.** The split moved only live code
+(the `-D warnings` lint gate is the item-level proof — dead-code
+lints fire on `pub(crate)` in a bin crate), and the review's dead
+machinery (`ordered-float`, the `rayon` feature, `_is_dependency`,
+the gate's local-path doc) left in the hygiene round before this
+one.
+
+**Methodology note, kept honestly:** the round's first lcov parse
+read the DA record's line NUMBER as its hit count and reported a
+false 100% on every file; the cross-check against the raw lcov
+caught it. A false number in a ledger is worse than none — the
+parser fix is in the round's scratch, the lesson is already the
+ledger's own (coverage measures execution; verify the instrument).
 
 ## Justified residue
 
@@ -934,10 +997,12 @@ kept as the record of what they were)
   fails closed, no-UI fails closed, and the native:select_one card
   shape), plus the e2e pair (`the_builtin_gate_asks_on_a_risky_bash_
   and_a_block_skips`, `a_disabled_gate_mounts_nowhere`).
-- `tabit/bin print-mode stdin reader` (`main.rs` watcher thread,
-  card rendering incl. the FIFO card queue) — **JUSTIFIED**: owns real
-  stdin; `parse_answer` is unit-covered (numbered buttons + reason,
-  free text, fail-closed empties).
+- `tabit/bin print-mode stdin reader` (the watcher thread and the
+  FIFO card queue — `print.rs` since the 2026-09 split, `main.rs`
+  before it) — **JUSTIFIED**: owns real stdin; `parse_answer` is
+  unit-covered (numbered buttons + reason, free text, fail-closed
+  empties), and the mode around it is e2e-covered (the split round's
+  print-mode pins, below).
 - json bridge `InteractionResponse` passthrough — rides the generic
   `ClientFrame::Command => link.send(command)` arm, unchanged by this
   feature; the command itself is round-trip covered in tabit-protocol
