@@ -11,7 +11,7 @@
 use crate::arg_parser::parse_args;
 use crate::bash_walker::{FoundCommand, walk_in_context};
 use crate::config::{Rule, SanityConfig};
-use crate::path_permission::{PathContext, check_read, check_write, default_context};
+use crate::path_permission::{PathContext, check_read, check_write};
 use crate::path_utils::clearly_not_a_path;
 use crate::pre_check::evaluate_pre_checks;
 use crate::types::{Action, CheckResult, aggregate_results};
@@ -23,8 +23,11 @@ pub fn check_bash(command: impl AsRef<str>, config: &SanityConfig) -> CheckResul
         return CheckResult::allow();
     }
 
-    let base_ctx = default_context();
-    let walk_result = walk_in_context(command, &base_ctx);
+    // The walk's world is the one the rule book was expanded
+    // against — cd tracking seeds from it, every path it finds
+    // checks against it.
+    let base_ctx = &config.context;
+    let walk_result = walk_in_context(command, base_ctx);
 
     if !walk_result.errors.is_empty() {
         let error_messages = walk_result.errors.join("; ");
@@ -37,7 +40,7 @@ pub fn check_bash(command: impl AsRef<str>, config: &SanityConfig) -> CheckResul
     let results: Vec<CheckResult> = walk_result
         .commands
         .iter()
-        .map(|cmd| check_single_command(cmd, config, &base_ctx))
+        .map(|cmd| check_single_command(cmd, config, base_ctx))
         .collect();
 
     if results.is_empty() {

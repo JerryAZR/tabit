@@ -163,7 +163,12 @@ Current workspace layout:
 - `crates/tabit-gate` — the default permission gate: pi-sanity's
   heuristic policy ported verbatim (static checks, allow-when-unsure —
   a careless-mistake catcher, never a security boundary; brush-parser
-  replaces the unbash parser) as a pure core crate. The `AgentHook`
+  replaces the unbash parser) as a pure core crate. One rule book per
+  process, loaded at start, and the book carries the world it was
+  expanded against (`SanityConfig::context`, owner ruling 2026-09-27):
+  a check is normalize-then-match — no per-check context construction,
+  no repo probing (`{{REPO}}` falls back to cwd; the TS check-time git
+  probe is the port's deliberate deletion). The `AgentHook`
   member, the `native:select_one` ask, and the settings.toml
   `[gate] enabled = false` opt-out assemble in the `tabit-core`
   binary — `tabit-session` stays a mechanism with no policy

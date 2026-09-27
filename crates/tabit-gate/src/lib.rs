@@ -74,6 +74,18 @@
 //! ([`path_utils::preprocess_runtime_path`], also public — the TS
 //! unit surface). Checking never preprocesses patterns.
 //!
+//! The world is a load-time fact too (owner-ruled 2026-09-27): the
+//! rule book carries the one context its patterns were expanded
+//! against (`SanityConfig::context`), and a check is
+//! normalize-then-match — the runtime path resolves against that
+//! world, the already-expanded patterns compare. Nothing is derived
+//! at check time: no per-check context construction, no repo probing
+//! (`{{REPO}}` falls back to cwd — if the repo isn't known at
+//! expansion time, cwd it is; TS's check-time `getDefaultContext`
+//! git probe is the port's deliberate deletion). One table per
+//! process serves every session a node hosts; a subagent child is
+//! its own node with its own table, loaded against its own cwd.
+//!
 //! Porting discipline (the owner's ruling): **policy and logic
 //! unchanged** — port what is there, including pi-sanity's
 //! LIMITATIONS.md blind spots (obfuscation, `eval`, `xargs` … are

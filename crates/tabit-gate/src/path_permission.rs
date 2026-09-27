@@ -19,52 +19,12 @@ pub struct PathCheckResult {
     pub matched_pattern: Option<String>,
 }
 
-/// Detect a git repository root using `git rev-parse --show-toplevel`.
-/// Returns `None` if not in a git repository or git is not available.
-/// TS bounds the probe with `execSync`'s 1-second timeout; here
-/// `wait-timeout` does the same, killing the child on expiry.
-fn detect_repo() -> Option<String> {
-    use std::io::Read;
-    use std::process::{Command, Stdio};
-    use wait_timeout::ChildExt;
-
-    let mut child = Command::new("git")
-        .args(["rev-parse", "--show-toplevel"])
-        .stdin(Stdio::null())
-        .stdout(Stdio::piped())
-        .stderr(Stdio::null())
-        .spawn()
-        .ok()?;
-    const TIMEOUT: std::time::Duration = std::time::Duration::from_secs(1);
-    // rev-parse output is a single short line, well under the pipe
-    // buffer, so reading after the bounded wait cannot deadlock.
-    match child.wait_timeout(TIMEOUT) {
-        Ok(Some(status)) if status.success() => {
-            let mut out = String::new();
-            let read = child
-                .stdout
-                .take()
-                .and_then(|mut s| s.read_to_string(&mut out).ok())
-                .unwrap_or(0);
-            let trimmed = out.trim().to_string();
-            if !trimmed.is_empty() && read > 0 {
-                Some(trimmed)
-            } else {
-                None
-            }
-        }
-        _ => {
-            // Timeout (kill) or failure: TS `catch { return undefined }`.
-            let _ = child.kill();
-            let _ = child.wait();
-            None
-        }
-    }
-}
-
-/// Get the default path context using system values (TS
-/// `getDefaultContext`). Attempts to detect a git repo, falling back
-/// to no repo.
+/// The standalone process-cwd context: cwd, home, tmpdir, no repo
+/// resolution (`{{REPO}}` falls back to cwd — it is never probed;
+/// owner ruling 2026-09-27). Production checks never build this: the
+/// rule book carries its own world (`SanityConfig::context`),
+/// expanded and matched against the same facts. This constructor
+/// serves the load itself, the bash walker's default, and tests.
 pub fn default_context() -> PathContext {
     PathContext {
         cwd: std::env::current_dir()
@@ -74,7 +34,7 @@ pub fn default_context() -> PathContext {
             .map(|p| p.to_string_lossy().into_owned())
             .unwrap_or_else(|| ".".to_string()),
         tmpdir: std::env::temp_dir().to_string_lossy().into_owned(),
-        repo: detect_repo(),
+        repo: None,
         platform: Platform::native(),
     }
 }
