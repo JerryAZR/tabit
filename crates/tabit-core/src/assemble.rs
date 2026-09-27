@@ -1,0 +1,934 @@
+//! The binary's assembly policy — everything ruled to live HERE,
+//! never in tabit-session (the front/back split: sessions are
+//! mechanism, the binary decides what mounts). Session builds (the
+//! preamble, the tool sets, the invocation's tool filter, the hook
+//! stack), the process's node, and the extension side of a boot (the
+//! scan's shaping, the providers-fragment merge, the skills
+//! contribution, the supervisor launch).
+
+use std::path::PathBuf;
+use std::sync::Arc;
+
+use tabit_config::TabitConfig;
+use tabit_session::{
+    ModelRegistry, ModelSelection, Session, SessionBuilder, SessionStore, build_system_prompt,
+    build_system_prompt_with_base,
+};
+use tabit_tools::dynamic_contextual;
+
+use crate::cli::Args;
+use crate::cli::parse_model;
+use crate::extensions;
+use crate::gate;
+
+/// The process's node — the one routing layer the session host and
+/// its subprocess children mount on (one net per process, by design:
+/// the host's routes and the children's lanes live in one learning
+/// table), so a `OnceLock` is the honest shape rather than threading
+/// an `Arc` through every assembly site. The name is the ask-id mint
+/// — unique per process, never colliding with a child's (a child
+/// names its node by its boot session's uuid).
+pub(crate) fn host_node() -> std::sync::Arc<tabit_session::Node> {
+    static NODE: std::sync::OnceLock<std::sync::Arc<tabit_session::Node>> =
+        std::sync::OnceLock::new();
+    NODE.get_or_init(|| {
+        std::sync::Arc::new(tabit_session::Node::new(&format!(
+            "core-{}",
+            std::process::id()
+        )))
+    })
+    .clone()
+}
+
+static EXTENSION_SKILLS: std::sync::OnceLock<tabit_session::skills::Skills> =
+    std::sync::OnceLock::new();
+
+/// The extension host's skills contribution — the one process-level
+/// piece of the catalog (one host per backend; children boot their
+/// own hosts against the parent's root, the 2026-09 ruling). The
+/// LADDER half is per-session now (the session-level catalog ruling,
+/// 2026-09: each session build discovers over its own cwd, so a
+/// subagent in another directory announces and runs ITS skills);
+/// within a session the consistency triple — the prompt's listing,
+/// the `skill` tool's lookup, the wire snapshot — still reads one
+/// catalog object, built once at the session's build.
+fn extension_skills_part() -> tabit_session::skills::Skills {
+    EXTENSION_SKILLS.get().cloned().unwrap_or_default()
+}
+
+/// Seed the extension contribution (the JSON boot). Seeding after a
+/// reader is an ordering bug, not a condition to absorb — the boot
+/// runs before any assembly by construction.
+#[allow(clippy::panic)] // the sanctioned crash below (AGENTS.md doctrine)
+pub(crate) fn seed_extension_skills(extension_skills: tabit_session::skills::Skills) {
+    if EXTENSION_SKILLS.set(extension_skills).is_err() {
+        panic!(
+            "internal invariant violated: a session assembled before the boot seeded the extension skills"
+        );
+    }
+}
+
+/// The tabit-core executable subprocess children spawn: this very
+/// binary (the pi self-spawn pattern). `current_exe`, no exceptions —
+/// an inherited `TABIT_CORE_BIN` (a frontend's dev override for
+/// finding the backend) must not diverge children from the running
+/// image.
+fn tabit_exe() -> Result<PathBuf, String> {
+    std::env::current_exe().map_err(|e| format!("cannot resolve the tabit-core executable: {e}"))
+}
+
+/// The invocation's tool filter (`--tools` allow, `--without` deny),
+/// split and validated against the process's full candidate set —
+/// core and extension proxies alike. A name nothing offers is a loud
+/// startup error listing what exists: a typo'd filter that quietly
+/// kept or dropped the wrong tool would look like a broken agent.
+/// Allow first, then deny — the surviving set is
+/// allowed-and-not-denied.
+fn tool_filter(
+    args: &Args,
+    candidate: &[rig_agent::tool::DynamicTool],
+) -> Result<(Option<Vec<String>>, Vec<String>), String> {
+    let offered: Vec<&str> = candidate.iter().map(|tool| tool.name()).collect();
+    let split = |spec: &Option<String>, flag: &str| -> Result<Option<Vec<String>>, String> {
+        let Some(raw) = spec.as_deref() else {
+            return Ok(None);
+        };
+        let mut names = Vec::new();
+        for name in raw.split(',').map(str::trim).filter(|s| !s.is_empty()) {
+            if !offered.contains(&name) {
+                return Err(format!(
+                    "{flag}: unknown tool `{name}` — this process offers: {}",
+                    offered.join(", ")
+                ));
+            }
+            names.push(name.to_string());
+        }
+        Ok(Some(names))
+    };
+    Ok((
+        split(&args.tools, "--tools")?,
+        split(&args.without, "--without")?.unwrap_or_default(),
+    ))
+}
+
+/// Keep the tools the invocation's filter admits: allowed (when an
+/// allow-list crossed) and not denied. Pure name matching — both
+/// specs were validated against the full candidate set already, so
+/// subsets (the child core set behind `SubagentParts::tools`) filter
+/// without re-validation; a proxy-only name simply matches nothing
+/// here, which is correct (proxy shaping is the child's business,
+/// via the crossing flags).
+fn retain_filtered(
+    tools: Vec<rig_agent::tool::DynamicTool>,
+    allow: &Option<Vec<String>>,
+    deny: &[String],
+) -> Vec<rig_agent::tool::DynamicTool> {
+    tools
+        .into_iter()
+        .filter(|tool| {
+            let name = tool.name();
+            allow
+                .as_ref()
+                .is_none_or(|names| names.iter().any(|n| n == name))
+                && !deny.iter().any(|n| n == name)
+        })
+        .collect()
+}
+
+fn assemble_session(
+    args: &Args,
+    registry: ModelRegistry,
+    selection: ModelSelection,
+    resume_target: Option<PathBuf>,
+    store: SessionStore,
+    extensions: Option<&std::sync::Arc<extensions::Mounted>>,
+) -> Result<Session, String> {
+    let cwd = std::env::current_dir()
+        .map_err(|e| format!("cannot determine the working directory: {e}"))?;
+    // The session's skills catalog — ONE DISCOVERY PER SESSION
+    // (the session-level catalog ruling): the ladder over this
+    // session's cwd with the process-level extension contribution
+    // folded in. The prompt stays byte-stable per session for the
+    // provider's prompt cache, and the consistency triple — the
+    // prompt's listing, the `skill` tool's lookup, the wire snapshot
+    // — reads this one object.
+    let skills = std::sync::Arc::new(
+        tabit_session::skills::discover(&cwd).with_extension_defaults(extension_skills_part()),
+    );
+    // `--preamble` replaces the default preamble — the identity and
+    // standing body — while the environment block, AGENTS.md files,
+    // and skills catalog append as usual (ruled 2026-09: the spawner
+    // owns the child's voice; tabit still owns the truthful context).
+    let preamble = match &args.preamble {
+        Some(text) if text.trim().is_empty() => {
+            return Err("the --preamble override is empty".to_string());
+        }
+        Some(text) => {
+            build_system_prompt_with_base(text, &cwd, &skills).map_err(|e| e.to_string())?
+        }
+        None => build_system_prompt(&cwd, &skills).map_err(|e| e.to_string())?,
+    };
+
+    // Subagent support (ROADMAP item 5): the process-wide parts, whose
+    // toolset is the child toolset — the parent's minus the subagent
+    // tool itself, so children cannot spawn children (recursion depth
+    // is enforced by omission). A child-role process (`--parent`)
+    // mounts that toolset only: it does not spawn.
+    let (children, parent_core) = core_sets(args)?;
+    // The process's candidate toolset: its core set plus the extension
+    // mount — replaced core tools unmount, the proxies join (one
+    // name, one tool, resolved at this assembly). Children resolve
+    // against their own core set (the child set): they boot their own
+    // hosts.
+    let mut manifest_disables: Vec<String> = Vec::new();
+    let candidate: Vec<rig_agent::tool::DynamicTool> = match extensions {
+        Some(mounted) => {
+            manifest_disables = mounted.manifest_disables().to_vec();
+            let replaced = mounted.replaced_core();
+            parent_core
+                .into_iter()
+                .filter(|tool| !replaced.iter().any(|name| name == tool.name()))
+                .chain(mounted.tools().iter().cloned())
+                .collect()
+        }
+        None => parent_core,
+    };
+    // The invocation's filter applies once, here, over the full
+    // candidate — `--tools`/`--without` shape extension proxies the
+    // same as core tools (a whitelisted read-only agent gets no
+    // extension write tools; a denied delegate tool cannot recurse).
+    let (allow, mut deny) = tool_filter(args, &candidate)?;
+    // The scanned manifests' role-shaping declarations join the deny
+    // list — `--without`'s own storage, the same filter at the same
+    // point, no separate mechanism.
+    deny.extend(manifest_disables);
+    let mounted = retain_filtered(candidate, &allow, &deny);
+    let subagents = std::sync::Arc::new(tabit_session::subagent::SubagentParts {
+        tools: retain_filtered(children, &allow, &deny),
+        max_turns: args.max_turns.unwrap_or(tabit_session::DEFAULT_MAX_TURNS),
+        node: host_node(),
+        exe: tabit_exe()?,
+        // Children boot their own hosts against the parent's root
+        // (the same packages, the same rules).
+        extensions: extension_root(args).unwrap_or_default(),
+    });
+
+    // The hook surface: the built-in permission gate (pi-sanity's
+    // policy, in-process — a default must not fail open on a dead
+    // extension; settings.toml's [gate] enabled = false opts out)
+    // ahead of whatever the extension mount carries — forwarded
+    // policy hooks of installed packages — composed through the
+    // builder's one seam. Children mount their own (they boot their
+    // own hosts, the 2026-09 ruling).
+    let gate_enabled = tabit_config::SettingsConfig::load_default()
+        .map_err(|e| e.to_string())?
+        .gate
+        .enabled;
+    let hooks = {
+        let mut stack = if gate_enabled {
+            gate::PermissionGate::stack()
+        } else {
+            rig_agent::agent::HookStack::new()
+        };
+        if let Some(mounted) = extensions {
+            stack = stack.merge(mounted.hooks());
+        }
+        stack
+    };
+    let mut builder = SessionBuilder::new(
+        store,
+        registry.config().clone(),
+        registry.auth().clone(),
+        selection,
+    )
+    .map_err(|e| e.to_string())?
+    .preamble(preamble)
+    .model_factory(registry.factory())
+    .hooks(hooks)
+    .subagents(subagents)
+    .skills(skills);
+    for tool in mounted {
+        builder = builder.dynamic_tool(tool);
+    }
+    if let Some(max_turns) = args.max_turns {
+        builder = builder.max_turns(max_turns);
+    }
+
+    if let Some(path) = &resume_target {
+        let (session, _report) = builder.resume(path).map_err(|e| e.to_string())?;
+        Ok(session)
+    } else {
+        let cwd = cwd.display().to_string();
+        if args.ephemeral {
+            // The child role's in-memory boot: nothing on disk, the
+            // process's lifetime is the session's.
+            builder.ephemeral(&cwd).map_err(|e| e.to_string())
+        } else {
+            builder.create(&cwd).map_err(|e| e.to_string())
+        }
+    }
+}
+
+/// The toolset a subagent child runs: every coding tool (contextual —
+/// they read the session cwd and the run token from the per-run
+/// ToolContext) plus the skill tool, except the subagent tool.
+fn child_tools() -> Vec<rig_agent::tool::DynamicTool> {
+    vec![
+        dynamic_contextual(tabit_tools::Read),
+        dynamic_contextual(tabit_tools::Write),
+        dynamic_contextual(tabit_tools::Edit),
+        tabit_tools::shell_tool(),
+        tabit_session::skills::skill_tool(),
+    ]
+}
+
+/// The two core toolsets every assembly derives from: the child set
+/// (every coding tool) and the parent set (the child set plus the
+/// subagent tool). Pure derivation — the invocation's tool filter
+/// applies later, once, over the full candidate set (core plus
+/// extension proxies; see [`tool_filter`]). The extension mount's
+/// conflict baseline is the parent set — exactly what the session
+/// would mount without extensions.
+pub(crate) fn core_sets(
+    args: &Args,
+) -> Result<
+    (
+        Vec<rig_agent::tool::DynamicTool>,
+        Vec<rig_agent::tool::DynamicTool>,
+    ),
+    String,
+> {
+    let children = child_tools();
+    let mut parent = children.clone();
+    if args.parent.is_none() {
+        parent.push(tabit_session::subagent::subagent_tool());
+        // The follow-up surface rides the same omission: a child role
+        // mounts neither the spawner nor the addressing tool.
+        parent.push(tabit_session::subagent::followup_tool());
+    }
+    Ok((children, parent))
+}
+
+/// The host's session builders — the boot's DATA half (what only
+/// exists once the extension handshakes resolved): how
+/// `new_session`/`open_session` build sessions, the same assembly as
+/// the boot (config, tools, preamble), behind closures so
+/// tabit-session stays free of front-facing wiring. The process's
+/// `--model`/`--max-turns` apply to sessions created later;
+/// `open_session` resolves by stored id and resumes that file.
+/// One registry for the whole process (the ruling: providers are user
+/// config, not per-session) — every session the host builds shares
+/// the provider client caches.
+pub(crate) fn host_data(
+    args: &Args,
+    registry: &ModelRegistry,
+    store: &SessionStore,
+    extensions: &std::sync::Arc<extensions::Mounted>,
+) -> tabit_session::SessionHostData {
+    let fresh_args = Args {
+        session: None,
+        continue_newest: false,
+        // A new session is a user session of this process: no parent
+        // to announce, a file behind it.
+        parent: None,
+        ephemeral: false,
+        ..args.clone()
+    };
+    let fresh_registry = registry.clone();
+    let fresh_store = store.clone();
+    let fresh_extensions = extensions.clone();
+    let open_args = args.clone();
+    let open_registry = registry.clone();
+    let open_store = store.clone();
+    let open_extensions = extensions.clone();
+    tabit_session::SessionHostData {
+        extensions: extensions.catalog.clone(),
+        create: Arc::new(move || {
+            assemble(
+                &fresh_args,
+                &fresh_registry,
+                &fresh_store,
+                ContinueMiss::StartFresh,
+                Some(fresh_extensions.clone()),
+            )
+        }),
+        open: Arc::new(move |session_id: &str| {
+            let path = open_store
+                .list()
+                .map_err(|e| e.to_string())?
+                .into_iter()
+                .find(|summary| summary.id == session_id)
+                .ok_or_else(|| format!("no stored session with id `{session_id}`"))?
+                .path;
+            let args = Args {
+                session: Some(path),
+                ..open_args.clone()
+            };
+            assemble(
+                &args,
+                &open_registry,
+                &open_store,
+                ContinueMiss::Fail,
+                Some(open_extensions.clone()),
+            )
+        }),
+    }
+}
+
+/// The install target: the default extensions root only (task 6's
+/// ruling — `--extensions` is a backend test/dev override, not an
+/// install destination).
+pub(crate) fn install_root() -> Result<PathBuf, String> {
+    tabit_config::home_dir()
+        .map(|home| home.join(".tabit").join("extensions"))
+        .ok_or_else(|| "cannot resolve the home directory for the extensions root".to_string())
+}
+
+pub(crate) fn extension_root(args: &Args) -> Option<PathBuf> {
+    args.extensions
+        .clone()
+        .or_else(|| tabit_config::home_dir().map(|home| home.join(".tabit").join("extensions")))
+}
+
+/// The extension host boot: launch the scanned packages, handshake
+/// each, supervise for the backend's life — reports land on stderr
+/// (stdout is protocol). Every tabit process boots its own extension
+/// host — the frontend-attached backend AND every subagent child
+/// (ruled 2026-09: children pick up extensions; the leaf law outlaws
+/// loading into a parent's process, not a child hosting its own
+/// set). Must run on the serving runtime (it spawns).
+pub(crate) fn boot_extensions(
+    found: Vec<tabit_ext::manifest::Discovered>,
+    host: tabit_ext::LaunchContext,
+) -> std::sync::Arc<tabit_ext::supervisor::Supervisor> {
+    // Reports land on stderr (stdout is protocol).
+    let (supervisor, mut events) =
+        tabit_ext::supervisor::launch(found, tabit_ext::supervisor::BOOT_TIMEOUT, host);
+    tokio::spawn(async move {
+        while let Some(event) = events.recv().await {
+            match &event.status {
+                tabit_ext::supervisor::Status::Alive => {
+                    eprintln!("extension {}: loaded", event.name)
+                }
+                tabit_ext::supervisor::Status::Dead { reason } => {
+                    eprintln!("extension {}: not running — {reason}", event.name)
+                }
+                tabit_ext::supervisor::Status::Starting => {}
+            }
+        }
+    });
+    std::sync::Arc::new(supervisor)
+}
+
+/// The scan, shaped for boot (item 9, tasks 4+6): what the host
+/// LAUNCHES — every refusal plus the not-disabled PROCESS packages —
+/// and the MOUNTED packages themselves (name + dir), the list the
+/// providers fragment merge, the skills tables, and the requirement
+/// check apply to. Packages mount by default (install was the
+/// consent; disabling is the explicit act), and a disabled package
+/// is absent everywhere by design — including as a requirement
+/// (unmet). **Static packages** (no entry) mount but never launch
+/// and never announce: their contributions are exactly the
+/// scan-driven ones. Unmet `requires` become refusals (presence, not
+/// liveness — the mounted set is the truth, standing never is).
+pub(crate) struct Launchable {
+    pub(crate) found: Vec<tabit_ext::manifest::Discovered>,
+    pub(crate) packages: Vec<(String, PathBuf)>,
+}
+
+pub(crate) fn partition(
+    found: Vec<tabit_ext::manifest::Discovered>,
+    disabled: &std::collections::HashSet<String>,
+) -> Launchable {
+    let mut mounted = Vec::new();
+    let mut refusals = Vec::new();
+    for found in found {
+        match found {
+            tabit_ext::manifest::Discovered::Package { dir, manifest } => {
+                if !disabled.contains(&manifest.name) {
+                    mounted.push(tabit_ext::manifest::Discovered::Package { dir, manifest });
+                }
+                // A disabled package is absent everywhere — not a
+                // refusal (the user's setting reports nowhere), just
+                // gone.
+            }
+            // Refusals always launch (as dead reports): a broken
+            // package is loud, whatever the settings say.
+            refused => refusals.push(refused),
+        }
+    }
+    // The requirement check runs over the mounted set: disabled or
+    // missing requirements are unmet, dead ones are not.
+    let mounted_names: std::collections::HashSet<String> = mounted
+        .iter()
+        .filter_map(|found| found.manifest().map(|m| m.name.clone()))
+        .collect();
+    let mounted = tabit_ext::manifest::enforce_requires(mounted, &mounted_names);
+    // Split by process-ness: static packages contribute scan facts
+    // only; process packages (and every refusal) reach the launch.
+    let mut launchable = refusals;
+    let mut packages = Vec::new();
+    for found in mounted {
+        match &found {
+            tabit_ext::manifest::Discovered::Package { dir, manifest } => {
+                packages.push((manifest.name.clone(), dir.clone()));
+                if !manifest.is_static() {
+                    launchable.push(found);
+                }
+            }
+            tabit_ext::manifest::Discovered::Refused { .. } => {
+                launchable.push(found);
+            }
+        }
+    }
+    launchable.sort_by(|a, b| a.dir().cmp(b.dir()));
+    Launchable {
+        found: launchable,
+        packages,
+    }
+}
+
+/// Merge one mounted package's `providers.toml` fragment into `config`
+/// (EXTENSIONS.md: the user's own provider ids win silently; only a
+/// fragment colliding with an earlier fragment warns). A broken
+/// fragment refuses the *fragment* — warned, skipped — never the
+/// package, whose tools and hooks are unaffected.
+pub(crate) fn merge_fragment_into(
+    config: &mut TabitConfig,
+    name: &str,
+    dir: &std::path::Path,
+    user_ids: &std::collections::HashSet<String>,
+    warnings: &mut Vec<String>,
+) {
+    let path = dir.join("providers.toml");
+    if !path.is_file() {
+        return;
+    }
+    match TabitConfig::load(&path) {
+        Ok(fragment) => {
+            config.merge_fragment(fragment, &format!("extension `{name}`"), user_ids, warnings);
+        }
+        Err(detail) => {
+            warnings.push(format!(
+                "extension `{name}`: providers fragment refused: {detail}"
+            ));
+        }
+    }
+}
+
+/// The extension walker's skills contribution (item 9, task 4): every
+/// mounted package's `skills/` tree, entries at their original paths,
+/// first-package-wins on a name collision (scan order — the same
+/// determinism law as tool registration). In-memory tables only; the
+/// catalog, the `skill` tool, and the wire snapshot read them.
+pub(crate) fn extension_skills_catalog(
+    packages: &[(String, PathBuf)],
+) -> tabit_session::skills::Skills {
+    let mut extension_skills = tabit_session::skills::Skills::default();
+    for (_name, dir) in packages {
+        for entry in tabit_session::skills::entries_in(&dir.join("skills")) {
+            extension_skills.register(entry);
+        }
+    }
+    extension_skills
+}
+
+/// What happens when `--continue` finds nothing to resume. Print mode
+/// fails loudly (a terminal user asked explicitly); JSON mode starts
+/// fresh — the pinned startup contract: the chat UI is unconditional,
+/// and an empty store (a brand-new project) is not an error. The
+/// handshake's `resumed: false` tells the frontend what happened.
+#[derive(Clone, Copy, PartialEq, Eq)]
+pub(crate) enum ContinueMiss {
+    Fail,
+    StartFresh,
+}
+
+/// Resolve config/auth into a session per the args (model selection,
+/// resume target, tools, preamble). `store` is injected so tests drive
+/// a temp store instead of the repo's. The registry is the caller's
+/// process-shared one (owner ruling: providers are user config, not
+/// per-session — one client cache per provider per process).
+pub(crate) fn assemble(
+    args: &Args,
+    registry: &ModelRegistry,
+    store: &SessionStore,
+    miss: ContinueMiss,
+    extensions: Option<std::sync::Arc<extensions::Mounted>>,
+) -> Result<(Session, Vec<String>), String> {
+    // Default-model resolution (registry): an explicit --model wins,
+    // then the resumed session's last model, then default_model in
+    // providers.toml, then the first configured model.
+    let resume_target = match (&args.session, args.continue_newest) {
+        (Some(path), _) => Some(path.clone()),
+        (None, true) => {
+            let newest = store.list().map_err(|e| e.to_string())?.into_iter().next();
+            match (newest, miss) {
+                (Some(newest), _) => Some(newest.path),
+                (None, ContinueMiss::Fail) => {
+                    return Err(format!("no sessions yet in {}", store.dir().display()));
+                }
+                (None, ContinueMiss::StartFresh) => None,
+            }
+        }
+        (None, false) => None,
+    };
+    let resumed = match &resume_target {
+        Some(path) => store.open_path(path).map_err(|e| e.to_string())?.register,
+        None => None,
+    };
+    let explicit = args
+        .model
+        .as_deref()
+        .map(|raw| parse_model(raw, registry.config()))
+        .transpose()?;
+    let (selection, startup_notes) = registry
+        .default_selection(explicit, resumed)
+        .map_err(|e| e.to_string())?;
+    // Startup degradations are data (ruled: external errors ride the
+    // channel): the worker emits them as `error { kind: model }` frames —
+    // the first frames after the handshake ack.
+    let session = assemble_session(
+        args,
+        registry.clone(),
+        selection,
+        resume_target,
+        store.clone(),
+        extensions.as_ref(),
+    )?;
+    Ok((session, startup_notes))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::cli::{bare_args, parse_args_from, test_config};
+    use tabit_config::AuthConfig;
+
+    fn args(list: &[&str]) -> Result<Args, String> {
+        parse_args_from(list.iter().map(|s| s.to_string()))
+    }
+
+    fn named_tool(name: &'static str) -> rig_agent::tool::DynamicTool {
+        rig_agent::tool::DynamicTool::new(
+            name,
+            "a test tool",
+            serde_json::json!({"type": "object"}),
+            move |_ctx, _args| {
+                let output = name;
+                Box::pin(async move { Ok(rig_agent::tool::ToolOutput::text(output)) })
+            },
+        )
+    }
+
+    #[test]
+    fn the_tool_filter_admits_allowed_and_not_denied() {
+        let candidate = vec![named_tool("read"), named_tool("bash"), named_tool("echo")];
+        let args = Args {
+            tools: Some("read,echo".to_string()),
+            without: Some("echo".to_string()),
+            ..bare_args()
+        };
+        let (allow, deny) = tool_filter(&args, &candidate).expect("valid filter");
+        let kept = retain_filtered(candidate, &allow, &deny);
+        assert_eq!(
+            kept.iter().map(|tool| tool.name()).collect::<Vec<_>>(),
+            vec!["read"],
+            "allow first, then deny: the intersection survives"
+        );
+
+        // A subset of the candidate (the child core set behind
+        // SubagentParts::tools) filters without re-validation; a
+        // proxy-only allow name matches nothing there.
+        let core_subset = vec![named_tool("read"), named_tool("bash")];
+        let kept = retain_filtered(core_subset, &allow, &deny);
+        assert_eq!(
+            kept.iter().map(|tool| tool.name()).collect::<Vec<_>>(),
+            vec!["read"]
+        );
+    }
+
+    #[test]
+    fn the_tool_filter_rejects_unknown_names_loudly() {
+        let candidate = vec![named_tool("read")];
+        let mut args = Args {
+            tools: Some("bogus".to_string()),
+            ..bare_args()
+        };
+        let error = tool_filter(&args, &candidate).expect_err("unknown allow name");
+        assert!(error.contains("bogus") && error.contains("read"), "{error}");
+
+        args.tools = None;
+        args.without = Some("bogus".to_string());
+        let error = tool_filter(&args, &candidate).expect_err("unknown deny name");
+        assert!(
+            error.contains("--without") && error.contains("read"),
+            "{error}"
+        );
+    }
+
+    #[test]
+    fn a_set_tabit_core_bin_never_overrides_self_reference() {
+        // Pins the ruling: backend self-reference is current_exe, no
+        // exceptions — a frontend's TABIT_CORE_BIN (stale or not) must
+        // not diverge subagent children from the running image.
+        // SAFETY: process-global state; no other test in this binary
+        // reads the variable, and it is removed before the assertion.
+        unsafe {
+            std::env::set_var("TABIT_CORE_BIN", "a-stale-override");
+        }
+        let resolved = tabit_exe().expect("current_exe resolves in a test binary");
+        unsafe {
+            std::env::remove_var("TABIT_CORE_BIN");
+        }
+        assert_eq!(
+            resolved,
+            std::env::current_exe().expect("current_exe resolves in a test binary")
+        );
+    }
+
+    #[test]
+    fn enablement_partitions_the_scan_and_refusals_always_launch() {
+        use std::collections::HashSet;
+        use tabit_ext::manifest::{Discovered, Manifest};
+        fn package(name: &str) -> Discovered {
+            Discovered::Package {
+                dir: PathBuf::from(format!("C:/ext/{name}")),
+                manifest: Manifest {
+                    name: name.to_string(),
+                    version: "0.1.0".to_string(),
+                    entry: Some(vec!["bin".to_string()]),
+                    description: None,
+                    requires: Vec::new(),
+                    disables: Vec::new(),
+                },
+            }
+        }
+        fn static_package(name: &str, requires: &[&str]) -> Discovered {
+            Discovered::Package {
+                dir: PathBuf::from(format!("C:/ext/{name}")),
+                manifest: Manifest {
+                    name: name.to_string(),
+                    version: "0.1.0".to_string(),
+                    entry: None,
+                    description: None,
+                    requires: requires.iter().map(|r| r.to_string()).collect(),
+                    disables: Vec::new(),
+                },
+            }
+        }
+        fn refused(dir: &str) -> Discovered {
+            Discovered::Refused {
+                dir: PathBuf::from(format!("C:/ext/{dir}")),
+                reason: "invalid manifest".to_string(),
+            }
+        }
+        let found = vec![
+            package("alpha"),
+            package("beta"),
+            Discovered::Refused {
+                dir: PathBuf::from("C:/ext/broken"),
+                reason: "invalid manifest".to_string(),
+            },
+        ];
+        let mut disabled = HashSet::new();
+        disabled.insert("alpha".to_string());
+        let launchable = partition(found, &disabled);
+        // The disabled alpha is absent everywhere; beta mounts by
+        // default (install was the consent) and reaches the
+        // fragment/skills consumers; the refusal still reports (a
+        // broken package is loud whatever the settings say).
+        assert_eq!(launchable.packages.len(), 1);
+        assert_eq!(launchable.packages[0].0, "beta");
+        assert_eq!(launchable.found.len(), 2);
+        assert!(launchable.found.iter().any(
+            |found| matches!(found, Discovered::Package { manifest, .. } if manifest.name == "beta")
+        ));
+        assert!(
+            launchable
+                .found
+                .iter()
+                .any(|found| matches!(found, Discovered::Refused { .. }))
+        );
+        // Nothing disabled: everything launches (install was the
+        // consent); the refusal still reports.
+        let none = partition(
+            vec![
+                package("alpha"),
+                Discovered::Refused {
+                    dir: PathBuf::from("C:/ext/broken"),
+                    reason: "invalid manifest".to_string(),
+                },
+            ],
+            &HashSet::new(),
+        );
+        assert_eq!(none.packages.len(), 1, "mounted by default");
+        assert_eq!(none.found.len(), 2);
+
+        // Everything disabled: nothing launches but the refusal.
+        let mut all = HashSet::new();
+        all.insert("alpha".to_string());
+        let none = partition(vec![package("alpha"), refused("broken")], &all);
+        assert!(none.packages.is_empty());
+        assert_eq!(none.found.len(), 1);
+
+        // Static packages (task 6): mounted for scan facts and
+        // requirement presence, never launched, never announced.
+        let launchable = partition(
+            vec![package("alpha"), static_package("bundle", &["alpha"])],
+            &HashSet::new(),
+        );
+        assert_eq!(launchable.packages.len(), 2, "the static package mounts");
+        assert_eq!(
+            launchable.found.len(),
+            1,
+            "only the process package launches"
+        );
+        assert_eq!(
+            launchable.found[0].manifest().map(|m| m.name.clone()),
+            Some("alpha".to_string())
+        );
+
+        // An unmet requirement refuses — and the refusal announces
+        // (a static dependent with an unmet requirement reports dead).
+        let launchable = partition(vec![static_package("needy", &["ghost"])], &HashSet::new());
+        assert!(
+            launchable.packages.is_empty(),
+            "the refused package does not mount"
+        );
+        assert_eq!(
+            launchable.found.len(),
+            1,
+            "the refusal launches as a report"
+        );
+        match &launchable.found[0] {
+            Discovered::Refused { reason, .. } => {
+                assert!(reason.contains("requires extension `ghost`"), "{reason}");
+            }
+            _ => panic!("unmet requirements refuse"),
+        }
+
+        // A disabled requirement is unmet ("disabled is absent
+        // everywhere").
+        let mut disabled = HashSet::new();
+        disabled.insert("there".to_string());
+        let launchable = partition(
+            vec![package("there"), static_package("needy", &["there"])],
+            &disabled,
+        );
+        assert!(launchable.packages.is_empty());
+    }
+
+    #[test]
+    fn a_broken_fragment_refuses_the_fragment_not_the_package() {
+        let dir = std::env::temp_dir().join(format!("tabit-frag-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).expect("package dir");
+        std::fs::write(dir.join("providers.toml"), "not toml").expect("broken fragment");
+        let mut config = TabitConfig::default();
+        let user_ids = std::collections::HashSet::new();
+        let mut warnings = Vec::new();
+        merge_fragment_into(&mut config, "broken", &dir, &user_ids, &mut warnings);
+        assert!(config.providers.is_empty());
+        assert_eq!(warnings.len(), 1);
+        let warning = &warnings[0];
+        assert!(warning.contains("providers fragment refused"), "{warning}");
+
+        // A healthy fragment lands under the same call.
+        std::fs::write(
+            dir.join("providers.toml"),
+            "[providers.relay]\nbase_url = \"http://127.0.0.1:8391/v1\"\napi = \"openai-completions\"\n",
+        )
+        .expect("fragment");
+        let mut warnings = Vec::new();
+        merge_fragment_into(&mut config, "broken", &dir, &user_ids, &mut warnings);
+        assert!(config.provider("relay").is_some(), "the fragment landed");
+        assert!(warnings.is_empty(), "{warnings:?}");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn selection_defaults_follow_the_registry_chain() {
+        let registry = ModelRegistry::new(
+            std::sync::Arc::new(test_config()),
+            std::sync::Arc::new(AuthConfig::default()),
+        );
+        assert_eq!(
+            registry
+                .default_selection(None, None)
+                .expect("preference from default_model")
+                .0
+                .provider,
+            "lmstudio"
+        );
+
+        // No preference: the first configured model is the default.
+        let bare = TabitConfig::from_toml_str(
+            r#"
+[providers.lmstudio]
+base_url = "http://127.0.0.1:1234/v1"
+api = "openai-completions"
+keyless = true
+
+[[providers.lmstudio.models]]
+id = "m"
+"#,
+            std::path::Path::new("providers.toml"),
+        )
+        .expect("bare config");
+        let registry = ModelRegistry::new(
+            std::sync::Arc::new(bare),
+            std::sync::Arc::new(AuthConfig::default()),
+        );
+        assert_eq!(
+            registry
+                .default_selection(None, None)
+                .expect("first-seen")
+                .0
+                .model,
+            "m"
+        );
+
+        let empty = ModelRegistry::new(
+            std::sync::Arc::new(TabitConfig::default()),
+            std::sync::Arc::new(AuthConfig::default()),
+        );
+        let error = empty
+            .default_selection(None, None)
+            .expect_err("nothing configured");
+        assert!(
+            error.to_string().contains("usable model provider"),
+            "{error}"
+        );
+    }
+
+    #[test]
+    fn continue_miss_is_loud_in_print_and_absorbed_in_json() {
+        let dir = std::env::temp_dir().join(format!("tabit-assemble-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        let store = SessionStore::new(&dir);
+        let config = Arc::new(test_config());
+        let auth = Arc::new(AuthConfig::default());
+        let registry = ModelRegistry::new(config.clone(), auth.clone());
+        let cont_print = args(&["--continue", "-p", "hi"]).expect("valid print combo");
+
+        let error = match assemble(&cont_print, &registry, &store, ContinueMiss::Fail, None) {
+            Err(error) => error,
+            Ok(_) => panic!("print mode fails loudly on an empty store"),
+        };
+        assert!(error.contains("no sessions yet"), "{error}");
+
+        let cont_json = args(&["--continue", "--json"]).expect("valid json combo");
+        let (session, notes) = assemble(
+            &cont_json,
+            &registry,
+            &store,
+            ContinueMiss::StartFresh,
+            None,
+        )
+        .expect("json mode starts fresh");
+        assert!(!session.resumed(), "the fresh start is reported");
+        assert!(notes.is_empty(), "a clean config degrades nothing");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+}
