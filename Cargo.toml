@@ -76,12 +76,10 @@ httpmock = "0.8.3"
 indexmap = "2.14.0"
 mime = "0.3.17"
 mime_guess = "2.0.5"
-ordered-float = "5.0.0"
 petname = { version = "3.2", default-features = false, features = ["default-words", "default-rng"] }
 pin-project-lite = "0.2.16"
 proc-macro2 = "1.0.95"
 quote = "1.0.40"
-rayon = "1.10.0"
 reqwest = { version = "0.13", default-features = false }
 reqwest-middleware = { version = "0.5.2", default-features = false }
 reqwest-retry = "0.9"

@@ -33,8 +33,9 @@
 //! | `tool-checker.ts`       | [`tool_checker`]             | the entry point: tool name + args → checks |
 //! | `action-utils.ts`       | folded into [`types`]        | stricter-action aggregation |
 //!
-//! Source of truth: `C:\Users\Jerry\Projects\agent-utils\pi-packages\pi-sanity`
-//! (Apache-2.0; the owner's own package, port authorized).
+//! Source of truth: the owner's `pi-sanity` package from
+//! `agent-utils/pi-packages` (Apache-2.0; the owner's own package,
+//! port authorized).
 //!
 //! # The public API (frozen contract — implementation and tests are
 //! written against these signatures; changing one is a coordinated

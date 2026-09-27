@@ -130,12 +130,7 @@ impl Installer {
         })?;
         let mut landed = Vec::new();
         let mut visited = HashSet::new();
-        self.install_recursive(
-            source,
-            &mut landed,
-            &mut visited,
-            /* is_dependency = */ false,
-        )?;
+        self.install_recursive(source, &mut landed, &mut visited)?;
         Ok(Installed { packages: landed })
     }
 
@@ -147,7 +142,6 @@ impl Installer {
         source: &Source,
         landed: &mut Vec<String>,
         visited: &mut HashSet<String>,
-        is_dependency: bool,
     ) -> Result<(), String> {
         // Resolve and validate into a staging directory first — and
         // never leave it behind: a failed install (fetch, validation,
@@ -155,7 +149,7 @@ impl Installer {
         // whole packages (the disk-is-the-truth corollary: no
         // half-facts).
         let stage = self.next_stage();
-        match self.install_staged(source, &stage, landed, visited, is_dependency) {
+        match self.install_staged(source, &stage, landed, visited) {
             Ok(()) => Ok(()),
             Err(error) => {
                 let _ = std::fs::remove_dir_all(&stage);
@@ -170,7 +164,6 @@ impl Installer {
         stage: &Path,
         landed: &mut Vec<String>,
         visited: &mut HashSet<String>,
-        _is_dependency: bool,
     ) -> Result<(), String> {
         self.resolve_to(source, stage)?;
         let manifest = self.validate(stage)?;
@@ -190,7 +183,7 @@ impl Installer {
                 name: required.clone(),
                 version: None,
             };
-            self.install_recursive(&dependency, landed, visited, true)?;
+            self.install_recursive(&dependency, landed, visited)?;
         }
         self.place(&manifest.name, stage)?;
         landed.push(manifest.name.clone());

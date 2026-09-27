@@ -29,8 +29,6 @@ futures = { workspace = true }
 httpdate = { workspace = true }
 indexmap = { workspace = true }
 mime_guess = { workspace = true }
-ordered-float = { workspace = true }
-rayon = { workspace = true, optional = true }
 reqwest = { workspace = true, features = ["json", "stream", "multipart"] }
 rig-derive = { version = "0.41.0", path = "../rig-derive", optional = true }
 schemars = { workspace = true }
@@ -95,7 +93,6 @@ reqwest-middleware = { workspace = true, features = [
 default = ["reqwest", "derive", "rustls"]
 derive = ["dep:rig-derive"]
 test-utils = []
-rayon = ["dep:rayon"]
 socks = ["reqwest/socks"]
 reqwest = [
   "reqwest/charset",
