@@ -264,15 +264,18 @@ pub enum SessionEvent {
         /// Every stored session, newest first.
         sessions: Vec<AvailableSession>,
     },
-    /// The skills catalog, announced once at startup right after
-    /// `sessions_available` (v8): every skill the four-source
-    /// discovery merged, the same facts the prompt catalog carries.
-    /// **Unstamped, backend-level** — one backend process has one
-    /// cwd, so one skill set; fold it connection-level. Only
-    /// announced when discovery found at least one skill (no empty
-    /// announcements). Skill *invocation* needs no wire shape: the
-    /// model calls the `skill` tool, which is an ordinary
-    /// `tool_call`/`tool_result` pair on the asking session's stream.
+    /// A session's skills catalog (v20): every skill the four-source
+    /// discovery merged over that session's own cwd — one discovery
+    /// per session build, the same facts the session's prompt
+    /// catalog carries. **Stamped with the session's stream** and
+    /// announced as each session becomes visible (the boot attach,
+    /// `new_session`, `open_session`); fold per stream — a subagent
+    /// child is a full session host in its own cwd and announces
+    /// its own catalog. Only announced when discovery found at
+    /// least one skill (no empty announcements). Skill
+    /// *invocation* needs no wire shape: the model calls the
+    /// `skill` tool, which is an ordinary `tool_call`/`tool_result`
+    /// pair on the asking session's stream.
     SkillsAvailable {
         /// Every discovered skill.
         skills: Vec<AvailableSkill>,

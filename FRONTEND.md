@@ -18,7 +18,7 @@ render a specific tool's `details` cargo, the interaction template
 payloads — lives in **TOOLS.md**, its companion since the shapes grew
 past one doc (2026-09 ruling).
 
-Wire shapes below are the **v18 contract**. v3 was the multi-session
+Wire shapes below are the **v20 contract**. v3 was the multi-session
 host — session-addressed commands, `new_session`/`open_session` on the
 channel, the `"main"` stream alias retired (the stream stamp is the
 session id). v4 made backend-level frames **unstamped** (§6) and
@@ -52,10 +52,16 @@ extension asks; frontends keep echoing the card's stamp); within v18,
 event frames may also carry `ttl` — the node net's internal hop budget,
 serialized verbatim because a node does not know (and must not know)
 who reads its stdio: the consumer ignores the field (its absence means
-an older backend). Each
-version landed as one
-protocol-version bump with no compatibility period; always check the
-report's `protocol_version`. (`tabit-core --list` prints a human table —
+an older backend); v19 made children **report first** — the first line
+on any child pipe is the child's self-report
+(`report { protocol_version }`), the initialize/ack handshake is gone
+(the spawner is the version check and owns the kill), and a resumed
+boot auto-replays (§3); v20 made `skills_available` **session-level** —
+stamped with the session's stream and announced as each session
+becomes visible, so frontends fold skills per stream and a subagent
+child in another directory announces its own catalog (§6). Each
+version landed as one protocol-version bump with no compatibility
+period; always check the report's `protocol_version`. (`tabit-core --list` prints a human table —
 there is no JSON listing edge.)
 
 ## 1. Architecture: two processes, one pipe
