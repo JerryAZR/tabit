@@ -5,9 +5,6 @@
 
 use std::path::PathBuf;
 
-use tabit_config::TabitConfig;
-use tabit_session::ModelSelection;
-
 #[derive(Debug, Clone)]
 pub(crate) struct Args {
     pub(crate) print_prompt: Option<String>,
@@ -399,47 +396,31 @@ where
     Ok(parsed)
 }
 
-/// Resolve a `--model` value against the config: `provider/model` when
-/// the text before the first `/` names a configured provider, otherwise
-/// a bare model id that must be unambiguous (see
-/// `TabitConfig::resolve_model_ref`).
-pub(crate) fn parse_model(raw: &str, config: &TabitConfig) -> Result<ModelSelection, String> {
-    let (provider, model) = config
-        .resolve_model_ref(raw)
-        .map_err(|message| format!("--model: {message}"))?;
-    Ok(ModelSelection::new(provider, model))
-}
-
-/// The shared test literal (the tool-filter and continue-miss tests
-/// build on it).
-#[cfg(test)]
-pub(crate) fn bare_args() -> Args {
-    Args {
-        print_prompt: None,
-        session: None,
-        continue_newest: false,
-        list: false,
-        model: None,
-        max_turns: None,
-        rewind: None,
-        json: false,
-        parent: None,
-        parent_call: None,
-        tools: None,
-        without: None,
-        ephemeral: false,
-        preamble: None,
-        extensions: None,
-        install: None,
-        extensions_list: false,
-        extensions_uninstall: None,
+impl Args {
+    /// The assembly's input: the CLI's fields converted to the
+    /// library's options (`tabit-app` owns the shape; the binary
+    /// owns only argv).
+    pub(crate) fn options(&self) -> tabit_app::AppOptions {
+        tabit_app::AppOptions {
+            session: self.session.clone(),
+            continue_newest: self.continue_newest,
+            model: self.model.clone(),
+            max_turns: self.max_turns,
+            parent: self.parent.clone(),
+            parent_call: self.parent_call.clone(),
+            tools: self.tools.clone(),
+            without: self.without.clone(),
+            ephemeral: self.ephemeral,
+            preamble: self.preamble.clone(),
+            extensions: self.extensions.clone(),
+        }
     }
 }
 
 /// The shared two-model test config.
 #[cfg(test)]
-pub(crate) fn test_config() -> TabitConfig {
-    TabitConfig::from_toml_str(
+pub(crate) fn test_config() -> tabit_config::TabitConfig {
+    tabit_config::TabitConfig::from_toml_str(
         r#"
 default_model = { provider = "lmstudio", model = "m" }
 
@@ -462,6 +443,7 @@ id = "m2"
 #[cfg(test)]
 mod tests {
     use super::*;
+    use tabit_app::parse_model;
 
     fn args(list: &[&str]) -> Result<Args, String> {
         parse_args_from(list.iter().map(|s| s.to_string()))

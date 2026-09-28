@@ -753,7 +753,9 @@ policy. Scoped measurement: `cargo llvm-cov -p tabit-core --lcov
 --ignore-run-fail` (the scope cannot build the SDK's example
 binaries, so extension_tools/subprocess_children fail under the
 coverage target dir — their subject is spawned processes either way,
-class 6 both ways). Unit-attributed per file: assemble.rs 92.0%,
+class 6 both ways; the split's files moved to the tabit-app crate
+2026-09 — the composition-root extraction — attribution follows
+the code). Unit-attributed per file: assemble.rs 92.0%,
 cli.rs 96.9%, gate.rs 98.2%, extensions.rs 60.4%, print.rs 20.1%,
 main.rs 0% — 70.8% of 2,082 instrumented lines.
 

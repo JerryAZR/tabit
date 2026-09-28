@@ -180,8 +180,9 @@ Current workspace layout:
   resumes where it now lives and gate, skills, preamble, and tools
   share one world). The `AgentHook`
   member, the `native:select_one` ask, and the settings.toml
-  `[gate] enabled = false` opt-out assemble in the `tabit-core`
-  binary — `tabit-session` stays a mechanism with no policy
+  `[gate] enabled = false` opt-out assemble in `tabit-app` (the
+  composition root; extracted from the binary 2026-09) —
+  `tabit-session` stays a mechanism with no policy
 - `crates/tabit-ext-install` — extension installation (EXTENSIONS.md
   is the record): npm (plain registry HTTP)/git/path sources,
   stage-validate-place installs, name-only `requires` pulls, list,
@@ -240,13 +241,26 @@ Current workspace layout:
   bins — `gate-ext` was deleted 2026-09
   (the gate returns as the built-in `tabit-gate`; examples will ride
   the extension SDK when it is developed)
+- `crates/tabit-app` — the composition root as a library: the
+  opinionated assembly an embedder mounts to build their own agent
+  app over the stack (extracted from the binary 2026-09 so the
+  stack is reusable above Session without copying glue).
+  `AppOptions` is the library's input shape (the assembly fields
+  only — the binary converts from argv); the surface is
+  `core_tools` (the default toolset), `world_registry` +
+  `mount_world` (the extension world's two halves), the gate hook
+  (`PermissionGate`), `assemble`/`host_data` (the session builders
+  behind the host), `host_node` (the process's one net), and
+  `install_root`. tabit-session stays mechanism with no policy —
+  this crate is the policy's linkable home
 - `crates/tabit-core` — the backend binary (`tabit-core`): headless,
   no UI and no frontend references — frontends spawn it, never the
-  other way. Print mode (`-p <PROMPT>`, `--rewind <n>`) and JSON
-  mode (`--json` — the stdio protocol edge) over the session host
-  (create / `--continue` / `--session <path>` / `--list`); both
-  session modes boot the same extension world (owner ruling
-  2026-09-27: `world_registry`/`mount_world` in assemble.rs — an
+  other way. argv in (`cli.rs` converts to `tabit_app::AppOptions`),
+  two I/O arms out. Print mode (`-p <PROMPT>`, `--rewind <n>`) and
+  JSON mode (`--json` — the stdio protocol edge) over the session
+  host (create / `--continue` / `--session <path>` / `--list`); both
+  session modes ride tabit-app's same extension world (owner ruling
+  2026-09-27: `world_registry`/`mount_world` — an
   installed package exists in every mode; no mode-specific
   surprises), differing only at the I/O arm: print reads no wire
   frames (Esc/card answers on plain stdin) and stdout carries

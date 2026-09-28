@@ -33,23 +33,18 @@
 //! `print` is print mode — the smallest frontend — and this file is
 //! the entry: mode dispatch and the failure reporters.
 
-mod assemble;
 mod cli;
-mod extensions;
-// serde_json's `Value` indexing returns Null for missing keys — it
-// never panics — and the ask-answer reads live on that ergonomics
-// (the same allowance the extension SDK's bins carry).
-#[allow(clippy::indexing_slicing)]
-mod gate;
 mod print;
 
 use std::sync::Arc;
 use tabit_config::{AuthConfig, TabitConfig};
 use tabit_session::{SessionHost, SessionHostWiring, SessionStore};
 
-use crate::assemble::{ContinueMiss, assemble, host_data, host_node, install_root};
 use crate::cli::{Mode, mode_of, parse_args};
 use crate::print::{list_sessions, print_banner, print_mode};
+use tabit_app::{
+    ContinueMiss, assemble, host_data, host_node, install_root, mount_world, world_registry,
+};
 
 /// The first-run setup guide: a fresh install has no config, which is
 /// normal — the failure message must teach, not scare.
@@ -198,7 +193,7 @@ fn run() -> Result<i32, String> {
             // fragment merge, skills, registry) — shared with print
             // mode; a settings failure is a plain startup failure.
             let (registry, launchable) =
-                match assemble::world_registry(&args, config, Arc::new(auth)) {
+                match world_registry(&args.options(), config, Arc::new(auth)) {
                     Ok(world) => world,
                     Err(detail) => return json_startup_failure(&detail),
                 };
@@ -247,7 +242,7 @@ fn run() -> Result<i32, String> {
                     frontend,
                 )
             });
-            let mounted = assemble::mount_world(launchable, &runtime);
+            let mounted = mount_world(launchable, &runtime);
             // Assemble failures (session unreadable, model unbuildable)
             // reject the handshake with the plain reason — not the
             // config setup guide, which would be advice for a problem
@@ -256,7 +251,7 @@ fn run() -> Result<i32, String> {
             // startup contract; `session_opened`'s `resumed: false`
             // says so).
             let (session, startup_notes) = match assemble(
-                &args,
+                &args.options(),
                 &registry,
                 &store,
                 ContinueMiss::StartFresh,
@@ -266,7 +261,7 @@ fn run() -> Result<i32, String> {
                 Err(detail) => return json_startup_failure(&detail),
             };
             print_banner(&session);
-            let data = host_data(&args, &registry, &store, &mounted);
+            let data = host_data(&args.options(), &registry, &store, &mounted);
             Ok(runtime.block_on(async {
                 let handle = structure.attach(session, startup_notes, data);
                 let code = tabit_session::edge::serve(
@@ -290,12 +285,12 @@ fn run() -> Result<i32, String> {
             // 2026-09-27): an installed package exists in every mode.
             // The runtime is the boot's and the run's one serving
             // runtime — the supervisor's watchers outlive the boot.
-            let (registry, launchable) = assemble::world_registry(&args, config, Arc::new(auth))?;
+            let (registry, launchable) = world_registry(&args.options(), config, Arc::new(auth))?;
             let runtime = tokio::runtime::Builder::new_current_thread()
                 .enable_all()
                 .build()
                 .map_err(|e| e.to_string())?;
-            let mounted = assemble::mount_world(launchable, &runtime);
+            let mounted = mount_world(launchable, &runtime);
             print_mode(&args, &registry, Some(&mounted), &runtime)
         }
     }

@@ -1,0 +1,29 @@
+[package]
+name = "tabit-app"
+version.workspace = true
+edition.workspace = true
+license = "MIT"
+description = "The tabit composition root: the opinionated assembly (toolset, extension world, gate, host data) as a library — the presets an embedder mounts to build their own agent app over the tabit stack."
+
+[dependencies]
+futures = { workspace = true }
+rig-agent = { path = "../rig-agent", version = "0.41.0", default-features = false }
+# The tool-result cargo shapes extension proxies build.
+rig-core = { path = "../rig-core", version = "0.41.0", default-features = false }
+serde_json = { workspace = true }
+tabit-config = { path = "../tabit-config", version = "0.41.0" }
+tabit-ext = { path = "../tabit-ext", version = "0.41.0" }
+tabit-gate = { path = "../tabit-gate", version = "0.41.0" }
+tabit-protocol = { path = "../tabit-protocol", version = "0.41.0" }
+tabit-session = { path = "../tabit-session", version = "0.41.0" }
+tabit-tools = { path = "../tabit-tools", version = "0.41.0" }
+tokio = { workspace = true }
+tokio-util = { version = "0.7", default-features = false }
+
+[dev-dependencies]
+# The gate hook's tests drive the engine's hook context double
+# (the same dev-feature split tabit-session uses).
+rig-agent = { path = "../rig-agent", version = "0.41.0", default-features = false, features = ["test-utils"] }
+
+[lints]
+workspace = true

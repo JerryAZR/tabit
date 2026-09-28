@@ -1,10 +1,11 @@
-//! The binary's assembly policy — everything ruled to live HERE,
-//! never in tabit-session (the front/back split: sessions are
-//! mechanism, the binary decides what mounts). Session builds (the
-//! preamble, the tool sets, the invocation's tool filter, the hook
-//! stack), the process's node, and the extension side of a boot (the
-//! scan's shaping, the providers-fragment merge, the skills
-//! contribution, the supervisor launch).
+//! The composition root's assembly policy — everything ruled to
+//! live HERE, never in tabit-session (the front/back split: sessions
+//! are mechanism, the composition decides what mounts). Session
+//! builds (the preamble, the tool sets, the invocation's tool
+//! filter, the hook stack), the process's node, and the extension
+//! side of a boot (the scan's shaping, the providers-fragment merge,
+//! the skills contribution, the supervisor launch). The `tabit-core`
+//! binary is one consumer; an embedder is any other.
 
 use std::path::PathBuf;
 use std::sync::Arc;
@@ -16,10 +17,10 @@ use tabit_session::{
 };
 use tabit_tools::dynamic_contextual;
 
-use crate::cli::Args;
-use crate::cli::parse_model;
 use crate::extensions;
 use crate::gate;
+use crate::options::AppOptions;
+use crate::options::parse_model;
 
 /// The process's node — the one routing layer the session host and
 /// its subprocess children mount on (one net per process, by design:
@@ -28,7 +29,7 @@ use crate::gate;
 /// an `Arc` through every assembly site. The name is the ask-id mint
 /// — unique per process, never colliding with a child's (a child
 /// names its node by its boot session's uuid).
-pub(crate) fn host_node() -> std::sync::Arc<tabit_session::Node> {
+pub fn host_node() -> std::sync::Arc<tabit_session::Node> {
     static NODE: std::sync::OnceLock<std::sync::Arc<tabit_session::Node>> =
         std::sync::OnceLock::new();
     NODE.get_or_init(|| {
@@ -91,7 +92,7 @@ fn tabit_exe() -> Result<PathBuf, String> {
 /// nothing, and an allow that matches nothing is a tool-less
 /// session, a legal shape (a chatbot). Forwarded child lists rely
 /// on this — a child may be sent names it does not offer.
-fn tool_filter(args: &Args) -> (Option<Vec<String>>, Vec<String>) {
+fn tool_filter(args: &AppOptions) -> (Option<Vec<String>>, Vec<String>) {
     let split = |spec: &Option<String>| -> Option<Vec<String>> {
         let raw = spec.as_deref()?;
         Some(
@@ -130,7 +131,7 @@ fn retain_filtered(
 }
 
 fn assemble_session(
-    args: &Args,
+    args: &AppOptions,
     registry: ModelRegistry,
     selection: ModelSelection,
     resume_target: Option<PathBuf>,
@@ -291,7 +292,7 @@ fn coding_tools() -> Vec<rig_agent::tool::DynamicTool> {
 /// candidate set (core plus extension proxies). The extension
 /// mount's conflict baseline is this set — exactly what the session
 /// would mount without extensions.
-pub(crate) fn core_tools() -> Vec<rig_agent::tool::DynamicTool> {
+pub fn core_tools() -> Vec<rig_agent::tool::DynamicTool> {
     let mut tools = coding_tools();
     tools.push(tabit_session::subagent::subagent_tool());
     tools.push(tabit_session::subagent::followup_tool());
@@ -308,13 +309,13 @@ pub(crate) fn core_tools() -> Vec<rig_agent::tool::DynamicTool> {
 /// One registry for the whole process (the ruling: providers are user
 /// config, not per-session) — every session the host builds shares
 /// the provider client caches.
-pub(crate) fn host_data(
-    args: &Args,
+pub fn host_data(
+    args: &AppOptions,
     registry: &ModelRegistry,
     store: &SessionStore,
     extensions: &std::sync::Arc<extensions::Mounted>,
 ) -> tabit_session::SessionHostData {
-    let fresh_args = Args {
+    let fresh_args = AppOptions {
         session: None,
         continue_newest: false,
         // A new session is a user session of this process: no parent
@@ -349,7 +350,7 @@ pub(crate) fn host_data(
                 .find(|summary| summary.id == session_id)
                 .ok_or_else(|| format!("no stored session with id `{session_id}`"))?
                 .path;
-            let args = Args {
+            let args = AppOptions {
                 session: Some(path),
                 ..open_args.clone()
             };
@@ -367,13 +368,13 @@ pub(crate) fn host_data(
 /// The install target: the default extensions root only (task 6's
 /// ruling — `--extensions` is a backend test/dev override, not an
 /// install destination).
-pub(crate) fn install_root() -> Result<PathBuf, String> {
+pub fn install_root() -> Result<PathBuf, String> {
     tabit_config::home_dir()
         .map(|home| home.join(".tabit").join("extensions"))
         .ok_or_else(|| "cannot resolve the home directory for the extensions root".to_string())
 }
 
-pub(crate) fn extension_root(args: &Args) -> Option<PathBuf> {
+pub fn extension_root(args: &AppOptions) -> Option<PathBuf> {
     args.extensions
         .clone()
         .or_else(|| tabit_config::home_dir().map(|home| home.join(".tabit").join("extensions")))
@@ -388,8 +389,8 @@ pub(crate) fn extension_root(args: &Args) -> Option<PathBuf> {
 /// existing in one mode and not the other). The boot half is
 /// [`mount_world`], kept separate so the JSON edge can mount its
 /// wire structure between them.
-pub(crate) fn world_registry(
-    args: &Args,
+pub fn world_registry(
+    args: &AppOptions,
     config: tabit_config::TabitConfig,
     auth: std::sync::Arc<tabit_config::AuthConfig>,
 ) -> Result<(ModelRegistry, Launchable), String> {
@@ -434,7 +435,7 @@ pub(crate) fn world_registry(
 /// The extension world, boot half: launch + handshakes + the tool
 /// mount over the core baseline. `runtime` is the SERVING runtime —
 /// the boot spawns watchers that must outlive it.
-pub(crate) fn mount_world(
+pub fn mount_world(
     launchable: Launchable,
     runtime: &tokio::runtime::Runtime,
 ) -> std::sync::Arc<extensions::Mounted> {
@@ -501,9 +502,9 @@ pub(crate) fn boot_extensions(
 /// and never announce: their contributions are exactly the
 /// scan-driven ones. Unmet `requires` become refusals (presence, not
 /// liveness — the mounted set is the truth, standing never is).
-pub(crate) struct Launchable {
-    pub(crate) found: Vec<tabit_ext::manifest::Discovered>,
-    pub(crate) packages: Vec<(String, PathBuf)>,
+pub struct Launchable {
+    pub found: Vec<tabit_ext::manifest::Discovered>,
+    pub packages: Vec<(String, PathBuf)>,
 }
 
 pub(crate) fn partition(
@@ -609,7 +610,7 @@ pub(crate) fn extension_skills_catalog(
 /// and an empty store (a brand-new project) is not an error. The
 /// handshake's `resumed: false` tells the frontend what happened.
 #[derive(Clone, Copy, PartialEq, Eq)]
-pub(crate) enum ContinueMiss {
+pub enum ContinueMiss {
     Fail,
     StartFresh,
 }
@@ -619,8 +620,8 @@ pub(crate) enum ContinueMiss {
 /// a temp store instead of the repo's. The registry is the caller's
 /// process-shared one (owner ruling: providers are user config, not
 /// per-session — one client cache per provider per process).
-pub(crate) fn assemble(
-    args: &Args,
+pub fn assemble(
+    args: &AppOptions,
     registry: &ModelRegistry,
     store: &SessionStore,
     miss: ContinueMiss,
@@ -672,12 +673,29 @@ pub(crate) fn assemble(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::cli::{bare_args, parse_args_from, test_config};
     use tabit_config::AuthConfig;
     use tabit_session::{SessionHost, SessionHostWiring};
 
-    fn args(list: &[&str]) -> Result<Args, String> {
-        parse_args_from(list.iter().map(|s| s.to_string()))
+    /// The shared two-model test config.
+    fn test_config() -> tabit_config::TabitConfig {
+        tabit_config::TabitConfig::from_toml_str(
+            r#"
+default_model = { provider = "lmstudio", model = "m" }
+
+[providers.lmstudio]
+base_url = "http://127.0.0.1:1234/v1"
+api = "openai-completions"
+keyless = true
+
+[[providers.lmstudio.models]]
+id = "m"
+
+[[providers.lmstudio.models]]
+id = "m2"
+"#,
+            std::path::Path::new("providers.toml"),
+        )
+        .expect("test config")
     }
 
     fn named_tool(name: &'static str) -> rig_agent::tool::DynamicTool {
@@ -695,10 +713,10 @@ mod tests {
     #[test]
     fn the_tool_filter_admits_allowed_and_not_denied() {
         let candidate = vec![named_tool("read"), named_tool("bash"), named_tool("echo")];
-        let args = Args {
+        let args = AppOptions {
             tools: Some("read,echo".to_string()),
             without: Some("echo".to_string()),
-            ..bare_args()
+            ..AppOptions::default()
         };
         let (allow, deny) = tool_filter(&args);
         let kept = retain_filtered(candidate, &allow, &deny);
@@ -717,9 +735,9 @@ mod tests {
         // allow that matches nothing is a tool-less session, a legal
         // shape (a chatbot).
         let candidate = || vec![named_tool("read"), named_tool("bash")];
-        let args = Args {
+        let args = AppOptions {
             tools: Some("read,typo".to_string()),
-            ..bare_args()
+            ..AppOptions::default()
         };
         let (allow, deny) = tool_filter(&args);
         let kept = retain_filtered(candidate(), &allow, &deny);
@@ -729,9 +747,9 @@ mod tests {
             "the unknown allow name matched nothing, without error"
         );
 
-        let args = Args {
+        let args = AppOptions {
             without: Some("typo,bash".to_string()),
-            ..bare_args()
+            ..AppOptions::default()
         };
         let (allow, deny) = tool_filter(&args);
         let kept = retain_filtered(candidate(), &allow, &deny);
@@ -742,9 +760,9 @@ mod tests {
         );
 
         // The chatbot: an allow matching nothing is legal.
-        let args = Args {
+        let args = AppOptions {
             tools: Some("nothing-real".to_string()),
-            ..bare_args()
+            ..AppOptions::default()
         };
         let (allow, deny) = tool_filter(&args);
         assert!(
@@ -996,7 +1014,10 @@ id = "m"
         let config = Arc::new(test_config());
         let auth = Arc::new(AuthConfig::default());
         let registry = ModelRegistry::new(config.clone(), auth.clone());
-        let cont_print = args(&["--continue", "-p", "hi"]).expect("valid print combo");
+        let cont_print = AppOptions {
+            continue_newest: true,
+            ..AppOptions::default()
+        };
 
         let error = match assemble(&cont_print, &registry, &store, ContinueMiss::Fail, None) {
             Err(error) => error,
@@ -1004,7 +1025,10 @@ id = "m"
         };
         assert!(error.contains("no sessions yet"), "{error}");
 
-        let cont_json = args(&["--continue", "--json"]).expect("valid json combo");
+        let cont_json = AppOptions {
+            continue_newest: true,
+            ..AppOptions::default()
+        };
         let (session, notes) = assemble(
             &cont_json,
             &registry,
@@ -1038,7 +1062,7 @@ id = "m"
         let store = SessionStore::new(&dir);
         let registry = ModelRegistry::new(Arc::new(test_config()), Arc::new(AuthConfig::default()));
         let mounted = Arc::new(extensions::Mounted::none());
-        let data = host_data(&bare_args(), &registry, &store, &mounted);
+        let data = host_data(&AppOptions::default(), &registry, &store, &mounted);
 
         let (created, notes) = (data.create)().expect("the create closure builds");
         assert!(!created.resumed(), "a create is always fresh");
@@ -1096,9 +1120,9 @@ id = "m"
         let _ = std::fs::remove_dir_all(&dir);
         let store = SessionStore::new(&dir);
         let registry = ModelRegistry::new(Arc::new(test_config()), Arc::new(AuthConfig::default()));
-        let child_role = Args {
+        let child_role = AppOptions {
             ephemeral: true,
-            ..bare_args()
+            ..AppOptions::default()
         };
         let (session, _) = assemble(
             &child_role,

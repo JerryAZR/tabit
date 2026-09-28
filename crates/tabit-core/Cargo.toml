@@ -19,8 +19,9 @@ rig-agent = { path = "../rig-agent", version = "0.41.0", default-features = fals
 # provider request dies in hyper-util with "invalid URL, scheme is not http".
 rig-core = { path = "../rig-core", version = "0.41.0", default-features = false, features = ["rustls"] }
 tabit-config = { path = "../tabit-config", version = "0.41.0" }
-tabit-ext = { path = "../tabit-ext", version = "0.41.0" }
-tabit-gate = { path = "../tabit-gate", version = "0.41.0" }
+# The assembly policy: the toolset, the extension world, the gate
+# hook, the host data — everything the binary's mode arms mount.
+tabit-app = { path = "../tabit-app", version = "0.41.0" }
 # The backend's one stderr subscriber (WARN and up) — without it
 # every tracing::warn in the backend vanishes into the no-op sink.
 tracing-subscriber = { workspace = true }
@@ -28,7 +29,6 @@ tabit-ext-install = { path = "../tabit-ext-install", version = "0.41.0" }
 tokio-util = { version = "0.7", default-features = false }
 tabit-protocol = { path = "../tabit-protocol", version = "0.41.0" }
 tabit-session = { path = "../tabit-session", version = "0.41.0" }
-tabit-tools = { path = "../tabit-tools", version = "0.41.0" }
 futures = { workspace = true }
 serde_json = { workspace = true }
 tokio = { workspace = true, features = ["rt-multi-thread", "macros"] }

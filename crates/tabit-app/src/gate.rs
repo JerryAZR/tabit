@@ -1,6 +1,6 @@
 //! The built-in permission gate's integration: pi-sanity's ported
 //! policy (crates/tabit-gate) as one in-process `AgentHook` member,
-//! assembled into the binary's hook stack (owner ruling 2026-09 — a
+//! assembled into the composition's hook stack (owner ruling 2026-09 — a
 //! default safety feature must not fail open on a dead extension
 //! process). The card flow follows pi-sanity's integration layer:
 //! `allow` runs, `deny` skips with the reason, `ask` opens one
@@ -9,6 +9,11 @@
 //! available (print mode, a headless host) all skip, never silently
 //! run. There is deliberately no "Always allow" in v1 — pi-sanity
 //! has none, and the default rule set is shaped to ask rarely.
+
+// serde_json's `Value` indexing returns Null for missing keys — it
+// never panics — and the ask-answer reads live on that ergonomics
+// (the same allowance the extension SDK's bins carry).
+#![allow(clippy::indexing_slicing)]
 
 use rig_agent::agent::hook::{AgentHook, HookContext, ToolCall, ToolCallAction};
 use rig_agent::tool::interaction::InteractionOutcome;

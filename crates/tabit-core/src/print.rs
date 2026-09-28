@@ -13,9 +13,9 @@ use tabit_protocol::SessionCommand;
 use tabit_session::SessionEvent;
 use tabit_session::{ModelRegistry, Session, SessionHost, SessionHostWiring, SessionStore};
 
-use crate::assemble::{ContinueMiss, assemble, host_data, host_node};
 use crate::cli::Args;
-use crate::extensions;
+use tabit_app::extensions;
+use tabit_app::{ContinueMiss, assemble, host_data, host_node};
 
 pub(crate) fn list_sessions(store: &SessionStore) -> Result<(), String> {
     let summaries = store.list().map_err(|e| e.to_string())?;
@@ -185,8 +185,9 @@ pub(crate) fn print_mode(
                 .to_string(),
         );
     }
+    let options = args.options();
     let (mut session, startup_notes) = assemble(
-        args,
+        &options,
         registry,
         &SessionStore::project_default(),
         ContinueMiss::Fail,
@@ -231,7 +232,7 @@ pub(crate) fn print_mode(
             boot_parent: args.parent.clone(),
             boot_parent_call: args.parent_call.clone(),
         };
-        let data = host_data(args, registry, &store, mounted);
+        let data = host_data(&options, registry, &store, mounted);
             let mut handle = SessionHost::spawn(session, startup_notes, wiring, data);
             let boot = handle.info().session_id.clone();
             {

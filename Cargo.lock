@@ -2957,6 +2957,24 @@ dependencies = [
 ]
 
 [[package]]
+name = "tabit-app"
+version = "0.41.0"
+dependencies = [
+ "futures",
+ "rig-agent",
+ "rig-core",
+ "serde_json",
+ "tabit-config",
+ "tabit-ext",
+ "tabit-gate",
+ "tabit-protocol",
+ "tabit-session",
+ "tabit-tools",
+ "tokio",
+ "tokio-util",
+]
+
+[[package]]
 name = "tabit-config"
 version = "0.41.0"
 dependencies = [
@@ -2979,13 +2997,11 @@ dependencies = [
  "rig-agent",
  "rig-core",
  "serde_json",
+ "tabit-app",
  "tabit-config",
- "tabit-ext",
  "tabit-ext-install",
- "tabit-gate",
  "tabit-protocol",
  "tabit-session",
- "tabit-tools",
  "tokio",
  "tokio-util",
  "tracing-subscriber",

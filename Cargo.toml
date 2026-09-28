@@ -18,6 +18,7 @@ default-members = [
     "crates/tabit-session",
     "crates/tabit-gate",
     "crates/tabit-tools",
+    "crates/tabit-app",
     "crates/tabit-core",
 ]
 exclude = []
