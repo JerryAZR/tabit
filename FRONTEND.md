@@ -64,6 +64,75 @@ version landed as one protocol-version bump with no compatibility
 period; always check the report's `protocol_version`. (`tabit-core --list` prints a human table —
 there is no JSON listing edge.)
 
+## Getting started: your first frontend
+
+The sections below are the contract; this is the path through it —
+the order you actually build in. Wire lines are shown as the JSONL
+you read and write on the child's stdio (one frame per line; the
+`type` tag is the frame's identity throughout).
+
+1. **Spawn the backend.** `tabit-core --json`, spawned by you, in
+   the project directory (sessions live under its
+   `.tabit/sessions`; config resolves from the same world — the
+   setup guide below is what a config-less first run sends). Session
+   flags you may add: `--continue` (resume the newest stored
+   session), `--session <path>`, `--model provider/model`,
+   `--max-turns <n>`, `--ephemeral` (in memory, nothing persists).
+   You own the lifecycle: you picked the binary, you kill it.
+2. **Read the first line — the report.**
+   `{"type":"report","protocol_version":20}`. Protocol facts only.
+   **You are the version check**: a version you do not speak is
+   yours to kill and clean up (§3). After the report there is no
+   handshake state — your commands may flow from your first line
+   onward.
+3. **Collect the boot's addresses.** The boot announcements follow
+   (common order, not a contract — build on stamps and kinds, never
+   position): `session_opened` carries the boot session's id (your
+   command address), then its `skills_available`, then the
+   backend-level `sessions_available` and `extensions_available`
+   catalogs, then — for a resumed boot — the replay bracket
+   (`replay_begin` … `replay_end`).
+4. **Send your first message.**
+   `{"type":"message","session":"<the id>","text":"hello"}`. Idle,
+   it starts a run (acknowledged in milliseconds by `user_message`);
+   mid-run, it steers at the next turn boundary (acknowledged by
+   `message_queued`). Everything the run does arrives as stamped
+   events on the session's stream: `text_delta`/`reasoning_delta`,
+   `tool_call`/`tool_result` pairs, turn brackets,
+   `completion_call` (per-turn usage), and exactly one terminal —
+   `run_finished`/`run_failed`/`run_aborted`. §6 is the vocabulary;
+   §4 is the model behind it.
+5. **Render by identity, not order.** Dispatch on each frame's
+   `type` and stream stamp. The backend's stdout is protocol —
+   never mine it for diagnostics; capture its **stderr** instead
+   (that is the crash-report path, §3.7).
+6. **Answer cards.** A permission gate or an extension asking the
+   user crosses as `interaction_request { id, ui_type, payload }` —
+   render the template (TOOLS.md), then answer with
+   `{"type":"interaction_response","session":"<id>","id":"<the
+   request id>","payload":{"selected":["Allow"]}}`. §8 is the card
+   law; the settle close (`interaction_settled`) follows.
+7. **Drive the rest through commands.** `abort` (running: preempts
+   and stops the subtree), `new_session`/`open_session` (the
+   multi-session host), `checkout` (rewind/branch), `model`
+   (switch), `compact` (manual compaction) — the full table with
+   their timing laws is §5. Subagent children are command-addressed
+   the same way: any id you saw stamped on a frame is an address.
+8. **Shut down by closing stdin.** Close stdin and the backend
+   dies: an in-flight run aborts (its terminal still flushes),
+   queued messages discard, the process exits. Exit codes: `0`
+   broken pipe, `1` startup failure (the report, then one unstamped
+   `error` event carrying the reason — display it; a config reason
+   carries the first-run setup guide), `101` an internal crash
+   (display the stderr report — that is what the user sends back).
+
+The tabit-core source is itself a frontend of the simplest kind:
+`crates/tabit-core/src/print.rs` drives exactly this loop in one
+file (one message, rendered events, cards answered from stdin), and
+`crates/tabit-app/examples/host_cards.rs` is the same shape reduced
+to a page. Building in-process instead? That is EMBEDDING.md's
+world, not this one.
+
 ## 1. Architecture: two processes, one pipe
 
 You spawn the backend; you never link it as a library.

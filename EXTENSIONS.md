@@ -32,6 +32,87 @@ Frontend-protocol support is inherited, never re-specified here — the
 pipe carries the frontend grammar verbatim, and an extension speaks it
 as a peer.
 
+## Getting started: your first extension
+
+The sections below are the record; this is the path through it. Two
+ways in — with the Rust SDK, or from scratch in any language — and
+the local loop is the same for both.
+
+**With the SDK (Rust).** A package is a directory: a `tabit.json`
+manifest plus an entry binary. The manifest carries install-time
+facts only:
+
+```json
+{
+  "name": "my-ext",
+  "version": "0.1.0",
+  "description": "what it does, one line",
+  "entry": ["my-ext"]
+}
+```
+
+`entry` is argv (arguments follow the command: `["node",
+"server.js"]`); absent means a static package (skills and provider
+fragments contribute; no process ever spawns). The binary is the whole surface
+— `crates/tabit-ext-sdk/src/bin/echo.rs` is the shape, in one file:
+
+```rust
+fn main() {
+    tabit_ext_sdk::serve(
+        Extension::new()
+            .tool(tool(
+                "my_tool",
+                "What the model sees.",
+                schema_for!(["path"]),
+                |args, ctx| async move { Ok(Output::from("done")) },
+            ))
+            .watch(watch(tags::INTERACTION_SETTLED, |ctx, frame| async move {
+                ctx.emit(/* an event the frontend sees */)
+            })),
+    )
+}
+```
+
+Bodies are futures (asks await natively; `ctx.cancelled()` polls the
+leash — "Tool cancellation crosses the pipe" below). The SDK bins
+are the full worked set: `echo` (tools + asks + watches),
+`autotitle` (model_prompt), `lmstudio` (a provider relay),
+`child-ext` (owned subagent children).
+
+**From scratch (any language).** The pipe is JSONL on your stdio and
+six laws:
+
+1. **You speak first.** Your very first stdout line is the report:
+   `{"type":"report","protocol_version":5,"tools":[…],"hooks":[…],
+   "watch":[…]}` — `tools` carry `name`/`description`/`schema`
+   (JSON Schema), `hooks` name declared hook points, `watch` names
+   watched event tags. What you report is what you serve.
+2. The host answers with `host_facts` (`core_path`, `cwd`); there is
+   no other handshake.
+3. The frontend grammar rides the pipe flat ("The wire" below):
+   tool calls arrive as commands, your events and asks cross as
+   stamped frames, hook consults and results ride the hook lane.
+4. **Ignore nothing.** An unparseable line, a well-formed frame of a
+   type the host does not know, or a result answering the wrong
+   correlation is a contract break — death with the snippet. If you
+   need new extension→host vocabulary, the protocol version bumps
+   and older hosts refuse you at the report (the one-directional
+   compatibility law below).
+5. Never block the pipe: answers may take arbitrarily long, but you
+   keep reading while you work ("Tool bodies never stall the
+   harness").
+6. The behavioral reference is `crates/tabit-ext/src/bin/ext-double.rs`
+   — one pathological path per argv, spoken over the real pipe.
+
+**The local loop.** `tabit-core install path:/abs/path/to/pkg`
+(stage-validate-place; the directory is the single truth — no
+lockfile), then boot the backend: stderr reports
+`extension my-ext: loaded`, the model's vocabulary carries your
+tools on the next boot, and `tabit-core extensions list` shows the
+standing. Update is install again; the refusal-uninstall and the
+disable list (`~/.tabit/settings.toml` or the workspace layer) are
+the "Packages mount by default" section below.
+
 ## Extensions are subprocesses over a frozen pipe (2026-09, the
 item-9 substrate ruling)
 
