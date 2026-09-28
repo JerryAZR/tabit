@@ -219,6 +219,12 @@ git.
   `context > max − 32K` (the two-turn reserve; no mailbox gate —
   urgent is urgent). Idle checks A ∨ B; the seam checks only B. The
   disjunction makes idle ≤ seam at every window by construction.
+  The pause point is the **mechanism**, never a threshold preference
+  (owner ruling 2026-09-29): a reference-style "compact at 50%
+  before a follow-up" would land on the same pause point — the only
+  delta is the cap. Unchanged for now; the shape, if ever wanted, is
+  a command-line override for the idle cap (`IDLE_FRACTION`), not a
+  new door.
 - **Measurement, never estimation (the delta regime)**: every
   assistant commit stamps `delta_tokens = total[k] − total[k−1]`
   (predecessor: the previous measured assistant in the regime, the
