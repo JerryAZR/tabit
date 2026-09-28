@@ -133,8 +133,11 @@ impl ChildSpec {
         self
     }
 
-    /// Restrict the child's toolset to these names; an unknown name
-    /// fails the child loudly at startup.
+    /// Restrict the child's toolset to these names —
+    /// include-if-it-exists child-side: a name the child does not
+    /// offer simply matches nothing (forwarded lists legitimately
+    /// carry such names), and a list matching nothing is a tool-less
+    /// child, a legal shape.
     pub fn tools(mut self, names: Vec<String>) -> Self {
         self.tools = Some(names);
         self

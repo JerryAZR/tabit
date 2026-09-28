@@ -142,7 +142,12 @@ Current workspace layout:
   synchronously before any task starts, one feed, the writer ending
   on the stream's end token), the
   subagent framework (`subagent.rs`: `SpawnContext` — spawn/drive a
-  subprocess child, the one substrate; `subprocess.rs`: the bridge —
+  subprocess child, the one substrate; the tool policy crossing
+  (owner ruling 2026-09-27): the spawner forwards allow/deny lists —
+  the blacklist extended with `subagent`/`followup`, the recursion
+  guard, never a baked-in role check — and the child filters its own
+  toolset (include/exclude-if-it-exists; an allow matching nothing
+  is a legal tool-less child); `subprocess.rs`: the bridge —
   the session adapter over `tabit-wire`'s client (the child's lane
   on the node: stamped arrivals intake — one act serves the fan,
   the grandchild learning, and the ask route home; the exit

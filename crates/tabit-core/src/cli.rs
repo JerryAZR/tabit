@@ -55,6 +55,13 @@ usage: tabit-core -p <PROMPT>            print mode: one prompt, one run
        tabit-core --continue --rewind <n>
                                          rewind n user messages, then exit;
                                          add -p <PROMPT> to branch with it
+       tabit-core -p <PROMPT> --tools <a,b,..> | --without <a,b,..>
+                                         filter this run's toolset:
+                                         include-if-it-exists (an unknown
+                                         name matches nothing; an allow
+                                         matching nothing is a tool-less
+                                         chatbot); --without also forwards
+                                         to subagent children
        tabit-core --json [session flags]
                                          JSON protocol on stdio (scriptable)
                                          child role adds: --parent <id> (the
@@ -209,6 +216,8 @@ fn validate_mode(args: &Args) -> Result<Mode, String> {
             "--model",
             "--max-turns",
             "--preamble",
+            "--tools",
+            "--without",
         ],
         Mode::Install => &["install <source>"],
         Mode::Extensions => &["extensions list", "extensions uninstall <name>"],

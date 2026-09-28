@@ -757,16 +757,19 @@ class 6 both ways). Unit-attributed per file: assemble.rs 92.0%,
 cli.rs 96.9%, gate.rs 98.2%, extensions.rs 60.4%, print.rs 20.1%,
 main.rs 0% — 70.8% of 2,082 instrumented lines.
 
-**Filled (attributed, unit — `assemble.rs` tests):** `core_sets`'
-parent/child role derivation (the spawner and its addressing tool
-mount only in the parent role — recursion by omission, both sides);
-`host_data`'s closures end to end (create is always fresh; open
-resolves the stored id and resumes it — the open path needs a
-file-backed session, staged the real way: one run over the
-dead-port provider commits the user message, the run fails, the
+**Filled (attributed, unit — `assemble.rs` tests):** the core
+toolset's role independence (`core_tools` mounts the delegation pair
+in every process — the 2026-09-27 ruling: recursion is the spawner's
+forwarded blacklist, never a role check; the pre-ruling role pin
+died with the check); `host_data`'s closures end to end (create is
+always fresh; open resolves the stored id and resumes it — the open
+path needs a file-backed session, staged the real way: one run over
+the dead-port provider commits the user message, the run fails, the
 file exists — deferred creation is the catalog's law; the unknown
 id is the loud named error); the ephemeral in-memory boot
-(`path().is_none()`).
+(`path().is_none()`); the filter semantics (unknown flag names
+match nothing — include/exclude-if-it-exists — and a matching-
+nothing allow is a legal tool-less session).
 
 **Filled (behavioral, class-6 e2e — `tests/modes.rs`, the real
 binary over an httpmock SSE provider with per-child env):** print

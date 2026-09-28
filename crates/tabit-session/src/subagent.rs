@@ -16,7 +16,7 @@
 //!
 //! The framework's surface is exactly the parent-half machinery a
 //! child has no worker to provide: [`SpawnContext::spawn_subprocess`]
-//! (the bridge builder — model, cwd, toolset, budget) and
+//! (the bridge builder — model, cwd, tool policy, budget) and
 //! [`SpawnContext::drive_subprocess`] (the pump under the abort
 //! leash — the one recipe extensions must not hand-roll). The
 //! session's [`SubagentPool`](crate::subagent_pool) keeps completed
@@ -34,9 +34,9 @@ use tabit_protocol::ModelSelection;
 use tokio_util::sync::CancellationToken;
 
 /// The process-wide half: everything an extension tool cannot get
-/// from [`ToolContext`] alone, minted once by the assembly. Defaults
-/// and access — not policy: the default child toolset and budget are
-/// conveniences to filter or ignore.
+/// from [`ToolContext`] alone, minted once by the assembly. Policy,
+/// not defaults: the tool lists and budget cross to children as the
+/// spawner's choices.
 pub struct SubagentParts {
     /// The node the host and its children share — spawns register
     /// their lanes on it (the learning table carries child and
@@ -54,10 +54,18 @@ pub struct SubagentParts {
     /// children on the same root (and tests pin empty dirs for
     /// hermeticity). An empty dir is a valid extension-less root.
     pub extensions: PathBuf,
-    /// The default child toolset — the parent's minus the subagent
-    /// tool (recursion depth is enforced by omission). A starting
-    /// point for allow-lists: filter it, ignore it, build your own.
-    pub tools: Vec<DynamicTool>,
+    /// The assembly's effective allow-list, forwarded to children
+    /// (`--tools`) — `None` when the invocation set none (the usual
+    /// case: the child mounts everything the blacklist spares).
+    /// Policy, never tools: the child assembles its own toolset and
+    /// filters it itself.
+    pub tool_allow: Option<Vec<String>>,
+    /// The assembly's effective deny-list, forwarded to children
+    /// (`--without`, extended with `subagent`/`followup` by the
+    /// spawn preset — the recursion guard is the spawner's blacklist
+    /// policy, never a baked-in role check). Unknown names match
+    /// nothing child-side (include/exclude-if-it-exists).
+    pub tool_deny: Vec<String>,
     /// The default per-child model-call budget.
     pub max_turns: usize,
 }
@@ -126,16 +134,29 @@ impl SpawnContext {
 
     /// Begin a subprocess child: the spawner's preset over the shared
     /// spec — the exe, this parent's identity (`--parent` speaks at
-    /// the source of truth), the extensions root, and the lane mount
-    /// on the assembly's node. The caller chains the child-role knobs
-    /// (cwd, model, toolset, budget, persistence) and spawns; the
-    /// child announces itself and routing registers at spawn.
+    /// the source of truth), the extensions root, the lane mount
+    /// on the assembly's node, and the tool policy crossing as
+    /// `--tools`/`--without` (the blacklist extended with
+    /// `subagent`/`followup` — the recursion guard; the child
+    /// filters its own toolset against the lists). The caller chains
+    /// the child-role knobs (cwd, model, budget, persistence) and
+    /// spawns; the child announces itself and routing registers at
+    /// spawn.
     pub fn spawn_subprocess(&self) -> tabit_wire::client::ChildSpec {
         let parts = self.parts();
-        tabit_wire::client::ChildSpec::new(parts.exe.clone(), self.parent_cwd().to_path_buf())
-            .parent(self.parent_id().to_string())
-            .extensions(parts.extensions.clone())
-            .on_node(parts.node.clone())
+        let mut deny = parts.tool_deny.clone();
+        deny.push("subagent".to_string());
+        deny.push("followup".to_string());
+        let mut spec =
+            tabit_wire::client::ChildSpec::new(parts.exe.clone(), self.parent_cwd().to_path_buf())
+                .parent(self.parent_id().to_string())
+                .extensions(parts.extensions.clone())
+                .on_node(parts.node.clone())
+                .without(deny);
+        if let Some(allow) = &parts.tool_allow {
+            spec = spec.tools(allow.clone());
+        }
+        spec
     }
 
     /// Drive a subprocess child under the abort leash: the task
@@ -331,36 +352,3 @@ pub fn followup_tool() -> DynamicTool {
 #[cfg(test)]
 #[path = "subagent_tests.rs"]
 mod tests;
-
-/// Filter a toolset down to an allow-list of names — the
-/// `subagent` tool's `tools` arg rides it (the CLI's `--tools` flag
-/// is the assembly's own filter: it composes allow and deny over the
-/// full candidate set, a different concern than a child's
-/// allow-list). An unknown name is a loud error, not a silent
-/// drop — a typo'd allow-list that quietly empties the toolset
-/// would look like a broken child.
-pub fn filter_tools(
-    defaults: &[DynamicTool],
-    allow: &[String],
-) -> Result<Vec<DynamicTool>, ToolExecutionError> {
-    let mut chosen = Vec::with_capacity(allow.len());
-    let mut missing = Vec::new();
-    for name in allow {
-        match defaults.iter().find(|tool| tool.name() == name) {
-            Some(tool) => chosen.push(tool.clone()),
-            None => missing.push(name.clone()),
-        }
-    }
-    if !missing.is_empty() {
-        return Err(ToolExecutionError::other(format!(
-            "unknown tools in the allow-list: {} — the child toolset offers: {}",
-            missing.join(", "),
-            defaults
-                .iter()
-                .map(|tool| tool.name())
-                .collect::<Vec<_>>()
-                .join(", ")
-        )));
-    }
-    Ok(chosen)
-}

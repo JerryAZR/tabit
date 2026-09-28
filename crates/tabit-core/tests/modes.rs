@@ -148,6 +148,62 @@ fn print_mode_answers_one_prompt_end_to_end() {
     let _ = std::fs::remove_dir_all(&dir);
 }
 
+/// The tool flags are include/exclude-if-it-exists (owner ruling
+/// 2026-09-27): an unknown name in `--tools` matches nothing without
+/// error, and the surviving set is what crosses to the provider —
+/// the mock only answers a request carrying `read` but not `write`,
+/// so a leak matches only the catch-all and the run fails.
+#[test]
+fn tool_flags_filter_if_it_exists_and_reach_the_request() {
+    let server = MockServer::start();
+    let filtered = server.mock(|when, then| {
+        when.method(POST)
+            .path("/v1/chat/completions")
+            .body_includes("\"name\":\"read\"")
+            .body_excludes("\"name\":\"write\"");
+        then.status(200)
+            .header("content-type", "text/event-stream")
+            .body(sse_answer("the filtered answer"));
+    });
+    let catch_all = server.mock(|when, then| {
+        when.method(POST).path("/v1/chat/completions");
+        then.status(200)
+            .header("content-type", "text/event-stream")
+            .body(sse_answer("the leak answer"));
+    });
+    let dir = test_dir("tools-flags");
+    let config = dir.join("providers.toml");
+    std::fs::write(
+        &config,
+        format!(
+            "[providers.p]\nbase_url = \"http://127.0.0.1:{}/v1\"\napi = \"openai-completions\"\nkeyless = true\n\n[[providers.p.models]]\nid = \"m\"\n",
+            server.port()
+        ),
+    )
+    .expect("write config");
+    let (code, stdout, stderr) = run_in(
+        &dir,
+        &config,
+        &["--tools", "read,typo", "-p", "say the thing"],
+    );
+    assert_eq!(
+        code,
+        Some(0),
+        "the unknown allow name matched nothing, without error: {stdout}\n{stderr}"
+    );
+    assert_eq!(
+        filtered.calls(),
+        1,
+        "exactly one request, its toolset filtered: {stdout}"
+    );
+    assert_eq!(
+        catch_all.calls(),
+        0,
+        "no request carried the filtered-out tool: {stdout}"
+    );
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
 /// The backend's tracing finally lands somewhere: the binary installs
 /// one stderr subscriber (WARN and up — the TTL tripwire's door), so
 /// a discovery warning the assembly actually emits reaches the user

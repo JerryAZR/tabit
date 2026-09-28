@@ -4,38 +4,6 @@
 //! subprocess_children.rs` (the in-process suite died with the
 //! in-process substrate, owner ruling 2026-09).
 
-fn named_tool(name: &'static str) -> rig_agent::tool::DynamicTool {
-    rig_agent::tool::DynamicTool::new(
-        name,
-        "a test tool",
-        serde_json::json!({"type": "object"}),
-        move |_ctx, _args| {
-            let output = name;
-            Box::pin(async move { Ok(rig_agent::tool::ToolOutput::text(output)) })
-        },
-    )
-}
-
-#[test]
-fn filter_tools_keeps_order_and_fails_loudly_on_unknown_names() {
-    let tools = vec![named_tool("read"), named_tool("bash")];
-    let allow =
-        super::filter_tools(&tools, &["bash".to_string(), "read".to_string()]).expect("filters");
-    assert_eq!(
-        allow.iter().map(|tool| tool.name()).collect::<Vec<_>>(),
-        vec!["bash", "read"],
-        "the allow-list's order is the child's toolset order"
-    );
-
-    let error = match super::filter_tools(&tools, &["read".to_string(), "typo".to_string()]) {
-        Err(error) => error,
-        Ok(tools) => panic!("an unknown name must be loud, got {}", tools.len()),
-    };
-    let message = error.to_string();
-    assert!(message.contains("typo"), "names the miss: {message}");
-    assert!(message.contains("bash"), "lists what exists: {message}");
-}
-
 #[tokio::test]
 async fn a_pre_cancelled_token_refuses_before_spawning() {
     // Bash's rule (tabit-tools' run_shell): "it never ran" is
@@ -110,22 +78,6 @@ fn a_failed_child_carries_its_own_failure_reason() {
 }
 
 #[test]
-fn an_unknown_tool_in_the_allow_list_is_refused() {
-    // The allow-list validates parent-side against the mounted
-    // toolset — a name nothing offers is refused before any spawn.
-    // (`DynamicTool` carries closures and no Debug — a match, not
-    // `expect_err`.)
-    let error = match super::filter_tools(&[], &["read".to_string()]) {
-        Err(error) => error,
-        Ok(offered) => panic!(
-            "an empty toolset cannot offer `read` (returned {} tools)",
-            offered.len()
-        ),
-    };
-    assert!(error.to_string().contains("read"), "{error}");
-}
-
-#[test]
 fn a_failed_child_without_a_recorded_reason_says_unknown() {
     // A crash-shaped failure leaves no RunFailed event; the report
     // names the absence instead of inventing a cause.
@@ -189,7 +141,8 @@ async fn a_missing_executable_fails_the_spawn_with_the_exe_named() {
     let parts = std::sync::Arc::new(super::SubagentParts {
         node: std::sync::Arc::new(tabit_wire::node::Node::new("test")),
         exe: std::path::PathBuf::from("Z:/does-not-exist/tabit-child.exe"),
-        tools: Vec::new(),
+        tool_allow: None,
+        tool_deny: Vec::new(),
         max_turns: 4,
         extensions: std::path::PathBuf::new(),
     });
@@ -216,7 +169,7 @@ async fn a_missing_executable_fails_the_spawn_with_the_exe_named() {
 
 /// The bridge's mount invariant, over a REAL child: the child's
 /// first stamped frames — its `session_opened` lands right after the
-/// handshake ack, usually in the same pipe read — must reach the
+/// handshake's report, usually in the same pipe read — must reach the
 /// node's fan (the frontend's subscription hears them; the learning
 /// table learns the child's stream). The pre-mount bug this pins:
 /// the lane was caller-assembled after `spawn` returned, so any
@@ -232,12 +185,10 @@ async fn a_childs_first_frames_reach_the_node_fan() {
         .join("debug")
         .join("tabit-core.exe");
     if !core.is_file() {
-        eprintln!(
-            "bridge e2e: no tabit-core.exe at {} — \
-             run the workspace suite (scripts/test.sh) to cover it",
+        panic!(
+            "tabit-core.exe not built — run the workspace suite (scripts/test.sh): {}",
             core.display()
         );
-        return;
     }
     // A minimal offline config, isolated to this test: the child
     // parses the provider and never calls it (no message is sent —
@@ -278,7 +229,8 @@ async fn a_childs_first_frames_reach_the_node_fan() {
     let parts = std::sync::Arc::new(super::SubagentParts {
         node: node.clone(),
         exe: core,
-        tools: Vec::new(),
+        tool_allow: None,
+        tool_deny: Vec::new(),
         max_turns: 1,
         extensions: dir.join("ext"),
     });
@@ -342,11 +294,10 @@ async fn a_failing_child_drives_to_the_failed_outcome_with_its_terminal() {
         .join("debug")
         .join("tabit-core.exe");
     if !core.is_file() {
-        eprintln!(
-            "bridge e2e: no tabit-core.exe at {} —              run the workspace suite (scripts/test.sh) to cover it",
+        panic!(
+            "tabit-core.exe not built — run the workspace suite (scripts/test.sh): {}",
             core.display()
         );
-        return;
     }
     let dir = std::env::temp_dir().join(format!("tabit-bridge-fail-{}", std::process::id()));
     let _ = std::fs::remove_dir_all(&dir);
@@ -370,7 +321,8 @@ id = \"dead\"
     let parts = std::sync::Arc::new(super::SubagentParts {
         node,
         exe: core,
-        tools: Vec::new(),
+        tool_allow: None,
+        tool_deny: Vec::new(),
         max_turns: 1,
         extensions: dir.join("ext"),
     });

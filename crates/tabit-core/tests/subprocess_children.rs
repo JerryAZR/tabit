@@ -130,7 +130,8 @@ id = "m"
     );
     let auth = Arc::new(tabit_config::AuthConfig::default());
     let parts = Arc::new(subagent::SubagentParts {
-        tools: Vec::new(),
+        tool_allow: None,
+        tool_deny: Vec::new(),
         max_turns: 8,
         node,
         exe: PathBuf::from(env!("CARGO_BIN_EXE_tabit-core")),
@@ -507,7 +508,8 @@ async fn a_preamble_override_replaces_the_preamble_and_appends_the_context() {
     let child_cwd = test_dir("preamble-child");
     let ctx = subagent::SpawnContext::new(
         Arc::new(subagent::SubagentParts {
-            tools: Vec::new(),
+            tool_allow: None,
+            tool_deny: Vec::new(),
             max_turns: 8,
             node: Arc::new(Node::new("test")),
             exe: PathBuf::from(env!("CARGO_BIN_EXE_tabit-core")),
@@ -559,6 +561,101 @@ async fn a_preamble_override_replaces_the_preamble_and_appends_the_context() {
         default_mock.calls(),
         0,
         "the default prompt was replaced, not extended"
+    );
+
+    #[allow(unsafe_code, clippy::missing_safety_doc)]
+    unsafe {
+        std::env::remove_var("TABIT_CONFIG");
+    }
+}
+
+/// The tool policy crossing (owner ruling 2026-09-27): the parent
+/// forwards lists, never tools — the spawn preset crosses the
+/// assembly's deny-list (extended with `subagent`/`followup`, the
+/// recursion guard) as `--without`, and the child filters its own
+/// toolset in its own assembly. The mock is the assertion: it only
+/// answers a request still carrying `read` but neither `bash`
+/// (denied by the parent) nor `subagent`/`followup` (denied by the
+/// preset) — a leak matches only the catch-all and the test fails.
+#[tokio::test]
+async fn the_forwarded_blacklist_shapes_the_childs_toolset() {
+    let _guard = env_lock().lock().await;
+    let server = MockServer::start();
+    let filtered = server.mock(|when, then| {
+        when.method(POST)
+            .path("/v1/chat/completions")
+            .body_includes("\"name\":\"read\"")
+            .body_excludes("\"name\":\"bash\"")
+            .body_excludes("\"name\":\"subagent\"")
+            .body_excludes("\"name\":\"followup\"");
+        then.status(200)
+            .header("content-type", "text/event-stream")
+            .body(sse_answer("filtered"));
+    });
+    let catch_all = server.mock(|when, then| {
+        when.method(POST).path("/v1/chat/completions");
+        then.status(200)
+            .header("content-type", "text/event-stream")
+            .body(sse_answer("leaked"));
+    });
+    let config_path = stage_child_config("tool-deny", &server);
+    #[allow(unsafe_code, clippy::missing_safety_doc)]
+    unsafe {
+        std::env::set_var("TABIT_CONFIG", &config_path);
+    }
+
+    let child_cwd = test_dir("tool-deny-child");
+    let ctx = subagent::SpawnContext::new(
+        Arc::new(subagent::SubagentParts {
+            tool_allow: None,
+            tool_deny: vec!["bash".to_string()],
+            max_turns: 8,
+            node: Arc::new(Node::new("test")),
+            exe: PathBuf::from(env!("CARGO_BIN_EXE_tabit-core")),
+            extensions: child_cwd.join(".tabit/no-extensions"),
+        }),
+        Arc::new(tabit_session::subagent_pool::SubagentPool::new()),
+        "tool-deny-test-parent".to_string(),
+        ModelSelection::new("p", "m"),
+        child_cwd.clone(),
+    );
+    let mut child = ctx
+        .spawn_subprocess()
+        .cwd(child_cwd.clone())
+        .model(ModelSelection::new("p", "m"))
+        .max_turns(8)
+        .ephemeral(true)
+        .spawn()
+        .await
+        .expect("the child spawns");
+    let summary = ctx
+        .drive_subprocess(
+            &mut child,
+            rig_agent::completion::Message::user("report"),
+            None,
+        )
+        .await;
+    child.wait_exit().await;
+
+    assert_eq!(
+        summary.outcome,
+        tabit_session::RunOutcome::Completed,
+        "the child completed ({:?})",
+        summary.output
+    );
+    assert_eq!(
+        summary.output, "filtered",
+        "the child's request matched the filtered-toolset mock"
+    );
+    assert_eq!(
+        filtered.calls(),
+        1,
+        "exactly one request, its toolset denied-shaped"
+    );
+    assert_eq!(
+        catch_all.calls(),
+        0,
+        "no request carried the denied or delegation tools"
     );
 
     #[allow(unsafe_code, clippy::missing_safety_doc)]
@@ -688,7 +785,8 @@ id = "m"
     );
     let auth = Arc::new(tabit_config::AuthConfig::default());
     let parts = Arc::new(subagent::SubagentParts {
-        tools: Vec::new(),
+        tool_allow: None,
+        tool_deny: Vec::new(),
         max_turns: 8,
         node: node.clone(),
         exe: PathBuf::from(env!("CARGO_BIN_EXE_tabit-core")),
@@ -765,7 +863,8 @@ id = "m"
     // plain-answer arm serves it.
     let deny_ctx = subagent::SpawnContext::new(
         Arc::new(subagent::SubagentParts {
-            tools: Vec::new(),
+            tool_allow: None,
+            tool_deny: Vec::new(),
             max_turns: 8,
             node: Arc::new(Node::new("test")),
             exe: PathBuf::from(env!("CARGO_BIN_EXE_tabit-core")),
@@ -868,7 +967,8 @@ id = "m"
     );
     let auth = Arc::new(tabit_config::AuthConfig::default());
     let parts = Arc::new(subagent::SubagentParts {
-        tools: Vec::new(),
+        tool_allow: None,
+        tool_deny: Vec::new(),
         max_turns: 8,
         node,
         exe: PathBuf::from(env!("CARGO_BIN_EXE_tabit-core")),

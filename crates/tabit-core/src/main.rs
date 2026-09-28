@@ -48,7 +48,7 @@ use tabit_config::{AuthConfig, TabitConfig};
 use tabit_session::{ModelRegistry, SessionHost, SessionHostWiring, SessionStore};
 
 use crate::assemble::{
-    ContinueMiss, assemble, boot_extensions, core_sets, extension_root, extension_skills_catalog,
+    ContinueMiss, assemble, boot_extensions, core_tools, extension_root, extension_skills_catalog,
     host_data, host_node, install_root, merge_fragment_into, partition, seed_extension_skills,
 };
 use crate::cli::{Mode, mode_of, parse_args};
@@ -296,10 +296,10 @@ fn run() -> Result<i32, String> {
                     supervisor.await_resolved().await;
                     supervisor
                 });
-                // The conflict baseline is the parent core set —
+                // The conflict baseline is the core toolset —
                 // exactly what a session would mount without
                 // extensions.
-                let core = core_sets(&args).map(|(_, parent)| parent)?;
+                let core = core_tools();
                 Arc::new(extensions::Mounted::mount(supervisor, &core))
             };
             // Assemble failures (session unreadable, model unbuildable)
@@ -307,7 +307,8 @@ fn run() -> Result<i32, String> {
             // config setup guide, which would be advice for a problem
             // the user does not have. A `--continue` that finds no
             // sessions is absorbed into a fresh start (the pinned
-            // startup contract; the ack's `resumed: false` says so).
+            // startup contract; `session_opened`'s `resumed: false`
+            // says so).
             let (session, startup_notes) = match assemble(
                 &args,
                 &registry,

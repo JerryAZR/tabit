@@ -84,31 +84,25 @@ fn tabit_exe() -> Result<PathBuf, String> {
 /// kept or dropped the wrong tool would look like a broken agent.
 /// Allow first, then deny — the surviving set is
 /// allowed-and-not-denied.
-fn tool_filter(
-    args: &Args,
-    candidate: &[rig_agent::tool::DynamicTool],
-) -> Result<(Option<Vec<String>>, Vec<String>), String> {
-    let offered: Vec<&str> = candidate.iter().map(|tool| tool.name()).collect();
-    let split = |spec: &Option<String>, flag: &str| -> Result<Option<Vec<String>>, String> {
-        let Some(raw) = spec.as_deref() else {
-            return Ok(None);
-        };
-        let mut names = Vec::new();
-        for name in raw.split(',').map(str::trim).filter(|s| !s.is_empty()) {
-            if !offered.contains(&name) {
-                return Err(format!(
-                    "{flag}: unknown tool `{name}` — this process offers: {}",
-                    offered.join(", ")
-                ));
-            }
-            names.push(name.to_string());
-        }
-        Ok(Some(names))
+/// The invocation's tool filter: the `--tools` allow-list and the
+/// `--without` deny-list, comma-split. No validation against the
+/// offered set — include/exclude-if-it-exists (owner ruling
+/// 2026-09-27): a name the process does not offer simply matches
+/// nothing, and an allow that matches nothing is a tool-less
+/// session, a legal shape (a chatbot). Forwarded child lists rely
+/// on this — a child may be sent names it does not offer.
+fn tool_filter(args: &Args) -> (Option<Vec<String>>, Vec<String>) {
+    let split = |spec: &Option<String>| -> Option<Vec<String>> {
+        let raw = spec.as_deref()?;
+        Some(
+            raw.split(',')
+                .map(str::trim)
+                .filter(|s| !s.is_empty())
+                .map(str::to_string)
+                .collect(),
+        )
     };
-    Ok((
-        split(&args.tools, "--tools")?,
-        split(&args.without, "--without")?.unwrap_or_default(),
-    ))
+    (split(&args.tools), split(&args.without).unwrap_or_default())
 }
 
 /// Keep the tools the invocation's filter admits: allowed (when an
@@ -169,12 +163,13 @@ fn assemble_session(
         None => build_system_prompt(&cwd, &skills).map_err(|e| e.to_string())?,
     };
 
-    // Subagent support (ROADMAP item 5): the process-wide parts, whose
-    // toolset is the child toolset — the parent's minus the subagent
-    // tool itself, so children cannot spawn children (recursion depth
-    // is enforced by omission). A child-role process (`--parent`)
-    // mounts that toolset only: it does not spawn.
-    let (children, parent_core) = core_sets(args)?;
+    // Subagent support (ROADMAP item 5): the process-wide parts. The
+    // child's toolset is the CHILD's assembly over its own candidate
+    // set — the parent forwards policy, never tools: the assembly's
+    // effective lists cross as `--tools`/`--without`, the blacklist
+    // extended with `subagent`/`followup` (the recursion guard is
+    // the spawner's blacklist policy, never a baked-in role check).
+    let parent_core = core_tools();
     // The process's candidate toolset: its core set plus the extension
     // mount — replaced core tools unmount, the proxies join (one
     // name, one tool, resolved at this assembly). Children resolve
@@ -197,14 +192,18 @@ fn assemble_session(
     // candidate — `--tools`/`--without` shape extension proxies the
     // same as core tools (a whitelisted read-only agent gets no
     // extension write tools; a denied delegate tool cannot recurse).
-    let (allow, mut deny) = tool_filter(args, &candidate)?;
+    let (allow, mut deny) = tool_filter(args);
     // The scanned manifests' role-shaping declarations join the deny
     // list — `--without`'s own storage, the same filter at the same
     // point, no separate mechanism.
     deny.extend(manifest_disables);
     let mounted = retain_filtered(candidate, &allow, &deny);
+    // The same lists forward to children (the deny already carries
+    // the manifests' role-shaping disables — children re-derive the
+    // same ones from the same root; agreement, not a second source).
     let subagents = std::sync::Arc::new(tabit_session::subagent::SubagentParts {
-        tools: retain_filtered(children, &allow, &deny),
+        tool_allow: allow.clone(),
+        tool_deny: deny.clone(),
         max_turns: args.max_turns.unwrap_or(tabit_session::DEFAULT_MAX_TURNS),
         node: host_node(),
         exe: tabit_exe()?,
@@ -272,7 +271,8 @@ fn assemble_session(
 /// The toolset a subagent child runs: every coding tool (contextual —
 /// they read the session cwd and the run token from the per-run
 /// ToolContext) plus the skill tool, except the subagent tool.
-fn child_tools() -> Vec<rig_agent::tool::DynamicTool> {
+/// The coding tools every assembly starts from.
+fn coding_tools() -> Vec<rig_agent::tool::DynamicTool> {
     vec![
         dynamic_contextual(tabit_tools::Read),
         dynamic_contextual(tabit_tools::Write),
@@ -282,31 +282,20 @@ fn child_tools() -> Vec<rig_agent::tool::DynamicTool> {
     ]
 }
 
-/// The two core toolsets every assembly derives from: the child set
-/// (every coding tool) and the parent set (the child set plus the
-/// subagent tool). Pure derivation — the invocation's tool filter
-/// applies later, once, over the full candidate set (core plus
-/// extension proxies; see [`tool_filter`]). The extension mount's
-/// conflict baseline is the parent set — exactly what the session
+/// The core toolset every assembly starts from: the coding tools
+/// plus the delegation pair. Role-independent (owner ruling
+/// 2026-09-27): recursion is the spawner's blacklist policy — the
+/// built-in subagent tool denies `subagent`/`followup` in its
+/// children — never a baked-in parent check. Pure derivation; the
+/// invocation's tool filter applies later, once, over the full
+/// candidate set (core plus extension proxies). The extension
+/// mount's conflict baseline is this set — exactly what the session
 /// would mount without extensions.
-pub(crate) fn core_sets(
-    args: &Args,
-) -> Result<
-    (
-        Vec<rig_agent::tool::DynamicTool>,
-        Vec<rig_agent::tool::DynamicTool>,
-    ),
-    String,
-> {
-    let children = child_tools();
-    let mut parent = children.clone();
-    if args.parent.is_none() {
-        parent.push(tabit_session::subagent::subagent_tool());
-        // The follow-up surface rides the same omission: a child role
-        // mounts neither the spawner nor the addressing tool.
-        parent.push(tabit_session::subagent::followup_tool());
-    }
-    Ok((children, parent))
+pub(crate) fn core_tools() -> Vec<rig_agent::tool::DynamicTool> {
+    let mut tools = coding_tools();
+    tools.push(tabit_session::subagent::subagent_tool());
+    tools.push(tabit_session::subagent::followup_tool());
+    tools
 }
 
 /// The host's session builders — the boot's DATA half (what only
@@ -630,41 +619,56 @@ mod tests {
             without: Some("echo".to_string()),
             ..bare_args()
         };
-        let (allow, deny) = tool_filter(&args, &candidate).expect("valid filter");
+        let (allow, deny) = tool_filter(&args);
         let kept = retain_filtered(candidate, &allow, &deny);
         assert_eq!(
             kept.iter().map(|tool| tool.name()).collect::<Vec<_>>(),
             vec!["read"],
             "allow first, then deny: the intersection survives"
         );
-
-        // A subset of the candidate (the child core set behind
-        // SubagentParts::tools) filters without re-validation; a
-        // proxy-only allow name matches nothing there.
-        let core_subset = vec![named_tool("read"), named_tool("bash")];
-        let kept = retain_filtered(core_subset, &allow, &deny);
-        assert_eq!(
-            kept.iter().map(|tool| tool.name()).collect::<Vec<_>>(),
-            vec!["read"]
-        );
     }
 
     #[test]
-    fn the_tool_filter_rejects_unknown_names_loudly() {
-        let candidate = vec![named_tool("read")];
-        let mut args = Args {
-            tools: Some("bogus".to_string()),
+    fn unknown_flag_names_match_nothing() {
+        // Include/exclude-if-it-exists (owner ruling 2026-09-27): no
+        // validation against the offered set — forwarded child lists
+        // legitimately carry names the child does not offer, and an
+        // allow that matches nothing is a tool-less session, a legal
+        // shape (a chatbot).
+        let candidate = || vec![named_tool("read"), named_tool("bash")];
+        let args = Args {
+            tools: Some("read,typo".to_string()),
             ..bare_args()
         };
-        let error = tool_filter(&args, &candidate).expect_err("unknown allow name");
-        assert!(error.contains("bogus") && error.contains("read"), "{error}");
+        let (allow, deny) = tool_filter(&args);
+        let kept = retain_filtered(candidate(), &allow, &deny);
+        assert_eq!(
+            kept.iter().map(|tool| tool.name()).collect::<Vec<_>>(),
+            vec!["read"],
+            "the unknown allow name matched nothing, without error"
+        );
 
-        args.tools = None;
-        args.without = Some("bogus".to_string());
-        let error = tool_filter(&args, &candidate).expect_err("unknown deny name");
+        let args = Args {
+            without: Some("typo,bash".to_string()),
+            ..bare_args()
+        };
+        let (allow, deny) = tool_filter(&args);
+        let kept = retain_filtered(candidate(), &allow, &deny);
+        assert_eq!(
+            kept.iter().map(|tool| tool.name()).collect::<Vec<_>>(),
+            vec!["read"],
+            "the unknown deny name matched nothing, without error"
+        );
+
+        // The chatbot: an allow matching nothing is legal.
+        let args = Args {
+            tools: Some("nothing-real".to_string()),
+            ..bare_args()
+        };
+        let (allow, deny) = tool_filter(&args);
         assert!(
-            error.contains("--without") && error.contains("read"),
-            "{error}"
+            retain_filtered(candidate(), &allow, &deny).is_empty(),
+            "a tool-less session is a legal shape"
         );
     }
 
@@ -934,36 +938,15 @@ id = "m"
     }
 
     #[test]
-    fn core_sets_mount_the_spawner_only_in_the_parent_role() {
-        let names = |tools: &[rig_agent::tool::DynamicTool]| {
-            tools
-                .iter()
-                .map(|tool| tool.name().to_string())
-                .collect::<Vec<_>>()
-        };
-        let (children, parent) = core_sets(&bare_args()).expect("the parent role derives");
+    fn core_tools_mount_the_delegation_pair_in_every_role() {
+        // Role-independent (owner ruling 2026-09-27): recursion is
+        // the spawner's blacklist policy — the built-in subagent
+        // tool denies `subagent`/`followup` in its children — never
+        // a baked-in parent check.
+        let names: Vec<String> = core_tools().iter().map(|t| t.name().to_string()).collect();
         assert!(
-            names(&parent).contains(&"subagent".to_string())
-                && names(&parent).contains(&"followup".to_string()),
-            "the parent role mounts the spawner and its addressing tool"
-        );
-        assert!(
-            !names(&children).contains(&"subagent".to_string())
-                && !names(&children).contains(&"followup".to_string()),
-            "the child set omits both — recursion is enforced by omission"
-        );
-
-        // A child-role process (spawned with --parent) mounts the
-        // child set even as its "parent" set.
-        let child_role = Args {
-            parent: Some("p1".to_string()),
-            ..bare_args()
-        };
-        let (children2, parent2) = core_sets(&child_role).expect("the child role derives");
-        assert_eq!(
-            names(&parent2),
-            names(&children2),
-            "the child role never mounts the spawner"
+            names.contains(&"subagent".to_string()) && names.contains(&"followup".to_string()),
+            "every process's candidate carries the delegation pair: {names:?}"
         );
     }
 
