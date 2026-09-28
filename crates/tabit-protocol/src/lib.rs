@@ -21,9 +21,9 @@
 //! churn the wire silently (the reason this vocabulary left
 //! tabit-session).
 //!
-//! Consumers: tabit-session (the backend mints and emits), the `tabit`
-//! binary's stdio bridge (serialization edge), and frontends (the egui
-//! GUI and any future transport client) — all against these types, no
+//! Consumers: tabit-session (the backend mints and emits), the
+//! backend's JSON stdio edge (serialization), and frontends (transport
+//! clients over the frozen wire) — all against these types, no
 //! codegen, no persistence internals.
 
 mod events;

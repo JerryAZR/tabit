@@ -373,6 +373,13 @@ fn crash_injection() {
 
 fn main() {
     install_crash_hook();
+    // The backend's diagnostics: one subscriber, stderr, WARN and up
+    // — the same door the lock TTL tripwire writes to. Print mode's
+    // stdout is the answer channel; everything diagnostic is stderr.
+    tracing_subscriber::fmt()
+        .with_writer(std::io::stderr)
+        .with_max_level(tracing_subscriber::filter::LevelFilter::WARN)
+        .init();
     if std::env::var_os("TABIT_CRASH_TEST").is_some() {
         crash_injection();
     }

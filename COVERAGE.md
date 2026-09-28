@@ -597,12 +597,15 @@ reverse order — holds the semantics until the session-edge port),
 mesh/off-path settle clears, multi-hop settles over real pipes.
 
 `client.rs` / `process.rs` residue is the recorded process-fault
-family (the rejected/hung handshake, the crash-synthesis arms in
-`settle` — one shared fold, verified: both the subprocess bridge and
-the SDK's children route through `ChildHandle::settle` — and the
-pump's garbage-line skip), the deferred `--session` builder, and the
-dead `stream`/`frames` getters on the standing dead-pub-API list;
-increment 2's client generalization revisits the file wholesale.
+family (the rejected/hung handshake; the crash-synthesis and
+abort-leash arms of `settle` are now PINNED — 2026-09, the round
+that also fixed the synthesis to await the reaper's exit record, so
+the report carries the exit code instead of "no exit recorded";
+`stub_settle` grew `die`/`hang` modes, the fault-injection child
+this family once lacked — and the pump's garbage-line skip), the
+deferred `--session` builder, and the dead `stream`/`frames` getters
+on the standing dead-pub-API list; increment 2's client
+generalization revisits the file wholesale.
 
 **Methodology notes from this round:**
 
@@ -725,7 +728,9 @@ wrong kind); the SDK's strict-frame process exits (unknown watch
 kind, unparseable line — `die` exits, needs a process-level
 harness) and `serve`'s seen-kinds dedup (drives only inside the
 bins); the owned-child cancel leash e2e (`Settlement::Aborted` —
-needs a slow-child scenario that outlives its cancelled call);
+**filled 2026-09**: `stub_settle`'s `hang` mode is the slow child,
+and the wire net's cancelling-the-leash pin drives cancel → Abort →
+close → `Aborted` over a real pipe);
 `extensions.rs`'s hook forwarding through the real `mount()` and
 the pre-send dead-lane fail-open (an e2e installing a
 hook-declaring package); the wire client's boot-timeout,
@@ -781,6 +786,9 @@ the other standing deferral, closed.
 **Justified (standing classes, renumbered to the split):** main.rs
 0% attributed — `run`/`main`/the failure reporters execute only in
 spawned processes, asserted by the modes and crash e2e (class 6);
+`main`'s subscriber install (2026-09) is behaviorally pinned the
+same way — the modes e2e stages a broken skill and asserts the
+discovery warn crosses stderr through it;
 print.rs 20.1% — the stdin watcher and the FIFO card queue own
 real stdin (the standing justification, relocated from the
 pre-split main.rs entry), and `print_mode`/`print_event`/

@@ -1,25 +1,27 @@
 //! `ext-double` — the extension host's behavior double: one binary,
 //! one protocol behavior per argv, for the supervisor's offline
-//! tests. It speaks the frozen pipe honestly (parse the initialize,
-//! ack by hand-built JSON — no host library linked in, proving the
-//! wire is the whole contract) and takes the pathological paths a
-//! real package never should.
+//! tests. It speaks the frozen pipe honestly (the report first,
+//! hand-built JSON — no host library linked in, proving the wire is
+//! the whole contract) and takes the pathological paths a real
+//! package never should. The `-ack` argv labels predate the
+//! report-first model (extension protocol v3's vocabulary); the
+//! behaviors they name are unchanged.
 //!
 //! Handshake/death behaviors:
-//! - `hello`         — ack empty capabilities, drain stdin to EOF, exit 0
-//! - `mute`          — read the initialize, then never answer
-//! - `die-pre-ack`   — exit 1 before answering anything
-//! - `die-post-ack`  — ack, then exit 0
-//! - `bad-ack`       — answer the initialize with garbage
-//! - `wrong-version` — ack speaking protocol version 99
-//! - `late-garbage`  — ack, then emit one unparseable line, then drain
-//! - `late-unknown`  — ack, then emit one WELL-FORMED line of an
+//! - `hello`         — report empty capabilities, drain stdin to EOF, exit 0
+//! - `mute`          — never report, never answer
+//! - `die-pre-ack`   — exit 1 before the report
+//! - `die-post-ack`  — report, then exit 0
+//! - `bad-ack`       — emit garbage where the report belongs
+//! - `wrong-version` — report speaking protocol version 99
+//! - `late-garbage`  — report, then one unparseable line, then drain
+//! - `late-unknown`  — report, then one WELL-FORMED line of an
 //!   unknown frame type, then drain (the compatibility ruling: an
 //!   extension speaking vocabulary its host lacks is a contract
 //!   break, same death as garbage)
 //!
 //! Grammar behaviors (the routing generalization):
-//! - `grammar` — ack watching `session_opened` and
+//! - `grammar` — report watching `session_opened` and
 //!   `interaction_settled`; emit one `message` command and one
 //!   `interaction_request` (id `g-1`); then echo every inbound line
 //!   that is not a lane frame back out as an `error { kind:
@@ -27,7 +29,7 @@
 //!   tests can see exactly what the host mirrored or routed down
 //!   the pipe.
 //!
-//! Tool-lane behaviors (task 2): ack with one declared tool, then
+//! Tool-lane behaviors (task 2): report with one declared tool, then
 //! serve it on the pipe:
 //! - `tools-echo`   — tool `echo`: answers with the args as the report
 //! - `tools-fail`   — tool `boom`: answers with an error

@@ -156,9 +156,6 @@ pub(crate) fn print_banner(session: &Session) {
     }
 }
 
-/// Print mode: assemble (rewinding first when asked), banner, one
-/// message through the session actor, events printed as they arrive,
-/// then the closing footer.
 /// What one print-mode session left behind, for the footer and exit code.
 struct PrintOutcome {
     failed: Option<String>,
@@ -168,6 +165,9 @@ struct PrintOutcome {
     stats: Option<tabit_session::SessionStats>,
 }
 
+/// Print mode: assemble (rewinding first when asked), banner, one
+/// message through the session actor, events printed as they arrive,
+/// then the closing footer.
 pub(crate) fn print_mode(args: &Args, registry: &ModelRegistry) -> Result<i32, String> {
     if args.rewind.is_some() && args.session.is_none() && !args.continue_newest {
         return Err(

@@ -4,7 +4,11 @@
 //! stamped step events and a terminal (`run_finished`, or
 //! `run_failed` when the task text is `fail`), so a driver can
 //! drive whole runs and both dispositions of the fold over a real
-//! pipe.
+//! pipe. Two special task texts exist for the failure paths:
+//! `die` emits one step and exits mid-run (no terminal crosses —
+//! the crash-synthesis shape), and `hang` emits one step then parks
+//! (no terminal until the driver's abort closes stdin; later
+//! messages are ignored — the abort-leash shape).
 
 use std::io::{BufRead, Write};
 
@@ -24,6 +28,10 @@ fn stamped(event: SessionEvent) -> String {
         ttl: None,
         event,
     }))
+}
+
+fn step(text: &str, index: u8) -> SessionEvent {
+    SessionEvent::error_session(format!("step {index} of {text}"))
 }
 
 fn terminal(task: &str) -> SessionEvent {
@@ -57,19 +65,35 @@ fn main() {
 
     // One response per message; EOF (the close) ends the stub.
     let stdin = std::io::stdin();
-    for inbound in stdin.lock().lines() {
-        let Ok(inbound) = inbound else { break };
+    let mut sink = stdin.lock();
+    // Set by `hang`: the run parked — drain quietly to EOF, answer
+    // nothing (the driver's abort is the only way out).
+    let mut hung = false;
+    loop {
+        let mut inbound = String::new();
+        match sink.read_line(&mut inbound) {
+            Ok(0) | Err(_) => break,
+            Ok(_) => {}
+        }
+        if hung {
+            continue;
+        }
         let Ok(SessionCommand::Message { text, .. }) = serde_json::from_str(&inbound) else {
             continue;
         };
-        for step in 0..2 {
-            let _ = writeln!(
-                out,
-                "{}",
-                stamped(SessionEvent::error_session(format!(
-                    "step {step} of {text}"
-                )))
-            );
+        if text == "die" {
+            let _ = writeln!(out, "{}", stamped(step(&text, 0)));
+            let _ = out.flush();
+            std::process::exit(3);
+        }
+        if text == "hang" {
+            let _ = writeln!(out, "{}", stamped(step(&text, 0)));
+            let _ = out.flush();
+            hung = true;
+            continue;
+        }
+        for index in 0..2 {
+            let _ = writeln!(out, "{}", stamped(step(&text, index)));
         }
         let _ = writeln!(out, "{}", stamped(terminal(&text)));
         let _ = out.flush();

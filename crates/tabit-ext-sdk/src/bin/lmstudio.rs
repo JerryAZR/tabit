@@ -29,7 +29,7 @@
 //! this process at boot, keeps it supervised for the backend's life,
 //! and its exit is the relay's end. The pipe handshake declares
 //! nothing — the HTTP listener is the whole service, bound before the
-//! ack so the port the fragment names is live by the time any model
+//! report so the port the fragment names is live by the time any model
 //! call could reach it.
 //!
 //! The native-API mapping is best-effort (the e2e suite drives it
@@ -65,7 +65,7 @@ fn main() {
     let upstream = Arc::new(
         std::env::var("TABIT_LMSTUDIO_URL").unwrap_or_else(|_| DEFAULT_UPSTREAM.to_string()),
     );
-    // Bind before the handshake ack: the fragment names this port, so
+    // Bind before the report: the fragment names this port, so
     // it must be live by the time the host considers the extension
     // loaded. A bind failure is the loud death — the host reports the
     // extension dead and the provider it contributed fails as any

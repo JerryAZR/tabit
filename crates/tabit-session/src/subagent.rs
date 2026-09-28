@@ -332,11 +332,13 @@ pub fn followup_tool() -> DynamicTool {
 #[path = "subagent_tests.rs"]
 mod tests;
 
-/// Filter a toolset down to an allow-list of names — the one
-/// implementation of the concern (the `subagent` tool's `tools` arg
-/// and the CLI's `--tools` flag both ride it). An unknown name is a
-/// loud error, not a silent drop — a typo'd allow-list that quietly
-/// empties the toolset would look like a broken child.
+/// Filter a toolset down to an allow-list of names — the
+/// `subagent` tool's `tools` arg rides it (the CLI's `--tools` flag
+/// is the assembly's own filter: it composes allow and deny over the
+/// full candidate set, a different concern than a child's
+/// allow-list). An unknown name is a loud error, not a silent
+/// drop — a typo'd allow-list that quietly empties the toolset
+/// would look like a broken child.
 pub fn filter_tools(
     defaults: &[DynamicTool],
     allow: &[String],

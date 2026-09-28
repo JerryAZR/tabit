@@ -560,6 +560,19 @@ impl ChildHandle {
         let _ = (&mut self.reaper).await;
     }
 
+    /// Wait, bounded by [`crate::process::EXIT_GRACE`], for the
+    /// reaper to record the child's exit status — the crash
+    /// synthesis's beat, so the report carries the exit code instead
+    /// of "no exit recorded". Polls the shared exit cell rather than
+    /// the JoinHandle: the handle is single-shot, and [`Self::wait_exit`]
+    /// still owns it.
+    async fn await_exit_recorded(&self) {
+        let deadline = tokio::time::Instant::now() + crate::process::EXIT_GRACE;
+        while lock(&self.exit).is_none() && tokio::time::Instant::now() < deadline {
+            tokio::time::sleep(std::time::Duration::from_millis(5)).await;
+        }
+    }
+
     /// Run one task to the child's terminal — THE drive recipe every
     /// driver shares (the session's subagent tool, the extension
     /// SDK's owned children): the task crosses as the first message,
@@ -641,9 +654,12 @@ impl ChildHandle {
                 frame = self.frames.recv() => {
                     let Some(frame) = frame else {
                         // The stream ended without a terminal: the child
-                        // process died. The crash report carries the
-                        // exit status and the stderr tail, shaped as the
-                        // run-failed event the drivers already keep.
+                        // process died. Give the reaper a beat to record
+                        // the death — the report's exit status and stderr
+                        // tail land with it — then shape the crash report
+                        // as the run-failed event the drivers already
+                        // keep.
+                        self.await_exit_recorded().await;
                         events.push(SessionEvent::RunFailed {
                             message: self.crash_report(),
                             kind: tabit_protocol::RunFailedKind::ENGINE.to_string(),

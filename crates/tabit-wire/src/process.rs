@@ -43,6 +43,13 @@ pub const REAP_GRACE: Duration = Duration::from_secs(5);
 /// loaded machine.
 pub const BOOT_TIMEOUT: Duration = Duration::from_secs(30);
 
+/// How long the settle fold waits for the reaper after the child's
+/// stream ends without a terminal, so the synthesized crash report
+/// carries the exit status instead of "no exit recorded": a dead
+/// child's wait resolves at once; the bound only guards a pipe
+/// holder lingering past its process's death.
+pub const EXIT_GRACE: Duration = Duration::from_millis(250);
+
 /// A crash-report tail buffer: the last [`STDERR_RING`] stderr lines
 /// of a spawned child.
 pub type StderrRing = Mutex<VecDeque<String>>;

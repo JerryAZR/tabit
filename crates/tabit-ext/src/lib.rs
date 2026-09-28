@@ -13,7 +13,7 @@
 //! Tabit extension host (ROADMAP item 9): subprocess executables over
 //! a frozen JSONL pipe — the subagent substrate, generalized.
 //!
-//! One supervisor per backend process. The `tabit` binary owns it:
+//! One supervisor per backend process. The `tabit-core` binary owns it:
 //! extensions are backend machinery, and their contributions (tools,
 //! hooks) reach sessions through the binary's assembly, never through
 //! tabit-session. This crate is the leaf below that wiring — it knows

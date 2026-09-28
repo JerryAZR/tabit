@@ -1,6 +1,6 @@
 //! The serializable event stream a tabit frontend consumes.
 //!
-//! v1 events are the item-level view of one outer loop plus session-level
+//! Events are the item-level view of one outer loop plus session-level
 //! bookkeeping. The enum is closed: the CLI/RPC surface (ROADMAP item 7)
 //! ships in this workspace, so an added variant is a coordinated change,
 //! not a compatibility hazard.
@@ -255,8 +255,9 @@ pub enum SessionEvent {
         #[serde(default)]
         base_id: Option<String>,
     },
-    /// The session catalog, announced once at startup right after the
-    /// ack's startup notes: every stored session, newest first, from a
+    /// The session catalog, announced once at startup, after the boot
+    /// session's announcements (its notes, then its skills catalog):
+    /// every stored session, newest first, from a
     /// header-only listing (lazy loading — only the boot session is
     /// loaded). Minimal by ruling; a plain object fields can grow
     /// into. A brand-new session has no file yet and is absent.

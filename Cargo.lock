@@ -2988,6 +2988,7 @@ dependencies = [
  "tabit-tools",
  "tokio",
  "tokio-util",
+ "tracing-subscriber",
 ]
 
 [[package]]

@@ -313,22 +313,32 @@ fn the_net_laws_hold_over_real_pipes() {
     );
 }
 
-/// The built `stub_child` example's path — a sibling of this test
-/// binary under the active target dir (robust to `--target-dir`
-/// overrides). `None` when the example was not built.
-fn stub_exe(example: &str) -> Option<std::path::PathBuf> {
-    let exe = std::env::current_exe().ok()?;
+/// The built example's path — a sibling of this test binary under
+/// the active target dir (robust to `--target-dir` overrides).
+/// Panics when the example was not built: a silent skip once let
+/// whole suites pass unbuilt (the extension suites' convention —
+/// "workspace binary not built — run the workspace gate").
+fn stub_exe(example: &str) -> std::path::PathBuf {
+    let exe = std::env::current_exe().expect("the test binary's path");
     let name = if cfg!(windows) {
         format!("{example}.exe")
     } else {
         example.to_string()
     };
-    let examples = exe.parent()?.parent()?.join("examples");
+    let examples = exe
+        .parent()
+        .and_then(|parent| parent.parent())
+        .expect("the deps dir beside the test binary")
+        .join("examples");
     let stub = examples.join(name);
-    stub.is_file().then_some(stub)
+    assert!(
+        stub.is_file(),
+        "workspace example `{example}` not built — run the workspace suite"
+    );
+    stub
 }
 
-fn stub_child_exe() -> Option<std::path::PathBuf> {
+fn stub_child_exe() -> std::path::PathBuf {
     stub_exe("stub_child")
 }
 
@@ -343,12 +353,7 @@ fn stub_child_exe() -> Option<std::path::PathBuf> {
 /// pump at the handshake's resolution, so nothing can beat it.
 #[test]
 fn the_childs_burst_frame_reaches_the_mounted_lane() {
-    let Some(stub) = stub_child_exe() else {
-        eprintln!(
-            "client burst test: no stub_child example built - run the workspace suite to cover it"
-        );
-        return;
-    };
+    let stub = stub_child_exe();
     let parent: Arc<Node> = Arc::new(Node::new("parent"));
     let saw: Arc<Mutex<Vec<String>>> = Arc::new(Mutex::new(Vec::new()));
     let sink = saw.clone();
@@ -404,12 +409,7 @@ fn the_childs_burst_frame_reaches_the_mounted_lane() {
 /// of the child's (mismatched) traffic reaches the net.
 #[test]
 fn a_mismatched_report_is_a_kill() {
-    let Some(stub) = stub_exe("stub_mismatch") else {
-        eprintln!(
-            "mismatched-report test: no stub_mismatch example built - run the workspace suite to cover it"
-        );
-        return;
-    };
+    let stub = stub_exe("stub_mismatch");
     let parent: Arc<Node> = Arc::new(Node::new("parent"));
     let saw: Arc<Mutex<Vec<String>>> = Arc::new(Mutex::new(Vec::new()));
     let sink = saw.clone();
@@ -449,12 +449,7 @@ fn a_mismatched_report_is_a_kill() {
 /// (the stub exits at the stdin EOF the close produces).
 #[test]
 fn the_settle_fold_collects_the_run_and_closes_at_completed() {
-    let Some(stub) = stub_exe("stub_settle") else {
-        eprintln!(
-            "settle fold test: no stub_settle example built - run the workspace suite to cover it"
-        );
-        return;
-    };
+    let stub = stub_exe("stub_settle");
     let runtime = tokio::runtime::Builder::new_current_thread()
         .enable_all()
         .build()
@@ -490,12 +485,7 @@ fn the_settle_fold_collects_the_run_and_closes_at_completed() {
 /// as usual, even under `settle_open`.
 #[test]
 fn settle_open_parks_a_completed_child_and_closes_a_failed_one() {
-    let Some(stub) = stub_exe("stub_settle") else {
-        eprintln!(
-            "settle_open test: no stub_settle example built - run the workspace suite to cover it"
-        );
-        return;
-    };
+    let stub = stub_exe("stub_settle");
     let bound = Duration::from_secs(5);
     let runtime = tokio::runtime::Builder::new_current_thread()
         .enable_all()
@@ -537,5 +527,95 @@ fn settle_open_parks_a_completed_child_and_closes_a_failed_one() {
     assert!(
         crash.contains("exit code"),
         "a failed run closes even under settle_open: {crash}"
+    );
+}
+
+/// The crash-synthesis path: a child that dies mid-run — no terminal
+/// crosses the pipe — settles as `Crashed` carrying a synthesized
+/// `run_failed` (the crash report: exit status and stderr tail)
+/// appended to the events collected so far, shaped exactly as the
+/// drivers already keep.
+#[test]
+fn a_child_dying_mid_run_settles_as_a_synthesized_crash() {
+    let stub = stub_exe("stub_settle");
+    let runtime = tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()
+        .expect("the test runtime");
+    let (settlement, crash) = runtime.block_on(async move {
+        let mut handle = ChildSpec::new(stub, std::env::temp_dir())
+            .spawn()
+            .await
+            .expect("spawn");
+        let settlement = handle.run("die".to_string(), None).await;
+        handle.wait_exit().await;
+        (settlement, handle.crash_report())
+    });
+    let Settlement::Crashed { events } = settlement else {
+        panic!("the dying child settles as a crash: {settlement:?}");
+    };
+    // The announce burst + the one step + the synthesized terminal.
+    assert_eq!(
+        events.len(),
+        3,
+        "the fold collected up to the death: {events:?}"
+    );
+    assert!(
+        matches!(events.last(), Some(SessionEvent::RunFailed { message, kind, .. })
+            if message.contains("exit code") && kind == "engine"),
+        "the synthesized terminal carries the crash report: {events:?}"
+    );
+    assert!(
+        crash.contains("exit code"),
+        "the death itself is recorded: {crash}"
+    );
+}
+
+/// The abort leash: cancelling mid-run forwards `Abort`, closes
+/// stdin, and settles `Aborted` immediately — a courtesy with a
+/// deadline, never a wait on the child's cooperation. The parked
+/// child ends at the stdin EOF the close produces.
+#[test]
+fn cancelling_the_leash_settles_aborted_without_waiting_on_the_child() {
+    use tokio_util::sync::CancellationToken;
+
+    let stub = stub_exe("stub_settle");
+    let bound = Duration::from_secs(5);
+    let runtime = tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()
+        .expect("the test runtime");
+    let (settlement, crash) = runtime.block_on(async move {
+        let mut handle = ChildSpec::new(stub, std::env::temp_dir())
+            .spawn()
+            .await
+            .expect("spawn");
+        handle.prompt("hang".to_string());
+        let token = CancellationToken::new();
+        let leash = token.clone();
+        tokio::spawn(async move {
+            tokio::time::sleep(Duration::from_millis(200)).await;
+            leash.cancel();
+        });
+        let settlement = tokio::time::timeout(bound, handle.settle(Some(token)))
+            .await
+            .expect("the abort settles within the bound");
+        handle.wait_exit().await;
+        (settlement, handle.crash_report())
+    });
+    let Settlement::Aborted { output, events } = settlement else {
+        panic!("the cancelled run settles aborted: {settlement:?}");
+    };
+    assert!(
+        output.is_empty(),
+        "the courtesy abort carries no output: {output}"
+    );
+    assert!(
+        !events.is_empty(),
+        "what crossed before the cancel is kept: {events:?}"
+    );
+    assert!(
+        crash.contains("exit code"),
+        "the parked child ended at the EOF the close produced: {crash}"
     );
 }

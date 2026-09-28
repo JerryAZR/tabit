@@ -148,6 +148,35 @@ fn print_mode_answers_one_prompt_end_to_end() {
     let _ = std::fs::remove_dir_all(&dir);
 }
 
+/// The backend's tracing finally lands somewhere: the binary installs
+/// one stderr subscriber (WARN and up — the TTL tripwire's door), so
+/// a discovery warning the assembly actually emits reaches the user
+/// instead of vanishing into the no-op sink.
+#[test]
+fn a_discovery_warning_reaches_stderr_through_the_subscriber() {
+    let (_server, config) = staged_provider("tracing-warn", "any answer");
+    let dir = config.parent().expect("config dir").to_path_buf();
+    let broken = dir.join(".agents").join("skills").join("broken");
+    std::fs::create_dir_all(&broken).expect("stage skills dir");
+    std::fs::write(
+        broken.join("SKILL.md"),
+        "---\nname: broken\n---\nno description in the frontmatter\n",
+    )
+    .expect("stage the broken skill");
+
+    let (code, stdout, stderr) = run_in(&dir, &config, &["-p", "say the thing"]);
+    assert_eq!(code, Some(0), "stdout: {stdout}\nstderr: {stderr}");
+    assert!(
+        stderr.contains("skipping skill without a description"),
+        "the warn crossed stderr through the subscriber: {stderr}"
+    );
+    assert!(
+        stdout.contains("any answer"),
+        "the answer channel is untouched by the diagnostics: {stdout}"
+    );
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
 #[test]
 fn a_promptless_rewind_drops_the_last_user_message_then_branches() {
     let (_server, config) = staged_provider("rewind", "the branch answer");

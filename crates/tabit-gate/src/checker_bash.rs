@@ -123,7 +123,7 @@ fn check_single_command(
     }
 
     // 2. Parse args (pure).
-    let parsed = parse_args(&cmd.args, Some(&rule.config), &cmd.dynamic_indices);
+    let parsed = parse_args(&cmd.args, Some(&rule.config));
 
     // 3. Flag actions.
     for flag_config in &rule.config.flags {

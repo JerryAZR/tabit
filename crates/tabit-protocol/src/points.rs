@@ -17,8 +17,8 @@ use serde::{Deserialize, Serialize};
 /// One hook point: the declaration triple — name, answer type,
 /// neutral.
 pub trait HookPoint {
-    /// The wire name (the engine's consult point, the ack's
-    /// `hooks[].event`).
+    /// The wire name (the engine's consult point, the extension
+    /// manifest's `hooks[].event`).
     const NAME: &'static str;
     /// What a consult on this point returns. Observe points declare
     /// `()` — the roundtrip exists for completion, the payload is
@@ -69,8 +69,8 @@ impl HookPoint for ToolResult {
     fn neutral() {}
 }
 
-/// The subscribable points — the ack's validation list, one source
-/// with the declarations.
+/// The subscribable points — the manifest's `hooks[].event` validation
+/// list, one source with the declarations.
 pub const LIST: &[&str] = &[ToolCall::NAME, ToolResult::NAME];
 
 /// The serialized neutral answer for a point name (the SDK's

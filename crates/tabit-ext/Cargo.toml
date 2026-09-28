@@ -16,10 +16,9 @@ doctest = true
 [dependencies]
 # BoxFuture — the HostServices verbs' return shape.
 futures = { workspace = true }
-# The interaction capability trait — the lift routes extension asks
-# through the engine's `UserInteraction` verbatim (ui_type + opaque
-# payload), so the ask shapes stay one concern across core and
-# extensions.
+# The host-service verbs — the supervisor relays `model_prompt` (the
+# service envelope's one verb) through the engine's `HostServices`,
+# usage billed through the session's ledger.
 rig-agent = { path = "../rig-agent", version = "0.41.0", default-features = false }
 serde = { workspace = true, features = ["derive"] }
 serde_json = { workspace = true }
