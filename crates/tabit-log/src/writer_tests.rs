@@ -19,7 +19,7 @@ fn header() -> SessionHeader {
         minor: crate::entry::SESSION_FORMAT_MINOR,
         id: "sid".to_string(),
         created_at: "t".to_string(),
-        cwd: "C:/w".to_string(),
+        cwd: None,
         parent_session: None,
     }
 }

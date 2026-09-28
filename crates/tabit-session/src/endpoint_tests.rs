@@ -799,7 +799,7 @@ async fn open_session_loads_a_stored_session_and_replays_it() {
                 .path;
             Factory::new(vec![text_turn("reopened answer")])
                 .into_builder(open_store.clone())
-                .resume(&path)
+                .resume(&path, "C:/w")
                 .map(|(session, _)| (session, Vec::new()))
                 .map_err(|error| error.to_string())
         }),
@@ -950,7 +950,7 @@ async fn open_session_emits_its_model_notes_ahead_of_the_replay() {
                 .path;
             Factory::new(vec![text_turn("reopened answer")])
                 .into_builder(open_store.clone())
-                .resume(&path)
+                .resume(&path, "C:/w")
                 .map(|(session, _)| {
                     (
                         session,
@@ -1039,7 +1039,7 @@ async fn a_replay_request_streams_the_pass_onto_the_event_channel() {
     };
     let session = Factory::new(vec![text_turn("second answer")])
         .into_builder(store.clone())
-        .resume(&path)
+        .resume(&path, "C:/w")
         .expect("resume")
         .0;
     let mut handle = SessionHost::spawn(session, Vec::new(), plain_wiring(&store), plain_data());
@@ -3834,7 +3834,7 @@ async fn replay_requests_collapse_to_one_pass() {
     };
     let session = Factory::new(vec![text_turn("second answer")])
         .into_builder(store.clone())
-        .resume(&path)
+        .resume(&path, "C:/w")
         .expect("resume")
         .0;
     let mut handle = SessionHost::spawn(session, Vec::new(), plain_wiring(&store), plain_data());

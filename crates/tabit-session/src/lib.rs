@@ -57,9 +57,10 @@
 //! let run = session.prompt("explain this repository").await;
 //! println!("{}", run.output);
 //!
-//! // Resuming is the same builder with `.resume(path)` instead of
-//! // `.create(cwd)` — the log is the source of truth. A fresh session
-//! // leaves no file behind until its first user message.
+//! // Resuming is the same builder with `.resume(&path, cwd)` instead
+//! // of `.create(cwd)` — the log is the state, the caller's cwd the
+//! // world (the header records none). A fresh session leaves no file
+//! // behind until its first user message.
 //! # Ok(())
 //! # }
 //! ```

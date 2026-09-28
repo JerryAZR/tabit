@@ -142,12 +142,16 @@ fn header_round_trips_and_rejects_unknown_fields() {
         minor: SESSION_FORMAT_MINOR,
         id: "0195c0de-0000-7000-8000-000000000000".to_string(),
         created_at: "2026-08-15T00:00:00Z".to_string(),
-        cwd: "C:/work".to_string(),
+        cwd: None,
         parent_session: None,
     };
     assert_eq!(SESSION_FORMAT_MAJOR, 6);
-    assert_eq!(SESSION_FORMAT_MINOR, 1);
+    assert_eq!(SESSION_FORMAT_MINOR, 2);
     let line = serde_json::to_string(&header).expect("header serializes");
+    assert!(
+        !line.contains("cwd"),
+        "since 6.2 the header writes no cwd: {line}"
+    );
     let back: SessionHeader = serde_json::from_str(&line).expect("header parses back");
     assert_eq!(back, header);
     assert!(
@@ -156,4 +160,10 @@ fn header_round_trips_and_rejects_unknown_fields() {
         )
         .is_err()
     );
+    // The tolerated 6.1 field still parses (ignored, never written).
+    let old = serde_json::from_str::<SessionHeader>(
+        r#"{"version":6,"minor":1,"id":"x","created_at":"t","cwd":"C:/moved/away"}"#,
+    )
+    .expect("a 6.1 header still opens");
+    assert_eq!(old.cwd.as_deref(), Some("C:/moved/away"));
 }

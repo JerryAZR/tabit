@@ -168,7 +168,12 @@ Current workspace layout:
   expanded against (`SanityConfig::context`, owner ruling 2026-09-27):
   a check is normalize-then-match — no per-check context construction,
   no repo probing (`{{REPO}}` falls back to cwd; the TS check-time git
-  probe is the port's deliberate deletion). The `AgentHook`
+  probe is the port's deliberate deletion). The world is the process
+  cwd for every session a node hosts — resume included (owner ruling
+  2026-09-27: the session header records no cwd since log format 6.2;
+  a resumed session adopts the caller's cwd, so a moved project
+  resumes where it now lives and gate, skills, preamble, and tools
+  share one world). The `AgentHook`
   member, the `native:select_one` ask, and the settings.toml
   `[gate] enabled = false` opt-out assemble in the `tabit-core`
   binary — `tabit-session` stays a mechanism with no policy

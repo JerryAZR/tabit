@@ -1029,7 +1029,7 @@ id = "m"
             session.path().expect("file-backed").to_path_buf()
         };
         let session = history_session("second answer", store)
-            .resume(&path)
+            .resume(&path, "C:/w")
             .unwrap()
             .0;
         let handle = SessionHost::spawn(
@@ -1265,7 +1265,7 @@ id = "m"
                     ],
                 ])))
             }))
-            .resume(&summary.path)
+            .resume(&summary.path, "C:/w")
             .map(|(session, _)| (session, Vec::new()))
             .map_err(|e| e.to_string())
         });

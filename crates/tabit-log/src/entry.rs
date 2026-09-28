@@ -41,7 +41,12 @@ use serde_json::Value;
 /// the reader cannot know the added vocabulary). v6 (2026-09): the
 /// tool result carries its bookkeeping cargo in a dedicated `details`
 /// field, and the content blocks are model modalities only (text,
-/// image). v5: the `compaction` node appends as a **leaf at the
+/// image). v6.2 (2026-09): the header carries no `cwd` — the
+/// session's world is the process cwd at assembly (owner ruling
+/// 2026-09-27: a resumed session adopts the caller's cwd, never a
+/// recorded one), so the field lost its only reader and is no longer
+/// written; files from 6.1 and earlier may still carry it, tolerated
+/// and ignored. v5: the `compaction` node appends as a **leaf at the
 /// head-at-insert** (the tree's parent links are never rewritten — the
 /// history view, not the writer, places the boundary). v3: the log
 /// splits into conversation nodes (id + parent, the tree) and
@@ -51,7 +56,7 @@ use serde_json::Value;
 /// and a stable protocol with real breaking changes is when a
 /// migration story gets designed.
 pub const SESSION_FORMAT_MAJOR: u32 = 6;
-pub const SESSION_FORMAT_MINOR: u32 = 1;
+pub const SESSION_FORMAT_MINOR: u32 = 2;
 
 /// The first line of a session file.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -69,8 +74,13 @@ pub struct SessionHeader {
     pub id: String,
     /// Creation time (RFC 3339).
     pub created_at: String,
-    /// The working directory the session was created in.
-    pub cwd: String,
+    /// The working directory the session was created in — **removed in
+    /// 6.2** (the session's world is the process cwd at assembly; a
+    /// resumed session adopts the caller's cwd, never a recorded one).
+    /// Never written since; parsed only so files from 6.1 and earlier
+    /// still open, and ignored.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub cwd: Option<String>,
     /// The id of the session this one was forked from, if any. Reserved;
     /// forking is not implemented yet.
     #[serde(default, skip_serializing_if = "Option::is_none")]

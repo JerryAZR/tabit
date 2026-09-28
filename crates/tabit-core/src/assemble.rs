@@ -254,11 +254,11 @@ fn assemble_session(
         builder = builder.max_turns(max_turns);
     }
 
+    let cwd = cwd.display().to_string();
     if let Some(path) = &resume_target {
-        let (session, _report) = builder.resume(path).map_err(|e| e.to_string())?;
+        let (session, _report) = builder.resume(path, &cwd).map_err(|e| e.to_string())?;
         Ok(session)
     } else {
-        let cwd = cwd.display().to_string();
         if args.ephemeral {
             // The child role's in-memory boot: nothing on disk, the
             // process's lifetime is the session's.

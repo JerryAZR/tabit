@@ -382,7 +382,7 @@ cache_write = 0.0
     // spend that left.
     let (resumed, _) = Factory::new(vec![text_turn("never runs")])
         .into_builder_with_config(store.clone(), config(0.5), ModelSelection::new("p", "m"))
-        .resume(&path)?;
+        .resume(&path, "C:/w")?;
     let resumed_cost = resumed.stats().total_cost;
     assert!(
         (resumed_cost - spent).abs() < 1e-12,
@@ -747,8 +747,33 @@ async fn resumed_reflects_create_vs_resume() -> Result<(), SessionError> {
 
     let (second, _report) = Factory::new(vec![text_turn("b")])
         .into_builder(store)
-        .resume(&path)?;
+        .resume(&path, "C:/w")?;
     assert!(second.resumed(), "a resumed session continues a chain");
+    Ok(())
+}
+
+#[tokio::test]
+async fn a_resumed_session_takes_its_world_from_the_caller() -> Result<(), SessionError> {
+    // Owner ruling 2026-09-27: the process cwd is the session's world.
+    // The header records no cwd; a resumed session adopts the caller's
+    // cwd (a moved project resumes where it now lives), never a
+    // recorded one — gate, skills, preamble, and tools all key on the
+    // one world the assembly chose.
+    let store = temp_store("resume-world");
+    let factory = Factory::new(vec![text_turn("a")]);
+    let mut first = factory.into_builder(store.clone()).create("C:/original")?;
+    first.prompt("hi").await;
+    let path = first.path().expect("file-backed").to_path_buf();
+    drop(first);
+
+    let (second, _report) = Factory::new(vec![text_turn("b")])
+        .into_builder(store)
+        .resume(&path, "D:/moved/here")?;
+    assert_eq!(
+        second.cwd(),
+        std::path::Path::new("D:/moved/here"),
+        "the caller's world wins, the created-in directory does not"
+    );
     Ok(())
 }
 
@@ -763,7 +788,7 @@ async fn resume_continues_the_log_and_reports_the_model() -> Result<(), SessionE
 
     let (second, report) = Factory::new(vec![text_turn("two")])
         .into_builder(store.clone())
-        .resume(&path)
+        .resume(&path, "C:/w")
         .expect("resume");
     assert_eq!(
         report
@@ -800,7 +825,7 @@ async fn a_dangling_tool_roundtrip_fails_the_resume_loudly() -> Result<(), Sessi
     // file written only at roundtrip boundaries cannot look like this —
     // the open is a loud corruption error, never a repair (the repair
     // pass is deleted: it hid real bugs).
-    let mut writer = store.create("C:/w");
+    let mut writer = store.create();
     let user = crate::entry::SessionEntry::with_id(
         "u1".to_string(),
         None,
@@ -840,7 +865,7 @@ async fn a_dangling_tool_roundtrip_fails_the_resume_loudly() -> Result<(), Sessi
 
     let resumed = Factory::new(vec![text_turn("never runs")])
         .into_builder(store.clone())
-        .resume(&path);
+        .resume(&path, "C:/w");
     match resumed {
         Err(SessionError::Corrupt { message, .. }) => {
             assert!(
@@ -1185,7 +1210,7 @@ async fn resume_uses_the_builder_selection_and_records_the_switch() -> Result<()
             vec![text_turn("b")],
         )))
     }));
-    let (session, report) = builder.resume(&path).expect("resume");
+    let (session, report) = builder.resume(&path, "C:/w").expect("resume");
     // The report still says what the log last used...
     let resumed = report.resumed_model.expect("log carried the switch");
     assert_eq!(
@@ -1980,7 +2005,7 @@ async fn a_rewind_never_moves_the_model_register() -> Result<(), SessionError> {
     drop(session);
     let (session, report) = Factory::new(vec![text_turn("answer three")])
         .into_builder(store.clone())
-        .resume(&path)
+        .resume(&path, "C:/w")
         .expect("resume");
     let resumed = report.resumed_model.expect("the register was read");
     assert_eq!(
@@ -2017,7 +2042,7 @@ async fn promptless_rewind_survives_reopen() -> Result<(), SessionError> {
 
     let (session, _report) = Factory::new(vec![text_turn("continued")])
         .into_builder(store.clone())
-        .resume(&path)
+        .resume(&path, "C:/w")
         .expect("resume");
     assert_eq!(
         user_messages(&session.context()),
@@ -2073,7 +2098,7 @@ async fn rewind_targets_steers_like_prompts() -> Result<(), SessionError> {
     let store = temp_store("rewind-steer");
     // Hand-written log whose last user message is a mid-run steer: a
     // rewind of one message drops the steer — "un-send it".
-    let mut writer = store.create("C:/w");
+    let mut writer = store.create();
     let user = write_node(
         &mut writer,
         None,
@@ -2105,7 +2130,7 @@ async fn rewind_targets_steers_like_prompts() -> Result<(), SessionError> {
 
     let (mut session, _report) = Factory::new(vec![text_turn("ok")])
         .into_builder(store.clone())
-        .resume(&path)
+        .resume(&path, "C:/w")
         .expect("resume");
     let rewind = session.rewind(1).expect("rewind");
     assert_eq!(rewind.dropped, 1);
@@ -2125,7 +2150,7 @@ async fn rewinding_into_an_open_roundtrip_resolves_forward() -> Result<(), Sessi
     // the FIRST result entry targets a branch that ends mid-roundtrip —
     // the 2026-09-26 ruling: resolve forward to the batch's last result
     // (the landing is reported; the ask was mid-batch).
-    let mut writer = store.create("C:/w");
+    let mut writer = store.create();
     let user = write_node(
         &mut writer,
         None,
@@ -2186,7 +2211,7 @@ async fn rewinding_into_an_open_roundtrip_resolves_forward() -> Result<(), Sessi
 
     let (mut session, _report) = Factory::new(vec![text_turn("ok")])
         .into_builder(store.clone())
-        .resume(&path)
+        .resume(&path, "C:/w")
         .expect("resume");
 
     let summary = session.rewind_to_entry(&first_result.id)?;
@@ -2242,7 +2267,7 @@ async fn rewind_to_the_root_leaves_the_register_untouched() -> Result<(), Sessio
     // Hand-written log whose first entry is a user message with no
     // parent (create always records a model change first, so only a
     // hand-written log reaches a root branch).
-    let mut writer = store.create("C:/w");
+    let mut writer = store.create();
     let user = write_node(
         &mut writer,
         None,
@@ -2266,7 +2291,7 @@ async fn rewind_to_the_root_leaves_the_register_untouched() -> Result<(), Sessio
     let path = writer.path().to_path_buf();
     let mut session = Factory::new(vec![text_turn("fresh answer"), text_turn("next")])
         .into_builder(store.clone())
-        .resume(&path)
+        .resume(&path, "C:/w")
         .expect("resume")
         .0;
 
@@ -2314,7 +2339,7 @@ async fn a_ghost_model_in_history_does_not_block_a_rewind() -> Result<(), Sessio
     // history's stale selections are inert records, and the session's
     // current (valid) selection keeps answering — so the rewind
     // succeeds where it once failed loudly.
-    let mut writer = store.create("C:/w");
+    let mut writer = store.create();
     let error = tabit_log::WriteBuffer::enqueue(
         &mut writer,
         &[crate::entry::FileRecord::Side(crate::entry::SideRecord {
@@ -2351,7 +2376,7 @@ async fn a_ghost_model_in_history_does_not_block_a_rewind() -> Result<(), Sessio
 
     let (mut session, _report) = Factory::new(vec![text_turn("ok"), text_turn("after")])
         .into_builder(store.clone())
-        .resume(&path)
+        .resume(&path, "C:/w")
         .expect("resume");
 
     session.rewind(1).expect("the ghost is inert history");
@@ -2522,7 +2547,7 @@ async fn replay_re_emits_the_chain_with_live_ids_and_whole_texts() -> Result<(),
     // Resume and replay: the pass carries the same ids verbatim.
     let (resumed, _report) = Factory::new(vec![text_turn("never runs")])
         .into_builder(store.clone())
-        .resume(&path)?;
+        .resume(&path, "C:/w")?;
     let replayed = resumed.replay_events();
 
     let replay_turns: Vec<String> = replayed
@@ -2609,7 +2634,7 @@ async fn resumed_sessions_probe_ids_from_earlier_processes() -> Result<(), Sessi
     // A fresh session over the same file (the next process): the
     // probe answers for entries it never recorded — off-chain
     // branches included, the checkout branch-switch case.
-    let (resumed, _) = factory.into_builder(store.clone()).resume(&path)?;
+    let (resumed, _) = factory.into_builder(store.clone()).resume(&path, "C:/w")?;
     assert!(resumed.entry_id_probe().contains(&off_chain));
     assert!(!resumed.entry_id_probe().contains("never-recorded"));
     std::fs::remove_dir_all(store.dir()).ok();
@@ -2651,26 +2676,6 @@ async fn a_runs_tools_see_the_session_cwd() {
         Some(std::path::PathBuf::from("D:/the/session/dir")),
         "the run's tool context carried the session cwd"
     );
-    std::fs::remove_dir_all(store.dir()).ok();
-}
-
-#[tokio::test]
-async fn a_resumed_session_adopts_its_recorded_cwd() {
-    let store = temp_store("session-cwd-resume");
-    let path = {
-        let mut session = Factory::new(vec![text_turn("one")])
-            .into_builder(store.clone())
-            .create("E:/recorded/cwd")
-            .expect("session");
-        // The first commit materializes the file (the no-orphan gate).
-        session.prompt("hello").await;
-        session.path().expect("file-backed").to_path_buf()
-    };
-    let (resumed, _) = Factory::new(vec![text_turn("two")])
-        .into_builder(store.clone())
-        .resume(&path)
-        .expect("resume");
-    assert_eq!(resumed.cwd(), Path::new("E:/recorded/cwd"));
     std::fs::remove_dir_all(store.dir()).ok();
 }
 

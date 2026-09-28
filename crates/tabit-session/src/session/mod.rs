@@ -134,11 +134,14 @@ pub struct Session {
     /// folds and grows; nothing persists), so there is nothing to
     /// resume, replay, or list. The subagent scratch child.
     path: Option<PathBuf>,
-    /// The working directory this session runs in — recorded in the
-    /// header, mounted into every run's tool context as
-    /// [`SessionCwd`](rig_agent::tool::SessionCwd) so relative tool
-    /// paths and spawned commands resolve against it, not the process
-    /// cwd (the subagent ruling: a child may scope elsewhere).
+    /// The working directory this session runs in — the process cwd at
+    /// assembly (owner ruling 2026-09-27: the header records no cwd; a
+    /// resumed session adopts the caller's world, so a moved project
+    /// resumes where it now lives) — mounted into every run's tool
+    /// context as [`SessionCwd`](rig_agent::tool::SessionCwd) so
+    /// relative tool paths and spawned commands resolve against it (a
+    /// child scopes elsewhere by being its own process, spawned with
+    /// its own cwd).
     cwd: PathBuf,
     id: String,
     /// Whether this session continues an existing chain (`resume`) or

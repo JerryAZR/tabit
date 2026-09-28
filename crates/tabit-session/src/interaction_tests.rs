@@ -333,7 +333,7 @@ async fn always_allow_remembers_across_calls_in_the_session() {
         .into_builder(store.clone())
         .dynamic_tool(gated_tool())
         .hooks(gated_gate())
-        .resume(std::path::Path::new(&path))
+        .resume(std::path::Path::new(&path), "C:/w")
         .expect("resume");
     let mut handle = SessionHost::spawn(
         session,
@@ -489,7 +489,7 @@ async fn frontend_death_with_a_card_open_winds_the_worker_down() {
     );
     let (resumed, _report) = Factory::new(vec![text_turn("recovered")])
         .into_builder(store.clone())
-        .resume(std::path::Path::new(&path))
+        .resume(std::path::Path::new(&path), "C:/w")
         .expect("the log reopens after the death");
     let _ = resumed;
     std::fs::remove_dir_all(store.dir()).ok();

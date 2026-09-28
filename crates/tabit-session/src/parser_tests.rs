@@ -246,7 +246,7 @@ fn a_future_format_version_is_rejected() {
     let raw = format!("{header}\n{rest}");
     match parse(&raw, Path::new("t.jsonl")) {
         Err(SessionError::Corrupt { message, .. }) => {
-            assert!(message.contains("format 99.1"), "{message}")
+            assert!(message.contains("format 99."), "{message}")
         }
         other => panic!("expected version error, got {other:?}"),
     }
